@@ -452,11 +452,11 @@ jobs:
           python3 - <<'PY'
           import json
 
-          from gco.bedrock import get_default_bedrock_model_id
+          from gco.bedrock import get_default_claude_code_model_id
 
           with open("/tmp/autopilot-plan.json") as handle:
               plan = json.load(handle)
-          assert plan["model"] == get_default_bedrock_model_id(), plan["model"]
+          assert plan["model"] == get_default_claude_code_model_id(), plan["model"]
           assert plan["claude_binary"] is None, plan["claude_binary"]
           assert "gco" in plan["mcp_servers"]
           print("launch plan OK:", plan["model"])

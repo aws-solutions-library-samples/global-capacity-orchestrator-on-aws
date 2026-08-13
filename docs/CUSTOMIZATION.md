@@ -1619,8 +1619,10 @@ The full field reference (including length limits) is in the AWS guide on
 **Prefer to skip the form entirely?** Point GCO at a first-party Amazon model,
 which needs no FTU form, using any of the override paths below — for example
 `--model global.amazon.nova-2-lite-v1:0`, or by changing
-`context.bedrock.default_model_id` in `cdk.json`. GCO keeps the Nova
-`reasoningConfig` translation, so that default remains fully supported.
+`context.bedrock.mission_default_model_id` and
+`context.bedrock.capacity_advisor_default_model_id` in `cdk.json`. GCO keeps
+the Nova `reasoningConfig` translation, so those defaults remain fully
+supported.
 
 ### Choosing a different model
 
@@ -1652,14 +1654,16 @@ export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # Claude Code sess
 
 | File | Keys |
 |------|------|
-| `cdk.json` | `context.bedrock.default_model_id`, `context.bedrock.thinking.effort` (advisory: capacity advisor + Mission sampling) |
+| `cdk.json` | `context.bedrock.mission_default_model_id` (Mission sampling) and `context.bedrock.capacity_advisor_default_model_id` (capacity advisor), sharing `context.bedrock.thinking.effort` |
 | `cdk.json` | `context.bedrock.claude_code_default_model_id` (the model `gco autopilot` hands to Claude Code) |
 | `cdk.json` | `context.bedrock.embedding_model_id` (the text-embedding model [mission memory](MISSION.md#mission-memory) uses for its vector index) |
 
-The model keys are deliberately independent so repointing the interactive
-agent never repoints advisory Converse calls, and vice versa (`gco stacks
-bedrock set-model` / `set-claude-code-model` edit the first two safely). Every
-consumer resolves its key through `gco.bedrock`. The same `cdk.json` is
+Each consumer has its own key, deliberately independent, so repointing one
+feature never silently repoints another (`gco stacks bedrock
+set-mission-model` / `set-capacity-advisor-model` / `set-claude-code-model`
+edit them safely). Every consumer resolves its key through `gco.bedrock`,
+and the pre-v6 single `default_model_id` key fails validation with rename
+instructions instead of being silently ignored. The same `cdk.json` is
 shipped as package data so installed CLI and MCP entry points retain the
 defaults when they run outside a source checkout.
 
@@ -1671,11 +1675,11 @@ same width or similarity results are meaningless. Changing the embedding
 model therefore means recreating the index and re-embedding stored items
 (`gco mission memory backfill`) — think once before repointing it.
 `tests/test_default_bedrock_model_consistency.py` guards the resolver,
-compatibility aliases, package-data declaration, inference-profile shape,
+per-consumer accessors, package-data declaration, inference-profile shape,
 reasoning translation, and captured fixture.
 
-The canonical thinking setting applies only when the selected model id equals
-the configured default, and it is translated into whichever reasoning dialect
+The canonical thinking setting applies only when the selected model id is one
+of the configured generation defaults, and it is translated into whichever reasoning dialect
 that model speaks — Claude adaptive `thinking` + `output_config` for Opus 4.6+,
 Sonnet 4.6, and the Mythos/Fable lines, or Nova 2 `reasoningConfig` for Nova 2
 profiles. A per-call or environment override, or a default in neither dialect
@@ -1683,7 +1687,7 @@ profiles. A per-call or environment override, or a default in neither dialect
 `thinking.type: "enabled"` form), keeps that caller's normal inference controls
 and receives no reasoning fields.
 
-Resolution order (advisory features): per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
+Resolution order (Mission sampling): `--bedrock-model-id` flag → `GCO_MISSION_BEDROCK_MODEL_ID` → `cdk.json` `context.bedrock.mission_default_model_id`. Resolution order (capacity advisor): `--model` flag / MCP `model=` → `cdk.json` `context.bedrock.capacity_advisor_default_model_id`.
 
 Resolution order (`gco autopilot`): `--model` / `-m` flag → `GCO_AUTOPILOT_MODEL` → `cdk.json` `context.bedrock.claude_code_default_model_id`. See [Autopilot → Choosing a Model](AUTOPILOT.md#choosing-a-model).
 

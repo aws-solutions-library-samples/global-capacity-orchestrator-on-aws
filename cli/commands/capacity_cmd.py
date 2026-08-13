@@ -299,7 +299,10 @@ def recommend_region(
     "--model",
     "-m",
     default=None,
-    help="Bedrock model ID to use (default: cdk.json context.bedrock.default_model_id).",
+    help=(
+        "Bedrock model ID to use "
+        "(default: cdk.json context.bedrock.capacity_advisor_default_model_id)."
+    ),
 )
 @click.option("--raw", is_flag=True, help="Show raw AI response")
 @pass_config
@@ -341,7 +344,7 @@ def ai_recommend(
     REQUIREMENTS:
     - AWS credentials with bedrock:InvokeModel permission
     - The specified Bedrock model must be enabled in your account
-    - Default model: cdk.json context.bedrock.default_model_id
+    - Default model: cdk.json context.bedrock.capacity_advisor_default_model_id
 
     Examples:
         gco capacity ai-recommend --workload "Training a large language model"
@@ -1477,7 +1480,10 @@ def _print_prediction(prediction: Any, raw: bool) -> None:
     "--model",
     "-m",
     default=None,
-    help="Bedrock model ID to use (default: cdk.json context.bedrock.default_model_id).",
+    help=(
+        "Bedrock model ID to use "
+        "(default: cdk.json context.bedrock.capacity_advisor_default_model_id)."
+    ),
 )
 @click.option("--raw", is_flag=True, help="Show the raw AI response")
 @pass_config

@@ -51,7 +51,7 @@ from gco.bedrock import (
     BedrockResponseTruncatedError,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
-    get_default_bedrock_model_id,
+    get_default_mission_model_id,
     raise_if_bedrock_ftu_form_error,
 )
 
@@ -69,9 +69,6 @@ from .validation import MissionValidationError
 
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
-    # Runtime access is provided lazily by ``__getattr__`` below.
-    DEFAULT_BEDROCK_MODEL_ID: str
-
     # ``fastmcp.Context`` is the concrete type expected by
     # :class:`MCPSamplingBackend`. Kept behind ``TYPE_CHECKING`` so the
     # runtime import surface stays pure-stdlib; the backend itself
@@ -81,7 +78,6 @@ if TYPE_CHECKING:  # pragma: no cover - import-time only
 __all__ = [
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
-    "DEFAULT_BEDROCK_MODEL_ID",
     "DEFAULT_BEDROCK_REGION",
     "ENV_BEDROCK_MODEL_ID",
     "ENV_BEDROCK_REGION",
@@ -109,18 +105,6 @@ __all__ = [
     "select_sampling_backend",
     "validate_strategy_against_catalog",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve the historical Mission default only when explicitly accessed."""
-    if name == "DEFAULT_BEDROCK_MODEL_ID":
-        return get_default_bedrock_model_id()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    """Advertise the lazy compatibility alias to introspection tools."""
-    return sorted({*globals(), "DEFAULT_BEDROCK_MODEL_ID"})
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +271,10 @@ def _summarise_prior_missions(
 # Bedrock backend tunables
 # ---------------------------------------------------------------------------
 
-#: Default Bedrock model identifier, loaded lazily from
-#: ``cdk.json`` ``context.bedrock.default_model_id`` through the lightweight
-#: :mod:`gco.bedrock` resolver. The module-level compatibility attribute keeps
-#: existing Mission integrations stable without coupling unrelated imports to
-#: Bedrock configuration resolution.
+#: The default Bedrock model identifier is read on demand from ``cdk.json``
+#: ``context.bedrock.mission_default_model_id`` through the lightweight
+#: :func:`gco.bedrock.get_default_mission_model_id` resolver, so unrelated
+#: imports never couple to Bedrock configuration resolution.
 #:
 #: Operators with regulatory or model-governance requirements can override per
 #: call via ``GCO_MISSION_BEDROCK_MODEL_ID`` or ``--bedrock-model-id``; see
@@ -302,7 +285,7 @@ def _summarise_prior_missions(
 #: in ``us-east-1`` first and our installations have it whitelisted.
 DEFAULT_BEDROCK_REGION: str = "us-east-1"
 
-#: Env var that overrides :data:`DEFAULT_BEDROCK_MODEL_ID` at runtime.
+#: Env var that overrides the canonical Mission model default at runtime.
 ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
@@ -1046,8 +1029,8 @@ class BedrockSamplingBackend:
     from (in order of precedence) the explicit constructor argument,
     the matching environment variable
     (:data:`ENV_BEDROCK_MODEL_ID` / :data:`ENV_BEDROCK_REGION`), and
-    finally the shared ``cdk.json`` default
-    (:data:`DEFAULT_BEDROCK_MODEL_ID` /
+    finally the ``cdk.json`` Mission default
+    (:func:`gco.bedrock.get_default_mission_model_id` /
     :data:`DEFAULT_BEDROCK_REGION`). The ``boto3`` client itself is
     constructed lazily on the first :meth:`sample` call so that
     ``import mission.sampling`` does not pull ``boto3`` into the
@@ -1092,8 +1075,8 @@ class BedrockSamplingBackend:
         Args:
             model_id: Optional explicit model id. When ``None``, falls
                 back to the :data:`ENV_BEDROCK_MODEL_ID` environment
-                variable, then to the shared ``cdk.json`` default exposed as
-                :data:`DEFAULT_BEDROCK_MODEL_ID`.
+                variable, then to the ``cdk.json`` Mission default from
+                :func:`gco.bedrock.get_default_mission_model_id`.
             region: Optional explicit region. When ``None``, falls back
                 to :data:`ENV_BEDROCK_REGION`, then to
                 :data:`DEFAULT_BEDROCK_REGION`.
@@ -1107,7 +1090,7 @@ class BedrockSamplingBackend:
             self.model_id = os.environ[ENV_BEDROCK_MODEL_ID]
             self._uses_default_model = False
         else:
-            self.model_id = get_default_bedrock_model_id()
+            self.model_id = get_default_mission_model_id()
             self._uses_default_model = True
         self._region: str = (
             region
@@ -1129,7 +1112,7 @@ class BedrockSamplingBackend:
         override. Fixture capture uses it to reproduce the checked-in default
         exactly, while ordinary explicit model IDs retain override semantics.
         """
-        backend = cls(model_id=get_default_bedrock_model_id(), region=region)
+        backend = cls(model_id=get_default_mission_model_id(), region=region)
         backend._uses_default_model = True
         return backend
 

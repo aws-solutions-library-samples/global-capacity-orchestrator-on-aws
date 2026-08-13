@@ -693,12 +693,13 @@ import unittest.mock as mock  # noqa: E402
 from mission.sampling import (  # noqa: E402
     BEDROCK_READ_TIMEOUT_SECONDS,
     BEDROCK_TEMPERATURE,
-    DEFAULT_BEDROCK_MODEL_ID,
     DEFAULT_BEDROCK_REGION,
     ENV_BEDROCK_MODEL_ID,
     ENV_BEDROCK_REGION,
     BedrockSamplingBackend,
 )
+
+from gco.bedrock import get_default_mission_model_id  # noqa: E402
 
 
 class _FakeBedrockClient:
@@ -758,7 +759,7 @@ def test_bedrock_backend_resolves_defaults(monkeypatch) -> None:
     monkeypatch.delenv(ENV_BEDROCK_REGION, raising=False)
 
     backend = BedrockSamplingBackend()
-    assert backend.model_id == DEFAULT_BEDROCK_MODEL_ID
+    assert backend.model_id == get_default_mission_model_id()
     assert backend._region == DEFAULT_BEDROCK_REGION
     assert backend._uses_default_model is True
 
@@ -1042,7 +1043,7 @@ def test_select_returns_bedrock_when_ctx_is_none() -> None:
     the module default model id."""
     backend = select_sampling_backend(None, model_id=None, prefs=None)
     assert isinstance(backend, BedrockSamplingBackend)
-    assert backend.model_id == DEFAULT_BEDROCK_MODEL_ID
+    assert backend.model_id == get_default_mission_model_id()
 
 
 def test_select_falls_back_to_fastmcp_client_capabilities() -> None:
@@ -2231,7 +2232,7 @@ class TestBedrockSampling:
     def test_used_path(self) -> None:
         """Converse returns valid JSON in the expected shape →
         :class:`SamplingUsed`, audit event has ``sampling_backend="bedrock"``
-        and ``sampling_model_id`` matches :data:`DEFAULT_BEDROCK_MODEL_ID`."""
+        and ``sampling_model_id`` matches the canonical Mission default."""
         payload = self._strategy_revision_payload()
         fake_client = _FakeBedrockClient(response=_well_shaped_response(json.dumps(payload)))
 
@@ -2258,17 +2259,17 @@ class TestBedrockSampling:
         assert result.parsed == payload
         assert result.backend_name == "bedrock"
         # The model id flows through from the backend to the envelope.
-        assert result.model_id == DEFAULT_BEDROCK_MODEL_ID
+        assert result.model_id == get_default_mission_model_id()
         # The Converse call landed on the cached client exactly once.
         assert len(fake_client.converse_calls) == 1
-        assert fake_client.converse_calls[0]["modelId"] == DEFAULT_BEDROCK_MODEL_ID
+        assert fake_client.converse_calls[0]["modelId"] == get_default_mission_model_id()
 
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_purpose"] == "strategy_revision"
         assert kwargs["sampling_status"] == "used"
         assert kwargs["sampling_backend"] == "bedrock"
-        assert kwargs["sampling_model_id"] == DEFAULT_BEDROCK_MODEL_ID
+        assert kwargs["sampling_model_id"] == get_default_mission_model_id()
         assert kwargs["model_output_bytes"] > 0
 
     def test_rejected_access_denied(self) -> None:
@@ -2305,7 +2306,7 @@ class TestBedrockSampling:
         assert isinstance(result, SamplingFallback)
         assert result.reason == "transport_error"
         assert result.backend_name == "bedrock"
-        assert result.model_id == DEFAULT_BEDROCK_MODEL_ID
+        assert result.model_id == get_default_mission_model_id()
         assert result.rationale  # deterministic template populated
 
         assert emit.call_count == 1

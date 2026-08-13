@@ -897,12 +897,11 @@ def regions_set(config: Any, role: Any, region: Any, config_path: Any, yes: Any)
 def bedrock_cmd(config: Any) -> None:
     """Manage the Bedrock model defaults in cdk.json.
 
-    Two independent keys live under context.bedrock: default_model_id — the
-    model/inference-profile ID GCO's advisory Bedrock features (capacity
-    advisor, Mission sampling) use unless explicitly overridden — and
-    claude_code_default_model_id, the session model `gco autopilot` hands
-    to Claude Code. Edits go through the managed-config engine: validated,
-    atomic, idempotent, and audited.
+    Three independent keys live under context.bedrock, one per consumer:
+    mission_default_model_id (Mission sampling), capacity_advisor_default_model_id
+    (`gco capacity advise`), and claude_code_default_model_id (the session
+    model `gco autopilot` hands to Claude Code). Edits go through the
+    managed-config engine: validated, atomic, idempotent, and audited.
     """
     pass
 
@@ -911,7 +910,7 @@ def bedrock_cmd(config: Any) -> None:
 @click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
 @pass_config
 def bedrock_show(config: Any, config_path: Any) -> None:
-    """Show both configured Bedrock model defaults and their backing path."""
+    """Show every configured Bedrock model default and its backing path."""
     from ..managed_config import ManagedConfigError, get_bedrock_model_status
 
     formatter = get_output_formatter(config)
@@ -924,34 +923,36 @@ def bedrock_show(config: Any, config_path: Any) -> None:
     formatter.print(status)
 
 
-@bedrock_cmd.command("set-model")
+@bedrock_cmd.command("set-mission-model")
 @click.argument("model_id")
 @click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
-def bedrock_set_model(config: Any, model_id: Any, config_path: Any, yes: Any) -> None:
-    """Set context.bedrock.default_model_id (advisory features).
+def bedrock_set_mission_model(config: Any, model_id: Any, config_path: Any, yes: Any) -> None:
+    """Set context.bedrock.mission_default_model_id (Mission sampling).
 
-    This is the default consumed by the capacity advisor and Mission
-    sampling; `gco autopilot` has its own key (see set-claude-code-model).
-    Model and inference-profile IDs are free-form (custom profiles,
-    marketplace models), so validation mirrors the runtime reader: a
-    non-empty string without surrounding whitespace. Sibling settings
-    (bedrock.thinking, bedrock.claude_code_default_model_id) are preserved.
+    This is the default Mission sampling uses; the capacity advisor and
+    `gco autopilot` have their own keys (see set-capacity-advisor-model and
+    set-claude-code-model). Model and inference-profile IDs are free-form
+    (custom profiles, marketplace models), so validation mirrors the runtime
+    reader: a non-empty string without surrounding whitespace. Sibling
+    settings (bedrock.thinking, the other model keys) are preserved.
 
     Examples:
-        gco stacks bedrock set-model us.amazon.nova-pro-v1:0
-        gco stacks bedrock set-model us.amazon.nova-2-lite-v1:0 -y
+        gco stacks bedrock set-mission-model us.amazon.nova-pro-v1:0
+        gco stacks bedrock set-mission-model us.amazon.nova-2-lite-v1:0 -y
     """
-    from ..managed_config import ManagedConfigError, set_default_bedrock_model
+    from ..managed_config import ManagedConfigError, set_mission_default_model
 
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Set bedrock.default_model_id to {model_id} in cdk.json?", abort=True)
+        click.confirm(
+            f"Set bedrock.mission_default_model_id to {model_id} in cdk.json?", abort=True
+        )
 
     try:
-        report = set_default_bedrock_model(model_id, config_path=config_path)
+        report = set_mission_default_model(model_id, config_path=config_path)
     except ManagedConfigError as e:
         formatter.print_error(str(e))
         sys.exit(1)
@@ -959,8 +960,56 @@ def bedrock_set_model(config: Any, model_id: Any, config_path: Any, yes: Any) ->
     if report.changed:
         formatter.print_success(report.summary())
         formatter.print_info(
-            "Advisory features pick this up on their next run; explicit "
-            "--model/env overrides still take precedence"
+            "Mission sampling picks this up on its next run; explicit "
+            "--bedrock-model-id/env overrides still take precedence"
+        )
+    else:
+        formatter.print_info(report.summary())
+
+
+@bedrock_cmd.command("set-capacity-advisor-model")
+@click.argument("model_id")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def bedrock_set_capacity_advisor_model(
+    config: Any, model_id: Any, config_path: Any, yes: Any
+) -> None:
+    """Set context.bedrock.capacity_advisor_default_model_id.
+
+    This is the default `gco capacity advise` (and its historical variant)
+    uses; Mission sampling and `gco autopilot` have their own keys (see
+    set-mission-model and set-claude-code-model). Model and inference-profile
+    IDs are free-form (custom profiles, marketplace models), so validation
+    mirrors the runtime reader: a non-empty string without surrounding
+    whitespace. Sibling settings (bedrock.thinking, the other model keys)
+    are preserved.
+
+    Examples:
+        gco stacks bedrock set-capacity-advisor-model us.amazon.nova-pro-v1:0
+        gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
+    """
+    from ..managed_config import ManagedConfigError, set_capacity_advisor_default_model
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        click.confirm(
+            f"Set bedrock.capacity_advisor_default_model_id to {model_id} in cdk.json?",
+            abort=True,
+        )
+
+    try:
+        report = set_capacity_advisor_default_model(model_id, config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+
+    if report.changed:
+        formatter.print_success(report.summary())
+        formatter.print_info(
+            "The capacity advisor picks this up on its next run; explicit "
+            "--model overrides still take precedence"
         )
     else:
         formatter.print_info(report.summary())
@@ -975,9 +1024,9 @@ def bedrock_set_claude_code_model(config: Any, model_id: Any, config_path: Any, 
     """Set context.bedrock.claude_code_default_model_id.
 
     This is the session model `gco autopilot` hands to Claude Code, kept
-    separate from the advisory default (see set-model) so repointing the
-    interactive agent never repoints Mission sampling or the capacity
-    advisor. Validation mirrors the runtime reader: a non-empty string
+    separate from the generation defaults (see set-mission-model and
+    set-capacity-advisor-model) so repointing the interactive agent never
+    repoints Mission sampling or the capacity advisor. Validation mirrors the runtime reader: a non-empty string
     without surrounding whitespace. Sibling settings are preserved.
 
     Examples:

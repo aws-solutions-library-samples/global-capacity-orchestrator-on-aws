@@ -807,7 +807,7 @@ Resolution precedence at session start:
 
 Defaults:
 
-- Model — `cdk.json` `context.bedrock.default_model_id` (stock value:
+- Model — `cdk.json` `context.bedrock.mission_default_model_id` (stock value:
   `global.anthropic.claude-opus-5`, Anthropic Claude Opus 5's global inference
   profile). The stock `context.bedrock.thinking.effort` is `high`, Claude's
   default adaptive-thinking level; it can materially increase billed output

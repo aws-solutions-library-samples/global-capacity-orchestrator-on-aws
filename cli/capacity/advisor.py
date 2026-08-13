@@ -18,7 +18,7 @@ from gco.bedrock import (
     BedrockResponseTruncatedError,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
-    get_default_bedrock_model_id,
+    get_default_capacity_advisor_model_id,
     raise_if_bedrock_ftu_form_error,
 )
 
@@ -62,11 +62,11 @@ class CapacityPredictionResult:
     raw_response: str = ""
 
 
-class _SharedBedrockModelDefault:
-    """Lazily expose the historical advisor class attribute as a string."""
+class _CapacityAdvisorModelDefault:
+    """Lazily expose the advisor's canonical model default as a string."""
 
     def __get__(self, instance: object, owner: type[Any] | None = None) -> str:
-        return get_default_bedrock_model_id()
+        return get_default_capacity_advisor_model_id()
 
 
 class BedrockCapacityAdvisor:
@@ -80,10 +80,11 @@ class BedrockCapacityAdvisor:
     before making production decisions.
     """
 
-    # Backward-compatible lazy class alias for callers that inspect the
-    # advisor default. Resolution occurs only when this Bedrock-specific
-    # attribute (or an advisor without an explicit model) is used.
-    DEFAULT_MODEL = _SharedBedrockModelDefault()
+    # Lazy class attribute for callers that inspect the advisor default.
+    # Resolution occurs only when this Bedrock-specific attribute (or an
+    # advisor without an explicit model) is used, reading the dedicated
+    # ``context.bedrock.capacity_advisor_default_model_id`` knob.
+    DEFAULT_MODEL = _CapacityAdvisorModelDefault()
 
     def __init__(self, config: GCOConfig | None = None, model_id: str | None = None):
         self.config = config or get_config()

@@ -1170,7 +1170,7 @@ gco stacks regions set monitoring us-west-2 -y
 
 #### `gco stacks bedrock`
 
-Manage the two Bedrock model defaults in cdk.json: `context.bedrock.default_model_id` — the model/inference-profile ID GCO's advisory Bedrock features (capacity advisor, Mission sampling) use unless explicitly overridden — and `context.bedrock.claude_code_default_model_id`, the session model `gco autopilot` hands to Claude Code. The keys are independent: repointing one never repoints the other. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`, the other model key) are preserved.
+Manage the three Bedrock model defaults in cdk.json, one per consumer: `context.bedrock.mission_default_model_id` — the model/inference-profile ID Mission sampling uses unless explicitly overridden — `context.bedrock.capacity_advisor_default_model_id` — the capacity advisor's equivalent — and `context.bedrock.claude_code_default_model_id`, the session model `gco autopilot` hands to Claude Code. The keys are independent: repointing one never repoints the others. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`, the other model keys) are preserved.
 
 ```bash
 gco stacks bedrock COMMAND [OPTIONS]
@@ -1178,15 +1178,17 @@ gco stacks bedrock COMMAND [OPTIONS]
 
 **Subcommands:**
 
-- `show` - Show both configured default model IDs and their backing cdk.json path (`gco stacks bedrock show`).
-- `set-model` - Set the advisory default model/inference-profile ID (`gco stacks bedrock set-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `show` - Show every configured default model ID and its backing cdk.json path (`gco stacks bedrock show`).
+- `set-mission-model` - Set the Mission sampling default model/inference-profile ID (`gco stacks bedrock set-mission-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `set-capacity-advisor-model` - Set the capacity advisor default model/inference-profile ID (`gco stacks bedrock set-capacity-advisor-model`). Same free-form validation; explicit `--model` overrides still win at run time.
 - `set-claude-code-model` - Set the Claude Code session model `gco autopilot` launches with (`gco stacks bedrock set-claude-code-model`). Same free-form validation; explicit `--model`/`GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 
 **Example:**
 
 ```bash
 gco stacks bedrock show
-gco stacks bedrock set-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-mission-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
 ```
 
@@ -2010,8 +2012,8 @@ is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
 B200, B300).
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
-`context.bedrock.default_model_id` (Anthropic Claude Opus 5's global inference
-profile in the stock configuration). The stock
+`context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5's
+global inference profile in the stock configuration). The stock
 `context.bedrock.thinking.effort=high` runs Claude adaptive thinking at its
 default effort; reasoning tokens are billed as output and can materially
 increase latency. Explicit model overrides do not inherit the default's
@@ -2034,7 +2036,7 @@ thinking fields.
 | `--min-memory-gb` | | Minimum memory in GB |
 | `--fault-tolerance` | `-f` | Fault tolerance level: `high`, `medium`, `low` |
 | `--max-cost` | | Maximum cost per hour in USD |
-| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show raw AI response |
 
 **Example:**
@@ -2391,7 +2393,7 @@ gco capacity predict [OPTIONS]
 | `--region` | `-r` | AWS region (omit when using `--all-regions`) |
 | `--all-regions` | `-a` | Predict across every region that has historical data for the instance type |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
-| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show the raw AI response |
 
 **Example:**
@@ -4410,7 +4412,7 @@ in this order:
 3. Bedrock credential probe — when `boto3` resolves credentials, the
    Bedrock backend is selected with the model id from
    `GCO_MISSION_BEDROCK_MODEL_ID` (or `cdk.json`
-   `context.bedrock.default_model_id`).
+   `context.bedrock.mission_default_model_id`).
 4. Otherwise sampling is off and the loop runs deterministically.
 
 <details>
@@ -4846,7 +4848,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the advisory `cdk.json` `context.bedrock.default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the `cdk.json` `context.bedrock.mission_default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

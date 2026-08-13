@@ -32,9 +32,10 @@ from click.testing import CliRunner
 
 from cli.main import cli
 from cli.managed_config import (
-    BEDROCK_DEFAULT_MODEL,
+    CAPACITY_ADVISOR_DEFAULT_MODEL,
     CLAUDE_CODE_DEFAULT_MODEL,
     DEPLOYMENT_REGION_SCALARS,
+    MISSION_DEFAULT_MODEL,
     REGIONAL_DEPLOYMENT_REGIONS,
     ChangeReport,
     ManagedConfigError,
@@ -42,9 +43,10 @@ from cli.managed_config import (
     get_bedrock_model_status,
     get_deployment_regions_status,
     remove_deployment_region,
+    set_capacity_advisor_default_model,
     set_claude_code_default_model,
-    set_default_bedrock_model,
     set_deployment_region_role,
+    set_mission_default_model,
 )
 
 # Ensure gco_mcp/ is importable, mirroring the other MCP test modules.
@@ -57,7 +59,8 @@ REGION_TOOLS = (
     "add_deployment_region",
     "remove_deployment_region",
     "set_deployment_region",
-    "set_default_bedrock_model",
+    "set_mission_default_model",
+    "set_capacity_advisor_default_model",
     "set_claude_code_default_model",
 )
 
@@ -72,7 +75,8 @@ BASE_CONFIG: dict = {
             "regional": ["us-east-1"],
         },
         "bedrock": {
-            "default_model_id": "global.anthropic.claude-opus-5",
+            "mission_default_model_id": "global.anthropic.claude-opus-5",
+            "capacity_advisor_default_model_id": "global.anthropic.claude-opus-5",
             "claude_code_default_model_id": "global.anthropic.claude-opus-5",
             "thinking": {"effort": "high"},
         },
@@ -652,14 +656,28 @@ class TestEngineScalars:
         with pytest.raises(ManagedConfigError, match="must be a JSON string"):
             set_deployment_region_role("global", "us-east-1", config_path=path)
 
-    def test_set_bedrock_model_preserves_siblings(self, cdk_json: Path):
-        report = set_default_bedrock_model("us.amazon.nova-2-lite-v1:0", config_path=cdk_json)
+    def test_set_mission_model_preserves_siblings(self, cdk_json: Path):
+        report = set_mission_default_model("us.amazon.nova-2-lite-v1:0", config_path=cdk_json)
         assert report.changed is True
         written = json.loads(cdk_json.read_text(encoding="utf-8"))
         bedrock = written["context"]["bedrock"]
-        assert bedrock["default_model_id"] == "us.amazon.nova-2-lite-v1:0"
+        assert bedrock["mission_default_model_id"] == "us.amazon.nova-2-lite-v1:0"
         assert bedrock["thinking"] == {"effort": "high"}
-        # Repointing the advisory default never repoints autopilot.
+        # Repointing Mission never repoints the advisor or autopilot.
+        assert bedrock["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_capacity_advisor_model_preserves_siblings(self, cdk_json: Path):
+        report = set_capacity_advisor_default_model(
+            "us.amazon.nova-2-lite-v1:0", config_path=cdk_json
+        )
+        assert report.changed is True
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["capacity_advisor_default_model_id"] == "us.amazon.nova-2-lite-v1:0"
+        assert bedrock["thinking"] == {"effort": "high"}
+        # Repointing the advisor never repoints Mission or autopilot.
+        assert bedrock["mission_default_model_id"] == "global.anthropic.claude-opus-5"
         assert bedrock["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
 
     def test_set_claude_code_model_preserves_siblings(self, cdk_json: Path):
@@ -671,16 +689,31 @@ class TestEngineScalars:
         bedrock = written["context"]["bedrock"]
         assert bedrock["claude_code_default_model_id"] == "us.anthropic.claude-sonnet-4-6"
         assert bedrock["thinking"] == {"effort": "high"}
-        # Repointing autopilot never repoints the advisory features.
-        assert bedrock["default_model_id"] == "global.anthropic.claude-opus-5"
+        # Repointing autopilot never repoints Mission or the advisor.
+        assert bedrock["mission_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
 
-    def test_set_bedrock_model_empty_rejected(self, cdk_json: Path):
+    def test_set_mission_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(ManagedConfigError, match="non-empty string"):
-            set_default_bedrock_model("   ", config_path=cdk_json)
+            set_mission_default_model("   ", config_path=cdk_json)
 
-    def test_set_bedrock_model_surrounding_whitespace_rejected(self, cdk_json: Path):
+    def test_set_mission_model_surrounding_whitespace_rejected(self, cdk_json: Path):
         with pytest.raises(ManagedConfigError, match="whitespace"):
-            set_default_bedrock_model(" model-id ", config_path=cdk_json)
+            set_mission_default_model(" model-id ", config_path=cdk_json)
+
+    def test_set_capacity_advisor_model_empty_rejected(self, cdk_json: Path):
+        with pytest.raises(
+            ManagedConfigError,
+            match="bedrock.capacity_advisor_default_model_id must be a non-empty string",
+        ):
+            set_capacity_advisor_default_model("   ", config_path=cdk_json)
+
+    def test_set_capacity_advisor_model_surrounding_whitespace_rejected(self, cdk_json: Path):
+        with pytest.raises(
+            ManagedConfigError,
+            match="bedrock.capacity_advisor_default_model_id must not have",
+        ):
+            set_capacity_advisor_default_model(" model-id ", config_path=cdk_json)
 
     def test_set_claude_code_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(
@@ -696,21 +729,22 @@ class TestEngineScalars:
         ):
             set_claude_code_default_model(" model-id ", config_path=cdk_json)
 
-    def test_bedrock_status_reads_both_configured_values(self, cdk_json: Path):
+    def test_bedrock_status_reads_every_configured_value(self, cdk_json: Path):
         status = get_bedrock_model_status(config_path=cdk_json)
-        assert status["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert status["mission_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert status["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
         assert status["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
         assert status["config_path"] == str(cdk_json)
 
     def test_bedrock_container_materialized_when_absent(self, tmp_path: Path):
         path = tmp_path / "cdk.json"
         path.write_text(json.dumps({"context": {"project_name": "gco"}}), encoding="utf-8")
-        report = set_default_bedrock_model("global.anthropic.claude-opus-5", config_path=path)
+        report = set_mission_default_model("global.anthropic.claude-opus-5", config_path=path)
         assert report.changed is True
         assert report.old == ""  # the reader-level "unset" default
         written = json.loads(path.read_text(encoding="utf-8"))
         assert written["context"]["bedrock"] == {
-            "default_model_id": "global.anthropic.claude-opus-5"
+            "mission_default_model_id": "global.anthropic.claude-opus-5"
         }
 
     def test_claude_code_leaf_materialized_when_absent(self, tmp_path: Path):
@@ -873,7 +907,7 @@ class TestRegionsCli:
 
 
 class TestBedrockCli:
-    def test_show_reports_both_models_and_path(self, cdk_json: Path):
+    def test_show_reports_every_model_and_path(self, cdk_json: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -881,7 +915,8 @@ class TestBedrockCli:
         )
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert payload["mission_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert payload["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
         assert payload["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
 
     def test_set_claude_code_model_with_yes_writes(self, cdk_json: Path):
@@ -903,7 +938,8 @@ class TestBedrockCli:
         written = json.loads(cdk_json.read_text(encoding="utf-8"))
         bedrock = written["context"]["bedrock"]
         assert bedrock["claude_code_default_model_id"] == "us.anthropic.claude-sonnet-4-6"
-        assert bedrock["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["mission_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
 
     def test_set_claude_code_model_empty_exits_nonzero(self, cdk_json: Path):
         runner = CliRunner()
@@ -922,14 +958,14 @@ class TestBedrockCli:
         assert result.exit_code == 1
         assert "refusing to update" in result.output
 
-    def test_set_model_with_yes_writes(self, cdk_json: Path):
+    def test_set_mission_model_with_yes_writes(self, cdk_json: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
             [
                 "stacks",
                 "bedrock",
-                "set-model",
+                "set-mission-model",
                 "us.amazon.nova-2-lite-v1:0",
                 "--config-path",
                 str(cdk_json),
@@ -939,13 +975,55 @@ class TestBedrockCli:
         assert result.exit_code == 0, result.output
         assert "set 'us.amazon.nova-2-lite-v1:0'" in result.output
         written = json.loads(cdk_json.read_text(encoding="utf-8"))
-        assert written["context"]["bedrock"]["default_model_id"] == "us.amazon.nova-2-lite-v1:0"
+        assert (
+            written["context"]["bedrock"]["mission_default_model_id"]
+            == "us.amazon.nova-2-lite-v1:0"
+        )
 
-    def test_set_model_empty_exits_nonzero(self, cdk_json: Path):
+    def test_set_mission_model_empty_exits_nonzero(self, cdk_json: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["stacks", "bedrock", "set-model", "  ", "--config-path", str(cdk_json), "-y"],
+            ["stacks", "bedrock", "set-mission-model", "  ", "--config-path", str(cdk_json), "-y"],
+        )
+        assert result.exit_code == 1
+        assert "refusing to update" in result.output
+
+    def test_set_capacity_advisor_model_with_yes_writes(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-capacity-advisor-model",
+                "us.amazon.nova-2-lite-v1:0",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "set 'us.amazon.nova-2-lite-v1:0'" in result.output
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        assert (
+            written["context"]["bedrock"]["capacity_advisor_default_model_id"]
+            == "us.amazon.nova-2-lite-v1:0"
+        )
+
+    def test_set_capacity_advisor_model_empty_exits_nonzero(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-capacity-advisor-model",
+                "  ",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
         )
         assert result.exit_code == 1
         assert "refusing to update" in result.output
@@ -1029,16 +1107,31 @@ class TestMcpRegionToolsArgv:
         assert cmd[-6:] == ["stacks", "regions", "set", "monitoring", "us-west-2", "-y"]
 
     @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
-    def test_set_bedrock_model_argv(self):
+    def test_set_mission_model_argv(self):
         importlib.reload(run_mcp)
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.set_default_bedrock_model(model_id="global.anthropic.claude-opus-5")
+            run_mcp.set_mission_default_model(model_id="global.anthropic.claude-opus-5")
             cmd = mock.call_args[0][0]
         assert cmd[-5:] == [
             "stacks",
             "bedrock",
-            "set-model",
+            "set-mission-model",
+            "global.anthropic.claude-opus-5",
+            "-y",
+        ]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
+    def test_set_capacity_advisor_model_argv(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.set_capacity_advisor_default_model(model_id="global.anthropic.claude-opus-5")
+            cmd = mock.call_args[0][0]
+        assert cmd[-5:] == [
+            "stacks",
+            "bedrock",
+            "set-capacity-advisor-model",
             "global.anthropic.claude-opus-5",
             "-y",
         ]
@@ -1080,11 +1173,17 @@ class TestRegistryContract:
             assert key.leaf == role
             assert key.default == "us-east-2"  # matches the reader contract
 
-    def test_bedrock_registry_entry_shape(self):
-        key = BEDROCK_DEFAULT_MODEL
-        assert key.key_id == "bedrock.default_model_id"
+    def test_mission_registry_entry_shape(self):
+        key = MISSION_DEFAULT_MODEL
+        assert key.key_id == "bedrock.mission_default_model_id"
         assert key.container == "bedrock"
-        assert key.leaf == "default_model_id"
+        assert key.leaf == "mission_default_model_id"
+
+    def test_capacity_advisor_registry_entry_shape(self):
+        key = CAPACITY_ADVISOR_DEFAULT_MODEL
+        assert key.key_id == "bedrock.capacity_advisor_default_model_id"
+        assert key.container == "bedrock"
+        assert key.leaf == "capacity_advisor_default_model_id"
 
     def test_claude_code_registry_entry_shape(self):
         key = CLAUDE_CODE_DEFAULT_MODEL

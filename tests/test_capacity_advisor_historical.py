@@ -8,7 +8,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from cli.capacity.advisor import BedrockCapacityAdvisor, CapacityPredictionResult
-from gco.bedrock import DEFAULT_BEDROCK_MODEL_ID
+from gco.bedrock import get_default_capacity_advisor_model_id
 
 BASE_DATA = {"timestamp": "t", "regions_analyzed": [], "instance_types_analyzed": []}
 
@@ -143,7 +143,7 @@ class TestPredictCapacityWindow:
         )
         result = _predict_advisor(
             client,
-            model_id=DEFAULT_BEDROCK_MODEL_ID,
+            model_id=get_default_capacity_advisor_model_id(),
             uses_default_model=True,
         ).predict_capacity_window("g5.xlarge", "us-east-1")
         assert isinstance(result, CapacityPredictionResult)

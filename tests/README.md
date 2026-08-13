@@ -506,7 +506,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 |------|-------------|
 | `test_oidc_stack.py` | GitHub OIDC provider CDK stack — synthesis, OIDC provider config, trust policy (wildcard/branch/custom repo), IAM policy actions, role properties, `policy.json` validation |
 | `test_feature_toggles.py` | Generic feature toggle helpers, Valkey config (get/update/enable/disable), Aurora config (get/update/enable/disable), FSx refactor regression |
-| `test_managed_config.py` | Managed deployment-config engine (`cli/managed_config.py`) and its veneers: writable-config resolution (installed-mode refusal), result-only validation incl. the repair path, idempotent no-ops, atomic writes preserving comments/order/mode/trailing-newline, scalar keys (region roles + `bedrock.default_model_id` with sibling preservation), `gco.cli.managed_config` audit lines, `gco stacks regions list/add/remove/set` + `gco stacks bedrock show/set-model` CliRunner coverage, and the `GCO_ENABLE_CONFIG_MANAGEMENT`-gated MCP tools (registration + argv). |
+| `test_managed_config.py` | Managed deployment-config engine (`cli/managed_config.py`) and its veneers: writable-config resolution (installed-mode refusal), result-only validation incl. the repair path, idempotent no-ops, atomic writes preserving comments/order/mode/trailing-newline, scalar keys (region roles + `bedrock.mission_default_model_id` / `bedrock.capacity_advisor_default_model_id` with sibling preservation), `gco.cli.managed_config` audit lines, `gco stacks regions list/add/remove/set` + `gco stacks bedrock show/set-mission-model/set-capacity-advisor-model` CliRunner coverage, and the `GCO_ENABLE_CONFIG_MANAGEMENT`-gated MCP tools (registration + argv). |
 
 ### Configuration Files
 
@@ -636,7 +636,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_costs_cmd_extended.py` | Extended tests for cli/commands/costs_cmd.py. |
 | `test_cross_region_aggregator_extended.py` | Extended coverage tests for the cross-region aggregator Lambda. |
 | `test_dag.py` | Tests for the job-DAG pipeline feature in cli/dag.py. |
-| `test_default_bedrock_model_consistency.py` | Guards that `cdk.json` `context.bedrock.default_model_id` is the sole operational Bedrock default, both advisory subsystems resolve it through `gco.bedrock`, the canonical file ships as package data, and the selected system-defined inference profile has a complete scaffold replay fixture. |
+| `test_default_bedrock_model_consistency.py` | Guards that each `cdk.json` `context.bedrock` model default (`mission_default_model_id`, `capacity_advisor_default_model_id`, `claude_code_default_model_id`, `embedding_model_id`) is its consumer's sole operational source through `gco.bedrock`, the retired pre-v6 `default_model_id` key and its module aliases stay removed (fail-closed rename error), the canonical file ships as package data, and the configured Mission profile has a complete scaffold replay fixture. |
 | `test_drift_detection.py` | Tests for the CloudFormation drift-detection resources on the regional stack. |
 | `test_ephemeral_bastion.py` | The ephemeral SSM bastion lifecycle (`cli/ephemeral_bastion.py`): validated `aws` CLI argv builders with orphan safeguards (IMDSv2, shutdown-terminate, self-terminate user-data, `gco:ephemeral` tags), network/AMI discovery, and the atomic create/destroy lifecycle, with the AWS CLI shell-out mocked. |
 | `test_ga_registration.py` | Tests for the Global Accelerator registration Lambda (lambda/ga-registration/handler.py). |
@@ -677,6 +677,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_tasks_cmd_coverage.py` | Coverage for the `gco tasks` command helpers and subcommands (`cli/commands/tasks_cmd.py`): PID liveness, state colorization, duration formatting, and the list, show, tail, and prune paths. |
 | `test_tls_certificate_manager.py` | Tests for the TLS certificate manager Lambda: strict project ownership, ACM certificate discovery and reconciliation, SSM state recovery, cryptographic legacy-certificate migration, and safe cleanup of managed resources. |
 | `test_trusted_registries_augmentation.py` | Tests for ``_augment_trusted_registries_with_project_ecr``. |
+| `test_vector_store_config.py` | Tests for the `vector_store.*` config getters and validation in gco/config/config_loader.py — shipped defaults (feature OFF), cdk.json/code default agreement, replica-region derivation from `deployment_regions`, partial-override merging, and every validation error path including the one-way-door `dimensions` / `distance_function` fields. |
 | `test_waf_rate_limit.py` | Tests for the WAF PerIPRateLimit rule on GCOApiGatewayGlobalStack. |
 | `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
 | `test_yaml_parsing_limits.py` | Tests for YAML parsing limits on the manifest processor. |

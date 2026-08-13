@@ -15,12 +15,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from gco.bedrock import DEFAULT_BEDROCK_MODEL_ID
+from gco.bedrock import get_default_mission_model_id
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scaffold_responses"
 
-DEFAULT_MODEL_ID = DEFAULT_BEDROCK_MODEL_ID
+# Scaffold fixtures are Mission sampling captures, so replay follows the
+# Mission knob.
+DEFAULT_MODEL_ID = get_default_mission_model_id()
 CANONICAL_CAPTURE_SLUGS = (
     "search_inference_docs",
     "metric_drive_loss",

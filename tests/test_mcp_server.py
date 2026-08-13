@@ -208,10 +208,10 @@ class TestToolRegistration:
         if "sync_storage_bucket" in tool_names:
             expected += 1  # gated by GCO_ENABLE_LOCAL_STORAGE_SYNC
         if "add_deployment_region" in tool_names:
-            # list/add/remove/set_deployment_region + set_default_bedrock_model
-            # + set_claude_code_default_model register together under
-            # GCO_ENABLE_CONFIG_MANAGEMENT.
-            expected += 6
+            # list/add/remove/set_deployment_region + set_mission_default_model
+            # + set_capacity_advisor_default_model + set_claude_code_default_model
+            # register together under GCO_ENABLE_CONFIG_MANAGEMENT.
+            expected += 7
         if "mission_start" in tool_names:
             # The ten mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 10
@@ -479,7 +479,8 @@ class TestToolRegistration:
                     "add_deployment_region",
                     "remove_deployment_region",
                     "set_deployment_region",
-                    "set_default_bedrock_model",
+                    "set_mission_default_model",
+                    "set_capacity_advisor_default_model",
                     "set_claude_code_default_model",
                 }
             )

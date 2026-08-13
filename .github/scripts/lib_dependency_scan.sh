@@ -948,17 +948,18 @@ if m:
 # extract_default_bedrock_model [cdk_json_path] [leaf_key]
 #
 # Prints a configured Bedrock model id from ``cdk.json``
-# ``context.bedrock.<leaf_key>`` (default leaf: ``default_model_id``).
-# Two managed leaves exist: ``default_model_id`` — the advisory default that
-# Mission sampling and the capacity advisor resolve through ``gco.bedrock``
-# when no explicit override is supplied — and
-# ``claude_code_default_model_id``, the session model ``gco autopilot`` hands
-# to Claude Code. The keys are deliberately independent knobs.
+# ``context.bedrock.<leaf_key>`` (default leaf: ``mission_default_model_id``).
+# The managed generation leaves are ``mission_default_model_id`` — what
+# Mission sampling resolves through ``gco.bedrock`` when no explicit override
+# is supplied — ``capacity_advisor_default_model_id`` — the capacity
+# advisor's equivalent — and ``claude_code_default_model_id``, the session
+# model ``gco autopilot`` hands to Claude Code. The keys are deliberately
+# independent knobs.
 #
 # These values feed the Bedrock-model drift check in dependency-scan.sh, which
 # compares each against the newest profile in the same model family
 # (get_latest_bedrock_model). A newer release is the cue to update cdk.json
-# and, for the advisory key, re-capture the scaffold fixture under
+# and, for the Mission key, re-capture the scaffold fixture under
 # tests/fixtures/scaffold_responses/.
 #
 # Prints nothing if the file is absent, malformed, or does not contain a
@@ -966,7 +967,7 @@ if m:
 # skip, matching the other extractors in this library.
 extract_default_bedrock_model() {
   local file="${1:-cdk.json}"
-  local leaf="${2:-default_model_id}"
+  local leaf="${2:-mission_default_model_id}"
   # Optional third argument selects the context block (default: bedrock).
   # The vector-store feature keeps its own independent embedding model at
   # ``context.vector_store.embedding_model_id``; passing ``vector_store``
@@ -1056,8 +1057,8 @@ print('same' if a == b else ('newer' if b > a else 'older'))
 # Prints the newest system-defined inference-profile id in the same
 # model family as <current_id> (see bedrock_model_family), as reported
 # by ``aws bedrock list-inference-profiles --type-equals SYSTEM_DEFINED``.
-# Used by the Bedrock-model drift check to tell whether the pinned
-# DEFAULT_BEDROCK_MODEL_ID has a newer release available.
+# Used by the Bedrock-model drift check to tell whether a pinned
+# generation-model default has a newer release available.
 #
 # Family scoping keeps the comparison apples-to-apples: a newer Nova
 # Pro is reported against a pinned Nova Pro, but a different tier (Nova

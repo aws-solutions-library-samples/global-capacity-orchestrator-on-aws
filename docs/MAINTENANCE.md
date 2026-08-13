@@ -365,7 +365,8 @@ a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The month
 **Bedrock default model** check reads each managed `cdk.json` context value and
 flags a newer release **in the same model family** — a future global Claude
 Opus release, never a jump to a different scope, tier, or provider (that is a
-choice, not drift). The generation keys (`default_model_id`,
+choice, not drift). The generation keys (`mission_default_model_id`,
+`capacity_advisor_default_model_id`,
 `claude_code_default_model_id`) compare against the system-defined inference
 profiles in `us-east-1`; `embedding_model_id` — Mission memory's text-embedding
 model, resolved through `gco.bedrock.get_default_embedding_model_id()` — is a
@@ -380,11 +381,15 @@ credential-less run is not a false "up to date".
 When the scan flags a newer same-family model (or you decide to move the default
 deliberately):
 
-1. Change `cdk.json` `context.bedrock.default_model_id` to the new id and set
-   `context.bedrock.thinking.effort` to a level the model supports. Decide
-   separately whether `context.bedrock.claude_code_default_model_id` — the
+1. Change the flagged `cdk.json` key — `context.bedrock.mission_default_model_id`
+   (Mission sampling) or `context.bedrock.capacity_advisor_default_model_id`
+   (capacity advisor) — to the new id and set
+   `context.bedrock.thinking.effort` to a level the model supports (the two
+   generation knobs share it). Decide
+   separately whether the sibling generation knob and
+   `context.bedrock.claude_code_default_model_id` — the
    independent default `gco autopilot` hands to Claude Code — should move too:
-   the advisory default can be any Converse-capable family, while the Claude
+   the generation defaults can be any Converse-capable family, while the Claude
    Code default should stay a Claude model. The stock
    value is a system-defined **global inference profile**; global profiles can
    route worldwide and are unsuitable when a geography boundary is required.
@@ -392,19 +397,22 @@ deliberately):
    where data residency requires it. If the new model speaks a reasoning
    dialect GCO does not yet translate, add it to the dialect dispatch in
    `gco/bedrock.py` — otherwise the configured effort is silently inert. Update
-   the intentionally independent `_EXPECTED_DEFAULT_MODEL_ID`,
+   the intentionally independent `_EXPECTED_MISSION_MODEL_ID`,
+   `_EXPECTED_CAPACITY_ADVISOR_MODEL_ID`,
    `_EXPECTED_CLAUDE_CODE_MODEL_ID` (when moving the autopilot default),
    `_EXPECTED_FIXTURE_NAME`, and thinking review
    pins in `tests/test_default_bedrock_model_consistency.py`; those assertions
    are not runtime defaults, but they make model, fixture, and reasoning changes
    explicit in review.
-2. Capture a genuine fixture for the exact profile id:
+2. When the Mission key moved, capture a genuine fixture for the exact profile
+   id:
    `python3 scripts/capture_scaffold_fixtures.py --model <id> --region us-east-1`.
    The canonical directive set makes three paid calls; high reasoning can make
-   the run substantially slower and more expensive.
+   the run substantially slower and more expensive. (Scaffold fixtures replay
+   Mission sampling, so a capacity-advisor-only move needs no re-capture.)
 3. Run the Mission and capacity suites, then open a PR. The consistency guard
-   proves both runtime aliases and the dependency scanner still resolve the
-   same `cdk.json` value.
+   proves each consumer accessor and the dependency scanner still resolve the
+   same `cdk.json` values.
 
 The scan also tracks `context.vector_store.embedding_model_id` — the workload
 RAG corpus's deliberately independent embedding model — through the same
@@ -486,7 +494,8 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, the Python-constant Mooncake default image in
   `cli/images.py`, and the Bedrock models at `cdk.json`
-  `context.bedrock.default_model_id`,
+  `context.bedrock.mission_default_model_id`,
+  `context.bedrock.capacity_advisor_default_model_id`,
   `context.bedrock.claude_code_default_model_id`, and
   `context.bedrock.embedding_model_id`, and
   `context.vector_store.embedding_model_id` (see

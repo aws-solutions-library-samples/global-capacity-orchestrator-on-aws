@@ -239,13 +239,22 @@ DEPLOYMENT_REGION_SCALARS: dict[str, ManagedScalarKey] = {
     )
 }
 
-BEDROCK_DEFAULT_MODEL = ManagedScalarKey(
-    key_id="bedrock.default_model_id",
+MISSION_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.mission_default_model_id",
     container="bedrock",
-    leaf="default_model_id",
-    description="Default Bedrock model/inference-profile ID for advisory features",
+    leaf="mission_default_model_id",
+    description="Bedrock model/inference-profile ID Mission sampling uses by default",
     default="",  # the reader has no fallback: it requires the key when consulted
-    validate_result=_bedrock_model_id_validator("bedrock.default_model_id"),
+    validate_result=_bedrock_model_id_validator("bedrock.mission_default_model_id"),
+)
+
+CAPACITY_ADVISOR_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.capacity_advisor_default_model_id",
+    container="bedrock",
+    leaf="capacity_advisor_default_model_id",
+    description="Bedrock model/inference-profile ID the capacity advisor uses by default",
+    default="",  # the reader has no fallback: it requires the key when consulted
+    validate_result=_bedrock_model_id_validator("bedrock.capacity_advisor_default_model_id"),
 )
 
 CLAUDE_CODE_DEFAULT_MODEL = ManagedScalarKey(
@@ -561,21 +570,31 @@ def set_deployment_region_role(
 
 
 def get_bedrock_model_status(*, config_path: Path | str | None = None) -> dict[str, Any]:
-    """Return both configured Bedrock model defaults and their backing path."""
+    """Return every configured Bedrock model default and its backing path."""
     path = _resolve_config_path(config_path)
     document, _ = _load_document(path)
     return {
         "config_path": str(path),
-        "default_model_id": _current_scalar(document, BEDROCK_DEFAULT_MODEL),
+        "mission_default_model_id": _current_scalar(document, MISSION_DEFAULT_MODEL),
+        "capacity_advisor_default_model_id": _current_scalar(
+            document, CAPACITY_ADVISOR_DEFAULT_MODEL
+        ),
         "claude_code_default_model_id": _current_scalar(document, CLAUDE_CODE_DEFAULT_MODEL),
     }
 
 
-def set_default_bedrock_model(
+def set_mission_default_model(
     model_id: str, *, config_path: Path | str | None = None
 ) -> ChangeReport:
-    """Set ``bedrock.default_model_id`` (advisory-feature model default)."""
-    return managed_scalar_set(BEDROCK_DEFAULT_MODEL, model_id, config_path=config_path)
+    """Set ``bedrock.mission_default_model_id`` (Mission sampling model default)."""
+    return managed_scalar_set(MISSION_DEFAULT_MODEL, model_id, config_path=config_path)
+
+
+def set_capacity_advisor_default_model(
+    model_id: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set ``bedrock.capacity_advisor_default_model_id`` (capacity-advisor model default)."""
+    return managed_scalar_set(CAPACITY_ADVISOR_DEFAULT_MODEL, model_id, config_path=config_path)
 
 
 def set_claude_code_default_model(
