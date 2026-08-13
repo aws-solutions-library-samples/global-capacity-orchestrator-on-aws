@@ -44,6 +44,7 @@ from .commands import (
     storage,
     tasks,
     templates,
+    vector,
     webhooks,
 )
 from .config import get_config
@@ -156,6 +157,7 @@ cli.add_command(analytics)
 cli.add_command(monitoring)
 cli.add_command(tasks)
 cli.add_command(mission_cmd)
+cli.add_command(vector)
 
 
 def main() -> None:

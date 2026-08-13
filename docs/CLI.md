@@ -27,6 +27,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [config-cmd](#config-cmd-commands)
   - [tasks](#tasks-commands)
   - [mission](#mission-commands)
+  - [vector](#vector-commands)
   - [release](#release-commands)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
@@ -4709,6 +4710,89 @@ gco mission memory backfill
 **Options:**
 
 - `--root DIR` — Directory holding `*.report.json` Final_Reports (default: the filesystem mission root, `~/.gco/missions`).
+
+---
+
+### Vector Commands
+
+Semantic search over an S3-ingested document corpus, backed by the opt-in
+**vector store**: a `{project}-vector-store` [DynamoDB global
+table](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GlobalTables.html)
+with a `corpus-embedding-index` vector index, replicated to every deployment
+region so workloads and searches read locally. Ships with the global stack
+when `vector_store.enabled` is `true` in `cdk.json` (**off by default** — a
+replicated table carries real per-region cost). Ingestion is S3-driven:
+objects dropped under the corpus prefix (default `vector-corpus/`) of the
+cluster-shared bucket are chunked and embedded by the
+`lambda/vector-ingest` Lambda automatically; `gco vector ingest` is a
+convenience wrapper around that upload.
+
+Corpus lifecycle notes: re-uploading a file overwrites its chunks in place
+(deterministic ids), deleting an S3 object does **not** delete its items,
+and adopting a newer `vector_store.embedding_model_id` means re-ingesting
+the corpus — vectors are only comparable to vectors from the model that
+wrote them. After the first enabled deploy the vector index takes several
+minutes to build; searches answer a "still building" hint until it is
+ACTIVE (`gco vector status` shows where things stand).
+
+#### `gco vector status`
+
+Show the table, replica, and vector-index state plus the resolved names.
+
+```bash
+gco vector status
+gco vector status --region us-east-1 --output table
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region` | Region whose replica to describe (default: the global region) |
+| `--output` | Output format: `json` (default) or `table` |
+
+#### `gco vector ingest`
+
+Upload `.txt`/`.md`/`.jsonl` files to the corpus prefix for ingestion.
+Uploading IS ingestion — the S3 event notification invokes the ingest
+Lambda, and global-table replication fans the embedded chunks out to every
+replica region. `.jsonl` files are pre-chunked (`{"text": "...", "title":
+"optional"}` per line); `.txt`/`.md` go through the deterministic paragraph
+chunker.
+
+```bash
+gco vector ingest docs/RUNBOOKS.md operations-notes.txt
+gco vector ingest --demo --wait     # seed with the checkout's docs/*.md
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--demo` | Ingest the checkout's `docs/*.md` as a self-contained demo corpus (requires a source checkout) |
+| `--wait` | Block until every uploaded document is searchable (up to 5 minutes); exits `1` if the wait times out |
+| `--output` | Output format: `json` (default) or `table` |
+
+#### `gco vector search`
+
+Search the corpus for chunks similar to QUERY. The query is embedded with
+the corpus's own model at the index width (both one-way doors), and a
+lower score is closer under the default COSINE distance.
+
+```bash
+gco vector search "how do capacity blocks work"
+gco vector search "spot interruption handling" --top-k 3 --output table
+gco vector search "runbook steps" --source vector-corpus/RUNBOOKS.md --region us-east-1
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--top-k` | Number of similar chunks to return (default: 5) |
+| `--source` | Only return chunks from this source document (full S3 key) |
+| `--region` | Region whose replica to query (default: the global region) |
+| `--output` | Output format: `json` (default) or `table` |
 
 ---
 

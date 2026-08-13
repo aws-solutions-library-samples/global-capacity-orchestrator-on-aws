@@ -27,6 +27,7 @@ from .stacks_cmd import stacks
 from .storage_cmd import storage
 from .tasks_cmd import tasks
 from .templates_cmd import templates
+from .vector_cmd import vector
 from .webhooks_cmd import webhooks
 
 __all__ = [
@@ -52,5 +53,6 @@ __all__ = [
     "storage",
     "tasks",
     "templates",
+    "vector",
     "webhooks",
 ]
