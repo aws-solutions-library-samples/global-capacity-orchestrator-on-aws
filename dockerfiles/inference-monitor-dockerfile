@@ -9,7 +9,7 @@
 # zoneinfo, dpkg scanner metadata) that the FROM scratch runtime stage copies
 # wholesale. The deployed image contains no shell, package manager, or
 # coreutils. See the script's module docstring for the full rationale.
-FROM python:3.14.7-slim AS builder
+FROM python:3.15.0rc1-slim AS builder
 
 # Apply Debian security patches at build time. APT_SECURITY_EPOCH busts
 # the CI layer cache so a freshly-published trixie-security patch isn't
