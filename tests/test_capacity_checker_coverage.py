@@ -522,3 +522,235 @@ def test_estimate_capacity_genuinely_unavailable_no_regression():
     estimates = checker.estimate_capacity("p5.48xlarge", "us-east-1")
     assert len(estimates) == 1
     assert estimates[0].availability == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Pooled Spot Placement Scores on the live path
+# ---------------------------------------------------------------------------
+# GetSpotPlacementScores needs at least three instance types for a meaningful
+# answer, so the checker requests the score of the catalog pool containing the
+# requested type, and three non-score outcomes must stay distinguishable:
+# unpooled (no request made), refused (configuration limit), and no data.
+
+
+def _client_error(code):
+    return ClientError({"Error": {"Code": code, "Message": code}}, "GetSpotPlacementScores")
+
+
+def test_spot_score_request_carries_the_full_pool():
+    from scripts.accelerator_catalog import pool_for_instance_type
+
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_spot_placement_scores.return_value = {"SpotPlacementScores": [{"Score": 8}]}
+    checker._session.client = MagicMock(return_value=mock_ec2)
+
+    scores = checker.get_spot_placement_score("g5.xlarge", "us-east-1")
+
+    kwargs = mock_ec2.get_spot_placement_scores.call_args.kwargs
+    pool = pool_for_instance_type("g5.xlarge")
+    assert kwargs["InstanceTypes"] == list(pool.members)
+    assert len(kwargs["InstanceTypes"]) >= 3
+    assert "g5.xlarge" in kwargs["InstanceTypes"]
+    assert kwargs["TargetCapacity"] == 1
+    assert scores == {"regional": 8}
+
+
+def test_unpooled_type_skips_the_request_entirely():
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    checker._session.client = MagicMock(return_value=mock_ec2)
+
+    # m5.large is not an accelerator type and belongs to no pool: issuing a
+    # single-type request would return a misleadingly low score, so none is
+    # issued at all.
+    scores = checker.get_spot_placement_score("m5.large", "us-east-1")
+
+    mock_ec2.get_spot_placement_scores.assert_not_called()
+    assert scores == {}
+
+
+def test_config_limit_refusal_raises_a_named_condition():
+    from cli.capacity import SpotPlacementConfigLimitError
+
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_spot_placement_scores.side_effect = _client_error("MaxConfigLimitExceeded")
+    checker._session.client = MagicMock(return_value=mock_ec2)
+
+    with pytest.raises(SpotPlacementConfigLimitError) as excinfo:
+        checker.get_spot_placement_score("g5.xlarge", "us-east-1")
+
+    # The condition names the refusal, so a caller can never mistake it for
+    # an empty-but-successful score lookup.
+    assert "MaxConfigLimitExceeded" in str(excinfo.value)
+
+
+def test_scored_estimate_names_pool_and_target_capacity():
+    checker = _make_checker()
+    with (
+        patch.object(checker, "get_spot_placement_score", return_value={"regional": 8}),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+    ):
+        estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
+
+    details = estimates[0].details
+    assert details["spot_pool"] == "single-gpu-24gb"
+    assert details["sps_target_capacity"] == 1
+    # The interpretation still renders the numeric score and now conveys the
+    # pool-at-capacity semantics.
+    assert details["spot_placement_score"] == 8
+    assert "8/10" in details["score_interpretation"]
+    assert "single-gpu-24gb" in details["score_interpretation"]
+    assert "target capacity 1" in details["score_interpretation"]
+    assert estimates[0].confidence == 0.85
+
+
+def test_refused_estimate_degrades_without_score_confidence():
+    from cli.capacity import SpotPlacementConfigLimitError
+
+    checker = _make_checker()
+    prices = [SpotPriceInfo("g5.xlarge", "us-east-1a", 0.5, 0.5, 0.4, 0.6, 0.9)]
+    with (
+        patch.object(
+            checker,
+            "get_spot_placement_score",
+            side_effect=SpotPlacementConfigLimitError("refused"),
+        ),
+        patch.object(checker, "get_spot_price_history", return_value=prices),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+    ):
+        estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
+
+    estimate = estimates[0]
+    # Price fallback confidence, never the 0.85 reserved for a real score.
+    assert estimate.confidence == 0.5
+    assert "no placement score was obtained" in estimate.recommendation
+    assert "configuration limit" in estimate.recommendation
+    assert "spot_placement_score" not in estimate.details
+
+
+def test_unpooled_estimate_says_no_score_was_obtained():
+    checker = _make_checker()
+    prices = [SpotPriceInfo("m5.large", "us-east-1a", 0.1, 0.1, 0.08, 0.12, 0.9)]
+    mock_ec2 = MagicMock()
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    with (
+        patch.object(checker, "get_spot_price_history", return_value=prices),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+    ):
+        estimates = checker._estimate_spot_capacity("m5.large", "us-east-1", None)
+
+    estimate = estimates[0]
+    mock_ec2.get_spot_placement_scores.assert_not_called()
+    assert estimate.confidence == 0.5
+    assert "no placement score was obtained" in estimate.recommendation
+    assert "belongs to no instance pool" in estimate.recommendation
+
+
+def test_no_data_estimate_reports_why_no_score_exists():
+    from cli.capacity import SpotPlacementConfigLimitError
+
+    checker = _make_checker()
+    with (
+        patch.object(
+            checker,
+            "get_spot_placement_score",
+            side_effect=SpotPlacementConfigLimitError("refused"),
+        ),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+    ):
+        estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
+
+    estimate = estimates[0]
+    assert estimate.availability == "unknown"
+    assert estimate.confidence == 0.1
+    assert "configuration limit" in estimate.recommendation
+
+
+def test_on_demand_only_path_survives_a_config_limit_refusal():
+    from cli.capacity import SpotPlacementConfigLimitError
+
+    checker = _make_checker()
+    with (
+        patch.object(
+            checker,
+            "get_spot_placement_score",
+            side_effect=SpotPlacementConfigLimitError("refused"),
+        ),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_on_demand_price", return_value=1.0),
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        patch.object(checker, "check_instance_available_in_region", return_value=True),
+        patch.object(checker, "get_az_coverage", return_value=1.0),
+    ):
+        estimate = checker._estimate_on_demand_capacity("g5.xlarge", "us-east-1", None)
+
+    # The estimate degrades to the remaining scarcity signals instead of
+    # propagating the refusal to the caller.
+    assert estimate is not None
+    assert estimate.capacity_type == "on-demand"
+
+
+def test_pool_lookup_loads_the_catalog_without_repo_root_on_sys_path(monkeypatch):
+    # The installed `gco` entrypoint does not put the repository root on
+    # sys.path, so `import scripts` fails even inside a checkout (live
+    # testing caught exactly this). The lookup must fall back to loading the
+    # catalog module by its checkout-relative path.
+    import builtins
+
+    from cli.capacity import checker as checker_module
+
+    real_import = builtins.__import__
+
+    def missing_scripts(name, *args, **kwargs):
+        if name.startswith("scripts"):
+            raise ImportError("repository root is not on sys.path")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_scripts)
+    checker_module._pool_catalog_lookup.cache_clear()
+    try:
+        pool = CapacityChecker.instance_pool_for("g5.xlarge")
+        assert pool is not None
+        assert pool[0] == "single-gpu-24gb"
+        assert "g5.xlarge" in pool[1]
+    finally:
+        checker_module._pool_catalog_lookup.cache_clear()
+
+
+def test_pool_lookup_degrades_when_catalog_is_unavailable(monkeypatch, tmp_path):
+    # An installed wheel outside a checkout ships neither an importable
+    # `scripts` package nor the catalog file: the checker treats every type
+    # as unpooled and never issues a known-invalid single-type request.
+    import builtins
+
+    from cli.capacity import checker as checker_module
+
+    real_import = builtins.__import__
+
+    def missing_scripts(name, *args, **kwargs):
+        if name.startswith("scripts"):
+            raise ImportError("scripts is not shipped in the installed wheel")
+        return real_import(name, *args, **kwargs)
+
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    monkeypatch.setattr(builtins, "__import__", missing_scripts)
+    monkeypatch.setattr(
+        checker_module, "_POOL_CATALOG_PATH", tmp_path / "missing" / "accelerator_catalog.py"
+    )
+    checker_module._pool_catalog_lookup.cache_clear()
+    try:
+        scores = checker.get_spot_placement_score("g5.xlarge", "us-east-1")
+        assert scores == {}
+        mock_ec2.get_spot_placement_scores.assert_not_called()
+    finally:
+        checker_module._pool_catalog_lookup.cache_clear()

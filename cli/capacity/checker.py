@@ -33,11 +33,15 @@ is unavailable or the instance type isn't offered in the region.
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import logging
 import statistics
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -56,6 +60,72 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SpotPlacementConfigLimitError(Exception):
+    """GetSpotPlacementScores refused the request with ``MaxConfigLimitExceeded``.
+
+    The account has asked about too many distinct Spot placement
+    configurations in the rolling 24-hour window. This is a refusal, not a
+    capacity signal: it must never be collapsed into an empty score mapping,
+    which callers could mistake for "this instance type has no capacity
+    data". Callers degrade to non-SPS signals and say the score was
+    unavailable.
+    """
+
+
+# Checkout-relative location of the pool catalog module, used when a plain
+# ``import scripts`` fails because the repository root is not on sys.path
+# (the installed ``gco`` console entrypoint). Patchable in tests.
+_POOL_CATALOG_PATH = Path(__file__).resolve().parents[2] / "scripts" / "accelerator_catalog.py"
+
+
+@functools.cache
+def _pool_catalog_lookup() -> Any | None:
+    """Return ``scripts.accelerator_catalog.pool_for_instance_type`` or ``None``.
+
+    The pool catalog lives beside the repository's maintenance tooling, not in
+    the installed ``cli``/``gco`` packages. Two situations need handling:
+
+    - The ``gco`` console entrypoint does not put the repository root on
+      ``sys.path``, so a plain ``import scripts`` fails even when running from
+      a checkout. The catalog module is self-contained (stdlib + PyYAML), so
+      load it directly from the file that sits two levels above this package.
+    - An installed wheel outside a checkout has no ``scripts/`` directory at
+      all; return ``None`` and let callers treat every type as unpooled
+      rather than issue a known-invalid single-type request.
+
+    Cached because the catalog is static for the life of the process and the
+    lookup runs on every capacity check.
+    """
+    try:
+        from scripts.accelerator_catalog import pool_for_instance_type
+
+        return pool_for_instance_type
+    except ImportError:
+        pass
+    catalog_path = _POOL_CATALOG_PATH
+    if not catalog_path.is_file():
+        return None
+    module_name = "_gco_pool_catalog"
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, catalog_path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        # dataclass creation resolves cls.__module__ through sys.modules, so
+        # the module must be registered before its body executes.
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            raise
+        return module.pool_for_instance_type
+    except Exception as exc:
+        logger.debug("failed to load the instance pool catalog from %s: %s", catalog_path, exc)
+        return None
+
 
 # Capacity Block offering API error codes that mean "this instance type / region
 # simply doesn't have Capacity Blocks" rather than a real failure — expected and
@@ -297,23 +367,72 @@ class CapacityChecker:
             logger.warning("Failed to get AZ coverage for %s in %s: %s", instance_type, region, e)
             return None
 
+    @staticmethod
+    def instance_pool_for(instance_type: str) -> tuple[str, tuple[str, ...]] | None:
+        """Return (pool name, member types) for the first catalog pool containing the type.
+
+        AWS documents that ``GetSpotPlacementScores`` needs at least three
+        instance types to return meaningful scores, so every SPS request this
+        checker makes is scoped to a reviewed instance pool from
+        ``scripts/accelerator_catalog.py`` (the same catalog the capacity
+        poller uses). Returns ``None`` when no pool contains the type — and,
+        as a deliberate degradation, when the pool catalog is unavailable (an
+        installed wheel running outside a repository checkout ships without
+        ``scripts/``): an honest "no score obtained" beats a known-invalid
+        single-type request in both cases.
+        """
+        lookup = _pool_catalog_lookup()
+        if lookup is None:
+            logger.debug(
+                "instance pool catalog (scripts/accelerator_catalog.py) is unavailable; "
+                "treating %s as unpooled and skipping Spot Placement Scores",
+                instance_type,
+            )
+            return None
+        pool = lookup(instance_type)
+        if pool is None:
+            return None
+        return (pool.name, pool.members)
+
     def get_spot_placement_score(
         self, instance_type: str, region: str, target_capacity: int = 1
     ) -> dict[str, int]:
         """
-        Get Spot Placement Score for an instance type.
+        Get the Spot Placement Score for the instance pool containing a type.
 
         The Spot Placement Score (1-10) indicates the likelihood of getting
-        spot capacity. Higher scores mean better availability.
+        spot capacity. Higher scores mean better availability. The request
+        carries the full member list of the first catalog pool containing
+        ``instance_type`` — never the single type, which AWS documents as
+        returning misleadingly low scores — so the score describes the pool
+        at ``target_capacity``, not one instance type.
 
         Returns:
-            Dict mapping AZ to score (1-10), or empty if not available
+            Dict mapping AZ to score (1-10). Empty when no pool contains the
+            type (no request is made) or the API reports the type/region as
+            unsupported.
+
+        Raises:
+            SpotPlacementConfigLimitError: the account has queried too many
+                distinct SPS configurations in the rolling window
+                (``MaxConfigLimitExceeded``). Surfaced as a distinct condition
+                because "refused" must never be mistaken for "no capacity
+                data exists".
         """
+        pool = self.instance_pool_for(instance_type)
+        if pool is None:
+            logger.info(
+                "no instance pool contains %s; skipping the Spot Placement Score request "
+                "(a single-type request returns misleadingly low scores)",
+                instance_type,
+            )
+            return {}
+        pool_name, members = pool
         try:
             ec2 = self._session.client("ec2", region_name=region)
 
             response = ec2.get_spot_placement_scores(
-                InstanceTypes=[instance_type],
+                InstanceTypes=list(members),
                 TargetCapacity=target_capacity,
                 TargetCapacityUnitType="units",
                 RegionNames=[region],
@@ -333,6 +452,20 @@ class CapacityChecker:
 
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code == "MaxConfigLimitExceeded":
+                logger.warning(
+                    "Spot Placement Score request refused (MaxConfigLimitExceeded) for "
+                    "pool %s (%s) in %s: the account has queried too many distinct SPS "
+                    "configurations in the rolling 24h window",
+                    pool_name,
+                    instance_type,
+                    region,
+                )
+                raise SpotPlacementConfigLimitError(
+                    f"Spot Placement Score request for pool {pool_name} in {region} was "
+                    "refused: the account reached its Spot placement configuration limit "
+                    "(MaxConfigLimitExceeded)"
+                ) from e
             if error_code in ("InvalidParameterValue", "UnsupportedOperation"):
                 return {}
             raise
@@ -495,11 +628,14 @@ class CapacityChecker:
 
         if capacity_type in ("on-demand", "both"):
             # Pass spot placement scores to on-demand estimator as a scarcity signal
-            spot_scores = (
-                self.get_spot_placement_score(instance_type, region)
-                if capacity_type == "on-demand"
-                else {}
-            )
+            spot_scores = {}
+            if capacity_type == "on-demand":
+                try:
+                    spot_scores = self.get_spot_placement_score(instance_type, region)
+                except SpotPlacementConfigLimitError:
+                    # The refusal is already logged distinctly; the on-demand
+                    # estimate degrades to its other scarcity signals.
+                    spot_scores = {}
             # If we already fetched spot estimates, extract the scores from them
             if spot_estimates := [e for e in estimates if e.capacity_type == "spot"]:
                 spot_scores = {
@@ -520,11 +656,35 @@ class CapacityChecker:
     def _estimate_spot_capacity(
         self, instance_type: str, region: str, instance_info: InstanceTypeInfo | None
     ) -> list[CapacityEstimate]:
-        """Estimate spot capacity using Spot Placement Score and price history."""
+        """Estimate spot capacity using pooled Spot Placement Scores and price history."""
         estimates = []
 
-        # Get Spot Placement Score (primary signal)
-        placement_scores = self.get_spot_placement_score(instance_type, region)
+        # Spot Placement Score (primary signal), requested for the instance
+        # pool containing the type. Three distinct non-score outcomes exist
+        # and must stay distinguishable: the type is in no pool (no request
+        # made), the account's configuration limit refused the request, or
+        # the API had nothing to say. None of them may borrow the confidence
+        # reserved for a real score.
+        pool = self.instance_pool_for(instance_type)
+        sps_target_capacity = 1
+        placement_scores: dict[str, int] = {}
+        if pool is None:
+            sps_note = (
+                f"no placement score was obtained: {instance_type} belongs to no "
+                "instance pool, and a single-type request returns misleadingly "
+                "low scores"
+            )
+        else:
+            sps_note = "no placement score was obtained"
+            try:
+                placement_scores = self.get_spot_placement_score(
+                    instance_type, region, sps_target_capacity
+                )
+            except SpotPlacementConfigLimitError:
+                sps_note = (
+                    "no placement score was obtained: the account reached its Spot "
+                    "placement configuration limit (MaxConfigLimitExceeded)"
+                )
 
         # Get spot prices for pricing info
         spot_prices = self.get_spot_price_history(instance_type, region)
@@ -537,6 +697,7 @@ class CapacityChecker:
 
         if placement_scores:
             # Use Spot Placement Score as primary signal
+            pool_name = pool[0] if pool is not None else "unknown"
             regional_score = placement_scores.get("regional", 0)
 
             for az in azs:
@@ -563,7 +724,14 @@ class CapacityChecker:
 
                 details: dict[str, Any] = {
                     "spot_placement_score": score,
-                    "score_interpretation": f"{score}/10",
+                    # The score describes the pool's fleet at the stated
+                    # target capacity, not this one instance type.
+                    "score_interpretation": (
+                        f"{score}/10 for instance pool {pool_name} "
+                        f"at target capacity {sps_target_capacity}"
+                    ),
+                    "spot_pool": pool_name,
+                    "sps_target_capacity": sps_target_capacity,
                 }
 
                 if spot_info:
@@ -608,7 +776,7 @@ class CapacityChecker:
                     "current_price": spot_info.current_price,
                     "avg_price_7d": spot_info.avg_price_7d,
                     "price_stability": f"{spot_info.price_stability:.2f}",
-                    "note": "Estimate based on price history (Spot Placement Score unavailable)",
+                    "note": f"Estimate based on price history; {sps_note}",
                 }
 
                 if on_demand_price:
@@ -624,7 +792,7 @@ class CapacityChecker:
                         availability=availability,
                         confidence=0.5,  # Lower confidence without placement score
                         price_per_hour=spot_info.current_price,
-                        recommendation=recommendation,
+                        recommendation=f"{recommendation} ({sps_note})",
                         details=details,
                     )
                 )
@@ -638,8 +806,10 @@ class CapacityChecker:
                     capacity_type="spot",
                     availability="unknown",
                     confidence=0.1,
-                    recommendation=f"No spot data available for {instance_type} in {region}",
-                    details={"reason": "No spot price history or placement score available"},
+                    recommendation=(
+                        f"No spot data available for {instance_type} in {region}; {sps_note}"
+                    ),
+                    details={"reason": f"No spot price history, and {sps_note}"},
                 )
             )
 
@@ -677,7 +847,12 @@ class CapacityChecker:
 
         # Fetch spot placement scores if not provided (on-demand only mode)
         if spot_placement_scores is None:
-            spot_placement_scores = self.get_spot_placement_score(instance_type, region)
+            try:
+                spot_placement_scores = self.get_spot_placement_score(instance_type, region)
+            except SpotPlacementConfigLimitError:
+                # Logged distinctly at the source; degrade to the other
+                # universal scarcity signals rather than failing the estimate.
+                spot_placement_scores = {}
 
         if spot_prices is None:
             spot_prices = self.get_spot_price_history(instance_type, region)
