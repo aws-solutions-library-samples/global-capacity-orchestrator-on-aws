@@ -1,8 +1,9 @@
 """Tests for the ``gco status`` command surface.
 
 Drives the command through :class:`click.testing.CliRunner` with a directly
-constructed :class:`GCOConfig`. The gatherer's file boundary is patched so
-no test depends on the checkout's real ``cdk.json``.
+constructed :class:`GCOConfig`. The gatherer is patched at the command's
+import site and fed hand-built :class:`FleetStatus` documents, so these
+tests cover rendering and exit behavior without any AWS boundary.
 """
 
 from __future__ import annotations
@@ -17,13 +18,17 @@ from click.testing import CliRunner
 
 from cli.commands.status_cmd import status
 from cli.config import GCOConfig
-
-_CDK_REGIONS = {
-    "global": "us-east-2",
-    "api_gateway": "us-east-2",
-    "monitoring": "us-east-2",
-    "regional": ["us-east-1", "us-west-2"],
-}
+from cli.status import (
+    OVERALL_DEGRADED,
+    OVERALL_OK,
+    SECTION_ORDER,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
+    Finding,
+    FleetStatus,
+    Section,
+)
 
 _TOP_LEVEL_KEYS = {"generated_at", "project_name", "overall", "degraded", "findings", "sections"}
 
@@ -41,67 +46,111 @@ def _config(*, output_format: str = "table") -> GCOConfig:
     )
 
 
+def _document(
+    *,
+    overall: str = OVERALL_OK,
+    degraded: list[str] | None = None,
+    findings: list[Finding] | None = None,
+    section_overrides: dict[str, Section] | None = None,
+) -> FleetStatus:
+    sections = {
+        name: Section(name=name, status=STATUS_OK, data={"placeholder": True})
+        for name in SECTION_ORDER
+    }
+    sections["costs"] = Section(
+        name="costs", status=STATUS_SKIPPED, reason="not requested; pass --with-costs"
+    )
+    sections["nodepools"] = Section(
+        name="nodepools", status=STATUS_SKIPPED, reason="not requested; pass --with-nodepools"
+    )
+    sections.update(section_overrides or {})
+    return FleetStatus(
+        generated_at="2026-08-13T18:22:04+00:00",
+        project_name="test-gco",
+        overall=overall,
+        degraded=degraded or [],
+        findings=findings or [],
+        sections=sections,
+    )
+
+
 def _invoke(
     runner: CliRunner,
     args: list[str],
     *,
     config: GCOConfig,
-    cdk_regions: dict[str, Any] | None = None,
-) -> Any:
-    regions = dict(_CDK_REGIONS) if cdk_regions is None else cdk_regions
-    with patch("cli.status._load_cdk_json", return_value=regions):
-        return runner.invoke(status, args, obj=config)
+    document: FleetStatus | None = None,
+) -> tuple[Any, Any]:
+    doc = document or _document()
+    with patch("cli.commands.status_cmd.gather_fleet_status", return_value=doc) as gather:
+        result = runner.invoke(status, args, obj=config)
+    return result, gather
 
 
 def test_status_json_emits_one_document_and_nothing_else(runner: CliRunner) -> None:
-    result = _invoke(runner, [], config=_config(output_format="json"))
+    result, _ = _invoke(runner, [], config=_config(output_format="json"))
 
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
     assert set(document) == _TOP_LEVEL_KEYS
     assert document["project_name"] == "test-gco"
-    assert set(document["sections"]) == {
-        "regions",
-        "stacks",
-        "queue",
-        "jobs",
-        "capacity",
-        "inference",
-        "costs",
-        "nodepools",
-    }
+    assert set(document["sections"]) == set(SECTION_ORDER)
     for glyph in ("ℹ", "✓", "⚠", "✗"):
         assert glyph not in result.stdout
     assert "REGION" not in result.stdout
 
 
-def test_status_json_region_flag_narrows_the_workload_list(runner: CliRunner) -> None:
-    result = _invoke(runner, ["-r", "eu-west-1"], config=_config(output_format="json"))
+def test_status_json_serializes_findings_as_objects(runner: CliRunner) -> None:
+    document = _document(
+        overall=OVERALL_DEGRADED,
+        degraded=["stacks"],
+        findings=[Finding(severity="error", section="stacks", message="stack rolled back")],
+    )
+    result, _ = _invoke(runner, [], config=_config(output_format="json"), document=document)
 
-    assert result.exit_code == 0, result.output
-    document = json.loads(result.stdout)
-    assert document["sections"]["regions"]["data"]["workload"] == ["eu-west-1"]
+    payload = json.loads(result.stdout)
+    assert payload["findings"] == [
+        {"severity": "error", "section": "stacks", "message": "stack rolled back"}
+    ]
 
 
 def test_status_yaml_emits_one_parseable_document(runner: CliRunner) -> None:
-    result = _invoke(runner, [], config=_config(output_format="yaml"))
+    result, _ = _invoke(runner, [], config=_config(output_format="yaml"))
 
     assert result.exit_code == 0, result.output
     document = yaml.safe_load(result.stdout)
     assert set(document) == _TOP_LEVEL_KEYS
 
 
-def test_status_exits_zero_when_the_document_is_degraded(runner: CliRunner) -> None:
-    result = _invoke(runner, [], config=_config(output_format="json"), cdk_regions={})
+def test_status_region_flag_is_forwarded_to_the_gatherer(runner: CliRunner) -> None:
+    result, gather = _invoke(runner, ["-r", "eu-west-1"], config=_config(output_format="json"))
 
     assert result.exit_code == 0, result.output
-    document = json.loads(result.stdout)
-    assert document["overall"] == "degraded"
-    assert document["sections"]["regions"]["status"] == "unavailable"
+    assert gather.call_args.kwargs["region"] == "eu-west-1"
+
+
+def test_status_exits_zero_when_the_document_is_degraded(runner: CliRunner) -> None:
+    document = _document(
+        overall=OVERALL_DEGRADED,
+        degraded=["regions"],
+        section_overrides={
+            "regions": Section(
+                name="regions",
+                status=STATUS_UNAVAILABLE,
+                reason="deployment regions are not configured",
+            )
+        },
+    )
+    result, _ = _invoke(runner, [], config=_config(output_format="json"), document=document)
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["overall"] == "degraded"
+    assert payload["sections"]["regions"]["status"] == "unavailable"
 
 
 def test_status_table_mode_exits_zero(runner: CliRunner) -> None:
-    result = _invoke(runner, [], config=_config(output_format="table"))
+    result, _ = _invoke(runner, [], config=_config(output_format="table"))
 
     assert result.exit_code == 0, result.output
     assert "ok" in result.output
