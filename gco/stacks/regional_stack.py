@@ -241,6 +241,7 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
         "cert_manager",
         "slurm",
         "yunikorn",
+        "kubeflow_trainer",
         "kueue",
     }
 )
@@ -421,14 +422,17 @@ def _helm_chart_enabled(
 
 
 def _compute_kubectl_scheduler_replacements(
-    *, kueue_enabled: bool, slurm_enabled: bool
+    *, kueue_enabled: bool, slurm_enabled: bool, kubeflow_trainer_enabled: bool = False
 ) -> dict[str, str]:
     """Build the kubectl-applier replacements that gate scheduler manifests.
 
     When Kueue is enabled the ``{{KUEUE_ENABLED}}`` gate resolves so the
     default queue topology (post-helm-kueue-default-queues.yaml) applies;
     when Slurm is enabled the ``{{SLURM_ENABLED}}`` gate resolves so the
-    Slinky NetworkPolicies (post-helm-slurm-network.yaml) apply. A disabled
+    Slinky NetworkPolicies (post-helm-slurm-network.yaml) apply; when the
+    Kubeflow Trainer is enabled the ``{{KUBEFLOW_TRAINER_ENABLED}}`` gate
+    resolves so the built-in ClusterTrainingRuntime blueprints
+    (post-helm-kubeflow-trainer-runtimes.yaml) apply. A disabled
     scheduler leaves its placeholder unreplaced, the applier skips the file,
     and _FEATURE_RESOURCE_INVENTORY prunes previously applied objects — the
     same optional-feature gating observability, FSx, and Valkey use.
@@ -438,6 +442,8 @@ def _compute_kubectl_scheduler_replacements(
         replacements["{{KUEUE_ENABLED}}"] = "true"
     if slurm_enabled:
         replacements["{{SLURM_ENABLED}}"] = "true"
+    if kubeflow_trainer_enabled:
+        replacements["{{KUBEFLOW_TRAINER_ENABLED}}"] = "true"
     return replacements
 
 
@@ -3316,6 +3322,9 @@ class GCORegionalStack(Stack):
             _compute_kubectl_scheduler_replacements(
                 kueue_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "kueue"),
                 slurm_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "slurm"),
+                kubeflow_trainer_enabled=_helm_chart_enabled(
+                    _helm_config, _helm_overrides, "kubeflow_trainer"
+                ),
             )
         )
 
@@ -4131,6 +4140,7 @@ class GCORegionalStack(Stack):
             ("cert_manager", ["cert-manager"]),
             ("slurm", ["slinky-slurm-operator", "slinky-slurm"]),
             ("yunikorn", ["yunikorn"]),
+            ("kubeflow_trainer", ["kubeflow-trainer"]),
             ("kueue", ["kueue"]),  # Must be last
         ]
 

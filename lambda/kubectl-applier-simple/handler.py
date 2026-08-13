@@ -134,6 +134,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "APIService",
         "ClusterRole",
         "ClusterRoleBinding",
+        "ClusterTrainingRuntime",
         "ConfigMap",
         "CronJob",
         "CustomResourceDefinition",
@@ -180,6 +181,7 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "ClusterQueue",
         "ClusterRole",
         "ClusterRoleBinding",
+        "ClusterTrainingRuntime",
         "CustomResourceDefinition",
         "DeviceClass",
         "EC2NodeClass",
@@ -459,6 +461,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-to-restapi"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-egress"),
+    ),
+    ("{{KUBEFLOW_TRAINER_ENABLED}}", True): (
+        ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),

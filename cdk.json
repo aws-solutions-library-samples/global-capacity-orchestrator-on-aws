@@ -362,6 +362,10 @@
       "kuberay": {
         "enabled": true
       },
+      "_comment_kubeflow_trainer": "Kubeflow Trainer v2 — distributed-training operator (TrainJob against ClusterTrainingRuntime blueprints; supersedes the legacy training-operator's PyTorchJob/TFJob/MPIJob). Installs the trainer controller, its JobSet dependency, and the torch-distributed runtime. TrainJob manifests submit through the standard GCO job pipeline. On by default; set enabled: false to opt out. See docs/DISTRIBUTED_TRAINING.md.",
+      "kubeflow_trainer": {
+        "enabled": true
+      },
       "_comment_cert_manager": "cert-manager — issues and rotates TLS certs for cluster webhooks. Required by kueue and several other charts. Upstream: https://cert-manager.io/docs/.",
       "cert_manager": {
         "enabled": true

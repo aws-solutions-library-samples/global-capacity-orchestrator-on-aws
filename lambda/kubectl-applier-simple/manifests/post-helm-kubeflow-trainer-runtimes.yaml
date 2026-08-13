@@ -1,0 +1,50 @@
+# Kubeflow Trainer built-in ClusterTrainingRuntime blueprints
+#
+# Applied in the post-Helm pass because the kubeflow-trainer chart must have
+# registered the ClusterTrainingRuntime CRD first. The chart's own runtime
+# delivery is a post-install hook Job that downloads kubectl into an alpine
+# pod at run time; GCO disables that hook (runtimes.*.enabled: false in
+# charts.yaml) and ships the same bytes here instead — pinned, reviewable,
+# and pruned by the applier's feature inventory when the trainer chart is
+# disabled.
+#
+# Extracted verbatim from chart kubeflow-trainer 2.3.0
+# (helm template --set runtimes.torchDistributed.enabled=true), minus the
+# Helm bookkeeping labels. Keep in lockstep with the chart version pinned in
+# lambda/helm-installer/charts.yaml.
+#
+# Gated on {{KUBEFLOW_TRAINER_ENABLED}}: with the chart disabled the
+# placeholder stays unresolved, the applier skips this file, and
+# _FEATURE_RESOURCE_INVENTORY prunes the previously applied runtime.
+---
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
+metadata:
+  name: torch-distributed
+  labels:
+    trainer.kubeflow.org/framework: torch
+    # Upstream marks its built-in runtimes as pre-validated so webhook
+    # warm-up cannot flake the apply; the shape here is byte-identical to
+    # the chart's own copy.
+    trainer.kubeflow.org/webhook-validation: disabled
+    project: gco
+  annotations:
+    gco.io/kubeflow-trainer-enabled: "{{KUBEFLOW_TRAINER_ENABLED}}"
+spec:
+  mlPolicy:
+    numNodes: 1
+    torch: {}
+  template:
+    spec:
+      replicatedJobs:
+        - name: node
+          template:
+            metadata:
+              labels:
+                trainer.kubeflow.org/trainjob-ancestor-step: trainer
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: node
+                      image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime

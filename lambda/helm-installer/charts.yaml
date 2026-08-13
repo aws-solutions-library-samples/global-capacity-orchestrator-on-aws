@@ -19,6 +19,7 @@
 #   - Slinky Slurm Operator: https://github.com/SlinkyProject/slurm-operator/tags
 #   - cert-manager: https://github.com/cert-manager/cert-manager/releases
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
+#   - Kubeflow Trainer: https://github.com/kubeflow/trainer/releases
 
 charts:
   # AWS Load Balancer Controller - mandatory Gateway API data plane
@@ -783,6 +784,68 @@ charts:
               memory: 55Mi
             limits:
               memory: 256Mi
+
+  # Kubeflow Trainer v2 - distributed training operator (TrainJob CRD)
+  # Runs multi-node training through TrainJob CRs against ClusterTrainingRuntime
+  # blueprints; supersedes the legacy training-operator (PyTorchJob/TFJob/
+  # MPIJob). Installs the trainer controller plus its JobSet dependency (the
+  # replicated-Job engine TrainJobs compile to; nothing else in the platform
+  # ships JobSet). Webhooks are self-scoped — the trainer CRD group plus
+  # jobset-owned pods via an objectSelector on jobset.sigs.k8s.io/jobset-name —
+  # so installing before kueue is safe (kueue stays last).
+  # https://github.com/kubeflow/trainer
+  kubeflow-trainer:
+    enabled: true
+    repo_name: kubeflow-oci
+    repo_url: oci://ghcr.io/kubeflow/charts
+    chart: kubeflow-trainer
+    version: "2.3.0"
+    namespace: kubeflow-trainer
+    create_namespace: true
+    use_oci: true
+    wait: true
+    wait_timeout: "8m"
+    values:
+      # CRDs (TrainJob, TrainingRuntime, ClusterTrainingRuntime) are chart
+      # templates in Trainer 2.x, so install AND upgrade keep them current
+      # (no crds/-directory install-only gap). JobSet's own CRD still ships
+      # from the subchart's crds/ directory (install-time only).
+      crds:
+        enabled: true
+      jobset:
+        install: true
+      image:
+        registry: ghcr.io
+        repository: kubeflow/trainer/trainer-controller-manager
+        # Pin the tag explicitly (the chart defaults it to the chart version)
+        # so the monthly deps-drift report covers it. Bump in lockstep with
+        # `version` above and with the runtime manifest extracted from this
+        # chart (post-helm-kubeflow-trainer-runtimes.yaml).
+        tag: "v2.3.0"
+      manager:
+        replicas: 1
+        # Never voluntarily consolidate the training control plane.
+        podAnnotations:
+          karpenter.sh/do-not-disrupt: "true"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      # Built-in ClusterTrainingRuntimes stay OFF here on purpose: the chart
+      # delivers them via a post-install/post-upgrade hook Job that downloads
+      # kubectl into an alpine pod at run time (an unpinned network fetch)
+      # and burns helm --wait budget (the cert-manager startupapicheck
+      # lesson). GCO applies the torch-distributed runtime through the
+      # post-Helm kubectl pass instead — same bytes, pinned and reviewable,
+      # pruned when this chart is disabled. See
+      # lambda/kubectl-applier-simple/manifests/post-helm-kubeflow-trainer-runtimes.yaml.
+      runtimes:
+        defaultEnabled: false
+        torchDistributed:
+          enabled: false
 
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling
