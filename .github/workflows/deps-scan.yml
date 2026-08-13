@@ -17,10 +17,11 @@
 #   - Aurora PostgreSQL engine versions (AWS creds via OIDC)
 #   - EMR Serverless release labels (AWS creds via OIDC)
 #   - Bedrock default model ids from cdk.json context.bedrock
-#     (default_model_id, claude_code_default_model_id, embedding_model_id),
-#     each compared against the newest same-family release — inference
-#     profiles for the generation keys, EMBEDDING foundation models for the
-#     embedding key (AWS creds via OIDC)
+#     (default_model_id, claude_code_default_model_id, embedding_model_id)
+#     plus context.vector_store.embedding_model_id, each compared against the
+#     newest same-family release — inference profiles for the generation
+#     keys, EMBEDDING foundation models for the embedding keys (AWS creds
+#     via OIDC)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
 #   - Dockerfile.dev ARG pins (NODE_VERSION, NPM_VERSION, CDK_VERSION,

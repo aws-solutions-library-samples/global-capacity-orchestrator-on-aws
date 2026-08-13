@@ -967,18 +967,23 @@ if m:
 extract_default_bedrock_model() {
   local file="${1:-cdk.json}"
   local leaf="${2:-default_model_id}"
+  # Optional third argument selects the context block (default: bedrock).
+  # The vector-store feature keeps its own independent embedding model at
+  # ``context.vector_store.embedding_model_id``; passing ``vector_store``
+  # here lets the same extractor and drift plumbing manage it.
+  local block="${3:-bedrock}"
   [ -f "$file" ] || return 0
   python3 -c "
 import json, sys
 try:
     with open(sys.argv[1]) as handle:
         data = json.load(handle)
-    value = data.get('context', {}).get('bedrock', {}).get(sys.argv[2])
+    value = data.get('context', {}).get(sys.argv[3], {}).get(sys.argv[2])
 except Exception:
     value = None
 if isinstance(value, str) and value.strip():
     print(value.strip())
-" "$file" "$leaf" 2>/dev/null
+" "$file" "$leaf" "$block" 2>/dev/null
 }
 
 # bedrock_model_family <inference_profile_id>

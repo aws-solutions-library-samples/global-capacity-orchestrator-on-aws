@@ -1791,6 +1791,41 @@ SHIM
 # get_latest_bedrock_model tests: family scoping, lifecycle filtering, and
 # version ranking run offline against canned JSON.
 
+@test "extract_default_bedrock_model: block argument reads vector_store from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["vector_store"]["embedding_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: block argument defaults to bedrock" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'JSON'
+{"context":{"bedrock":{"embedding_model_id":"from-bedrock"},"vector_store":{"embedding_model_id":"from-vector-store"}}}
+JSON
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "from-bedrock" ]
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ "$output" = "from-vector-store" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when the requested block is absent" {
+    tmpfile="$(mktemp)"
+    echo '{"context":{"bedrock":{"embedding_model_id":"x"}}}' > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
 @test "extract_default_bedrock_model: reads the embedding leaf from cdk.json" {
     expected="$(python3 -c '
 import json

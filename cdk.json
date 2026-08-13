@@ -272,6 +272,15 @@
       "distance_function": "COSINE",
       "top_k": 3
     },
+    "_comment_vector_store": "Globally replicated vector store for workload RAG - an OPT-IN add-on (enabled=false by default; replicated storage and writes carry per-region cost). When enabled, GCOGlobalStack creates a DynamoDB GLOBAL table ({project}-vector-store, primary in the global region) with a vector index whose definition and data replicate to every replica region automatically, an S3-triggered ingest Lambda that embeds documents dropped under corpus_prefix on the cluster-shared bucket (txt/md are chunked; jsonl is pre-chunked), and per-cluster read wiring (gco-vector-store ConfigMap + SearchVectors grants on the LOCAL replica). dimensions and distance_function are ONE-WAY DOORS (immutable after index creation) and dimensions must match the embedding_model_id output width. embedding_model_id is deliberately independent of bedrock.embedding_model_id (mission memory); CHANGING IT REQUIRES RE-INGESTING THE CORPUS - vectors from different models are not comparable. replica_regions: explicit replica list; empty means follow deployment_regions.regional (minus the global region, which hosts the primary). corpus_prefix: watched S3 prefix. Deleting an S3 object does NOT delete its items. Query with `gco vector search`; load with `gco vector ingest` (or --demo). Complementary to aurora_pgvector, not a replacement: pgvector gives SQL (joins, range predicates, transactions); this gives managed global replication with equality-only inline filters. See lambda/vector-ingest/README.md.",
+    "vector_store": {
+      "enabled": false,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
+      "replica_regions": [],
+      "corpus_prefix": "vector-corpus/"
+    },
     "_comment_aurora_pgvector": "Aurora Serverless v2 PostgreSQL with pgvector. enabled: master toggle. min_acu / max_acu: Aurora Capacity Unit range; min_acu=0 enables scale-to-zero. backup_retention_days: automated backup TTL. deletion_protection: blocks accidental cluster deletion when true. See docs/CUSTOMIZATION.md (Configure Aurora pgvector) and https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html.",
     "aurora_pgvector": {
       "enabled": false,

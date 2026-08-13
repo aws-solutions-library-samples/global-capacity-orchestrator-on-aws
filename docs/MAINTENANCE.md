@@ -406,6 +406,12 @@ deliberately):
    proves both runtime aliases and the dependency scanner still resolve the
    same `cdk.json` value.
 
+The scan also tracks `context.vector_store.embedding_model_id` — the workload
+RAG corpus's deliberately independent embedding model — through the same
+foundation-model lookup. Its remediation is heavier: adopting a newer model
+means re-ingesting the corpus (`gco vector ingest`), because stored vectors
+are only comparable to vectors from the model that wrote them.
+
 When the flagged key is `context.bedrock.embedding_model_id`, treat the row as
 a planning signal rather than a routine bump: vectors are only comparable to
 vectors produced by the same model, and every Mission-memory item records its
@@ -482,7 +488,8 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   `cli/images.py`, and the Bedrock models at `cdk.json`
   `context.bedrock.default_model_id`,
   `context.bedrock.claude_code_default_model_id`, and
-  `context.bedrock.embedding_model_id` (see
+  `context.bedrock.embedding_model_id`, and
+  `context.vector_store.embedding_model_id` (see
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
   These are tracked by the monthly scan rather than Dependabot.
 

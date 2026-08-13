@@ -169,6 +169,8 @@ class ConfigLoader:
 
         # Validate mission-memory configuration (recall across mission sessions)
         self._validate_mission_memory_config()
+        # Validate the vector-store configuration (global workload RAG corpus)
+        self._validate_vector_store_config()
 
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
@@ -871,6 +873,108 @@ class ConfigLoader:
                 raise ConfigValidationError(
                     f"mission_memory.distance_function must be one of {valid}, got "
                     f"{distance!r}. This is immutable after index creation."
+                )
+
+    def _validate_vector_store_config(self) -> None:
+        """Validate the optional ``vector_store`` block in cdk.json.
+
+        The block is optional; absence means the feature stays off. When
+        present, types are validated so a typo fails fast at synth time —
+        especially the one-way-door fields (``dimensions``,
+        ``distance_function``) that cannot be corrected after the vector
+        index exists. The distance-function set and dimension ceiling reuse
+        the mission-memory constants because both features target the same
+        DynamoDB vector-index API limits:
+
+        - ``enabled``: bool if present.
+        - ``dimensions``: positive int <= 4096 if present.
+        - ``distance_function``: one of COSINE / DOT_PRODUCT / EUCLIDEAN.
+        - ``embedding_model_id``: non-empty string. Deliberately independent
+          of ``bedrock.embedding_model_id`` (mission memory) — the two
+          corpora may use different models.
+        - ``replica_regions``: list of known regions, no duplicates, and
+          never the global region (that is the table's primary).
+        - ``corpus_prefix``: non-empty S3 key prefix ending in ``/``.
+        """
+        vector_store_ctx = self.app.node.try_get_context("vector_store")
+        if not isinstance(vector_store_ctx, dict):
+            return
+
+        if "enabled" in vector_store_ctx and not isinstance(vector_store_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"vector_store.enabled must be a bool, got "
+                f"{type(vector_store_ctx['enabled']).__name__}: "
+                f"{vector_store_ctx['enabled']!r}"
+            )
+        if "dimensions" in vector_store_ctx:
+            dimensions = vector_store_ctx["dimensions"]
+            if (
+                not isinstance(dimensions, int)
+                or isinstance(dimensions, bool)
+                or dimensions <= 0
+                or dimensions > self.MISSION_MEMORY_MAX_DIMENSIONS
+            ):
+                raise ConfigValidationError(
+                    "vector_store.dimensions must be a positive integer <= "
+                    f"{self.MISSION_MEMORY_MAX_DIMENSIONS} (DynamoDB vector-index "
+                    f"limit), got {dimensions!r}. This is a one-way door: it is "
+                    "immutable after index creation and must match the "
+                    "vector_store.embedding_model_id output width."
+                )
+        if "distance_function" in vector_store_ctx:
+            distance = vector_store_ctx["distance_function"]
+            if (
+                not isinstance(distance, str)
+                or distance not in self.MISSION_MEMORY_DISTANCE_FUNCTIONS
+            ):
+                valid = ", ".join(sorted(self.MISSION_MEMORY_DISTANCE_FUNCTIONS))
+                raise ConfigValidationError(
+                    f"vector_store.distance_function must be one of {valid}, got "
+                    f"{distance!r}. This is immutable after index creation."
+                )
+        if "embedding_model_id" in vector_store_ctx:
+            model_id = vector_store_ctx["embedding_model_id"]
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ConfigValidationError(
+                    f"vector_store.embedding_model_id must be a non-empty string, got {model_id!r}"
+                )
+        if "replica_regions" in vector_store_ctx:
+            replica_regions = vector_store_ctx["replica_regions"]
+            if not isinstance(replica_regions, list) or not all(
+                isinstance(region, str) for region in replica_regions
+            ):
+                raise ConfigValidationError(
+                    f"vector_store.replica_regions must be a list of region strings, "
+                    f"got {replica_regions!r}"
+                )
+            if len(replica_regions) != len(set(replica_regions)):
+                raise ConfigValidationError(
+                    f"vector_store.replica_regions contains duplicates: {replica_regions!r}"
+                )
+            global_region = self.get_global_region()
+            for region in replica_regions:
+                if region not in self.VALID_REGIONS:
+                    raise ConfigValidationError(
+                        f"vector_store.replica_regions contains invalid region "
+                        f"'{region}'. Valid regions: {sorted(self.VALID_REGIONS)}"
+                    )
+                if region == global_region:
+                    raise ConfigValidationError(
+                        f"vector_store.replica_regions must not include the global "
+                        f"region '{global_region}': the primary table already lives "
+                        "there and a global table cannot replicate into its own region."
+                    )
+        if "corpus_prefix" in vector_store_ctx:
+            corpus_prefix = vector_store_ctx["corpus_prefix"]
+            if (
+                not isinstance(corpus_prefix, str)
+                or not corpus_prefix.strip()
+                or not corpus_prefix.endswith("/")
+                or corpus_prefix.startswith("/")
+            ):
+                raise ConfigValidationError(
+                    "vector_store.corpus_prefix must be a non-empty S3 key prefix "
+                    f"ending in '/' (and not starting with '/'), got {corpus_prefix!r}"
                 )
 
     def get_project_name(self) -> str:
@@ -1672,6 +1776,67 @@ class ConfigLoader:
     def get_mission_memory_enabled(self) -> bool:
         """Return whether mission memory is enabled."""
         return bool(self.get_mission_memory_config()["enabled"])
+
+    def get_vector_store_config(self) -> dict[str, Any]:
+        """Get the vector-store configuration (global workload RAG corpus).
+
+        Returns the merged ``vector_store`` block from cdk.json layered on
+        top of the defaults below. The feature is OFF by default — a
+        replicated vector store carries real per-region storage and write
+        cost, so it is an explicit opt-in like ``aurora_pgvector``; set
+        ``vector_store.enabled: true`` to provision it.
+
+        Keys:
+            - enabled: provision the global vector-store table + index,
+              the S3-triggered ingest pipeline, and the regional read wiring
+              (default False)
+            - dimensions: embedding vector width (default 1024). ONE-WAY
+              DOOR: immutable after index creation and must match the
+              configured ``embedding_model_id`` output width.
+            - distance_function: vector distance metric (default COSINE);
+              immutable after index creation.
+            - embedding_model_id: Bedrock text-embedding model used by the
+              ingest pipeline and query paths (default
+              amazon.titan-embed-text-v2:0). Independent of
+              ``bedrock.embedding_model_id`` on purpose. Changing it means
+              re-ingesting the corpus: vectors from different models are
+              not comparable.
+            - replica_regions: regions to replicate the table into. Empty
+              (the default) means "follow deployment_regions.regional",
+              excluding the global region (the primary).
+            - corpus_prefix: S3 key prefix on the Cluster_Shared_Bucket
+              watched by the ingest pipeline (default vector-corpus/).
+        """
+        default_config: dict[str, Any] = {
+            "enabled": False,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "embedding_model_id": "amazon.titan-embed-text-v2:0",
+            "replica_regions": [],
+            "corpus_prefix": "vector-corpus/",
+        }
+        vector_store_ctx = self.app.node.try_get_context("vector_store")
+        vector_store_config = vector_store_ctx if isinstance(vector_store_ctx, dict) else {}
+        return {**default_config, **vector_store_config}
+
+    def get_vector_store_enabled(self) -> bool:
+        """Return whether the vector store is enabled (default False)."""
+        return bool(self.get_vector_store_config()["enabled"])
+
+    def get_vector_store_replica_regions(self) -> list[str]:
+        """Return the effective replica region list for the vector store.
+
+        The configured ``replica_regions`` when non-empty, otherwise the
+        regional deployment list — in both cases with the global region
+        removed, because the primary table lives there and a global table
+        cannot replicate into its own region. May legitimately be empty
+        (single-region deployments get a single-region global table).
+        """
+        config = self.get_vector_store_config()
+        configured = [str(region) for region in config["replica_regions"]]
+        candidates = configured or self.get_regions()
+        global_region = self.get_global_region()
+        return [region for region in candidates if region != global_region]
 
     def get_tags(self) -> dict[str, str]:
         """Get common tags from configuration"""
