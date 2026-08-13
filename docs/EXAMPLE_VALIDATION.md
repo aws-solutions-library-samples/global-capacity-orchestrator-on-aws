@@ -76,7 +76,7 @@ never skips teardown — `destroy` and `final-inventory` run regardless.
 Per-run enablement is **derived from the selection**: examples that need
 off-by-default schedulers thread `helm_enabled_overrides` (slurm,
 yunikorn) and examples that need optional infrastructure thread
-`feature_enabled_overrides` (`aurora_pgvector`, `valkey`, `fsx_lustre`)
+`feature_enabled_overrides` (`aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`)
 into every CDK invocation of the run — cdk.json is never rewritten, so the
 clean-worktree preflight holds.
 

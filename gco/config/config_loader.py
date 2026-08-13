@@ -53,7 +53,7 @@ FEATURE_OVERRIDE_CONTEXT_KEY = "feature_enabled_overrides"
 #: The cdk.json blocks whose ``enabled`` flag the override may force on. Kept
 #: deliberately narrow: each of these is a self-contained regional feature the
 #: examples exercise (Aurora pgvector, Valkey Serverless, FSx for Lustre).
-FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre"})
+FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store"})
 
 
 def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
@@ -1817,7 +1817,10 @@ class ConfigLoader:
         }
         vector_store_ctx = self.app.node.try_get_context("vector_store")
         vector_store_config = vector_store_ctx if isinstance(vector_store_ctx, dict) else {}
-        return {**default_config, **vector_store_config}
+        merged = {**default_config, **vector_store_config}
+        if self._feature_override_enabled("vector_store"):
+            merged["enabled"] = True
+        return merged
 
     def get_vector_store_enabled(self) -> bool:
         """Return whether the vector store is enabled (default False)."""
