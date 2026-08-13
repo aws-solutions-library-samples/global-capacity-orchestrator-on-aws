@@ -146,8 +146,8 @@ def _render_costs(data: dict[str, Any]) -> list[str]:
 def _render_nodepools(data: dict[str, Any]) -> list[str]:
     lines = []
     for region, entry in data.get("by_region", {}).items():
-        pools = entry.get("nodepools", [])
-        if entry.get("reachable") is False:
+        pools = entry.get("nodepools")
+        if pools is None:
             lines.append(f"{region:<15}  {entry.get('note', 'endpoint not reachable')}")
         else:
             names = ", ".join(str(p.get("name")) for p in pools) or "none"
@@ -224,22 +224,41 @@ def _render_table(doc: FleetStatus) -> None:
 
 @click.command("status")
 @click.option("--region", "-r", help="Restrict the gather to a single region")
+@click.option(
+    "--with-costs",
+    is_flag=True,
+    help="Include the costs section (Cost Explorer bills per request)",
+)
+@click.option(
+    "--with-nodepools",
+    is_flag=True,
+    help="Include Karpenter nodepools (requires a reachable cluster API endpoint)",
+)
 @pass_config
-def status(config: GCOConfig, region: str | None) -> None:
+def status(
+    config: GCOConfig,
+    region: str | None,
+    with_costs: bool,
+    with_nodepools: bool,
+) -> None:
     """Show fleet-wide deployment status across configured regions.
 
     Aggregates control-plane state — stacks, queue depth, jobs, capacity,
     and inference endpoints — into one document. Every section carries its
     own status, so a failed read degrades that section instead of hiding
-    the rest.
+    the rest. Reads that bill per request or need cluster reachability are
+    opt-in flags.
 
     Examples:
         gco status
         gco status -r us-east-1
         gco status --output json
+        gco status --with-costs --with-nodepools
     """
     formatter = get_output_formatter(config)
-    doc = gather_fleet_status(config, region=region)
+    doc = gather_fleet_status(
+        config, region=region, with_costs=with_costs, with_nodepools=with_nodepools
+    )
 
     if config.output_format == "table":
         _render_table(doc)

@@ -129,6 +129,20 @@ def test_status_region_flag_is_forwarded_to_the_gatherer(runner: CliRunner) -> N
     assert gather.call_args.kwargs["region"] == "eu-west-1"
 
 
+def test_status_opt_in_flags_are_forwarded_to_the_gatherer(runner: CliRunner) -> None:
+    _, gather_default = _invoke(runner, [], config=_config(output_format="json"))
+    _, gather_opted = _invoke(
+        runner,
+        ["--with-costs", "--with-nodepools"],
+        config=_config(output_format="json"),
+    )
+
+    assert gather_default.call_args.kwargs["with_costs"] is False
+    assert gather_default.call_args.kwargs["with_nodepools"] is False
+    assert gather_opted.call_args.kwargs["with_costs"] is True
+    assert gather_opted.call_args.kwargs["with_nodepools"] is True
+
+
 def test_status_exits_zero_when_the_document_is_degraded(runner: CliRunner) -> None:
     document = _document(
         overall=OVERALL_DEGRADED,

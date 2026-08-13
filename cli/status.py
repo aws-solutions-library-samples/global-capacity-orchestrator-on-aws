@@ -114,6 +114,9 @@ HEALTH_UNHEALTHY = "unhealthy"
 #: reports ``error`` instead of holding the whole document.
 SECTION_TIMEOUT_SECONDS = 30
 
+#: Cost Explorer window for the opt-in ``costs`` section.
+COST_WINDOW_DAYS = 30
+
 #: Ceiling for concurrent per-region (or per-stack) reads within a section.
 _MAX_FANOUT_WORKERS = 8
 
@@ -270,11 +273,6 @@ def _regions_unavailable_section(name: str) -> Section:
         status=STATUS_UNAVAILABLE,
         reason="deployment regions could not be resolved; see the regions section",
     )
-
-
-def _pending_section(name: str) -> Section:
-    """Placeholder for a section whose gatherer does not exist yet."""
-    return Section(name=name, status=STATUS_SKIPPED, reason="gathering is not implemented yet")
 
 
 def _fanout_workers(count: int) -> int:
@@ -691,27 +689,162 @@ def _gather_inference(config: GCOConfig) -> Section:
 
 
 def _gather_costs(config: GCOConfig, requested: bool) -> Section:
-    """Gather the ``costs`` section, or report it skipped when not requested."""
-    del config
+    """Read the Cost Explorer summary and cost-allocation-tag status.
+
+    Tier 2: Cost Explorer bills per ``GetCostAndUsage`` request, so this
+    section is gathered only on explicit request. No by-region breakdown is
+    populated — it would need a second billed request.
+    """
     if not requested:
         return Section(
             name=SECTION_COSTS,
             status=STATUS_SKIPPED,
             reason="not requested; pass --with-costs (Cost Explorer bills per request)",
         )
-    return _pending_section(SECTION_COSTS)
+
+    from cli.costs import get_cost_tracker
+
+    tracker = get_cost_tracker(config)
+    summary = tracker.get_cost_summary(days=COST_WINDOW_DAYS)
+
+    errors: list[str] = []
+    tags: list[dict[str, str]] | None = None
+    try:
+        tags = [
+            {"tag_key": tag.get("tag_key", ""), "status": tag.get("status", "")}
+            for tag in tracker.get_cost_allocation_tag_status()
+        ]
+    except Exception as e:
+        errors.append(f"cost allocation tag status: {e}")
+
+    data: dict[str, Any] = {
+        "total": round(summary.total, 2),
+        "currency": summary.currency,
+        "window_days": COST_WINDOW_DAYS,
+        "period_start": summary.period_start,
+        "period_end": summary.period_end,
+        "by_service": [
+            {"service": item.service, "amount": round(item.amount, 2)}
+            for item in summary.by_service
+        ],
+        # Whether the tag filters this total depends on are active in
+        # Billing, so a near-zero total is not misread as near-zero spend.
+        "allocation_tags": tags,
+        "as_of": datetime.now(UTC).isoformat(),
+    }
+    if errors:
+        return Section(
+            name=SECTION_COSTS,
+            status=STATUS_PARTIAL,
+            data=data,
+            reason="cost total read, but the allocation-tag status could not be",
+            errors=errors,
+        )
+    status = STATUS_EMPTY if not data["by_service"] and data["total"] == 0 else STATUS_OK
+    return Section(name=SECTION_COSTS, status=status, data=data)
+
+
+_NODEPOOL_FIELDS = ("name", "status", "capacity_types", "instance_types")
 
 
 def _gather_nodepools(config: GCOConfig, requested: bool, workload: list[str]) -> Section:
-    """Gather the ``nodepools`` section, or report it skipped when not requested."""
-    del config, workload
+    """List Karpenter NodePools per region, probing reachability first.
+
+    Tier 3: the NodePool listing talks straight to the EKS API endpoint,
+    which is private by default; against a private endpoint it would block
+    until timeout. Each region's endpoint posture is probed first and a
+    non-public endpoint is reported ``unavailable`` — the Kubernetes call
+    is never attempted in that case.
+    """
     if not requested:
         return Section(
             name=SECTION_NODEPOOLS,
             status=STATUS_SKIPPED,
             reason="not requested; pass --with-nodepools (requires cluster API reachability)",
         )
-    return _pending_section(SECTION_NODEPOOLS)
+    if not workload:
+        return _regions_unavailable_section(SECTION_NODEPOOLS)
+
+    from cli import kubectl_helpers
+    from cli.nodepools import list_cluster_nodepools
+
+    by_region: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    listed = 0
+    private = 0
+
+    for region in workload:
+        cluster = f"{config.project_name}-{region}"
+        try:
+            access = kubectl_helpers.describe_cluster_access(cluster, region)
+        except Exception as e:
+            errors.append(f"{region}: {e}")
+            by_region[region] = {
+                "cluster": cluster,
+                "reachable": False,
+                "note": "cluster endpoint posture could not be determined",
+            }
+            continue
+        if not access.get("public"):
+            private += 1
+            by_region[region] = {
+                "cluster": cluster,
+                "reachable": False,
+                "note": (
+                    f"cluster endpoint is private; open a tunnel with "
+                    f"`gco cluster tunnel --region {region}`"
+                ),
+            }
+            continue
+        try:
+            pools = list_cluster_nodepools(cluster, region)
+        except Exception as e:
+            errors.append(f"{region}: {e}")
+            by_region[region] = {
+                "cluster": cluster,
+                "reachable": True,
+                "note": "nodepool listing failed",
+            }
+            continue
+        listed += 1
+        by_region[region] = {
+            "cluster": cluster,
+            "reachable": True,
+            "nodepools": [
+                {field_name: pool.get(field_name) for field_name in _NODEPOOL_FIELDS}
+                for pool in pools
+            ],
+        }
+
+    data = {"by_region": by_region}
+    if listed == len(workload):
+        return Section(name=SECTION_NODEPOOLS, status=STATUS_OK, data=data)
+    if listed:
+        return Section(
+            name=SECTION_NODEPOOLS,
+            status=STATUS_PARTIAL,
+            data=data,
+            reason=f"nodepools listed in {listed} of {len(workload)} regions",
+            errors=errors,
+        )
+    if private:
+        return Section(
+            name=SECTION_NODEPOOLS,
+            status=STATUS_UNAVAILABLE,
+            data=data,
+            reason=(
+                "no cluster endpoint is publicly reachable; open a tunnel with "
+                "`gco cluster tunnel` and use `gco nodepools list` through it"
+            ),
+            errors=errors,
+        )
+    return Section(
+        name=SECTION_NODEPOOLS,
+        status=STATUS_ERROR,
+        data=data,
+        reason="nodepools could not be listed in any region",
+        errors=errors,
+    )
 
 
 # ---------------------------------------------------------------------------

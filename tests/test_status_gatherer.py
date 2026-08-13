@@ -21,6 +21,7 @@ from botocore.exceptions import ClientError
 
 from cli.capacity.multi_region import RegionCapacity
 from cli.config import GCOConfig
+from cli.costs import CostSummary, ResourceCost
 from cli.stacks import StackInfo
 from cli.status import (
     HEALTH_HEALTHY,
@@ -49,8 +50,10 @@ from cli.status import (
     Section,
     _derive_overall,
     _gather_capacity,
+    _gather_costs,
     _gather_inference,
     _gather_jobs,
+    _gather_nodepools,
     _gather_queue,
     _gather_stacks,
     derive_findings,
@@ -122,6 +125,30 @@ def _capacity(region: str, telemetry_status: str = "complete", **overrides: Any)
     return RegionCapacity(region=region, **values)
 
 
+def _cost_summary(total: float = 12.34) -> CostSummary:
+    by_service = (
+        [ResourceCost(service="Amazon Elastic Compute Cloud - Compute", amount=total)]
+        if total
+        else []
+    )
+    return CostSummary(
+        total=total,
+        period_start="2026-07-14",
+        period_end="2026-08-13",
+        by_service=by_service,
+    )
+
+
+def _nodepool_payload() -> dict[str, Any]:
+    return {
+        "name": "gpu-pool",
+        "capacity_types": "spot",
+        "instance_types": "g4dn.xlarge, g5.xlarge",
+        "status": "Ready",
+        "limits": {"cpu": "1000"},
+    }
+
+
 def _stats_payload() -> dict[str, Any]:
     return {
         "summary": {
@@ -150,6 +177,16 @@ def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleName
     checker.get_all_regions_capacity.return_value = [_capacity(region) for region in _WORKLOAD]
     inference_manager = MagicMock(name="inference_manager")
     inference_manager.list_endpoints.return_value = []
+    cost_tracker = MagicMock(name="cost_tracker")
+    cost_tracker.get_cost_summary.return_value = _cost_summary()
+    cost_tracker.get_cost_allocation_tag_status.return_value = [
+        {"tag_key": "Project", "type": "UserDefined", "status": "Active"}
+    ]
+    describe_access = MagicMock(
+        name="describe_cluster_access",
+        return_value={"endpoint": "https://eks.example", "public": True, "private": True},
+    )
+    list_pools = MagicMock(name="list_cluster_nodepools", return_value=[_nodepool_payload()])
     with (
         patch("cli.status._load_cdk_json", return_value=cdk_regions or {}),
         patch("cli.stacks.get_stack_manager", return_value=stack_manager),
@@ -157,6 +194,9 @@ def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleName
         patch("cli.aws_client.get_aws_client", return_value=aws_client),
         patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker),
         patch("cli.inference.get_inference_manager", return_value=inference_manager),
+        patch("cli.costs.get_cost_tracker", return_value=cost_tracker),
+        patch("cli.kubectl_helpers.describe_cluster_access", describe_access),
+        patch("cli.nodepools.list_cluster_nodepools", list_pools),
     ):
         yield SimpleNamespace(
             config=config,
@@ -165,6 +205,9 @@ def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleName
             aws_client=aws_client,
             checker=checker,
             inference_manager=inference_manager,
+            cost_tracker=cost_tracker,
+            describe_access=describe_access,
+            list_pools=list_pools,
         )
 
 
@@ -732,6 +775,215 @@ def test_gather_marks_opt_in_sections_skipped_by_default() -> None:
     assert nodepools.status == STATUS_SKIPPED
     assert nodepools.reason is not None
     assert "--with-nodepools" in nodepools.reason
+
+
+# ---------------------------------------------------------------------------
+# costs section (opt-in)
+# ---------------------------------------------------------------------------
+
+
+def test_costs_section_skipped_without_the_flag_and_issues_no_call() -> None:
+    factory = MagicMock()
+
+    with patch("cli.costs.get_cost_tracker", factory):
+        section = _gather_costs(_config(), False)
+
+    factory.assert_not_called()
+    assert section.status == STATUS_SKIPPED
+    assert section.reason is not None
+    assert "--with-costs" in section.reason
+    assert "bills per request" in section.reason
+
+
+def test_costs_section_reads_summary_and_tag_status() -> None:
+    tracker = MagicMock()
+    tracker.get_cost_summary.return_value = _cost_summary()
+    tracker.get_cost_allocation_tag_status.return_value = [
+        {"tag_key": "Project", "type": "UserDefined", "status": "Active"}
+    ]
+
+    with patch("cli.costs.get_cost_tracker", return_value=tracker):
+        section = _gather_costs(_config(), True)
+
+    assert section.status == STATUS_OK
+    tracker.get_cost_summary.assert_called_once_with(days=30)
+    assert section.data["total"] == 12.34
+    assert section.data["window_days"] == 30
+    assert section.data["by_service"] == [
+        {"service": "Amazon Elastic Compute Cloud - Compute", "amount": 12.34}
+    ]
+    assert section.data["allocation_tags"] == [{"tag_key": "Project", "status": "Active"}]
+    assert section.data["as_of"]
+    # A by-region breakdown would need a second billed request.
+    assert "by_region" not in section.data
+
+
+def test_costs_section_zero_spend_is_empty() -> None:
+    tracker = MagicMock()
+    tracker.get_cost_summary.return_value = _cost_summary(total=0.0)
+    tracker.get_cost_allocation_tag_status.return_value = []
+
+    with patch("cli.costs.get_cost_tracker", return_value=tracker):
+        section = _gather_costs(_config(), True)
+
+    assert section.status == STATUS_EMPTY
+
+
+def test_costs_section_tag_status_failure_degrades_to_partial() -> None:
+    tracker = MagicMock()
+    tracker.get_cost_summary.return_value = _cost_summary()
+    tracker.get_cost_allocation_tag_status.side_effect = RuntimeError("throttled")
+
+    with patch("cli.costs.get_cost_tracker", return_value=tracker):
+        section = _gather_costs(_config(), True)
+
+    assert section.status == STATUS_PARTIAL
+    assert section.data["allocation_tags"] is None
+    assert any("throttled" in error for error in section.errors)
+
+
+def test_costs_section_summary_failure_escapes_to_the_boundary() -> None:
+    tracker = MagicMock()
+    tracker.get_cost_summary.side_effect = RuntimeError("Cost Explorer query failed: denied")
+
+    with patch("cli.costs.get_cost_tracker", return_value=tracker):
+        try:
+            _gather_costs(_config(), True)
+        except RuntimeError as e:
+            assert "denied" in str(e)
+        else:
+            raise AssertionError("expected the Cost Explorer failure to escape")
+
+
+# ---------------------------------------------------------------------------
+# nodepools section (opt-in)
+# ---------------------------------------------------------------------------
+
+
+def test_nodepools_section_skipped_without_the_flag_and_issues_no_call() -> None:
+    describe = MagicMock()
+
+    with patch("cli.kubectl_helpers.describe_cluster_access", describe):
+        section = _gather_nodepools(_config(), False, _WORKLOAD)
+
+    describe.assert_not_called()
+    assert section.status == STATUS_SKIPPED
+    assert section.reason is not None
+    assert "--with-nodepools" in section.reason
+
+
+def test_nodepools_section_private_endpoint_never_attempts_the_list() -> None:
+    describe = MagicMock(
+        return_value={"endpoint": "https://eks.example", "public": False, "private": True}
+    )
+    list_pools = MagicMock()
+
+    with (
+        patch("cli.kubectl_helpers.describe_cluster_access", describe),
+        patch("cli.nodepools.list_cluster_nodepools", list_pools),
+    ):
+        section = _gather_nodepools(_config(), True, ["us-east-1"])
+
+    list_pools.assert_not_called()
+    assert section.status == STATUS_UNAVAILABLE
+    assert section.reason is not None
+    assert "gco cluster tunnel" in section.reason
+    entry = section.data["by_region"]["us-east-1"]
+    assert entry["reachable"] is False
+    assert "gco cluster tunnel" in entry["note"]
+
+
+def test_nodepools_section_public_endpoint_lists_pools() -> None:
+    describe = MagicMock(
+        return_value={"endpoint": "https://eks.example", "public": True, "private": True}
+    )
+    list_pools = MagicMock(return_value=[_nodepool_payload()])
+
+    with (
+        patch("cli.kubectl_helpers.describe_cluster_access", describe),
+        patch("cli.nodepools.list_cluster_nodepools", list_pools),
+    ):
+        section = _gather_nodepools(_config(), True, ["us-east-1"])
+
+    list_pools.assert_called_once_with("test-gco-us-east-1", "us-east-1")
+    assert section.status == STATUS_OK
+    pools = section.data["by_region"]["us-east-1"]["nodepools"]
+    assert pools == [
+        {
+            "name": "gpu-pool",
+            "status": "Ready",
+            "capacity_types": "spot",
+            "instance_types": "g4dn.xlarge, g5.xlarge",
+        }
+    ]
+
+
+def test_nodepools_section_mixed_reachability_is_partial() -> None:
+    def describe(cluster: str, region: str) -> dict[str, Any]:
+        return {"endpoint": "https://eks.example", "public": region == "us-east-1", "private": True}
+
+    with (
+        patch("cli.kubectl_helpers.describe_cluster_access", side_effect=describe),
+        patch("cli.nodepools.list_cluster_nodepools", return_value=[_nodepool_payload()]),
+    ):
+        section = _gather_nodepools(_config(), True, _WORKLOAD)
+
+    assert section.status == STATUS_PARTIAL
+    assert section.reason == "nodepools listed in 1 of 2 regions"
+
+
+def test_nodepools_section_probe_failure_everywhere_is_an_error() -> None:
+    describe = MagicMock(side_effect=RuntimeError("AWS CLI not found"))
+
+    with patch("cli.kubectl_helpers.describe_cluster_access", describe):
+        section = _gather_nodepools(_config(), True, ["us-east-1"])
+
+    assert section.status == STATUS_ERROR
+    assert any("AWS CLI not found" in error for error in section.errors)
+
+
+def test_nodepools_section_without_regions_points_at_the_regions_section() -> None:
+    section = _gather_nodepools(_config(), True, [])
+
+    assert section.status == STATUS_UNAVAILABLE
+    assert section.reason is not None
+    assert "regions section" in section.reason
+
+
+# ---------------------------------------------------------------------------
+# Opt-in wiring through the orchestrator
+# ---------------------------------------------------------------------------
+
+
+def test_gather_default_issues_no_cost_explorer_or_eks_call() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config)
+
+    boundaries.cost_tracker.get_cost_summary.assert_not_called()
+    boundaries.describe_access.assert_not_called()
+    boundaries.list_pools.assert_not_called()
+    assert doc.sections["costs"].status == STATUS_SKIPPED
+    assert doc.sections["nodepools"].status == STATUS_SKIPPED
+
+
+def test_gather_with_costs_gathers_only_the_costs_section() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config, with_costs=True)
+
+    boundaries.cost_tracker.get_cost_summary.assert_called_once()
+    boundaries.describe_access.assert_not_called()
+    assert doc.sections["costs"].status == STATUS_OK
+    assert doc.sections["nodepools"].status == STATUS_SKIPPED
+
+
+def test_gather_with_nodepools_gathers_only_the_nodepools_section() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config, with_nodepools=True)
+
+    boundaries.cost_tracker.get_cost_summary.assert_not_called()
+    assert boundaries.describe_access.call_count == 2
+    assert doc.sections["nodepools"].status == STATUS_OK
+    assert doc.sections["costs"].status == STATUS_SKIPPED
 
 
 # ---------------------------------------------------------------------------
