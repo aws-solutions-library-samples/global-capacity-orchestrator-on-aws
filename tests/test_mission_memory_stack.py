@@ -88,12 +88,13 @@ class TestMissionMemoryEnabled:
         updates = create["parameters"]["VectorIndexUpdates"]
         assert len(updates) == 1
         spec = updates[0]["Create"]
+        # CreateVectorIndexAction is FLAT — the live service rejected an
+        # earlier nested "VectorConfiguration" draft with nulls for the
+        # three required members below.
         assert spec["IndexName"] == "directive-embedding-index"
-        assert spec["VectorConfiguration"] == {
-            "VectorAttributeName": "directive_embedding",
-            "Dimensions": 1024,
-            "DistanceFunction": "COSINE",
-        }
+        assert spec["VectorAttribute"] == {"AttributeName": "directive_embedding"}
+        assert spec["Dimensions"] == 1024
+        assert spec["DistanceFunction"] == "COSINE"
         assert spec["SearchSchema"] == [
             {"AttributeName": "final_verdict", "SearchSchemaElementType": "INLINE_FILTER"}
         ]
@@ -155,20 +156,50 @@ class TestMissionMemoryEnabled:
         delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
         assert delete["ignoreErrorCodesMatching"] == "ResourceNotFoundException|ValidationException"
 
-    def test_botocore_model_knows_the_vector_update_member(self):
-        """Document the API-model dependency the provisioning payload rides on.
+    def test_payloads_validate_against_the_botocore_api_model(self):
+        """Every member the custom resource sends must exist in the API model.
 
-        The ``VectorIndexUpdates`` member must exist in the current SDK
-        models — the custom resource installs a current JS SDK for exactly
-        this reason, and this assertion (against botocore, the model source
-        this repo can see) fails loudly if the payload is ever reshaped
-        against an SDK generation that lacks the API.
+        Second live-deploy regression guard, and the stronger half: the
+        first deploy failure was the *runtime SDK* not knowing
+        ``VectorIndexUpdates`` (see the InstallLatestAwsSdk test); the
+        second was the *payload shape* not matching the API — a nested
+        "VectorConfiguration" draft that serialized as nulls for the
+        required flat members. Unknown members are silently dropped at
+        SDK serialization, so a wrong shape only surfaces at deploy time.
+        Walking the synthesized Create/Delete payloads against botocore's
+        UpdateTable model (structure members and required-member sets,
+        recursively) catches any reshaping at unit-test time instead.
         """
         import botocore.session
 
         model = botocore.session.get_session().get_service_model("dynamodb")
         update_table = model.operation_model("UpdateTable").input_shape
-        assert "VectorIndexUpdates" in update_table.members
+
+        def check(payload, shape, path):
+            if shape.type_name == "structure":
+                assert isinstance(payload, dict), f"{path}: expected object"
+                unknown = set(payload) - set(shape.members)
+                assert not unknown, (
+                    f"{path}: members {sorted(unknown)} do not exist in the API model "
+                    "and would be silently dropped at SDK serialization"
+                )
+                missing = set(shape.required_members) - set(payload)
+                assert not missing, f"{path}: required members {sorted(missing)} absent"
+                for key, value in payload.items():
+                    check(value, shape.members[key], f"{path}.{key}")
+            elif shape.type_name == "list":
+                assert isinstance(payload, list), f"{path}: expected list"
+                for index, entry in enumerate(payload):
+                    check(entry, shape.member, f"{path}[{index}]")
+            # Scalars: resolved refs and literals both acceptable here — the
+            # shape walk is about member names, not value types.
+
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        for call_name in ("Create", "Delete"):
+            call = json.loads(_resolve_joins(props[call_name]))
+            check(call["parameters"], update_table, f"{call_name}.parameters")
 
     def test_index_role_scoped_to_the_table_only(self):
         template = _synth(_EnabledConfig())

@@ -579,15 +579,22 @@ class GCOGlobalStack(Stack):
             )
         )
 
+        # CreateVectorIndexAction is FLAT — IndexName, VectorAttribute
+        # ({AttributeName}), Dimensions, DistanceFunction, SearchSchema,
+        # Projection all sit at the same level. Verified against the live
+        # service (its validation names create.vectorAttribute /
+        # create.dimensions / create.distanceFunction as the required
+        # members) and against botocore's UpdateTable model; an earlier
+        # nested "VectorConfiguration" draft shape deployed as nulls and
+        # failed create. tests/test_mission_memory_stack.py pins this
+        # payload against the botocore model.
         vector_index_updates = [
             {
                 "Create": {
                     "IndexName": index_name,
-                    "VectorConfiguration": {
-                        "VectorAttributeName": "directive_embedding",
-                        "Dimensions": dimensions,
-                        "DistanceFunction": distance_function,
-                    },
+                    "VectorAttribute": {"AttributeName": "directive_embedding"},
+                    "Dimensions": dimensions,
+                    "DistanceFunction": distance_function,
                     "SearchSchema": [
                         {
                             "AttributeName": "final_verdict",
