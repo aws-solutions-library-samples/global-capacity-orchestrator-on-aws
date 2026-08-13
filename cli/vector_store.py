@@ -373,7 +373,11 @@ class VectorStoreClient:
             "TopK": int(top_k),
         }
         if source is not None:
-            request["SearchConditionExpression"] = "source = :source"
+            # ``source`` is a DynamoDB reserved keyword (live-verified: the
+            # bare name is a ValidationException), so it rides behind an
+            # ExpressionAttributeNames alias — same as the ingest-wait Scan.
+            request["SearchConditionExpression"] = "#source = :source"
+            request["ExpressionAttributeNames"] = {"#source": "source"}
             request["ExpressionAttributeValues"] = {":source": {"S": str(source)}}
 
         try:

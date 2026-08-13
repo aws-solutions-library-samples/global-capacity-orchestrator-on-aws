@@ -145,7 +145,11 @@ class TestSearch:
         store.search("q", source="vector-corpus/a.md")
 
         (request,) = store._dynamodb_client.search_requests
-        assert request["SearchConditionExpression"] == "source = :source"
+        # ``source`` is a DynamoDB reserved keyword: the live service
+        # rejects the bare name in a SearchConditionExpression, so the
+        # filter must ride behind an ExpressionAttributeNames alias.
+        assert request["SearchConditionExpression"] == "#source = :source"
+        assert request["ExpressionAttributeNames"] == {"#source": "source"}
         assert request["ExpressionAttributeValues"] == {":source": {"S": "vector-corpus/a.md"}}
 
     @pytest.mark.parametrize("code", ["ValidationException", "ResourceNotFoundException"])
