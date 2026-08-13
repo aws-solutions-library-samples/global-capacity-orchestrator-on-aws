@@ -399,6 +399,10 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("v1", "ConfigMap", namespace, "gco-aurora-pgvector")
         for namespace in ("gco-system", "gco-jobs", "gco-inference")
     ),
+    ("{{VECTOR_STORE_TABLE_NAME}}", False): tuple(
+        ("v1", "ConfigMap", namespace, "gco-vector-store")
+        for namespace in ("gco-system", "gco-jobs", "gco-inference")
+    ),
     ("{{CLUSTER_OBSERVABILITY_ENABLED}}", False): (
         ("apps/v1", "DaemonSet", "kube-system", "dcgm-exporter"),
         ("v1", "Service", "kube-system", "dcgm-exporter"),

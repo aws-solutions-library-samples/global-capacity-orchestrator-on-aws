@@ -16,6 +16,7 @@
 # and delete-path error swallowing).
 
 import json
+from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
 from aws_cdk import assertions
@@ -330,6 +331,123 @@ class TestVectorIngestWiring:
         assert "dynamodb:SearchVectors" not in actions
         assert "dynamodb:GetItem" not in actions
         assert "dynamodb:Query" not in actions
+
+
+def _mock_helm_installer(stack):
+    """Stand-in for the Docker-building helm-installer construct (synth only)."""
+    stack.helm_installer_lambda = MagicMock()
+    stack.helm_installer_provider = MagicMock()
+    stack.helm_installer_provider.service_token = (
+        "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN
+    )
+
+
+def _synth_regional(config):
+    """Synthesize GCORegionalStack the way test_regional_stack.py does."""
+    from gco.stacks.regional_stack import GCORegionalStack
+
+    app = cdk.App()
+    with (
+        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+        patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
+    ):
+        mock_image = MagicMock()
+        mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+        mock_docker.return_value = mock_image
+        stack = GCORegionalStack(
+            app,
+            "vs-regional",
+            config=config,
+            region="us-east-1",
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN
+            env=cdk.Environment(account="123456789012", region="us-east-1"),
+        )
+        return assertions.Template.from_stack(stack)
+
+
+def _convergence_replacements(template):
+    """The ImageReplacements map on the convergence-trigger custom resource."""
+    resources = template.to_json().get("Resources", {})
+    trigger = resources.get("HelmInstallCharts")
+    assert trigger is not None, "HelmInstallCharts CustomResource must be present"
+    return trigger.get("Properties", {}).get("ImageReplacements", {})
+
+
+class TestRegionalWiring:
+    """Regional-stack wiring: ConfigMap replacements and workload read grants.
+
+    Every replacement value is a synth-time literal (the global stack names
+    the table and index from the same config), and the IAM grants point at
+    the cluster's LOCAL global-table replica — the whole point of paying for
+    replication.
+    """
+
+    def test_enabled_populates_the_vector_store_replacements(self):
+        replacements = _convergence_replacements(_synth_regional(_EnabledConfig()))
+
+        assert replacements["{{VECTOR_STORE_TABLE_NAME}}"] == "gco-test-vector-store"
+        assert replacements["{{VECTOR_STORE_INDEX_NAME}}"] == "corpus-embedding-index"
+        assert replacements["{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"] == "amazon.titan-embed-text-v2:0"
+        assert replacements["{{VECTOR_STORE_DIMENSIONS}}"] == "1024"
+
+    def test_disabled_leaves_the_placeholders_unreplaced(self):
+        # The applier skips 26-storage-vector-store.yaml when its
+        # placeholders survive replacement — absence of the keys IS the
+        # disable mechanism, so none may leak into a disabled synth.
+        replacements = _convergence_replacements(_synth_regional(MockConfigLoader()))
+
+        vector_keys = [key for key in replacements if "VECTOR_STORE" in key]
+        assert vector_keys == []
+
+    def test_enabled_grants_local_region_read_path_to_workloads(self):
+        template = _synth_regional(_EnabledConfig())
+        statements = []
+        for res in template.find_resources("AWS::IAM::Policy").values():
+            statements.extend(res["Properties"]["PolicyDocument"]["Statement"])
+
+        search_statements = [
+            stmt
+            for stmt in statements
+            if "dynamodb:SearchVectors"
+            in ([stmt["Action"]] if isinstance(stmt.get("Action"), str) else stmt.get("Action", []))
+        ]
+        assert len(search_statements) == 1
+        stmt = search_statements[0]
+        assert sorted(stmt["Action"]) == [
+            "dynamodb:GetItem",
+            "dynamodb:Query",
+            "dynamodb:SearchVectors",
+        ]
+        # LOCAL-region (us-east-1 cluster), exact table + exact index — the
+        # store's primary lives in the global region, but reads stay local.
+        # The partition rides as a CloudFormation token, so assert the
+        # deterministic remainder of each ARN.
+        assert len(stmt["Resource"]) == 2
+        table_arn, index_arn = (json.dumps(entry) for entry in stmt["Resource"])
+        assert ":dynamodb:us-east-1:123456789012:table/gco-test-vector-store" in table_arn
+        assert table_arn.count("index") == 0
+        assert (
+            ":dynamodb:us-east-1:123456789012:table/gco-test-vector-store"
+            "/index/corpus-embedding-index"
+        ) in index_arn
+
+        bedrock_statements = [
+            stmt
+            for stmt in statements
+            if "bedrock:InvokeModel"
+            in ([stmt["Action"]] if isinstance(stmt.get("Action"), str) else stmt.get("Action", []))
+        ]
+        assert len(bedrock_statements) == 1
+        assert (":bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0") in json.dumps(
+            bedrock_statements[0]["Resource"]
+        )
+
+    def test_disabled_grants_no_vector_store_access(self):
+        template = _synth_regional(MockConfigLoader())
+        blob = json.dumps(template.to_json())
+        assert "dynamodb:SearchVectors" not in blob
+        assert "bedrock:InvokeModel" not in blob
+        assert "vector-store" not in blob
 
 
 class TestVectorStoreDisabled:

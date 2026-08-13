@@ -2587,3 +2587,29 @@ class TestQueueingCustomObjectMapConsistency:
         inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{SLURM_ENABLED}}", True)]
         pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
         assert pruned == expected
+
+    def test_vector_store_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        """Every ConfigMap in the gated vector-store manifest is pruned on disable.
+
+        Namespace-inclusive comparison: the same ConfigMap name exists in
+        three namespaces, so a 3-tuple check could pass with a missing or
+        misplaced namespace entry.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "26-storage-vector-store.yaml"
+        expected = {
+            (
+                str(doc.get("apiVersion")),
+                str(doc.get("kind")),
+                str(doc["metadata"]["namespace"]),
+                str(doc["metadata"]["name"]),
+            )
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[
+            ("{{VECTOR_STORE_TABLE_NAME}}", False)
+        ]
+        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
+        assert pruned == expected

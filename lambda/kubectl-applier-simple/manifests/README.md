@@ -87,6 +87,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in all namespaces — **pruned when Valkey is disabled** |
 | `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **pruned when Aurora pgvector is disabled** |
 | `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
+| `26-storage-vector-store.yaml` | `gco-vector-store` `ConfigMap` (table/index/embedding-model/region) in all namespaces, pointing pods at their local global-table replica — **pruned when the vector store is disabled** |
 
 ### System Services (30–39)
 

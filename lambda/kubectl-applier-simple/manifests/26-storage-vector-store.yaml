@@ -1,0 +1,57 @@
+# Vector-store ConfigMap — provides the DynamoDB global-table name, vector
+# index name, embedding model contract, and region to pods via configMapKeyRef.
+# Only applied when the vector store is enabled (cdk.json vector_store.enabled
+# = true). The handler automatically skips this file when placeholders are
+# unreplaced. The region key is deliberately the CLUSTER's region: the table
+# is a DynamoDB global table with a replica in every deployment region, so
+# workloads query their local replica. Query vectors must come from the
+# embedding_model_id below at the dimensions below — vectors from any other
+# model or width are not comparable to the stored corpus.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-vector-store
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+data:
+  table_name: "{{VECTOR_STORE_TABLE_NAME}}"
+  index_name: "{{VECTOR_STORE_INDEX_NAME}}"
+  embedding_model_id: "{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"
+  dimensions: "{{VECTOR_STORE_DIMENSIONS}}"
+  region: "{{REGION}}"
+  role_arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-vector-store
+  namespace: gco-jobs
+  labels:
+    app: gco
+    project: gco
+data:
+  table_name: "{{VECTOR_STORE_TABLE_NAME}}"
+  index_name: "{{VECTOR_STORE_INDEX_NAME}}"
+  embedding_model_id: "{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"
+  dimensions: "{{VECTOR_STORE_DIMENSIONS}}"
+  region: "{{REGION}}"
+  role_arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-vector-store
+  namespace: gco-inference
+  labels:
+    app: gco
+    project: gco
+data:
+  table_name: "{{VECTOR_STORE_TABLE_NAME}}"
+  index_name: "{{VECTOR_STORE_INDEX_NAME}}"
+  embedding_model_id: "{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"
+  dimensions: "{{VECTOR_STORE_DIMENSIONS}}"
+  region: "{{REGION}}"
+  role_arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"

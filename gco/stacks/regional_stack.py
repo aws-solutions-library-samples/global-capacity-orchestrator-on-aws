@@ -2062,6 +2062,45 @@ class GCORegionalStack(Stack):
             ],
         )
 
+        # Vector-store read path for workloads (opt-in feature). Deliberately
+        # LOCAL-region ARNs: the store is a DynamoDB global table with a
+        # replica in this cluster's region, so pods query locally instead of
+        # crossing regions to the primary. Every resource is exact — the
+        # table and index names are deterministic from config — and the
+        # grant is read-only: writes belong to the ingest Lambda in the
+        # global stack, so a compromised workload cannot poison the corpus.
+        # The embedding-model grant lets pods embed their own query text
+        # with the exact model the corpus was ingested with.
+        if self.config.get_vector_store_enabled():
+            vector_store_table_prefix = (
+                f"arn:{self.partition}:dynamodb:{self.region}:{self.account}:"
+                f"table/{project_name}-vector-store"
+            )
+            self.service_account_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "dynamodb:SearchVectors",
+                        "dynamodb:GetItem",
+                        "dynamodb:Query",
+                    ],
+                    resources=[
+                        vector_store_table_prefix,
+                        f"{vector_store_table_prefix}/index/corpus-embedding-index",
+                    ],
+                )
+            )
+            self.service_account_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["bedrock:InvokeModel"],
+                    resources=[
+                        f"arn:{self.partition}:bedrock:{self.region}::foundation-model/"
+                        f"{self.config.get_vector_store_config()['embedding_model_id']}"
+                    ],
+                )
+            )
+
         # Add S3 permissions for model weights bucket (used by inference init containers)
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -3433,6 +3472,25 @@ class GCORegionalStack(Stack):
                 image_replacements["{{AURORA_PGVECTOR_SECRET_ARN}}"] = (
                     self.aurora_cluster.secret.secret_arn
                 )
+
+        # Add vector-store discovery if enabled. Every value is deterministic
+        # at synth time (the global stack names the table and index from the
+        # same config), so no cross-stack reference is needed; the manifest's
+        # {{REGION}} key points pods at their cluster's LOCAL global-table
+        # replica. When disabled, the placeholders stay unreplaced and the
+        # applier skips 26-storage-vector-store.yaml entirely.
+        if self.config.get_vector_store_enabled():
+            vector_store_config = self.config.get_vector_store_config()
+            image_replacements["{{VECTOR_STORE_TABLE_NAME}}"] = (
+                f"{self.config.get_project_name()}-vector-store"
+            )
+            image_replacements["{{VECTOR_STORE_INDEX_NAME}}"] = "corpus-embedding-index"
+            image_replacements["{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"] = str(
+                vector_store_config["embedding_model_id"]
+            )
+            image_replacements["{{VECTOR_STORE_DIMENSIONS}}"] = str(
+                vector_store_config["dimensions"]
+            )
 
         # Add FSx replacements if enabled
         if self.fsx_file_system:
