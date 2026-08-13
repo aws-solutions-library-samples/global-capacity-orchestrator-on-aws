@@ -49,6 +49,10 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Using Valkey in Jobs](#using-valkey-in-jobs)
 - [Configure Aurora pgvector](#configure-aurora-pgvector)
   - [Using Aurora pgvector in Jobs](#using-aurora-pgvector-in-jobs)
+- [Configure the Vector Store](#configure-the-vector-store)
+  - [Vector store or Aurora pgvector?](#vector-store-or-aurora-pgvector)
+  - [Using the Vector Store in Jobs](#using-the-vector-store-in-jobs)
+  - [Corpus lifecycle and limits](#corpus-lifecycle-and-limits)
 - [Infrastructure Version Constants](#infrastructure-version-constants)
 - [Bedrock Model Selection](#bedrock-model-selection)
 - [CDK-nag Compliance](#cdk-nag-compliance)
@@ -1501,6 +1505,139 @@ The cluster includes both a writer and a reader instance for high availability. 
 For use outside the cluster (scripts, Lambda functions), the endpoint is also stored in SSM at `/{project}/aurora-pgvector-endpoint-{region}`.
 
 See `examples/aurora-pgvector-job.yaml` for a complete working example that creates the pgvector extension, an embeddings table with an HNSW index, and runs a similarity search.
+
+## Configure the Vector Store
+
+GCO can provision a **globally replicated vector store**: a
+`{project}-vector-store` [DynamoDB global table](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GlobalTables.html)
+with a native vector index over an S3-ingested document corpus. Drop
+`.txt`/`.md`/`.jsonl` files under the corpus prefix of the always-on
+cluster-shared bucket (or run `gco vector ingest`), and an S3-triggered
+Lambda chunks each document, embeds it with the configured
+[Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)
+text-embedding model, and writes the vectors once — global-table
+replication then fans the corpus (and its index) out to every deployment
+region, so workloads and `gco vector search` read from their own region.
+
+The feature is **off by default** and enabled in `cdk.json`:
+
+```json
+{
+  "context": {
+    "vector_store": {
+      "enabled": true,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
+      "replica_regions": [],
+      "corpus_prefix": "vector-corpus/"
+    }
+  }
+}
+```
+
+Then deploy the global stack (`gco stacks deploy gco-global -y`) and the
+regional stacks (`gco stacks deploy-all -y`) to roll out the ConfigMaps and
+workload IAM grants. After the first enabled deploy the vector index takes
+several minutes to build; `gco vector status` shows where things stand, and
+searches answer a "still building" hint until it is ACTIVE.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Provision the table, index, ingest pipeline, and regional wiring |
+| `dimensions` | `1024` | Embedding width. **One-way door**: immutable after index creation and must match the embedding model's output width |
+| `distance_function` | `COSINE` | Similarity metric (`COSINE` or `EUCLIDEAN`); immutable after index creation |
+| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries. Deliberately independent of mission memory's `bedrock.embedding_model_id` |
+| `replica_regions` | `[]` | Regions to replicate into. Empty means "follow `deployment_regions.regional`", minus the global region (the primary) |
+| `corpus_prefix` | `vector-corpus/` | S3 key prefix on the cluster-shared bucket watched by the ingest Lambda |
+
+Cost model: the table is on-demand, so a mostly idle corpus costs storage
+plus per-request reads — but **every write is replicated**, so ingesting a
+corpus pays one write per chunk per region (plus one Bedrock embedding call
+per chunk, paid once). Storage is billed per region. Adding
+`replica_regions` multiplies the write and storage sides accordingly; the
+read side is what you are buying — local-latency similarity search with no
+per-region infrastructure to run.
+
+### Vector store or Aurora pgvector?
+
+GCO ships two vector-search options because they sit at opposite ends of
+the operational spectrum:
+
+| | Vector store (`vector_store`) | Aurora pgvector (`aurora_pgvector`) |
+|---|---|---|
+| Data model | Document corpus: chunks + vectors, one index, similarity + inline source filter | Full PostgreSQL: SQL, joins, HNSW/IVF indexes, transactions, any schema |
+| Scope | One global table, replicated to every deployment region | One cluster per regional stack, VPC-local |
+| Ingestion | Managed: S3 drop → Lambda chunks/embeds/writes | Yours: jobs create tables, embed, and insert |
+| Access | IAM only (DynamoDB + Bedrock APIs), from pods, the CLI, or anything with credentials | In-VPC network access + Secrets Manager credentials |
+| Idle cost | Storage + on-demand requests (serverless) | Aurora Serverless v2 ACU floor per region |
+| Fits | Shared reference corpus (runbooks, docs, procedures) read everywhere | Workload-owned embeddings with relational needs and heavy in-region write traffic |
+
+Rule of thumb: if the question is "let every region search these
+documents", use the vector store; if it is "my workload needs a real
+database that also does vectors", use Aurora pgvector.
+
+### Using the Vector Store in Jobs
+
+When enabled, GCO creates a `gco-vector-store` ConfigMap in each workload
+namespace carrying the table name, index name, embedding-model contract,
+and the cluster's own region (pods query their local replica):
+
+```yaml
+env:
+- name: VECTOR_TABLE
+  valueFrom:
+    configMapKeyRef:
+      name: gco-vector-store
+      key: table_name
+- name: VECTOR_INDEX
+  valueFrom:
+    configMapKeyRef:
+      name: gco-vector-store
+      key: index_name
+- name: VECTOR_EMBEDDING_MODEL
+  valueFrom:
+    configMapKeyRef:
+      name: gco-vector-store
+      key: embedding_model_id
+- name: VECTOR_REGION
+  valueFrom:
+    configMapKeyRef:
+      name: gco-vector-store
+      key: region
+```
+
+The shared workload role carries read-only grants (`dynamodb:SearchVectors`,
+`GetItem`, `Query` on the local replica, plus `bedrock:InvokeModel` on the
+embedding model so pods can embed their own query text). Writes belong
+exclusively to the ingest Lambda — a compromised workload cannot poison the
+corpus. Query vectors must come from the ConfigMap's `embedding_model_id`
+at the ConfigMap's `dimensions`; vectors from any other model or width are
+not comparable to the stored corpus.
+
+For use outside the cluster, the names are also in SSM at
+`/{project}/vector-store-table-name` and
+`/{project}/vector-store-index-name` (global region), and `gco vector
+search` wraps the whole path.
+
+### Corpus lifecycle and limits
+
+- **Re-uploading a document overwrites its chunks in place** — chunk ids
+  are deterministic, so S3's at-least-once event delivery and repeated
+  ingests are safe.
+- **Deleting an S3 object does not delete its items.** The store is
+  additive; remove stale content by re-creating the corpus (empty the
+  prefix, re-upload, re-ingest) or by deleting items directly.
+- **A shrinking document leaves tail chunks behind** until the corpus is
+  re-ingested.
+- **Embedding-model drift means re-ingesting.** Vectors are only
+  comparable to vectors from the model that wrote them; every item records
+  its `embedding_model_id` for exactly this audit. The monthly dependency
+  scan tracks `vector_store.embedding_model_id` and repeats this caveat
+  when it flags a newer same-family model.
+- `dimensions` and `distance_function` are immutable after index creation;
+  changing either means destroying and re-creating the store (and
+  re-ingesting).
 
 ## Infrastructure Version Constants
 

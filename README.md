@@ -455,6 +455,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **FSx for Lustre**: Optional high-performance parallel file system for ML training (toggle on/off)
 - **Valkey cache**: Optional serverless key-value cache for prompt caching and session state
 - **Aurora pgvector**: Optional serverless vector database for RAG, semantic search, and embedding storage
+- **Vector store**: Optional globally replicated DynamoDB vector index over an S3-ingested document corpus — drop files in, search from every region (`gco vector`)
 
 ### Operations
 
