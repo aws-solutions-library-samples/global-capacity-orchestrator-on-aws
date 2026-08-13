@@ -2299,6 +2299,8 @@ gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
 
 Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that is enabled by default. Set `historical.enabled` to `false` in cdk.json to opt out. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
 
+Spot placement scores are collected per *instance pool* (a reviewed set of interchangeable types; the snapshot's `spot_pool` attribute names it) at each configured target capacity, because the underlying AWS API needs at least three instance types to return a meaningful score. Snapshots recorded before pooled collection used single-type requests whose scores are artificially depressed and are not comparable with pooled values; see the [capacity poller README](../lambda/capacity-poller/README.md#history-discontinuity).
+
 #### `gco capacity history show`
 
 Show the recorded capacity time-series (pooled spot placement scores at each configured target capacity, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region. Columns follow the store's metric registry, so newly configured metrics appear automatically.
