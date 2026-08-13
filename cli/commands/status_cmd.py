@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import time
 from typing import Any
 
 import click
@@ -9,6 +11,7 @@ import click
 from ..config import GCOConfig
 from ..output import get_output_formatter
 from ..status import (
+    COST_REFRESH_INTERVAL_SECONDS,
     SECTION_CAPACITY,
     SECTION_COSTS,
     SECTION_INFERENCE,
@@ -18,8 +21,10 @@ from ..status import (
     SECTION_QUEUE,
     SECTION_REGIONS,
     SECTION_STACKS,
+    SEVERITY_ERROR,
     STATUS_EMPTY,
     STATUS_OK,
+    WATCH_INTERVAL_FLOOR_SECONDS,
     FleetStatus,
     Section,
     gather_fleet_status,
@@ -222,6 +227,56 @@ def _render_table(doc: FleetStatus) -> None:
             print(line)
 
 
+def _has_error_finding(doc: FleetStatus) -> bool:
+    return any(finding.severity == SEVERITY_ERROR for finding in doc.findings)
+
+
+def _watch_loop(
+    config: GCOConfig,
+    *,
+    region: str | None,
+    with_costs: bool,
+    with_nodepools: bool,
+    interval: int,
+    fail_on_findings: bool,
+) -> None:
+    """Re-gather and redraw until interrupted.
+
+    The costs section is re-fetched at most once per
+    ``COST_REFRESH_INTERVAL_SECONDS``; ticks in between reuse the previous
+    section, whose ``as_of`` timestamp shows when the figure was actually
+    retrieved. The reuse is in-process only — no cache file is written.
+    """
+    cached_costs: Section | None = None
+    cached_costs_at = 0.0
+    while True:
+        now = time.monotonic()
+        reuse = None
+        if (
+            with_costs
+            and cached_costs is not None
+            and now - cached_costs_at < COST_REFRESH_INTERVAL_SECONDS
+        ):
+            reuse = cached_costs
+        doc = gather_fleet_status(
+            config,
+            region=region,
+            with_costs=with_costs,
+            with_nodepools=with_nodepools,
+            costs_cache=reuse,
+        )
+        if with_costs and reuse is None:
+            cached_costs = doc.sections.get(SECTION_COSTS)
+            cached_costs_at = now
+
+        click.clear()
+        _render_table(doc)
+        if fail_on_findings and _has_error_finding(doc):
+            sys.exit(1)
+        print(f"\nrefreshing every {interval}s — Ctrl-C to stop")
+        time.sleep(interval)
+
+
 @click.command("status")
 @click.option("--region", "-r", help="Restrict the gather to a single region")
 @click.option(
@@ -234,12 +289,32 @@ def _render_table(doc: FleetStatus) -> None:
     is_flag=True,
     help="Include Karpenter nodepools (requires a reachable cluster API endpoint)",
 )
+@click.option(
+    "--watch",
+    type=int,
+    default=None,
+    metavar="SECONDS",
+    help=(
+        f"Re-gather and redraw every SECONDS (minimum "
+        f"{WATCH_INTERVAL_FLOOR_SECONDS}; table output only)"
+    ),
+)
+@click.option(
+    "--fail-on-findings",
+    is_flag=True,
+    help=(
+        "Exit 1 when any error-severity finding is present (after rendering); "
+        "with --watch, exits on the first tick that carries one"
+    ),
+)
 @pass_config
 def status(
     config: GCOConfig,
     region: str | None,
     with_costs: bool,
     with_nodepools: bool,
+    watch: int | None,
+    fail_on_findings: bool,
 ) -> None:
     """Show fleet-wide deployment status across configured regions.
 
@@ -254,8 +329,36 @@ def status(
         gco status -r us-east-1
         gco status --output json
         gco status --with-costs --with-nodepools
+        gco status --watch 10
+        gco status --fail-on-findings
     """
     formatter = get_output_formatter(config)
+
+    if watch is not None:
+        if config.output_format != "table":
+            formatter.print_error(
+                "--watch requires table output; a repeating stream of documents "
+                "is not consumable as JSON or YAML"
+            )
+            sys.exit(1)
+        if watch < WATCH_INTERVAL_FLOOR_SECONDS:
+            formatter.print_error(
+                f"--watch interval must be at least {WATCH_INTERVAL_FLOOR_SECONDS} seconds"
+            )
+            sys.exit(1)
+        try:
+            _watch_loop(
+                config,
+                region=region,
+                with_costs=with_costs,
+                with_nodepools=with_nodepools,
+                interval=watch,
+                fail_on_findings=fail_on_findings,
+            )
+        except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
+            return
+        return
+
     doc = gather_fleet_status(
         config, region=region, with_costs=with_costs, with_nodepools=with_nodepools
     )
@@ -264,3 +367,6 @@ def status(
         _render_table(doc)
     else:
         formatter.print(doc)
+
+    if fail_on_findings and _has_error_finding(doc):
+        sys.exit(1)

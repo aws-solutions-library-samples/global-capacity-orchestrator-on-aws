@@ -10,6 +10,7 @@ are used.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -424,7 +425,11 @@ def test_jobs_section_surfaces_totals_and_scan_completeness() -> None:
     assert section.data["totals"] == {"total": 4, "queued": 3, "running": 1}
     assert section.data["complete"] is True
     assert section.data["records_evaluated"] == 4
-    client.call_api.assert_called_once_with(method="GET", path="/api/v1/queue/stats", region=None)
+    # A single attempt: a status snapshot reports a failing route honestly
+    # rather than retrying past the section timeout.
+    client.call_api.assert_called_once_with(
+        method="GET", path="/api/v1/queue/stats", region=None, max_attempts=1
+    )
 
 
 def test_jobs_section_pins_the_requested_region() -> None:
@@ -984,6 +989,40 @@ def test_gather_with_nodepools_gathers_only_the_nodepools_section() -> None:
     assert boundaries.describe_access.call_count == 2
     assert doc.sections["nodepools"].status == STATUS_OK
     assert doc.sections["costs"].status == STATUS_SKIPPED
+
+
+def test_gather_reuses_a_costs_cache_without_a_new_read() -> None:
+    cached = Section(name="costs", status=STATUS_OK, data={"total": 1.0, "as_of": "T0"})
+
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config, with_costs=True, costs_cache=cached)
+
+    boundaries.cost_tracker.get_cost_summary.assert_not_called()
+    assert doc.sections["costs"] is cached
+
+
+def test_gather_ignores_the_costs_cache_when_costs_are_not_requested() -> None:
+    cached = Section(name="costs", status=STATUS_OK, data={"total": 1.0})
+
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config, with_costs=False, costs_cache=cached)
+
+    assert doc.sections["costs"].status == STATUS_SKIPPED
+
+
+def test_gather_times_out_a_stuck_section_without_holding_the_document() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        boundaries.inference_manager.list_endpoints.side_effect = lambda: time.sleep(5)
+        with patch("cli.status.SECTION_TIMEOUT_SECONDS", 0.2):
+            doc = gather_fleet_status(boundaries.config)
+
+    section = doc.sections["inference"]
+    assert section.status == STATUS_ERROR
+    assert section.reason is not None
+    assert "timeout" in section.reason
+    # The stuck section never held the rest of the document.
+    assert doc.sections[SECTION_STACKS].status == STATUS_OK
+    assert doc.sections[SECTION_QUEUE].status == STATUS_OK
 
 
 # ---------------------------------------------------------------------------

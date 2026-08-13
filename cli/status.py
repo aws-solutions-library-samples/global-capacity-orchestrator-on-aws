@@ -14,9 +14,11 @@ MCP tool returns that JSON to agents.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import Counter
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -116,6 +118,15 @@ SECTION_TIMEOUT_SECONDS = 30
 
 #: Cost Explorer window for the opt-in ``costs`` section.
 COST_WINDOW_DAYS = 30
+
+#: Minimum ``--watch`` interval, so watch mode cannot hammer AWS APIs.
+WATCH_INTERVAL_FLOOR_SECONDS = 5
+
+#: Minimum spacing between Cost Explorer fetches under ``--watch``.
+#: Cost Explorer bills per request and its data does not change minute to
+#: minute; the in-between ticks reuse the last section, whose ``as_of``
+#: shows when the figure was actually retrieved.
+COST_REFRESH_INTERVAL_SECONDS = 15 * 60
 
 #: Ceiling for concurrent per-region (or per-stack) reads within a section.
 _MAX_FANOUT_WORKERS = 8
@@ -243,26 +254,37 @@ def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> d
 
     Every gatherer gets the full :data:`SECTION_TIMEOUT_SECONDS` of wall
     clock because they run concurrently. A section that has not finished by
-    the deadline reports ``error`` naming the timeout; its thread is
-    abandoned rather than allowed to hold the document.
+    the deadline reports ``error`` naming the timeout. Sections run on
+    daemon threads so an abandoned straggler — a hung subprocess probe or
+    an unresponsive endpoint — can neither hold the document nor block
+    process exit afterwards.
     """
-    pool = ThreadPoolExecutor(max_workers=max(1, len(gatherers)))
-    futures = {name: pool.submit(_run_section, name, gather) for name, gather in gatherers.items()}
-    done, _ = wait(futures.values(), timeout=SECTION_TIMEOUT_SECONDS)
+    results: dict[str, Section] = {}
+    lock = threading.Lock()
+
+    def run(name: str, gather: Callable[[], Section]) -> None:
+        section = _run_section(name, gather)
+        with lock:
+            results[name] = section
+
+    threads = {
+        name: threading.Thread(target=run, args=(name, gather), name=f"status-{name}", daemon=True)
+        for name, gather in gatherers.items()
+    }
+    for thread in threads.values():
+        thread.start()
+    deadline = time.monotonic() + SECTION_TIMEOUT_SECONDS
+    for thread in threads.values():
+        thread.join(max(0.0, deadline - time.monotonic()))
+
     sections: dict[str, Section] = {}
-    for name, future in futures.items():
-        if future in done:
-            sections[name] = future.result()
-        else:
-            future.cancel()
-            sections[name] = Section(
+    with lock:
+        for name in gatherers:
+            sections[name] = results.get(name) or Section(
                 name=name,
                 status=STATUS_ERROR,
                 reason=f"the gather exceeded the {SECTION_TIMEOUT_SECONDS}s section timeout",
             )
-    # Let stragglers finish in the background instead of blocking the
-    # document on them here.
-    pool.shutdown(wait=False, cancel_futures=True)
     return sections
 
 
@@ -503,7 +525,12 @@ def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
     aws_client = get_aws_client(config)
     query_region = region or (config.default_region if config.use_regional_api else None)
     try:
-        result = aws_client.call_api(method="GET", path="/api/v1/queue/stats", region=query_region)
+        # A status snapshot reports a failing route honestly instead of
+        # retrying through it; the next gather re-reads anyway, and retries
+        # here can outlive the section timeout.
+        result = aws_client.call_api(
+            method="GET", path="/api/v1/queue/stats", region=query_region, max_attempts=1
+        )
     except RuntimeError as e:
         if "API endpoint" not in str(e):
             raise
@@ -986,11 +1013,16 @@ def gather_fleet_status(
     region: str | None = None,
     with_costs: bool = False,
     with_nodepools: bool = False,
+    costs_cache: Section | None = None,
 ) -> FleetStatus:
     """Gather every section and assemble the fleet status document.
 
     Always returns a document: sections that cannot be gathered degrade
     individually and the rest are unaffected.
+
+    ``costs_cache`` reuses a previously gathered ``costs`` section instead
+    of issuing a new Cost Explorer request. It exists for watch mode's
+    in-process rate limit only; nothing is ever written to disk.
     """
     regions_section = _run_section(SECTION_REGIONS, lambda: resolve_regions(config, region))
     workload = _workload_regions(regions_section)
@@ -1019,7 +1051,11 @@ def gather_fleet_status(
         )
     gatherers[SECTION_JOBS] = lambda: _gather_jobs(config, region)
     gatherers[SECTION_INFERENCE] = lambda: _gather_inference(config)
-    gatherers[SECTION_COSTS] = lambda: _gather_costs(config, with_costs)
+    if with_costs and costs_cache is not None:
+        reused_costs = costs_cache
+        gatherers[SECTION_COSTS] = lambda: reused_costs
+    else:
+        gatherers[SECTION_COSTS] = lambda: _gather_costs(config, with_costs)
     gatherers[SECTION_NODEPOOLS] = lambda: _gather_nodepools(config, with_nodepools, workload)
 
     sections: dict[str, Section] = {SECTION_REGIONS: regions_section}

@@ -360,3 +360,204 @@ def test_status_table_and_json_render_the_same_document(runner: CliRunner) -> No
     # The truncated-scan marker renders in both.
     assert payload["sections"]["jobs"]["data"]["complete"] is False
     assert "TRUNCATED after 41 records" in table_result.output
+
+
+# ---------------------------------------------------------------------------
+# Watch mode
+# ---------------------------------------------------------------------------
+
+
+def test_status_watch_rejects_a_sub_floor_interval(runner: CliRunner) -> None:
+    result, gather = _invoke(runner, ["--watch", "3"], config=_config(output_format="table"))
+
+    assert result.exit_code == 1
+    assert "at least 5 seconds" in result.stderr
+    gather.assert_not_called()
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_status_watch_refuses_machine_formats(runner: CliRunner, output_format: str) -> None:
+    result, gather = _invoke(runner, ["--watch", "10"], config=_config(output_format=output_format))
+
+    assert result.exit_code == 1
+    assert "JSON or YAML" in result.stderr
+    gather.assert_not_called()
+
+
+def test_status_watch_clears_and_redraws_until_interrupted(runner: CliRunner) -> None:
+    doc = _document()
+    with (
+        patch("cli.commands.status_cmd.gather_fleet_status", return_value=doc) as gather,
+        patch("cli.commands.status_cmd.click.clear") as clear,
+        patch(
+            "cli.commands.status_cmd.time.sleep",
+            side_effect=[None, None, KeyboardInterrupt()],
+        ) as sleep,
+    ):
+        result = runner.invoke(status, ["--watch", "5"], obj=_config(output_format="table"))
+
+    assert result.exit_code == 0, result.output
+    assert gather.call_count == 3
+    assert clear.call_count == 3
+    assert sleep.call_count == 3
+    # Each redraw shows the gather time and the refresh cadence.
+    assert "generated 2026-08-13T18:22:04+00:00" in result.output
+    assert "refreshing every 5s" in result.output
+
+
+def test_status_watch_reuses_the_costs_section_inside_the_refresh_interval(
+    runner: CliRunner,
+) -> None:
+    costs = Section(name="costs", status=STATUS_OK, data={"total": 1.0, "as_of": "T0"})
+    doc = _document(section_overrides={"costs": costs})
+    with (
+        patch("cli.commands.status_cmd.gather_fleet_status", return_value=doc) as gather,
+        patch("cli.commands.status_cmd.click.clear"),
+        patch("cli.commands.status_cmd.time.monotonic", side_effect=[0.0, 10.0, 20.0]),
+        patch(
+            "cli.commands.status_cmd.time.sleep",
+            side_effect=[None, None, KeyboardInterrupt()],
+        ),
+    ):
+        result = runner.invoke(
+            status, ["--watch", "5", "--with-costs"], obj=_config(output_format="table")
+        )
+
+    assert result.exit_code == 0, result.output
+    caches = [call.kwargs["costs_cache"] for call in gather.call_args_list]
+    assert caches[0] is None
+    # Ticks inside the 15-minute window reuse the very same section object,
+    # preserving its as_of timestamp.
+    assert caches[1] is costs
+    assert caches[2] is costs
+
+
+def test_status_watch_refetches_costs_after_the_refresh_interval(runner: CliRunner) -> None:
+    costs = Section(name="costs", status=STATUS_OK, data={"total": 1.0, "as_of": "T0"})
+    doc = _document(section_overrides={"costs": costs})
+    with (
+        patch("cli.commands.status_cmd.gather_fleet_status", return_value=doc) as gather,
+        patch("cli.commands.status_cmd.click.clear"),
+        patch("cli.commands.status_cmd.time.monotonic", side_effect=[0.0, 10.0, 1000.0]),
+        patch(
+            "cli.commands.status_cmd.time.sleep",
+            side_effect=[None, None, KeyboardInterrupt()],
+        ),
+    ):
+        result = runner.invoke(
+            status, ["--watch", "5", "--with-costs"], obj=_config(output_format="table")
+        )
+
+    assert result.exit_code == 0, result.output
+    caches = [call.kwargs["costs_cache"] for call in gather.call_args_list]
+    assert caches[0] is None
+    assert caches[1] is costs
+    # 1000s > the 900s refresh interval: the cache is dropped for a fresh read.
+    assert caches[2] is None
+
+
+# ---------------------------------------------------------------------------
+# --fail-on-findings
+# ---------------------------------------------------------------------------
+
+
+def _error_finding_document() -> FleetStatus:
+    return _document(
+        overall=OVERALL_DEGRADED,
+        degraded=["stacks"],
+        findings=[
+            Finding(severity="error", section="stacks", message="stack rolled back"),
+            Finding(severity="warn", section="queue", message="dlq holds 2 messages"),
+        ],
+    )
+
+
+def test_status_fail_on_findings_exits_one_after_rendering_in_full(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner,
+        ["--fail-on-findings"],
+        config=_config(output_format="table"),
+        document=_error_finding_document(),
+    )
+
+    assert result.exit_code == 1
+    # The document was rendered in full before exiting.
+    assert "stack rolled back" in result.output
+    assert "nodepools [skipped]" in result.output
+
+
+def test_status_fail_on_findings_in_json_mode_still_emits_the_document(
+    runner: CliRunner,
+) -> None:
+    result, _ = _invoke(
+        runner,
+        ["--fail-on-findings"],
+        config=_config(output_format="json"),
+        document=_error_finding_document(),
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["findings"][0]["severity"] == "error"
+
+
+def test_status_exit_zero_without_the_fail_flag_despite_error_findings(
+    runner: CliRunner,
+) -> None:
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_error_finding_document()
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_status_fail_on_findings_ignores_warn_only_documents(runner: CliRunner) -> None:
+    document = _document(
+        overall=OVERALL_DEGRADED,
+        findings=[Finding(severity="warn", section="queue", message="dlq holds 2 messages")],
+    )
+    result, _ = _invoke(
+        runner, ["--fail-on-findings"], config=_config(output_format="table"), document=document
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_status_fail_on_findings_ignores_degraded_sections_without_error_findings(
+    runner: CliRunner,
+) -> None:
+    document = _document(
+        overall=OVERALL_DEGRADED,
+        degraded=["regions"],
+        section_overrides={
+            "regions": Section(name="regions", status=STATUS_UNAVAILABLE, reason="no cdk.json")
+        },
+    )
+    result, _ = _invoke(
+        runner, ["--fail-on-findings"], config=_config(output_format="table"), document=document
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_status_watch_with_fail_on_findings_exits_on_the_first_bad_tick(
+    runner: CliRunner,
+) -> None:
+    with (
+        patch(
+            "cli.commands.status_cmd.gather_fleet_status",
+            return_value=_error_finding_document(),
+        ) as gather,
+        patch("cli.commands.status_cmd.click.clear"),
+        patch("cli.commands.status_cmd.time.sleep") as sleep,
+    ):
+        result = runner.invoke(
+            status,
+            ["--watch", "5", "--fail-on-findings"],
+            obj=_config(output_format="table"),
+        )
+
+    assert result.exit_code == 1
+    assert gather.call_count == 1
+    sleep.assert_not_called()
+    assert "stack rolled back" in result.output
