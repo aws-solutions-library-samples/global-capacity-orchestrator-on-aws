@@ -29,6 +29,7 @@ def register_all_tools() -> None:
         queue,
         semantic_progress,
         stacks,
+        status,
         storage,
         tasks,
         templates,

@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 134 tools; with every flag enabled the
-ceiling is 182. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 135 tools; with every flag enabled the
+ceiling is 183. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |

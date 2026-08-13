@@ -239,6 +239,7 @@ from tools.stacks import (  # noqa: E402, F401
     stack_synth,
     valkey_status,
 )
+from tools.status import fleet_status  # noqa: E402, F401
 from tools.storage import (  # noqa: E402, F401
     files_access_points,
     files_get,
@@ -633,6 +634,7 @@ _PUBLIC_EXPORTS = [
     "find_capacity_reservations",
     "find_docs",
     "find_examples",
+    "fleet_status",
     "fsx_status",
     "get_job",
     "get_job_events",
