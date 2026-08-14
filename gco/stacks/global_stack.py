@@ -671,22 +671,17 @@ class GCOGlobalStack(Stack):
                     f"{project_name}-mission-memory-vector-index"
                 ),
             ),
-            on_delete=cr.AwsSdkCall(
-                service="DynamoDB",
-                action="updateTable",
-                parameters={
-                    "TableName": self.mission_memory_table.table_name,
-                    "VectorIndexUpdates": [{"Delete": {"IndexName": index_name}}],
-                },
-                # Teardown must never wedge the stack. If creation failed
-                # (index absent) or the table is already gone, deleting the
-                # index answers ValidationException / ResourceNotFoundException
-                # — swallowing them is safe because stack deletion removes the
-                # table (and with it any index) anyway. Without this, a failed
-                # create rolls back into DELETE_FAILED on this very resource,
-                # which is exactly what the first live deploy hit.
-                ignore_error_codes_matching="ResourceNotFoundException|ValidationException",
-            ),
+            # DELIBERATELY NO on_delete, matching the vector store (see the
+            # long comment on VectorStoreIndex for the live incident). The
+            # table carries RemovalPolicy.DESTROY, so teardown deletes it and
+            # the index goes with it — an explicit index delete only buys an
+            # UPDATING window for the next resource to trip over. This table
+            # is single-region today, so the replica-delete deadlock that
+            # wedged the vector store cannot fire here; the hazard is latent,
+            # not absent, and it would become live the day this table gains a
+            # replica. Keeping both call sites identical means the fix cannot
+            # be half-applied. tests/test_mission_memory_stack.py pins the
+            # absence.
             # The Lambda behind AwsCustomResource ships the runtime's bundled
             # AWS SDK for JavaScript, which lags the API models: a bundled SDK
             # that predates vector indexes silently DROPS the unknown
@@ -919,19 +914,34 @@ class GCOGlobalStack(Stack):
                 },
                 physical_resource_id=cr.PhysicalResourceId.of(f"{project_name}-vector-store-index"),
             ),
-            on_delete=cr.AwsSdkCall(
-                service="DynamoDB",
-                action="updateTable",
-                parameters={
-                    "TableName": self.vector_store_table.table_name,
-                    "VectorIndexUpdates": [{"Delete": {"IndexName": index_name}}],
-                },
-                # Teardown must never wedge the stack; a failed create or an
-                # in-flight global-table replica deletion answers
-                # ValidationException / ResourceNotFoundException here, and
-                # deleting the table removes the index anyway.
-                ignore_error_codes_matching="ResourceNotFoundException|ValidationException",
-            ),
+            # DELIBERATELY NO on_delete. Deleting the index at teardown is
+            # both unnecessary and actively harmful here.
+            #
+            # Unnecessary: the table carries RemovalPolicy.DESTROY, so stack
+            # teardown deletes the table, and deleting a table removes its
+            # indexes with it. There is no path where this custom resource
+            # goes away while the table survives.
+            #
+            # Harmful: UpdateTable{VectorIndexUpdates:[Delete]} returns as
+            # soon as the call is ACCEPTED and parks the table in UPDATING
+            # for as long as the service needs. CFN then moves to the next
+            # resource in reverse-dependency order — the GlobalTable — whose
+            # first act is UpdateTable{ReplicaUpdates:[Delete <replica>]}.
+            # That call requires the table to be ACTIVE, so it fails with
+            # ResourceInUseException, and CFN retries it on a fixed interval
+            # with no backoff and no give-up. Caught live 2026-08-14: index
+            # delete accepted at 17:50:23Z, replica delete first refused at
+            # 17:50:31Z, ~130 consecutive refusals, table still UPDATING
+            # (index still ACTIVE on the primary, absent on the replica)
+            # 2.5h later, gco-global DELETE_FAILED, and every manual
+            # recovery path — update-table replica delete, delete-table in
+            # either region — refused as well. The prior mitigation here
+            # (ignore_error_codes_matching on this call) could not help: the
+            # failure surfaces in CFN's own GlobalTable handler, not in this
+            # custom resource. Removing the call removes the UPDATING window
+            # altogether, which is the only reliable fix available to an
+            # AwsCustomResource (it has no isComplete poller to wait for
+            # ACTIVE). tests/test_vector_store_stack.py pins the absence.
             # Same live-earned requirement as mission memory: the runtime's
             # bundled SDK silently drops the VectorIndexUpdates member.
             install_latest_aws_sdk=True,

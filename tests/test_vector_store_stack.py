@@ -157,14 +157,42 @@ class TestVectorStoreEnabled:
             "embedding_model_id",
         }
 
-    def test_vector_index_deletes_on_teardown(self):
+    def test_no_index_delete_call_so_teardown_cannot_deadlock(self):
+        """Teardown must NOT delete the vector index. Live incident pin.
+
+        UpdateTable{VectorIndexUpdates:[Delete]} returns when the call is
+        accepted and leaves the table UPDATING. CFN then deletes the
+        GlobalTable, whose replica removal requires ACTIVE — so it fails
+        ResourceInUseException and retries forever. Caught live
+        2026-08-14: ~130 refusals, table still UPDATING 2.5h later, stack
+        DELETE_FAILED, every manual recovery path refused too.
+
+        Deleting the index is also pointless: RemovalPolicy.DESTROY means
+        teardown deletes the table, which removes its indexes. So the
+        contract is "no Delete call at all", and it is asserted on the
+        synthesized template rather than trusted to a comment.
+        """
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
-        delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
-        assert delete["action"] == "updateTable"
-        assert delete["parameters"]["VectorIndexUpdates"] == [
-            {"Delete": {"IndexName": "corpus-embedding-index"}}
-        ]
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props, (
+            "VectorStoreIndex must not carry an on_delete call — an index "
+            "delete parks the table in UPDATING and deadlocks the "
+            "GlobalTable replica removal (live 2026-08-14)"
+        )
+
+    def test_table_removal_policy_is_delete(self):
+        """The premise that makes dropping the index delete safe.
+
+        The index is only guaranteed to disappear at teardown because the
+        table itself is deleted. If someone flips this to Retain, the
+        index-delete question has to be reopened (with a wait-for-ACTIVE
+        poller, not a bare UpdateTable).
+        """
+        template = _synth(_EnabledConfig())
+        table = next(iter(_store_tables(template).values()))
+        assert table.get("DeletionPolicy") == "Delete"
+        assert table.get("UpdateReplacePolicy") == "Delete"
 
     def test_custom_resource_installs_a_current_sdk(self):
         """The index call must not run on the runtime's bundled SDK.
@@ -179,17 +207,20 @@ class TestVectorStoreEnabled:
         props = next(iter(custom.values()))["Properties"]
         assert props["InstallLatestAwsSdk"] is True
 
-    def test_delete_tolerates_absent_index_so_teardown_never_wedges(self):
+    def test_failed_create_rolls_back_without_a_delete_call(self):
         """A failed create must roll back cleanly, not strand the stack.
 
-        The global-table variant has one extra reason to swallow
-        ValidationException: on stack teardown the index delete can race
-        in-flight replica deletions.
+        This used to be handled by swallowing ResourceNotFoundException /
+        ValidationException on the delete call. With no delete call at all
+        the rollback is a no-op, which is strictly stronger — there is no
+        API interaction left to fail. Pinned so nobody "restores" the
+        delete path in the name of rollback safety.
         """
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
-        delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
-        assert delete["ignoreErrorCodesMatching"] == "ResourceNotFoundException|ValidationException"
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props
+        assert "Update" not in props
 
     def test_payloads_validate_against_the_botocore_api_model(self):
         """Every member the custom resource sends must exist in the API model.
@@ -227,7 +258,9 @@ class TestVectorStoreEnabled:
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
         props = next(iter(custom.values()))["Properties"]
-        for call_name in ("Create", "Delete"):
+        # Create is the only lifecycle call now (teardown deliberately makes
+        # no API call — see the deadlock pin above).
+        for call_name in ("Create",):
             call = json.loads(_resolve_joins(props[call_name]))
             check(call["parameters"], update_table, f"{call_name}.parameters")
 

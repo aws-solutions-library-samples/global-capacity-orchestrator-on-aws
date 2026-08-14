@@ -117,14 +117,30 @@ class TestMissionMemoryEnabled:
             "completed_at",
         }
 
-    def test_vector_index_deletes_on_teardown(self):
+    def test_no_index_delete_call_so_teardown_cannot_deadlock(self):
+        """Teardown must NOT delete the vector index.
+
+        Mirrors the vector-store pin. UpdateTable{VectorIndexUpdates:
+        [Delete]} returns on acceptance and parks the table in UPDATING;
+        any table-level operation CFN attempts next then fails
+        ResourceInUseException. On the vector store (a global table) that
+        deadlocked the replica removal for 2.5h and left the stack
+        DELETE_FAILED, live 2026-08-14.
+
+        This table is single-region, so that specific deadlock cannot fire
+        here — the hazard is latent, and it goes live the day this table
+        gains a replica. The call sites are kept identical so the fix
+        cannot be half-applied. Deleting the index is redundant regardless:
+        RemovalPolicy.DESTROY means teardown deletes the table, and that
+        removes its indexes.
+        """
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
-        delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
-        assert delete["action"] == "updateTable"
-        assert delete["parameters"]["VectorIndexUpdates"] == [
-            {"Delete": {"IndexName": "directive-embedding-index"}}
-        ]
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props, (
+            "MissionMemoryVectorIndex must not carry an on_delete call — see "
+            "the vector-store deadlock (live 2026-08-14)"
+        )
 
     def test_custom_resource_installs_a_current_sdk(self):
         """The vector-index call MUST NOT run on the runtime's bundled SDK.
@@ -147,21 +163,23 @@ class TestMissionMemoryEnabled:
         # replaces rendered as the string "false" in the failed deploy).
         assert props["InstallLatestAwsSdk"] is True
 
-    def test_delete_tolerates_absent_index_so_teardown_never_wedges(self):
+    def test_failed_create_rolls_back_without_a_delete_call(self):
         """A failed create must roll back cleanly, not strand the stack.
 
-        If index creation failed (or the table is already gone), the
-        on-delete UpdateTable answers ValidationException /
-        ResourceNotFoundException. Without ``ignoreErrorCodesMatching``
-        the custom resource reports DELETE_FAILED and the whole stack
-        wedges in ROLLBACK_FAILED — exactly what the first live deploy
-        hit. Swallowing those two codes on delete is safe: stack
-        deletion removes the table (and any index on it) regardless.
+        History: the first live deploy failed the index create, and the
+        rollback then failed on this resource's own delete, wedging the
+        stack in ROLLBACK_FAILED. That was fixed by swallowing
+        ResourceNotFoundException / ValidationException on the delete
+        call. With no delete call at all the rollback is a no-op — no API
+        interaction left to fail — which is strictly stronger. Pinned so
+        the delete path is not "restored" for rollback safety, since
+        restoring it also restores the teardown deadlock above.
         """
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
-        delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
-        assert delete["ignoreErrorCodesMatching"] == "ResourceNotFoundException|ValidationException"
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props
+        assert "Update" not in props
 
     def test_payloads_validate_against_the_botocore_api_model(self):
         """Every member the custom resource sends must exist in the API model.
@@ -204,7 +222,9 @@ class TestMissionMemoryEnabled:
         template = _synth(_EnabledConfig())
         custom = _index_custom_resources(template)
         props = next(iter(custom.values()))["Properties"]
-        for call_name in ("Create", "Delete"):
+        # Create is the only lifecycle call now (teardown deliberately makes
+        # no API call — see the deadlock pin above).
+        for call_name in ("Create",):
             call = json.loads(_resolve_joins(props[call_name]))
             check(call["parameters"], update_table, f"{call_name}.parameters")
 
