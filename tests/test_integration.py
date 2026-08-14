@@ -276,6 +276,10 @@ class TestKubernetesManifests:
             # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
             # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.
             "kueue.x-k8s.io/v1beta1",
+            # Kubeflow Trainer runtime blueprint
+            # (post-helm-kubeflow-trainer-runtimes.yaml); keep in lockstep
+            # with TRAINJOB_API_VERSION in gco/services/manifest_processor.py.
+            "trainer.kubeflow.org/v1alpha1",
         }
 
         for filepath in manifest_files:
@@ -1352,11 +1356,16 @@ class TestHelmChartConsistency:
         conflicts = {
             ns: names for ns, names in conflicts.items() if not all("slinky" in n for n in names)
         }
-        # OpenCost deliberately co-locates with kube-prometheus-stack in the
-        # monitoring namespace (it reads that Prometheus, and the shared
-        # namespace keeps the ServiceMonitor + tunnel wiring simple). Pin the
-        # exact pair so any third chart landing in `monitoring` still fails.
-        if sorted(conflicts.get("monitoring", [])) == ["kube-prometheus-stack", "opencost"]:
+        # OpenCost and MLflow deliberately co-locate with kube-prometheus-stack
+        # in the monitoring namespace (OpenCost reads that Prometheus; MLflow
+        # rides the observability conjunction, its gp3 StorageClass, and the
+        # same tunnel wiring). Pin the exact trio so any fourth chart landing
+        # in `monitoring` still fails.
+        if sorted(conflicts.get("monitoring", [])) == [
+            "kube-prometheus-stack",
+            "mlflow",
+            "opencost",
+        ]:
             del conflicts["monitoring"]
         assert not conflicts, f"Charts sharing unexpected namespaces: {conflicts}"
 

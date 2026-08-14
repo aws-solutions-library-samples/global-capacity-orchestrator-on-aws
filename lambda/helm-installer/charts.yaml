@@ -20,6 +20,7 @@
 #   - cert-manager: https://github.com/cert-manager/cert-manager/releases
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
 #   - Kubeflow Trainer: https://github.com/kubeflow/trainer/releases
+#   - MLflow: https://artifacthub.io/packages/helm/community-charts/mlflow
 
 charts:
   # AWS Load Balancer Controller - mandatory Gateway API data plane
