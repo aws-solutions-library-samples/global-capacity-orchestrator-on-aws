@@ -582,6 +582,13 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     # storage block); {{MLFLOW_BACKEND_SIZE}} is gone with the hand-rolled
     # PVC manifest.
     assert mlflow_values["storage"] == {"size": "10Gi"}
+    # The complete host-validation allow-list is deployment-derived:
+    # service DNS plus one wildcard per vpc_endpoint_cidrs entry (this
+    # fixture's 10.41.0.0/16 + 10.42.0.0/16), proving the VPC range is the
+    # single source — no charts.yaml edit involved.
+    assert mlflow_values["server"]["value_options"]["allowed_hosts"] == (
+        "mlflow.monitoring,mlflow.monitoring:5000,10.41.*,10.42.*"
+    )
 
     replacements = properties["ImageReplacements"]
     assert replacements["{{MLFLOW_ENABLED}}"] == "true"

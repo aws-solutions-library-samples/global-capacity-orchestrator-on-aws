@@ -67,6 +67,7 @@ Modification Guide:
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from collections.abc import Mapping
@@ -193,6 +194,46 @@ def _compute_kubectl_cluster_shared_replacements(
 #: static (a placeholder in ``metadata.name`` would fail k8s schema
 #: validation), so the toggle gate lives in an annotation value instead.
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
+
+
+#: In-cluster names clients use to reach the MLflow tracking server. MLflow
+#: 3.x's host-validation middleware matches the raw Host header (port
+#: included — that is why both spellings are listed), and setting
+#: ``allowed-hosts`` REPLACES its built-in localhost/private-IP allowance
+#: rather than extending it, so the value override must carry the complete
+#: list (see ``_mlflow_allowed_hosts``).
+_MLFLOW_SERVICE_HOSTS = ("mlflow.monitoring", "mlflow.monitoring:5000")
+
+
+def _mlflow_allowed_hosts(vpc_endpoint_cidrs: list[str]) -> str:
+    """Compose the MLflow ``allowed-hosts`` list from the deployment's CIDRs.
+
+    The service-DNS spellings are static; the IP tail derives from
+    ``vpc_endpoint_cidrs`` (single source of truth — the same context key the
+    NetworkPolicy egress rules render) so widening the VPC range never needs
+    a matching charts.yaml edit. Prometheus scrapes the pod IP directly, so
+    dropping the pod-IP allowance 403s every ServiceMonitor scrape (caught
+    live, 2026-08-14).
+
+    MLflow's allow-list is glob-based, so only octet-aligned prefixes convert
+    exactly; other masks WIDEN to the containing octet boundary (capped at
+    /24 granularity so the trailing ``.*`` still matches ``host:port``
+    Host headers). Widening is the safe direction — this is Host-header
+    hygiene layered over NetworkPolicies and a private ALB, and
+    under-matching is what breaks scrapes.
+    """
+    patterns: list[str] = []
+    for cidr in vpc_endpoint_cidrs:
+        network = ipaddress.ip_network(cidr, strict=False)
+        if network.version != 4:
+            raise ValueError(
+                f"vpc_endpoint_cidrs entry {cidr!r} is not IPv4; the MLflow "
+                "allowed-hosts derivation only understands IPv4 globs"
+            )
+        octets = str(network.network_address).split(".")
+        kept = min(max(network.prefixlen // 8, 1), 3)
+        patterns.append(".".join(octets[:kept]) + ".*")
+    return ",".join(dict.fromkeys([*_MLFLOW_SERVICE_HOSTS, *patterns]))
 
 
 _SERVICE_IMAGE_BUILD_INPUTS = (
@@ -4169,7 +4210,7 @@ class GCORegionalStack(Stack):
     def _mlflow_chart_values(self) -> dict[str, Any]:
         """Build the MLflow value overrides that carry deployment tokens.
 
-        Only three things are dynamic — everything static (image pin, PVC
+        Only four things are dynamic — everything static (image pin, PVC
         wiring, resources, posture toggles) lives in ``charts.yaml``:
 
         - ``mlflow.artifactsDestination``: run artifacts go to the
@@ -4183,10 +4224,17 @@ class GCORegionalStack(Stack):
           the server-side artifact proxy gets its S3 credentials.
         - ``storage.size``: the metadata claim size from
           ``cluster_observability.mlflow.persistence_size``.
+        - ``server.value_options.allowed_hosts``: the complete
+          host-validation allow-list — service DNS plus wildcard patterns
+          derived from ``vpc_endpoint_cidrs`` (see
+          ``_mlflow_allowed_hosts``); the deep merge keeps the static
+          ``workers`` value while replacing the charts.yaml DNS-only
+          fallback with this full list.
         """
         s3_destination = (
             f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
         )
+        vpc_endpoint_cidrs = self.node.try_get_context("vpc_endpoint_cidrs") or ["10.0.0.0/16"]
         return {
             "values": {
                 "mlflow": {
@@ -4201,6 +4249,11 @@ class GCORegionalStack(Stack):
                     "size": str(
                         self.config.get_cluster_observability_config()["mlflow"]["persistence_size"]
                     ),
+                },
+                "server": {
+                    "value_options": {
+                        "allowed_hosts": _mlflow_allowed_hosts(vpc_endpoint_cidrs),
+                    },
                 },
             }
         }

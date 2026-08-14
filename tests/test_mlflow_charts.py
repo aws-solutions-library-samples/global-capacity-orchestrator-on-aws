@@ -28,7 +28,10 @@ import pytest
 import yaml
 
 from gco.config.config_loader import ConfigLoader
-from gco.stacks.regional_stack import _OBSERVABILITY_STORAGE_CLASS
+from gco.stacks.regional_stack import (
+    _OBSERVABILITY_STORAGE_CLASS,
+    _mlflow_allowed_hosts,
+)
 from gco.stacks.regional_stack import GCORegionalStack as RS
 from tests._lambda_imports import load_lambda_module
 
@@ -273,18 +276,17 @@ class TestMlflowChartEntry:
         server = charts["mlflow"]["values"]["server"]
         assert server["value_options"]["workers"] == 1
 
-    def test_service_dns_hosts_pass_the_host_validation_middleware(self, charts):
+    def test_static_allowed_hosts_carry_the_service_dns_fallback(self, charts):
         # MLflow 3.x 403s API requests whose Host header it does not
-        # recognize, and setting allowed_hosts REPLACES the built-in
-        # localhost/private-IP allowance rather than extending it —
-        # Prometheus scrapes the pod IP directly and got 403 until 10.*
-        # was listed (caught live 2026-08-14). Service DNS both ways
-        # clients spell it + the VPC's 10.* pod IPs; arbitrary DNS names
-        # stay rejected and /health is exempt (all verified against the
-        # pinned image).
+        # recognize (setting allowed_hosts REPLACES the built-in
+        # localhost/private-IP allowance). charts.yaml keeps only the
+        # static service-DNS spellings; the regional stack replaces the
+        # value at deploy time with the complete list, appending wildcard
+        # patterns derived from vpc_endpoint_cidrs — a hardcoded IP glob
+        # here would silently drift from the VPC range.
         server = charts["mlflow"]["values"]["server"]
         assert server["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,10.*"
+            "mlflow.monitoring,mlflow.monitoring:5000"
         )
 
     def test_guaranteed_cpu_beats_the_fixed_liveness_window(self, charts):
@@ -363,10 +365,61 @@ class TestRegionalChartWiring:
         assert annotation == "arn:aws:iam::123456789012:role/test-mlflow"
         # Deep-merged into the static storage block (enabled + class stay).
         assert values["storage"] == {"size": "10Gi"}
+        # The complete host-validation allow-list: service DNS plus the
+        # wildcard derived from the default vpc_endpoint_cidrs
+        # (10.0.0.0/16 -> 10.0.*). Prometheus scrapes the pod IP directly,
+        # so dropping the CIDR-derived tail 403s every ServiceMonitor
+        # scrape (caught live 2026-08-14). Deep merge keeps the static
+        # workers value alongside.
+        assert values["server"]["value_options"]["allowed_hosts"] == (
+            "mlflow.monitoring,mlflow.monitoring:5000,10.0.*"
+        )
 
     def test_overrides_exclude_mlflow_when_disabled(self, valid_cdk_context):
         overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context, mlflow_enabled=False))
         assert "mlflow" not in overrides
+
+    def test_allowed_hosts_follow_configured_vpc_endpoint_cidrs(self, valid_cdk_context):
+        # Widening the VPC range in cdk.json must reach the allow-list
+        # without a charts.yaml edit — that sync burden is exactly what the
+        # derivation removes.
+        ctx = copy.deepcopy(valid_cdk_context)
+        ctx["vpc_endpoint_cidrs"] = ["10.0.0.0/16", "172.31.0.0/16"]
+        overrides = RS._helm_chart_value_overrides(_stub(ctx))
+        assert overrides["mlflow"]["values"]["server"]["value_options"]["allowed_hosts"] == (
+            "mlflow.monitoring,mlflow.monitoring:5000,10.0.*,172.31.*"
+        )
+
+
+class TestMlflowAllowedHostsDerivation:
+    """CIDR -> Host-header glob conversion (see _mlflow_allowed_hosts)."""
+
+    def test_octet_aligned_prefixes_convert_exactly(self):
+        assert _mlflow_allowed_hosts(["10.0.0.0/16"]).endswith(",10.0.*")
+        assert _mlflow_allowed_hosts(["10.0.0.0/8"]).endswith(",10.*")
+        assert _mlflow_allowed_hosts(["192.168.1.0/24"]).endswith(",192.168.1.*")
+
+    def test_service_dns_spellings_always_lead(self):
+        hosts = _mlflow_allowed_hosts(["10.0.0.0/16"]).split(",")
+        assert hosts[:2] == ["mlflow.monitoring", "mlflow.monitoring:5000"]
+
+    def test_non_aligned_masks_widen_to_the_octet_boundary(self):
+        # /12 cannot be a prefix glob; widening (to 10.*) is the safe
+        # direction — under-matching is what 403s Prometheus scrapes.
+        assert _mlflow_allowed_hosts(["10.16.0.0/12"]).endswith(",10.*")
+
+    def test_host_prefixes_cap_at_slash_24_granularity(self):
+        # A /32 glob of all four octets would never match a host:port Host
+        # header; the trailing .* needs at least the last octet free.
+        assert _mlflow_allowed_hosts(["10.1.2.3/32"]).endswith(",10.1.2.*")
+
+    def test_duplicate_patterns_collapse(self):
+        hosts = _mlflow_allowed_hosts(["10.0.0.0/16", "10.0.128.0/17"])
+        assert hosts.count("10.0.*") == 1
+
+    def test_ipv6_is_rejected_loudly(self):
+        with pytest.raises(ValueError, match="not IPv4"):
+            _mlflow_allowed_hosts(["fd00::/8"])
 
 
 class TestMlflowNetworkManifest:

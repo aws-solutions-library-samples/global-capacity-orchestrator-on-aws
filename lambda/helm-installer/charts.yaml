@@ -856,16 +856,20 @@ charts:
       # 403s API requests whose Host header it does not recognize ("possible
       # DNS rebinding attack detected"), and setting the flag REPLACES the
       # built-in localhost/private-IP allowance rather than extending it
-      # (Prometheus scrapes the pod IP directly and got 403 until 10.* was
-      # listed — caught live 2026-08-14). The list is: the in-cluster
-      # service DNS both ways clients spell it, plus the VPC's 10.* pod IPs
-      # (vpc_endpoint_cidrs defaults to 10.0.0.0/16). Arbitrary DNS names
-      # stay rejected; /health is exempt so probes never depended on this.
-      # All three behaviors verified against the pinned image.
+      # (Prometheus scrapes the pod IP directly and got 403 until the pod
+      # CIDR was listed — caught live 2026-08-14). Only the static
+      # service-DNS spellings live here (a DNS-name Host carries the port,
+      # hence both); at deploy time the regional stack REPLACES this value
+      # with the complete list, appending wildcard patterns derived from
+      # cdk.json's vpc_endpoint_cidrs (single source of truth — see
+      # _mlflow_allowed_hosts in gco/stacks/regional_stack.py) so the
+      # allow-list follows the VPC range with no edit here. Arbitrary DNS
+      # names stay rejected; /health is exempt so probes never depended on
+      # this. Verified against the pinned image.
       server:
         value_options:
           workers: 1
-          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000,10.*"
+          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000"
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
