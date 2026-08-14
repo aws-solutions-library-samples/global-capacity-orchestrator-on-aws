@@ -255,9 +255,23 @@ class TestMlflowChartEntry:
 
     def test_metrics_and_service_monitor_feed_prometheus(self, charts):
         # kube-prometheus-stack discovers ServiceMonitors cluster-wide and
-        # the mlflow conjunction guarantees it is present.
-        assert charts["mlflow"]["values"]["metrics"]["enabled"] is True
+        # the mlflow conjunction guarantees it is present. path must
+        # accompany enabled: chart 0.1.0 renders the ServiceMonitor
+        # endpoint path as null otherwise, the API server rejects it, and
+        # every helm upgrade fails (caught live, 2026-08-14).
+        metrics = charts["mlflow"]["values"]["metrics"]
+        assert metrics["enabled"] is True
+        assert metrics["path"] == "/metrics"
         assert charts["mlflow"]["values"]["serviceMonitor"]["enabled"] is True
+
+    def test_single_gunicorn_worker_for_the_sqlite_singleton(self, charts):
+        # Chart default is 4 workers; that quadruples the full-MLflow
+        # import at startup and starved /health past the chart's fixed
+        # liveness window under the CPU request (observed live 2026-08-14
+        # as an exit-137 crash-loop). One worker is also the honest
+        # concurrency for a single-writer SQLite backend.
+        server = charts["mlflow"]["values"]["server"]
+        assert server["value_options"]["workers"] == 1
 
 
 class TestConfigLoaderMlflowToggle:

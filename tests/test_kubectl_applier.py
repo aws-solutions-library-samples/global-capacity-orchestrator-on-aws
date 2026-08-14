@@ -1905,6 +1905,46 @@ class TestAuthoritativeManifestPlanner:
         }
         assert {"ClusterQueue", "LocalQueue", "ResourceFlavor", "NetworkPolicy"} <= planned_kinds
 
+    def test_every_supported_kind_has_an_apply_dispatch_branch(self, handler_module):
+        """_SUPPORTED_MANIFEST_KINDS and the apply loop must agree exactly.
+
+        Regression: the 2026-08-14 shakeout deploy admitted the shipped
+        torch-distributed ClusterTrainingRuntime at planning time (the kind
+        was in _SUPPORTED_MANIFEST_KINDS) but the apply loop had no dispatch
+        branch for it, so every applier pass died on the defensive
+        "Planner admitted unsupported kind" ValueError — hours into a live
+        run. Extract every dispatch route from the handler source (literal
+        ``kind == "X"`` branches, ``kind in ("X", "Y")`` tuples, and the
+        gateway/queueing custom-object maps) and require set equality in
+        both directions, so a kind added to planning without an apply
+        branch (or a dead branch for an unplannable kind) fails here
+        instead of mid-deploy.
+        """
+        source = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "handler.py"
+        ).read_text(encoding="utf-8")
+        dispatched = set(re.findall(r'(?:el)?if kind == "([A-Za-z0-9]+)"', source))
+        for group in re.findall(r"(?:el)?if kind in \(([^)]*)\)", source):
+            dispatched.update(re.findall(r'"([A-Za-z0-9]+)"', group))
+        # Table-driven branches: `elif kind in _GATEWAY_CUSTOM_OBJECTS or
+        # kind in _QUEUEING_CUSTOM_OBJECTS`. Require the branch to exist so
+        # the maps' keys genuinely reach the apply loop.
+        assert re.search(
+            r"kind in _GATEWAY_CUSTOM_OBJECTS or kind in _QUEUEING_CUSTOM_OBJECTS", source
+        ), "table-driven custom-object dispatch branch disappeared; update this test"
+        dispatched.update(handler_module._GATEWAY_CUSTOM_OBJECTS)
+        dispatched.update(handler_module._QUEUEING_CUSTOM_OBJECTS)
+
+        supported = set(handler_module._SUPPORTED_MANIFEST_KINDS)
+        assert supported - dispatched == set(), (
+            "kinds admitted by planning but with no apply dispatch branch "
+            f"(would die on the defensive ValueError mid-deploy): {sorted(supported - dispatched)}"
+        )
+        assert dispatched - supported == set(), (
+            "apply branches exist for kinds planning rejects (dead code or a "
+            f"missing _SUPPORTED_MANIFEST_KINDS entry): {sorted(dispatched - supported)}"
+        )
+
     def test_rejects_duplicate_identity_across_phases(self, handler_module, tmp_path):
         manifest = yaml.safe_dump(
             {

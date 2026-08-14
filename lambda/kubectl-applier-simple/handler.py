@@ -1361,6 +1361,25 @@ def apply_manifests(
                                 )
                             else:
                                 raise
+                    elif kind == "ClusterTrainingRuntime":
+                        # Kubeflow Trainer v2 runtime blueprint (cluster-scoped;
+                        # the CRD is registered by the kubeflow-trainer chart, so
+                        # the shipped torch-distributed runtime lands in the
+                        # post-Helm pass).
+                        group = "trainer.kubeflow.org"
+                        version = api_version.split("/")[-1] if "/" in api_version else "v1alpha1"
+                        plural = "clustertrainingruntimes"
+                        try:
+                            custom_api.create_cluster_custom_object(
+                                group, version, plural, body=doc
+                            )
+                        except ApiException as e:
+                            if e.status == 409:
+                                custom_api.patch_cluster_custom_object(
+                                    group, version, plural, name, body=doc
+                                )
+                            else:
+                                raise
 
                     elif kind == "NetworkPolicy":
                         try:

@@ -846,6 +846,15 @@ charts:
         storageClassName: gco-observability-gp3
       mlflow:
         backendStoreUri: "sqlite:////mlflow/mlflow.db"
+      # One gunicorn worker, deliberately (chart default is 4): the metadata
+      # store is single-writer SQLite so extra workers only add lock
+      # contention, and four workers importing the full MLflow server under
+      # the CPU request starved startup past the chart's fixed liveness
+      # window (probe kills at ~100s, observed live 2026-08-14 as an exit
+      # 137 crash-loop; the chart exposes no probe knobs).
+      server:
+        value_options:
+          workers: 1
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
@@ -870,7 +879,10 @@ charts:
         enabled: true
       resources:
         requests:
-          cpu: 100m
+          # 250m, not the usual 100m: server startup (gunicorn + full
+          # MLflow import) must beat the chart's fixed liveness window on
+          # a busy node (see the workers comment above).
+          cpu: 250m
           memory: 256Mi
         limits:
           cpu: "1"
@@ -879,8 +891,14 @@ charts:
       # ServiceMonitors cluster-wide and is guaranteed present (the mlflow
       # conjunction requires observability), so the tracking server's
       # health lands in the same Prometheus as OpenCost.
+      # path is REQUIRED alongside enabled: chart 0.1.0 renders the
+      # ServiceMonitor endpoint path as null without it, which the API
+      # server rejects and every helm upgrade then fails (caught live,
+      # 2026-08-14; upstream default bug — the chart docs always pair
+      # enabled with path).
       metrics:
         enabled: true
+        path: /metrics
       serviceMonitor:
         enabled: true
 
