@@ -300,8 +300,9 @@ class TestSubmittableKindsRbacLockstep:
     runtime, as a bare "Forbidden" out of the SQS path (caught live
     2026-08-14, when TrainJob became the first CRD to ride that path). The
     integration:kind:examples-smoke CI job proves the same contract against
-    a real apiserver via explicit SubjectAccessReview objects; this test is
-    the fast local half of that pair.
+    a real apiserver via explicit SubjectAccessReview (SAR) objects — the
+    authorization.k8s.io API that answers "may this user <verb> this
+    resource?"; this test is the fast local half of that pair.
     """
 
     REQUIRED_VERBS = {"create", "get", "list", "watch", "patch", "update", "delete"}

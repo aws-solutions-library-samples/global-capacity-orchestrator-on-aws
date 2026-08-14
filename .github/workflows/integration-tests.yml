@@ -23,7 +23,7 @@
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
-#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob example e2e + SAR sweep + mlflow probes
+#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
@@ -1683,11 +1683,20 @@ jobs:
           kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
-      - name: Verify submission allowlist is writable by the processor SA (SAR sweep)
+      - name: Verify submission allowlist is writable by the processor SA (SubjectAccessReview sweep)
         # Real-apiserver half of the kinds<->RBAC lockstep: for every kind
         # users can submit (DEFAULT_ALLOWED_KINDS x RESOURCE_API_VERSIONS),
         # ask the authorizer whether the processor SA holds every lifecycle
-        # verb in gco-jobs. Deliberately NOT `kubectl auth can-i`: can-i
+        # verb in gco-jobs.
+        #
+        # SAR = SubjectAccessReview, the authorization.k8s.io object you POST
+        # to ask the apiserver "may this user <verb> this resource?" —
+        # answered in .status.allowed. It is the same API `kubectl auth
+        # can-i` calls under the hood; the difference is that can-i derives
+        # the request's resourceAttributes from discovery first, while a
+        # hand-built body states them outright.
+        #
+        # Deliberately NOT `kubectl auth can-i`: can-i
         # resolves its resource argument through client-side discovery, and
         # for a CRD kind whose chart isn't installed yet it silently
         # degrades to an empty-group query that always answers "no" (caught
@@ -1713,6 +1722,7 @@ jobs:
               print(f"{kind.lower()}s {api_version}")
           ')
           sar() {
+            # SubjectAccessReview probe.
             # sar <namespace> <verb> <group> <plural> -> "true" / "false"
             jq -cn --arg user "$PROCESSOR_SA" --arg ns "$1" --arg verb "$2" \
               --arg group "$3" --arg plural "$4" \
