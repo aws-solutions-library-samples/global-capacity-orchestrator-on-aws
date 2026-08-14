@@ -248,14 +248,29 @@ class TestTrainerRuntimeManifest:
         assert image.split("/")[0] in DEFAULT_TRUSTED_DOCKERHUB_ORGS
 
     def test_runtime_pods_do_not_automount_the_sa_token(self, manifest_text):
-        # The one documented deviation from verbatim chart extraction: the
-        # same SA-token default both submission paths inject into user pods.
+        # Documented deviation #1 from verbatim chart extraction: the same
+        # SA-token default both submission paths inject into user pods.
         rendered = manifest_text.replace("{{KUBEFLOW_TRAINER_ENABLED}}", "true")
         (runtime,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
         pod_spec = runtime["spec"]["template"]["spec"]["replicatedJobs"][0]["template"]["spec"][
             "template"
         ]["spec"]
         assert pod_spec["automountServiceAccountToken"] is False
+
+    def test_runtime_container_blocks_privilege_escalation(self, manifest_text):
+        # Documented deviation #2: NoNewPrivs on the node container (the
+        # platform's manifest policy already rejects an explicit `true`;
+        # this closes the implicit default). runAsNonRoot is deliberately
+        # absent — the pinned pytorch image runs as root, and forcing
+        # non-root would make the kubelet refuse the pods.
+        rendered = manifest_text.replace("{{KUBEFLOW_TRAINER_ENABLED}}", "true")
+        (runtime,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
+        pod_spec = runtime["spec"]["template"]["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        (container,) = pod_spec["containers"]
+        assert container["securityContext"] == {"allowPrivilegeEscalation": False}
+        assert "runAsNonRoot" not in container["securityContext"]
 
 
 class TestRegionalChartWiring:

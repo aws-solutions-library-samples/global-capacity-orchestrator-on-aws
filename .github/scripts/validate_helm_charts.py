@@ -718,8 +718,9 @@ def validate_gateway_lockstep(
 # blueprints through a post-install hook Job (an unpinned run-time network
 # fetch), so GCO disables that hook and ships the ``torch-distributed``
 # runtime itself — extracted verbatim from the pinned chart into
-# ``post-helm-kubeflow-trainer-runtimes.yaml`` with exactly one documented
-# deviation (``automountServiceAccountToken: false``). Three more surfaces
+# ``post-helm-kubeflow-trainer-runtimes.yaml`` with two documented
+# deviations (``automountServiceAccountToken: false`` and NoNewPrivs on the
+# ``node`` container). Three more surfaces
 # repeat the runtime's pinned trainer image so users see exactly what runs:
 #
 #   * the shipped runtime manifest (the source of truth in-repo),
@@ -736,7 +737,7 @@ def validate_gateway_lockstep(
 #     agree on one image.
 #   online: rendering the *pinned* chart with its runtime delivery enabled
 #     must reproduce the shipped runtime — image called out explicitly,
-#     full spec compared after applying the documented deviation, and the
+#     full spec compared after applying the documented deviations, and the
 #     upstream ``trainer.kubeflow.org/*`` labels preserved (the
 #     ``webhook-validation: disabled`` label is what keeps webhook warm-up
 #     from flaking the apply).
@@ -862,12 +863,18 @@ def doc_pytorch_images(doc_text: str) -> list[str]:
 def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[str, Any]:
     """Return the upstream runtime spec with GCO's sanctioned deviations applied.
 
-    Exactly one deviation from verbatim extraction is documented in the
-    manifest header: the ``node`` pod template sets
-    ``automountServiceAccountToken: false`` (the same security default both
-    submission paths inject into user Jobs). Anything else that differs from
-    upstream is drift and must fail — a new deliberate deviation belongs here
-    *and* in the manifest header, in the same change.
+    Exactly two deviations from verbatim extraction are documented in the
+    manifest header, both on the ``node`` pod template:
+
+    - ``automountServiceAccountToken: false`` (the same security default
+      both submission paths inject into user Jobs), and
+    - ``securityContext.allowPrivilegeEscalation: false`` on the ``node``
+      container (NoNewPrivs; the platform's manifest policy already rejects
+      an explicit ``true``).
+
+    Anything else that differs from upstream is drift and must fail — a new
+    deliberate deviation belongs here *and* in the manifest header, in the
+    same change.
     """
     adjusted = copy.deepcopy(upstream_spec)
     jobs = ((adjusted.get("template") or {}).get("spec") or {}).get("replicatedJobs")
@@ -877,8 +884,14 @@ def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[
         pod_spec = (((job.get("template") or {}).get("spec") or {}).get("template") or {}).get(
             "spec"
         )
-        if isinstance(pod_spec, dict):
-            pod_spec["automountServiceAccountToken"] = False
+        if not isinstance(pod_spec, dict):
+            continue
+        pod_spec["automountServiceAccountToken"] = False
+        for container in pod_spec.get("containers") or []:
+            if isinstance(container, dict) and container.get("name") == "node":
+                security = container.setdefault("securityContext", {})
+                if isinstance(security, dict):
+                    security["allowPrivilegeEscalation"] = False
     return adjusted
 
 
@@ -951,7 +964,7 @@ def validate_trainer_runtime_lockstep(
     Offline: the shipped runtime manifest, the TrainJob example and the
     distributed-training doc must agree on the trainer image. Online (adds
     one chart render): the shipped runtime must reproduce what the pinned
-    chart ships — byte-identical spec after the documented deviation, with
+    chart ships — byte-identical spec after the documented deviations, with
     the trainer image compared explicitly for an actionable message. With
     ``require_entry`` (the default, used for the repository's real
     charts.yaml) a missing chart entry is reported rather than skipped;
@@ -1039,7 +1052,7 @@ def validate_trainer_runtime_lockstep(
         errors.append(
             f"trainer runtime lockstep: the shipped torch-distributed runtime spec "
             f"differs from what chart {entry.get('version')} ships (beyond the "
-            "documented automountServiceAccountToken deviation) — the manifest "
+            "documented deviations in _apply_documented_runtime_deviations) — the manifest "
             "header's contract is 'same bytes'; re-extract it from the pinned chart "
             "or record a new sanctioned deviation in both the manifest header and "
             "_apply_documented_runtime_deviations"

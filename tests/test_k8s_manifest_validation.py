@@ -699,6 +699,18 @@ class TestConstants:
         assert "batch.volcano.sh/v1alpha1/Job" in validator.SCHEMA_UNAVAILABLE_SKIPS
         assert all("/" in gvk for gvk in validator.SCHEMA_UNAVAILABLE_SKIPS)
 
+    def test_trainer_gvks_skipped_by_gvk(self) -> None:
+        # Kubeflow Trainer v2 has no datreeio catalog schema; the shipped
+        # runtime is covered by the (stronger) trainer runtime lockstep in
+        # validate_helm_charts.py instead. Removing these skips without a
+        # catalog schema appearing upstream re-breaks the schema job on
+        # every trainer manifest.
+        assert "trainer.kubeflow.org/v1alpha1/TrainJob" in validator.SCHEMA_UNAVAILABLE_SKIPS
+        assert (
+            "trainer.kubeflow.org/v1alpha1/ClusterTrainingRuntime"
+            in validator.SCHEMA_UNAVAILABLE_SKIPS
+        )
+
     def test_crd_catalog_is_datree_templated_url(self) -> None:
         loc = validator.CRD_CATALOG_SCHEMA_LOCATION
         assert loc.endswith(".json")

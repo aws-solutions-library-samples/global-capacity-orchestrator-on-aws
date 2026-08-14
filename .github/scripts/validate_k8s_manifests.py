@@ -94,6 +94,15 @@ NON_MANIFEST_FILENAMES = frozenset({"pipeline-dag.yaml"})
 SCHEMA_UNAVAILABLE_SKIPS = (
     "ray.io/v1/RayCluster",  # KubeRay — not in datreeio/CRDs-catalog
     "batch.volcano.sh/v1alpha1/Job",  # Volcano — not in datreeio/CRDs-catalog
+    # Kubeflow Trainer v2 — not in datreeio/CRDs-catalog. The shipped
+    # torch-distributed runtime is validated more strongly than a catalog
+    # lookup could: validate_helm_charts.py's trainer runtime lockstep
+    # re-renders the pinned kubeflow-trainer chart online and requires the
+    # manifest to reproduce it spec-for-spec; the TrainJob example's shape
+    # is exercised by the submission pipeline's decomposition tests and the
+    # live example run.
+    "trainer.kubeflow.org/v1alpha1/TrainJob",
+    "trainer.kubeflow.org/v1alpha1/ClusterTrainingRuntime",
     # AWS LBC gateway CRDs at their v1 storage version (v3.5.0+) — the
     # datreeio catalog only carries the deprecated v1beta1 schemas. These two
     # resources are instead schema-validated against the exact pinned CRD

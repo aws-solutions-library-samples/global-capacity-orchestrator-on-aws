@@ -13,11 +13,23 @@
 #
 # Extracted from chart kubeflow-trainer 2.3.0
 # (helm template --set runtimes.torchDistributed.enabled=true), minus the
-# Helm bookkeeping labels and with exactly one GCO addition: the pod template
-# sets automountServiceAccountToken: false (the same security default both
-# submission paths inject into user Jobs — training pods get no API token
-# unless a TrainJob opts back in via runtimePatches). Keep in lockstep with
-# the chart version pinned in lambda/helm-installer/charts.yaml.
+# Helm bookkeeping labels and with exactly two GCO additions to the pod
+# template (both mirrored in _apply_documented_runtime_deviations in
+# .github/scripts/validate_helm_charts.py, which fails CI on any other
+# drift):
+#   - automountServiceAccountToken: false — the same security default both
+#     submission paths inject into user Jobs; training pods get no API
+#     token unless a TrainJob opts back in via runtimePatches.
+#   - containers[node].securityContext.allowPrivilegeEscalation: false —
+#     NoNewPrivs for every training pod; the platform's manifest policy
+#     already rejects an explicit `true`, this closes the implicit default.
+#     runAsNonRoot is deliberately NOT set: upstream pins the stock pytorch
+#     image, which runs as root, and user images swapped in via
+#     spec.trainer.image commonly assume root too — forcing non-root here
+#     would fail admission for them (kubelet refuses runAsNonRoot with a
+#     root image).
+# Keep in lockstep with the chart version pinned in
+# lambda/helm-installer/charts.yaml.
 #
 # Gated on {{KUBEFLOW_TRAINER_ENABLED}}: with the chart disabled the
 # placeholder stays unresolved, the applier skips this file, and
@@ -50,8 +62,11 @@ spec:
                 trainer.kubeflow.org/trainjob-ancestor-step: trainer
             spec:
               template:
+                # nosemgrep: yaml.kubernetes.security.run-as-non-root.run-as-non-root -- root image upstream; rationale in header
                 spec:
                   automountServiceAccountToken: false
                   containers:
                     - name: node
                       image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
+                      securityContext:
+                        allowPrivilegeEscalation: false

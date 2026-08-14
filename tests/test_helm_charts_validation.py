@@ -926,6 +926,8 @@ spec:
                   containers:
                     - name: node
                       image: {_TRAINER_IMAGE}
+                      securityContext:
+                        allowPrivilegeEscalation: false
 """
 
 _EXAMPLE_FIXTURE = f"""
@@ -1110,8 +1112,9 @@ class TestTrainerLockstepValidation:
         assert errors == []
 
     def test_matching_upstream_passes_online(self) -> None:
-        # The upstream fixture has no automount override — proving the one
-        # documented deviation is tolerated by the spec comparison.
+        # The upstream fixture has neither the automount override nor the
+        # NoNewPrivs securityContext — proving both documented deviations
+        # are tolerated by the spec comparison.
         errors = _lockstep(
             online=True,
             runtime_fetcher=lambda entry, helm: _upstream_runtime(),
@@ -1136,7 +1139,7 @@ class TestTrainerLockstepValidation:
         errors = _lockstep(online=True, runtime_fetcher=lambda entry, helm: upstream)
         assert len(errors) == 1
         assert "differs from what chart" in errors[0]
-        assert "automountServiceAccountToken deviation" in errors[0]
+        assert "_apply_documented_runtime_deviations" in errors[0]
 
     def test_semantic_label_drift_fails_online(self) -> None:
         shipped = _RUNTIME_MANIFEST_FIXTURE.replace(
