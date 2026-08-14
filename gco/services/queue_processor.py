@@ -89,9 +89,11 @@ from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.manifest_processor import (
+    ADDON_KIND_HINTS,
     DEFAULT_ALLOWED_KINDS,
     DEFAULT_TRUSTED_DOCKERHUB_ORGS,
     DEFAULT_TRUSTED_REGISTRIES,
+    extract_trainjob_pod_specs,
     validate_resource_kind,
 )
 
@@ -367,6 +369,13 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
        ``max_*_per_manifest`` budget is a hard cap regardless of where
        the request is placed.
 
+    A TrainJob has no single pod spec: checks 2-5 run over its decomposition
+    (synthetic ``spec.trainer`` view plus every pod spec embedded in
+    ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with
+    the trainer view's resources counted once per ``numNodes`` for check 5
+    and accelerator tolerations unioned across views for the toleration
+    check.
+
     Returns:
         ``(True, "")`` if the manifest is accepted, otherwise
         ``(False, reason)`` where ``reason`` is a human-readable string.
@@ -388,35 +397,58 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     if not kind_valid:
         return False, kind_error or "resource kind is not allowed"
 
-    # Get pod spec for security and resource checks.
+    # Get pod spec(s) for security and resource checks, each with a replica
+    # multiplier for resource-cap accounting.
     # Handle multiple resource shapes, matching manifest_processor._get_all_containers:
     #   - Deployments / StatefulSets / ReplicaSets / DaemonSets / Jobs: spec.template.spec
     #   - CronJob: spec.jobTemplate.spec.template.spec
     #   - Pod (bare): spec (has 'containers' directly)
+    #   - TrainJob: synthetic spec.trainer view weighted by numNodes, plus every
+    #     pod spec embedded under spec (runtimePatches) weighted 1 — see
+    #     manifest_processor.TrainJobPodSpecs for why this decomposition exists.
     spec = m.get("spec", {})
-    pod_spec = None
-    if "template" in spec:
-        pod_spec = spec["template"].get("spec", {})
-    elif "jobTemplate" in spec:
-        pod_spec = spec["jobTemplate"].get("spec", {}).get("template", {}).get("spec", {})
-    elif "containers" in spec:
-        # Plain Pod manifest
-        pod_spec = spec
+    weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
+    if kind == "TrainJob":
+        trainjob_specs = extract_trainjob_pod_specs(m)
+        if trainjob_specs.trainer is not None:
+            weighted_pod_specs.append((trainjob_specs.trainer, trainjob_specs.num_nodes))
+        weighted_pod_specs.extend((item, 1) for item in trainjob_specs.embedded)
+        toleration_hint_example = (
+            "examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)"
+        )
+    else:
+        pod_spec = None
+        if "template" in spec:
+            pod_spec = spec["template"].get("spec", {})
+        elif "jobTemplate" in spec:
+            pod_spec = spec["jobTemplate"].get("spec", {}).get("template", {}).get("spec", {})
+        elif "containers" in spec:
+            # Plain Pod manifest
+            pod_spec = spec
+        if pod_spec:
+            weighted_pod_specs.append((pod_spec, 1))
+        toleration_hint_example = "examples/gpu-job.yaml"
 
-    if pod_spec:
-        all_containers = _iter_containers(pod_spec)
-
+    if weighted_pod_specs:
         # --- Accelerator toleration check ---
         # Mirror manifest_processor._validate_tolerations: a job requesting a
         # GPU/Neuron/EFA resource must carry a matching toleration or it would
-        # stay Pending forever on tainted accelerator nodes.
+        # stay Pending forever on tainted accelerator nodes. For a TrainJob the
+        # request usually lives in spec.trainer.resourcesPerNode while the
+        # toleration can only be expressed through a runtimePatches pod spec,
+        # so requests and tolerations are each unioned across every view
+        # before matching.
         if REQUIRE_ACCELERATOR_TOLERATION:
-            tolerations = pod_spec.get("tolerations", []) or []
-            for taint in _requested_accelerators(pod_spec):
+            requested_taints: set[str] = set()
+            tolerations: list[dict[str, Any]] = []
+            for pod_spec, _multiplier in weighted_pod_specs:
+                requested_taints.update(_requested_accelerators(pod_spec))
+                tolerations.extend(pod_spec.get("tolerations", []) or [])
+            for taint in requested_taints:
                 if not _toleration_matches(tolerations, taint):
                     hint = (
                         f"add a matching toleration (e.g. key '{taint}', operator "
-                        "'Exists', effect 'NoSchedule'); see examples/gpu-job.yaml"
+                        f"'Exists', effect 'NoSchedule'); see {toleration_hint_example}"
                     )
                     return (
                         False,
@@ -424,95 +456,109 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
                         f"toleration for taint {taint}=true:NoSchedule was found. {hint}",
                     )
 
-        # --- Pod-level security policy checks ---
-        # Mirror manifest_processor._validate_security_context so the SQS
-        # path enforces the same policy as the REST path.
-        if BLOCK_HOST_NETWORK and pod_spec.get("hostNetwork", False):
-            return False, "hostNetwork is not permitted"
-        if BLOCK_HOST_PID and pod_spec.get("hostPID", False):
-            return False, "hostPID is not permitted"
-        if BLOCK_HOST_IPC and pod_spec.get("hostIPC", False):
-            return False, "hostIPC is not permitted"
-        if BLOCK_HOST_PATH:
-            for volume in pod_spec.get("volumes", []) or []:
-                if volume.get("hostPath") is not None:
-                    return False, "hostPath volumes are not permitted"
+        for pod_spec, _multiplier in weighted_pod_specs:
+            # --- Pod-level security policy checks ---
+            # Mirror manifest_processor._validate_security_context so the SQS
+            # path enforces the same policy as the REST path.
+            if BLOCK_HOST_NETWORK and pod_spec.get("hostNetwork", False):
+                return False, "hostNetwork is not permitted"
+            if BLOCK_HOST_PID and pod_spec.get("hostPID", False):
+                return False, "hostPID is not permitted"
+            if BLOCK_HOST_IPC and pod_spec.get("hostIPC", False):
+                return False, "hostIPC is not permitted"
+            if BLOCK_HOST_PATH:
+                for volume in pod_spec.get("volumes", []) or []:
+                    if volume.get("hostPath") is not None:
+                        return False, "hostPath volumes are not permitted"
 
-        pod_security_context = pod_spec.get("securityContext", {}) or {}
-        if BLOCK_PRIVILEGED and pod_security_context.get("privileged", False):
-            return False, "privileged pod security context is not permitted"
-        if BLOCK_RUN_AS_ROOT:
-            pod_run_as_user = pod_security_context.get("runAsUser")
-            if pod_run_as_user is not None and pod_run_as_user == 0:
-                return False, "running as root (runAsUser: 0) is not permitted"
-
-        # --- Container-level security policy checks ---
-        # Every toggle is applied to every container kind (regular, init,
-        # ephemeral). An init container running as root or with CAP_SYS_ADMIN
-        # has the same blast radius as a regular container running the same
-        # way; there is no reason to give any kind a free pass.
-        for kind, c in all_containers:
-            cname = c.get("name", "unknown")
-            sc = c.get("securityContext", {}) or {}
-            if BLOCK_PRIVILEGED and sc.get("privileged", False):
-                return False, f"{kind} '{cname}': privileged containers are not permitted"
-            if BLOCK_PRIVILEGE_ESCALATION and sc.get("allowPrivilegeEscalation", False):
-                return False, f"{kind} '{cname}': allowPrivilegeEscalation is not permitted"
-            if BLOCK_ADDED_CAPABILITIES:
-                added_caps = (sc.get("capabilities", {}) or {}).get("add", []) or []
-                if added_caps:
-                    return False, f"{kind} '{cname}': added capabilities are not permitted"
+            pod_security_context = pod_spec.get("securityContext", {}) or {}
+            if BLOCK_PRIVILEGED and pod_security_context.get("privileged", False):
+                return False, "privileged pod security context is not permitted"
             if BLOCK_RUN_AS_ROOT:
-                ras = sc.get("runAsUser")
-                if ras is not None and ras == 0:
+                pod_run_as_user = pod_security_context.get("runAsUser")
+                if pod_run_as_user is not None and pod_run_as_user == 0:
+                    return False, "running as root (runAsUser: 0) is not permitted"
+
+            # --- Container-level security policy checks ---
+            # Every toggle is applied to every container kind (regular, init,
+            # ephemeral). An init container running as root or with CAP_SYS_ADMIN
+            # has the same blast radius as a regular container running the same
+            # way; there is no reason to give any kind a free pass.
+            for container_type, c in _iter_containers(pod_spec):
+                cname = c.get("name", "unknown")
+                sc = c.get("securityContext", {}) or {}
+                if BLOCK_PRIVILEGED and sc.get("privileged", False):
                     return (
                         False,
-                        f"{kind} '{cname}': running as root (runAsUser: 0) is not permitted",
+                        f"{container_type} '{cname}': privileged containers are not permitted",
+                    )
+                if BLOCK_PRIVILEGE_ESCALATION and sc.get("allowPrivilegeEscalation", False):
+                    return (
+                        False,
+                        f"{container_type} '{cname}': allowPrivilegeEscalation is not permitted",
+                    )
+                if BLOCK_ADDED_CAPABILITIES:
+                    added_caps = (sc.get("capabilities", {}) or {}).get("add", []) or []
+                    if added_caps:
+                        return (
+                            False,
+                            f"{container_type} '{cname}': added capabilities are not permitted",
+                        )
+                if BLOCK_RUN_AS_ROOT:
+                    ras = sc.get("runAsUser")
+                    if ras is not None and ras == 0:
+                        return (
+                            False,
+                            f"{container_type} '{cname}': running as root (runAsUser: 0) is not permitted",
+                        )
+
+            # Enforce image registry allowlist (matches manifest_processor semantics)
+            for container_type, c in _iter_containers(pod_spec):
+                image = c.get("image", "")
+                if not _is_image_trusted(image):
+                    cname = c.get("name", "unknown")
+                    return (
+                        False,
+                        f"{container_type} '{cname}': untrusted image source '{image}'",
                     )
 
-        # Enforce image registry allowlist (matches manifest_processor semantics)
-        for kind, c in all_containers:
-            image = c.get("image", "")
-            if not _is_image_trusted(image):
-                cname = c.get("name", "unknown")
-                return (
-                    False,
-                    f"{kind} '{cname}': untrusted image source '{image}'",
-                )
-
-        # Enforce resource caps across ALL container kinds.
+        # Enforce resource caps across ALL container kinds and pod-spec views.
         # Sum the resource requests/limits of every container (regular,
-        # init, and ephemeral). This is stricter than the K8s scheduler's
-        # accounting but matches our security intent: an operator's
-        # configured "max CPU/memory/GPU per manifest" is a hard cap on
-        # the total resources a submitter can request regardless of
-        # which container kind carries the request.
+        # init, and ephemeral), scaled by each view's replica multiplier
+        # (a TrainJob runs its trainer spec once per node — counting a
+        # 16-node GPU job as one node would make the cap meaningless).
+        # This is stricter than the K8s scheduler's accounting but matches
+        # our security intent: an operator's configured "max CPU/memory/GPU
+        # per manifest" is a hard cap on the total resources a submitter
+        # can request regardless of which container kind carries the request.
         total_gpu = 0
         total_cpu = 0
         total_memory = 0
-        for _kind, c in all_containers:
-            res = c.get("resources", {}) or {}
-            limits = res.get("limits", {}) or {}
-            requests = res.get("requests", {}) or {}
-            gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113 - dict.get(), not HTTP requests
-            total_gpu += int(gpu)
-            cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113 - dict.get(), not HTTP requests
-            if isinstance(cpu_str, str) and cpu_str.endswith("m"):
-                total_cpu += int(cpu_str[:-1])
-            else:
-                total_cpu += int(float(cpu_str) * 1000)
-            mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113 - dict.get(), not HTTP requests
-            if isinstance(mem_str, str):
-                if mem_str.endswith("Gi"):
-                    total_memory += int(float(mem_str[:-2]) * 1024**3)
-                elif mem_str.endswith("Mi"):
-                    total_memory += int(float(mem_str[:-2]) * 1024**2)
-                elif mem_str.endswith("Ki"):
-                    total_memory += int(float(mem_str[:-2]) * 1024)
+        for pod_spec, multiplier in weighted_pod_specs:
+            for _container_type, c in _iter_containers(pod_spec):
+                res = c.get("resources", {}) or {}
+                limits = res.get("limits", {}) or {}
+                requests = res.get("requests", {}) or {}
+                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                total_gpu += multiplier * int(gpu)
+                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                if isinstance(cpu_str, str) and cpu_str.endswith("m"):
+                    total_cpu += multiplier * int(cpu_str[:-1])
                 else:
-                    total_memory += int(mem_str)
-            else:
-                total_memory += int(mem_str)
+                    total_cpu += multiplier * int(float(cpu_str) * 1000)
+                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113 - dict.get(), not HTTP requests
+                if isinstance(mem_str, str):
+                    if mem_str.endswith("Gi"):
+                        mem_bytes = int(float(mem_str[:-2]) * 1024**3)
+                    elif mem_str.endswith("Mi"):
+                        mem_bytes = int(float(mem_str[:-2]) * 1024**2)
+                    elif mem_str.endswith("Ki"):
+                        mem_bytes = int(float(mem_str[:-2]) * 1024)
+                    else:
+                        mem_bytes = int(mem_str)
+                else:
+                    mem_bytes = int(mem_str)
+                total_memory += multiplier * mem_bytes
 
         errors = []
         if total_gpu > MAX_GPU:
@@ -584,7 +630,16 @@ def _inject_security_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     Mirrors manifest_processor._inject_security_defaults so jobs submitted
     via SQS get the same SA-token-theft protection as those submitted via
     the REST API.
+
+    For a TrainJob the default is injected into every pod spec embedded in
+    ``runtimePatches`` (live references into the manifest, so setdefault
+    mutates it in place); the base pod template comes from the shipped
+    ClusterTrainingRuntime, which already disables the token.
     """
+    if manifest.get("kind") == "TrainJob":
+        for embedded in extract_trainjob_pod_specs(manifest).embedded:
+            embedded.setdefault("automountServiceAccountToken", False)
+        return manifest
     pod_spec = _extract_pod_spec(manifest)
     if pod_spec is not None:
         pod_spec.setdefault("automountServiceAccountToken", False)
@@ -633,7 +688,12 @@ def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
     try:
         resource = dyn.resources.get(api_version=api_version, kind=kind)
     except ResourceNotFoundError:
-        return status("failed", f"Unsupported Kubernetes resource {api_version}/{kind}")
+        # A policy-allowed kind whose addon is not installed gets the
+        # actionable remedy appended; the stable prefix is kept for DLQ
+        # triage tooling.
+        addon_hint = ADDON_KIND_HINTS.get(kind)
+        detail = f" ({addon_hint})" if addon_hint else ""
+        return status("failed", f"Unsupported Kubernetes resource {api_version}/{kind}{detail}")
 
     # For Jobs, delete completed/failed ones first so re-submission works.
     # Without this, re-submitting the same job name would fail with a 409 conflict

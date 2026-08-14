@@ -1529,3 +1529,214 @@ class TestSecurityPolicyParityWithManifestProcessor:
             "added to manifest_processor, add it to queue_processor.py, "
             "regional_stack.py, post-helm-sqs-consumer.yaml, and this test."
         )
+
+
+# ── TrainJob validation (SQS path) ───────────────────────────────────────
+
+
+def _trainjob(
+    name="test-trainjob",
+    namespace="gco-jobs",
+    image="pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime",
+    num_nodes=None,
+    resources_per_node=None,
+    runtime_patches=None,
+):
+    """Build a Kubeflow Trainer v2 TrainJob manifest."""
+    trainer = {}
+    if image is not None:
+        trainer["image"] = image
+    if num_nodes is not None:
+        trainer["numNodes"] = num_nodes
+    if resources_per_node is not None:
+        trainer["resourcesPerNode"] = resources_per_node
+    spec = {"runtimeRef": {"name": "torch-distributed"}}
+    if trainer:
+        spec["trainer"] = trainer
+    if runtime_patches is not None:
+        spec["runtimePatches"] = runtime_patches
+    return {
+        "apiVersion": "trainer.kubeflow.org/v1alpha1",
+        "kind": "TrainJob",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": spec,
+    }
+
+
+def _patch_with_pod_spec(pod_spec):
+    """Wrap a pod spec in the runtimePatches nesting the trainer API uses."""
+    return {
+        "trainingRuntimeSpec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod_spec}}}}
+                    ]
+                }
+            }
+        }
+    }
+
+
+_GPU_TOLERATION_PATCH = _patch_with_pod_spec(
+    {
+        "containers": [],
+        "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
+    }
+)
+
+
+class TestTrainJobValidation:
+    """The SQS path applies the full TrainJob decomposition, like the REST path.
+
+    A TrainJob has no spec.template, so before the decomposition every check
+    here passed vacuously — these tests pin the SQS-side closure of that hole.
+    """
+
+    def test_trusted_trainjob_accepted(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(resources_per_node={"requests": {"cpu": "500m", "memory": "512Mi"}})
+        )
+        assert (ok, reason) == (True, "")
+
+    def test_trainjob_kind_allowed_by_default(self):
+        qp = _reload()
+        assert "TrainJob" in qp.ALLOWED_KINDS
+
+    def test_untrusted_trainer_image_rejected(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(_trainjob(image="evil.example.com/malicious:latest"))
+        assert not ok
+        assert "untrusted image source" in reason.lower()
+        assert "evil.example.com" in reason
+
+    def test_untrusted_runtime_patch_image_rejected(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                runtime_patches=[
+                    _patch_with_pod_spec(
+                        {"containers": [{"name": "smuggled", "image": "evil.example.com/bd:1"}]}
+                    )
+                ],
+            )
+        )
+        assert not ok
+        assert "evil.example.com" in reason
+
+    def test_hostpath_in_runtime_patch_rejected(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                runtime_patches=[
+                    _patch_with_pod_spec(
+                        {
+                            "containers": [{"name": "worker", "image": "python:3.14-slim"}],
+                            "volumes": [{"name": "host", "hostPath": {"path": "/etc"}}],
+                        }
+                    )
+                ],
+            )
+        )
+        assert not ok
+        assert "hostPath" in reason
+
+    def test_privileged_in_runtime_patch_rejected(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                runtime_patches=[
+                    _patch_with_pod_spec(
+                        {
+                            "containers": [
+                                {
+                                    "name": "worker",
+                                    "image": "python:3.14-slim",
+                                    "securityContext": {"privileged": True},
+                                }
+                            ]
+                        }
+                    )
+                ],
+            )
+        )
+        assert not ok
+        assert "privileged" in reason
+
+    def test_resource_caps_scale_with_num_nodes(self):
+        """MAX_GPU_PER_MANIFEST=4 (autouse fixture): 2x1 passes, 8x1 must not."""
+        qp = _reload()
+
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                num_nodes=2,
+                resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+                runtime_patches=[_GPU_TOLERATION_PATCH],
+            )
+        )
+        assert ok, reason
+
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                num_nodes=8,
+                resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+                runtime_patches=[_GPU_TOLERATION_PATCH],
+            )
+        )
+        assert not ok
+        assert "GPU 8 exceeds max 4" in reason
+
+    def test_gpu_without_toleration_rejected_with_trainjob_hint(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(num_nodes=2, resources_per_node={"limits": {"nvidia.com/gpu": "1"}})
+        )
+        assert not ok
+        assert "toleration" in reason
+        assert "kubeflow-trainjob.yaml" in reason
+
+    def test_toleration_in_runtime_patch_satisfies_trainer_gpu_request(self):
+        """Tolerations union across pod-spec views: request in spec.trainer,
+        toleration in a runtimePatches pod spec."""
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                num_nodes=1,
+                resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+                runtime_patches=[_GPU_TOLERATION_PATCH],
+            )
+        )
+        assert ok, reason
+
+    def test_inject_security_defaults_reaches_embedded_pod_specs(self):
+        qp = _reload()
+        manifest = _trainjob(
+            runtime_patches=[
+                _patch_with_pod_spec(
+                    {"containers": [{"name": "worker", "image": "python:3.14-slim"}]}
+                )
+            ],
+        )
+        qp._inject_security_defaults(manifest)
+        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
+            "replicatedJobs"
+        ][0]["template"]["spec"]["template"]["spec"]
+        assert embedded["automountServiceAccountToken"] is False
+        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+
+    def test_apply_manifest_missing_addon_hint(self):
+        """ResourceNotFoundError for TrainJob keeps the stable DLQ prefix and
+        appends the enable-the-addon remedy."""
+        from kubernetes.dynamic.exceptions import ResourceNotFoundError
+
+        qp = _reload()
+        qp.client = MagicMock()
+        mock_dyn = MagicMock()
+        mock_dyn.return_value.resources.get.side_effect = ResourceNotFoundError("no CRD")
+        qp.dynamic = MagicMock()
+        qp.dynamic.DynamicClient = mock_dyn
+        result = qp.apply_manifest(_trainjob())
+        assert result.status == "failed"
+        assert "Unsupported Kubernetes resource" in (result.message or "")
+        assert "kubeflow-trainer addon" in (result.message or "")

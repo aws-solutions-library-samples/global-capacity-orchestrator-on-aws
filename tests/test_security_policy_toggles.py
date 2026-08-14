@@ -485,6 +485,7 @@ class TestDefaultValues:
             "Service",
             "ConfigMap",
             "Pod",
+            "TrainJob",
         }
         assert processor.allowed_kinds == expected
 

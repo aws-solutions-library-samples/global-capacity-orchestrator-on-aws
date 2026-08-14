@@ -9,10 +9,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+import requests
 import yaml
 
-from gco.services.manifest_processor import safe_load_all_yaml
+from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
@@ -591,6 +593,11 @@ class JobManager:
         """
         Get detailed information about a specific job.
 
+        A name the batch Job endpoint does not know (404) is retried as a
+        Kubeflow TrainJob through the generic manifests endpoint, so
+        ``gco jobs get`` / ``gco jobs submit --wait`` work unchanged for
+        TrainJobs.
+
         Args:
             job_name: Name of the job
             namespace: Namespace of the job
@@ -599,14 +606,108 @@ class JobManager:
         Returns:
             JobInfo or None if not found
         """
+        target_region = region or self.config.default_region
         try:
             response = self._aws_client.get_job_details(
-                job_name=job_name, namespace=namespace, region=region or self.config.default_region
+                job_name=job_name, namespace=namespace, region=target_region
             )
-            return self._parse_job_info(response, region or self.config.default_region)
+            return self._parse_job_info(response, target_region)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                trainjob = self._get_trainjob_info(job_name, namespace, target_region)
+                if trainjob is not None:
+                    return trainjob
+            logger.debug("Failed to get job details for %s: %s", job_name, e)
+            return None
         except Exception as e:
             logger.debug("Failed to get job details for %s: %s", job_name, e)
             return None
+
+    def _get_trainjob_info(self, job_name: str, namespace: str, region: str) -> JobInfo | None:
+        """Fetch a TrainJob through the generic manifests endpoint, or None."""
+        try:
+            response = self._aws_client.call_api(
+                "GET",
+                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                region=region,
+                params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
+            )
+        except RuntimeError as e:
+            # 404 (no such TrainJob either) and transport errors both mean
+            # "not resolvable as a TrainJob"; the caller reports not-found.
+            logger.debug("TrainJob fallback lookup failed for %s: %s", job_name, e)
+            return None
+        resource = response.get("resource") or {}
+        if not resource.get("exists", False):
+            return None
+        return self._parse_trainjob_info(resource, region)
+
+    def _parse_trainjob_info(self, resource: dict[str, Any], region: str) -> JobInfo:
+        """Map a TrainJob resource payload onto JobInfo.
+
+        TrainJob status carries ``conditions`` (terminal types ``Complete`` /
+        ``Failed``, same strings as batch Jobs) plus per-child-Job counts in
+        ``jobsStatus``; there is no ``startTime``/``completionTime``, so the
+        terminal condition's ``lastTransitionTime`` stands in for completion.
+        """
+        metadata = resource.get("metadata", {}) or {}
+        status_data = resource.get("status", {}) or {}
+        spec = resource.get("spec", {}) or {}
+
+        job_status = "pending"
+        completion_time = None
+        for condition in status_data.get("conditions", []) or []:
+            if condition.get("status") != "True":
+                continue
+            if condition.get("type") == "Complete":
+                job_status = "succeeded"
+            elif condition.get("type") == "Failed":
+                job_status = "failed"
+            else:
+                continue
+            if condition.get("lastTransitionTime"):
+                completion_time = datetime.fromisoformat(
+                    condition["lastTransitionTime"].replace("Z", "+00:00")
+                )
+            break
+
+        active = succeeded = failed = 0
+        for child in status_data.get("jobsStatus", []) or []:
+            active += child.get("active", 0) or 0
+            succeeded += child.get("succeeded", 0) or 0
+            failed += child.get("failed", 0) or 0
+        if job_status == "pending" and active > 0:
+            job_status = "running"
+
+        created_time = None
+        if metadata.get("creationTimestamp"):
+            created_time = datetime.fromisoformat(
+                metadata["creationTimestamp"].replace("Z", "+00:00")
+            )
+
+        trainer = spec.get("trainer", {}) or {}
+        try:
+            num_nodes = max(1, int(trainer.get("numNodes") or 1))
+        except TypeError, ValueError:
+            num_nodes = 1
+
+        return JobInfo(
+            name=metadata.get("name", ""),
+            namespace=metadata.get("namespace", "default"),
+            region=region,
+            status=job_status,
+            created_time=created_time,
+            # TrainJob status reports no startTime; leave it unset rather
+            # than fabricating one from creation time.
+            completion_time=completion_time,
+            active_pods=active,
+            succeeded_pods=succeeded,
+            failed_pods=failed,
+            parallelism=num_nodes,
+            completions=num_nodes,
+            labels=metadata.get("labels", {}) or {},
+            image_refs=sorted({trainer["image"]} if trainer.get("image") else set()),
+        )
 
     def get_job_logs(
         self,
@@ -616,13 +717,18 @@ class JobManager:
         tail_lines: int = 100,
         follow: bool = False,
         since_hours: int = 24,
+        node: int = 0,
     ) -> str:
         """
         Get logs from a job.
 
-        Tries the Kubernetes API first (via the GCO API). If the pod is no
-        longer available (completed/deleted), falls back to CloudWatch Logs
-        where Container Insights stores application logs.
+        Tries the Kubernetes API first (via the GCO API). A name the batch
+        Job endpoint does not know is retried as a Kubeflow TrainJob: the
+        torch runtime runs the whole job as one child Job named
+        ``<name>-node-0`` whose indexed pods are the node ranks, so the
+        rank-``node`` pod's logs are fetched (rank 0 by default). If the pod
+        is no longer available (completed/deleted), falls back to CloudWatch
+        Logs where Container Insights stores application logs.
 
         Args:
             job_name: Name of the job
@@ -631,6 +737,7 @@ class JobManager:
             tail_lines: Number of lines to return
             follow: Stream logs (not implemented yet)
             since_hours: Hours to look back in CloudWatch (default 24)
+            node: Node rank to fetch for a distributed TrainJob (default 0)
 
         Returns:
             Log content as string
@@ -649,9 +756,23 @@ class JobManager:
             )
         except RuntimeError as e:
             error_msg = str(e)
+            lowered = error_msg.lower()
+            # An unknown batch Job name may be a TrainJob; its pods run
+            # under the JobSet child Job instead.
+            if "not found" in lowered:
+                try:
+                    return self._get_trainjob_node_logs(
+                        job_name=job_name,
+                        namespace=namespace,
+                        region=target_region,
+                        node=node,
+                        tail_lines=tail_lines,
+                    )
+                except Exception as tj_err:
+                    logger.debug("TrainJob logs fallback failed: %s", tj_err)
             # If the pod is gone or pending, try CloudWatch
             if any(
-                hint in error_msg.lower()
+                hint in lowered
                 for hint in ["not found", "pending", "no pods", "terminated", "completed"]
             ):
                 logger.info("Pod not available, falling back to CloudWatch Logs")
@@ -671,6 +792,65 @@ class JobManager:
                         f"If the job just finished, try again shortly."
                     ) from e
             raise
+
+    def _get_trainjob_node_logs(
+        self,
+        job_name: str,
+        namespace: str,
+        region: str,
+        node: int,
+        tail_lines: int,
+    ) -> str:
+        """Fetch logs from the rank-``node`` pod of a TrainJob.
+
+        The shipped torch-distributed runtime materializes a TrainJob as a
+        JobSet with a single replicated Job ``<name>-node-0`` running
+        ``numNodes`` indexed pods; the completion index is the node rank
+        (``PET_NODE_RANK``). Raises if no rank-``node`` pod exists.
+        """
+        child_job = f"{job_name}-node-0"
+        pods_response = self._aws_client.get_job_pods(child_job, namespace, region)
+        pods = pods_response.get("pods", []) or []
+        if not pods:
+            raise RuntimeError(f"no pods found for TrainJob child job '{child_job}'")
+
+        target_pod = None
+        for pod in pods:
+            metadata = pod.get("metadata", {}) or {}
+            labels = metadata.get("labels", {}) or {}
+            if labels.get("batch.kubernetes.io/job-completion-index") == str(node):
+                target_pod = metadata.get("name")
+                break
+        if target_pod is None:
+            # Older control planes may omit the index label; fall back to the
+            # deterministic indexed-pod name prefix '<child>-<index>-'.
+            prefix = f"{child_job}-{node}-"
+            for pod in pods:
+                pod_name = (pod.get("metadata", {}) or {}).get("name", "")
+                if pod_name.startswith(prefix):
+                    target_pod = pod_name
+                    break
+        if target_pod is None:
+            raise RuntimeError(
+                f"no rank-{node} pod found for TrainJob '{job_name}' "
+                f"({len(pods)} pod(s) under child job '{child_job}'); "
+                f"list them with: gco jobs pods {child_job} -n {namespace} -r {region}"
+            )
+
+        logger.info(
+            "Job '%s' resolved as TrainJob; fetching logs from rank-%d pod '%s'",
+            job_name,
+            node,
+            target_pod,
+        )
+        response = self._aws_client.get_pod_logs(
+            job_name=child_job,
+            pod_name=target_pod,
+            namespace=namespace,
+            region=region,
+            tail_lines=tail_lines,
+        )
+        return str(response.get("logs", ""))
 
     def _get_cloudwatch_logs(
         self,
@@ -774,6 +954,12 @@ class JobManager:
         """
         Delete a job.
 
+        A name the batch Job endpoint does not know (404) is retried as a
+        Kubeflow TrainJob through the generic manifests endpoint. Deleting
+        the TrainJob cascades to its JobSet, child Jobs, and pods via owner
+        references. ``expected_uid`` (a batch-Job concurrency guard) is not
+        supported on the TrainJob path.
+
         Args:
             job_name: Name of the job
             namespace: Namespace of the job
@@ -782,12 +968,37 @@ class JobManager:
         Returns:
             Deletion result
         """
-        return self._aws_client.delete_job(
-            job_name=job_name,
-            namespace=namespace,
-            region=region or self.config.default_region,
-            expected_uid=expected_uid,
-        )
+        target_region = region or self.config.default_region
+        try:
+            return self._aws_client.delete_job(
+                job_name=job_name,
+                namespace=namespace,
+                region=target_region,
+                expected_uid=expected_uid,
+            )
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                trainjob_result = self._delete_trainjob(job_name, namespace, target_region)
+                if trainjob_result is not None:
+                    return trainjob_result
+            raise
+
+    def _delete_trainjob(self, job_name: str, namespace: str, region: str) -> dict[str, Any] | None:
+        """Delete a TrainJob via the manifests endpoint, or None if that fails.
+
+        Returning None (rather than raising) lets the caller surface the
+        original batch-Job 404, which is the right error for a typo'd name.
+        """
+        try:
+            return self._aws_client.call_api(
+                "DELETE",
+                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                region=region,
+                params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
+            )
+        except RuntimeError as e:
+            logger.debug("TrainJob delete fallback failed for %s: %s", job_name, e)
+            return None
 
     def wait_for_job(
         self,

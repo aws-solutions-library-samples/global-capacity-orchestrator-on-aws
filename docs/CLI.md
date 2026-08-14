@@ -447,6 +447,10 @@ gco jobs logs JOB_NAME [OPTIONS]
 | `--namespace` | `-n` | Job namespace |
 | `--tail` | `-t` | Number of lines to show |
 | `--container` | `-c` | Container name (for multi-container pods) |
+| `--node` | | Node rank to fetch for a distributed TrainJob (default: 0) |
+
+Kubeflow TrainJobs are resolved automatically: logs come from the
+rank-`--node` pod of the training job (rank 0 by default).
 
 **Example:**
 
@@ -454,6 +458,7 @@ gco jobs logs JOB_NAME [OPTIONS]
 gco jobs logs my-job --region us-east-1
 gco jobs logs my-job -r us-east-1 --tail 500
 gco jobs logs multi-container-job -r us-east-1 --container sidecar
+gco jobs logs my-trainjob -r us-east-1 --node 1
 ```
 
 #### `gco jobs pod-logs`

@@ -8,10 +8,13 @@
 # and pruned by the applier's feature inventory when the trainer chart is
 # disabled.
 #
-# Extracted verbatim from chart kubeflow-trainer 2.3.0
+# Extracted from chart kubeflow-trainer 2.3.0
 # (helm template --set runtimes.torchDistributed.enabled=true), minus the
-# Helm bookkeeping labels. Keep in lockstep with the chart version pinned in
-# lambda/helm-installer/charts.yaml.
+# Helm bookkeeping labels and with exactly one GCO addition: the pod template
+# sets automountServiceAccountToken: false (the same security default both
+# submission paths inject into user Jobs — training pods get no API token
+# unless a TrainJob opts back in via runtimePatches). Keep in lockstep with
+# the chart version pinned in lambda/helm-installer/charts.yaml.
 #
 # Gated on {{KUBEFLOW_TRAINER_ENABLED}}: with the chart disabled the
 # placeholder stays unresolved, the applier skips this file, and
@@ -45,6 +48,7 @@ spec:
             spec:
               template:
                 spec:
+                  automountServiceAccountToken: false
                   containers:
                     - name: node
                       image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime

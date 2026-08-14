@@ -3135,6 +3135,9 @@ class GCORegionalStack(Stack):
         )
         allowed_kinds = job_policy.get(
             "allowed_kinds",
+            # Fallback mirrors manifest_processor.DEFAULT_ALLOWED_KINDS (kept
+            # inline so CDK synth never imports service modules; lockstep is
+            # pinned by tests/test_manifest_processor_extended.py::TestAllowedKindsLockstep).
             [
                 "Job",
                 "CronJob",
@@ -3144,6 +3147,7 @@ class GCORegionalStack(Stack):
                 "Service",
                 "ConfigMap",
                 "Pod",
+                "TrainJob",
             ],
         )
 

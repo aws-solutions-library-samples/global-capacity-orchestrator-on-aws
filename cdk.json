@@ -194,7 +194,8 @@
         "DaemonSet",
         "Service",
         "ConfigMap",
-        "Pod"
+        "Pod",
+        "TrainJob"
       ]
     },
 

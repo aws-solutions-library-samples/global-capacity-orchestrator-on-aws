@@ -483,9 +483,22 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
     "--since", "-s", default=24, type=int, help="Hours to look back in CloudWatch (default: 24)"
 )
 @click.option("--container", "-c", help="Container name (for multi-container pods)")
+@click.option(
+    "--node",
+    default=0,
+    type=int,
+    help="Node rank to fetch for a distributed TrainJob (default: 0)",
+)
 @pass_config
 def get_logs(
-    config: Any, job_name: Any, namespace: Any, region: Any, tail: Any, since: Any, container: Any
+    config: Any,
+    job_name: Any,
+    namespace: Any,
+    region: Any,
+    tail: Any,
+    since: Any,
+    container: Any,
+    node: Any,
 ) -> None:
     """Get logs from a job.
 
@@ -493,18 +506,22 @@ def get_logs(
     If the pod is gone, falls back to CloudWatch Logs automatically.
     Use --since to control how far back CloudWatch searches.
 
+    Kubeflow TrainJobs are resolved automatically; use --node to pick a
+    node rank other than 0.
+
     Examples:
         gco jobs logs my-job --region us-east-1
         gco jobs logs training-job -r us-west-2 -n ml-jobs --tail 500
         gco jobs logs old-job -r us-east-1 --since 72
         gco jobs logs multi-container-job -r us-east-1 --container sidecar
+        gco jobs logs my-trainjob -r us-east-1 --node 1
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
 
     try:
         logs = job_manager.get_job_logs(
-            job_name, namespace, region, tail_lines=tail, since_hours=since
+            job_name, namespace, region, tail_lines=tail, since_hours=since, node=node
         )
         print(logs)
     except Exception as e:

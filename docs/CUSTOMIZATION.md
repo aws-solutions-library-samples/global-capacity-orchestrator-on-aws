@@ -717,11 +717,11 @@ The `allowed_kinds` list controls which Kubernetes resource kinds can be submitt
 
 ```json
 "job_validation_policy": {
-  "allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod"]
+  "allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "TrainJob"]
 }
 ```
 
-The default list covers the most common workload and service types. Modify it to match your needs.
+The default list covers the most common workload and service types, plus the Kubeflow Trainer v2 `TrainJob` (pinned to `trainer.kubeflow.org/v1alpha1`; requires the `kubeflow_trainer` Helm chart, enabled by default). Modify it to match your needs.
 
 **Example: Restrict to only Jobs**
 
@@ -738,7 +738,7 @@ All other kinds (Deployment, Service, etc.) will be rejected.
 If you need users to submit NetworkPolicy resources:
 
 ```json
-"allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "NetworkPolicy"]
+"allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "TrainJob", "NetworkPolicy"]
 ```
 
 After changing any security policy or allowed_kinds settings, redeploy the regional stack:
