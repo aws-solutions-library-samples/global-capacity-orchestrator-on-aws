@@ -454,33 +454,16 @@ grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" scripts/live_release_valida
   | sed 's/image: //' >> "$ALL_IMAGES" || true
 
 echo "Checking Helm chart value images..."
-CHART_VALUE_IMAGES=""
-if ! CHART_VALUE_IMAGES="$(python3 - <<'PY'
-import yaml
-with open('lambda/helm-installer/charts.yaml') as f:
-    data = yaml.safe_load(f)
-
-
-def find_images(d):
-    if isinstance(d, dict):
-        repo = d.get('repository', '')
-        tag = d.get('tag', '')
-        if repo and tag and '/' in repo:
-            print(f'{repo}:{tag}')
-        for v in d.values():
-            find_images(v)
-    elif isinstance(d, list):
-        for item in d:
-            find_images(item)
-
-
-for name, cfg in (data or {}).get('charts', {}).items():
-    find_images(cfg.get('values', {}))
-PY
-)"; then
-  mark_scan_incomplete "Could not parse Helm chart value images."
-elif [ -n "$CHART_VALUE_IMAGES" ]; then
+# Registry-aware walk over every charts.yaml values block (see
+# extract_chart_value_images in lib_dependency_scan.sh — moved there so BATS
+# exercises the real logic). charts.yaml always pins values images, so an
+# empty result means the parse broke — surface that as an incomplete scan
+# rather than silently dropping the sweep.
+CHART_VALUE_IMAGES="$(extract_chart_value_images lambda/helm-installer/charts.yaml)"
+if [ -n "$CHART_VALUE_IMAGES" ]; then
   printf '%s\n' "$CHART_VALUE_IMAGES" >> "$ALL_IMAGES"
+else
+  mark_scan_incomplete "Could not parse Helm chart value images."
 fi
 
 # Mooncake default image — pinned as a Python constant in cli/images.py

@@ -644,6 +644,60 @@ EOF
     [ -z "$output" ]
 }
 
+# ── extract_chart_value_images ───────────────────────────────────────────────
+
+@test "extract_chart_value_images: qualifies the trainer controller image with its registry" {
+    # The regression this extractor fixes: a registry-split pin
+    # (registry: ghcr.io + multi-segment repository) must emit fully
+    # qualified, or the tag sweep resolves it against docker.io and the
+    # monthly scan goes permanently INCOMPLETE.
+    run extract_chart_value_images "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ghcr.io/kubeflow/trainer/trainer-controller-manager:v"* ]]
+    [[ "$output" != *$'\n'"kubeflow/trainer/trainer-controller-manager:v"* ]]
+}
+
+@test "extract_chart_value_images: handles every pin shape in a fixture" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+charts:
+  demo:
+    values:
+      image:
+        registry: ghcr.io
+        repository: org/sub/app
+        tag: "v1.2.3"
+      sidecar:
+        image:
+          repository: example/tool
+          tag: "4.5.6"
+      bare:
+        image:
+          repository: single-segment
+          tag: "7.8.9"
+      tagless:
+        image:
+          registry: ghcr.io
+          repository: kedacore/keda
+EOF
+    run extract_chart_value_images "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ghcr.io/org/sub/app:v1.2.3"* ]]
+    [[ "$output" == *"example/tool:4.5.6"* ]]
+    # Ambiguous single-segment repositories and tag-less pins (their images
+    # follow the chart appVersion, which the chart version sweep reports)
+    # stay un-emitted.
+    [[ "$output" != *"single-segment"* ]]
+    [[ "$output" != *"kedacore/keda"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_chart_value_images: returns empty for a missing file" {
+    run extract_chart_value_images "/nonexistent/charts.yaml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ── extract_dockerfile_pins ──────────────────────────────────────────────────
 
 @test "extract_dockerfile_pins: finds all eight pins in Dockerfile.dev" {

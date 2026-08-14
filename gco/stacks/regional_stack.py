@@ -2560,13 +2560,16 @@ class GCORegionalStack(Stack):
     def _create_mlflow_artifact_role(self, shared: SharedBucketIdentity) -> None:
         """Create the OIDC-only IRSA role MLflow uses for S3 artifact storage.
 
-        The community-charts mlflow chart creates a ``mlflow`` ServiceAccount
-        in the ``monitoring`` namespace; the value overrides annotate it with
-        this role's ARN so the tracking server exchanges its projected token
-        for credentials (the documented ``roleArn serviceaccount annotation``
-        path of ``artifactRoot.s3``). Controller-style posture: OIDC-only
-        (``include_pod_identity=False``), trust bound to exactly one
-        namespace/service-account pair.
+        The official mlflow chart creates a ``mlflow`` ServiceAccount in the
+        ``monitoring`` namespace (``fullnameOverride`` keeps the bare name);
+        the value overrides annotate it with this role's ARN so the tracking
+        server exchanges its webhook-injected projected token for
+        credentials, which is what feeds the server-side S3 artifact proxy
+        (``mlflow.artifactsDestination``). The chart's default
+        ``automountServiceAccountToken: false`` does not affect IRSA — the
+        EKS pod identity webhook mounts its own token volume. Controller-
+        style posture: OIDC-only (``include_pod_identity=False``), trust
+        bound to exactly one namespace/service-account pair.
 
         Grants are deliberately narrower than the job-pod role's bucket-wide
         grant: object access only under the ``mlflow-artifacts/`` prefix of
@@ -3456,21 +3459,14 @@ class GCORegionalStack(Stack):
                 }
             )
 
-        # MLflow (on by default, requires observability): gate the tracking
-        # server's SQLite backend PVC (post-helm-mlflow-backend.yaml) on the
-        # toggle via the same unreplaced-placeholder mechanism; a disabled
-        # deployment leaves the file unapplied and the applier prunes a
-        # previously created claim (metadata is discarded, artifacts stay
-        # in S3).
+        # MLflow (on by default, requires observability): gate the client
+        # egress NetworkPolicy (post-helm-mlflow-network.yaml) on the toggle
+        # via the same unreplaced-placeholder mechanism; a disabled
+        # deployment leaves the file unapplied and the applier prunes both
+        # the policy and the chart-managed metadata claim helm uninstall
+        # leaves behind (metadata is discarded, artifacts stay in S3).
         if self._mlflow_active():
-            image_replacements.update(
-                {
-                    "{{MLFLOW_ENABLED}}": "true",
-                    "{{MLFLOW_BACKEND_SIZE}}": str(
-                        self.config.get_cluster_observability_config()["mlflow"]["persistence_size"]
-                    ),
-                }
-            )
+            image_replacements.update({"{{MLFLOW_ENABLED}}": "true"})
 
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
@@ -4173,30 +4169,38 @@ class GCORegionalStack(Stack):
     def _mlflow_chart_values(self) -> dict[str, Any]:
         """Build the MLflow value overrides that carry deployment tokens.
 
-        Only two things are dynamic — everything static (image pin, Recreate
-        strategy, PVC wiring, resources, posture toggles) lives in
-        ``charts.yaml``:
+        Only three things are dynamic — everything static (image pin, PVC
+        wiring, resources, posture toggles) lives in ``charts.yaml``:
 
-        - ``artifactRoot.s3``: run artifacts go to the cluster-shared bucket
-          under ``mlflow-artifacts/<region>/`` — region-suffixed because each
-          regional tracking server numbers experiments independently, so a
-          shared root would interleave unrelated runs' artifacts.
-        - ``serviceAccount.annotations``: the IRSA role ARN, which is the
-          chart's documented credential path for S3 artifact storage.
+        - ``mlflow.artifactsDestination``: run artifacts go to the
+          cluster-shared bucket under ``mlflow-artifacts/<region>/`` —
+          region-suffixed because each regional tracking server numbers
+          experiments independently, so a shared root would interleave
+          unrelated runs' artifacts. The server proxies artifact traffic
+          (``--serve-artifacts`` is the server default), so client pods
+          never need S3 credentials of their own.
+        - ``serviceAccount.annotations``: the IRSA role ARN, which is how
+          the server-side artifact proxy gets its S3 credentials.
+        - ``storage.size``: the metadata claim size from
+          ``cluster_observability.mlflow.persistence_size``.
         """
+        s3_destination = (
+            f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
+        )
         return {
             "values": {
-                "artifactRoot": {
-                    "s3": {
-                        "enabled": True,
-                        "bucket": self.cluster_shared_identity.name,
-                        "path": f"mlflow-artifacts/{self.deployment_region}",
-                    },
+                "mlflow": {
+                    "artifactsDestination": s3_destination,
                 },
                 "serviceAccount": {
                     "annotations": {
                         "eks.amazonaws.com/role-arn": self.mlflow_role.role_arn,
                     },
+                },
+                "storage": {
+                    "size": str(
+                        self.config.get_cluster_observability_config()["mlflow"]["persistence_size"]
+                    ),
                 },
             }
         }

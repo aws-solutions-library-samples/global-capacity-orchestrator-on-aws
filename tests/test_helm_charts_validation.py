@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = PROJECT_ROOT / ".github" / "scripts" / "validate_helm_charts.py"
@@ -392,6 +393,14 @@ class TestLiveChartsOnline:
         refs = validator.build_refs(charts)
         errors = validator.validate_online(refs)
         assert errors == [], "Helm resolve/render failed:\n" + "\n".join(errors)
+
+    def test_shipped_trainer_runtime_matches_the_pinned_chart(self) -> None:
+        # The committed torch-distributed extraction must reproduce what the
+        # pinned kubeflow-trainer chart actually ships (image + full spec,
+        # modulo the documented automount deviation).
+        charts = validator.load_charts(LIVE_CHARTS)
+        errors = validator.validate_trainer_runtime_lockstep(charts, online=True)
+        assert errors == [], "Trainer runtime lockstep failed:\n" + "\n".join(errors)
 
     def test_online_detects_a_bogus_version(self) -> None:
         # Give the check a version that cannot exist and confirm it fails —
@@ -884,3 +893,268 @@ class TestValidateOnlineRepass:
         )
         assert errors
         assert sum(1 for c in calls if c[1] == "show") == 4
+
+
+# ---------------------------------------------------------------------------
+# Kubeflow Trainer runtime / example / docs lockstep
+# ---------------------------------------------------------------------------
+
+_TRAINER_IMAGE = "pytorch/pytorch:9.9.9-cuda99.9-cudnn9-runtime"
+
+_RUNTIME_MANIFEST_FIXTURE = f"""
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
+metadata:
+  name: torch-distributed
+  labels:
+    trainer.kubeflow.org/framework: torch
+    trainer.kubeflow.org/webhook-validation: disabled
+    project: gco
+spec:
+  mlPolicy:
+    numNodes: 1
+    torch: {{}}
+  template:
+    spec:
+      replicatedJobs:
+        - name: node
+          template:
+            spec:
+              template:
+                spec:
+                  automountServiceAccountToken: false
+                  containers:
+                    - name: node
+                      image: {_TRAINER_IMAGE}
+"""
+
+_EXAMPLE_FIXTURE = f"""
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: kubeflow-trainjob-example
+spec:
+  runtimeRef:
+    name: torch-distributed
+  trainer:
+    numNodes: 2
+    image: {_TRAINER_IMAGE}
+"""
+
+_DOC_FIXTURE = f"""
+# Distributed Training
+
+```yaml
+  trainer:
+    image: {_TRAINER_IMAGE}
+```
+"""
+
+
+def _upstream_runtime(image: str = _TRAINER_IMAGE) -> dict:
+    """The runtime as the chart ships it: helm labels, no automount override."""
+    return {
+        "apiVersion": "trainer.kubeflow.org/v1alpha1",
+        "kind": "ClusterTrainingRuntime",
+        "metadata": {
+            "name": "torch-distributed",
+            "labels": {
+                "trainer.kubeflow.org/framework": "torch",
+                "trainer.kubeflow.org/webhook-validation": "disabled",
+                "helm.sh/chart": "kubeflow-trainer-9.9.9",
+                "app.kubernetes.io/managed-by": "Helm",
+            },
+        },
+        "spec": {
+            "mlPolicy": {"numNodes": 1, "torch": {}},
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {"containers": [{"name": "node", "image": image}]}
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+
+def _trainer_charts(version: str = "9.9.9") -> dict:
+    return {
+        "kubeflow-trainer": {
+            "enabled": True,
+            "repo_url": "oci://ghcr.io/kubeflow/charts",
+            "chart": "kubeflow-trainer",
+            "version": version,
+            "namespace": "kubeflow-trainer",
+            "use_oci": True,
+        }
+    }
+
+
+def _lockstep(charts: dict | None = None, **overrides) -> list[str]:
+    kwargs = {
+        "manifest_text": _RUNTIME_MANIFEST_FIXTURE,
+        "example_text": _EXAMPLE_FIXTURE,
+        "doc_text": _DOC_FIXTURE,
+        "online": False,
+    }
+    kwargs.update(overrides)
+    return validator.validate_trainer_runtime_lockstep(
+        _trainer_charts() if charts is None else charts, **kwargs
+    )
+
+
+class TestTrainerLockstepParsers:
+    def test_parses_the_shipped_runtime(self) -> None:
+        runtime = validator.parse_shipped_torch_runtime(_RUNTIME_MANIFEST_FIXTURE)
+        assert runtime is not None
+        assert validator.trainer_node_image(runtime) == _TRAINER_IMAGE
+
+    def test_zero_or_many_runtimes_parse_as_none(self) -> None:
+        assert validator.parse_shipped_torch_runtime("kind: ConfigMap") is None
+        doubled = _RUNTIME_MANIFEST_FIXTURE + "\n---\n" + _RUNTIME_MANIFEST_FIXTURE
+        assert validator.parse_shipped_torch_runtime(doubled) is None
+
+    def test_upstream_runtime_extracted_from_installer_configmap(self) -> None:
+        payload = yaml.safe_dump(_upstream_runtime())
+        render = yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "kubeflow-trainer-runtimes-installer"},
+                "data": {"runtimes.yaml": payload},
+            }
+        )
+        runtime = validator.upstream_torch_runtime_from_render(render)
+        assert runtime is not None
+        assert validator.trainer_node_image(runtime) == _TRAINER_IMAGE
+
+    def test_render_without_installer_configmap_is_none(self) -> None:
+        assert validator.upstream_torch_runtime_from_render("kind: Deployment") is None
+
+    def test_trainer_node_image_requires_the_node_container(self) -> None:
+        runtime = _upstream_runtime()
+        (job,) = runtime["spec"]["template"]["spec"]["replicatedJobs"]
+        job["template"]["spec"]["template"]["spec"]["containers"][0]["name"] = "sidecar"
+        assert validator.trainer_node_image(runtime) is None
+
+    def test_example_trainer_image(self) -> None:
+        assert validator.example_trainer_image(_EXAMPLE_FIXTURE) == _TRAINER_IMAGE
+        assert validator.example_trainer_image("kind: Job") is None
+
+    def test_doc_regex_binds_only_pytorch_org_images(self) -> None:
+        text = (
+            "image: pytorch/pytorch:1.0.0-runtime\n"
+            "image: nvcr.io/nvidia/pytorch:24.01\n"
+            "    image: pytorch/pytorch:2.0.0-runtime\n"
+        )
+        assert validator.doc_pytorch_images(text) == [
+            "pytorch/pytorch:1.0.0-runtime",
+            "pytorch/pytorch:2.0.0-runtime",
+        ]
+
+    def test_real_repo_is_in_lockstep_offline(self) -> None:
+        # The committed manifest, example and doc must satisfy their own
+        # contract — this is the always-on (network-free) half of the gate.
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        assert validator.validate_trainer_runtime_lockstep(charts, online=False) == []
+
+
+class TestTrainerLockstepValidation:
+    def test_everything_in_sync_passes_offline(self) -> None:
+        assert _lockstep() == []
+
+    def test_example_drift_fails_offline(self) -> None:
+        stale = _EXAMPLE_FIXTURE.replace(_TRAINER_IMAGE, "pytorch/pytorch:8.8.8-runtime")
+        errors = _lockstep(example_text=stale)
+        assert len(errors) == 1
+        assert "examples/kubeflow-trainjob.yaml" in errors[0]
+        assert "pytorch/pytorch:8.8.8-runtime" in errors[0]
+        assert _TRAINER_IMAGE in errors[0]
+
+    def test_doc_drift_fails_offline(self) -> None:
+        stale = _DOC_FIXTURE.replace(_TRAINER_IMAGE, "pytorch/pytorch:8.8.8-runtime")
+        errors = _lockstep(doc_text=stale)
+        assert len(errors) == 1
+        assert "DISTRIBUTED_TRAINING.md" in errors[0]
+
+    def test_doc_without_pytorch_mentions_is_unconstrained(self) -> None:
+        assert _lockstep(doc_text="# rewritten doc, prose only") == []
+
+    def test_manifest_without_the_runtime_fails_loudly(self) -> None:
+        errors = _lockstep(manifest_text="kind: ConfigMap")
+        assert len(errors) == 1
+        assert "update this check" in errors[0]
+
+    def test_missing_chart_entry_is_an_error_for_the_real_charts_file(self) -> None:
+        errors = _lockstep(charts={}, require_entry=True)
+        assert len(errors) == 1
+        assert "no 'kubeflow-trainer' entry" in errors[0]
+
+    def test_missing_chart_entry_is_skipped_for_fixture_files(self) -> None:
+        assert _lockstep(charts={}, require_entry=False) == []
+
+    def test_offline_mode_never_calls_the_fetcher(self) -> None:
+        errors = _lockstep(
+            runtime_fetcher=lambda entry, helm: pytest.fail("offline must not render"),
+        )
+        assert errors == []
+
+    def test_matching_upstream_passes_online(self) -> None:
+        # The upstream fixture has no automount override — proving the one
+        # documented deviation is tolerated by the spec comparison.
+        errors = _lockstep(
+            online=True,
+            runtime_fetcher=lambda entry, helm: _upstream_runtime(),
+        )
+        assert errors == []
+
+    def test_upstream_image_drift_fails_online(self) -> None:
+        errors = _lockstep(
+            online=True,
+            runtime_fetcher=lambda entry, helm: _upstream_runtime(
+                image="pytorch/pytorch:8.8.8-runtime"
+            ),
+        )
+        image_errors = [e for e in errors if "re-extract the runtime" in e]
+        assert len(image_errors) == 1
+        assert "pytorch/pytorch:8.8.8-runtime" in image_errors[0]
+        assert _TRAINER_IMAGE in image_errors[0]
+
+    def test_non_image_spec_drift_fails_online(self) -> None:
+        upstream = _upstream_runtime()
+        upstream["spec"]["mlPolicy"]["torch"] = {"numProcPerNode": "2"}
+        errors = _lockstep(online=True, runtime_fetcher=lambda entry, helm: upstream)
+        assert len(errors) == 1
+        assert "differs from what chart" in errors[0]
+        assert "automountServiceAccountToken deviation" in errors[0]
+
+    def test_semantic_label_drift_fails_online(self) -> None:
+        shipped = _RUNTIME_MANIFEST_FIXTURE.replace(
+            "trainer.kubeflow.org/webhook-validation: disabled",
+            "trainer.kubeflow.org/webhook-validation: enabled",
+        )
+        errors = _lockstep(
+            manifest_text=shipped,
+            online=True,
+            runtime_fetcher=lambda entry, helm: _upstream_runtime(),
+        )
+        assert len(errors) == 1
+        assert "webhook-validation" in errors[0]
+
+    def test_render_failure_is_reported_not_swallowed(self) -> None:
+        def _boom(entry: dict, helm: str) -> dict:
+            raise RuntimeError("helm template oci://ghcr.io/... failed: registry down")
+
+        errors = _lockstep(online=True, runtime_fetcher=_boom)
+        assert len(errors) == 1
+        assert "registry down" in errors[0]

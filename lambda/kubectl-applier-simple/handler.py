@@ -466,9 +466,13 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),
     ),
     ("{{MLFLOW_ENABLED}}", True): (
-        # Deliberately destructive on disable: the claim holds the tracking
-        # server's SQLite run METADATA. Run artifacts live in S3 (untouched).
-        ("v1", "PersistentVolumeClaim", "monitoring", "gco-mlflow-backend"),
+        # The claim is created BY THE CHART (storage.enabled), not by a
+        # shipped manifest — it appears here because helm uninstall never
+        # deletes chart PVCs, so disabling the feature would otherwise leak
+        # the volume forever. Deliberately destructive on disable: the claim
+        # holds the tracking server's SQLite run METADATA. Run artifacts
+        # live in S3 (untouched).
+        ("v1", "PersistentVolumeClaim", "monitoring", "mlflow"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (

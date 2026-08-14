@@ -6,7 +6,10 @@
 # pod at run time; GCO disables that hook (runtimes.*.enabled: false in
 # charts.yaml) and ships the same bytes here instead — pinned, reviewable,
 # and pruned by the applier's feature inventory when the trainer chart is
-# disabled.
+# disabled. The "same bytes" contract is CI-enforced: the trainer runtime
+# lockstep in .github/scripts/validate_helm_charts.py re-renders the pinned
+# chart and fails when this file, the example image, the doc snippet, or
+# the runtime spec drift from what the chart ships.
 #
 # Extracted from chart kubeflow-trainer 2.3.0
 # (helm template --set runtimes.torchDistributed.enabled=true), minus the

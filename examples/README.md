@@ -490,7 +490,7 @@ Switch `aggregation` to `last` to track the current step's loss instead of the b
 
 **File:** `mlflow-tracking-job.yaml`
 
-Logs a tiny training run (params plus a loss curve) to the in-cluster MLflow tracking server over service DNS (`http://mlflow.monitoring:80`), then reads the run back through the API and asserts every logged value round-tripped — proving the tracking pipeline end to end rather than trusting acknowledged writes. The pod opts into egress to the tracking server with the `gco.io/mlflow-client: "true"` label (the `gco-jobs` namespace is otherwise egress-isolated).
+Logs a tiny training run (params plus a loss curve) to the in-cluster MLflow tracking server over service DNS (`http://mlflow.monitoring:5000`), then reads the run back through the API and asserts every logged value round-tripped — proving the tracking pipeline end to end rather than trusting acknowledged writes. The pod opts into egress to the tracking server with the `gco.io/mlflow-client: "true"` label (the `gco-jobs` namespace is otherwise egress-isolated).
 
 The tracking server ships with the observability bundle: run metadata persists on its gp3 volume, and run artifacts land in the cluster-shared S3 bucket under `mlflow-artifacts/<region>/` via the server's own IAM role. This example logs metrics and params only, so the client needs no AWS credentials.
 

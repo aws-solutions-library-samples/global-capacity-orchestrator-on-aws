@@ -565,21 +565,27 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     assert observability["prometheus-node-exporter"]["tolerations"]
 
     # MLflow rides the observability conjunction: the chart is enabled, its
-    # overrides carry the SSM-resolved shared bucket, a region-suffixed
-    # artifact prefix, and the dedicated IRSA role annotation, and the
-    # backend-PVC gate placeholders resolve.
+    # overrides carry the SSM-resolved shared-bucket artifact destination
+    # (region-suffixed), the dedicated IRSA role annotation, and the
+    # chart-managed claim size, and the client-egress gate placeholder
+    # resolves.
     assert "mlflow" in enabled
     mlflow_values = chart_overrides["mlflow"]["values"]
-    assert mlflow_values["artifactRoot"]["s3"]["enabled"] is True
-    assert "ReadClusterSharedBucket" in json.dumps(mlflow_values["artifactRoot"]["s3"]["bucket"])
-    assert mlflow_values["artifactRoot"]["s3"]["path"] == f"mlflow-artifacts/{_REGION}"
+    destination = json.dumps(mlflow_values["mlflow"]["artifactsDestination"])
+    assert "s3://" in destination
+    assert "ReadClusterSharedBucket" in destination
+    assert f"/mlflow-artifacts/{_REGION}" in destination
     assert "MlflowArtifactRole" in json.dumps(
         mlflow_values["serviceAccount"]["annotations"]["eks.amazonaws.com/role-arn"]
     )
+    # Claim size rides the values override (deep-merged into the static
+    # storage block); {{MLFLOW_BACKEND_SIZE}} is gone with the hand-rolled
+    # PVC manifest.
+    assert mlflow_values["storage"] == {"size": "10Gi"}
 
     replacements = properties["ImageReplacements"]
     assert replacements["{{MLFLOW_ENABLED}}"] == "true"
-    assert replacements["{{MLFLOW_BACKEND_SIZE}}"] == "10Gi"
+    assert "{{MLFLOW_BACKEND_SIZE}}" not in replacements
     expected_manifest_processor_values = {
         "{{MP_VALIDATION_ENABLED}}": "false",
         "{{MP_YAML_MAX_DEPTH}}": "50",

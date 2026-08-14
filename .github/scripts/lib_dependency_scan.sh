@@ -945,6 +945,66 @@ if m:
 " "$file" 2>/dev/null
 }
 
+# extract_chart_value_images [charts_yaml_path]
+#
+# Walks every ``values:`` block in charts.yaml and prints one fully-qualified
+# ``image:tag`` per line for every mapping that pins BOTH a repository and a
+# tag. Handles the two image-pin shapes the file uses:
+#
+#   image:                          image:
+#     repository: example/app         registry: ghcr.io
+#     tag: "1.2.3"                    repository: org/sub/app
+#                                     tag: "v1.2.3"
+#
+# The ``registry`` sibling must join the emitted reference: without it a
+# ghcr-hosted repository is emitted bare and the tag sweep resolves it
+# against docker.io — for multi-segment repositories that cannot exist
+# there, turning every monthly scan into a false INCOMPLETE (first hit by
+# kubeflow-trainer's controller pin, the first registry-split image with an
+# explicit tag; KEDA's registry-split blocks are tag-less and never emit).
+#
+# Tag-less pins stay un-emitted on purpose: their images follow the chart's
+# appVersion, which the Helm chart version sweep already reports. Registry-
+# less single-segment repositories are skipped as before (ambiguous
+# namespace). Prints nothing on a missing or unparseable file — the caller
+# treats empty output as a broken parse, matching the smoke-manifest
+# precedent (charts.yaml always carries pinned values images).
+extract_chart_value_images() {
+  local file="${1:-lambda/helm-installer/charts.yaml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import sys
+import yaml
+try:
+    with open(sys.argv[1]) as handle:
+        data = yaml.safe_load(handle)
+except Exception:
+    sys.exit(0)
+
+
+def find_images(node):
+    if isinstance(node, dict):
+        registry = node.get('registry', '')
+        repository = node.get('repository', '')
+        tag = node.get('tag', '')
+        if repository and tag:
+            if registry:
+                print(f'{registry}/{repository}:{tag}')
+            elif '/' in repository:
+                print(f'{repository}:{tag}')
+        for value in node.values():
+            find_images(value)
+    elif isinstance(node, list):
+        for item in node:
+            find_images(item)
+
+
+for _name, cfg in ((data or {}).get('charts') or {}).items():
+    if isinstance(cfg, dict):
+        find_images(cfg.get('values') or {})
+" "$file" 2>/dev/null
+}
+
 # extract_default_bedrock_model [cdk_json_path] [leaf_key]
 #
 # Prints a configured Bedrock model id from ``cdk.json``

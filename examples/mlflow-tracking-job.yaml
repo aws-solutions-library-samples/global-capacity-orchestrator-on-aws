@@ -97,8 +97,8 @@ spec:
           print("Browse it: gco monitoring open --service mlflow")
         env:
         - name: MLFLOW_TRACKING_URI
-          # Chart release `mlflow` in the monitoring namespace, port 80.
-          value: "http://mlflow.monitoring:80"
+          # Chart release `mlflow` in the monitoring namespace, port 5000.
+          value: "http://mlflow.monitoring:5000"
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: false

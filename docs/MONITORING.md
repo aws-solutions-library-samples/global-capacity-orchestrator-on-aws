@@ -208,6 +208,9 @@ from the Secret.
 An [MLflow](https://mlflow.org/) tracking server ships with the observability
 bundle for experiment tracking from any workload on the cluster (see
 [DISTRIBUTED_TRAINING.md](DISTRIBUTED_TRAINING.md) for the training side).
+GCO deploys MLflow's [official Helm chart](https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/)
+(`oci://ghcr.io/mlflow/charts/mlflow`) with the official server image, both
+pinned in `lambda/helm-installer/charts.yaml`.
 
 **Toggle.** Controlled by `cluster_observability.mlflow.enabled` in `cdk.json`
 (default `true`), effective only while `cluster_observability.enabled` is also
@@ -217,12 +220,15 @@ commands, so disabling observability switches MLflow off with it.
 
 **Storage.** Run *artifacts* go to the cluster-shared S3 bucket under
 `mlflow-artifacts/<region>/` through a dedicated IAM role scoped to exactly
-that prefix (IRSA on the server's service account). Run *metadata* is SQLite
-on a dedicated gp3 EBS volume (`cluster_observability.mlflow.persistence_size`,
-default `10Gi`). Disabling MLflow deletes the metadata volume on the next
-deploy — artifacts in S3 survive.
+that prefix (IRSA on the server's service account); the server proxies
+artifact traffic, so client pods never need S3 credentials of their own. Run
+*metadata* is SQLite on a chart-managed gp3 EBS volume
+(`cluster_observability.mlflow.persistence_size`, default `10Gi`). Disabling
+MLflow deletes the metadata volume on the next deploy — artifacts in S3
+survive.
 
-**Access.** The service is `ClusterIP` only — no Ingress, no public endpoint:
+**Access.** The service is `ClusterIP` only (in-cluster DNS
+`mlflow.monitoring:5000`) — no Ingress, no public endpoint:
 
 ```bash
 gco monitoring open --service mlflow          # http://localhost:5000
@@ -231,11 +237,12 @@ gco monitoring open --service mlflow --via-ssm auto   # no VPC route? ephemeral 
 
 **Auth posture.** The server runs without application-level authentication —
 the same posture as the OpenCost UI: it is reachable only from inside the
-cluster (workloads opt in via a NetworkPolicy label) and through the
-authenticated SSM/port-forward tunnel, which is the security boundary. The
-chart supports basic/OIDC auth (`auth.*` values in
-`lambda/helm-installer/charts.yaml`) if your deployment needs an additional
-in-cluster boundary.
+cluster (workloads opt in via a NetworkPolicy label, and the chart's built-in
+NetworkPolicy fences the server pod itself) and through the authenticated
+SSM/port-forward tunnel, which is the security boundary. The chart supports
+MLflow's basic-auth plugin (`server.value_options.app_name` plus a
+Secret-backed CSRF key — see the chart docs) if your deployment needs an
+additional in-cluster boundary.
 
 **Logging from a job.** Point the client at the service DNS and opt into
 egress with the `gco.io/mlflow-client: "true"` pod label —
