@@ -17,6 +17,7 @@ Step-by-step procedures for common operational scenarios. Each runbook includes 
 - [Inference Endpoint Not Serving Traffic](#inference-endpoint-not-serving-traffic)
 - [Cost Spike Detection](#cost-spike-detection)
 - [CloudFormation Drift Detected or Drift Scan Failed](#cloudformation-drift-detected-or-drift-scan-failed)
+- [Vector Store Global Table Blocks Stack Deletion](#vector-store-global-table-blocks-stack-deletion)
 
 ---
 
@@ -807,3 +808,90 @@ aws logs tail "$LOG_GROUP" --since 24h --region "$REGION"
 
    Repeat the status command until it reaches a terminal state; do not close the
    incident on `DETECTION_IN_PROGRESS`, `DETECTION_FAILED`, or a stale prior ID.
+
+---
+
+## Vector Store Global Table Blocks Stack Deletion
+
+**Symptoms:** `gco stacks destroy-all` (or a plain stack delete) hangs on the
+global stack for hours and eventually reports `DELETE_FAILED` naming the vector
+store's `AWS::DynamoDB::GlobalTable`. `describe-table` shows
+`TableStatus: UPDATING` in every replica region with nothing visibly in
+flight — no index backfilling, no replica in `CREATING`/`DELETING`, all nested
+statuses `ACTIVE` — and every mutating call is refused with
+`ResourceInUseException`.
+
+> **Fixed forward:** the cause was an on-delete `UpdateTable` that deleted the
+> vector index at teardown. It returned as soon as the call was *accepted*,
+> leaving the table in `UPDATING` while CloudFormation moved on to removing the
+> table's replica — an operation that requires `ACTIVE`. Current templates make
+> no delete-time index call at all (deleting the table removes its indexes), so
+> new deployments cannot hit this. A stack deployed from an older revision still
+> carries the old custom resource; that is who this runbook is for.
+
+**Diagnosis:** confirm it is this failure and not a permissions or encryption
+problem. The signature is a refused replica delete, repeated:
+
+```bash
+REGION=${REGION:-us-east-2}
+TABLE=${TABLE:-gco-vector-store}
+
+# Both/all replica regions report UPDATING with everything nested ACTIVE.
+aws dynamodb describe-table --table-name "$TABLE" --region "$REGION" \
+  --query 'Table.{Status:TableStatus,Replicas:Replicas[].{Region:RegionName,Status:ReplicaStatus},Protection:DeletionProtectionEnabled}'
+
+# CloudFormation retrying the replica delete on a fixed interval is the tell.
+aws cloudtrail lookup-events --region "$REGION" \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=UpdateTable \
+  --query 'Events[0:5].CloudTrailEvent' --output json \
+  | python3 -c 'import json,sys; [print(e["eventTime"], e.get("errorCode","SUCCESS"), json.dumps(e.get("requestParameters",{}).get("replicaUpdates"))) for e in map(json.loads, json.load(sys.stdin))]'
+```
+
+Rule out the look-alikes before waiting: deletion protection
+(`DeletionProtectionEnabled`), and a customer-managed KMS key that was disabled
+or scheduled for deletion ahead of the table (a table whose key is gone is
+`INACCESSIBLE_ENCRYPTION_CREDENTIALS`, not `UPDATING`).
+
+**Resolution:**
+
+1. Stop anything that keeps re-issuing the delete. `gco stacks destroy-all`
+   makes multiple passes, and a delete already in progress makes
+   CloudFormation reject `--retain-resources` outright
+   ("a delete stack operation is already in progress"). Let the in-flight
+   attempt finish failing.
+2. Wait for `DELETE_FAILED`. CloudFormation retries the replica delete for
+   roughly two hours before giving up, and `--retain-resources` is only
+   accepted in that window.
+3. Complete the stack deletion, orphaning just the wedged table:
+
+   ```bash
+   aws cloudformation delete-stack --region "$REGION" --stack-name gco-global \
+     --retain-resources VectorStoreTableA8C0C980
+   ```
+
+   Confirm the logical ID against your own template first
+   (`aws cloudformation list-stack-resources`); it is stack-specific.
+4. Delete the orphaned table once DynamoDB releases it. While more than one
+   replica remains, expect this refusal on the source region:
+   *"Replica cannot be deleted because it has acted as a source region for new
+   replica(s) being added to the table in the last 24 hours."* That clock starts
+   when the replica was **added**, so a table created earlier the same day
+   cannot have its source replica removed until the 24 hours elapse. Remove the
+   non-source replica first, then delete the table:
+
+   ```bash
+   aws dynamodb update-table --table-name "$TABLE" --region "$REGION" \
+     --replica-updates '[{"Delete":{"RegionName":"<non-source-region>"}}]'
+   aws dynamodb delete-table --table-name "$TABLE" --region "$REGION"
+   ```
+
+5. Redeploy from a revision that carries no delete-time index call, so the next
+   teardown removes the table directly. Verify with
+   `gco stacks diff gco-global` that the vector-index custom resource has no
+   `Delete` payload.
+
+**Prevention:** never add a custom resource whose delete fires an `UpdateTable`
+(or any other operation that parks a table in a transitional state) and returns
+without waiting for `ACTIVE`. `AwsCustomResource` cannot wait — it has no
+`isComplete` poller — so either drop the call or move to a provider-backed
+custom resource that polls for readiness.
