@@ -23,6 +23,7 @@
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
+#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob example e2e + can-i sweep + mlflow probes
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
@@ -1583,6 +1584,364 @@ jobs:
           kubectl -n gco-system logs deploy/inference-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-proxy --tail=200 || true
           kubectl -n gco-system logs deploy/cost-monitor --tail=200 || true
+
+  integration-kind-examples-smoke:
+    name: "integration:kind:examples-smoke"
+    # Simulates the live example-validation harness inside kind, closing the
+    # gap between static checks and a real deployment. Every bug the 2026-08
+    # live shakeouts caught was Kubernetes-level, not AWS-level — this job
+    # would have caught all of them:
+    #
+    #   1. TrainJob schema 400 (numProcPerNode string vs int32) — the REAL
+    #      example manifest is applied against the REAL CRDs from the pinned
+    #      trainer chart.
+    #   2. TrainJob RBAC Forbidden — the example is applied AS the
+    #      manifest-processor ServiceAccount, plus a can-i sweep derived from
+    #      the submission allowlist (the apiserver half of
+    #      tests/test_rbac_manifest.py::TestSubmittableKindsRbacLockstep).
+    #   3. mlflow ServiceMonitor null-path — installing the pinned mlflow
+    #      chart with the shipped values against the ServiceMonitor CRD from
+    #      the pinned kube-prometheus-stack rejects a bad render at install.
+    #   4. mlflow OOM at startup — the shipped memory limits are enforced by
+    #      real cgroups; the rollout gate fails on an OOM crash-loop.
+    #   5. mlflow host-validation 403s — probed with explicit Host headers
+    #      (allowed DNS 200 / arbitrary DNS 403 / exempt /health 200).
+    #
+    # What stays live-only (the harness in scripts/example_job_validation):
+    # IRSA/S3 artifact writes, Bedrock vector search, Karpenter/GPU capacity,
+    # the Global Accelerator -> ALB path, and the SQS -> KEDA loop (floci
+    # owns that orchestration logic in ci-floci-tests).
+    #
+    # Chart refs, versions, namespaces, and values are read from
+    # lambda/helm-installer/charts.yaml at run time via
+    # validate_helm_charts.py --emit-ref / --emit-values, so this job can
+    # never drift from what the installer Lambda deploys. NetworkPolicy
+    # enforcement is deliberately out of scope here (kindnet does not
+    # enforce; that is integration:kind:cluster-e2e's Calico domain).
+    #
+    # Disk: the example's pytorch image is ~3.5GB compressed (~7.5GB in the
+    # store) and transits the runner docker daemon AND the kind node, so the
+    # job starts with the free-disk-space reclaim and drops the runner-side
+    # copy right after `kind load`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      # Same pinned helm as integration:helm:charts-valid and the installer
+      # Lambda (lambda/helm-installer/Dockerfile). The version-consistency
+      # section of dependency-scan.sh asserts every HELM_VERSION declaration
+      # in CI agrees — bump them together.
+      HELM_VERSION: "v4.2.3"
+      HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
+      # The ServiceAccount the queue/manifest processors run as in
+      # production, and the identity that applies the example here.
+      PROCESSOR_SA: "system:serviceaccount:gco-system:gco-manifest-processor-sa"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reclaim runner disk space before large image pulls
+        uses: ./.github/actions/free-disk-space
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project (chart emit helper + allowlist derivation)
+        # -e . provides PyYAML for validate_helm_charts.py --emit-* and makes
+        # gco.services.manifest_processor importable so the can-i sweep
+        # derives (group, plural) pairs from the SAME constants production
+        # enforces — no hardcoded copy to drift.
+        run: pip install -e .
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
+          helm version --short
+      - name: Create kind cluster
+        # Same kind/node pins as integration:kind:cluster-e2e (bump together;
+        # tracked by the dependency drift scan). Default CNI is fine here —
+        # nothing in this job asserts NetworkPolicy enforcement.
+        uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.32.0"
+          node_image: "kindest/node:v1.36.1"
+          cluster_name: "gco-examples-smoke"
+      - name: Apply platform namespaces + RBAC
+        # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
+        # tokens; annotations are opaque strings to the apiserver, so the
+        # raw apply is valid (same approach as cluster-e2e).
+        run: |
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
+      - name: Verify submission allowlist is writable by the processor SA (can-i sweep)
+        # Real-apiserver half of the kinds<->RBAC lockstep: for every kind
+        # users can submit (DEFAULT_ALLOWED_KINDS x RESOURCE_API_VERSIONS),
+        # impersonate the processor SA and require every lifecycle verb in
+        # gco-jobs. Runs BEFORE any CRD exists on purpose — RBAC evaluation
+        # is decoupled from discovery, so a missing grant fails here in
+        # seconds. The negative probe proves the role stays namespace-scoped.
+        run: |
+          set -euo pipefail
+          pairs=$(python3 -c '
+          from gco.services.manifest_processor import (
+              DEFAULT_ALLOWED_KINDS,
+              RESOURCE_API_VERSIONS,
+          )
+          for kind in DEFAULT_ALLOWED_KINDS:
+              (api_version,) = {
+                  av.rsplit("/", 1)[0] if "/" in av else ""
+                  for av in RESOURCE_API_VERSIONS[kind]
+              }
+              print(f"{kind.lower()}s {api_version}")
+          ')
+          failed=0
+          while read -r plural group; do
+            resource="$plural"
+            if [ -n "$group" ]; then
+              resource="$plural.$group"
+            fi
+            for verb in create get list watch patch update delete; do
+              answer=$(kubectl auth can-i "$verb" "$resource" -n gco-jobs \
+                --as="$PROCESSOR_SA" 2>&1) || true
+              if [ "$answer" != "yes" ]; then
+                echo "FAIL: $verb $resource in gco-jobs as processor SA: $answer"
+                failed=1
+              fi
+            done
+            echo "PASS: full lifecycle verbs on $resource in gco-jobs"
+          done <<< "$pairs"
+          denied=$(kubectl auth can-i create pods -n gco-system \
+            --as="$PROCESSOR_SA" 2>&1) || true
+          if [ "$denied" != "no" ]; then
+            echo "FAIL: processor SA must NOT create pods outside gco-jobs: $denied"
+            failed=1
+          fi
+          echo "PASS: write access correctly denied outside gco-jobs"
+          exit "$failed"
+      - name: Install ServiceMonitor CRD from the pinned kube-prometheus-stack
+        # The mlflow values enable a ServiceMonitor, and in production the
+        # mlflow conjunction guarantees kube-prometheus-stack is present. Its
+        # CRD is what rejects a bad ServiceMonitor render (the chart-0.1.0
+        # null-path bug), so install the CRD at the exact pinned chart
+        # version. --server-side: prometheus-operator CRDs overflow the
+        # client-side last-applied annotation.
+        run: |
+          set -euo pipefail
+          read -r _ref version _namespace repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref kube-prometheus-stack
+          )
+          pull_dir="${RUNNER_TEMP}/kps-chart"
+          mkdir -p "${pull_dir}"
+          helm pull kube-prometheus-stack --repo "${repo_url}" \
+            --version "${version}" --destination "${pull_dir}"
+          tar -xzf "${pull_dir}"/kube-prometheus-stack-*.tgz -C "${pull_dir}"
+          crd=$(find "${pull_dir}/kube-prometheus-stack" -name 'crd-servicemonitors*' -print -quit)
+          if [ -z "${crd}" ]; then
+            echo "::error::ServiceMonitor CRD not found in kube-prometheus-stack ${version}"
+            exit 1
+          fi
+          kubectl apply --server-side -f "${crd}"
+          kubectl wait --for=condition=Established \
+            crd/servicemonitors.monitoring.coreos.com --timeout=60s
+          rm -rf "${pull_dir}"
+      - name: Provide the observability StorageClass
+        # The mlflow values pin storageClassName gco-observability-gp3 (an
+        # EBS gp3 class the regional stack ships). kind has no EBS driver, so
+        # alias the name to kind's local-path provisioner — the PVC binds and
+        # the SQLite store mounts exactly as it would in production.
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: gco-observability-gp3
+          provisioner: rancher.io/local-path
+          volumeBindingMode: WaitForFirstConsumer
+          EOF
+      - name: Install pinned kubeflow-trainer chart with shipped values
+        # Exactly what the installer Lambda does for this chart: the OCI ref,
+        # version, namespace, values, and the blocking wait all come from
+        # charts.yaml (wait: true / 8m for this entry).
+        run: |
+          set -euo pipefail
+          read -r ref version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref kubeflow-trainer
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values kubeflow-trainer \
+            > "${RUNNER_TEMP}/trainer-values.yaml"
+          helm install kubeflow-trainer "${ref}" --version "${version}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/trainer-values.yaml" \
+            --wait --timeout 8m
+          kubectl get crd trainjobs.trainer.kubeflow.org \
+            clustertrainingruntimes.trainer.kubeflow.org
+      - name: Apply the shipped torch-distributed runtime
+        # The platform delivers this runtime through the post-Helm kubectl
+        # pass (chart hook Jobs stay disabled — see charts.yaml). Applying it
+        # against the chart's real CRDs validates the extracted manifest the
+        # same way the applier Lambda's apply does. The enabled-gate token is
+        # a label value in production; substitute its enabled state.
+        run: |
+          set -euo pipefail
+          sed 's|{{KUBEFLOW_TRAINER_ENABLED}}|true|g' \
+            lambda/kubectl-applier-simple/manifests/post-helm-kubeflow-trainer-runtimes.yaml \
+            | kubectl apply -f -
+          kubectl get clustertrainingruntime torch-distributed
+      - name: Install pinned mlflow chart with shipped values
+        # charts.yaml sets wait: false for mlflow (installer-side cold-pull
+        # rationale), so the readiness gate is the next step's rollout wait —
+        # same shape as production, where the deployment converges after helm
+        # returns. Namespace comes from the emit (monitoring); production
+        # gets it from kube-prometheus-stack's create_namespace, so create it
+        # here.
+        run: |
+          set -euo pipefail
+          read -r ref version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref mlflow
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values mlflow \
+            > "${RUNNER_TEMP}/mlflow-values.yaml"
+          helm install mlflow "${ref}" --version "${version}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/mlflow-values.yaml"
+      - name: Wait for mlflow to become Available (real probes, real cgroups)
+        # This is the gate that catches the OOM and probe-window classes: the
+        # shipped requests/limits are enforced by the node's cgroups and the
+        # chart's fixed liveness window runs against the real server startup.
+        run: |
+          set -euo pipefail
+          if ! kubectl -n monitoring rollout status deployment/mlflow --timeout=8m; then
+            echo "::error::mlflow deployment never became Available"
+            kubectl -n monitoring get pods -o wide || true
+            kubectl -n monitoring describe deployment/mlflow || true
+            kubectl -n monitoring describe pods -l app.kubernetes.io/name=mlflow || true
+            kubectl -n monitoring get events --sort-by=.lastTimestamp | tail -40 || true
+            kubectl -n monitoring logs deployment/mlflow --tail=200 --all-containers || true
+            exit 1
+          fi
+          # The ServiceMonitor rendered with a REAL path (the null-path class):
+          # readback proves the apiserver admitted it with the endpoint intact.
+          kubectl -n monitoring get servicemonitors -o yaml > "${RUNNER_TEMP}/smons.yaml"
+          grep -q "path: /metrics" "${RUNNER_TEMP}/smons.yaml"
+          echo "ServiceMonitor admitted with endpoint path /metrics"
+      - name: Probe mlflow host validation (allowed 200 / arbitrary 403 / health exempt)
+        # MLflow 3.x host-validation middleware 403s unknown Host headers and
+        # --allowed-hosts REPLACES the built-in private-IP allowance (both
+        # caught live 2026-08-14). Probe through a port-forward with explicit
+        # Host headers against the values charts.yaml ships. The pod-IP
+        # wildcard variant is deploy-time injected (vpc_endpoint_cidrs ->
+        # _mlflow_allowed_hosts) and is pinned by
+        # tests/test_regional_stack_feature_gap_coverage.py instead.
+        run: |
+          set -euo pipefail
+          kubectl -n monitoring port-forward svc/mlflow 5000:5000 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://127.0.0.1:5000/health"; then
+              break
+            fi
+            sleep 2
+          done
+          health=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: anything.invalid" "http://127.0.0.1:5000/health")
+          allowed=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: mlflow.monitoring:5000" "http://127.0.0.1:5000/")
+          rejected=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: rebind.attacker.example" "http://127.0.0.1:5000/")
+          echo "health(exempt)=$health allowed-host=$allowed arbitrary-host=$rejected"
+          test "$health" = "200"
+          test "$allowed" = "200"
+          test "$rejected" = "403"
+      - name: Pre-pull the example's training image into kind
+        # The kubelet would pull this ~3.5GB docker.io image itself, but an
+        # explicit pull-with-retry gives Docker Hub blips bounded, attributed
+        # retries (the shellcheck lesson) instead of opaque ImagePullBackOff
+        # minutes. Image ref comes from the example manifest itself — the
+        # trainer-runtime lockstep already pins example == runtime == chart.
+        # The runner-side copy is dropped immediately; only kind's containerd
+        # keeps the bytes.
+        id: trainjob-image
+        run: |
+          set -euo pipefail
+          image=$(python3 -c '
+          import yaml
+          with open("examples/kubeflow-trainjob.yaml", encoding="utf-8") as fh:
+              doc = yaml.safe_load(fh)
+          print(doc["spec"]["trainer"]["image"])
+          ')
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: ${{ steps.trainjob-image.outputs.image }}
+      - name: Load training image into kind and drop the runner-side copy
+        run: |
+          set -euo pipefail
+          kind load docker-image "${{ steps.trainjob-image.outputs.image }}" \
+            --name gco-examples-smoke
+          docker image rm "${{ steps.trainjob-image.outputs.image }}"
+          df -h / | tail -1
+      - name: Run the REAL TrainJob example as the processor SA
+        # The exact file users submit, applied with the exact production
+        # identity. Schema (real CRD), RBAC (impersonation), runtime
+        # reference, and the gang rendezvous all get exercised; Complete only
+        # flips when every node of the JobSet succeeded.
+        run: |
+          set -euo pipefail
+          kubectl apply --as="$PROCESSOR_SA" -f examples/kubeflow-trainjob.yaml
+          deadline=$(( $(date +%s) + 720 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            complete=$(kubectl -n gco-jobs get trainjob kubeflow-trainjob-example \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            failed=$(kubectl -n gco-jobs get trainjob kubeflow-trainjob-example \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+            if [ "$failed" = "True" ]; then
+              echo "::error::TrainJob reached condition Failed"
+              break
+            fi
+            if [ "$complete" = "True" ]; then
+              echo "TrainJob Complete."
+              kubectl -n gco-jobs get trainjob kubeflow-trainjob-example \
+                -o jsonpath='{.status.jobsStatus}' | python3 -m json.tool
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::TrainJob did not reach Complete within 12m"
+          kubectl -n gco-jobs get trainjob kubeflow-trainjob-example -o yaml || true
+          kubectl -n gco-jobs get pods -o wide || true
+          kubectl -n gco-jobs describe pods || true
+          kubectl -n gco-jobs get events --sort-by=.lastTimestamp | tail -40 || true
+          exit 1
+      - name: Verify the all-reduce actually spanned the gang
+        # Completion proves exit codes; this proves the collective. Rank 0
+        # prints the sentinel only after asserting the summed tensor equals
+        # the world size on its side of the rendezvous.
+        run: |
+          set -euo pipefail
+          logs=$(kubectl -n gco-jobs logs \
+            -l jobset.sigs.k8s.io/jobset-name=kubeflow-trainjob-example \
+            --tail=-1 --prefix)
+          echo "$logs"
+          echo "$logs" | grep -q "distributed all-reduce verified across the gang"
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n kubeflow-trainer logs deployment/kubeflow-trainer-controller-manager --tail=200 || true
+          kubectl -n monitoring logs deployment/mlflow --tail=200 --all-containers || true
+          kubectl -n gco-jobs get trainjob -o yaml || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
 
   # --------------------------------------------------------------------------
   # Dev-onboarding alias live proofs. Each job installs the latest version of a

@@ -1504,7 +1504,20 @@ check_github_tool "Calico (CALICO_VERSION)" "$CALICO_PIN" "projectcalico/calico"
   "https://github.com/projectcalico/calico/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
-KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"
+# Both kind-action steps (cluster-e2e and examples-smoke) must pin the same
+# kind binary + node image; extract_kind_pins de-duplicates identical pins,
+# so >1 value per key means the two jobs drifted apart.
+for kind_key in kind kind-node; do
+  kind_vals="$(extract_kind_pins .github/workflows/integration-tests.yml \
+    | awk -F'|' -v k="$kind_key" '$1==k{print $2}')"
+  kind_distinct="$(printf '%s\n' "$kind_vals" | sed '/^$/d' | grep -c .)"
+  if [ "$kind_distinct" -gt 1 ]; then
+    kind_list="$(printf '%s\n' "$kind_vals" | sed '/^$/d' | paste -sd',' -)"
+    echo "  - ${kind_key} pins disagree across kind-action steps: ${kind_list}"
+    echo "${kind_key} (across kind-action steps)|${kind_list}" >> "$CONSISTENCY_RESULTS"
+  fi
+done
+KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
 check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
   "https://github.com/kubernetes-sigs/kind/releases"
 
@@ -1529,7 +1542,7 @@ fi
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
 # minor only. Jumping minors is governed by the kind release, not free drift,
 # so scoping to the same minor avoids false "upgrade" noise.
-KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}')"
+KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
 if [ -n "$KIND_NODE_PIN" ]; then
   node_tag="${KIND_NODE_PIN##*:}"
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"

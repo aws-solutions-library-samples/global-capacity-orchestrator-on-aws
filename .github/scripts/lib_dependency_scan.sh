@@ -1346,6 +1346,7 @@ try:
         data = yaml.safe_load(f)
 except Exception:
     sys.exit(0)
+seen = []
 for job in (data or {}).get('jobs', {}).values():
     for step in (job or {}).get('steps', []) or []:
         uses = (step or {}).get('uses', '') or ''
@@ -1353,10 +1354,16 @@ for job in (data or {}).get('jobs', {}).values():
             with_ = (step or {}).get('with', {}) or {}
             ver = with_.get('version', '')
             node = with_.get('node_image', '')
-            if ver:
-                print(f'kind|{ver}')
-            if node:
-                print(f'kind-node|{node}')
+            if ver and ('kind', ver) not in seen:
+                seen.append(('kind', ver))
+            if node and ('kind-node', node) not in seen:
+                seen.append(('kind-node', node))
+# De-duplicated: multiple kind-action steps (cluster-e2e + examples-smoke)
+# pinned to the SAME versions print once. A key appearing twice therefore
+# always means the steps drifted apart — the caller's consistency check
+# reports exactly that.
+for key, value in seen:
+    print(f'{key}|{value}')
 " "$file" 2>/dev/null
 }
 

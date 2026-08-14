@@ -350,6 +350,120 @@ class TestMainExitCodes:
         assert "structural checks only" in capsys.readouterr().out
 
 
+# ── emit query modes (--emit-ref / --emit-values) ────────────────────────────
+
+
+class TestEmitQueryModes:
+    """--emit-ref / --emit-values feed the integration:kind:examples-smoke job.
+
+    That CI job helm-installs the pinned trainer and mlflow charts into a
+    kind cluster; these flags are how it gets the exact reference, version,
+    namespace, and values from charts.yaml at run time instead of carrying
+    copies that could drift.
+    """
+
+    CHARTS = {
+        "mlflow": _oci(
+            repo_url="oci://ghcr.io/mlflow/charts",
+            chart="mlflow",
+            version="0.1.0",
+            namespace="monitoring",
+            values={"fullnameOverride": "mlflow", "image": {"tag": "v9-full"}},
+        ),
+        "keda": _classic(values={"watchNamespace": ""}),
+    }
+
+    def test_emit_ref_builds_the_installer_reference(self) -> None:
+        text, error = validator.emit_chart_ref(self.CHARTS, "mlflow")
+        assert error == ""
+        assert text == (
+            "oci://ghcr.io/mlflow/charts/mlflow 0.1.0 monitoring oci://ghcr.io/mlflow/charts"
+        )
+
+    def test_emit_ref_carries_the_repo_url_for_classic_charts(self) -> None:
+        """Classic refs are repo_name/chart — the URL is what helm pull needs."""
+        text, error = validator.emit_chart_ref(self.CHARTS, "keda")
+        assert error == ""
+        ref, version, namespace, repo_url = text.split()
+        assert ref == "kedacore/keda"
+        assert repo_url == "https://kedacore.github.io/charts"
+        assert version and namespace
+
+    def test_emit_ref_unknown_chart_names_known_entries(self) -> None:
+        text, error = validator.emit_chart_ref(self.CHARTS, "nope")
+        assert text == ""
+        assert "'nope' not found" in error
+        assert "keda" in error and "mlflow" in error
+
+    def test_emit_values_round_trips_the_values_block(self) -> None:
+        text, error = validator.emit_chart_values(self.CHARTS, "mlflow")
+        assert error == ""
+        assert yaml.safe_load(text) == self.CHARTS["mlflow"]["values"]
+
+    def test_emit_values_rejects_deployment_tokens(self) -> None:
+        charts = {
+            "tokened": _classic(
+                values={"serviceAccount": {"roleArn": "{{SERVICE_ACCOUNT_ROLE_ARN}}"}}
+            )
+        }
+        text, error = validator.emit_chart_values(charts, "tokened")
+        assert text == ""
+        assert "{{SERVICE_ACCOUNT_ROLE_ARN}}" in error
+        assert "standalone-installable" in error
+
+    def test_main_emit_ref_prints_and_exits_zero(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": self.CHARTS}))
+        rc = validator.main(["--charts", str(path), "--emit-ref", "mlflow"])
+        assert rc == 0
+        assert capsys.readouterr().out == (
+            "oci://ghcr.io/mlflow/charts/mlflow 0.1.0 monitoring oci://ghcr.io/mlflow/charts\n"
+        )
+
+    def test_main_emit_values_prints_yaml_and_exits_zero(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": self.CHARTS}))
+        rc = validator.main(["--charts", str(path), "--emit-values", "keda"])
+        assert rc == 0
+        assert yaml.safe_load(capsys.readouterr().out) == {"watchNamespace": ""}
+
+    def test_main_emit_unknown_chart_exits_two(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": self.CHARTS}))
+        rc = validator.main(["--charts", str(path), "--emit-values", "nope"])
+        assert rc == 2
+        assert "not found" in capsys.readouterr().err
+
+    def test_emit_flags_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": self.CHARTS}))
+        with pytest.raises(SystemExit) as excinfo:
+            validator.main(["--charts", str(path), "--emit-ref", "keda", "--emit-values", "keda"])
+        assert excinfo.value.code == 2
+
+    def test_live_charts_emit_smoke_charts_cleanly(self) -> None:
+        """The two charts the smoke job installs must emit token-free values.
+
+        Guards the job's runtime contract against future charts.yaml edits:
+        if someone adds a {{TOKEN}} to mlflow or kubeflow-trainer values, the
+        kind job's helm install would receive a literal brace string — fail
+        here first, with a message pointing at the contract.
+        """
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        for name in ("mlflow", "kubeflow-trainer", "kube-prometheus-stack"):
+            ref_text, ref_error = validator.emit_chart_ref(charts, name)
+            assert ref_error == "", ref_error
+            assert len(ref_text.split()) == 4
+            _, values_error = validator.emit_chart_values(charts, name)
+            assert values_error == "", values_error
+
+
 # ── live charts.yaml (offline) ────────────────────────────────────────────────
 
 

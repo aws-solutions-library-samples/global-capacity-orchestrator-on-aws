@@ -55,6 +55,12 @@ Usage::
     # Point at a non-default charts.yaml (used by the test suite):
     python3 .github/scripts/validate_helm_charts.py --charts /path/to/charts.yaml
 
+    # Emit one chart's pinned reference / shipped values (consumed by the
+    # integration:kind:examples-smoke job so its `helm install` uses the
+    # exact pins and values the installer Lambda would — no copies in CI):
+    python3 .github/scripts/validate_helm_charts.py --emit-ref mlflow
+    python3 .github/scripts/validate_helm_charts.py --emit-values mlflow
+
 Exit codes::
 
     0  all validated charts are well-formed (and, when online, resolvable
@@ -1071,6 +1077,52 @@ def validate_trainer_runtime_lockstep(
     return errors
 
 
+def emit_chart_ref(charts: dict[str, Any], chart_name: str) -> tuple[str, str]:
+    """Return ``(text, error)`` for --emit-ref.
+
+    The emitted line is "<helm-ref> <version> <namespace> <repo_url>",
+    space-separated so shell callers can consume it with a plain
+    ``read -r ref version namespace repo_url``. The reference is built by the
+    same ``ChartRef.reference()`` the online validator uses, which mirrors
+    ``handler.install_chart`` — the CI job installs exactly what the
+    installer Lambda would. ``repo_url`` rides along for classic (non-OCI)
+    charts, whose reference is ``<repo_name>/<chart>`` and only resolves
+    after ``helm repo add <repo_name> <repo_url>`` (or via
+    ``helm pull <chart> --repo <repo_url>``); for OCI charts it is the
+    ``oci://`` base already embedded in the reference.
+    """
+    refs = {ref.name: ref for ref in build_refs(charts)}
+    ref = refs.get(chart_name)
+    if ref is None:
+        known = ", ".join(sorted(refs)) or "(none)"
+        return "", f"chart {chart_name!r} not found in charts.yaml (known: {known})"
+    return f"{ref.reference()} {ref.version} {ref.namespace} {ref.repo_url}", ""
+
+
+def emit_chart_values(charts: dict[str, Any], chart_name: str) -> tuple[str, str]:
+    """Return ``(yaml_text, error)`` for --emit-values.
+
+    Fails when the values still carry a ``{{TOKEN}}`` deployment placeholder:
+    charts.yaml values are the deploy-time *fallback* and must be
+    standalone-installable (the regional stack only ever layers additional
+    overrides on top). A token here would mean the fallback contract broke —
+    better to fail the emit than install a chart with a literal ``{{...}}``.
+    """
+    refs = {ref.name: ref for ref in build_refs(charts)}
+    ref = refs.get(chart_name)
+    if ref is None:
+        known = ", ".join(sorted(refs)) or "(none)"
+        return "", f"chart {chart_name!r} not found in charts.yaml (known: {known})"
+    text = yaml.safe_dump(ref.values, default_flow_style=False, sort_keys=False)
+    if "{{" in text:
+        tokens = sorted(set(re.findall(r"\{\{[A-Z0-9_]+\}\}", text)))
+        return "", (
+            f"{chart_name}: values contain deployment tokens {tokens} — "
+            "charts.yaml values must be standalone-installable fallbacks"
+        )
+    return text, ""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -1110,6 +1162,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print a per-chart resolve/render line during the online pass.",
     )
+    emit = parser.add_mutually_exclusive_group()
+    emit.add_argument(
+        "--emit-ref",
+        metavar="CHART",
+        help=(
+            "Print '<helm-ref> <version> <namespace>' for one charts.yaml entry "
+            "and exit (query mode for CI jobs that helm-install the pinned chart)."
+        ),
+    )
+    emit.add_argument(
+        "--emit-values",
+        metavar="CHART",
+        help=(
+            "Print the shipped values block for one charts.yaml entry as YAML "
+            "and exit; fails if the values carry {{TOKEN}} placeholders."
+        ),
+    )
     return parser
 
 
@@ -1124,6 +1193,15 @@ def main(argv: list[str] | None = None) -> int:
     except (yaml.YAMLError, ValueError) as exc:
         print(f"ERROR: could not parse {args.charts}: {exc}", file=sys.stderr)
         return 2
+
+    if args.emit_ref or args.emit_values:
+        emitter = emit_chart_ref if args.emit_ref else emit_chart_values
+        text, error = emitter(charts, args.emit_ref or args.emit_values)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        print(text, end="" if text.endswith("\n") else "\n")
+        return 0
 
     errors = validate_structure(charts, enabled_only=args.enabled_only)
 
