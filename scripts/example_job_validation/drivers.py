@@ -535,3 +535,192 @@ class KedaDemoQueue:
     def destroy(self) -> None:
         if self.queue_url:
             self._sqs().delete_queue(QueueUrl=self.queue_url)
+
+
+@dataclass
+class VectorDemoCorpus:
+    """Demo-corpus precondition for the vector-search example, fully reverted.
+
+    ``create`` runs the example's documented prerequisite verbatim —
+    ``gco vector ingest --demo --wait`` — and records exactly which corpus
+    objects the CLI uploaded. ``destroy`` reverts precisely those: the S3
+    objects (whose upload is what triggered ingestion) and every DynamoDB
+    chunk item whose ``source`` is one of the recorded keys, resolved with
+    the same filtered-Scan shape the CLI's ingest wait uses (the table has
+    no by-source key schema; corpora are document-scale). Scoping deletion
+    to the recorded keys means a pre-existing user corpus in the same table
+    is never touched.
+    """
+
+    repo_root: Path
+    session: Any
+    region: str
+    uploaded: list[str] = field(default_factory=list)
+    bucket: str = ""
+
+    def create(self) -> dict[str, Any]:
+        code, out, err = _run_cli(
+            ["gco", "vector", "ingest", "--demo", "--wait", "--output", "json"],
+            self.repo_root,
+            timeout=900,
+        )
+        if code != 0:
+            raise ExampleValidationError(
+                f"gco vector ingest --demo --wait failed (exit {code}): "
+                f"{(err or out).strip()[:800]}"
+            )
+        try:
+            summary = json.loads(out)
+        except ValueError as exc:
+            raise ExampleValidationError(
+                f"gco vector ingest emitted non-JSON output: {out[:400]}"
+            ) from exc
+        self.bucket = str(summary.get("bucket", ""))
+        self.uploaded = [str(key) for key in summary.get("uploaded", [])]
+        if not self.bucket or not self.uploaded:
+            raise ExampleValidationError(
+                f"ingest summary carried no bucket/keys to revert later: {out[:400]}"
+            )
+        return {
+            "command": "gco vector ingest --demo --wait",
+            "bucket": self.bucket,
+            "uploaded": self.uploaded,
+            "chunks_by_source": summary.get("chunks_by_source", {}),
+        }
+
+    def destroy(self) -> None:
+        if not self.uploaded:
+            return
+        from cli.vector_store import VectorStoreClient
+
+        client = VectorStoreClient(query_region=self.region)
+        table_name = client._resolve_table_name()
+        bucket_name, bucket_region = client._resolve_bucket()
+        if bucket_name != self.bucket:
+            # Fail loudly rather than delete from a bucket other than the
+            # one create() actually uploaded to.
+            raise ExampleValidationError(
+                f"corpus bucket changed between ingest ({self.bucket}) and "
+                f"revert ({bucket_name}); refusing to delete"
+            )
+        with BOTO_CLIENT_LOCK:
+            dynamodb = self.session.client("dynamodb", region_name=self.region)
+            s3 = self.session.client("s3", region_name=bucket_region)
+
+        # Chunk items first (their source keys reference the S3 objects),
+        # then the objects themselves. Deleting the objects does NOT
+        # un-ingest — the notification only fires on creates — hence the
+        # explicit item sweep.
+        for key in self.uploaded:
+            doc_ids: list[str] = []
+            scan_kwargs: dict[str, Any] = {
+                "TableName": table_name,
+                "FilterExpression": "#source = :source",
+                "ExpressionAttributeNames": {"#source": "source"},
+                "ExpressionAttributeValues": {":source": {"S": key}},
+                "ProjectionExpression": "doc_id",
+            }
+            while True:
+                page = dynamodb.scan(**scan_kwargs)
+                doc_ids.extend(
+                    item["doc_id"]["S"] for item in page.get("Items", []) if "doc_id" in item
+                )
+                last_key = page.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                scan_kwargs["ExclusiveStartKey"] = last_key
+            for start in range(0, len(doc_ids), 25):
+                batch = doc_ids[start : start + 25]
+                dynamodb.batch_write_item(
+                    RequestItems={
+                        table_name: [
+                            {"DeleteRequest": {"Key": {"doc_id": {"S": doc_id}}}}
+                            for doc_id in batch
+                        ]
+                    }
+                )
+            s3.delete_object(Bucket=bucket_name, Key=key)
+
+
+def wait_trainer_runtime_ready(kubectl: KubectlRunner, *, timeout: int = 300) -> dict[str, Any]:
+    """Wait until the TrainJob CRD is served and the shipped runtime exists.
+
+    The trainer chart installs the CRDs and controller; the post-Helm
+    kubectl pass applies the torch-distributed ClusterTrainingRuntime the
+    example's ``runtimeRef`` names. Both are deploy-time artifacts, so this
+    is a readiness wait, not created state — nothing to revert.
+    """
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while True:
+        code, _, err = kubectl("get", "crd", "trainjobs.trainer.kubeflow.org")
+        if code != 0:
+            last_error = f"TrainJob CRD not present: {err.strip()[:300]}"
+        else:
+            code, out, err = kubectl(
+                "get", "clustertrainingruntime", "torch-distributed", "-o", "json"
+            )
+            if code == 0:
+                runtime = json.loads(out)
+                return {
+                    "crd": "trainjobs.trainer.kubeflow.org",
+                    "runtime": runtime["metadata"]["name"],
+                    "runtime_created": runtime["metadata"].get("creationTimestamp", ""),
+                }
+            last_error = f"torch-distributed runtime not present: {err.strip()[:300]}"
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_POLL_SECONDS)
+    raise ExampleValidationError(
+        f"Kubeflow Trainer runtime not ready within {timeout}s — is "
+        f"helm.kubeflow_trainer enabled? Last error: {last_error}"
+    )
+
+
+def wait_mlflow_ready(kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str, Any]:
+    """Wait until the MLflow tracking server Deployment is Available.
+
+    The example's client job fails its read-back (or hangs on connect) if
+    it races the server's first rollout — the backend PVC arrives one
+    applier pass after the chart on a fresh install. Readiness wait only;
+    nothing to revert.
+    """
+    deadline = time.monotonic() + timeout
+    last_state = ""
+    while True:
+        code, out, err = kubectl("get", "deployment", "mlflow", "-n", "monitoring", "-o", "json")
+        if code != 0:
+            last_state = f"mlflow Deployment not found: {err.strip()[:300]}"
+        else:
+            payload = json.loads(out)
+            conditions = payload.get("status", {}).get("conditions", []) or []
+            available = any(
+                condition.get("type") == "Available" and condition.get("status") == "True"
+                for condition in conditions
+            )
+            if available:
+                return {
+                    "deployment": "monitoring/mlflow",
+                    "ready_replicas": payload.get("status", {}).get("readyReplicas", 0),
+                }
+            last_state = f"conditions: {json.dumps(conditions)[:400]}"
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_POLL_SECONDS)
+    raise ExampleValidationError(
+        f"MLflow tracking server not Available within {timeout}s — is "
+        f"cluster_observability.mlflow enabled? Last state: {last_state}"
+    )
+
+
+#: Setup drivers _run_one_example knows how to dispatch, by spec.setup_driver
+#: name. Kept as an explicit registry so a spec naming a driver that does not
+#: exist fails the registry pin test, not a live run.
+KNOWN_SETUP_DRIVERS = frozenset(
+    {
+        "keda-demo-queue",
+        "vector-demo-corpus",
+        "trainer-runtime-ready",
+        "mlflow-ready",
+    }
+)

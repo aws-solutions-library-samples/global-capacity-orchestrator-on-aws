@@ -21,6 +21,15 @@ from typing import Any
 from ..models import RunContext
 
 #: Schedulers the action can probe, in probe order: name -> cdk.json helm key.
+#:
+#: The Kubeflow Trainer is deliberately NOT probed here: it is a workload
+#: controller (TrainJob -> JobSet compilation), not a pod scheduler, so the
+#: "completion proves the scheduler did its work" contract this action rests
+#: on does not apply. Its live proof rides two other rails instead: the
+#: examples harness runs the kubeflow-trainjob example end to end (gang
+#: all-reduce through the shipped runtime), and the topology action's
+#: helmValidation asserts the kubeflow-trainer release converged exactly as
+#: the deployment config demanded.
 PROBED_SCHEDULERS: dict[str, str] = {
     "volcano": "volcano",
     "kueue": "kueue",

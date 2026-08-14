@@ -1949,3 +1949,48 @@ class TestHealthMonitorQuiesce:
             helm_handler.handle_task(event)
 
         mock_remove.assert_called_once_with("/tmp/kc")
+
+
+class TestReleaseSetExpectations:
+    """The validate_releases expected set is deployment-config-driven.
+
+    There is deliberately no fixed release list anywhere: every entry in the
+    REAL charts.yaml is an expected release, and EnabledCharts decides which
+    must be deployed versus absent. These pins prove the two 6.0 charts ride
+    that mechanism — present in the expected set, enabled exactly when the
+    convergence payload enables them — so ValidateHelmReleases needs no
+    per-chart wiring.
+    """
+
+    def test_new_charts_are_expected_and_enabled_when_converged_on(self):
+        configurations, enabled = helm_handler._release_configurations(
+            {"EnabledCharts": ["keda", "kubeflow-trainer", "mlflow"], "Charts": {}}
+        )
+        names = [release for release, _ in configurations]
+        assert "kubeflow-trainer" in names
+        assert "mlflow" in names
+        assert enabled == {"keda", "kubeflow-trainer", "mlflow"}
+
+    def test_new_charts_are_expected_absent_when_not_enabled(self):
+        configurations, enabled = helm_handler._release_configurations(
+            {"EnabledCharts": ["keda"], "Charts": {}}
+        )
+        names = {release for release, _ in configurations}
+        # Still in the expected set (from charts.yaml), so validation asserts
+        # their ABSENCE — flipping a toggle off is verified, not ignored.
+        assert {"kubeflow-trainer", "mlflow"} <= names
+        assert enabled == {"keda"}
+
+    def test_release_metadata_resolves_for_both_charts(self):
+        configurations, _ = helm_handler._release_configurations(
+            {"EnabledCharts": [], "Charts": {}}
+        )
+        by_name = dict(configurations)
+        chart, version, namespace = helm_handler._release_metadata(
+            "kubeflow-trainer", by_name["kubeflow-trainer"]
+        )
+        assert (chart, namespace) == ("kubeflow-trainer", "kubeflow-trainer")
+        assert version == by_name["kubeflow-trainer"]["version"]
+        chart, version, namespace = helm_handler._release_metadata("mlflow", by_name["mlflow"])
+        assert (chart, namespace) == ("mlflow", "monitoring")
+        assert version == by_name["mlflow"]["version"]

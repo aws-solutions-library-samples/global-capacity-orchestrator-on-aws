@@ -112,8 +112,9 @@ def _run_one_example(
     manifest_path, mutations = drivers.apply_mutations(parsed)
     evidence: dict[str, Any] = {}
     keda_queue: drivers.KedaDemoQueue | None = None
+    vector_corpus: drivers.VectorDemoCorpus | None = None
     try:
-        if spec.setup_driver and spec.setup_driver != "keda-demo-queue":
+        if spec.setup_driver and spec.setup_driver not in drivers.KNOWN_SETUP_DRIVERS:
             # Fail closed: a spec naming a driver this dispatcher does not
             # implement must fail loudly, not run without its precondition
             # and report an unearned pass.
@@ -130,6 +131,21 @@ def _run_one_example(
                 parsed, keda_queue.queue_url, region, manifest_path
             )
             mutations["ScaledJob.triggers.queueURL"] = "disposable demo queue for this run"
+        elif spec.setup_driver == "vector-demo-corpus":
+            # The example's documented prerequisite, run verbatim and fully
+            # reverted in the finally below (S3 objects + chunk items).
+            vector_corpus = drivers.VectorDemoCorpus(
+                repo_root=ctx.settings.repo_root, session=ctx.session, region=region
+            )
+            evidence["setup"] = vector_corpus.create()
+        elif spec.setup_driver == "trainer-runtime-ready":
+            # Readiness wait on deploy-time artifacts; nothing to revert.
+            evidence["setup"] = drivers.wait_trainer_runtime_ready(kubectl)
+        elif spec.setup_driver == "mlflow-ready":
+            # Readiness wait; the tracking server may still be rolling out
+            # right after a fresh install (its PVC lands one applier pass
+            # after the chart). Nothing to revert.
+            evidence["setup"] = drivers.wait_mlflow_ready(kubectl)
 
         evidence["submission"] = drivers.submit_example(
             parsed, manifest_path, repo_root=ctx.settings.repo_root, region=region, kubectl=kubectl
@@ -167,6 +183,8 @@ def _run_one_example(
     finally:
         if keda_queue is not None:
             keda_queue.destroy()
+        if vector_corpus is not None:
+            vector_corpus.destroy()
 
 
 def action_examples(ctx: RunContext) -> dict[str, Any]:

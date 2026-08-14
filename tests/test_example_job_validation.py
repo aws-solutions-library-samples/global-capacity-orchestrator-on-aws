@@ -590,3 +590,294 @@ class TestDagCleanup:
 
         with pytest.raises(drivers.ExampleValidationError, match="cleanup failed for pipeline-dag"):
             drivers.cleanup_example(parsed, parsed.path, kubectl)
+
+
+# ---------------------------------------------------------------------------
+# Setup drivers: registry pin, fail-closed dispatch, waiters, corpus revert.
+# ---------------------------------------------------------------------------
+
+
+class TestSetupDriverRegistry:
+    def test_every_spec_driver_is_implemented(self) -> None:
+        """A spec may only name drivers the dispatcher knows; anything else
+        would fail at live runtime instead of in CI."""
+        for name, spec in EXAMPLE_SPECS.items():
+            if spec.setup_driver:
+                assert spec.setup_driver in drivers.KNOWN_SETUP_DRIVERS, (
+                    f"{name} names setup driver {spec.setup_driver!r} which is not in "
+                    "drivers.KNOWN_SETUP_DRIVERS"
+                )
+
+    def test_unknown_driver_fails_closed_at_dispatch(self, monkeypatch, tmp_path) -> None:
+        """An unimplemented driver name must fail the example loudly, never
+        run without its precondition and report an unearned pass."""
+        import dataclasses
+        from types import SimpleNamespace
+
+        from scripts.example_job_validation import actions
+
+        bogus = dataclasses.replace(EXAMPLE_SPECS["simple-job"], setup_driver="bogus-driver")
+        monkeypatch.setitem(actions.EXAMPLE_SPECS, "simple-job", bogus)
+        ctx = SimpleNamespace(
+            settings=SimpleNamespace(repo_root=REPO_ROOT, run_id="t"),
+            session=None,
+        )
+        result = actions._run_one_example(
+            ctx, "simple-job", "us-east-1", lambda *_a, **_k: (0, "", "")
+        )
+        assert result.status == "failed"
+        assert "not implemented" in result.detail
+
+
+class TestReadinessWaiters:
+    """trainer-runtime-ready and mlflow-ready: pure waits, actionable errors."""
+
+    @staticmethod
+    def _kubectl(responses: dict[str, tuple[int, str, str]]):
+        def kubectl(*args: str, timeout: int = 120, **_kwargs):
+            for token, response in responses.items():
+                if token in " ".join(args):
+                    return response
+            raise AssertionError(f"unexpected kubectl call: {args}")
+
+        return kubectl
+
+    def test_trainer_runtime_ready_returns_evidence(self) -> None:
+        runtime = '{"metadata": {"name": "torch-distributed", "creationTimestamp": "2026-08-13T00:00:00Z"}}'
+        kubectl = self._kubectl(
+            {
+                "get crd": (0, "", ""),
+                "clustertrainingruntime": (0, runtime, ""),
+            }
+        )
+        evidence = drivers.wait_trainer_runtime_ready(kubectl, timeout=5)
+        assert evidence["runtime"] == "torch-distributed"
+        assert evidence["crd"] == "trainjobs.trainer.kubeflow.org"
+
+    def test_trainer_missing_crd_error_is_actionable(self, monkeypatch) -> None:
+        monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
+        kubectl = self._kubectl({"get crd": (1, "", "NotFound")})
+        with pytest.raises(drivers.ExampleValidationError, match="helm.kubeflow_trainer"):
+            drivers.wait_trainer_runtime_ready(kubectl, timeout=0)
+
+    def test_trainer_missing_runtime_error_is_actionable(self, monkeypatch) -> None:
+        monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
+        kubectl = self._kubectl(
+            {
+                "get crd": (0, "", ""),
+                "clustertrainingruntime": (1, "", "NotFound"),
+            }
+        )
+        with pytest.raises(drivers.ExampleValidationError, match="torch-distributed"):
+            drivers.wait_trainer_runtime_ready(kubectl, timeout=0)
+
+    def test_mlflow_ready_returns_evidence(self) -> None:
+        deployment = (
+            '{"status": {"readyReplicas": 1, '
+            '"conditions": [{"type": "Available", "status": "True"}]}}'
+        )
+        kubectl = self._kubectl({"get deployment mlflow": (0, deployment, "")})
+        evidence = drivers.wait_mlflow_ready(kubectl, timeout=5)
+        assert evidence == {"deployment": "monitoring/mlflow", "ready_replicas": 1}
+
+    def test_mlflow_missing_error_is_actionable(self, monkeypatch) -> None:
+        monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
+        kubectl = self._kubectl({"get deployment mlflow": (1, "", "NotFound")})
+        with pytest.raises(drivers.ExampleValidationError, match="cluster_observability.mlflow"):
+            drivers.wait_mlflow_ready(kubectl, timeout=0)
+
+
+class TestTrainJobWaiter:
+    @staticmethod
+    def _kubectl(payload: str, code: int = 0):
+        def kubectl(*args: str, timeout: int = 120, **_kwargs):
+            if args[1] == "trainjob":
+                return code, payload, ""
+            if args[0] == "describe":
+                return 0, "describe-tail", ""
+            raise AssertionError(f"unexpected kubectl call: {args}")
+
+        return kubectl
+
+    def _parsed(self):
+        return static_checks.parse_example(REPO_ROOT, "kubeflow-trainjob")
+
+    def test_complete_condition_returns_gang_evidence(self) -> None:
+        import json as _json
+
+        payload = _json.dumps(
+            {
+                "status": {
+                    "conditions": [{"type": "Complete", "status": "True"}],
+                    "jobsStatus": [{"name": "node", "succeeded": 2, "active": 0, "failed": 0}],
+                }
+            }
+        )
+        evidence = drivers.wait_trainjob_completes(
+            self._parsed(), self._kubectl(payload), timeout=5
+        )
+        assert evidence["condition"] == "Complete"
+        assert evidence["trainjob"] == "gco-jobs/kubeflow-trainjob-example"
+        assert evidence["jobsStatus"][0]["succeeded"] == 2
+
+    def test_failed_condition_raises_with_message(self) -> None:
+        import json as _json
+
+        payload = _json.dumps(
+            {
+                "status": {
+                    "conditions": [
+                        {"type": "Failed", "status": "True", "message": "backoff exceeded"}
+                    ]
+                }
+            }
+        )
+        with pytest.raises(drivers.ExampleValidationError, match="backoff exceeded"):
+            drivers.wait_trainjob_completes(self._parsed(), self._kubectl(payload), timeout=5)
+
+    def test_false_terminal_condition_keeps_waiting_to_timeout(self, monkeypatch) -> None:
+        import json as _json
+
+        monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
+        payload = _json.dumps({"status": {"conditions": [{"type": "Failed", "status": "False"}]}})
+        with pytest.raises(drivers.ExampleValidationError, match="did not complete"):
+            drivers.wait_trainjob_completes(self._parsed(), self._kubectl(payload), timeout=0)
+
+
+class TestVectorDemoCorpusDriver:
+    """The vector precondition ingests the documented way and reverts exactly."""
+
+    def _driver(self, session=None):
+        return drivers.VectorDemoCorpus(repo_root=REPO_ROOT, session=session, region="us-east-1")
+
+    def test_create_runs_the_documented_command_and_records_keys(self, monkeypatch) -> None:
+        import json as _json
+
+        seen: dict[str, list[str]] = {}
+
+        def fake_run_cli(args, _repo_root, timeout=600):
+            seen["args"] = args
+            return (
+                0,
+                _json.dumps(
+                    {
+                        "bucket": "gco-cluster-shared-x",
+                        "uploaded": ["vector-corpus/a.md", "vector-corpus/b.md"],
+                        "chunks_by_source": {"vector-corpus/a.md": 3},
+                    }
+                ),
+                "",
+            )
+
+        monkeypatch.setattr(drivers, "_run_cli", fake_run_cli)
+        driver = self._driver()
+        evidence = driver.create()
+
+        assert seen["args"] == [
+            "gco",
+            "vector",
+            "ingest",
+            "--demo",
+            "--wait",
+            "--output",
+            "json",
+        ]
+        assert driver.bucket == "gco-cluster-shared-x"
+        assert driver.uploaded == ["vector-corpus/a.md", "vector-corpus/b.md"]
+        assert evidence["command"] == "gco vector ingest --demo --wait"
+
+    def test_create_failure_raises_with_output(self, monkeypatch) -> None:
+        monkeypatch.setattr(drivers, "_run_cli", lambda *_a, **_k: (1, "", "no such feature"))
+        with pytest.raises(drivers.ExampleValidationError, match="no such feature"):
+            self._driver().create()
+
+    def test_destroy_removes_exactly_the_recorded_corpus(self, monkeypatch) -> None:
+        deleted_items: list[dict] = []
+        deleted_objects: list[tuple[str, str]] = []
+
+        class FakeDynamo:
+            def __init__(self):
+                self.scans = 0
+
+            def scan(self, **kwargs):
+                # Two pages for the first key to prove pagination; the doc_ids
+                # are distinct per source key.
+                source = kwargs["ExpressionAttributeValues"][":source"]["S"]
+                if source == "vector-corpus/a.md":
+                    self.scans += 1
+                    if self.scans == 1:
+                        return {
+                            "Items": [{"doc_id": {"S": "a-0"}}],
+                            "LastEvaluatedKey": {"doc_id": {"S": "a-0"}},
+                        }
+                    return {"Items": [{"doc_id": {"S": "a-1"}}]}
+                return {"Items": [{"doc_id": {"S": "b-0"}}]}
+
+            def batch_write_item(self, RequestItems):
+                deleted_items.append(RequestItems)
+                return {}
+
+        class FakeS3:
+            def delete_object(self, Bucket, Key):
+                deleted_objects.append((Bucket, Key))
+
+        fake_dynamo = FakeDynamo()
+
+        class FakeSession:
+            def client(self, service, region_name=None):
+                return fake_dynamo if service == "dynamodb" else FakeS3()
+
+        class FakeClient:
+            def __init__(self, query_region=None):
+                pass
+
+            def _resolve_table_name(self):
+                return "gco-vector-store"
+
+            def _resolve_bucket(self):
+                return "gco-cluster-shared-x", "us-east-2"
+
+        import cli.vector_store as vector_store_module
+
+        monkeypatch.setattr(vector_store_module, "VectorStoreClient", FakeClient)
+
+        driver = self._driver(session=FakeSession())
+        driver.bucket = "gco-cluster-shared-x"
+        driver.uploaded = ["vector-corpus/a.md", "vector-corpus/b.md"]
+        driver.destroy()
+
+        doc_ids = [
+            request["DeleteRequest"]["Key"]["doc_id"]["S"]
+            for batch in deleted_items
+            for request in batch["gco-vector-store"]
+        ]
+        assert sorted(doc_ids) == ["a-0", "a-1", "b-0"]
+        assert deleted_objects == [
+            ("gco-cluster-shared-x", "vector-corpus/a.md"),
+            ("gco-cluster-shared-x", "vector-corpus/b.md"),
+        ]
+
+    def test_destroy_refuses_a_changed_bucket(self, monkeypatch) -> None:
+        class FakeClient:
+            def __init__(self, query_region=None):
+                pass
+
+            def _resolve_table_name(self):
+                return "gco-vector-store"
+
+            def _resolve_bucket(self):
+                return "some-other-bucket", "us-east-2"
+
+        import cli.vector_store as vector_store_module
+
+        monkeypatch.setattr(vector_store_module, "VectorStoreClient", FakeClient)
+
+        driver = self._driver(session=None)
+        driver.bucket = "gco-cluster-shared-x"
+        driver.uploaded = ["vector-corpus/a.md"]
+        with pytest.raises(drivers.ExampleValidationError, match="refusing to delete"):
+            driver.destroy()
+
+    def test_destroy_is_a_noop_before_create(self) -> None:
+        # No AWS clients are constructed when nothing was uploaded.
+        self._driver(session=None).destroy()
