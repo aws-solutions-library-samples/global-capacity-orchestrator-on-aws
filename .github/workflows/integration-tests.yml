@@ -23,7 +23,7 @@
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
-#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob example e2e + can-i sweep + mlflow probes
+#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob example e2e + SAR sweep + mlflow probes
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
@@ -1683,13 +1683,21 @@ jobs:
           kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
-      - name: Verify submission allowlist is writable by the processor SA (can-i sweep)
+      - name: Verify submission allowlist is writable by the processor SA (SAR sweep)
         # Real-apiserver half of the kinds<->RBAC lockstep: for every kind
         # users can submit (DEFAULT_ALLOWED_KINDS x RESOURCE_API_VERSIONS),
-        # impersonate the processor SA and require every lifecycle verb in
-        # gco-jobs. Runs BEFORE any CRD exists on purpose — RBAC evaluation
-        # is decoupled from discovery, so a missing grant fails here in
-        # seconds. The negative probe proves the role stays namespace-scoped.
+        # ask the authorizer whether the processor SA holds every lifecycle
+        # verb in gco-jobs. Deliberately NOT `kubectl auth can-i`: can-i
+        # resolves its resource argument through client-side discovery, and
+        # for a CRD kind whose chart isn't installed yet it silently
+        # degrades to an empty-group query that always answers "no" (caught
+        # on this job's first run — the sweep reported TrainJob denied while
+        # the RBAC grant was present and correct). Explicit
+        # SubjectAccessReview bodies carry group/resource verbatim and hit
+        # the exact authorizer path production requests hit, which keeps
+        # this step independent of chart install order — a missing grant
+        # fails here in seconds, before the first helm pull. The negative
+        # probe proves the role stays namespace-scoped.
         run: |
           set -euo pipefail
           pairs=$(python3 -c '
@@ -1704,29 +1712,41 @@ jobs:
               }
               print(f"{kind.lower()}s {api_version}")
           ')
+          sar() {
+            # sar <namespace> <verb> <group> <plural> -> "true" / "false"
+            jq -cn --arg user "$PROCESSOR_SA" --arg ns "$1" --arg verb "$2" \
+              --arg group "$3" --arg plural "$4" \
+              '{apiVersion: "authorization.k8s.io/v1",
+                kind: "SubjectAccessReview",
+                spec: {user: $user, resourceAttributes: {
+                  namespace: $ns, verb: $verb,
+                  group: $group, resource: $plural}}}' \
+              | kubectl create --raw /apis/authorization.k8s.io/v1/subjectaccessreviews -f - \
+              | jq -r '.status.allowed'
+          }
           failed=0
           while read -r plural group; do
-            resource="$plural"
-            if [ -n "$group" ]; then
-              resource="$plural.$group"
-            fi
+            group="${group:-}"
+            resource_ok=1
             for verb in create get list watch patch update delete; do
-              answer=$(kubectl auth can-i "$verb" "$resource" -n gco-jobs \
-                --as="$PROCESSOR_SA" 2>&1) || true
-              if [ "$answer" != "yes" ]; then
-                echo "FAIL: $verb $resource in gco-jobs as processor SA: $answer"
+              allowed=$(sar gco-jobs "$verb" "$group" "$plural")
+              if [ "$allowed" != "true" ]; then
+                echo "FAIL: authorizer denies $verb ${plural}${group:+.$group} in gco-jobs to the processor SA"
+                resource_ok=0
                 failed=1
               fi
             done
-            echo "PASS: full lifecycle verbs on $resource in gco-jobs"
+            if [ "$resource_ok" -eq 1 ]; then
+              echo "PASS: full lifecycle verbs on ${plural}${group:+.$group} in gco-jobs"
+            fi
           done <<< "$pairs"
-          denied=$(kubectl auth can-i create pods -n gco-system \
-            --as="$PROCESSOR_SA" 2>&1) || true
-          if [ "$denied" != "no" ]; then
-            echo "FAIL: processor SA must NOT create pods outside gco-jobs: $denied"
+          denied=$(sar gco-system create "" pods)
+          if [ "$denied" != "false" ]; then
+            echo "FAIL: processor SA must NOT create pods outside gco-jobs (allowed=$denied)"
             failed=1
+          else
+            echo "PASS: write access correctly denied outside gco-jobs"
           fi
-          echo "PASS: write access correctly denied outside gco-jobs"
           exit "$failed"
       - name: Install ServiceMonitor CRD from the pinned kube-prometheus-stack
         # The mlflow values enable a ServiceMonitor, and in production the
