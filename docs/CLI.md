@@ -3894,7 +3894,7 @@ port-forward.
 | [`gco monitoring status`](#gco-monitoring-status) | Show the current `cluster_observability.*` toggle state from `cdk.json`. |
 | [`gco monitoring enable`](#gco-monitoring-enable) | Flip `cluster_observability.enabled` to `true` in `cdk.json`. |
 | [`gco monitoring disable`](#gco-monitoring-disable) | Flip `cluster_observability.enabled` to `false` in `cdk.json`. |
-| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager / OpenCost over the private endpoint (optionally via an SSM tunnel). |
+| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager / OpenCost / MLflow over the private endpoint (optionally via an SSM tunnel). |
 | [`gco monitoring users add`](#gco-monitoring-users) | Create a Grafana user via the admin API. |
 | [`gco monitoring users list`](#gco-monitoring-users) | List Grafana organisation users. |
 | [`gco monitoring users remove`](#gco-monitoring-users) | Delete a Grafana user. |
@@ -3943,7 +3943,7 @@ gco monitoring open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), or `opencost-api` (the OpenCost allocation API, `:9003`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md). |
+| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). |

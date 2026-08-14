@@ -430,8 +430,9 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
 - **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml)
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
+- **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
+- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
@@ -462,6 +463,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
 - **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard, scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
+- **MLflow experiment tracking** (on by default with observability): an in-cluster [MLflow](https://mlflow.org/) tracking server per region — run artifacts to S3 via a prefix-scoped IAM role, metadata on EBS, reached with `gco monitoring open --service mlflow` — see [MONITORING.md](docs/MONITORING.md#mlflow-experiment-tracking)
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region [monitoring](./docs/MONITORING.md)**: CloudWatch dashboards, alarms, and SNS alerts across all regions
 
@@ -497,6 +499,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 |-----------|-----------|
 | CLI commands and usage | [CLI Reference](docs/CLI.md) |
 | Deploy inference endpoints | [Inference Guide](docs/INFERENCE.md) |
+| Run multi-node distributed training | [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md) |
 | Use the REST API directly | [API Reference](docs/API.md) |
 | Fix issues | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Respond to incidents | [Operational Runbooks](docs/RUNBOOKS.md) |

@@ -776,6 +776,32 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["ARCHITECTURE", "ANALYTICS"],
     },
+    "DISTRIBUTED_TRAINING": {
+        "summary": (
+            "Multi-node distributed training through the Kubeflow Trainer v2 "
+            "TrainJob API — runtimes, validation semantics, GPU variants, "
+            "Kueue gang scheduling, and Spot guidance."
+        ),
+        "topics": [
+            "jobs",
+            "gpu",
+            "schedulers",
+            "architecture",
+        ],
+        "keywords": [
+            "kubeflow",
+            "trainer",
+            "trainjob",
+            "distributed training",
+            "torchrun",
+            "jobset",
+            "clustertrainingruntime",
+            "gang scheduling",
+            "pytorchjob",
+            "spot",
+        ],
+        "related": ["KUEUE", "SCHEDULERS", "MONITORING", "CUSTOMIZATION"],
+    },
     "FLOCI_TESTING": {
         "summary": (
             "Emulated-AWS test layer between in-process mocks and real-account "

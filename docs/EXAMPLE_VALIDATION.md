@@ -99,8 +99,8 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | Submission path | Used by | Success criteria |
 |---|---|---|
 | `gco jobs submit` (API) | inferentia, trainium | Job completes |
-| `gco jobs submit-sqs` | simple, gpu, sqs-job-submission | Job completes |
-| `gco jobs submit-direct` | storage/data examples, efa training, inference pairs | Job completes / Deployment Available + Service endpoints |
+| `gco jobs submit-sqs` | simple, gpu, sqs-job-submission, kubeflow-trainjob | Job completes / TrainJob condition Complete (with per-node gang counts) |
+| `gco jobs submit-direct` | storage/data examples, efa training, inference pairs, vector-store-search, mlflow-tracking | Job completes / Deployment Available + Service endpoints |
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 
@@ -111,13 +111,26 @@ harness provisions the ephemeral bastion, points kubeconfig at the tunnel
 bastion down with the session — so `gco jobs submit-direct`, which shells
 out to kubectl, works unmodified too.
 
-Special drivers, fully reverted afterwards:
+Special drivers, fully reverted afterwards (a spec naming a driver the
+dispatcher does not implement fails in CI and at dispatch — never a silent
+skip):
 
 - **keda-scaled-job** — creates a disposable demo SQS queue, seeds
   synthetic messages, grants the KEDA operator read-only queue metrics via
   a queue policy (the example's documented prerequisites), substitutes the
   placeholder `queueURL`, requires KEDA to spawn observer Jobs, then
   deletes the queue.
+- **vector-store-search-job** — runs the documented prerequisite verbatim
+  (`gco vector ingest --demo --wait`), records exactly which corpus objects
+  were uploaded, and reverts precisely those afterwards: the DynamoDB chunk
+  items per recorded source key, then the S3 objects. A pre-existing user
+  corpus in the same table is never touched.
+- **kubeflow-trainjob** — waits for the TrainJob CRD and the shipped
+  `torch-distributed` runtime before submitting (deploy-time artifacts;
+  nothing to revert).
+- **mlflow-tracking-job** — waits for the tracking server Deployment to be
+  Available first, since its backend volume lands one applier pass after
+  the chart on a fresh install (readiness wait; nothing to revert).
 
 Disclosed mutations: inference examples whose default model is
 HuggingFace-gated (vLLM's Llama 3.1, TGI's Mistral) are validated with the

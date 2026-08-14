@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``build_engine_dependencies`` -> ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.png``)

@@ -97,6 +97,15 @@ from gco.services.manifest_processor import (
     validate_resource_kind,
 )
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-08-14T03:46:22Z
+# Flowchart(s) generated from this file:
+#   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [queue-processor] %(message)s",

@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Volcano image-mirror config read (project-scoped ECR namespace default, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,30 +206,30 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5413=>operation: 'Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139).\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    '
-op5418=>operation: with open(cdk_json_path, encoding='utf-8') as f:
+        <div><textarea id="code" style="width: 100%;" rows="11">op6106=>operation: 'Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139).\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    '
+op6111=>operation: with open(cdk_json_path, encoding='utf-8') as f:
     ctx = json.load(f).get('context', {}) or {}
-cond5415=>condition: exception raised?
-cond5420=>condition: except (OSError, json.JSONDecodeError)
-io5427=>inputoutput: output: {'enabled': False, 'ecr_namespace': _DEFAULT_NAMESPACE}
-e5425=>end: end function return
-op5433=>operation: default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
-op5435=>operation: block = ctx.get('volcano_image_mirror') or {}
-op5437=>operation: namespace = str(block.get('ecr_namespace', default_namespace)).strip('/') or default_namespace
-io5442=>inputoutput: output: {'enabled': bool(block.get('enabled', False)), 'ecr_namespace': namespace}
-e5440=>end: end function return
+cond6108=>condition: exception raised?
+cond6113=>condition: except (OSError, json.JSONDecodeError)
+io6120=>inputoutput: output: {'enabled': False, 'ecr_namespace': _DEFAULT_NAMESPACE}
+e6118=>end: end function return
+op6126=>operation: default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
+op6128=>operation: block = ctx.get('volcano_image_mirror') or {}
+op6130=>operation: namespace = str(block.get('ecr_namespace', default_namespace)).strip('/') or default_namespace
+io6135=>inputoutput: output: {'enabled': bool(block.get('enabled', False)), 'ecr_namespace': namespace}
+e6133=>end: end function return
 
-op5413->op5418
-op5418->cond5415
-cond5415(yes)->cond5420
-cond5420(yes)->io5427
-io5427->e5425
-cond5420(no)->op5433
-op5433->op5435
-op5435->op5437
-op5437->io5442
-io5442->e5440
-cond5415(no)->op5433
+op6106->op6111
+op6111->cond6108
+cond6108(yes)->cond6113
+cond6113(yes)->io6120
+io6120->e6118
+cond6113(no)->op6126
+op6126->op6128
+op6128->op6130
+op6130->io6135
+io6135->e6133
+cond6108(no)->op6126
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -239,10 +239,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

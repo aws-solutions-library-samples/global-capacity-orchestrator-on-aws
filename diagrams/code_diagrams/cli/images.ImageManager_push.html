@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>gco images push — auth + push existing local image</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,38 +206,42 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4114=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag).\n        "
-op4116=>operation: validated_name = self._validate_name(name)
-op4118=>operation: validated_tag = self._validate_tag(tag)
-cond4121=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
-op4131=>operation: runtime = self._runtime_or_error()
-sub4133=>subroutine: self.init(name, retain=retain)
-sub4135=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub4137=>subroutine: self._ecr_login(runtime)
-op4139=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
-sub4141=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], check=True)
-op4143=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True)
-op4145=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond4148=>operation: self._apply_retain_tag(validated_name) if  retain
-op4158=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io4163=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e4161=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op4788=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag). When ``quiet``\n        is true, the local tag command is captured for machine-readable output.\n        "
+op4790=>operation: validated_name = self._validate_name(name)
+op4792=>operation: validated_tag = self._validate_tag(tag)
+cond4795=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
+op4805=>operation: runtime = self._runtime_or_error()
+sub4807=>subroutine: self.init(name, retain=retain)
+sub4809=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub4811=>subroutine: self._ecr_login(runtime)
+op4813=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op4815=>operation: tag_run_kwargs: dict[str, Any] = {'check': True}
+cond4818=>operation: tag_run_kwargs.update(capture_output=True, text=True) if  quiet
+sub4828=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], **tag_run_kwargs)
+op4830=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True)
+op4832=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond4835=>operation: self._apply_retain_tag(validated_name) if  retain
+op4845=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io4850=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e4848=>end: end function return
 
-op4114->op4116
-op4116->op4118
-op4118->cond4121
-cond4121->op4131
-op4131->sub4133
-sub4133->sub4135
-sub4135->sub4137
-sub4137->op4139
-op4139->sub4141
-sub4141->op4143
-op4143->op4145
-op4145->cond4148
-cond4148->op4158
-op4158->io4163
-io4163->e4161
+op4788->op4790
+op4790->op4792
+op4792->cond4795
+cond4795->op4805
+op4805->sub4807
+sub4807->sub4809
+sub4809->sub4811
+sub4811->op4813
+op4813->op4815
+op4815->cond4818
+cond4818->sub4828
+sub4828->op4830
+op4830->op4832
+op4832->cond4835
+cond4835->op4845
+op4845->io4850
+io4850->e4848
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -247,10 +251,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

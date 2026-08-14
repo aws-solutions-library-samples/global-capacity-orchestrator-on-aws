@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>gco images build — context validation, login, build, push</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,52 +206,56 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4029=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
-op4031=>operation: ctx = self._validate_context(context)
-op4033=>operation: validated_name = self._validate_name(name)
-op4035=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
-op4037=>operation: df_path = (ctx / dockerfile).resolve()
-cond4040=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
-cond4051=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
-op4061=>operation: runtime = self._runtime_or_error()
-sub4063=>subroutine: self.init(name, retain=retain)
-sub4065=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub4067=>subroutine: self._ecr_login(runtime)
-op4069=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
-op4071=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
-cond4074=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
-sub4083=>subroutine: build_cmd.append(str(ctx))
-sub4085=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
-sub4087=>subroutine: subprocess.run(build_cmd, check=True, cwd=str(ctx))
-op4089=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
-op4091=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond4094=>operation: self._apply_retain_tag(validated_name) if  retain
-op4104=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io4109=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e4107=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op4690=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n            quiet: Capture container build output instead of writing it to the\n                command\'s output stream. Used for machine-readable CLI output.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
+op4692=>operation: ctx = self._validate_context(context)
+op4694=>operation: validated_name = self._validate_name(name)
+op4696=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
+op4698=>operation: df_path = (ctx / dockerfile).resolve()
+cond4701=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
+cond4712=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
+op4722=>operation: runtime = self._runtime_or_error()
+sub4724=>subroutine: self.init(name, retain=retain)
+sub4726=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub4728=>subroutine: self._ecr_login(runtime)
+op4730=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op4732=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
+cond4735=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
+sub4744=>subroutine: build_cmd.append(str(ctx))
+sub4746=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
+op4748=>operation: build_run_kwargs: dict[str, Any] = {'check': True, 'cwd': str(ctx)}
+cond4751=>operation: build_run_kwargs.update(capture_output=True, text=True) if  quiet
+sub4761=>subroutine: subprocess.run(build_cmd, **build_run_kwargs)
+op4763=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
+op4765=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond4768=>operation: self._apply_retain_tag(validated_name) if  retain
+op4778=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io4783=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e4781=>end: end function return
 
-op4029->op4031
-op4031->op4033
-op4033->op4035
-op4035->op4037
-op4037->cond4040
-cond4040->cond4051
-cond4051->op4061
-op4061->sub4063
-sub4063->sub4065
-sub4065->sub4067
-sub4067->op4069
-op4069->op4071
-op4071->cond4074
-cond4074->sub4083
-sub4083->sub4085
-sub4085->sub4087
-sub4087->op4089
-op4089->op4091
-op4091->cond4094
-cond4094->op4104
-op4104->io4109
-io4109->e4107
+op4690->op4692
+op4692->op4694
+op4694->op4696
+op4696->op4698
+op4698->cond4701
+cond4701->cond4712
+cond4712->op4722
+op4722->sub4724
+sub4724->sub4726
+sub4726->sub4728
+sub4728->op4730
+op4730->op4732
+op4732->cond4735
+cond4735->sub4744
+sub4744->sub4746
+sub4746->op4748
+op4748->cond4751
+cond4751->sub4761
+sub4761->op4763
+op4763->op4765
+op4765->cond4768
+cond4768->op4778
+op4778->io4783
+io4783->e4781
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -261,10 +265,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

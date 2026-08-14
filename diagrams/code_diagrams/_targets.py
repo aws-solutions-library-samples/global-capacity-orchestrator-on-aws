@@ -381,4 +381,40 @@ TARGETS: list[Target] = [
         function="GCOGlobalStack._create_image_replication_rule",
         title="Global ECR replication rule (project-scoped PREFIX_MATCH filter, #139)",
     ),
+    # --- 6.0: trainer, MLflow, vector store (#252) ------------------------
+    # The validation pipeline gained a workload kind without a single pod
+    # spec (TrainJob decomposes into weighted views), the helm installer
+    # now converges two more charts, and the CLI job lifecycle grew
+    # TrainJob-aware fallback chains. Each target below carries the real
+    # branch structure a reader needs to audit those flows.
+    Target(
+        source="gco/services/queue_processor.py",
+        function="validate_manifest",
+        title="SQS job prevalidation (kinds, TrainJob decomposition, security, weighted caps)",
+    ),
+    Target(
+        source="gco/services/manifest_processor.py",
+        function="ManifestProcessor.validate_manifest",
+        title="REST manifest validation pipeline (structure, kinds, limits, tolerations, images)",
+    ),
+    Target(
+        source="lambda/helm-installer/handler.py",
+        function="handle_task",
+        title="Helm convergence per-chart decision (EnabledCharts authority: install vs uninstall)",
+    ),
+    Target(
+        source="lambda/helm-installer/handler.py",
+        function="validate_releases",
+        title="Helm release-set validation (charts.yaml expected set, deployed vs absent)",
+    ),
+    Target(
+        source="cli/jobs.py",
+        function="JobManager.get_job_logs",
+        title="gco jobs logs — TrainJob rank resolution and CloudWatch fallback chain",
+    ),
+    Target(
+        source="lambda/vector-ingest/handler.py",
+        function="lambda_handler",
+        title="Vector-store corpus ingest (S3 notification -> chunk, embed, write items)",
+    ),
 ]

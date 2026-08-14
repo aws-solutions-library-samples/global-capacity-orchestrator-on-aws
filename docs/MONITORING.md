@@ -25,6 +25,7 @@ stock deployment installs it in each region; operators opt out with
 - [Accessing Grafana on a private cluster](#accessing-grafana-on-a-private-cluster)
 - [Managing Grafana users](#managing-grafana-users)
 - [Admin credential rotation](#admin-credential-rotation)
+- [MLflow experiment tracking](#mlflow-experiment-tracking)
 - [Curated dashboards](#curated-dashboards)
 - [Dashboard screenshots](#dashboard-screenshots)
 
@@ -87,6 +88,9 @@ Per regional cluster, when enabled:
   that reads this Prometheus and powers the *GCO Cost (OpenCost)* dashboard
   plus the cost report pipeline — see
   [COST_MONITORING.md](COST_MONITORING.md).
+- When MLflow is enabled (the default), an [MLflow](https://mlflow.org/)
+  tracking server in the same `monitoring` namespace — see
+  [MLflow experiment tracking](#mlflow-experiment-tracking).
 
 Grafana uses **Grafana-native authentication** (its own user database) with self
 sign-up and anonymous access disabled. All three UIs (Grafana, Prometheus,
@@ -198,6 +202,46 @@ The cadence is configurable and defaults to monthly:
 
 Rotation is transparent to the CLI, which always re-reads the current password
 from the Secret.
+
+## MLflow experiment tracking
+
+An [MLflow](https://mlflow.org/) tracking server ships with the observability
+bundle for experiment tracking from any workload on the cluster (see
+[DISTRIBUTED_TRAINING.md](DISTRIBUTED_TRAINING.md) for the training side).
+
+**Toggle.** Controlled by `cluster_observability.mlflow.enabled` in `cdk.json`
+(default `true`), effective only while `cluster_observability.enabled` is also
+true — the server lives in the `monitoring` namespace, stores metadata on the
+observability gp3 StorageClass, and is reached through the same tunnel
+commands, so disabling observability switches MLflow off with it.
+
+**Storage.** Run *artifacts* go to the cluster-shared S3 bucket under
+`mlflow-artifacts/<region>/` through a dedicated IAM role scoped to exactly
+that prefix (IRSA on the server's service account). Run *metadata* is SQLite
+on a dedicated gp3 EBS volume (`cluster_observability.mlflow.persistence_size`,
+default `10Gi`). Disabling MLflow deletes the metadata volume on the next
+deploy — artifacts in S3 survive.
+
+**Access.** The service is `ClusterIP` only — no Ingress, no public endpoint:
+
+```bash
+gco monitoring open --service mlflow          # http://localhost:5000
+gco monitoring open --service mlflow --via-ssm auto   # no VPC route? ephemeral bastion
+```
+
+**Auth posture.** The server runs without application-level authentication —
+the same posture as the OpenCost UI: it is reachable only from inside the
+cluster (workloads opt in via a NetworkPolicy label) and through the
+authenticated SSM/port-forward tunnel, which is the security boundary. The
+chart supports basic/OIDC auth (`auth.*` values in
+`lambda/helm-installer/charts.yaml`) if your deployment needs an additional
+in-cluster boundary.
+
+**Logging from a job.** Point the client at the service DNS and opt into
+egress with the `gco.io/mlflow-client: "true"` pod label —
+[`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
+is the complete, validated pattern (it logs a run, reads it back through the
+API, and asserts every value round-tripped).
 
 ## Curated dashboards
 

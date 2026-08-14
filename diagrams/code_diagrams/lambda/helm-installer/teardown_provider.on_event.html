@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Helm teardown provider event path (install drain + idempotent execution start)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,48 +206,56 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3866=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
-op3868=>operation: request_type = event['RequestType']
-op3870=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
-cond3873=>condition: if request_type != 'Delete'
-io3880=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e3878=>end: end function return
-op3886=>operation: props = event['ResourceProperties']
-op3888=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
-op3890=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
-op3892=>operation: execution_name = _execution_name(event)
-op3894=>operation: sfn_client = _sfn()
-sub3896=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
-op3898=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
-sub3903=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
-cond3900=>condition: exception raised?
-cond3905=>condition: except ClientError as exc
-cond3910=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
-sub3923=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
-io3928=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e3926=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op4514=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
+op4516=>operation: request_type = event['RequestType']
+op4518=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
+cond4521=>condition: if request_type != 'Delete'
+io4528=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e4526=>end: end function return
+op4534=>operation: props = event['ResourceProperties']
+op4536=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
+op4538=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
+op4540=>operation: execution_name = _execution_name(event)
+op4542=>operation: sfn_client = _sfn()
+op4544=>operation: fence_name = f"/{props['ProjectName']}/addons/{props['Region']}/_teardown"
+sub4546=>subroutine: _ssm(str(props['Region'])).put_parameter(Name=fence_name, Value=execution_name, Type='String', Overwrite=True)
+sub4548=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
+op4550=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'RegistryRegion': props['RegistryRegion'], 'ProjectName': props['ProjectName'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
+op4552=>operation: endpoint_group_arn = props.get('EndpointGroupArn')
+cond4555=>operation: execution_input['EndpointGroupArn'] = endpoint_group_arn if  endpoint_group_arn
+sub4568=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
+cond4565=>condition: exception raised?
+cond4570=>condition: except ClientError as exc
+cond4575=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
+sub4588=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
+io4593=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e4591=>end: end function return
 
-op3866->op3868
-op3868->op3870
-op3870->cond3873
-cond3873(yes)->io3880
-io3880->e3878
-cond3873(no)->op3886
-op3886->op3888
-op3888->op3890
-op3890->op3892
-op3892->op3894
-op3894->sub3896
-sub3896->op3898
-op3898->sub3903
-sub3903->cond3900
-cond3900(yes)->cond3905
-cond3905(yes)->cond3910
-cond3910->sub3923
-sub3923->io3928
-io3928->e3926
-cond3905(no)->sub3923
-cond3900(no)->sub3923
+op4514->op4516
+op4516->op4518
+op4518->cond4521
+cond4521(yes)->io4528
+io4528->e4526
+cond4521(no)->op4534
+op4534->op4536
+op4536->op4538
+op4538->op4540
+op4540->op4542
+op4542->op4544
+op4544->sub4546
+sub4546->sub4548
+sub4548->op4550
+op4550->op4552
+op4552->cond4555
+cond4555->sub4568
+sub4568->cond4565
+cond4565(yes)->cond4570
+cond4570(yes)->cond4575
+cond4575->sub4588
+sub4588->io4593
+io4593->e4591
+cond4570(no)->sub4588
+cond4565(no)->sub4588
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -257,10 +265,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

@@ -41,7 +41,7 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png``)

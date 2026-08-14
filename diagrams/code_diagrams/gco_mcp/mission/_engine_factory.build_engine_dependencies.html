@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-08-13T01:19:51Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,26 +206,26 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op226=>operation: 'Build the :class:`MissionEngine` dependency triple for ``session``.\n\n    Looks up the live FastMCP registry to populate the registered-tools\n    map and per-tool docstring cache, then assembles the production\n    wiring: a live tool dispatcher (or the canned-stub when\n    ``use_stub_dispatcher`` is True), the Strategy_Revision sampler\n    when sampling resolved to a real backend, and a sandbox runner\n    when the session permits scripted strategies.\n\n    The CLI passes ``use_stub_dispatcher=True`` only on the\n    ``--dry-run`` path; the MCP tool surface always uses the live\n    dispatcher.\n    '
-cond229=>condition: if use_stub_dispatcher
-io236=>inputoutput: output: EngineDependencies(tool_dispatcher=make_stub_dispatcher(), sampling_callable=None, sandbox_runner=_build_sandbox_runner(session))
-e234=>end: end function return
-op242=>operation: registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
-op244=>operation: sampling_callable = _build_sampling_callable(session, ctx, registered_tools=registered_tools, tool_docstrings=tool_docstrings)
-op246=>operation: sandbox_runner = _build_sandbox_runner(session)
-op248=>operation: final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
-io253=>inputoutput: output: EngineDependencies(tool_dispatcher=_live_dispatch_tool, sampling_callable=sampling_callable, sandbox_runner=sandbox_runner, final_lessons_callable=final_lessons, memory_store=_build_memory_store())
-e251=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op6074=>operation: 'Build the :class:`MissionEngine` dependency triple for ``session``.\n\n    Looks up the live FastMCP registry to populate the registered-tools\n    map and per-tool docstring cache, then assembles the production\n    wiring: a live tool dispatcher (or the canned-stub when\n    ``use_stub_dispatcher`` is True), the Strategy_Revision sampler\n    when sampling resolved to a real backend, and a sandbox runner\n    when the session permits scripted strategies.\n\n    The CLI passes ``use_stub_dispatcher=True`` only on the\n    ``--dry-run`` path; the MCP tool surface always uses the live\n    dispatcher.\n    '
+cond6077=>condition: if use_stub_dispatcher
+io6084=>inputoutput: output: EngineDependencies(tool_dispatcher=make_stub_dispatcher(), sampling_callable=None, sandbox_runner=_build_sandbox_runner(session))
+e6082=>end: end function return
+op6090=>operation: registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
+op6092=>operation: sampling_callable = _build_sampling_callable(session, ctx, registered_tools=registered_tools, tool_docstrings=tool_docstrings)
+op6094=>operation: sandbox_runner = _build_sandbox_runner(session)
+op6096=>operation: final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
+io6101=>inputoutput: output: EngineDependencies(tool_dispatcher=_live_dispatch_tool, sampling_callable=sampling_callable, sandbox_runner=sandbox_runner, final_lessons_callable=final_lessons, memory_store=_build_memory_store())
+e6099=>end: end function return
 
-op226->cond229
-cond229(yes)->io236
-io236->e234
-cond229(no)->op242
-op242->op244
-op244->op246
-op246->op248
-op248->io253
-io253->e251
+op6074->cond6077
+cond6077(yes)->io6084
+io6084->e6082
+cond6077(no)->op6090
+op6090->op6092
+op6092->op6094
+op6094->op6096
+op6096->io6101
+io6101->e6099
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -235,10 +235,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-08-13T01:19:51Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-08-13T01:19:51Z">2026-08-13T01:19:51Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

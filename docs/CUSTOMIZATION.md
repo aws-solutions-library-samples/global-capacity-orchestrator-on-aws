@@ -999,6 +999,7 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
       "cert_manager": { "enabled": true },
       "slurm": { "enabled": false },
       "yunikorn": { "enabled": false },
+      "kubeflow_trainer": { "enabled": true },
       "kueue": { "enabled": true }
     }
   }
@@ -1013,10 +1014,14 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [Volcano](https://volcano.sh/) | Enabled | Gang scheduling for distributed training |
 | [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) | Enabled | Ray distributed computing operator |
 | [cert-manager](https://cert-manager.io/docs/) | Enabled | Certificate management for cluster webhooks |
+| [Kubeflow Trainer](https://github.com/kubeflow/trainer) | Enabled | Trainer v2 controller + JobSet for `TrainJob` distributed training — see the [Distributed Training Guide](DISTRIBUTED_TRAINING.md) |
 | kube-prometheus-stack | Enabled | [Prometheus](https://prometheus.io/docs/introduction/overview/), Alertmanager, and [Grafana](https://grafana.com/docs/grafana/latest/) when `cluster_observability.enabled` is true |
+| [MLflow](https://mlflow.org/) | Enabled | Experiment tracking server when `cluster_observability.enabled` AND `cluster_observability.mlflow.enabled` are true — see [MONITORING.md](MONITORING.md#mlflow-experiment-tracking) |
 | Slurm/Slinky | Disabled | Slurm operator and cluster |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
+
+Disabling `helm.kubeflow_trainer` uninstalls the trainer on the next deploy, prunes the shipped `torch-distributed` runtime, and makes `TrainJob` submissions fail with an actionable enable-the-addon message (the kind stays in the [allowed-kinds policy](#allowed-resource-kinds); the addon gate is what rejects it). Disabling `cluster_observability.mlflow` removes the tracking server and deletes its run-metadata volume; artifacts in S3 survive.
 
 Disable optional charts you do not use to reduce system-node overhead and deployment time. KEDA cannot be disabled without replacing platform features that depend on it.
 

@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-08-13T01:20:46Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Global ECR replication rule (project-scoped PREFIX_MATCH filter, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,20 +206,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n        '
-cond5=>condition: if not self.images_config['replication']['enabled']
-e10=>end: end function return
-op16=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
-cond19=>condition: if not destinations
-e24=>end: end function return
-sub30=>subroutine: ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
+        <div><textarea id="code" style="width: 100%;" rows="11">op6346=>operation: 'Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n        '
+cond6349=>condition: if not self.images_config['replication']['enabled']
+e6354=>end: end function return
+op6360=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
+cond6363=>condition: if not destinations
+e6368=>end: end function return
+sub6374=>subroutine: ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
 
-op2->cond5
-cond5(yes)->e10
-cond5(no)->op16
-op16->cond19
-cond19(yes)->e24
-cond19(no)->sub30
+op6346->cond6349
+cond6349(yes)->e6354
+cond6349(no)->op6360
+op6360->cond6363
+cond6363(yes)->e6368
+cond6363(no)->sub6374
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -229,10 +229,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-08-13T01:20:46Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-08-13T01:20:46Z">2026-08-13T01:20:46Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

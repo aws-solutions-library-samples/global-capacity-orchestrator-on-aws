@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Global Accelerator Endpoint Registration Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,23 +206,23 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op551=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
+        <div><textarea id="code" style="width: 100%;" rows="11">op551=>operation: 'Dispatch Step Functions tasks or raw CloudFormation resource events.'
 cond554=>condition: if event.get('Action')
-sub558=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+sub558=>subroutine: logger.info('Task event: %s', json.dumps(event))
 io563=>inputoutput: output: handle_task(event)
 e561=>end: end function return
-sub569=>subroutine: logger.info(f'Event: {json.dumps(event)}')
+sub569=>subroutine: logger.info('CloudFormation event: %s', json.dumps(event))
 op571=>operation: request_type = event['RequestType']
 op573=>operation: props = event['ResourceProperties']
 op575=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
 cond581=>condition: if request_type == 'Delete'
 sub585=>subroutine: handle_delete(event, context, props, physical_id)
 cond577=>condition: exception raised?
-cond592=>condition: except Exception as e
-sub596=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond592=>condition: except Exception as exc
+sub596=>subroutine: logger.error('Registration handler failed: %s', exc, exc_info=True)
 cond599=>condition: if request_type == 'Delete'
 sub603=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
-sub607=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
+sub607=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(exc))
 sub589=>subroutine: handle_create_update(event, context, props, physical_id)
 
 op551->cond554
@@ -252,10 +252,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

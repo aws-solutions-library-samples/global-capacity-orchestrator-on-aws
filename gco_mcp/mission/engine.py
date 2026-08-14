@@ -79,7 +79,7 @@ from .types import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``MissionEngine.run_iteration`` -> ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.png``)

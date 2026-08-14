@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,32 +206,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5528=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op5530=>operation: from . import _image_mirror as image_mirror
-op5532=>operation: cfg = image_mirror.read_mirror_config()
-cond5535=>condition: if not cfg['enabled']
-e5540=>end: end function return
-op5546=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond5549=>condition: for region in regions
-sub5553=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub5558=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True)
-cond5555=>condition: exception raised?
-cond5560=>condition: except Exception as exc
-sub5564=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op6234=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
+op6236=>operation: from . import _image_mirror as image_mirror
+op6238=>operation: cfg = image_mirror.read_mirror_config()
+cond6241=>condition: if not cfg['enabled']
+e6246=>end: end function return
+op6252=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
+cond6255=>condition: for region in regions
+sub6259=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
+sub6264=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
+cond6261=>condition: exception raised?
+cond6266=>condition: except Exception as exc
+sub6270=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
 
-op5528->op5530
-op5530->op5532
-op5532->cond5535
-cond5535(yes)->e5540
-cond5535(no)->op5546
-op5546->cond5549
-cond5549(yes)->sub5553
-sub5553->sub5558
-sub5558->cond5555
-cond5555(yes)->cond5560
-cond5560(yes)->sub5564
-cond5560(no)->cond5549
-cond5555(no)->cond5549
+op6234->op6236
+op6236->op6238
+op6238->cond6241
+cond6241(yes)->e6246
+cond6241(no)->op6252
+op6252->cond6255
+cond6255(yes)->sub6259
+sub6259->sub6264
+sub6264->cond6261
+cond6261(yes)->cond6266
+cond6266(yes)->sub6270
+cond6266(no)->cond6255
+cond6261(no)->cond6255
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -241,10 +241,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

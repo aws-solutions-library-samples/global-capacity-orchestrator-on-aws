@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Authenticated inference target resolution (region, readiness, namespace, canary)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,46 +206,46 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3590=>operation: 'Resolve the authorized Service, namespace, and configured health path.'
-op3592=>operation: endpoint_name = _validate_label(endpoint_name, 'name')
-op3594=>operation: endpoint = await asyncio.to_thread(_get_inference_store().get_endpoint, endpoint_name)
-cond3597=>operation: raise HTTPException(status_code=404, detail=f"Inference endpoint '{endpoint_name}' not found") if  not endpoint
-op3607=>operation: namespace = _validate_label(endpoint.get('namespace', 'gco-inference'), 'namespace')
-op3609=>operation: allowed_namespace = os.getenv('INFERENCE_NAMESPACE', 'gco-inference')
-cond3612=>operation: raise HTTPException(status_code=503, detail='Inference endpoint namespace is not routable') if  namespace != allowed_namespace
-op3622=>operation: region = os.getenv('REGION', '')
-op3624=>operation: target_regions = endpoint.get('target_regions')
-cond3627=>operation: raise HTTPException(status_code=404, detail='Inference endpoint is not deployed in this region') if  not region or not isinstance(target_regions, list) or region not in target_regions
-op3637=>operation: desired_state = endpoint.get('desired_state')
-op3639=>operation: region_status = endpoint.get('region_status')
-op3641=>operation: local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
-op3643=>operation: local_state = local_status.get('state') if isinstance(local_status, dict) else None
-cond3646=>operation: raise HTTPException(status_code=503, detail='Inference endpoint is not ready in this region') if  desired_state != 'running' or local_state != 'running'
-op3656=>operation: spec = endpoint.get('spec')
-op3658=>operation: configured_health_path = spec.get('health_check_path', '/health') if isinstance(spec, dict) else '/health'
-cond3661=>operation: configured_health_path = '/health' if  not isinstance(configured_health_path, str) or not configured_health_path.startswith('/')
-io3674=>inputoutput: output: (_target_service(endpoint, endpoint_name), namespace, configured_health_path)
-e3672=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op4238=>operation: 'Resolve the authorized Service, namespace, and configured health path.'
+op4240=>operation: endpoint_name = _validate_label(endpoint_name, 'name')
+op4242=>operation: endpoint = await asyncio.to_thread(_get_inference_store().get_endpoint, endpoint_name)
+cond4245=>operation: raise HTTPException(status_code=404, detail=f"Inference endpoint '{endpoint_name}' not found") if  not endpoint
+op4255=>operation: namespace = _validate_label(endpoint.get('namespace', 'gco-inference'), 'namespace')
+op4257=>operation: allowed_namespace = os.getenv('INFERENCE_NAMESPACE', 'gco-inference')
+cond4260=>operation: raise HTTPException(status_code=503, detail='Inference endpoint namespace is not routable') if  namespace != allowed_namespace
+op4270=>operation: region = os.getenv('REGION', '')
+op4272=>operation: target_regions = endpoint.get('target_regions')
+cond4275=>operation: raise HTTPException(status_code=404, detail='Inference endpoint is not deployed in this region') if  not region or not isinstance(target_regions, list) or region not in target_regions
+op4285=>operation: desired_state = endpoint.get('desired_state')
+op4287=>operation: region_status = endpoint.get('region_status')
+op4289=>operation: local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
+op4291=>operation: local_state = local_status.get('state') if isinstance(local_status, dict) else None
+cond4294=>operation: raise HTTPException(status_code=503, detail='Inference endpoint is not ready in this region') if  desired_state != 'running' or local_state != 'running'
+op4304=>operation: spec = endpoint.get('spec')
+op4306=>operation: configured_health_path = spec.get('health_check_path', '/health') if isinstance(spec, dict) else '/health'
+cond4309=>operation: configured_health_path = '/health' if  not isinstance(configured_health_path, str) or not configured_health_path.startswith('/')
+io4322=>inputoutput: output: (_target_service(endpoint, endpoint_name), namespace, configured_health_path)
+e4320=>end: end function return
 
-op3590->op3592
-op3592->op3594
-op3594->cond3597
-cond3597->op3607
-op3607->op3609
-op3609->cond3612
-cond3612->op3622
-op3622->op3624
-op3624->cond3627
-cond3627->op3637
-op3637->op3639
-op3639->op3641
-op3641->op3643
-op3643->cond3646
-cond3646->op3656
-op3656->op3658
-op3658->cond3661
-cond3661->io3674
-io3674->e3672
+op4238->op4240
+op4240->op4242
+op4242->cond4245
+cond4245->op4255
+op4255->op4257
+op4257->cond4260
+cond4260->op4270
+op4270->op4272
+op4272->cond4275
+cond4275->op4285
+op4285->op4287
+op4287->op4289
+op4289->op4291
+op4291->cond4294
+cond4294->op4304
+op4304->op4306
+op4306->cond4309
+cond4309->io4322
+io4322->e4320
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -255,10 +255,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

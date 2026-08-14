@@ -49,7 +49,7 @@ from ._image_uri import (
 from .config import GCOConfig, _load_cdk_json, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)

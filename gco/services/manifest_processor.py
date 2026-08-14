@@ -62,10 +62,12 @@ from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
+#   * ``ManifestProcessor.validate_manifest`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_validate_manifest.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_validate_manifest.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
