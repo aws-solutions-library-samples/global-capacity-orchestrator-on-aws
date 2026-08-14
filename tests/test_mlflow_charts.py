@@ -273,6 +273,27 @@ class TestMlflowChartEntry:
         server = charts["mlflow"]["values"]["server"]
         assert server["value_options"]["workers"] == 1
 
+    def test_service_dns_hosts_pass_the_host_validation_middleware(self, charts):
+        # MLflow 3.x 403s API requests whose Host header is a non-localhost
+        # DNS name ("possible DNS rebinding attack detected"); in-cluster
+        # clients reach the server as mlflow.monitoring:5000 (see the
+        # example's MLFLOW_TRACKING_URI). Both spellings are allowed;
+        # localhost/IP Hosts (probes, the tunnel) stay allowed by default.
+        server = charts["mlflow"]["values"]["server"]
+        assert server["value_options"]["allowed_hosts"] == (
+            "mlflow.monitoring,mlflow.monitoring:5000"
+        )
+
+    def test_guaranteed_cpu_beats_the_fixed_liveness_window(self, charts):
+        # requests == limits for CPU, measured against the pinned image:
+        # /health first answers within the probes' 1s budget at ~16s with
+        # a full core but only ~62s at half a core — past the chart's
+        # fixed liveness window (15s + 3x20s), which crash-looped the
+        # server on a contended node (2026-08-14). No probe knobs exist,
+        # so the guaranteed share is the only lever.
+        resources = charts["mlflow"]["values"]["resources"]
+        assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "1"
+
 
 class TestConfigLoaderMlflowToggle:
     def _loader(self, observability: dict[str, Any] | None) -> ConfigLoader:

@@ -204,6 +204,33 @@ class TestManifestProcessorRole:
             "manifest-processor Role must grant events for events endpoint"
         )
 
+    def test_manifest_processor_manages_trainjobs(self, rbac_docs):
+        """trainer.kubeflow.org/trainjobs needs full lifecycle verbs.
+
+        Regression: the 2026-08-14 shakeout queued a TrainJob through SQS
+        and every apply failed with "Create failed: Forbidden" — TrainJob
+        is the first CRD submitted through the SQS path (Ray/Volcano
+        examples submit direct), so no CRD group had ever been granted to
+        the gco-jobs write role. The CLI's generic-manifest REST fallback
+        (TrainJob status/logs/delete) rides the same ServiceAccount.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        trainer_rules = [
+            rule for rule in role["rules"] if "trainer.kubeflow.org" in rule.get("apiGroups", [])
+        ]
+        assert trainer_rules, "gco-jobs write role must grant trainer.kubeflow.org"
+        (rule,) = trainer_rules
+        assert rule["resources"] == ["trainjobs"]
+        assert set(rule["verbs"]) == {
+            "create",
+            "get",
+            "list",
+            "watch",
+            "patch",
+            "update",
+            "delete",
+        }
+
     def test_manifest_processor_has_patch_verb_on_workload_resources(self, rbac_docs):
         """patch must be granted on every resource the dynamic client might update.
 

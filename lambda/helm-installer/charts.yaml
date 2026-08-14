@@ -852,9 +852,17 @@ charts:
       # the CPU request starved startup past the chart's fixed liveness
       # window (probe kills at ~100s, observed live 2026-08-14 as an exit
       # 137 crash-loop; the chart exposes no probe knobs).
+      # allowed_hosts: MLflow 3.x ships host-validation middleware that
+      # 403s API requests whose Host header is a non-localhost DNS name
+      # ("possible DNS rebinding attack detected") — in-cluster clients
+      # reach the server as mlflow.monitoring:5000, so both spellings are
+      # allowed explicitly (verified against the pinned image; /health is
+      # exempt, and localhost/IP Hosts — kubelet probes, the tunnel — stay
+      # allowed by default).
       server:
         value_options:
           workers: 1
+          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000"
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
@@ -879,10 +887,15 @@ charts:
         enabled: true
       resources:
         requests:
-          # 250m, not the usual 100m: server startup (gunicorn + full
-          # MLflow import) must beat the chart's fixed liveness window on
-          # a busy node (see the workers comment above).
-          cpu: 250m
+          # A full guaranteed core (requests == limits), measured, not
+          # guessed: against the pinned image, /health first answers
+          # within the probes' 1-second budget at ~16s of server start
+          # with 1.0 CPU but only at ~62s with 0.5 CPU — past the chart's
+          # fixed liveness window (15s delay + 3 probes x 20s), which is
+          # exactly the 18-restart crash-loop observed live 2026-08-14 on
+          # a contended node with a smaller request. The chart exposes no
+          # probe knobs, so the guaranteed share is the only lever.
+          cpu: "1"
           memory: 256Mi
         limits:
           cpu: "1"
