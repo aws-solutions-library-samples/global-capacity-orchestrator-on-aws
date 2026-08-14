@@ -853,16 +853,19 @@ charts:
       # window (probe kills at ~100s, observed live 2026-08-14 as an exit
       # 137 crash-loop; the chart exposes no probe knobs).
       # allowed_hosts: MLflow 3.x ships host-validation middleware that
-      # 403s API requests whose Host header is a non-localhost DNS name
-      # ("possible DNS rebinding attack detected") — in-cluster clients
-      # reach the server as mlflow.monitoring:5000, so both spellings are
-      # allowed explicitly (verified against the pinned image; /health is
-      # exempt, and localhost/IP Hosts — kubelet probes, the tunnel — stay
-      # allowed by default).
+      # 403s API requests whose Host header it does not recognize ("possible
+      # DNS rebinding attack detected"), and setting the flag REPLACES the
+      # built-in localhost/private-IP allowance rather than extending it
+      # (Prometheus scrapes the pod IP directly and got 403 until 10.* was
+      # listed — caught live 2026-08-14). The list is: the in-cluster
+      # service DNS both ways clients spell it, plus the VPC's 10.* pod IPs
+      # (vpc_endpoint_cidrs defaults to 10.0.0.0/16). Arbitrary DNS names
+      # stay rejected; /health is exempt so probes never depended on this.
+      # All three behaviors verified against the pinned image.
       server:
         value_options:
           workers: 1
-          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000"
+          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000,10.*"
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
@@ -896,10 +899,15 @@ charts:
           # a contended node with a smaller request. The chart exposes no
           # probe knobs, so the guaranteed share is the only lever.
           cpu: "1"
-          memory: 256Mi
+          # 2Gi requested / 3Gi limit, measured: the v3.15.1-full server
+          # ramps to ~1.5GiB steady state during startup (server + job
+          # schedulers) — the previous 1Gi limit OOM-killed the container
+          # at ~25s every cycle (kernel TaskOOM, caught live 2026-08-14
+          # after the CPU fix let startup get far enough to hit it).
+          memory: 2Gi
         limits:
           cpu: "1"
-          memory: 1Gi
+          memory: 3Gi
       # /metrics + ServiceMonitor: kube-prometheus-stack discovers
       # ServiceMonitors cluster-wide and is guaranteed present (the mlflow
       # conjunction requires observability), so the tracking server's

@@ -63,7 +63,7 @@ spec:
   trainer:
     image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
     numNodes: 2
-    numProcPerNode: "1"
+    numProcPerNode: 1
     resourcesPerNode:
       requests:
         cpu: "500m"
@@ -105,7 +105,7 @@ spec:
     name: torch-distributed
   trainer:
     numNodes: 2
-    numProcPerNode: "1"
+    numProcPerNode: 1
     resourcesPerNode:
       limits:
         nvidia.com/gpu: "1"

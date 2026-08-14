@@ -273,6 +273,25 @@ class TestTrainerRuntimeManifest:
         assert "runAsNonRoot" not in container["securityContext"]
 
 
+class TestTrainJobExampleSchema:
+    """CRD-schema shapes the example must honor (no kubeconform coverage).
+
+    TrainJob has no datreeio catalog schema, so the schema job skips it —
+    these pins encode what the apiserver enforced live instead.
+    """
+
+    def test_num_proc_per_node_is_a_plain_integer(self):
+        # spec.trainer.numProcPerNode is typed int32 in the chart's CRD
+        # (the "auto" string belongs to the runtime's mlPolicy, not the
+        # TrainJob); a quoted "1" failed apiserver validation with a bare
+        # 400 on every SQS apply (caught live, 2026-08-14).
+        example = yaml.safe_load(
+            (_REPO_ROOT / "examples" / "kubeflow-trainjob.yaml").read_text(encoding="utf-8")
+        )
+        value = example["spec"]["trainer"]["numProcPerNode"]
+        assert isinstance(value, int) and not isinstance(value, bool)
+
+
 class TestRegionalChartWiring:
     def test_chart_enabled_by_default(self, valid_cdk_context):
         charts = RS._get_enabled_helm_charts(_stub(valid_cdk_context))

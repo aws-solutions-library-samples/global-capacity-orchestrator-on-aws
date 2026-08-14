@@ -33,7 +33,7 @@
 #   spec:
 #     trainer:
 #       numNodes: 2
-#       numProcPerNode: "1"
+#       numProcPerNode: 1
 #       resourcesPerNode:
 #         limits:
 #           nvidia.com/gpu: "1"
@@ -75,7 +75,11 @@ spec:
     # platform's image-trust gate validates exactly what will run.
     image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
     numNodes: 2
-    numProcPerNode: "1"
+    # Plain integer, not a quoted string: TrainJob's CRD schema types this
+    # field int32 (the "auto" string lives on the runtime's mlPolicy, not
+    # here) — a quoted "1" fails apiserver validation with a bare 400
+    # (caught live, 2026-08-14).
+    numProcPerNode: 1
     resourcesPerNode:
       requests:
         cpu: "500m"

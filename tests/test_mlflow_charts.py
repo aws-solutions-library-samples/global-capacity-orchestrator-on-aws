@@ -274,14 +274,17 @@ class TestMlflowChartEntry:
         assert server["value_options"]["workers"] == 1
 
     def test_service_dns_hosts_pass_the_host_validation_middleware(self, charts):
-        # MLflow 3.x 403s API requests whose Host header is a non-localhost
-        # DNS name ("possible DNS rebinding attack detected"); in-cluster
-        # clients reach the server as mlflow.monitoring:5000 (see the
-        # example's MLFLOW_TRACKING_URI). Both spellings are allowed;
-        # localhost/IP Hosts (probes, the tunnel) stay allowed by default.
+        # MLflow 3.x 403s API requests whose Host header it does not
+        # recognize, and setting allowed_hosts REPLACES the built-in
+        # localhost/private-IP allowance rather than extending it —
+        # Prometheus scrapes the pod IP directly and got 403 until 10.*
+        # was listed (caught live 2026-08-14). Service DNS both ways
+        # clients spell it + the VPC's 10.* pod IPs; arbitrary DNS names
+        # stay rejected and /health is exempt (all verified against the
+        # pinned image).
         server = charts["mlflow"]["values"]["server"]
         assert server["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000"
+            "mlflow.monitoring,mlflow.monitoring:5000,10.*"
         )
 
     def test_guaranteed_cpu_beats_the_fixed_liveness_window(self, charts):
@@ -293,6 +296,16 @@ class TestMlflowChartEntry:
         # so the guaranteed share is the only lever.
         resources = charts["mlflow"]["values"]["resources"]
         assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "1"
+
+    def test_memory_limit_clears_the_measured_startup_ramp(self, charts):
+        # The v3.15.1-full server ramps to ~1.5GiB steady state during
+        # startup; a 1Gi limit OOM-killed the container at ~25s every
+        # cycle (kernel TaskOOM, caught live 2026-08-14 once the CPU fix
+        # let startup progress far enough to hit it). 3Gi is 2x the
+        # measured steady state.
+        resources = charts["mlflow"]["values"]["resources"]
+        assert resources["requests"]["memory"] == "2Gi"
+        assert resources["limits"]["memory"] == "3Gi"
 
 
 class TestConfigLoaderMlflowToggle:
