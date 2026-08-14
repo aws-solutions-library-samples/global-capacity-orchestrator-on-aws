@@ -335,9 +335,7 @@ class TestMlflowBackendManifest:
         tracking server, and only the tracking server's pods."""
         policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
         assert policy["metadata"]["namespace"] == "gco-jobs"
-        assert policy["spec"]["podSelector"]["matchLabels"] == {
-            "gco.io/mlflow-client": "true"
-        }
+        assert policy["spec"]["podSelector"]["matchLabels"] == {"gco.io/mlflow-client": "true"}
         assert policy["spec"]["policyTypes"] == ["Egress"]
         (egress,) = policy["spec"]["egress"]
         (to,) = egress["to"]
