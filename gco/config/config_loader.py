@@ -1511,6 +1511,13 @@ class ConfigLoader:
             - alertmanager: Alertmanager sub-block
               - enabled: Whether Alertmanager is deployed (default: True)
               - persistence_size: EBS PVC size for Alertmanager (default: "5Gi")
+            - mlflow: MLflow experiment-tracking sub-block
+              - enabled: Whether the MLflow tracking server is installed per
+                region (default: True). Effective only while observability
+                itself is enabled — see ``get_mlflow_enabled``.
+              - persistence_size: EBS PVC size for the tracking server's
+                SQLite run-metadata store (default: "10Gi"); artifacts go
+                to S3, not this volume
         """
         default_config: dict[str, Any] = {
             "enabled": True,
@@ -1523,6 +1530,7 @@ class ConfigLoader:
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+            "mlflow": {"enabled": True, "persistence_size": "10Gi"},
         }
         obs_ctx = self.app.node.try_get_context("cluster_observability")
         obs_config: dict[str, Any] = obs_ctx if isinstance(obs_ctx, dict) else {}
@@ -1530,7 +1538,7 @@ class ConfigLoader:
 
         # Deep-merge each nested sub-block so a partial override does not
         # drop the other defaults in the same sub-block.
-        for sub_block in ("grafana", "prometheus", "alertmanager"):
+        for sub_block in ("grafana", "prometheus", "alertmanager", "mlflow"):
             override = obs_config.get(sub_block)
             if isinstance(override, dict):
                 default_sub = cast(dict[str, Any], default_config[sub_block])
@@ -1546,6 +1554,21 @@ class ConfigLoader:
         methods, the CLI) do not have to index into the merged dict.
         """
         return bool(self.get_cluster_observability_config()["enabled"])
+
+    def get_mlflow_enabled(self) -> bool:
+        """Return whether the MLflow tracking server is effectively enabled.
+
+        The conjunction of ``cluster_observability.mlflow.enabled`` (default
+        True) and ``cluster_observability.enabled`` (default True): MLflow
+        installs into the ``monitoring`` namespace kube-prometheus-stack
+        creates, stores run metadata on the observability gp3 StorageClass,
+        and is reached through the same tunnel commands, so disabling
+        observability switches the tracking server off with it rather than
+        deploying it against missing storage — the same conjunction shape
+        ``get_cost_monitoring_enabled`` uses for OpenCost.
+        """
+        obs = self.get_cluster_observability_config()
+        return bool(obs["mlflow"]["enabled"]) and bool(obs["enabled"])
 
     def get_cost_monitoring_config(self) -> dict[str, Any]:
         """Get the cost monitoring configuration.

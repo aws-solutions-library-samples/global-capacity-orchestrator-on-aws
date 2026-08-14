@@ -132,6 +132,7 @@ def _stub(
     config = ConfigLoader(app)
     stub = SimpleNamespace(config=config, node=app.node)
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
+    stub._mlflow_active = lambda: RS._mlflow_active(stub)
     return stub
 
 

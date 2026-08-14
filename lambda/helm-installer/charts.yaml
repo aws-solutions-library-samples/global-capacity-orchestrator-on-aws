@@ -785,6 +785,86 @@ charts:
             limits:
               memory: 256Mi
 
+  # MLflow - experiment tracking server (community-charts packaging)
+  # enabled:false here because inclusion is driven by GCORegionalStack:
+  # cluster_observability.mlflow.enabled (default true) AND
+  # cluster_observability.enabled — MLflow lives in the monitoring namespace
+  # kube-prometheus-stack creates, keeps run metadata on the observability
+  # gp3 StorageClass, and is reached through the same tunnel commands.
+  # Deployment tokens (S3 artifact bucket + IRSA role ARN) are injected by
+  # the regional stack via value overrides; everything static lives here.
+  # Access posture: ClusterIP only, no Ingress, no app-level auth — the
+  # authenticated SSM/port-forward tunnel (`gco monitoring open --service
+  # mlflow`) is the security boundary, the same posture as the OpenCost UI.
+  # Run ARTIFACTS go to the cluster-shared S3 bucket via IRSA (durable);
+  # run METADATA is SQLite on a gp3 PVC (gco-mlflow-backend, shipped through
+  # the post-Helm kubectl pass; the pod stays Pending for one applier pass
+  # on first install until the claim exists).
+  # wait: false for the same cold-image-pull rationale as kube-prometheus-stack.
+  # https://github.com/community-charts/helm-charts/tree/main/charts/mlflow
+  mlflow:
+    enabled: false
+    repo_name: community-charts
+    repo_url: https://community-charts.github.io/helm-charts
+    chart: mlflow
+    version: "1.11.4"
+    namespace: monitoring
+    create_namespace: false
+    wait: false
+    wait_timeout: "8m"
+    values:
+      image:
+        repository: burakince/mlflow
+        # Pin the tag explicitly (the chart defaults it to its appVersion)
+        # so the monthly deps-drift report covers it. Bump in lockstep with
+        # `version` above (tag = the chart's appVersion).
+        tag: "3.15.1"
+      # Recreate, not RollingUpdate: the SQLite metadata store lives on a
+      # ReadWriteOnce EBS volume, so surge replicas would deadlock on the
+      # attach and two servers must never share one SQLite file anyway.
+      strategy:
+        type: Recreate
+      # Never voluntarily consolidate the singleton tracking server.
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+      service:
+        type: ClusterIP
+        port: 80
+      ingress:
+        enabled: false
+      # Anonymized usage tracking stays off (posture, not just default).
+      telemetry:
+        enabled: false
+      # SQLite run-metadata store on the observability gp3 PVC. The claim
+      # (gco-mlflow-backend) ships via the post-Helm kubectl pass gated on
+      # {{MLFLOW_ENABLED}} and is pruned when the feature is disabled —
+      # disabling MLflow discards run METADATA while artifacts stay in S3.
+      # The chart's default podSecurityContext (fsGroup 1001,
+      # OnRootMismatch) makes the EBS mount writable by the non-root
+      # server; readOnlyRootFilesystem stays true because the DB lives on
+      # the mounted volume.
+      backendStore:
+        defaultSqlitePath: /mlflow-data/mlflow.db
+      extraVolumes:
+        - name: mlflow-backend
+          persistentVolumeClaim:
+            claimName: gco-mlflow-backend
+      extraVolumeMounts:
+        - name: mlflow-backend
+          mountPath: /mlflow-data
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      serviceMonitor:
+        # kube-prometheus-stack discovers ServiceMonitors cluster-wide, so
+        # the tracking server's /metrics lands in Prometheus without extra
+        # wiring (same mechanism as OpenCost).
+        enabled: true
+
   # Kubeflow Trainer v2 - distributed training operator (TrainJob CRD)
   # Runs multi-node training through TrainJob CRs against ClusterTrainingRuntime
   # blueprints; supersedes the legacy training-operator (PyTorchJob/TFJob/

@@ -1,0 +1,40 @@
+# MLflow SQLite run-metadata store — gp3 PersistentVolumeClaim
+#
+# The community-charts mlflow chart has no first-class persistence for its
+# SQLite backend (its default is an in-memory database), so the claim the
+# chart's extraVolumes reference (see lambda/helm-installer/charts.yaml,
+# mlflow.values.extraVolumes) is shipped here through the post-Helm kubectl
+# pass. Post-Helm because the monitoring namespace is created by the
+# kube-prometheus-stack chart; on a first install the mlflow pod may sit
+# Pending for the short window until this pass applies the claim.
+#
+# Storage class is the observability gp3 class (gco-observability-gp3,
+# 25-storage-observability-gp3.yaml) — MLflow requires observability via the
+# cluster_observability.mlflow conjunction, so the class always exists here.
+# WaitForFirstConsumer defers provisioning until the pod schedules.
+#
+# Only applied when the MLflow conjunction holds (cdk.json
+# cluster_observability.enabled AND cluster_observability.mlflow.enabled).
+# GCORegionalStack substitutes {{MLFLOW_ENABLED}} and {{MLFLOW_BACKEND_SIZE}}
+# only then; otherwise the placeholders stay unreplaced, the applier skips
+# this file, and _FEATURE_RESOURCE_INVENTORY prunes a previously created
+# claim. Pruning DELETES run metadata (deliberate: disabling the feature
+# discards the tracking database); run artifacts live in S3 and survive.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gco-mlflow-backend
+  namespace: monitoring
+  labels:
+    project: gco
+    app: mlflow
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gco-observability-gp3
+  resources:
+    requests:
+      storage: "{{MLFLOW_BACKEND_SIZE}}"

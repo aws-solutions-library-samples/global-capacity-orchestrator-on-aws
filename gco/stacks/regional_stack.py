@@ -729,6 +729,15 @@ class GCORegionalStack(Stack):
         self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
         self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
 
+        # MLflow artifact storage: a dedicated OIDC-only IRSA role for the
+        # tracking server's service account, scoped to the mlflow-artifacts/
+        # prefix of the same shared bucket. Created here (not with the other
+        # IRSA roles) because it needs the resolved bucket identity above;
+        # must precede _apply_kubernetes_manifests, whose value overrides
+        # inject the role ARN into the chart's service-account annotation.
+        if self._mlflow_active():
+            self._create_mlflow_artifact_role(self.cluster_shared_identity)
+
         # Create the always-on general-purpose regional bucket (KMS key +
         # access-logs bucket + primary bucket). Provisioned unconditionally —
         # there is no cdk.json toggle and no feature flag gating its existence —
@@ -2548,6 +2557,98 @@ class GCORegionalStack(Stack):
             ],
         )
 
+    def _create_mlflow_artifact_role(self, shared: SharedBucketIdentity) -> None:
+        """Create the OIDC-only IRSA role MLflow uses for S3 artifact storage.
+
+        The community-charts mlflow chart creates a ``mlflow`` ServiceAccount
+        in the ``monitoring`` namespace; the value overrides annotate it with
+        this role's ARN so the tracking server exchanges its projected token
+        for credentials (the documented ``roleArn serviceaccount annotation``
+        path of ``artifactRoot.s3``). Controller-style posture: OIDC-only
+        (``include_pod_identity=False``), trust bound to exactly one
+        namespace/service-account pair.
+
+        Grants are deliberately narrower than the job-pod role's bucket-wide
+        grant: object access only under the ``mlflow-artifacts/`` prefix of
+        the cluster-shared bucket, ``ListBucket`` condition-scoped to the
+        same prefix, and KMS confined by ``kms:ViaService`` exactly like
+        ``_grant_cluster_shared_bucket_to_job_role``.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        self.mlflow_role = GCORegionalStack._create_irsa_role(
+            self,
+            "MlflowArtifactRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["mlflow"],
+            namespaces=["monitoring"],
+            include_pod_identity=False,
+        )
+
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+                resources=[f"{shared.arn}/mlflow-artifacts/*"],
+            )
+        )
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:ListBucket"],
+                resources=[shared.arn],
+                conditions={
+                    "StringLike": {
+                        "s3:prefix": "mlflow-artifacts/*",
+                    }
+                },
+            )
+        )
+        # GetBucketLocation cannot share the ListBucket statement: requests
+        # for it never carry the s3:prefix key, so the condition above would
+        # implicitly deny it.
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetBucketLocation"],
+                resources=[shared.arn],
+            )
+        )
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt", "kms:GenerateDataKey"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"s3.{shared.region}.{self.url_suffix}",
+                    }
+                },
+            )
+        )
+
+        acknowledge_nag_findings(
+            self.mlflow_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The MLflow artifact grants require two wildcard shapes: a "
+                        "mlflow-artifacts/* object-key suffix within the single shared "
+                        "bucket resolved from SSM, and KMS Resource::* because the "
+                        "global key ARN is not exported to this stack. KMS use is "
+                        "constrained by kms:ViaService to S3 in the bucket's region, "
+                        "and S3 access is separately limited to the artifact prefix."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/mlflow-artifacts/*",
+                    ],
+                },
+            ],
+        )
+
     def _create_regional_shared_bucket(self) -> None:
         """Create the always-on general-purpose regional bucket for this region.
 
@@ -3355,6 +3456,22 @@ class GCORegionalStack(Stack):
                 }
             )
 
+        # MLflow (on by default, requires observability): gate the tracking
+        # server's SQLite backend PVC (post-helm-mlflow-backend.yaml) on the
+        # toggle via the same unreplaced-placeholder mechanism; a disabled
+        # deployment leaves the file unapplied and the applier prunes a
+        # previously created claim (metadata is discarded, artifacts stay
+        # in S3).
+        if self._mlflow_active():
+            image_replacements.update(
+                {
+                    "{{MLFLOW_ENABLED}}": "true",
+                    "{{MLFLOW_BACKEND_SIZE}}": str(
+                        self.config.get_cluster_observability_config()["mlflow"]["persistence_size"]
+                    ),
+                }
+            )
+
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
 
@@ -4027,6 +4144,9 @@ class GCORegionalStack(Stack):
         if self._cost_monitoring_active():
             overrides["opencost"] = self._opencost_chart_values()
 
+        if self._mlflow_active():
+            overrides["mlflow"] = self._mlflow_chart_values()
+
         return overrides
 
     def _cost_monitoring_active(self) -> bool:
@@ -4039,6 +4159,47 @@ class GCORegionalStack(Stack):
         off together.
         """
         return self.config.get_cost_monitoring_enabled()
+
+    def _mlflow_active(self) -> bool:
+        """Return whether the MLflow tracking server deploys on this cluster.
+
+        Delegates to ``ConfigLoader.get_mlflow_enabled`` — the conjunction of
+        ``cluster_observability.mlflow.enabled`` and observability itself,
+        so the chart, its IRSA role, the gated backend PVC, and the value
+        overrides all switch together.
+        """
+        return self.config.get_mlflow_enabled()
+
+    def _mlflow_chart_values(self) -> dict[str, Any]:
+        """Build the MLflow value overrides that carry deployment tokens.
+
+        Only two things are dynamic — everything static (image pin, Recreate
+        strategy, PVC wiring, resources, posture toggles) lives in
+        ``charts.yaml``:
+
+        - ``artifactRoot.s3``: run artifacts go to the cluster-shared bucket
+          under ``mlflow-artifacts/<region>/`` — region-suffixed because each
+          regional tracking server numbers experiments independently, so a
+          shared root would interleave unrelated runs' artifacts.
+        - ``serviceAccount.annotations``: the IRSA role ARN, which is the
+          chart's documented credential path for S3 artifact storage.
+        """
+        return {
+            "values": {
+                "artifactRoot": {
+                    "s3": {
+                        "enabled": True,
+                        "bucket": self.cluster_shared_identity.name,
+                        "path": f"mlflow-artifacts/{self.deployment_region}",
+                    },
+                },
+                "serviceAccount": {
+                    "annotations": {
+                        "eks.amazonaws.com/role-arn": self.mlflow_role.role_arn,
+                    },
+                },
+            }
+        }
 
     def _opencost_chart_values(self) -> dict[str, Any]:
         """Build the OpenCost value overrides that carry deployment tokens.
@@ -4185,6 +4346,12 @@ class GCORegionalStack(Stack):
         # Operator CRDs exist before its ServiceMonitor renders.
         if self._cost_monitoring_active():
             enabled_charts.append("opencost")
+
+        # MLflow is driven by the on-by-default cluster_observability.mlflow
+        # sub-toggle and requires observability itself (monitoring namespace,
+        # gp3 StorageClass, ServiceMonitor discovery, tunnel access path).
+        if self._mlflow_active():
+            enabled_charts.append("mlflow")
 
         return enabled_charts
 

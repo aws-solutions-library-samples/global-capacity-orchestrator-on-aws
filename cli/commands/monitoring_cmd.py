@@ -60,6 +60,14 @@ _SERVICES: dict[str, dict[str, Any]] = {
         "remote_port": 9003,
         "default_local_port": 9003,
     },
+    # MLflow tracking server (release name = chart key). Service listens on
+    # 80 in-cluster; the local default is MLflow's canonical 5000 so it can
+    # run alongside the Grafana (3000) and Prometheus (9090) forwards.
+    "mlflow": {
+        "target": "svc/mlflow",
+        "remote_port": 80,
+        "default_local_port": 5000,
+    },
 }
 
 _MONITORING_NAMESPACE = "monitoring"

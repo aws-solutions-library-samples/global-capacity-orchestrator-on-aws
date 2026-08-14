@@ -564,7 +564,22 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     assert observability["alertmanager"]["enabled"] is True
     assert observability["prometheus-node-exporter"]["tolerations"]
 
+    # MLflow rides the observability conjunction: the chart is enabled, its
+    # overrides carry the SSM-resolved shared bucket, a region-suffixed
+    # artifact prefix, and the dedicated IRSA role annotation, and the
+    # backend-PVC gate placeholders resolve.
+    assert "mlflow" in enabled
+    mlflow_values = chart_overrides["mlflow"]["values"]
+    assert mlflow_values["artifactRoot"]["s3"]["enabled"] is True
+    assert "ReadClusterSharedBucket" in json.dumps(mlflow_values["artifactRoot"]["s3"]["bucket"])
+    assert mlflow_values["artifactRoot"]["s3"]["path"] == f"mlflow-artifacts/{_REGION}"
+    assert "MlflowArtifactRole" in json.dumps(
+        mlflow_values["serviceAccount"]["annotations"]["eks.amazonaws.com/role-arn"]
+    )
+
     replacements = properties["ImageReplacements"]
+    assert replacements["{{MLFLOW_ENABLED}}"] == "true"
+    assert replacements["{{MLFLOW_BACKEND_SIZE}}"] == "10Gi"
     expected_manifest_processor_values = {
         "{{MP_VALIDATION_ENABLED}}": "false",
         "{{MP_YAML_MAX_DEPTH}}": "50",

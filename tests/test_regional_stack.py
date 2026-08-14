@@ -193,10 +193,16 @@ class MockConfigLoader:
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+            "mlflow": {"enabled": True, "persistence_size": "10Gi"},
         }
 
     def get_cluster_observability_enabled(self):
         return bool(self.get_cluster_observability_config()["enabled"])
+
+    def get_mlflow_enabled(self):
+        # The real loader returns the conjunction with cluster observability.
+        obs = self.get_cluster_observability_config()
+        return bool(obs["mlflow"]["enabled"]) and bool(obs["enabled"])
 
     def get_cost_monitoring_config(self):
         # Mirrors the on-by-default cdk.json cost_monitoring defaults so

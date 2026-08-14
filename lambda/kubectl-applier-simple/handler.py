@@ -465,6 +465,11 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{KUBEFLOW_TRAINER_ENABLED}}", True): (
         ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),
     ),
+    ("{{MLFLOW_ENABLED}}", True): (
+        # Deliberately destructive on disable: the claim holds the tracking
+        # server's SQLite run METADATA. Run artifacts live in S3 (untouched).
+        ("v1", "PersistentVolumeClaim", "monitoring", "gco-mlflow-backend"),
+    ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),
         ("v1", "Service", "gco-system", "cost-monitor"),

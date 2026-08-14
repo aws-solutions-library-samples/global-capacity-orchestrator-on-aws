@@ -313,7 +313,7 @@
       }
     },
 
-    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
+    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). mlflow: MLflow tracking server sub-toggle, ON BY DEFAULT and effective only while observability is enabled (it shares the monitoring namespace, gp3 StorageClass, and tunnel access path); run artifacts go to the cluster-shared S3 bucket via IRSA, run metadata to an EBS PVC of mlflow.persistence_size, and access is 'gco monitoring open --service mlflow' (ClusterIP only, no ingress, no app-level auth — the authenticated tunnel is the boundary). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
     "cluster_observability": {
       "enabled": true,
       "grafana": {
@@ -328,6 +328,10 @@
       "alertmanager": {
         "enabled": true,
         "persistence_size": "5Gi"
+      },
+      "mlflow": {
+        "enabled": true,
+        "persistence_size": "10Gi"
       }
     },
 
