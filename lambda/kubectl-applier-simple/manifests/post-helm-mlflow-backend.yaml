@@ -38,3 +38,39 @@ spec:
   resources:
     requests:
       storage: "{{MLFLOW_BACKEND_SIZE}}"
+---
+# Egress for MLflow clients in gco-jobs. The namespace's zero-trust posture
+# (03-network-policies.yaml) limits job pods to DNS + 443-to-VPC-endpoints,
+# so tracking calls to the in-cluster server need an explicit allow. Scoped
+# to pods that opt in with the gco.io/mlflow-client label (see
+# examples/mlflow-tracking-job.yaml) and to the tracking server's pods only.
+# Port 5000 is the mlflow container port (NetworkPolicy applies post-DNAT);
+# 80 is the Service port, kept for CNIs that evaluate pre-translation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mlflow-clients
+  namespace: gco-jobs
+  labels:
+    project: gco
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      gco.io/mlflow-client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mlflow
+      ports:
+        - protocol: TCP
+          port: 5000
+        - protocol: TCP
+          port: 80

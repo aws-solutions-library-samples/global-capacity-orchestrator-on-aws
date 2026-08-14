@@ -1,0 +1,116 @@
+# MLflow Experiment Tracking Job Example
+#
+# Logs a tiny training run (params + a loss curve) to the in-cluster
+# MLflow tracking server over service DNS, then READS THE RUN BACK and
+# asserts every logged value round-tripped — proof the tracking pipeline
+# works end to end, not just that the POSTs returned 200.
+#
+# The tracking server (http://mlflow.monitoring) ships with the
+# observability bundle: run metadata lives on the server's gp3 volume,
+# run artifacts in the cluster-shared S3 bucket under
+# mlflow-artifacts/<region>/ via the server's own IAM role. This job
+# logs metrics and params only, so it needs no AWS credentials — the
+# pod label `gco.io/mlflow-client: "true"` grants it egress to the
+# tracking server through the platform's zero-trust NetworkPolicies.
+# Browse the result: gco monitoring open --service mlflow
+#
+# Prerequisites:
+#   - cluster_observability.enabled = true in cdk.json (the default)
+#   - cluster_observability.mlflow.enabled = true in cdk.json (the default)
+#
+# Usage:
+#   gco jobs submit-direct examples/mlflow-tracking-job.yaml -r us-east-1
+#
+# Docs: ../docs/MONITORING.md
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlflow-tracking-example
+  namespace: gco-jobs
+  labels:
+    app: mlflow-tracking-example
+    project: gco
+spec:
+  template:
+    metadata:
+      labels:
+        # Grants egress to the tracking server (see the allow-mlflow-clients
+        # NetworkPolicy shipped with the MLflow feature).
+        gco.io/mlflow-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: mlflow-client
+        image: python:3.14.7-slim
+        command:
+        - python
+        - -c
+        - |
+          import math, os, subprocess, sys
+
+          # mlflow-skinny is the client-only distribution (no server deps).
+          subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                 "--target", "/tmp/pylib", "mlflow-skinny", "-q"])
+          sys.path.insert(0, "/tmp/pylib")
+
+          import mlflow
+
+          tracking_uri = os.environ["MLFLOW_TRACKING_URI"]
+          mlflow.set_tracking_uri(tracking_uri)
+          print(f"Tracking to {tracking_uri}")
+
+          experiment = "gco-tracking-example"
+          mlflow.set_experiment(experiment)
+
+          params = {"optimizer": "sgd", "learning_rate": "0.1", "epochs": "5"}
+          losses = [2.0 * math.exp(-0.8 * epoch) for epoch in range(5)]
+
+          with mlflow.start_run(run_name="smoke-run") as run:
+              mlflow.log_params(params)
+              for epoch, loss in enumerate(losses):
+                  mlflow.log_metric("loss", loss, step=epoch)
+              run_id = run.info.run_id
+          print(f"Logged run {run_id}: {len(params)} params, {len(losses)} loss points")
+
+          # Read-back assertion: fetch the run through the API and compare
+          # against what was sent. A tracking server that acknowledged the
+          # writes but persisted nothing fails here.
+          client = mlflow.tracking.MlflowClient()
+          fetched = client.get_run(run_id)
+          assert fetched.data.params == params, (
+              f"params round-trip failed: {fetched.data.params} != {params}"
+          )
+          history = client.get_metric_history(run_id, "loss")
+          fetched_losses = [entry.value for entry in sorted(history, key=lambda m: m.step)]
+          assert len(fetched_losses) == len(losses), (
+              f"expected {len(losses)} loss points, got {len(fetched_losses)}"
+          )
+          for sent, got in zip(losses, fetched_losses):
+              assert abs(sent - got) < 1e-9, f"loss round-trip failed: {got} != {sent}"
+          assert fetched.info.status == "FINISHED"
+
+          print(f"Read-back verified: run {run_id} in experiment {experiment!r}")
+          print("Browse it: gco monitoring open --service mlflow")
+        env:
+        - name: MLFLOW_TRACKING_URI
+          # Chart release `mlflow` in the monitoring namespace, port 80.
+          value: "http://mlflow.monitoring:80"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      restartPolicy: Never
+  backoffLimit: 2

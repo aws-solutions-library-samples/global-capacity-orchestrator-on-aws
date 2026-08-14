@@ -76,11 +76,15 @@ class TestStaticChecksAsCiGate:
 class TestDerivedOverrides:
     def test_full_selection_needs_every_override(self) -> None:
         names = sorted(EXAMPLE_SPECS)
+        # kubeflow-trainjob and mlflow-tracking-job deliberately contribute
+        # nothing here: the trainer chart and the observability/MLflow bundle
+        # are on by default, so a stock deploy already satisfies them.
         assert required_helm_overrides(names) == ("slurm", "yunikorn")
         assert required_feature_overrides(names) == (
             "aurora_pgvector",
             "fsx_lustre",
             "valkey",
+            "vector_store",
         )
 
     def test_narrow_selection_needs_nothing(self) -> None:

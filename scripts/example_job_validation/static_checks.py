@@ -386,6 +386,14 @@ def _pod_spec_and_parallelism(doc: dict[str, Any], kind: str) -> tuple[dict[str,
         return template_spec, int(spec.get("replicas", 1) or 1)
     if kind == "Pod":
         return spec or None, 1
+    if kind == "TrainJob":
+        # A TrainJob runs its spec.trainer view once per node; the shared
+        # decomposition builds the same synthetic pod spec the deployed
+        # validators check, so the offline governance math matches theirs.
+        from gco.services.manifest_processor import extract_trainjob_pod_specs
+
+        trainjob_specs = extract_trainjob_pod_specs(doc)
+        return trainjob_specs.trainer, trainjob_specs.num_nodes
     return None, 1
 
 

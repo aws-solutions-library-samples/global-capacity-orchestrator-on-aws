@@ -30,6 +30,7 @@ from .specs import (
     SUBMIT_API,
     SUBMIT_DIRECT,
     SUBMIT_SQS,
+    TRAINJOB_COMPLETES,
     VCJOB_COMPLETES,
 )
 from .static_checks import ParsedExample
@@ -363,6 +364,45 @@ def wait_vcjob_completes(
     raise ExampleValidationError(f"vcjob {namespace}/{name} did not complete within {timeout}s")
 
 
+def wait_trainjob_completes(
+    parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
+) -> dict[str, Any]:
+    """Kubeflow TrainJob must reach condition Complete (Failed is terminal).
+
+    Evidence carries the terminal condition plus the per-child-Job counts
+    from status.jobsStatus so the report shows the gang actually ran
+    (numNodes pods succeeded), not merely that a condition flipped.
+    """
+    trainjobs = _workload_documents(parsed, {"TrainJob"})
+    namespace = trainjobs[0]["metadata"].get("namespace", "gco-jobs")
+    name = trainjobs[0]["metadata"]["name"]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        code, out, _ = kubectl("get", "trainjob", name, "-n", namespace, "-o", "json")
+        if code == 0:
+            status = json.loads(out).get("status", {}) or {}
+            jobs_status = status.get("jobsStatus", []) or []
+            for condition in status.get("conditions", []) or []:
+                if condition.get("status") != "True":
+                    continue
+                if condition.get("type") == "Complete":
+                    return {
+                        "trainjob": f"{namespace}/{name}",
+                        "condition": "Complete",
+                        "jobsStatus": jobs_status,
+                    }
+                if condition.get("type") == "Failed":
+                    raise ExampleValidationError(
+                        f"TrainJob {namespace}/{name} reached condition Failed: "
+                        f"{condition.get('message', '')}"
+                    )
+        time.sleep(_POLL_SECONDS)
+    _, describe, _ = kubectl("describe", "trainjob", name, "-n", namespace, timeout=60)
+    raise ExampleValidationError(
+        f"TrainJob {namespace}/{name} did not complete within {timeout}s; tail: {describe[-600:]}"
+    )
+
+
 def wait_scaledjob_scales(
     parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
 ) -> dict[str, Any]:
@@ -398,6 +438,7 @@ CRITERIA_WAITERS = {
     RAYCLUSTER_READY: wait_raycluster_ready,
     VCJOB_COMPLETES: wait_vcjob_completes,
     SCALEDJOB_SCALES: wait_scaledjob_scales,
+    TRAINJOB_COMPLETES: wait_trainjob_completes,
 }
 
 

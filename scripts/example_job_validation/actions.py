@@ -113,6 +113,13 @@ def _run_one_example(
     evidence: dict[str, Any] = {}
     keda_queue: drivers.KedaDemoQueue | None = None
     try:
+        if spec.setup_driver and spec.setup_driver != "keda-demo-queue":
+            # Fail closed: a spec naming a driver this dispatcher does not
+            # implement must fail loudly, not run without its precondition
+            # and report an unearned pass.
+            raise ExampleValidationError(
+                f"setup driver {spec.setup_driver!r} is not implemented in actions._run_one_example"
+            )
         if spec.setup_driver == "keda-demo-queue":
             role_arn = _keda_operator_role_arn(kubectl)
             keda_queue = drivers.KedaDemoQueue(

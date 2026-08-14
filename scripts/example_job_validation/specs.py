@@ -39,6 +39,7 @@ DEPLOYMENT_AVAILABLE = "deployment-available"  # Deployment Available + Service 
 RAYCLUSTER_READY = "raycluster-ready"  # RayCluster ready: head + minReplicas workers
 VCJOB_COMPLETES = "vcjob-completes"  # batch.volcano.sh Job phase Completed
 SCALEDJOB_SCALES = "scaledjob-scales"  # KEDA ScaledJob spawns >=1 Job from queue depth
+TRAINJOB_COMPLETES = "trainjob-completes"  # trainer.kubeflow.org TrainJob condition Complete
 DAG_SUCCEEDS = "dag-succeeds"  # gco dag run exits 0 with all steps completed
 NONE = "none"  # companion artifacts: static checks only
 
@@ -112,6 +113,29 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             SUBMIT_DIRECT,
             JOB_COMPLETES,
             feature_overrides=("aurora_pgvector",),
+        ),
+        ExampleSpec(
+            "vector-store-search-job",
+            SUBMIT_DIRECT,
+            JOB_COMPLETES,
+            feature_overrides=("vector_store",),
+            setup_driver="vector-demo-corpus",
+            notes=(
+                "read-only search; the setup driver ingests the bundled demo "
+                "corpus (gco vector ingest --demo --wait) so the >=1-hit "
+                "self-assert has something to find"
+            ),
+        ),
+        ExampleSpec(
+            "mlflow-tracking-job",
+            SUBMIT_DIRECT,
+            JOB_COMPLETES,
+            setup_driver="mlflow-ready",
+            notes=(
+                "tracking server ships with the default-on observability "
+                "bundle (no override key needed); the setup driver waits for "
+                "the mlflow Deployment before the client job submits"
+            ),
         ),
         ExampleSpec(
             "valkey-cache-job",
@@ -267,6 +291,19 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             KUBECTL_APPLY,
             RAYCLUSTER_READY,
             timeout_seconds=1200,
+        ),
+        ExampleSpec(
+            "kubeflow-trainjob",
+            SUBMIT_SQS,
+            TRAINJOB_COMPLETES,
+            setup_driver="trainer-runtime-ready",
+            timeout_seconds=1800,
+            notes=(
+                "CPU-sized 2-node torchrun all-reduce; the trainer chart is "
+                "on by default (no override key), the setup driver waits for "
+                "the TrainJob CRD and the torch-distributed runtime, and the "
+                "timeout absorbs the multi-GB pytorch image pull on both nodes"
+            ),
         ),
         ExampleSpec(
             "keda-scaled-job",

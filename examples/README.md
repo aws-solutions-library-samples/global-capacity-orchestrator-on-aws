@@ -20,9 +20,11 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [Inference Frameworks](#inference-frameworks)
   - [Inferentia Job](#inferentia-job)
   - [KEDA Autoscaled Job](#keda-autoscaled-job)
+  - [Kubeflow TrainJob](#kubeflow-trainjob)
   - [Kueue Job Queueing](#kueue-job-queueing)
   - [Mission Semantic-Progress Judge](#mission-semantic-progress-judge)
   - [Mission Training-Loss Observation](#mission-training-loss-observation)
+  - [MLflow Tracking Job](#mlflow-tracking-job)
   - [Model Download Job](#model-download-job)
   - [Multi-GPU Distributed Training](#multi-gpu-distributed-training)
   - [Ray Cluster](#ray-cluster)
@@ -31,6 +33,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [SQS Job Submission](#sqs-job-submission)
   - [Trainium Job](#trainium-job)
   - [Valkey Cache Job](#valkey-cache-job)
+  - [Vector Store Search Job](#vector-store-search-job)
   - [Volcano Gang Scheduling](#volcano-gang-scheduling)
   - [YuniKorn Hierarchical Queues](#yunikorn-hierarchical-queues)
 - [Customizing Examples](#customizing-examples)
@@ -61,9 +64,11 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [Triton](#inference-frameworks) | `inference-triton.yaml` | Inference | ✅ | — |
 | [vLLM](#inference-frameworks) | `inference-vllm.yaml` | Inference | ✅ | — |
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
+| [Kubeflow TrainJob](#kubeflow-trainjob) | `kubeflow-trainjob.yaml` | Jobs | Optional | — |
 | [Kueue](#kueue-job-queueing) | `kueue-job.yaml` | Scheduler | Optional | — |
 | [Mission Semantic-Progress](#mission-semantic-progress-judge) | `mission-semantic-progress-criteria.json` | Mission | — | Mission, Semantic-Progress |
 | [Mission Training-Loss](#mission-training-loss-observation) | `mission-training-loss-criteria.json`, `megatrain-trainer-state.json` | Mission | — | Mission |
+| [MLflow Tracking](#mlflow-tracking-job) | `mlflow-tracking-job.yaml` | Jobs | — | — |
 | [Model Download](#model-download-job) | `model-download-job.yaml` | Jobs | — | — |
 | [Multi-GPU Training](#multi-gpu-distributed-training) | `multi-gpu-training.yaml` | Jobs | ✅ | — |
 | [Pipeline DAG](#dag-pipeline) | `pipeline-dag.yaml` | Pipeline | — | — |
@@ -73,6 +78,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [SQS Submission](#sqs-job-submission) | `sqs-job-submission.yaml` | Jobs | Optional | — |
 | [Trainium](#trainium-job) | `trainium-job.yaml` | Accelerator | [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) | — |
 | [Valkey Cache](#valkey-cache-job) | `valkey-cache-job.yaml` | Caching | — | Valkey |
+| [Vector Store Search](#vector-store-search-job) | `vector-store-search-job.yaml` | Database | — | Vector store |
 | [Volcano Gang](#volcano-gang-scheduling) | `volcano-gang-job.yaml` | Scheduler | — | — |
 | [YuniKorn](#yunikorn-hierarchical-queues) | `yunikorn-job.yaml` | Scheduler | — | YuniKorn |
 
@@ -347,6 +353,32 @@ kubectl apply -f examples/keda-scaled-job.yaml
 
 ---
 
+### Kubeflow TrainJob
+
+**File:** `kubeflow-trainjob.yaml`
+
+Runs a 2-node distributed PyTorch all-reduce through the Kubeflow Trainer v2 `TrainJob` API against the platform-shipped `torch-distributed` runtime. The runtime supplies the pod template and torchrun rendezvous wiring; the manifest only declares what to run (`spec.trainer`) and how wide (`numNodes`). Trainer v2 supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) with one `TrainJob` kind plus runtime blueprints. Deliberately CPU-sized so the distributed plumbing is provable without accelerator quota — the manifest documents the GPU variant (per-node GPU resources plus a toleration delivered via `runtimePatches`).
+
+The trainer controller compiles the TrainJob into a JobSet whose child Job `<name>-node-0` runs `numNodes` indexed pods (completion index = node rank). The `gco jobs` commands resolve TrainJobs automatically: `gco jobs get`, `gco jobs delete`, and `gco jobs logs` (rank 0 by default, `--node N` for another rank) all work unchanged.
+
+**Prerequisites:** the Kubeflow Trainer addon, enabled by default (`"kubeflow_trainer": { "enabled": true }` under `helm` in `cdk.json`).
+
+**Usage:**
+
+```bash
+gco jobs submit-sqs examples/kubeflow-trainjob.yaml --region us-east-1
+gco jobs logs kubeflow-trainjob-example -r us-east-1          # rank 0
+gco jobs logs kubeflow-trainjob-example -r us-east-1 --node 1 # rank 1
+```
+
+**Gang scheduling (optional):** add the label `kueue.x-k8s.io/queue-name: gco-default` to admit the whole gang through the platform's Kueue queue at once; unlabeled TrainJobs run immediately.
+
+**Demonstrates:** TrainJob API, runtime blueprints, torchrun rendezvous via injected `PET_*` env, verified multi-node all-reduce, TrainJob-aware CLI lifecycle.
+
+**When to use:** Multi-node training without hand-writing JobSets or per-framework CRDs; the on-ramp to distributed PyTorch on GCO.
+
+---
+
 ### Kueue Job Queueing
 
 **File:** `kueue-job.yaml`
@@ -451,6 +483,29 @@ The Mission loop calls `metrics_from_shared_storage_file` each iteration with th
 Switch `aggregation` to `last` to track the current step's loss instead of the best-so-far. To observe the held-out metric instead, set `field` to `eval_loss`.
 
 **When to use:** Goal-directed training runs where a `metric_threshold` criterion should observe a metric a HF Trainer persisted (loss, eval loss, perplexity) without writing a custom log-scraping tool.
+
+---
+
+### MLflow Tracking Job
+
+**File:** `mlflow-tracking-job.yaml`
+
+Logs a tiny training run (params plus a loss curve) to the in-cluster MLflow tracking server over service DNS (`http://mlflow.monitoring:80`), then reads the run back through the API and asserts every logged value round-tripped — proving the tracking pipeline end to end rather than trusting acknowledged writes. The pod opts into egress to the tracking server with the `gco.io/mlflow-client: "true"` label (the `gco-jobs` namespace is otherwise egress-isolated).
+
+The tracking server ships with the observability bundle: run metadata persists on its gp3 volume, and run artifacts land in the cluster-shared S3 bucket under `mlflow-artifacts/<region>/` via the server's own IAM role. This example logs metrics and params only, so the client needs no AWS credentials.
+
+**Prerequisites:** `cluster_observability.enabled` and `cluster_observability.mlflow.enabled` in `cdk.json` — both are the defaults.
+
+**Usage:**
+
+```bash
+gco jobs submit-direct examples/mlflow-tracking-job.yaml -r us-east-1
+gco monitoring open --service mlflow   # browse the logged run at http://localhost:5000
+```
+
+**Demonstrates:** MLflow client-to-server tracking over service DNS, params/metrics logging, read-back verification, opt-in NetworkPolicy egress labels.
+
+**When to use:** Track experiments from any training job on the cluster; verify the tracking stack before wiring real training code to it.
 
 ---
 
@@ -607,6 +662,27 @@ gco jobs submit-direct examples/valkey-cache-job.yaml -r us-east-1
 **Demonstrates:** Prompt caching, feature embedding storage, session state management, TTL-based expiry.
 
 **When to use:** LLM prompt caching, feature stores, session state, any workload needing low-latency key-value access.
+
+---
+
+### Vector Store Search Job
+
+**File:** `vector-store-search-job.yaml`
+
+Read-only semantic search against the built-in DynamoDB vector store: embeds a query with the same Bedrock model and width the corpus was built with (both read from the `gco-vector-store` ConfigMap — vectors from any other model or width are not comparable), calls the DynamoDB `SearchVectors` API against the cluster's local global-table replica, and asserts at least one hit. The job never writes: ingest is an operator action.
+
+**Prerequisites:** enable the vector store in `cdk.json` (`"vector_store": { "enabled": true }`), redeploy, and ingest a corpus — `gco vector ingest --demo --wait` loads the bundled demo corpus and blocks until the index answers queries.
+
+**Usage:**
+
+```bash
+gco vector ingest --demo --wait   # once, to have something to find
+gco jobs submit-direct examples/vector-store-search-job.yaml -r us-east-1
+```
+
+**Demonstrates:** ConfigMap-driven embedding contract, Bedrock query embedding, `SearchVectors` against the local replica, IRSA credentials, self-asserting search results.
+
+**When to use:** RAG retrieval or semantic search from workloads, anywhere in any deployment region, without running your own vector database.
 
 ---
 

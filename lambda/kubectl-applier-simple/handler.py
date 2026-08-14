@@ -469,6 +469,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         # Deliberately destructive on disable: the claim holds the tracking
         # server's SQLite run METADATA. Run artifacts live in S3 (untouched).
         ("v1", "PersistentVolumeClaim", "monitoring", "gco-mlflow-backend"),
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),

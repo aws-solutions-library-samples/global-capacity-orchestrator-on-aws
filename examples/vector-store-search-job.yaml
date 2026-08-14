@@ -1,0 +1,162 @@
+# Vector Store Search Job Example
+#
+# Semantic search against the built-in DynamoDB vector store: embeds a
+# query with the SAME Bedrock model and width the corpus was built with
+# (both read from the gco-vector-store ConfigMap — vectors from any other
+# model or width are not comparable), then calls the DynamoDB
+# SearchVectors API against the local global-table replica and asserts
+# at least one hit comes back. READ-ONLY: this job never writes to the
+# table or the corpus bucket; ingest is an operator action
+# (`gco vector ingest`).
+#
+# The ConfigMap's `region` key is deliberately the cluster's own region —
+# the table is a DynamoDB global table with a replica in every deployment
+# region, so workloads always query locally. Credentials come from IRSA
+# (role_arn + projected token), same as the Aurora example.
+#
+# Prerequisites:
+#   - vector_store.enabled = true in cdk.json (global + regional redeploy)
+#   - An ingested corpus: `gco vector ingest --demo --wait` loads the
+#     bundled demo corpus and blocks until the index answers queries
+#
+# Usage:
+#   gco jobs submit-direct examples/vector-store-search-job.yaml -r us-east-1
+#
+# Docs: ../docs/CUSTOMIZATION.md#configure-the-vector-store
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vector-store-search-example
+  namespace: gco-jobs
+  labels:
+    app: vector-store-search-example
+    project: gco
+spec:
+  template:
+    spec:
+      serviceAccountName: gco-service-account
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: vector-search
+        image: python:3.14.7-slim
+        command:
+        - python
+        - -c
+        - |
+          import json, os, subprocess, sys
+
+          subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                 "--target", "/tmp/pylib", "boto3", "-q"])
+          sys.path.insert(0, "/tmp/pylib")
+
+          import boto3
+
+          table = os.environ["VECTOR_TABLE_NAME"]
+          index = os.environ["VECTOR_INDEX_NAME"]
+          model_id = os.environ["VECTOR_EMBEDDING_MODEL_ID"]
+          dimensions = int(os.environ["VECTOR_DIMENSIONS"])
+          region = os.environ["AWS_REGION"]
+
+          query = "How do I schedule GPU training jobs across regions?"
+          print(f"Embedding query with {model_id} at {dimensions} dims: {query!r}")
+
+          # Titan embedding contract — identical to the ingest pipeline's
+          # builder so query vectors live in the same space as the corpus.
+          body = {"inputText": query}
+          if "titan-embed-text-v2" in model_id:
+              body["dimensions"] = dimensions
+          bedrock = boto3.client("bedrock-runtime", region_name=region)
+          response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+          vector = json.loads(response["body"].read())["embedding"]
+          assert len(vector) == dimensions, (
+              f"embedding width {len(vector)} != configured index width {dimensions}"
+          )
+
+          # SearchVectors runs against this region's global-table replica.
+          # This is the entire write surface of this job: none — search only.
+          dynamodb = boto3.client("dynamodb", region_name=region)
+          result = dynamodb.search_vectors(
+              TableName=table,
+              IndexName=index,
+              SearchVector=[{"N": str(value)} for value in vector],
+              TopK=3,
+          )
+          hits = result.get("SearchResults", [])
+          print(f"SearchVectors returned {len(hits)} hit(s) from {table}/{index}")
+          for entry in hits:
+              item = entry.get("Item", {})
+              title = item.get("title", {}).get("S", "?")
+              source = item.get("source", {}).get("S", "?")
+              print(f"  score={entry.get('Score')}  title={title!r}  source={source}")
+
+          # Self-assert: an ingested corpus must answer with at least one
+          # chunk; zero hits means the corpus is missing or was built with
+          # a different embedding contract.
+          if not hits:
+              print("FAILED: no hits — has `gco vector ingest --demo --wait` run?")
+              sys.exit(1)
+          print("\nVector store search completed successfully!")
+        env:
+        - name: VECTOR_TABLE_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: table_name
+        - name: VECTOR_INDEX_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: index_name
+        - name: VECTOR_EMBEDDING_MODEL_ID
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: embedding_model_id
+        - name: VECTOR_DIMENSIONS
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: dimensions
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: region
+        - name: AWS_ROLE_ARN
+          valueFrom:
+            configMapKeyRef:
+              name: gco-vector-store
+              key: role_arn
+        - name: AWS_WEB_IDENTITY_TOKEN_FILE
+          value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+        volumeMounts:
+        - name: aws-iam-token
+          mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      volumes:
+      - name: aws-iam-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: sts.amazonaws.com
+              expirationSeconds: 86400
+              path: token
+      restartPolicy: Never
+  backoffLimit: 2

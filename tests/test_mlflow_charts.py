@@ -304,34 +304,61 @@ class TestMlflowBackendManifest:
         )
         assert not re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", body)
 
-    def test_manifest_renders_the_backend_claim(self, manifest_text):
+    @staticmethod
+    def _rendered_docs(manifest_text: str) -> dict[str, dict[str, Any]]:
         rendered = manifest_text.replace("{{MLFLOW_ENABLED}}", "true").replace(
             "{{MLFLOW_BACKEND_SIZE}}", "10Gi"
         )
-        (claim,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
-        assert claim["kind"] == "PersistentVolumeClaim"
+        return {doc["kind"]: doc for doc in yaml.safe_load_all(rendered) if doc}
+
+    def test_manifest_renders_the_backend_claim(self, manifest_text):
+        claim = self._rendered_docs(manifest_text)["PersistentVolumeClaim"]
         assert claim["metadata"]["name"] == "gco-mlflow-backend"
         assert claim["metadata"]["namespace"] == "monitoring"
         assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
         assert claim["spec"]["resources"]["requests"]["storage"] == "10Gi"
 
     def test_claim_uses_the_observability_storage_class(self, manifest_text):
-        rendered = manifest_text.replace("{{MLFLOW_ENABLED}}", "true").replace(
-            "{{MLFLOW_BACKEND_SIZE}}", "10Gi"
-        )
-        (claim,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
+        claim = self._rendered_docs(manifest_text)["PersistentVolumeClaim"]
         # Lockstep with the gated StorageClass manifest and the constant the
         # stack injects into kube-prometheus-stack values. The conjunction
         # guarantees the class exists whenever this claim applies.
         assert claim["spec"]["storageClassName"] == _OBSERVABILITY_STORAGE_CLASS
 
     def test_claim_name_matches_the_chart_volume_wiring(self, manifest_text, charts):
-        rendered = manifest_text.replace("{{MLFLOW_ENABLED}}", "true").replace(
-            "{{MLFLOW_BACKEND_SIZE}}", "10Gi"
-        )
-        (claim,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
+        claim = self._rendered_docs(manifest_text)["PersistentVolumeClaim"]
         (volume,) = charts["mlflow"]["values"]["extraVolumes"]
         assert claim["metadata"]["name"] == volume["persistentVolumeClaim"]["claimName"]
+
+    def test_client_egress_policy_targets_opted_in_pods_only(self, manifest_text):
+        """gco-jobs is egress-isolated; only labeled pods may reach the
+        tracking server, and only the tracking server's pods."""
+        policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
+        assert policy["metadata"]["namespace"] == "gco-jobs"
+        assert policy["spec"]["podSelector"]["matchLabels"] == {
+            "gco.io/mlflow-client": "true"
+        }
+        assert policy["spec"]["policyTypes"] == ["Egress"]
+        (egress,) = policy["spec"]["egress"]
+        (to,) = egress["to"]
+        assert to["namespaceSelector"]["matchLabels"] == {
+            "kubernetes.io/metadata.name": "monitoring"
+        }
+        assert to["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "mlflow"}
+        ports = {entry["port"] for entry in egress["ports"]}
+        # 5000 = mlflow container port (post-DNAT); 80 = Service port.
+        assert ports == {5000, 80}
+
+    def test_example_job_carries_the_client_label(self, manifest_text):
+        """The shipped example must actually match the egress policy's
+        selector, or it hangs on connect with nothing explaining why."""
+        example = yaml.safe_load(
+            (_REPO_ROOT / "examples" / "mlflow-tracking-job.yaml").read_text(encoding="utf-8")
+        )
+        pod_labels = example["spec"]["template"]["metadata"]["labels"]
+        policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
+        selector = policy["spec"]["podSelector"]["matchLabels"]
+        assert selector.items() <= pod_labels.items()
 
 
 class TestApplierPruneInventory:
@@ -350,7 +377,10 @@ class TestApplierPruneInventory:
 
     def test_prune_inventory_removes_the_backend_claim_when_disabled(self, applier):
         targets = applier._FEATURE_RESOURCE_INVENTORY[("{{MLFLOW_ENABLED}}", True)]
-        assert targets == (("v1", "PersistentVolumeClaim", "monitoring", "gco-mlflow-backend"),)
+        assert targets == (
+            ("v1", "PersistentVolumeClaim", "monitoring", "gco-mlflow-backend"),
+            ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
+        )
 
     def test_inventory_matches_the_gated_manifest_resources(self, applier):
         rendered = (
