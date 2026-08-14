@@ -2,6 +2,18 @@
 
 GCO includes [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) for multi-node distributed training through the `TrainJob` API. The trainer is enabled by default.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [Submitting a TrainJob](#submitting-a-trainjob)
+- [Validation Semantics](#validation-semantics)
+- [GPU Training](#gpu-training)
+- [Gang Scheduling with Kueue](#gang-scheduling-with-kueue)
+- [Spot Capacity Guidance](#spot-capacity-guidance)
+- [Runtimes](#runtimes)
+- [Troubleshooting](#troubleshooting)
+
 ## Overview
 
 Kubeflow Trainer v2 separates *what to train* from *how the cluster runs it*. You submit a small `TrainJob` that names a runtime blueprint and declares your image, command, and node count; the trainer controller compiles that into a [JobSet](https://jobset.sigs.k8s.io/) with the correct `torchrun` rendezvous wiring, indexed pods, and restart semantics.
