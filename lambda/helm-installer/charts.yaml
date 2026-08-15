@@ -855,11 +855,15 @@ charts:
       # allowed_hosts: MLflow 3.x ships host-validation middleware that
       # 403s API requests whose Host header it does not recognize ("possible
       # DNS rebinding attack detected"), and setting the flag REPLACES the
-      # built-in localhost/private-IP allowance rather than extending it
-      # (Prometheus scrapes the pod IP directly and got 403 until the pod
-      # CIDR was listed — caught live 2026-08-14). Only the static
-      # service-DNS spellings live here (a DNS-name Host carries the port,
-      # hence both); at deploy time the regional stack REPLACES this value
+      # built-in localhost/private-IP allowance rather than extending it.
+      # Two live incidents came from that replacement: Prometheus scrapes
+      # the pod IP directly and got 403 until the pod CIDR was listed
+      # (2026-08-14), and `gco monitoring open --service mlflow` forwards to
+      # loopback, so the UI answered 403 until the localhost/127.0.0.1
+      # spellings were listed (2026-08-15) — the in-cluster DNS names
+      # returned 200 through the very same tunnel.
+      # Static spellings live here (a DNS-name Host carries the port, hence
+      # both forms); at deploy time the regional stack REPLACES this value
       # with the complete list, appending wildcard patterns derived from
       # cdk.json's vpc_endpoint_cidrs (single source of truth — see
       # _mlflow_allowed_hosts in gco/stacks/regional_stack.py) so the
@@ -869,7 +873,8 @@ charts:
       server:
         value_options:
           workers: 1
-          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000"
+          allowed_hosts: >-
+            mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"

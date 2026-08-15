@@ -204,16 +204,36 @@ _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 #: list (see ``_mlflow_allowed_hosts``).
 _MLFLOW_SERVICE_HOSTS = ("mlflow.monitoring", "mlflow.monitoring:5000")
 
+#: Loopback spellings a browser sends through the access tunnel.
+#:
+#: ``gco monitoring open --service mlflow`` is the ONLY human path to this
+#: server (ClusterIP, no Ingress), and it port-forwards to localhost — so the
+#: browser sends ``Host: localhost:5000`` or ``Host: 127.0.0.1:5000``. Because
+#: the flag replaces MLflow's built-in loopback allowance instead of extending
+#: it, omitting these makes the documented UI path answer 403 "possible DNS
+#: rebinding attack detected" while the server is perfectly healthy — the
+#: in-cluster DNS spellings return 200 through the very same tunnel (caught
+#: live 2026-08-15, taking the release screenshot).
+#:
+#: This restores upstream's own loopback posture rather than widening it: the
+#: rebinding attack these checks exist for is an external DNS name resolving
+#: to an internal address, which loopback literals cannot express. Reaching
+#: the port at all still requires the authenticated SSM tunnel, and arbitrary
+#: DNS names stay rejected.
+_MLFLOW_TUNNEL_HOSTS = ("localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000")
+
 
 def _mlflow_allowed_hosts(vpc_endpoint_cidrs: list[str]) -> str:
     """Compose the MLflow ``allowed-hosts`` list from the deployment's CIDRs.
 
-    The service-DNS spellings are static; the IP tail derives from
-    ``vpc_endpoint_cidrs`` (single source of truth — the same context key the
-    NetworkPolicy egress rules render) so widening the VPC range never needs
-    a matching charts.yaml edit. Prometheus scrapes the pod IP directly, so
-    dropping the pod-IP allowance 403s every ServiceMonitor scrape (caught
-    live, 2026-08-14).
+    The service-DNS and loopback spellings are static; the IP tail derives
+    from ``vpc_endpoint_cidrs`` (single source of truth — the same context key
+    the NetworkPolicy egress rules render) so widening the VPC range never
+    needs a matching charts.yaml edit. Every group is load-bearing:
+    Prometheus scrapes the pod IP directly, so dropping the pod-IP allowance
+    403s every ServiceMonitor scrape (caught live 2026-08-14); the tunnel
+    forwards to loopback, so dropping those 403s the only human UI path
+    (caught live 2026-08-15).
 
     MLflow's allow-list is glob-based, so only octet-aligned prefixes convert
     exactly; other masks WIDEN to the containing octet boundary (capped at
@@ -233,7 +253,7 @@ def _mlflow_allowed_hosts(vpc_endpoint_cidrs: list[str]) -> str:
         octets = str(network.network_address).split(".")
         kept = min(max(network.prefixlen // 8, 1), 3)
         patterns.append(".".join(octets[:kept]) + ".*")
-    return ",".join(dict.fromkeys([*_MLFLOW_SERVICE_HOSTS, *patterns]))
+    return ",".join(dict.fromkeys([*_MLFLOW_SERVICE_HOSTS, *_MLFLOW_TUNNEL_HOSTS, *patterns]))
 
 
 _SERVICE_IMAGE_BUILD_INPUTS = (

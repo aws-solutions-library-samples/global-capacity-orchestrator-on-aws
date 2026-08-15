@@ -286,7 +286,7 @@ class TestMlflowChartEntry:
         # here would silently drift from the VPC range.
         server = charts["mlflow"]["values"]["server"]
         assert server["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000"
+            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
         )
 
     def test_guaranteed_cpu_beats_the_fixed_liveness_window(self, charts):
@@ -372,7 +372,7 @@ class TestRegionalChartWiring:
         # scrape (caught live 2026-08-14). Deep merge keeps the static
         # workers value alongside.
         assert values["server"]["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,10.0.*"
+            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.0.*"
         )
 
     def test_overrides_exclude_mlflow_when_disabled(self, valid_cdk_context):
@@ -387,7 +387,7 @@ class TestRegionalChartWiring:
         ctx["vpc_endpoint_cidrs"] = ["10.0.0.0/16", "172.31.0.0/16"]
         overrides = RS._helm_chart_value_overrides(_stub(ctx))
         assert overrides["mlflow"]["values"]["server"]["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,10.0.*,172.31.*"
+            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.0.*,172.31.*"
         )
 
 
@@ -402,6 +402,36 @@ class TestMlflowAllowedHostsDerivation:
     def test_service_dns_spellings_always_lead(self):
         hosts = _mlflow_allowed_hosts(["10.0.0.0/16"]).split(",")
         assert hosts[:2] == ["mlflow.monitoring", "mlflow.monitoring:5000"]
+
+    def test_loopback_spellings_keep_the_tunnel_usable(self):
+        """The only human access path must not 403. Live incident pin.
+
+        ``gco monitoring open --service mlflow`` port-forwards to loopback
+        (ClusterIP service, no Ingress), so a browser sends
+        ``Host: localhost:<port>`` or ``Host: 127.0.0.1:<port>``. Setting
+        ``allowed-hosts`` REPLACES MLflow's built-in loopback allowance, so
+        omitting these answers 403 "possible DNS rebinding attack detected"
+        on a completely healthy server — verified live 2026-08-15, where the
+        in-cluster DNS spellings returned 200 through the very same tunnel
+        while both loopback spellings returned 403.
+        """
+        hosts = _mlflow_allowed_hosts(["10.0.0.0/16"]).split(",")
+        for spelling in ("localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"):
+            assert spelling in hosts, f"tunnel Host {spelling!r} would be rejected"
+
+    def test_loopback_port_matches_the_cli_forwarding_port(self):
+        """The allow-list port and the port the CLI binds must agree.
+
+        The middleware matches the raw Host header including the port, so a
+        drifted default in ``gco monitoring open`` would 403 the UI again
+        with nothing pointing at the cause.
+        """
+        from cli.commands.monitoring_cmd import _SERVICES
+
+        local_port = _SERVICES["mlflow"]["default_local_port"]
+        hosts = _mlflow_allowed_hosts(["10.0.0.0/16"]).split(",")
+        assert f"localhost:{local_port}" in hosts
+        assert f"127.0.0.1:{local_port}" in hosts
 
     def test_non_aligned_masks_widen_to_the_octet_boundary(self):
         # /12 cannot be a prefix glob; widening (to 10.*) is the safe
