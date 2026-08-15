@@ -1976,6 +1976,15 @@ jobs:
         # With Calico enforcing, this step plus the rollout gate below is a
         # real test of that policy: the probes have to traverse it.
         #
+        # Scope note: Calico re-programs pods when policies change, so the
+        # ORDERING hazard that made a supplemental policy insufficient in
+        # production is not reproducible here — the VPC CNI resolves a pod's
+        # policies at pod start and never revisits them, which is how a pod
+        # created 2s after a permissive policy was applied stayed stranded
+        # with only the restrictive one (live 2026-08-15). What this job can
+        # and does guard is the invariant that removes the hazard: exactly one
+        # policy, owned by GCO, selecting the server pod.
+        #
         # {{VPC_ENDPOINT_CIDR_BLOCKS}} is a deployment token that production
         # fills from cdk.json vpc_endpoint_cidrs — the CIDR range containing
         # the nodes. The faithful CI analogue is kind's own node CIDR, so it
