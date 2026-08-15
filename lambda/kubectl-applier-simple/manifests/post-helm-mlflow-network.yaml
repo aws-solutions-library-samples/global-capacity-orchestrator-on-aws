@@ -21,6 +21,59 @@
 # placeholder stays unreplaced, the applier skips this file, and
 # _FEATURE_RESOURCE_INVENTORY prunes previously created resources.
 ---
+# Let the kubelet's health probes reach the tracking server.
+#
+# The official chart ships its own pod NetworkPolicy (networkPolicy.enabled
+# in charts.yaml) whose ingress rule admits ONLY pod sources:
+#     from: [{podSelector: {}}, {namespaceSelector: {}}]
+# Kubelet HTTP probes do not come from a pod — they originate on the node's
+# host network (the node IP), which matches neither peer, so once the CNI
+# programs that policy every liveness and readiness probe is dropped. The
+# server stays healthy and answers /health 200 for anything that can reach
+# it, but the kubelet sees only timeouts, fails liveness three times, and
+# restarts the container forever: the Deployment never reports Available.
+# Caught live 2026-08-15 — the pod logged two /health 200s from the node IP
+# in its first seconds, then nothing at all across five restarts, with no
+# OOM and exit_status 137 from the stop timeout rather than a crash.
+#
+# NetworkPolicies are additive (a pod's allowed traffic is the UNION of every
+# policy selecting it), so this supplements the chart's policy instead of
+# replacing it: the chart keeps its egress restrictions (DNS + 443 + backend
+# ports) and its pod-source ingress, and this adds the node. Scoped to the
+# VPC CIDRs from cdk.json vpc_endpoint_cidrs — the same single source
+# _mlflow_allowed_hosts derives the server's --allowed-hosts globs from — and
+# to the server port only. This is a small delta on the chart's own posture,
+# which already admits every pod in every namespace on this port; nodes are
+# the one class it left out. GCO's own services keep probes working the same
+# way: the ingress rules in 03-network-policies.yaml omit `from` entirely
+# (see allow-alb-to-health-monitor), which admits any source on the port.
+#
+# The chart exposes no probe knobs (initialDelaySeconds/periodSeconds are
+# literals in its Deployment template, with no timeoutSeconds or
+# failureThreshold), so widening the probe budget is not an option; the
+# traffic has to be allowed to arrive.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mlflow-probes
+  namespace: monitoring
+  labels:
+    project: gco
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{VPC_ENDPOINT_CIDR_BLOCKS}}
+      ports:
+        - protocol: TCP
+          port: 5000
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

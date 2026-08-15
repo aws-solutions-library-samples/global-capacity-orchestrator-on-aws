@@ -431,23 +431,56 @@ class TestMlflowNetworkManifest:
         assert "{{MLFLOW_ENABLED}}" in manifest_text
 
     def test_no_other_upper_snake_tokens_leak(self, manifest_text):
-        body = manifest_text.replace("{{MLFLOW_ENABLED}}", "")
+        # Two deployment tokens are legitimate here: the feature gate and the
+        # VPC CIDR list the applier expands into ipBlock entries. Anything
+        # else would ship to the apiserver as a literal "{{...}}".
+        body = manifest_text.replace("{{MLFLOW_ENABLED}}", "").replace(
+            "{{VPC_ENDPOINT_CIDR_BLOCKS}}", ""
+        )
         assert not re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", body)
 
     @staticmethod
-    def _rendered_docs(manifest_text: str) -> dict[str, dict[str, Any]]:
-        rendered = manifest_text.replace("{{MLFLOW_ENABLED}}", "true")
-        return {doc["kind"]: doc for doc in yaml.safe_load_all(rendered) if doc}
+    def _render(manifest_text: str, cidrs: tuple[str, ...] = ("10.0.0.0/16",)) -> str:
+        """Substitute exactly like GCORegionalStack + the applier do.
+
+        The CIDR block is a multi-line YAML fragment whose first entry is
+        unindented (the manifest supplies that indent) and whose later
+        entries carry eight spaces — mirroring regional_stack's builder.
+        """
+        lines = [
+            f'{"" if index == 0 else "        "}- ipBlock:\n            cidr: "{cidr}"'
+            for index, cidr in enumerate(cidrs)
+        ]
+        return manifest_text.replace("{{MLFLOW_ENABLED}}", "true").replace(
+            "{{VPC_ENDPOINT_CIDR_BLOCKS}}", "\n".join(lines)
+        )
+
+    @classmethod
+    def _rendered_docs(
+        cls, manifest_text: str, cidrs: tuple[str, ...] = ("10.0.0.0/16",)
+    ) -> dict[str, dict[str, Any]]:
+        """Rendered documents keyed by metadata.name.
+
+        Keyed by NAME, not kind: the manifest ships two NetworkPolicies (the
+        client egress allow and the probe ingress allow), so a kind-keyed map
+        would silently drop one.
+        """
+        return {
+            doc["metadata"]["name"]: doc
+            for doc in yaml.safe_load_all(cls._render(manifest_text, cidrs))
+            if doc
+        }
 
     def test_manifest_ships_no_claim_anymore(self, manifest_text):
         # The metadata claim is chart-managed now (storage.enabled); a PVC
         # reappearing here would race the chart's own claim for the name.
-        assert "PersistentVolumeClaim" not in self._rendered_docs(manifest_text)
+        kinds = {doc["kind"] for doc in self._rendered_docs(manifest_text).values()}
+        assert "PersistentVolumeClaim" not in kinds
 
     def test_client_egress_policy_targets_opted_in_pods_only(self, manifest_text):
         """gco-jobs is egress-isolated; only labeled pods may reach the
         tracking server, and only the tracking server's pods."""
-        policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
+        policy = self._rendered_docs(manifest_text)["allow-mlflow-clients"]
         assert policy["metadata"]["namespace"] == "gco-jobs"
         assert policy["spec"]["podSelector"]["matchLabels"] == {"gco.io/mlflow-client": "true"}
         assert policy["spec"]["policyTypes"] == ["Egress"]
@@ -470,9 +503,56 @@ class TestMlflowNetworkManifest:
             encoding="utf-8"
         )
         assert "http://mlflow.monitoring:5000" in example_text
-        policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
+        policy = self._rendered_docs(manifest_text)["allow-mlflow-clients"]
         (egress,) = policy["spec"]["egress"]
         assert {entry["port"] for entry in egress["ports"]} == {5000}
+
+    def test_probe_ingress_policy_admits_the_node_network(self, manifest_text):
+        """Kubelet probes must be able to reach the server. Live incident pin.
+
+        The official chart's own pod NetworkPolicy admits only pod sources
+        (``from: [podSelector {}, namespaceSelector {}]``). Kubelet HTTP
+        probes originate on the node's host network, so once that policy is
+        programmed every liveness/readiness probe is dropped: the server
+        answers /health 200 for anything that can reach it, the kubelet sees
+        only timeouts, and the container restarts forever without ever going
+        Available. Caught live 2026-08-15 (five restarts, no OOM, exit 137
+        from the stop timeout). NetworkPolicies are additive, so this
+        supplemental ingress adds the node while the chart keeps its egress
+        restrictions.
+        """
+        policy = self._rendered_docs(manifest_text)["allow-mlflow-probes"]
+        assert policy["metadata"]["namespace"] == "monitoring"
+        assert policy["spec"]["policyTypes"] == ["Ingress"]
+        # Must select the chart's pods, or the allow lands on nothing.
+        assert policy["spec"]["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "mlflow"}
+        (ingress,) = policy["spec"]["ingress"]
+        assert ingress["from"] == [{"ipBlock": {"cidr": "10.0.0.0/16"}}]
+        assert [entry["port"] for entry in ingress["ports"]] == [5000]
+
+    def test_probe_ingress_tracks_every_configured_vpc_cidr(self, manifest_text):
+        """The allow follows vpc_endpoint_cidrs, the same single source the
+        server's --allowed-hosts globs are derived from."""
+        policy = self._rendered_docs(manifest_text, ("10.0.0.0/16", "10.41.0.0/16"))[
+            "allow-mlflow-probes"
+        ]
+        (ingress,) = policy["spec"]["ingress"]
+        assert ingress["from"] == [
+            {"ipBlock": {"cidr": "10.0.0.0/16"}},
+            {"ipBlock": {"cidr": "10.41.0.0/16"}},
+        ]
+
+    def test_probe_policy_selector_matches_the_chart_pod_labels(self, manifest_text, charts):
+        """The probe allow's selector must match what the chart labels pods.
+
+        The chart derives pod labels from its release name, which GCO pins
+        with fullnameOverride; if that pin moves, this selector has to move
+        with it or the policy silently selects no pods and the crash-loop
+        returns.
+        """
+        policy = self._rendered_docs(manifest_text)["allow-mlflow-probes"]
+        selector = policy["spec"]["podSelector"]["matchLabels"]
+        assert selector["app.kubernetes.io/name"] == charts["mlflow"]["values"]["fullnameOverride"]
 
     def test_example_job_carries_the_client_label(self, manifest_text):
         """The shipped example must actually match the egress policy's
@@ -481,7 +561,7 @@ class TestMlflowNetworkManifest:
             (_REPO_ROOT / "examples" / "mlflow-tracking-job.yaml").read_text(encoding="utf-8")
         )
         pod_labels = example["spec"]["template"]["metadata"]["labels"]
-        policy = self._rendered_docs(manifest_text)["NetworkPolicy"]
+        policy = self._rendered_docs(manifest_text)["allow-mlflow-clients"]
         selector = policy["spec"]["podSelector"]["matchLabels"]
         assert selector.items() <= pod_labels.items()
 
@@ -505,6 +585,7 @@ class TestApplierPruneInventory:
         assert targets == (
             ("v1", "PersistentVolumeClaim", "monitoring", "mlflow"),
             ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
+            ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "allow-mlflow-probes"),
         )
 
     def test_inventory_covers_manifest_resources_plus_the_chart_claim(self, applier):
@@ -512,9 +593,7 @@ class TestApplierPruneInventory:
         # one resource that is deliberately NOT in a manifest: the
         # chart-managed metadata claim (fullnameOverride name), which helm
         # uninstall never deletes.
-        rendered = _NETWORK_MANIFEST.read_text(encoding="utf-8").replace(
-            "{{MLFLOW_ENABLED}}", "true"
-        )
+        rendered = TestMlflowNetworkManifest._render(_NETWORK_MANIFEST.read_text(encoding="utf-8"))
         manifest_resources = {
             (doc["kind"], doc["metadata"]["name"]) for doc in yaml.safe_load_all(rendered) if doc
         }

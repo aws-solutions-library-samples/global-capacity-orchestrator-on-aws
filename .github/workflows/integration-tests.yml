@@ -1606,6 +1606,15 @@ jobs:
     #      real cgroups; the rollout gate fails on an OOM crash-loop.
     #   5. mlflow host-validation 403s — probed with explicit Host headers
     #      (allowed DNS 200 / arbitrary DNS 403 / exempt /health 200).
+    #   6. mlflow probes dropped by the chart's own NetworkPolicy — the
+    #      policy admits only pod sources, so kubelet probes (host network)
+    #      were discarded and the pod restarted forever. This needs a CNI
+    #      that ENFORCES NetworkPolicy, which is why this job installs
+    #      Calico: the first version of this job ran on kind's default
+    #      kindnet, which accepts policies without enforcing them, and it
+    #      passed green while that bug was live (caught live 2026-08-15
+    #      instead, one full deploy cycle later). The rollout gate below is
+    #      only meaningful with enforcement on.
     #
     # What stays live-only (the harness in scripts/example_job_validation):
     # IRSA/S3 artifact writes, Bedrock vector search, Karpenter/GPU capacity,
@@ -1615,16 +1624,14 @@ jobs:
     # Chart refs, versions, namespaces, and values are read from
     # lambda/helm-installer/charts.yaml at run time via
     # validate_helm_charts.py --emit-ref / --emit-values, so this job can
-    # never drift from what the installer Lambda deploys. NetworkPolicy
-    # enforcement is deliberately out of scope here (kindnet does not
-    # enforce; that is integration:kind:cluster-e2e's Calico domain).
+    # never drift from what the installer Lambda deploys.
     #
     # Disk: the example's pytorch image is ~3.5GB compressed (~7.5GB in the
     # store) and transits the runner docker daemon AND the kind node, so the
     # job starts with the free-disk-space reclaim and drops the runner-side
     # copy right after `kind load`.
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       # Same pinned helm as integration:helm:charts-valid and the installer
       # Lambda (lambda/helm-installer/Dockerfile). The version-consistency
@@ -1635,6 +1642,11 @@ jobs:
       # The ServiceAccount the queue/manifest processors run as in
       # production, and the identity that applies the example here.
       PROCESSOR_SA: "system:serviceaccount:gco-system:gco-manifest-processor-sa"
+      # Same pins as integration:kind:cluster-e2e — the version-consistency
+      # section of dependency-scan.sh requires every declaration to agree,
+      # so bump them together.
+      CALICO_VERSION: "v3.32.1"
+      CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim runner disk space before large image pulls
@@ -1666,15 +1678,58 @@ jobs:
           rm -f "${archive}" "${install_dir}/helm"
           rmdir "${install_dir}"
           helm version --short
-      - name: Create kind cluster
+      - name: Create kind cluster (no default CNI)
         # Same kind/node pins as integration:kind:cluster-e2e (bump together;
-        # tracked by the dependency drift scan). Default CNI is fine here —
-        # nothing in this job asserts NetworkPolicy enforcement.
+        # tracked by the dependency drift scan). The default CNI is disabled
+        # so Calico can take over: kindnet accepts NetworkPolicy objects
+        # without enforcing them, and the mlflow leg of this job is only a
+        # real test when the chart's own policy is actually enforced.
         uses: helm/kind-action@v1.14.0
         with:
           version: "v0.32.0"
           node_image: "kindest/node:v1.36.1"
           cluster_name: "gco-examples-smoke"
+          config: ".github/kind/kind-calico.yaml"
+          # The control plane cannot go Ready without a CNI; the next step
+          # installs Calico and waits via rollout status.
+          wait: "0s"
+      - name: Install Calico for NetworkPolicy enforcement
+        # Mirrors the proven step in integration:kind:cluster-e2e, including
+        # the retry loop: calico-node readiness is a known CI flake because
+        # it pulls from quay.io and runs install-cni / mount-bpffs init
+        # containers, which can exceed one timeout window under runner
+        # image-pull latency. The apply is idempotent, so each attempt
+        # re-applies and re-waits.
+        run: |
+          set -euo pipefail
+          calico_manifest="${RUNNER_TEMP}/calico.yaml"
+          curl --fail --show-error --location --retry 3 \
+            --output "${calico_manifest}" \
+            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
+          kubectl apply -f "${calico_manifest}"
+
+          attempts=3
+          for i in $(seq 1 "${attempts}"); do
+            echo "::group::Calico rollout attempt ${i}/${attempts}"
+            kubectl apply -f "${calico_manifest}"
+            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
+               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
+              echo "Calico is ready."
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "Calico not ready on attempt ${i}/${attempts}."
+            echo "::endgroup::"
+            if [ "${i}" -lt "${attempts}" ]; then
+              sleep 15
+            fi
+          done
+
+          echo "::error::Calico did not become ready after ${attempts} attempts."
+          kubectl -n kube-system get pods -o wide || true
+          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
+          exit 1
       - name: Apply platform namespaces + RBAC
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the
@@ -1844,6 +1899,56 @@ jobs:
           helm install mlflow "${ref}" --version "${version}" \
             --namespace "${namespace}" --create-namespace \
             --values "${RUNNER_TEMP}/mlflow-values.yaml"
+      - name: Apply the post-Helm mlflow network policies
+        # The chart's own pod NetworkPolicy (networkPolicy.enabled in the
+        # shipped values) admits only POD sources, so it drops kubelet
+        # probes, which arrive from the node's host network. GCO ships a
+        # supplemental ingress allow for exactly that; with Calico enforcing,
+        # this is the step that makes the rollout gate below a real test of
+        # the pair.
+        #
+        # {{VPC_ENDPOINT_CIDR_BLOCKS}} is a deployment token that production
+        # fills from cdk.json vpc_endpoint_cidrs — the CIDR range containing
+        # the nodes. The faithful CI analogue is kind's own node CIDR, so it
+        # is derived from the live node addresses rather than hardcoded (kind
+        # runs on a docker network, typically 172.18.0.0/16, NOT the 10.0/16
+        # production default — hardcoding the production value here would
+        # "pass" while proving nothing).
+        run: |
+          set -euo pipefail
+          node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+          node_cidr="$(echo "${node_ip}" | awk -F. '{print $1"."$2".0.0/16"}')"
+          echo "kind node ${node_ip} -> allowing ${node_cidr}"
+          python3 - "${node_cidr}" <<'PY' > "${RUNNER_TEMP}/mlflow-network.yaml"
+          import sys
+          from pathlib import Path
+
+          cidr = sys.argv[1]
+          path = Path("lambda/kubectl-applier-simple/manifests/post-helm-mlflow-network.yaml")
+          text = path.read_text(encoding="utf-8")
+          # Same substitution GCORegionalStack performs: the first ipBlock
+          # entry carries no indent (the manifest supplies it).
+          block = f'- ipBlock:\n            cidr: "{cidr}"'
+          text = text.replace("{{VPC_ENDPOINT_CIDR_BLOCKS}}", block)
+          text = text.replace("{{MLFLOW_ENABLED}}", "true")
+          if "{{" in text:
+              raise SystemExit(f"unsubstituted token(s) remain: {text}")
+          print(text)
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/mlflow-network.yaml"
+          kubectl -n monitoring get networkpolicy allow-mlflow-probes
+          kubectl -n gco-jobs get networkpolicy allow-mlflow-clients
+          # Both the chart's policy and the supplement must select the pod;
+          # a selector typo would leave the crash-loop in place.
+          kubectl -n monitoring get networkpolicy -o json \
+            | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)['items']
+          names = sorted(i['metadata']['name'] for i in items)
+          print('monitoring NetworkPolicies:', names)
+          if 'mlflow' not in names or 'allow-mlflow-probes' not in names:
+              raise SystemExit('expected both the chart policy and the probe supplement')
+          "
       - name: Wait for mlflow to become Available (real probes, real cgroups)
         # This is the gate that catches the OOM and probe-window classes: the
         # shipped requests/limits are enforced by the node's cgroups and the
