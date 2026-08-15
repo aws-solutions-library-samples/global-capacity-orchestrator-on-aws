@@ -235,6 +235,24 @@ gco monitoring open --service mlflow          # http://localhost:5000
 gco monitoring open --service mlflow --via-ssm auto   # no VPC route? ephemeral bastion
 ```
 
+![MLflow tracking server run view — the smoke-run logged by examples/mlflow-tracking-job.yaml, showing its loss metric, the optimizer/learning_rate/epochs parameters, and a Finished status](../images/mlflow-ui.png)
+
+The run above is the one
+[`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
+logs, captured through the tunnel command above.
+
+> **Host-header allow-list.** MLflow 3.x validates the `Host` header and
+> rejects anything it does not recognize with a 403 ("possible DNS rebinding
+> attack detected"). Setting `--allowed-hosts` REPLACES its built-in
+> localhost/private-IP allowance rather than extending it, so GCO's list
+> carries every spelling that legitimately reaches the server: the in-cluster
+> service DNS (with and without the port), the loopback spellings this tunnel
+> forwards to, and a wildcard per `vpc_endpoint_cidrs` entry so Prometheus can
+> scrape the pod IP. The list is assembled at deploy time from that one
+> `cdk.json` key (see `_mlflow_allowed_hosts` in `gco/stacks/regional_stack.py`)
+> — arbitrary DNS names stay rejected, and `/health` is exempt so probes never
+> depend on it.
+
 **Auth posture.** The server runs without application-level authentication —
 the same posture as the OpenCost UI: it is reachable only from inside the
 cluster (workloads opt in via a NetworkPolicy label, and the chart's built-in
