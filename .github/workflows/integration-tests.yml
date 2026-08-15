@@ -1970,12 +1970,11 @@ jobs:
             --namespace "${namespace}" --create-namespace \
             --values "${RUNNER_TEMP}/mlflow-values.yaml"
       - name: Apply the post-Helm mlflow network policies
-        # The chart's own pod NetworkPolicy (networkPolicy.enabled in the
-        # shipped values) admits only POD sources, so it drops kubelet
-        # probes, which arrive from the node's host network. GCO ships a
-        # supplemental ingress allow for exactly that; with Calico enforcing,
-        # this is the step that makes the rollout gate below a real test of
-        # the pair.
+        # GCO owns the server's NetworkPolicy (the chart's is disabled in the
+        # shipped values because its ingress admits only POD sources and so
+        # drops kubelet probes, which arrive from the node's host network).
+        # With Calico enforcing, this step plus the rollout gate below is a
+        # real test of that policy: the probes have to traverse it.
         #
         # {{VPC_ENDPOINT_CIDR_BLOCKS}} is a deployment token that production
         # fills from cdk.json vpc_endpoint_cidrs — the CIDR range containing
@@ -2006,18 +2005,19 @@ jobs:
           print(text)
           PY
           kubectl apply -f "${RUNNER_TEMP}/mlflow-network.yaml"
-          kubectl -n monitoring get networkpolicy allow-mlflow-probes
+          kubectl -n monitoring get networkpolicy mlflow-server
           kubectl -n gco-jobs get networkpolicy allow-mlflow-clients
-          # Both the chart's policy and the supplement must select the pod;
-          # a selector typo would leave the crash-loop in place.
+          # GCO's policy must be the ONLY one selecting the server pod. A
+          # chart-shipped policy reappearing here would re-introduce the
+          # startup race that crash-looped the pod live on 2026-08-15: a
+          # restrictive rule programmed without the permissive one.
           kubectl -n monitoring get networkpolicy -o json \
             | python3 -c "
           import json, sys
-          items = json.load(sys.stdin)['items']
-          names = sorted(i['metadata']['name'] for i in items)
+          names = sorted(i['metadata']['name'] for i in json.load(sys.stdin)['items'])
           print('monitoring NetworkPolicies:', names)
-          if 'mlflow' not in names or 'allow-mlflow-probes' not in names:
-              raise SystemExit('expected both the chart policy and the probe supplement')
+          if names != ['mlflow-server']:
+              raise SystemExit(f'expected exactly [mlflow-server], got {names}')
           "
       - name: Wait for mlflow to become Available (real probes, real cgroups)
         # This is the gate that catches the OOM and probe-window classes: the

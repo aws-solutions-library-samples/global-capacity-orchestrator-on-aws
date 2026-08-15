@@ -255,8 +255,10 @@ logs, captured through the tunnel command above.
 
 **Auth posture.** The server runs without application-level authentication —
 the same posture as the OpenCost UI: it is reachable only from inside the
-cluster (workloads opt in via a NetworkPolicy label, and the chart's built-in
-NetworkPolicy fences the server pod itself) and through the authenticated
+cluster (workloads opt in via a NetworkPolicy label, and a GCO-owned
+NetworkPolicy fences the server pod itself — ingress on the server port from
+in-cluster pods and the VPC CIDRs, egress limited to DNS and 443) and through
+the authenticated
 SSM/port-forward tunnel, which is the security boundary. The chart supports
 MLflow's basic-auth plugin (`server.value_options.app_name` plus a
 Secret-backed CSRF key — see the chart docs) if your deployment needs an

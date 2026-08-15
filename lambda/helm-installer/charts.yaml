@@ -891,12 +891,31 @@ charts:
           value: "true"
         - name: DO_NOT_TRACK
           value: "true"
-      # Chart-built pod NetworkPolicy: ingress restricted to the server
-      # port, egress limited to DNS + 443 (S3 artifact writes ride the VPC
-      # endpoints). Client-side restriction lives in gco-jobs
-      # (allow-mlflow-clients, post-helm-mlflow-network.yaml).
+      # Chart NetworkPolicy stays OFF; GCO ships the server's policy itself
+      # (mlflow-server in post-helm-mlflow-network.yaml, which also carries
+      # the gco-jobs client egress allow).
+      #
+      # The chart's own policy restricts ingress to POD sources
+      # (podSelector/namespaceSelector only), which silently drops the
+      # kubelet's health probes — those arrive from the node's host network.
+      # A supplemental allow fixes the steady state, but not the startup
+      # race: the VPC CNI programs a pod's policy when the pod starts, so a
+      # pod created in the window before the permissive rule has propagated
+      # is left with only the restrictive one, and nothing re-triggers the
+      # programming. Caught live 2026-08-15: the mlflow pod started 2s after
+      # the supplemental policy was applied and then crash-looped through 11
+      # containers, never receiving a single probe, while Prometheus (a pod)
+      # scraped /metrics 200 the whole time.
+      #
+      # Owning the policy removes the failure mode instead of narrowing it:
+      # before GCO's policy lands the pod is simply unisolated (probes work),
+      # and after it lands probes are explicitly allowed (they work). There is
+      # no ordering in which the server ends up unreachable by its own
+      # kubelet. It also puts the server's whole network posture in one
+      # reviewable manifest that CI exercises under a NetworkPolicy-enforcing
+      # CNI (integration:kind:examples-smoke).
       networkPolicy:
-        enabled: true
+        enabled: false
       resources:
         requests:
           # A full guaranteed core (requests == limits), measured, not

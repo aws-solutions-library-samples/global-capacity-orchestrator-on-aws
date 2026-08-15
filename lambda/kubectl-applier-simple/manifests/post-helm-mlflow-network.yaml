@@ -21,41 +21,49 @@
 # placeholder stays unreplaced, the applier skips this file, and
 # _FEATURE_RESOURCE_INVENTORY prunes previously created resources.
 ---
-# Let the kubelet's health probes reach the tracking server.
+# The tracking server's complete network posture. GCO owns this instead of
+# the chart (charts.yaml sets networkPolicy.enabled: false).
 #
-# The official chart ships its own pod NetworkPolicy (networkPolicy.enabled
-# in charts.yaml) whose ingress rule admits ONLY pod sources:
+# WHY NOT THE CHART'S POLICY: its ingress rule admits only POD sources
 #     from: [{podSelector: {}}, {namespaceSelector: {}}]
-# Kubelet HTTP probes do not come from a pod — they originate on the node's
-# host network (the node IP), which matches neither peer, so once the CNI
-# programs that policy every liveness and readiness probe is dropped. The
-# server stays healthy and answers /health 200 for anything that can reach
-# it, but the kubelet sees only timeouts, fails liveness three times, and
-# restarts the container forever: the Deployment never reports Available.
-# Caught live 2026-08-15 — the pod logged two /health 200s from the node IP
-# in its first seconds, then nothing at all across five restarts, with no
-# OOM and exit_status 137 from the stop timeout rather than a crash.
+# and the kubelet's health probes are not pod traffic — they arrive from the
+# node's host network, match neither peer, and get dropped. The server keeps
+# answering /health 200 for anything that can reach it while the kubelet sees
+# only timeouts, fails liveness, and restarts the container forever, so the
+# Deployment never reports Available. The chart hardcodes its probes (no
+# timeoutSeconds/failureThreshold knobs), so the traffic has to be allowed to
+# arrive.
 #
-# NetworkPolicies are additive (a pod's allowed traffic is the UNION of every
-# policy selecting it), so this supplements the chart's policy instead of
-# replacing it: the chart keeps its egress restrictions (DNS + 443 + backend
-# ports) and its pod-source ingress, and this adds the node. Scoped to the
-# VPC CIDRs from cdk.json vpc_endpoint_cidrs — the same single source
-# _mlflow_allowed_hosts derives the server's --allowed-hosts globs from — and
-# to the server port only. This is a small delta on the chart's own posture,
-# which already admits every pod in every namespace on this port; nodes are
-# the one class it left out. GCO's own services keep probes working the same
-# way: the ingress rules in 03-network-policies.yaml omit `from` entirely
-# (see allow-alb-to-health-monitor), which admits any source on the port.
+# WHY OWNING IT BEATS SUPPLEMENTING IT: NetworkPolicies are additive, so a
+# second policy CAN re-allow the node — but only once the CNI has programmed
+# it. The VPC CNI resolves a pod's policies when the pod starts, and nothing
+# re-triggers that programming afterwards, so a pod created before the
+# permissive rule propagates keeps just the restrictive one. Caught live
+# 2026-08-15: the pod started 2 seconds after the supplemental policy was
+# applied and then crash-looped through 11 containers without receiving a
+# single probe, while Prometheus (a pod) scraped /metrics 200 throughout.
+# With GCO owning the only policy, every ordering is safe: before it lands
+# the pod is unisolated and probes work; after it lands probes are explicitly
+# allowed and work. The server can never end up unreachable by its own
+# kubelet.
 #
-# The chart exposes no probe knobs (initialDelaySeconds/periodSeconds are
-# literals in its Deployment template, with no timeoutSeconds or
-# failureThreshold), so widening the probe budget is not an option; the
-# traffic has to be allowed to arrive.
+# INGRESS: the server port only, from in-cluster pods (Prometheus scrapes
+# /metrics, gco-jobs clients log runs) and from the VPC CIDRs, which is what
+# covers the nodes the kubelet probes from. The CIDR list is the same
+# cdk.json vpc_endpoint_cidrs that _mlflow_allowed_hosts derives the
+# server's --allowed-hosts globs from, so one key governs both. GCO's own
+# services keep probes working the same way — the ingress rules in
+# 03-network-policies.yaml omit `from` entirely (allow-alb-to-health-monitor),
+# admitting any source on the port.
+#
+# EGRESS: DNS plus 443. That is everything the server needs: run metadata is
+# SQLite on its own volume (no database ports), and artifact writes reach S3
+# over the VPC endpoints on 443. Ports 5353 (UDP+TCP) ride along with 53
+# because some CNIs evaluate egress after the Service DNAT to CoreDNS.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-mlflow-probes
+  name: mlflow-server
   namespace: monitoring
   labels:
     project: gco
@@ -67,12 +75,37 @@ spec:
       app.kubernetes.io/name: mlflow
   policyTypes:
     - Ingress
+    - Egress
   ingress:
+    # In-cluster pods: Prometheus scrapes /metrics, gco-jobs clients log runs.
+    - from:
+        - podSelector: {}
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5000
+    # The VPC CIDRs, which is what covers the nodes the kubelet probes from.
+    # Kept as its own rule because the CIDR placeholder is expanded as the
+    # sole entry under `from:` (the same shape 03-network-policies.yaml uses);
+    # ingress rules are unioned, so this is equivalent to one merged list.
     - from:
         {{VPC_ENDPOINT_CIDR_BLOCKS}}
       ports:
         - protocol: TCP
           port: 5000
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    - ports:
+        - protocol: TCP
+          port: 443
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

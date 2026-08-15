@@ -474,9 +474,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         # live in S3 (untouched).
         ("v1", "PersistentVolumeClaim", "monitoring", "mlflow"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
-        # Supplemental ingress so kubelet probes reach the server past the
-        # chart's pod-source-only policy (post-helm-mlflow-network.yaml).
-        ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "allow-mlflow-probes"),
+        # The server's own network posture; GCO owns it because the chart's
+        # policy drops kubelet probes (post-helm-mlflow-network.yaml).
+        ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "mlflow-server"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),

@@ -235,11 +235,6 @@ class TestMlflowChartEntry:
         assert "extraVolumes" not in values
         assert "extraVolumeMounts" not in values
 
-    def test_pod_network_policy_is_enabled(self, charts):
-        # Chart-built defense-in-depth for the server pod: ingress limited
-        # to the server port, egress to DNS + 443 (S3 via VPC endpoints).
-        assert charts["mlflow"]["values"]["networkPolicy"]["enabled"] is True
-
     def test_no_deployment_token_values_are_static(self, charts):
         # S3 destination + IRSA annotation + claim size are deployment
         # tokens injected by the regional stack; keeping them out of
@@ -537,50 +532,76 @@ class TestMlflowNetworkManifest:
         (egress,) = policy["spec"]["egress"]
         assert {entry["port"] for entry in egress["ports"]} == {5000}
 
-    def test_probe_ingress_policy_admits_the_node_network(self, manifest_text):
+    def test_server_policy_admits_the_node_network_for_probes(self, manifest_text):
         """Kubelet probes must be able to reach the server. Live incident pin.
 
-        The official chart's own pod NetworkPolicy admits only pod sources
-        (``from: [podSelector {}, namespaceSelector {}]``). Kubelet HTTP
-        probes originate on the node's host network, so once that policy is
-        programmed every liveness/readiness probe is dropped: the server
-        answers /health 200 for anything that can reach it, the kubelet sees
-        only timeouts, and the container restarts forever without ever going
-        Available. Caught live 2026-08-15 (five restarts, no OOM, exit 137
-        from the stop timeout). NetworkPolicies are additive, so this
-        supplemental ingress adds the node while the chart keeps its egress
-        restrictions.
+        The chart's own policy admits only pod sources
+        (``from: [podSelector {}, namespaceSelector {}]``), and kubelet HTTP
+        probes arrive from the node's host network — so they are dropped, the
+        kubelet sees only timeouts, and the container restarts forever while
+        the server answers /health 200 to anything that can reach it. GCO
+        therefore owns the policy (charts.yaml disables the chart's) and
+        includes the VPC CIDRs, which is what covers the nodes.
         """
-        policy = self._rendered_docs(manifest_text)["allow-mlflow-probes"]
+        policy = self._rendered_docs(manifest_text)["mlflow-server"]
         assert policy["metadata"]["namespace"] == "monitoring"
-        assert policy["spec"]["policyTypes"] == ["Ingress"]
-        # Must select the chart's pods, or the allow lands on nothing.
+        assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+        # Must select the chart's pods, or the policy lands on nothing.
         assert policy["spec"]["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "mlflow"}
-        (ingress,) = policy["spec"]["ingress"]
-        assert ingress["from"] == [{"ipBlock": {"cidr": "10.0.0.0/16"}}]
-        assert [entry["port"] for entry in ingress["ports"]] == [5000]
+        pod_rule, cidr_rule = policy["spec"]["ingress"]
+        # Ingress rules are unioned; the CIDR entry is its own rule because
+        # the placeholder expands as the sole entry under `from:`.
+        assert pod_rule["from"] == [{"podSelector": {}}, {"namespaceSelector": {}}]
+        assert cidr_rule["from"] == [{"ipBlock": {"cidr": "10.0.0.0/16"}}]
+        for rule in (pod_rule, cidr_rule):
+            assert [entry["port"] for entry in rule["ports"]] == [5000]
 
-    def test_probe_ingress_tracks_every_configured_vpc_cidr(self, manifest_text):
+    def test_chart_ships_no_competing_policy(self, charts):
+        """The chart's policy must stay off, or the startup race returns.
+
+        A restrictive chart policy plus a permissive GCO supplement is only
+        correct once the CNI has programmed BOTH. The VPC CNI resolves a
+        pod's policies when the pod starts and nothing re-triggers it, so a
+        pod created before the supplement propagates keeps only the
+        restrictive rule and crash-loops indefinitely — observed live
+        2026-08-15 with the pod starting 2s after the supplement was applied
+        (11 containers, zero probes received, while Prometheus scraped
+        /metrics 200 throughout). With GCO owning the only policy, every
+        ordering is safe: unisolated before it lands, explicitly allowed
+        after.
+        """
+        assert charts["mlflow"]["values"]["networkPolicy"]["enabled"] is False
+
+    def test_server_policy_tracks_every_configured_vpc_cidr(self, manifest_text):
         """The allow follows vpc_endpoint_cidrs, the same single source the
         server's --allowed-hosts globs are derived from."""
         policy = self._rendered_docs(manifest_text, ("10.0.0.0/16", "10.41.0.0/16"))[
-            "allow-mlflow-probes"
+            "mlflow-server"
         ]
-        (ingress,) = policy["spec"]["ingress"]
-        assert ingress["from"] == [
+        cidr_rule = policy["spec"]["ingress"][-1]
+        assert cidr_rule["from"] == [
             {"ipBlock": {"cidr": "10.0.0.0/16"}},
             {"ipBlock": {"cidr": "10.41.0.0/16"}},
         ]
 
-    def test_probe_policy_selector_matches_the_chart_pod_labels(self, manifest_text, charts):
-        """The probe allow's selector must match what the chart labels pods.
+    def test_server_policy_egress_covers_dns_and_https_only(self, manifest_text):
+        """Run metadata is SQLite on a volume and artifacts go to S3 over 443,
+        so DNS + 443 is the whole egress surface — no database ports."""
+        policy = self._rendered_docs(manifest_text)["mlflow-server"]
+        ports = {entry["port"] for rule in policy["spec"]["egress"] for entry in rule["ports"]}
+        assert ports == {53, 5353, 443}
+        # Unrestricted destinations would defeat the point of the rule set.
+        assert all("to" not in rule for rule in policy["spec"]["egress"])
+
+    def test_server_policy_selector_matches_the_chart_pod_labels(self, manifest_text, charts):
+        """The policy's selector must match what the chart labels pods.
 
         The chart derives pod labels from its release name, which GCO pins
         with fullnameOverride; if that pin moves, this selector has to move
         with it or the policy silently selects no pods and the crash-loop
         returns.
         """
-        policy = self._rendered_docs(manifest_text)["allow-mlflow-probes"]
+        policy = self._rendered_docs(manifest_text)["mlflow-server"]
         selector = policy["spec"]["podSelector"]["matchLabels"]
         assert selector["app.kubernetes.io/name"] == charts["mlflow"]["values"]["fullnameOverride"]
 
@@ -615,7 +636,7 @@ class TestApplierPruneInventory:
         assert targets == (
             ("v1", "PersistentVolumeClaim", "monitoring", "mlflow"),
             ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
-            ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "allow-mlflow-probes"),
+            ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "mlflow-server"),
         )
 
     def test_inventory_covers_manifest_resources_plus_the_chart_claim(self, applier):
