@@ -956,6 +956,43 @@ charts:
         enabled: true
       jobset:
         install: true
+        # Let cert-manager own the JobSet webhook certificate instead of the
+        # JobSet controller.
+        #
+        # With this false (the chart default) JobSet templates an EMPTY
+        # webhook-cert Secret and its controller self-signs into it at
+        # runtime. Helm 4 applies server-side, so the NEXT `helm upgrade`
+        # tries to apply that empty Secret and collides with the controller
+        # over the fields it filled in:
+        #
+        #   conflict occurred while applying object
+        #   kubeflow-trainer/jobset-webhook-server-cert /v1, Kind=Secret:
+        #   Apply failed with 4 conflicts: conflicts with "jobset" using v1:
+        #   .data.ca.crt .data.ca.key .data.tls.crt .data.tls.key
+        #
+        # That fails the chart task, so the convergence state machine never
+        # reaches its post-Helm apply — i.e. re-deploying an existing
+        # deployment breaks, and takes every post-Helm manifest with it.
+        # Caught live 2026-08-15 on the second `gco stacks deploy` of the
+        # same cluster; fresh deploys never hit it, which is why the
+        # shakeouts didn't.
+        #
+        # Setting this true flips both halves of the conflict off at once:
+        # the chart stops templating the Secret (its
+        # templates/internalcert/secret.yaml is gated on
+        # `not .Values.certManager.enable`) and the controller stops managing
+        # the cert (its ConfigMap sets internalCertManagement.enable to
+        # `not .Values.certManager.enable`). cert-manager creates and owns
+        # the Secret through a Certificate + self-signed Issuer, and the
+        # webhook configurations get its inject-ca-from annotation.
+        #
+        # Depends on cert-manager, which GCO installs unconditionally and
+        # EARLIER in this file (charts install in file order) — the same
+        # dependency the Slinky Slurm operator already declares. The
+        # upgrade-idempotency contract is exercised by the install-then-
+        # upgrade step in integration:kind:examples-smoke.
+        certManager:
+          enable: true
       image:
         registry: ghcr.io
         repository: kubeflow/trainer/trainer-controller-manager

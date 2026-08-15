@@ -1688,7 +1688,15 @@ if [ -n "$NPM_MANAGEMENT_PROBLEMS" ]; then
   done <<< "$NPM_MANAGEMENT_PROBLEMS"
 fi
 
-for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION; do
+# Every tool pinned in more than one workflow (or more than one job) must
+# agree. CALICO_* and METRICS_SERVER_* are here because the kind jobs install
+# them per job — two jobs on different Calico builds would enforce
+# NetworkPolicy with two different engines, and a version/checksum pair that
+# disagrees fails the download as what looks like a flake. The PR-time half of
+# this contract lives in
+# tests/test_supply_chain_integrity.py::test_repeated_workflow_pins_agree_across_jobs.
+for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION \
+    CALICO_VERSION CALICO_SHA256 METRICS_SERVER_VERSION METRICS_SERVER_SHA256; do
   cvals="$(extract_workflow_env_pin "$consistency_var")"
   cnum="$(echo "$cvals" | grep -c .)"
   if [ "$cnum" -gt 1 ]; then

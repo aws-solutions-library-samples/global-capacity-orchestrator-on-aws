@@ -401,3 +401,113 @@ def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
         )
         run_index = next(index for index, step in enumerate(steps) if image in step.get("run", ""))
         assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"
+
+
+def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:
+    """Map job name -> its job-level ``env`` pins (``*_VERSION`` / ``*_SHA256``).
+
+    Job-scoped rather than workflow-scoped on purpose: this repo pins CI
+    tooling per job so each one declares what it installs, which means the
+    same pin name can legitimately appear several times — and can therefore
+    silently disagree.
+    """
+    pins: dict[str, dict[str, str]] = {}
+    for name, job in (workflow.get("jobs") or {}).items():
+        env = (job or {}).get("env") or {}
+        pins[name] = {
+            key: str(value) for key, value in env.items() if key.endswith(("_VERSION", "_SHA256"))
+        }
+    return pins
+
+
+def test_repeated_workflow_pins_agree_across_jobs() -> None:
+    """A tool pinned by more than one job must be pinned to ONE value.
+
+    integration-tests.yml installs the same tooling in several jobs (Helm in
+    charts-valid and examples-smoke; Calico in cluster-e2e and
+    examples-smoke), and the per-step checksum tests elsewhere in this file
+    are substring assertions — they are satisfied by the FIRST matching
+    declaration and cannot see a second one that drifted. Two jobs running
+    different Calico builds would mean two different NetworkPolicy engines
+    enforcing the manifests CI claims to validate, and a version/checksum
+    pair that disagrees across jobs fails the download instead, which reads
+    as a flake rather than a pinning mistake.
+
+    Checks every ``*_VERSION`` / ``*_SHA256`` pin generically so tooling
+    added later inherits the guarantee without a new test.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    pins = _job_env_pins(workflow)
+
+    values_by_pin: dict[str, dict[str, set[str]]] = {}
+    for job_name, job_pins in pins.items():
+        for pin_name, value in job_pins.items():
+            values_by_pin.setdefault(pin_name, {}).setdefault(value, set()).add(job_name)
+
+    disagreements = {
+        pin_name: {value: sorted(jobs) for value, jobs in by_value.items()}
+        for pin_name, by_value in values_by_pin.items()
+        if len(by_value) > 1
+    }
+    assert not disagreements, (
+        "workflow pins disagree across jobs in integration-tests.yml "
+        f"(bump every declaration together): {disagreements}"
+    )
+
+    # Guard the guard: if the shared pins ever stop being shared, this test
+    # silently proves nothing. Calico and Helm are pinned by two jobs each.
+    shared = {
+        pin for pin, by_value in values_by_pin.items() if len(next(iter(by_value.values()))) > 1
+    }
+    assert {"CALICO_VERSION", "CALICO_SHA256"} <= shared, (
+        "expected Calico to be pinned by more than one job; if the second "
+        f"kind cluster was removed, drop this assertion. Shared pins: {sorted(shared)}"
+    )
+
+
+def test_every_calico_installing_job_pins_version_and_checksum() -> None:
+    """A job that installs Calico must carry both of its own pins.
+
+    Job-level ``env`` does not inherit between jobs, so a job that curls the
+    Calico manifest while relying on another job's pins would expand
+    ``${CALICO_VERSION}`` to an empty string and fetch a bogus URL (or, worse,
+    skip the checksum comparison against an empty expectation).
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    pins = _job_env_pins(workflow)
+
+    installing_jobs = [
+        name
+        for name, job in workflow["jobs"].items()
+        if any("projectcalico/calico" in (step.get("run") or "") for step in job.get("steps") or [])
+    ]
+    assert installing_jobs, "no job installs Calico — has the CNI setup moved?"
+
+    for job_name in installing_jobs:
+        job_pins = pins[job_name]
+        assert "CALICO_VERSION" in job_pins, f"{job_name} installs Calico without CALICO_VERSION"
+        assert "CALICO_SHA256" in job_pins, f"{job_name} installs Calico without CALICO_SHA256"
+
+
+def test_kind_clusters_without_a_default_cni_install_one() -> None:
+    """Using the Calico kind config obliges the job to install Calico.
+
+    kind-calico.yaml sets ``disableDefaultCNI: true``, so the control plane
+    cannot go Ready until a CNI is installed. A job that adopts the config
+    without the install step hangs instead of failing with a clear cause.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+
+    for job_name, job in workflow["jobs"].items():
+        steps = job.get("steps") or []
+        uses_calico_config = any(
+            str(step.get("uses", "")).startswith("helm/kind-action")
+            and "kind-calico.yaml" in str((step.get("with") or {}).get("config", ""))
+            for step in steps
+        )
+        if not uses_calico_config:
+            continue
+        assert any("projectcalico/calico" in (step.get("run") or "") for step in steps), (
+            f"{job_name} creates a kind cluster with the default CNI disabled "
+            "but never installs Calico"
+        )

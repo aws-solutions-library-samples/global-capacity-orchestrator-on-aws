@@ -1853,6 +1853,29 @@ jobs:
           provisioner: rancher.io/local-path
           volumeBindingMode: WaitForFirstConsumer
           EOF
+      - name: Install pinned cert-manager (the trainer chart's cert dependency)
+        # charts.yaml sets jobset.certManager.enable, so the trainer chart
+        # renders a Certificate + Issuer instead of a controller-managed
+        # Secret — that needs cert-manager's CRDs and controller present
+        # first. Production gets this from charts.yaml install order
+        # (cert-manager appears earlier in the file, and the installer walks
+        # it in order); CI installs it explicitly for the same reason. Pins
+        # and values come from charts.yaml like every other chart here.
+        run: |
+          set -euo pipefail
+          read -r ref version namespace repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref cert-manager
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values cert-manager \
+            > "${RUNNER_TEMP}/cert-manager-values.yaml"
+          helm repo add jetstack "${repo_url}"
+          helm repo update jetstack
+          helm install cert-manager "${ref}" --version "${version}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/cert-manager-values.yaml" \
+            --wait --timeout 5m
+          kubectl wait --for=condition=Established \
+            crd/certificates.cert-manager.io --timeout=60s
       - name: Install pinned kubeflow-trainer chart with shipped values
         # Exactly what the installer Lambda does for this chart: the OCI ref,
         # version, namespace, values, and the blocking wait all come from
@@ -1870,6 +1893,53 @@ jobs:
             --wait --timeout 8m
           kubectl get crd trainjobs.trainer.kubeflow.org \
             clustertrainingruntimes.trainer.kubeflow.org
+      - name: Re-run the trainer install as an upgrade (idempotency contract)
+        # Deploying twice must work. Helm 4 applies server-side, so any
+        # resource the chart templates EMPTY and a controller then fills in
+        # becomes a field-ownership conflict on the second apply. JobSet's
+        # webhook cert Secret did exactly that: the second `gco stacks
+        # deploy` of an existing cluster failed the chart task with
+        #   conflicts with "jobset" using v1: .data.ca.crt .data.ca.key ...
+        # which stalls the convergence state machine before its post-Helm
+        # apply, so every post-Helm manifest silently stops being applied
+        # too (caught live 2026-08-15; fresh deploys never reproduce it,
+        # which is why the live shakeouts missed it).
+        #
+        # The fix is jobset.certManager.enable in charts.yaml. This step is
+        # the regression gate: it repeats the exact install the installer
+        # Lambda performs, which is an upgrade the second time around.
+        run: |
+          set -euo pipefail
+          read -r ref version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref kubeflow-trainer
+          )
+          if ! helm upgrade kubeflow-trainer "${ref}" --version "${version}" \
+              --namespace "${namespace}" \
+              --values "${RUNNER_TEMP}/trainer-values.yaml" \
+              --wait --timeout 8m; then
+            echo "::error::helm upgrade of kubeflow-trainer failed — the chart is not"
+            echo "::error::idempotent, so a second deploy of an existing cluster breaks."
+            kubectl -n "${namespace}" get secrets -o json \
+              | python3 -c "
+          import json, sys
+          for item in json.load(sys.stdin)['items']:
+              managers = sorted(
+                  entry.get('manager', '?') for entry in item['metadata'].get('managedFields', [])
+              )
+              print(item['metadata']['name'], '-> field managers:', managers)
+          "
+            exit 1
+          fi
+          # cert-manager owns the JobSet cert now: helm must not be
+          # templating the Secret it used to fight over.
+          if kubectl -n "${namespace}" get secret jobset-webhook-server-cert \
+              -o jsonpath='{.metadata.managedFields[*].manager}' 2>/dev/null \
+              | tr ' ' '\n' | grep -qx helm; then
+            echo "::error::helm still manages jobset-webhook-server-cert"
+            exit 1
+          fi
+          kubectl -n "${namespace}" get certificate jobset-cert
+          echo "Trainer chart upgrade is idempotent."
       - name: Apply the shipped torch-distributed runtime
         # The platform delivers this runtime through the post-Helm kubectl
         # pass (chart hook Jobs stay disabled — see charts.yaml). Applying it

@@ -198,6 +198,47 @@ class TestKubeflowTrainerChartEntry:
         assert values["crds"]["enabled"] is True
         assert values["jobset"]["install"] is True
 
+    def test_jobset_webhook_cert_is_owned_by_cert_manager(self, charts):
+        """Live incident pin: without this, the SECOND deploy fails.
+
+        JobSet templates its webhook-cert Secret EMPTY and its controller
+        self-signs into it. Helm 4 applies server-side, so the next
+        ``helm upgrade`` collides with the controller over the fields it
+        filled:
+
+            conflict occurred while applying object
+            kubeflow-trainer/jobset-webhook-server-cert /v1, Kind=Secret:
+            conflicts with "jobset" using v1: .data.ca.crt .data.ca.key ...
+
+        The chart task then fails, and because the convergence state machine
+        runs the post-Helm apply as its final task, every post-Helm manifest
+        stops being applied too. Caught live 2026-08-15 on a second
+        ``gco stacks deploy`` of the same cluster — fresh deploys never
+        reproduce it.
+
+        Enabling the subchart's cert-manager support flips both halves off:
+        the chart stops templating the Secret and the controller stops
+        managing the cert. The install-then-upgrade step in
+        integration:kind:examples-smoke is the executable half of this pin.
+        """
+        jobset = charts["kubeflow-trainer"]["values"]["jobset"]
+        assert jobset["certManager"]["enable"] is True
+
+    def test_cert_manager_is_enabled_and_installs_before_the_trainer(self, charts):
+        """The cert dependency must actually be present, and present first.
+
+        Charts install in file order, so cert-manager has to appear above
+        kubeflow-trainer or the trainer's Certificate/Issuer apply lands
+        before the CRDs exist.
+        """
+        names = list(charts)
+        assert charts["cert-manager"]["enabled"] is True, (
+            "kubeflow-trainer's jobset.certManager.enable requires cert-manager"
+        )
+        assert names.index("cert-manager") < names.index("kubeflow-trainer"), (
+            "cert-manager must be ordered before kubeflow-trainer in charts.yaml"
+        )
+
     def test_controller_is_protected_from_consolidation(self, charts):
         manager = charts["kubeflow-trainer"]["values"]["manager"]
         assert manager["podAnnotations"]["karpenter.sh/do-not-disrupt"] == "true"
