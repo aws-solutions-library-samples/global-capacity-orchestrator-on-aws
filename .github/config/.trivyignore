@@ -251,3 +251,66 @@ GHSA-6v7p-g79w-8964 exp:2026-10-15
 # Advisories: https://nvd.nist.gov/vuln/detail/CVE-2026-46600
 #             https://access.redhat.com/security/cve/cve-2026-46600
 CVE-2026-46600 exp:2026-10-15
+# -----------------------------------------------------------------------------
+# CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
+# HTTP/2), CVE-2026-56858 (html/template XSS), CVE-2026-56859 (encoding/xml
+# DoS), CVE-2026-56860 (net/url DoS), CVE-2026-56862 (crypto/tls DoS) — all
+# six are Go STDLIB flaws in binaries built with go1.26.5, fixed in Go
+# 1.25.13 / 1.26.6 / 1.27.0-rc.3.
+#
+# Not introduced by any change of ours: the Security workflow was green on
+# 29f8aeca (2026-08-15 06:53Z) and red on the next commit three hours later,
+# with only chart/manifest/test/doc changes in between — none of which reach
+# these images' contents. The Go advisories landed in the Trivy DB in that
+# window, so they appeared on unchanged binaries.
+#
+# Flagged in every scanned image that carries a Go binary:
+#   dev (Dockerfile.dev)                    docker, docker-buildx, kubectl
+#   helm-installer                          helm, kubectl, aws-lambda-rie
+#   tls-certificate-manager                 aws-lambda-rie
+#
+# Not clearable by a pin bump — each upstream checked 2026-08-15:
+#   kubectl        v1.36.3 IS stable and stable-1.36
+#                  (https://dl.k8s.io/release/stable.txt), so there is no
+#                  newer release to move to.
+#   helm           v4.2.4 exists (we pin v4.2.3), but BOTH release binaries
+#                  report go1.26.5 via `go version -m`, so the bump would not
+#                  clear these findings. Deferred to the next helm release
+#                  that is actually rebuilt on a patched Go.
+#   docker         29.7.2 is the newest static build on
+#                  download.docker.com/linux/static/stable.
+#   docker-buildx  v0.36.1 is the latest release.
+#   aws-lambda-rie not a pin we own: it ships inside
+#                  public.ecr.aws/lambda/python:3.14, the AWS-managed base
+#                  image both Lambda images build on. It clears when AWS
+#                  republishes that base on a patched Go.
+#
+# Low runtime risk. Every flagged binary is a short-lived CLI/tooling client,
+# never a long-lived network service:
+#   * net/http unencrypted HTTP/2 and html/template XSS are server-side
+#     surfaces these clients do not expose at all.
+#   * the encoding/xml, net/url and crypto/tls denial-of-service paths need
+#     hostile input; these binaries talk only to trusted peers — the EKS API
+#     endpoint and the version-pinned chart registries in charts.yaml, reached
+#     over VPC endpoints — and encoding/asn1 is certificate parsing against
+#     those same endpoints.
+#   * aws-lambda-rie is the local Runtime Interface Emulator. Deployed Lambda
+#     functions get their runtime API from the platform, so the RIE binary is
+#     not on the production invocation path; it exists for local invocation.
+#   * the dev image is contributor/CI tooling and is never deployed.
+#
+# Clears per binary as upstream ships rebuilds on Go >= 1.26.6: bump
+# KUBECTL_VERSION in Dockerfile.dev plus the kubectl pin in
+# lambda/helm-installer/Dockerfile, the helm pin + SHA256 there (in lockstep
+# with the HELM_VERSION/HELM_SHA256 pairs in integration-tests.yml and
+# deps-scan.yml and the expected pins in tests/test_supply_chain_integrity.py),
+# ARG DOCKER_VERSION / ARG BUILDX_VERSION in Dockerfile.dev, and the Lambda
+# base image tag; then drop the ids that no longer appear.
+# Advisories: https://avd.aquasec.com/nvd/cve-2026-33818 (and the matching
+#             nvd/cve-2026-XXXXX page for each id below)
+CVE-2026-33818 exp:2026-10-15
+CVE-2026-56853 exp:2026-10-15
+CVE-2026-56858 exp:2026-10-15
+CVE-2026-56859 exp:2026-10-15
+CVE-2026-56860 exp:2026-10-15
+CVE-2026-56862 exp:2026-10-15
