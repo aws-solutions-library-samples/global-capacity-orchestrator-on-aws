@@ -104,3 +104,6 @@ THREAT_MODEL.md
 # Locally generated video conversions of the committed demo GIFs
 # (see demo/gif_to_mp4.sh) — the GIFs are the tracked source of truth.
 demo/*.mp4
+# MkDocs build output for the orientation wiki (mkdocs.yml) — built in CI
+# (lint:mkdocs:strict, pages.yml), never committed.
+site/

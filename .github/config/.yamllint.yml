@@ -53,6 +53,9 @@ ignore: |
   .pytest_cache/
   .ruff_cache/
   .git/
+  # MkDocs build output for the orientation wiki (kept in sync with the
+  # markdownlint ignore list) — generated, never authored.
+  site/
   # .github/legacy/.gitlab-ci.yml is a frozen reference kept for anyone
   # forking to GitLab. Some lines legitimately exceed 150 chars (long lint
   # command chains matching the authoritative workflow). We exclude it
