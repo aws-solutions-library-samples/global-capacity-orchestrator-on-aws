@@ -217,8 +217,16 @@ security = [
     "pillow==12.3.0",
     "pip-tools==7.6.0",
 ]
+docs = [
+    # Builds the orientation wiki (wiki/ -> GitHub Pages site root) with
+    # `mkdocs build --strict`; the lint:mkdocs:strict job and pages.yml both
+    # install this extra. Material's pymdown-extensions arrives transitively
+    # and is version-controlled through requirements-lock.txt.
+    "mkdocs==1.6.1",
+    "mkdocs-material==9.7.7",
+]
 dev = [
-    "gco-cli[cdk,diagrams,lint,typecheck,test,security]",
+    "gco-cli[cdk,diagrams,lint,typecheck,test,security,docs]",
     "pre-commit==4.6.1",
 ]
 
