@@ -85,8 +85,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout
       - name: Check out the commit the Unit Tests run measured
-        # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout
         # The pwn-request pattern this rule targets is checking out ATTACKER
         # code (a fork PR's head) into a privileged workflow_run context. The
         # job-level `if:` above admits only successful `push` events from
