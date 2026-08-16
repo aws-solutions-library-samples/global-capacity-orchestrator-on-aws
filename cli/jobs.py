@@ -600,13 +600,23 @@ class JobManager:
         ``gco jobs get`` / ``gco jobs submit --wait`` work unchanged for
         TrainJobs.
 
+        ``None`` means the API confirmed the job does not exist (HTTP 404 on
+        both lookups). Any other failure — an unreachable regional API bridge,
+        an auth error, a 5xx — propagates to the caller so it is never
+        misreported as "not found" (see issue #258).
+
         Args:
             job_name: Name of the job
             namespace: Namespace of the job
             region: Region where the job is running
 
         Returns:
-            JobInfo or None if not found
+            JobInfo, or None if the API confirmed the job does not exist
+
+        Raises:
+            RuntimeError: If the regional API bridge is unreachable or the
+                request fails for reasons other than the job being absent
+            requests.exceptions.HTTPError: For non-404 HTTP responses
         """
         target_region = region or self.config.default_region
         try:
@@ -616,14 +626,17 @@ class JobManager:
             return self._parse_job_info(response, target_region)
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
+                # The batch Job endpoint confirmed the name is unknown; the
+                # job may still exist as a Kubeflow TrainJob.
                 trainjob = self._get_trainjob_info(job_name, namespace, target_region)
                 if trainjob is not None:
                     return trainjob
-            logger.debug("Failed to get job details for %s: %s", job_name, e)
-            return None
-        except Exception as e:
-            logger.debug("Failed to get job details for %s: %s", job_name, e)
-            return None
+                logger.debug("Job %s not found in %s/%s", job_name, target_region, namespace)
+                return None
+            # Non-404 responses (401/403/5xx) do not mean the job is absent.
+            # Surface the real failure instead of collapsing it into None,
+            # which the CLI would render as "not found".
+            raise
 
     def _get_trainjob_info(self, job_name: str, namespace: str, region: str) -> JobInfo | None:
         """Fetch a TrainJob through the generic manifests endpoint, or None."""

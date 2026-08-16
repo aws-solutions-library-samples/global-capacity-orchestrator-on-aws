@@ -365,20 +365,51 @@ class TestJobManagerOperations:
                 assert job.name == "test-job"
 
     def test_get_job_not_found(self):
-        """Test getting a job that doesn't exist."""
+        """Test getting a job the API confirms does not exist (HTTP 404)."""
+        import requests
+
         from cli.jobs import JobManager
 
         with patch("cli.jobs.get_config") as mock_config:
             mock_config.return_value = MagicMock(default_region="us-east-1")
             with patch("cli.jobs.get_aws_client") as mock_aws:
                 mock_aws_client = MagicMock()
-                mock_aws_client.get_job_details.side_effect = Exception("Not found")
+                mock_aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+                    response=MagicMock(status_code=404)
+                )
+                mock_aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
                 mock_aws.return_value = mock_aws_client
 
                 manager = JobManager()
                 job = manager.get_job("nonexistent-job", "gco-jobs")
 
                 assert job is None
+
+    def test_get_job_transport_failure_propagates(self):
+        """A failure to reach the API must not be reported as "not found".
+
+        Regression test for issue #258: with the regional API bridge not
+        deployed, get_job_details raises RuntimeError; get_job used to
+        swallow it and return None, which the CLI rendered as
+        "Job <name> not found" even though the job was running.
+        """
+        from cli.jobs import JobManager
+
+        with patch("cli.jobs.get_config") as mock_config:
+            mock_config.return_value = MagicMock(default_region="us-east-1")
+            with patch("cli.jobs.get_aws_client") as mock_aws:
+                mock_aws_client = MagicMock()
+                mock_aws_client.get_job_details.side_effect = RuntimeError(
+                    "Regional API endpoint is not deployed in us-east-1; "
+                    "exact region routing requires the regional API bridge"
+                )
+                mock_aws.return_value = mock_aws_client
+
+                manager = JobManager()
+                with pytest.raises(RuntimeError, match="Regional API endpoint is not deployed"):
+                    manager.get_job("gpu-test-job", "gco-jobs")
+                # The TrainJob fallback must not run for transport failures.
+                mock_aws_client.call_api.assert_not_called()
 
     def test_get_job_logs(self):
         """Test getting job logs."""
@@ -590,14 +621,19 @@ class TestJobManagerGetJob:
         assert result.namespace == "default"
 
     def test_get_job_not_found(self):
-        """Test get_job when job is not found."""
+        """Test get_job when the API confirms the job does not exist."""
         from unittest.mock import MagicMock
+
+        import requests
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        manager._aws_client.get_job_details.side_effect = Exception("Not found")
+        manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=404)
+        )
+        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
 
         result = manager.get_job("nonexistent", "default", "us-east-1")
         assert result is None
@@ -1550,18 +1586,40 @@ class TestJobManagerWaitExtended:
     """Extended tests for job wait functionality."""
 
     def test_wait_for_job_not_found(self):
-        """Test wait_for_job raises error when job not found."""
+        """Test wait_for_job raises error when the job is confirmed absent."""
+        import requests
+
         from cli.jobs import JobManager
 
         with patch("cli.jobs.get_aws_client") as mock_get_client:
             mock_client = MagicMock()
             mock_get_client.return_value = mock_client
-            mock_client.get_job_details.side_effect = Exception("Not found")
+            mock_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+                response=MagicMock(status_code=404)
+            )
+            mock_client.call_api.side_effect = RuntimeError("API request failed: not found")
 
             manager = JobManager()
 
             with pytest.raises(ValueError, match="not found"):
                 manager.wait_for_job("nonexistent-job", "default", timeout_seconds=1)
+
+    def test_wait_for_job_transport_failure_is_not_reported_as_not_found(self):
+        """Issue #258: an unreachable bridge aborts the wait with the real reason."""
+        from cli.jobs import JobManager
+
+        with patch("cli.jobs.get_aws_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_get_client.return_value = mock_client
+            mock_client.get_job_details.side_effect = RuntimeError(
+                "Regional API endpoint is not deployed in us-east-1; "
+                "exact region routing requires the regional API bridge"
+            )
+
+            manager = JobManager()
+
+            with pytest.raises(RuntimeError, match="Regional API endpoint is not deployed"):
+                manager.wait_for_job("gpu-test-job", "default", timeout_seconds=1)
 
 
 class TestJobManagerLogsExtended:
@@ -2093,7 +2151,10 @@ class TestTrainJobLifecycleFallbacks:
             response=MagicMock(status_code=503)
         )
 
-        assert manager.get_job("train-demo", "gco-jobs", "us-east-1") is None
+        # A 503 is not "absent": it propagates (issue #258) and must not
+        # trigger the TrainJob fallback.
+        with pytest.raises(requests.exceptions.HTTPError):
+            manager.get_job("train-demo", "gco-jobs", "us-east-1")
         manager._aws_client.call_api.assert_not_called()
 
     def test_trainjob_terminal_conditions_map_to_job_states(self):
