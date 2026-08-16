@@ -97,7 +97,7 @@ def test_downloaded_release_assets_have_committed_checksums(
             # and the download/verify binding is unchanged.
             ".github/workflows/integration-tests.yml",
             "Install Helm",
-            "extract_helm_installer_pins | grep '^HELM_'",
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_'",
             "grep -q '^HELM_SHA256=' \"$GITHUB_ENV\"",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
@@ -129,7 +129,7 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/deps-scan.yml",
             "Install pinned Helm",
-            "extract_helm_installer_pins | tr '|' '='",
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '='",
             'grep -q "^${pin}=" "$GITHUB_ENV"',
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
@@ -137,7 +137,7 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/deps-scan.yml",
             "Install pinned kubectl",
-            "extract_helm_installer_pins | tr '|' '='",
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '='",
             'grep -q "^${pin}=" "$GITHUB_ENV"',
             "dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl",
             'echo "${KUBECTL_SHA256}  ${binary}" | sha256sum -c -',
