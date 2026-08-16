@@ -91,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           source .github/scripts/lib_dependency_scan.sh
-          extract_helm_installer_pins | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
           grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
       - name: Install Helm
         # The pin (version + checksum) was derived from the installer
@@ -983,12 +983,6 @@ jobs:
             elf-e-machine: "0xB7"
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
-        # The autopilot config check below runs the shared CI contract on
-        # the runner, which imports the project's cli package — that needs
-        # the repo's Python, not the runner image's system python.
-        with:
-          python-version-file: ".python-version"
       - name: Build dev container
         # Native build on the matching host arch — no --platform or QEMU.
         # Dockerfile.dev is parameterized on BuildKit's $TARGETARCH, which
@@ -1039,10 +1033,14 @@ jobs:
           # from the same single source unit:cli:autopilot and the boot
           # probe use; --gco-args additionally proves the gco server runs
           # from the mounted checkout, the assertion specific to this step.
-          python3 .github/scripts/autopilot_ci_contract.py \
-            verify-config /tmp/autopilot-config.json \
-            --expect-gco-env GCO_ENABLE_ALL_TOOLS=true \
-            --gco-args /workspace/gco_mcp/run_mcp.py
+          # Runs inside the image (the contract imports the cli package,
+          # and the dev container ships the project environment).
+          docker run --rm -v "$PWD":/workspace -w /workspace \
+            -v /tmp/autopilot-config.json:/tmp/autopilot-config.json:ro gco-dev \
+            python3 .github/scripts/autopilot_ci_contract.py \
+              verify-config /tmp/autopilot-config.json \
+              --expect-gco-env GCO_ENABLE_ALL_TOOLS=true \
+              --gco-args /workspace/gco_mcp/run_mcp.py
       - name: Verify image contains native ${{ matrix.arch }} binaries
         # Two layers of verification:
         #   1. `uname -m` inside the container reports the expected arch.
@@ -1728,7 +1726,7 @@ jobs:
         run: |
           set -euo pipefail
           source .github/scripts/lib_dependency_scan.sh
-          extract_helm_installer_pins | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
           grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
       - name: Install Helm
         run: |

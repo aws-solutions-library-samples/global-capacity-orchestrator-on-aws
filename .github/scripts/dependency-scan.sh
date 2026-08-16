@@ -1467,7 +1467,7 @@ check_github_tool() {
 
 # Trivy (aquasecurity/trivy) — the version-input default of the
 # install-trivy composite action, the single pin every caller inherits.
-TRIVY_PIN="$(extract_install_trivy_pin | head -1)"
+TRIVY_PIN="$(extract_install_trivy_pin .github/actions/install-trivy/action.yml | head -1)"
 check_github_tool "Trivy (install-trivy action default)" "$TRIVY_PIN" "aquasecurity/trivy" \
   "https://github.com/aquasecurity/trivy/releases"
 
@@ -1479,7 +1479,7 @@ check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/act
 # Helm (helm/helm) — the authenticated RUN-line pin in
 # lambda/helm-installer/Dockerfile, the single source every CI job derives
 # its HELM_VERSION/HELM_SHA256 from at runtime.
-HELM_PIN="$(extract_helm_installer_pins | awk -F'|' '$1=="HELM_VERSION"{print $2}' | head -1)"
+HELM_PIN="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="HELM_VERSION"{print $2}' | head -1)"
 check_github_tool "Helm (helm-installer Dockerfile)" "$HELM_PIN" "helm/helm" \
   "https://github.com/helm/helm/releases"
 
@@ -1529,7 +1529,7 @@ check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
 # Dockerfile (the single source the CI jobs derive from); compared against
 # the stable release for its own minor line (dl.k8s.io), the same source
 # the Dockerfile.dev kubectl pin uses.
-KUBECTL_WF_PIN="$(extract_helm_installer_pins | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}' | head -1)"
+KUBECTL_WF_PIN="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}' | head -1)"
 if [ -n "$KUBECTL_WF_PIN" ]; then
   kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
   if ! kubectl_latest="$(curl -fsSL --max-time 15 \
@@ -1609,7 +1609,7 @@ fi
 
 CANON_PY="$(echo "${LAMBDA_RT_CURRENT:-}" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
 [ -z "$CANON_PY" ] && CANON_PY="$(extract_constant_value LAMBDA_PYTHON_RUNTIME | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
-PY_PINS_UNIQUE="$(extract_python_version_pins "$WORKFLOWS_DIR" | sort -u)"
+PY_PINS_UNIQUE="$(extract_python_version_pins "$WORKFLOWS_DIR" .python-version | sort -u)"
 if [ -n "$PY_PINS_UNIQUE" ]; then
   py_distinct="$(echo "$PY_PINS_UNIQUE" | grep -c .)"
   py_list="$(echo "$PY_PINS_UNIQUE" | paste -sd',' -)"

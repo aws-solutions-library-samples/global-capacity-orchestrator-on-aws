@@ -130,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           source .github/scripts/lib_dependency_scan.sh
-          extract_helm_installer_pins | tr '|' '=' | tee -a "$GITHUB_ENV"
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '=' | tee -a "$GITHUB_ENV"
           for pin in HELM_VERSION HELM_SHA256 KUBECTL_VERSION KUBECTL_SHA256; do
             grep -q "^${pin}=" "$GITHUB_ENV"
           done
