@@ -38,6 +38,11 @@ Code session on Amazon Bedrock with the GCO MCP server wired in — deploying,
 checking capacity, and submitting jobs conversationally. See
 [docs/AUTOPILOT.md](https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/docs/AUTOPILOT.md).
 
+![Listing deployed CDK stacks via natural language through the GCO MCP server](assets/images/gco_mcp_list_stacks.png)
+
+*What a deployed platform looks like from an agent session: listing the CDK
+stacks via the GCO MCP server.*
+
 ## What it costs
 
 The README's

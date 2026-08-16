@@ -31,6 +31,11 @@ door to open. Descriptions below are the packages' own words, condensed.
   source, manifests) as tools for LLM interaction. Some tool groups are
   gated behind opt-in feature flags.
 
+![Using the MCP server to write a PI calculation manifest, run it on available capacity, and print the logs](assets/images/gco_mcp_calculating_pi.png)
+
+*The MCP server end to end: writing a manifest, running it on available
+capacity, and pulling the logs — without leaving the editor.*
+
 ## The material you'll use daily
 
 - [`examples/`](https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/examples/README.md)

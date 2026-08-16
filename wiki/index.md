@@ -45,6 +45,12 @@ explains the ideas behind it.
 - **Capacity intelligence**: spot placement scores, spot price history,
   capacity reservations, and auto-region workflows behind `gco capacity` —
   network routing never substitutes for live GPU-capacity placement.
+
+![Checking GPU capacity for g5.xlarge in us-east-1 through the GCO MCP server](assets/images/gco_mcp_check_capacity.png)
+
+*Capacity discovery the conversational way: the GCO MCP server answering a
+GPU capacity question in an AI-powered IDE.*
+
 - **Automatic GPU node provisioning** through EKS Auto Mode and purpose-built
   NodePools (GPU x86/ARM, inference, EFA, Neuron, CPU).
 - **Multi-region inference endpoint management** (vLLM, TGI, Triton,

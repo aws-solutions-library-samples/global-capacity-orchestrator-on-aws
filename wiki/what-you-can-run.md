@@ -29,6 +29,9 @@ covered next).
 
 ![GCO Schedulers and Queues dashboard — pending pods, Kueue workloads, active Jobs](assets/images/grafana-schedulers.png)
 
+*The shipped Grafana Schedulers and Queues dashboard: pending pods, Kueue
+workloads, and active Jobs.*
+
 ## Distributed training
 
 Kubeflow Trainer v2 is included and enabled by default: you submit a
@@ -58,9 +61,25 @@ GPU/DCGM telemetry, and cost:
 
 ![GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, power](assets/images/grafana-gpu-dcgm.png)
 
+*The GPU (DCGM) dashboard: per-GPU utilization, framebuffer memory,
+temperature, and power draw.*
+
 Cost monitoring pairs per-cluster OpenCost with scheduled Parquet reports
-and cross-region Athena analytics; MLflow experiment tracking is on by
-default with observability. See
+and cross-region Athena analytics:
+
+![GCO Cost dashboard — cluster and projected monthly cost, node and namespace splits](assets/images/grafana-cost.png)
+
+*The cost dashboard: cluster and projected monthly cost with node and
+namespace splits.*
+
+MLflow experiment tracking is on by default with observability:
+
+![MLflow tracking server run view with metric, parameters, and Finished status](assets/images/mlflow-ui.png)
+
+*The MLflow tracking server showing a finished run — this exact run is
+produced by one of the shipped example manifests.*
+
+See
 [docs/MONITORING.md](https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/docs/MONITORING.md)
 and
 [docs/COST_MONITORING.md](https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/docs/COST_MONITORING.md).
@@ -72,6 +91,9 @@ Serverless, and Cognito-authenticated presigned sessions onto an existing
 deployment — off by default and zero cost until enabled:
 
 ![SageMaker Studio landing screen after login](assets/images/sagemaker_studio_landing_screen.png)
+
+*The SageMaker Studio landing screen after logging in through the
+`gco analytics` CLI.*
 
 Details, sub-toggles (HyperPod, Canvas, managed MLflow), and cleanup
 behavior are in

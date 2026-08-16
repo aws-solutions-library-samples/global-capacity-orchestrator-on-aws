@@ -11,6 +11,8 @@ with the conceptual model in
 
 ![GCO multi-region reference architecture — global control plane and workload entry](assets/images/gco_ref_architecture_part1.png)
 
+*Part 1 — the multi-region reference architecture: global control plane and workload entry.*
+
 Platform engineers configure everything in `cdk.json` and drive deployment
 from the `gco` CLI. The global side provides partition-wide state (SSM
 parameters, DynamoDB tables, an S3 model bucket) and — in commercial `aws`
@@ -24,6 +26,8 @@ accelerator and route through IAM-authenticated regional APIs instead.
 ## Inside a region
 
 ![GCO regional reference architecture — EKS Auto Mode data plane and regional services](assets/images/gco_ref_architecture_part2.png)
+
+*Part 2 — the regional EKS Auto Mode data plane and platform services.*
 
 Each regional stack is a VPC with an **EKS Auto Mode cluster** (private API
 endpoint by default), an internal ALB provisioned from shared Gateway API
@@ -59,6 +63,8 @@ transparent; placement is deliberate.
 ## The security posture
 
 ![GCO security model — layered controls and the authenticated request flow](assets/images/gco_ref_architecture_part3.png)
+
+*Part 3 — security controls and the authenticated request flow.*
 
 Six complementary controls protect every backend request: IAM authentication
 at API Gateway, TLS trust separation (AWS-managed TLS at the edge, a
