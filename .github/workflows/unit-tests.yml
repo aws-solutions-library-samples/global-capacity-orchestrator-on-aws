@@ -529,9 +529,11 @@ jobs:
           fi
           echo "imports handling OK"
       - name: Install the pinned Claude Code release and re-resolve
+        # Runs the exact command autopilot itself executes (including the
+        # scoped --allow-scripts: npm >= 12 blocks the postinstall that
+        # fetches the platform-native binary, leaving a broken shim).
         run: |
-          PIN="$(python3 -c 'from cli.autopilot import CLAUDE_CODE_VERSION; print(CLAUDE_CODE_VERSION)')"
-          npm install -g "@anthropic-ai/claude-code@${PIN}"
+          python3 -c 'from cli.autopilot import claude_install_command; import subprocess; subprocess.run(claude_install_command(), check=True)'
           claude --version
           gco -o json autopilot --dry-run > /tmp/autopilot-plan-installed.json
           python3 - <<'PY'

@@ -7,6 +7,7 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
+#   - integration:autopilot:boot                  — `gco autopilot` installs pinned Claude Code + boots the MCP/Bedrock stack to the cred boundary
 #   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
@@ -350,6 +351,54 @@ jobs:
         with:
           name: integration-mcp-report
           path: test-mcp-integration-report.xml
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # integration:autopilot:boot — `gco autopilot` boots the real Claude Code
+  # stack on a bare runner, exactly like a first-time user: autopilot
+  # npm-installs the pinned Claude Code release itself (`claude` is absent
+  # on purpose), writes the session MCP config, and execs claude, which
+  # connects the in-tree gco MCP server plus every curated companion
+  # (uvx + npx recipes run for real) and dispatches to Amazon Bedrock with
+  # the shipped default model. Fabricated fail-closed credentials stop the
+  # launch at the exact credential boundary — AWS answering 403 to the
+  # signed request is the success condition, and the only part of the
+  # session a credential-less runner cannot reach. Complements
+  # unit:cli:autopilot (plan/config/pin-install, no boot) with the boot
+  # itself; assertions and marker contract live in the probe script.
+  # --------------------------------------------------------------------------
+
+  integration-autopilot-boot:
+    name: "integration:autopilot:boot"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install the CLI and the in-tree MCP server dependencies
+        # [mcp] brings fastmcp so the gco server entry in the generated
+        # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
+        # can actually boot under claude.
+        run: pip install -e ".[mcp]"
+      - name: Install uv (uvx launches the PyPI companion MCP servers)
+        run: pip install uv
+      - name: Boot the autopilot session to the credential boundary
+        run: bash .github/scripts/autopilot_boot_probe.sh
+      - name: Upload session evidence
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: autopilot-boot-evidence
+          path: ${{ runner.temp }}/autopilot-boot-probe/
           retention-days: 7
 
   # --------------------------------------------------------------------------

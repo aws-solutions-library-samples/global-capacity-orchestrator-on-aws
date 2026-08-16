@@ -204,7 +204,10 @@ def test_declining_the_install_exits_with_instructions(runner: CliRunner) -> Non
         result = _invoke(runner, [], input_text="n\n")
 
     assert result.exit_code == 1
-    assert f"npm install -g {CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}" in result.output
+    assert (
+        f"npm install -g --allow-scripts={CLAUDE_CODE_PACKAGE} "
+        f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
+    ) in result.output
 
 
 def test_yes_installs_the_pin_and_execs_claude(runner: CliRunner) -> None:
@@ -230,6 +233,27 @@ def test_yes_installs_the_pin_and_execs_claude(runner: CliRunner) -> None:
     assert argv[0] == "/tmp/bin/claude"
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--mcp-config") + 1].endswith("mcp.json")
+
+
+def test_unexecutable_claude_fails_with_reinstall_guidance(runner: CliRunner) -> None:
+    """A shim whose postinstall never ran dies at exec — remediation, not traceback.
+
+    Seen live under npm >= 12, which blocks lifecycle scripts by default:
+    the install leaves a launcher on PATH but no native binary, and execvpe
+    raises ``OSError: Exec format error``.
+    """
+    with (
+        patch("cli.commands.autopilot_cmd.find_claude_binary", return_value="/tmp/bin/claude"),
+        patch(
+            "cli.commands.autopilot_cmd.exec_claude",
+            side_effect=OSError(8, "Exec format error"),
+        ),
+    ):
+        result = _invoke(runner, [])
+
+    assert result.exit_code == 1
+    assert "Failed to launch Claude Code" in result.output
+    assert "--allow-scripts" in result.output  # the remediation is the full pinned command
 
 
 def test_launch_wires_the_bedrock_environment(runner: CliRunner) -> None:
@@ -449,6 +473,9 @@ def test_install_claude_code_invokes_the_pinned_npm_install() -> None:
         assert install_claude_code() == 0
     call.assert_called_once_with(claude_install_command())
     assert claude_install_command()[-1] == f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
+    # npm >= 12 blocks postinstall scripts by default; without this scoped
+    # allowance the install leaves a shim that dies with Exec format error.
+    assert f"--allow-scripts={CLAUDE_CODE_PACKAGE}" in claude_install_command()
 
 
 def test_exec_claude_replaces_the_process_on_posix() -> None:

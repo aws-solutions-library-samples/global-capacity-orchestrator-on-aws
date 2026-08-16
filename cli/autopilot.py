@@ -556,8 +556,21 @@ def has_resumable_session(workspace: Path) -> bool:
 
 
 def claude_install_command() -> list[str]:
-    """Return the pinned, reproducible Claude Code install command."""
-    return ["npm", "install", "-g", f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"]
+    """Return the pinned, reproducible Claude Code install command.
+
+    ``--allow-scripts`` names exactly this one package: Claude Code's
+    postinstall downloads the platform-native binary, and npm >= 12 blocks
+    lifecycle scripts by default, which would otherwise leave a shim on
+    PATH that fails with ``Exec format error`` on launch. Older npm (< 12)
+    accepts and ignores the flag, so one command form works everywhere.
+    """
+    return [
+        "npm",
+        "install",
+        "-g",
+        f"--allow-scripts={CLAUDE_CODE_PACKAGE}",
+        f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}",
+    ]
 
 
 def install_claude_code() -> int:

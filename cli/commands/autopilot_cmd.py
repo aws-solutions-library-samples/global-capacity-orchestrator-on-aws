@@ -440,5 +440,16 @@ def autopilot(
     argv = build_launch_argv(claude_binary, written, tuple(claude_args), resume_args, plugin_args)
 
     formatter.print_info(f"Launching Claude Code on Bedrock ({plan['model']})...")
-    rc = exec_claude(argv, env)  # returns only on Windows
+    try:
+        rc = exec_claude(argv, env)  # returns only on Windows
+    except OSError as e:
+        # A claude on PATH that cannot exec (for example a shim whose
+        # blocked postinstall never fetched the native binary) must fail
+        # with a remediation, not a traceback.
+        formatter.print_error(
+            f"Failed to launch Claude Code at {argv[0]}: {e}. "
+            "The install may be incomplete — reinstall with "
+            f"`{' '.join(claude_install_command())}` and re-run `gco autopilot`."
+        )
+        sys.exit(1)
     sys.exit(rc)
