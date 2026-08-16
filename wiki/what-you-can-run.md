@@ -8,9 +8,8 @@ category below ships with a ready-to-submit manifest in
 
 ## Schedulers for every workload pattern
 
-GCO ships six scheduling and orchestration tools; KEDA, Volcano, KubeRay,
-Kueue, and cert-manager are enabled by default, while Slurm (Slinky) and
-YuniKorn are opt-in:
+GCO ships six scheduling and orchestration tools — KEDA, Volcano, KubeRay,
+and Kueue enabled by default, Slurm (Slinky) and YuniKorn opt-in:
 
 - **Volcano** — gang scheduling for distributed training
 - **Kueue** — resource quotas, fair sharing, priority admission
@@ -23,7 +22,10 @@ They operate at different layers (admission, scaling, pod scheduling, node
 provisioning) and can be combined — the
 [Schedulers Overview](https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/docs/SCHEDULERS.md)
 has the comparison table, the decision guide, and the GPU-quota coordination
-warning you should read before enabling several at once.
+warning you should read before enabling several at once. The scheduler set is
+not the whole Helm-managed ecosystem: workload operators ship alongside it,
+most notably Kubeflow Trainer v2 for distributed training (on by default,
+covered next).
 
 ![GCO Schedulers and Queues dashboard — pending pods, Kueue workloads, active Jobs](assets/images/grafana-schedulers.png)
 
