@@ -176,16 +176,16 @@ The scan runs as an Advanced Setup workflow rather than Default Setup so the fil
 
 ## README badges
 
-The README's badge row has four parts:
+The README's badge row has three parts, in order — five dynamic health
+signals, then a navigation link:
 
 1. **Four workflow-status badges** (`Unit Tests`, `Integration Tests`, `Security`, `Linting`) from GitHub's native `badge.svg` endpoint.
-2. **A wiki badge** — a static shields.io badge linking to the Pages site root, where `pages.yml` serves the MkDocs wiki.
-3. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the 90% gate all describe one run.
-4. **Eight stack/tech badges** (Python, CDK, EKS Auto Mode, Kubernetes, CDK-Nag, etc.) rendered by shields.io from hardcoded values, each linking to the authoritative source (pyproject.toml, cdk.json, upstream docs, etc.).
+2. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the 90% gate all describe one run.
+3. **A wiki badge** — a static shields.io badge linking to the Pages site root, where `pages.yml` serves the MkDocs wiki. It sits last so the dynamic quality signals stay grouped.
 
 ### "repo or workflow not found" on fresh or private repositories
 
-The four workflow-status badges at the top of the README come from GitHub's native `badge.svg` endpoint and render a placeholder image when the repo is unreachable. All other shields.io URLs (`img.shields.io/badge/...`) are static and always render.
+The four workflow-status badges at the top of the README come from GitHub's native `badge.svg` endpoint and render a placeholder image when the repo is unreachable. The wiki badge (`img.shields.io/badge/...`) is static and always renders; the coverage badge (`img.shields.io/endpoint`) renders whatever `/coverage-badge.json` the Pages site last published, so it needs one successful `pages.yml` deploy before it shows a number.
 
 If a stale run ever shows a `img.shields.io/github/actions/workflow/status/...` URL rendering as **"repo or workflow not found"**, the usual cause is the repo being private (shields.io hits the public GitHub REST API and gets a 404). Making the repo public resolves it; there's no code change needed.
 
