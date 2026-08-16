@@ -598,7 +598,48 @@ gco stacks destroy-all -y
 - `docs/TROUBLESHOOTING.md`: Common issues
 - `docs/RUNBOOKS.md`: Operational runbooks for incident response
 - `docs/adr/`: Architecture Decision Records — the append-only log of significant architectural decisions
+- `wiki/` + `mkdocs.yml`: The orientation wiki published to GitHub Pages (see
+  [Developing the wiki](#developing-the-wiki))
 - `CONTRIBUTING.md`: This file
+
+### Developing the wiki
+
+The [project wiki](https://awslabs.github.io/global-capacity-orchestrator-on-aws/)
+is a small MkDocs site built from `wiki/*.md` and `mkdocs.yml`, published to
+GitHub Pages by `pages.yml` with the coverage report embedded at `/coverage/`.
+It is an orientation layer: pages **summarize and link** to the authoritative
+docs on GitHub — they must not restate reference detail (flags, config keys,
+procedures), which would rot. Deep-doc links use full
+`https://github.com/.../blob/main/...` URLs (the docs are not part of the
+built site), and images are referenced as `assets/images/<name>` — a build
+hook serves the tracked `images/` directory, so never commit image copies.
+
+To preview changes locally with live reload:
+
+```bash
+pip install -e ".[docs]"        # once, in your venv (or use the dev container)
+./scripts/preview_wiki.sh       # strict build + live server on :8000
+./scripts/preview_wiki.sh --build-only   # just the CI-equivalent strict build
+```
+
+The script's first phase runs `mkdocs build --strict` — the exact command the
+`lint:mkdocs:strict` PR gate and the Pages deploy run — so a broken link or a
+nav entry without a file fails locally before CI sees it. From the dev
+container, forward the port yourself
+(`docker run -p 8000:8000 ... ./scripts/preview_wiki.sh`); the `gco` shell
+function does not forward ports. The locally served `/coverage/` path 404s by
+design — the coverage report is merged in at deploy time, not built by MkDocs.
+
+Before pushing wiki changes, also run the wiki's guard tests and markdownlint:
+
+```bash
+pytest tests/test_wiki.py -q
+npm run lint:markdown
+```
+
+`tests/test_wiki.py` enforces the structural invariants (every page in the
+nav, every repo link and image resolving, no external image hosts); keep
+`mkdocs.yml` free of custom YAML tags so those guards can keep parsing it.
 
 ### Architecture Decision Records
 
