@@ -46,6 +46,20 @@ concurrency:
 permissions:
   contents: read
 
+# Single declarations for tooling installed by MORE than one job in this
+# file — both kind jobs (cluster-e2e, examples-smoke) build the same cluster
+# shape, and two jobs on different Calico builds would enforce NetworkPolicy
+# with two different engines. Workflow-level env inherits into every job, so
+# run-blocks interpolate ${CALICO_VERSION} directly and `with:` blocks use
+# ${{ env.KIND_VERSION }}. Tracked for drift by the "CI tooling" section of
+# dependency-scan.sh; single-job pins (METRICS_SERVER_*, KUBECONFORM_*) stay
+# scoped to their one job on purpose.
+env:
+  KIND_VERSION: "v0.32.0"
+  KIND_NODE_IMAGE: "kindest/node:v1.36.1"
+  CALICO_VERSION: "v3.32.1"
+  CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
+
 jobs:
   integration-helm-charts-valid:
     name: "integration:helm:charts-valid"
@@ -60,29 +74,29 @@ jobs:
     # (those are toggled on via cdk.json, so their pins must be valid too).
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # Declared as an env pin (not inline in the curl below) so the
-      # "version consistency" section of dependency-scan.sh can compare it
-      # against the HELM_VERSION deps-scan.yml installs. Keep this in
-      # lockstep with the helm the installer Lambda ships
-      # (lambda/helm-installer/Dockerfile); that RUN-line copy is now also
-      # covered by the consistency check via extract_helm_installer_pins.
-      HELM_VERSION: "v4.2.3"
-      HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project (provides PyYAML for the validator)
         run: pip install -e .
+      - name: Derive the Helm pin from the production installer Dockerfile
+        # lambda/helm-installer/Dockerfile is the single source for the Helm
+        # version + checksum: this step loads HELM_VERSION / HELM_SHA256 from
+        # its authenticated RUN line, so CI installs the exact binary the
+        # installer Lambda ships and a bump edits one file only.
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
       - name: Install Helm
-        # Pin to the SAME helm the installer Lambda ships (see
-        # lambda/helm-installer/Dockerfile) so CI validates against the exact
-        # authenticated binary that performs the real install. Bump the
-        # version and checksum together in every installation path.
+        # The pin (version + checksum) was derived from the installer
+        # Dockerfile in the previous step, so this validates against the
+        # exact authenticated binary that performs the real install.
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/helm.tar.gz"
@@ -110,14 +124,14 @@ jobs:
       # exclusively by the schema-validation step below, so it's installed
       # and pinned here rather than globally. Tracked for drift by the
       # "CI tooling" section of dependency-scan.sh, the same way
-      # TRIVY_VERSION / HELM_VERSION are.
+      # HELM_VERSION and the install-trivy action default are.
       KUBECONFORM_VERSION: "v0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
@@ -276,7 +290,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
@@ -304,7 +318,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install test dependencies
@@ -335,7 +349,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dev + mcp
@@ -381,7 +395,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install the CLI and the in-tree MCP server dependencies
@@ -969,6 +983,12 @@ jobs:
             elf-e-machine: "0xB7"
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7.0.0
+        # The autopilot config check below runs the shared CI contract on
+        # the runner, which imports the project's cli package — that needs
+        # the repo's Python, not the runner image's system python.
+        with:
+          python-version-file: ".python-version"
       - name: Build dev container
         # Native build on the matching host arch — no --platform or QEMU.
         # Dockerfile.dev is parameterized on BuildKit's $TARGETARCH, which
@@ -1015,17 +1035,14 @@ jobs:
             gco autopilot --dry-run
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
             gco autopilot -e all-tools --print-config > /tmp/autopilot-config.json
-          python3 - <<'PY'
-          import json
-
-          with open("/tmp/autopilot-config.json") as handle:
-              config = json.load(handle)
-          gco = config["mcpServers"]["gco"]
-          assert gco["env"] == {"GCO_ENABLE_ALL_TOOLS": "true"}, gco
-          assert gco["args"] == ["/workspace/gco_mcp/run_mcp.py"], gco["args"]
-          assert len(config["mcpServers"]) > 1, "companions missing"
-          print(f"in-container autopilot config OK: {len(config['mcpServers'])} servers")
-          PY
+          # Shared autopilot CI contract: full server-set/shape/env checks
+          # from the same single source unit:cli:autopilot and the boot
+          # probe use; --gco-args additionally proves the gco server runs
+          # from the mounted checkout, the assertion specific to this step.
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-config /tmp/autopilot-config.json \
+            --expect-gco-env GCO_ENABLE_ALL_TOOLS=true \
+            --gco-args /workspace/gco_mcp/run_mcp.py
       - name: Verify image contains native ${{ matrix.arch }} binaries
         # Two layers of verification:
         #   1. `uname -m` inside the container reports the expected arch.
@@ -1135,11 +1152,11 @@ jobs:
     env:
       # kind does not provide the EKS managed add-on used in production. Pin
       # upstream test-cluster components, authenticate their manifests, and
-      # expose their versions to the monthly dependency drift scan.
+      # expose their versions to the monthly dependency drift scan. The kind
+      # and Calico pins shared with examples-smoke live in the workflow-level
+      # env block at the top of this file.
       METRICS_SERVER_VERSION: "v0.9.0"
       METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
-      CALICO_VERSION: "v3.32.1"
-      CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim runner disk space before Kind image builds
@@ -1147,8 +1164,8 @@ jobs:
       - name: Create kind cluster (no default CNI)
         uses: helm/kind-action@v1.14.0
         with:
-          version: "v0.32.0"
-          node_image: "kindest/node:v1.36.1"
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
           cluster_name: "gco-ci"
           config: ".github/kind/kind-calico.yaml"
           # Default CNI is disabled in the kind config so Calico can take
@@ -1682,27 +1699,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Same pinned helm as integration:helm:charts-valid and the installer
-      # Lambda (lambda/helm-installer/Dockerfile). The version-consistency
-      # section of dependency-scan.sh asserts every HELM_VERSION declaration
-      # in CI agrees — bump them together.
-      HELM_VERSION: "v4.2.3"
-      HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
+      # Helm pin (version + checksum) is derived at runtime from
+      # lambda/helm-installer/Dockerfile by the derive step below — the same
+      # single source integration:helm:charts-valid and deps-scan.yml use.
       # The ServiceAccount the queue/manifest processors run as in
       # production, and the identity that applies the example here.
       PROCESSOR_SA: "system:serviceaccount:gco-system:gco-manifest-processor-sa"
-      # Same pins as integration:kind:cluster-e2e — the version-consistency
-      # section of dependency-scan.sh requires every declaration to agree,
-      # so bump them together.
-      CALICO_VERSION: "v3.32.1"
-      CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
+      # The kind and Calico pins shared with cluster-e2e live in the
+      # workflow-level env block at the top of this file — one declaration.
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim runner disk space before large image pulls
         uses: ./.github/actions/free-disk-space
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project (chart emit helper + allowlist derivation)
@@ -1711,6 +1722,14 @@ jobs:
         # derives (group, plural) pairs from the SAME constants production
         # enforces — no hardcoded copy to drift.
         run: pip install -e .
+      - name: Derive the Helm pin from the production installer Dockerfile
+        # Single source: lambda/helm-installer/Dockerfile (see the
+        # charts-valid job for the full rationale).
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
       - name: Install Helm
         run: |
           set -euo pipefail
@@ -1728,15 +1747,16 @@ jobs:
           rmdir "${install_dir}"
           helm version --short
       - name: Create kind cluster (no default CNI)
-        # Same kind/node pins as integration:kind:cluster-e2e (bump together;
-        # tracked by the dependency drift scan). The default CNI is disabled
-        # so Calico can take over: kindnet accepts NetworkPolicy objects
-        # without enforcing them, and the mlflow leg of this job is only a
-        # real test when the chart's own policy is actually enforced.
+        # kind/node pins come from the workflow-level env block (shared with
+        # integration:kind:cluster-e2e; tracked by the dependency drift
+        # scan). The default CNI is disabled so Calico can take over:
+        # kindnet accepts NetworkPolicy objects without enforcing them, and
+        # the mlflow leg of this job is only a real test when the chart's
+        # own policy is actually enforced.
         uses: helm/kind-action@v1.14.0
         with:
-          version: "v0.32.0"
-          node_image: "kindest/node:v1.36.1"
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
           cluster_name: "gco-examples-smoke"
           config: ".github/kind/kind-calico.yaml"
           # The control plane cannot go Ready without a CNI; the next step

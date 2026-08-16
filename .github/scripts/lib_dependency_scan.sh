@@ -1303,7 +1303,7 @@ get_latest_github_release_tag() {
 # Prints the unique value(s) of a ``<VAR_NAME>: "<value>"`` env assignment
 # found across the workflow YAML under <workflows_dir> (default
 # ``.github/workflows``). Used by the CI-tooling drift check to read the
-# pinned ``TRIVY_VERSION`` / ``HELM_VERSION`` / ``KUBECTL_VERSION`` the
+# pinned ``HELM_VERSION`` / ``KUBECTL_VERSION`` / ``CALICO_VERSION`` the
 # workflows install their own tooling from — pins Dependabot doesn't watch
 # (they're plain env strings, not ``uses:`` refs or Dockerfile ``FROM``
 # lines).
@@ -1323,6 +1323,28 @@ extract_workflow_env_pin() {
     | sort -u
 }
 
+# extract_install_trivy_pin [action_yml]
+#
+# Prints the Trivy version pinned as the ``version`` input default of the
+# install-trivy composite action — the one place the Trivy pin lives, now
+# that security.yml and cve-scan.yml carry no copies of their own. Empty
+# output when the file, the input, or the default is absent.
+extract_install_trivy_pin() {
+  local file="${1:-.github/actions/install-trivy/action.yml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f)
+except Exception:
+    sys.exit(0)
+value = ((((data or {}).get('inputs') or {}).get('version') or {}).get('default') or '')
+if value:
+    print(value)
+" "$file" 2>/dev/null
+}
+
 # extract_kind_pins [workflow_file]
 #
 # Prints the kind pins configured on the ``helm/kind-action`` step:
@@ -1340,26 +1362,49 @@ extract_kind_pins() {
   local file="${1:-.github/workflows/integration-tests.yml}"
   [ -f "$file" ] || return 0
   python3 -c "
-import sys, yaml
+import re, sys, yaml
 try:
     with open(sys.argv[1]) as f:
         data = yaml.safe_load(f)
 except Exception:
     sys.exit(0)
+
+# The kind-action steps reference the single workflow-level declarations as
+# \${{ env.KIND_VERSION }} / \${{ env.KIND_NODE_IMAGE }}; resolve those here
+# so callers keep seeing concrete values. Literal with: values (the
+# pre-hoist shape) still pass through unchanged. An env reference that does
+# not resolve prints nothing — the caller's presence checks report the pin
+# as missing rather than passing a template string to a release lookup.
+workflow_env = {
+    str(k): str(v) for k, v in ((data or {}).get('env') or {}).items()
+}
+_REF = re.compile(r'^\\\$\\{\\{\\s*env\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\\}\$')
+
+def resolve(value, job_env):
+    value = str(value or '')
+    match = _REF.match(value.strip())
+    if not match:
+        return value
+    name = match.group(1)
+    if name in job_env:
+        return str(job_env[name])
+    return workflow_env.get(name, '')
+
 seen = []
 for job in (data or {}).get('jobs', {}).values():
+    job_env = {str(k): str(v) for k, v in ((job or {}).get('env') or {}).items()}
     for step in (job or {}).get('steps', []) or []:
         uses = (step or {}).get('uses', '') or ''
         if uses.startswith('helm/kind-action'):
             with_ = (step or {}).get('with', {}) or {}
-            ver = with_.get('version', '')
-            node = with_.get('node_image', '')
+            ver = resolve(with_.get('version', ''), job_env)
+            node = resolve(with_.get('node_image', ''), job_env)
             if ver and ('kind', ver) not in seen:
                 seen.append(('kind', ver))
             if node and ('kind-node', node) not in seen:
                 seen.append(('kind-node', node))
 # De-duplicated: multiple kind-action steps (cluster-e2e + examples-smoke)
-# pinned to the SAME versions print once. A key appearing twice therefore
+# resolving to the SAME versions print once. A key appearing twice therefore
 # always means the steps drifted apart — the caller's consistency check
 # reports exactly that.
 for key, value in seen:
@@ -1450,7 +1495,15 @@ except Exception:
 # means the CI matrix drifted from the runtime the Lambdas actually ship on.
 extract_python_version_pins() {
   local dir="${1:-.github/workflows}"
+  local version_file="${2:-.python-version}"
   [ -d "$dir" ] || return 0
+  # The CI Python lives once, in .python-version (every setup-python step
+  # uses python-version-file). Emit that single pin, PLUS any literal
+  # python-version: leftovers in the workflows — a stray literal is
+  # exactly the drift the consistency check should surface.
+  if [ -f "$version_file" ]; then
+    grep -oE "^[0-9]+\.[0-9]+" "$version_file" | head -1
+  fi
   grep -rhoE "python-version:[[:space:]]*\"?[0-9]+\.[0-9]+\"?" "$dir" 2>/dev/null \
     | sed -E "s/python-version:[[:space:]]*//" \
     | tr -d '"'
@@ -1765,12 +1818,22 @@ extract_helm_installer_pins() {
 import re, sys
 with open(sys.argv[1]) as f:
     text = f.read()
+# Versions from the download URLs; checksums from the sha256sum trust
+# anchor bound to each download's output path. These four lines are the
+# single Helm/kubectl source the CI jobs load into GITHUB_ENV — the
+# workflows deliberately carry no literal copies of their own.
 m = re.search(r'get\.helm\.sh/helm-(v\d+\.\d+\.\d+)-', text)
 if m:
     print(f'HELM_VERSION|{m.group(1)}')
+m = re.search(r'([0-9a-f]{64})\s+/tmp/helm\.tar\.gz', text)
+if m:
+    print(f'HELM_SHA256|{m.group(1)}')
 m = re.search(r'dl\.k8s\.io/release/(v\d+\.\d+\.\d+)/', text)
 if m:
     print(f'KUBECTL_VERSION|{m.group(1)}')
+m = re.search(r'([0-9a-f]{64})\s+/tmp/kubectl', text)
+if m:
+    print(f'KUBECTL_SHA256|{m.group(1)}')
 " "$file" 2>/dev/null
 }
 

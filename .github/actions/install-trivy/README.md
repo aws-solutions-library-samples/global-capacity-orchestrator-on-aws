@@ -29,11 +29,12 @@ their distinct policies.
 ```yaml
 - uses: ./.github/actions/install-trivy
   with:
-    version: "${{ env.TRIVY_VERSION }}"
     github-token: "${{ github.token }}"
 ```
 
 ## Version Updates
 
-Keep the Trivy release synchronized across all workflow callers. Review and pin
-any update to `aquasecurity/setup-trivy` in [`action.yml`](action.yml).
+The `version` input default in [`action.yml`](action.yml) is the single Trivy
+pin for the repository; every workflow caller inherits it, and the monthly
+deps-scan tracks it via `extract_install_trivy_pin`. Review and pin any update
+to `aquasecurity/setup-trivy` in the same file.

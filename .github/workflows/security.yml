@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install security tooling
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install pip-audit
@@ -201,15 +201,13 @@ jobs:
     name: "security:trivy:filesystem"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # Pin in lockstep with TRIVY_VERSION in cve-scan.yml.
-      TRIVY_VERSION: "v0.73.0"
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned Trivy
+        # The Trivy pin lives in the composite action's `version` default —
+        # one place for security.yml and cve-scan.yml alike.
         uses: ./.github/actions/install-trivy
         with:
-          version: "${{ env.TRIVY_VERSION }}"
           github-token: "${{ github.token }}"
       - name: Trivy filesystem scan
         run: |
@@ -248,8 +246,6 @@ jobs:
     # gap the AWS GitLab runner couldn't handle (docker builds were flaky).
     # We rebuild here rather than passing images between workflows via
     # `workflow_call` — simpler and the build time is modest.
-    env:
-      TRIVY_VERSION: "v0.73.0"
     strategy:
       fail-fast: false
       matrix:
@@ -282,9 +278,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Install pinned Trivy
+        # Pin lives in the composite action's `version` default.
         uses: ./.github/actions/install-trivy
         with:
-          version: "${{ env.TRIVY_VERSION }}"
           github-token: "${{ github.token }}"
       - name: Build image
         # Shared GHA layer cache (scope: ${{ matrix.image }}). Same scope
@@ -480,7 +476,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install locked CDK + Python dependencies and synthesize

@@ -40,7 +40,8 @@
 #     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME;
 #     the Aurora engine is a plain version string checked against live RDS)
 #   - Latest stable Python release from endoflife.date — public endpoint
-#   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION),
+#   - CI tooling the workflows install by hand: Trivy (the install-trivy
+#     composite action's version default),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
 #     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind + its
@@ -1464,9 +1465,10 @@ check_github_tool() {
   fi
 }
 
-# Trivy (aquasecurity/trivy) — TRIVY_VERSION in the security workflows.
-TRIVY_PIN="$(extract_workflow_env_pin TRIVY_VERSION | head -1)"
-check_github_tool "Trivy (TRIVY_VERSION)" "$TRIVY_PIN" "aquasecurity/trivy" \
+# Trivy (aquasecurity/trivy) — the version-input default of the
+# install-trivy composite action, the single pin every caller inherits.
+TRIVY_PIN="$(extract_install_trivy_pin | head -1)"
+check_github_tool "Trivy (install-trivy action default)" "$TRIVY_PIN" "aquasecurity/trivy" \
   "https://github.com/aquasecurity/trivy/releases"
 
 # actionlint (rhysd/actionlint) — lint.yml downloads this release archive.
@@ -1474,9 +1476,11 @@ ACTIONLINT_PIN="$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
 check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/actionlint" \
   "https://github.com/rhysd/actionlint/releases"
 
-# Helm (helm/helm) — HELM_VERSION the deps-scan workflow installs.
-HELM_PIN="$(extract_workflow_env_pin HELM_VERSION | head -1)"
-check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
+# Helm (helm/helm) — the authenticated RUN-line pin in
+# lambda/helm-installer/Dockerfile, the single source every CI job derives
+# its HELM_VERSION/HELM_SHA256 from at runtime.
+HELM_PIN="$(extract_helm_installer_pins | awk -F'|' '$1=="HELM_VERSION"{print $2}' | head -1)"
+check_github_tool "Helm (helm-installer Dockerfile)" "$HELM_PIN" "helm/helm" \
   "https://github.com/helm/helm/releases"
 
 # kubeconform (yannh/kubeconform) — KUBECONFORM_VERSION the
@@ -1521,9 +1525,11 @@ KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|
 check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
   "https://github.com/kubernetes-sigs/kind/releases"
 
-# kubectl (workflow env) — compare against the stable release for its own
-# minor line (dl.k8s.io), the same source the Dockerfile.dev kubectl pin uses.
-KUBECTL_WF_PIN="$(extract_workflow_env_pin KUBECTL_VERSION | head -1)"
+# kubectl — the authenticated RUN-line pin in lambda/helm-installer/
+# Dockerfile (the single source the CI jobs derive from); compared against
+# the stable release for its own minor line (dl.k8s.io), the same source
+# the Dockerfile.dev kubectl pin uses.
+KUBECTL_WF_PIN="$(extract_helm_installer_pins | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}' | head -1)"
 if [ -n "$KUBECTL_WF_PIN" ]; then
   kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
   if ! kubectl_latest="$(curl -fsSL --max-time 15 \
@@ -1532,11 +1538,11 @@ if [ -n "$KUBECTL_WF_PIN" ]; then
     mark_scan_incomplete "kubectl stable-version lookup failed for minor ${kubectl_minor}."
   elif [ "$KUBECTL_WF_PIN" != "$kubectl_latest" ] \
      && [ "$(compare_semver "$KUBECTL_WF_PIN" "$kubectl_latest")" = "newer" ]; then
-    echo "  - kubectl (KUBECTL_VERSION): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
-    echo "kubectl (KUBECTL_VERSION)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
+    echo "  - kubectl (helm-installer Dockerfile): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
+    echo "kubectl (helm-installer Dockerfile)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
   fi
 else
-  mark_scan_incomplete "Could not parse KUBECTL_VERSION from the workflows."
+  mark_scan_incomplete "Could not parse the kubectl pin from lambda/helm-installer/Dockerfile."
 fi
 
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
@@ -1581,7 +1587,7 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 #   - AWS CDK CLI across the locked root npm graph and Dockerfile.dev.
 #   - every repository-owned package.json has a lockfile, exact direct pins,
 #     and a matching npm entry in Dependabot.
-#   - the same tool env pin (TRIVY_VERSION/HELM_VERSION/KUBECTL_VERSION)
+#   - the same tool env pin (HELM_VERSION/KUBECTL_VERSION/CALICO_*)
 #     resolving to different values in different workflow files.
 #   - every [build-system] requires entry in pyproject.toml is an exact
 #     ``==`` pin (the drift itself reports through the Python surface).
@@ -1695,7 +1701,15 @@ fi
 # disagrees fails the download as what looks like a flake. The PR-time half of
 # this contract lives in
 # tests/test_supply_chain_integrity.py::test_repeated_workflow_pins_agree_across_jobs.
-for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION \
+# (Trivy is absent from this list on purpose: its pin is the install-trivy
+# composite action's input default, a single declaration that cannot
+# disagree with itself.)
+# (Helm and kubectl are absent from this list on purpose: their pins live
+# only in lambda/helm-installer/Dockerfile — workflows derive their env
+# copies from it at runtime, so a checked-in workflow declaration that
+# could disagree no longer exists. The guard below still catches a stray
+# reintroduced copy.)
+for consistency_var in \
     CALICO_VERSION CALICO_SHA256 METRICS_SERVER_VERSION METRICS_SERVER_SHA256; do
   cvals="$(extract_workflow_env_pin "$consistency_var")"
   cnum="$(echo "$cvals" | grep -c .)"
@@ -1717,8 +1731,15 @@ if [ -n "$INSTALLER_PINS" ]; then
     installer_val="$(printf '%s\n' "$INSTALLER_PINS" | awk -F'|' -v v="$tool_var" '$1==v{print $2}')"
     [ -n "$installer_val" ] || continue
     all_vals="$installer_val"
+    # Workflows derive their copies from the installer Dockerfile at
+    # runtime, so a checked-in workflow declaration is itself a finding:
+    # it would shadow the derive step's GITHUB_ENV export and drift.
     wf_vals="$(extract_workflow_env_pin "$tool_var")"
-    [ -n "$wf_vals" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$wf_vals")"
+    if [ -n "$wf_vals" ]; then
+      echo "  - ${tool_var} is declared literally in a workflow again (should derive from the installer Dockerfile): ${wf_vals}"
+      echo "${tool_var} (literal workflow copy reintroduced)|${wf_vals}" >> "$CONSISTENCY_RESULTS"
+      all_vals="$(printf '%s\n%s' "$all_vals" "$wf_vals")"
+    fi
     if [ "$tool_var" = "KUBECTL_VERSION" ]; then
       dev_val="$(extract_dockerfile_pins Dockerfile.dev | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}')"
       [ -n "$dev_val" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$dev_val")"

@@ -9,8 +9,9 @@
 #      or extend the date with a new justification if the fix still isn't
 #      available. Never extend without re-checking upstream.
 #   4. Keep the file short. A growing ignorefile is a smell.
-#   5. Verify against the pinned CI Trivy (TRIVY_VERSION in security.yml /
-#      cve-scan.yml) and its DB source — local `brew install trivy` uses
+#   5. Verify against the pinned CI Trivy (the `version` default in
+#      .github/actions/install-trivy/action.yml) and its DB source —
+#      local `brew install trivy` uses
 #      the ghcr.io DB which can classify severities differently from the
 #      CI's mirror.gcr.io/aquasec/trivy-db:2.
 #

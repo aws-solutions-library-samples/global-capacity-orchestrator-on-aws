@@ -133,7 +133,7 @@ jobs:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dependencies
@@ -251,7 +251,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install coverage (same pin as the shards)
@@ -362,7 +362,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI
@@ -388,7 +388,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI with CDK and test dependencies
@@ -435,7 +435,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - uses: actions/setup-node@v7.0.0
@@ -449,56 +449,25 @@ jobs:
           gco autopilot --help
           gco autopilot --dry-run
           gco -o json autopilot --dry-run > /tmp/autopilot-plan.json
-          python3 - <<'PY'
-          import json
-
-          from gco.bedrock import get_default_claude_code_model_id
-
-          with open("/tmp/autopilot-plan.json") as handle:
-              plan = json.load(handle)
-          assert plan["model"] == get_default_claude_code_model_id(), plan["model"]
-          assert plan["claude_binary"] is None, plan["claude_binary"]
-          assert "gco" in plan["mcp_servers"]
-          print("launch plan OK:", plan["model"])
-          PY
+          # Assertions live in the shared autopilot CI contract — the same
+          # checks the dev-container step and the boot probe consume, so
+          # the expected server set / model / pin are asserted from ONE
+          # place (.github/scripts/autopilot_ci_contract.py).
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-plan /tmp/autopilot-plan.json --claude-binary absent
       - name: Validate the generated MCP config
         run: |
           gco autopilot --print-config > /tmp/autopilot-mcp.json
-          python3 - <<'PY'
-          import json
-
-          from cli.autopilot import COMPANION_MCP_SERVERS
-
-          with open("/tmp/autopilot-mcp.json") as handle:
-              config = json.load(handle)
-          servers = config["mcpServers"]
-          expected = {"gco"} | {c.name for c in COMPANION_MCP_SERVERS}
-          assert set(servers) == expected, sorted(servers)
-          for name, entry in servers.items():
-              assert isinstance(entry["command"], str) and entry["command"], name
-              assert all(isinstance(a, str) for a in entry["args"]), name
-          text = json.dumps(config)
-          for pruned in ("mcp-server-fetch", "mcp-server-calculator"):
-              assert pruned not in text, pruned
-          print(f"MCP config OK: {len(servers)} servers")
-          PY
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-config /tmp/autopilot-mcp.json
       - name: Validate feature-flag and resume-flag handling
         run: |
-          # Feature flags land on the gco server entry only.
+          # Feature flags land on the gco server entry only (the contract's
+          # --expect-gco-env also asserts the pair leaks onto no companion).
           gco autopilot -e all-tools --print-config > /tmp/autopilot-flags.json
-          python3 - <<'PY'
-          import json
-
-          with open("/tmp/autopilot-flags.json") as handle:
-              servers = json.load(handle)["mcpServers"]
-          assert servers["gco"]["env"] == {"GCO_ENABLE_ALL_TOOLS": "true"}
-          assert all(
-              "GCO_ENABLE_ALL_TOOLS" not in entry.get("env", {})
-              for name, entry in servers.items()
-              if name != "gco"
-          )
-          print("feature-flag injection OK")
-          PY
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-config /tmp/autopilot-flags.json \
+            --expect-gco-env GCO_ENABLE_ALL_TOOLS=true
           # Bad inputs fail loudly instead of launching a wrong session.
           if gco autopilot -e bogus-flag --print-config; then
             echo "unknown feature flag was accepted" >&2; exit 1
@@ -534,16 +503,10 @@ jobs:
         # fetches the platform-native binary, leaving a broken shim).
         run: |
           python3 -c 'from cli.autopilot import claude_install_command; import subprocess; subprocess.run(claude_install_command(), check=True)'
-          claude --version
+          claude --version | grep -qF "$(python3 .github/scripts/autopilot_ci_contract.py pin)"
           gco -o json autopilot --dry-run > /tmp/autopilot-plan-installed.json
-          python3 - <<'PY'
-          import json
-
-          with open("/tmp/autopilot-plan-installed.json") as handle:
-              plan = json.load(handle)
-          assert plan["claude_binary"], "installed claude binary was not detected"
-          print("claude detected at", plan["claude_binary"])
-          PY
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-plan /tmp/autopilot-plan-installed.json --claude-binary present
 
   unit-cdk-synth:
     name: "unit:cdk:synth"
@@ -560,7 +523,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install locked CDK + Python dependencies
@@ -597,7 +560,7 @@ jobs:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CDK + test dependencies
@@ -650,7 +613,7 @@ jobs:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CDK + test dependencies
@@ -728,7 +691,7 @@ jobs:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dependencies
@@ -771,7 +734,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install pip-tools
@@ -836,7 +799,7 @@ jobs:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           # Intentionally no pip cache — this job verifies a cold install.
       - name: Fresh install
         run: |
@@ -856,7 +819,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install core + inference-monitor image dependencies
@@ -917,7 +880,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
       - name: Install uv
         run: pip install uv
       - name: Derive the documented --python value from requires-python

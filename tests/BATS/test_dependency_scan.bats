@@ -2034,19 +2034,87 @@ SHIM
 
 # ── extract_workflow_env_pin ────────────────────────────────────────────────
 
-@test "extract_workflow_env_pin: reads TRIVY_VERSION from the security workflows" {
+# ── extract_install_trivy_pin ───────────────────────────────────────────────
+
+@test "extract_install_trivy_pin: reads the version default from the composite action" {
+    # The Trivy pin lives only in .github/actions/install-trivy/action.yml;
+    # the workflows carry no TRIVY_VERSION copies of their own anymore.
+    run extract_install_trivy_pin
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
     run extract_workflow_env_pin TRIVY_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    [ -z "$output" ]
 }
 
-@test "extract_workflow_env_pin: reads the deps-scan HELM_VERSION and KUBECTL_VERSION" {
+@test "extract_install_trivy_pin: empty for a missing file" {
+    run extract_install_trivy_pin /nonexistent/action.yml
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_install_trivy_pin: empty when the default is absent" {
+    tmpdir="$(mktemp -d)"
+    printf 'inputs:\n  version:\n    required: true\n' > "$tmpdir/action.yml"
+    run extract_install_trivy_pin "$tmpdir/action.yml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+# ── extract_helm_installer_pins ─────────────────────────────────────────────
+# Load-bearing beyond the monthly scan: integration-tests.yml and
+# deps-scan.yml source the library and pipe this function's output into
+# GITHUB_ENV, so its four lines ARE the Helm/kubectl pins CI installs.
+
+@test "extract_helm_installer_pins: emits all four pins from the real Dockerfile" {
+    run extract_helm_installer_pins
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | grep -c .)" -eq 4 ]
+    [[ "$output" == *"HELM_VERSION|v"* ]]
+    [[ "$output" =~ HELM_SHA256\|[0-9a-f]{64} ]]
+    [[ "$output" == *"KUBECTL_VERSION|v1."* ]]
+    [[ "$output" =~ KUBECTL_SHA256\|[0-9a-f]{64} ]]
+}
+
+@test "extract_helm_installer_pins: GITHUB_ENV shape survives the tr pipeline" {
+    # Exactly the pipeline the workflow derive steps run.
+    run bash -c 'source .github/scripts/lib_dependency_scan.sh; extract_helm_installer_pins | tr "|" "="'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^HELM_VERSION=v[0-9]+\.[0-9]+\.[0-9]+$'\n' ]]
+    [[ "$output" == *"KUBECTL_SHA256="* ]]
+}
+
+@test "extract_helm_installer_pins: empty for a missing Dockerfile" {
+    run extract_helm_installer_pins /nonexistent/Dockerfile
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_helm_installer_pins: a version without its trust anchor emits no sha line" {
+    # The workflow derive steps grep for every expected pin afterwards, so
+    # a Dockerfile edit that drops the sha256 line fails the derive step
+    # instead of installing an unauthenticated binary.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+RUN curl -o /tmp/helm.tar.gz https://get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz
+EOF
+    run extract_helm_installer_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "HELM_VERSION|v9.9.9" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_workflow_env_pin: HELM_VERSION and KUBECTL_VERSION carry no workflow copies" {
+    # Both pins live only in lambda/helm-installer/Dockerfile; workflows
+    # derive them into GITHUB_ENV at runtime, so the env extractor must
+    # find nothing to drift.
     run extract_workflow_env_pin HELM_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v[0-9] ]]
+    [ -z "$output" ]
     run extract_workflow_env_pin KUBECTL_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v1\. ]]
+    [ -z "$output" ]
 }
 
 @test "extract_workflow_env_pin: reads the KUBECONFORM_VERSION pin from integration-tests.yml" {
@@ -2144,6 +2212,50 @@ EOF
     run extract_kind_pins "$tmpfile"
     [ "$status" -eq 0 ]
     [[ "$output" == *"kind|v0.99.0"* ]]
+    [[ "$output" == *"kind-node|kindest/node:v1.40.0"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: resolves \${{ env.* }} references against workflow env" {
+    # The production shape: kind-action steps reference the single
+    # workflow-level declarations rather than carrying literal copies.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+env:
+  KIND_VERSION: "v0.98.0"
+  KIND_NODE_IMAGE: "kindest/node:v1.41.0"
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kind|v0.98.0"* ]]
+    [[ "$output" == *"kind-node|kindest/node:v1.41.0"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: an unresolvable env reference prints nothing for that key" {
+    # A template string must never reach a release lookup; the caller's
+    # presence check reports the pin as missing instead.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "${{ env.NOT_DECLARED }}"
+          node_image: "kindest/node:v1.40.0"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"kind|"* || "$output" == *"kind-node|"* ]]
+    [[ "$output" != *"NOT_DECLARED"* ]]
     [[ "$output" == *"kind-node|kindest/node:v1.40.0"* ]]
     rm -f "$tmpfile"
 }
@@ -2262,7 +2374,11 @@ EOF
 
 # ── extract_python_version_pins ─────────────────────────────────────────────
 
-@test "extract_python_version_pins: finds the repo's python-version pins" {
+@test "extract_python_version_pins: reads the single .python-version source" {
+    # CI Python is single-sourced: every setup-python step uses
+    # python-version-file, so the extractor emits the .python-version pin
+    # (plus any stray literal reintroduced in a workflow, for the
+    # consistency check to surface).
     run extract_python_version_pins
     [ "$status" -eq 0 ]
     [ -n "$output" ]
@@ -2270,6 +2386,7 @@ EOF
         [ -z "$line" ] && continue
         [[ "$line" =~ ^[0-9]+\.[0-9]+$ ]]
     done <<< "$output"
+    [ "$output" = "$(grep -oE '^[0-9]+\.[0-9]+' .python-version)" ]
 }
 
 @test "extract_python_version_pins: empty for a missing directory" {
@@ -2282,9 +2399,22 @@ EOF
     tmpdir="$(mktemp -d)"
     printf 'jobs:\n  a:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/a.yml"
     printf 'jobs:\n  b:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/b.yml"
-    run extract_python_version_pins "$tmpdir"
+    run extract_python_version_pins "$tmpdir" "$tmpdir/.python-version"
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | grep -c '^3\.14$')" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_python_version_pins: a drifted stray literal joins the version-file pin" {
+    # A workflow that reintroduces a literal python-version DIFFERENT from
+    # .python-version must surface as two distinct values for the
+    # consistency check to report.
+    tmpdir="$(mktemp -d)"
+    printf '3.14\n' > "$tmpdir/.python-version"
+    printf 'jobs:\n  a:\n    steps:\n      - with:\n          python-version: "3.12"\n' > "$tmpdir/a.yml"
+    run extract_python_version_pins "$tmpdir" "$tmpdir/.python-version"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | sort -u | grep -c .)" -eq 2 ]
     rm -rf "$tmpdir"
 }
 

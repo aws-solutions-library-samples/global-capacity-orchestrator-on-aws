@@ -119,8 +119,11 @@ if command -v claude >/dev/null; then
     fail "claude is already installed at $(command -v claude) — this probe must exercise autopilot's own install path"
 fi
 
-CLAUDE_PIN="$(python3 -c 'from cli.autopilot import CLAUDE_CODE_VERSION; print(CLAUDE_CODE_VERSION)')"
-EXPECTED_MODEL="$(python3 -c 'from gco.bedrock import get_default_claude_code_model_id; print(get_default_claude_code_model_id())')"
+# Facts come from the shared autopilot CI contract — the same single
+# source unit:cli:autopilot and the dev-container step assert against.
+CONTRACT=".github/scripts/autopilot_ci_contract.py"
+CLAUDE_PIN="$(python3 "$CONTRACT" pin)"
+EXPECTED_MODEL="$(python3 "$CONTRACT" default-model)"
 pass "preflight OK (pin ${CLAUDE_PIN}, default model ${EXPECTED_MODEL})"
 
 # ── Phase 1: resolve the session plan from this checkout ────────────────────
@@ -128,16 +131,13 @@ pass "preflight OK (pin ${CLAUDE_PIN}, default model ${EXPECTED_MODEL})"
 GENERATED_CONFIG="${WORK_DIR}/print-config.json"
 gco autopilot --print-config > "$GENERATED_CONFIG"
 
-mapfile -t SERVER_NAMES < <(python3 - "$GENERATED_CONFIG" <<'PY'
-import json, sys
-with open(sys.argv[1]) as handle:
-    config = json.load(handle)
-for name in sorted(config["mcpServers"]):
-    print(name)
-PY
-)
-[ "${#SERVER_NAMES[@]}" -ge 2 ] || fail "generated config lists ${#SERVER_NAMES[@]} servers; expected the gco server plus companions"
-printf '%s\n' "${SERVER_NAMES[@]}" | grep -qx "gco" || fail "generated config is missing the gco server"
+# Full structural validation from the shared contract (exact expected
+# server set, entry shapes, pruned-package bans), then load the expected
+# names for the per-server pre-warm and handshake assertions below.
+python3 "$CONTRACT" verify-config "$GENERATED_CONFIG" \
+    || fail "generated config failed the shared autopilot CI contract"
+mapfile -t SERVER_NAMES < <(python3 "$CONTRACT" expected-servers)
+[ "${#SERVER_NAMES[@]}" -ge 2 ] || fail "contract lists ${#SERVER_NAMES[@]} servers; expected the gco server plus companions"
 pass "session plan resolves: ${#SERVER_NAMES[@]} MCP servers (${SERVER_NAMES[*]})"
 
 # ── Phase 2: pre-warm every server's exact launch recipe ────────────────────
