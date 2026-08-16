@@ -12,7 +12,7 @@
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml/badge.svg?branch=main" alt="Integration Tests"></a>
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/security.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/security.yml/badge.svg?branch=main" alt="Security"></a>
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml/badge.svg?branch=main" alt="Linting"></a>
-  <a href="https://awslabs.github.io/global-capacity-orchestrator-on-aws/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fawslabs.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
+  <a href="https://awslabs.github.io/global-capacity-orchestrator-on-aws/coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fawslabs.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
 </p>
 <!-- END BADGE TABLE -->
 
@@ -489,6 +489,12 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 - **CLI + MCP surface**: ten `gco mission` subcommands (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call) and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
 
 ## Documentation
+
+**Prefer a website?** The [project wiki](https://awslabs.github.io/global-capacity-orchestrator-on-aws/)
+is a short orientation site — what GCO is, how it works, what you can run, and
+where to go deeper — published from this repository with the
+[live coverage report](https://awslabs.github.io/global-capacity-orchestrator-on-aws/coverage/)
+embedded.
 
 **New to GCO?** Start here:
 
