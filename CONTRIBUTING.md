@@ -208,11 +208,19 @@ docker build -f Dockerfile.dev -t gco-dev .
 
 # Regenerate the lockfile and strip the project self-reference
 docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+  pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
   sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
 '
 ```
+
+The `pip install "pip==25.0.1"` step works around `pip-tools==7.6.0` importing
+pip internals (`pip._internal.utils.compat.stdlib_pkgs`) that newer pip — as
+shipped in the current `python:3.14-slim` base image — has removed. The
+downgrade lives only inside the throwaway container; upgrading `pip-tools`
+past 7.6 would remove the need for it, but that is a dependency change made on
+its own PR, not silently alongside a lockfile regeneration.
 
 The `sed` step removes the `gco-cli @ file:///workspace` self-reference that
 `pip-compile` always emits (two lines — the `file://` URI and its `# via`

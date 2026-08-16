@@ -192,31 +192,38 @@ shipping a skew.
 1. `cdk.json` — set `context.kubernetes_version` to the new minor.
 2. `pyproject.toml` — bump `kubernetes==<minor>.x` so the Python client's major
    equals the cluster minor (for example `kubernetes==37.*` for EKS `1.37`),
-   then regenerate the lock:
-
-   ```bash
-   pip-compile --all-extras --strip-extras -o requirements-lock.txt pyproject.toml
-   ```
-
+   then regenerate the lock through the container exactly as described in
+   [Updating a dependency](#updating-a-dependency) step 3 — don't run
+   `pip-compile` against your host Python; the flags and platform differ from
+   what CI's staleness check expects.
 3. `gco/stacks/constants.py` — update the five `EKS_ADDON_*` constants to builds
    published for the new minor (see [validating add-ons](#validating-add-on-versions)).
 4. Confirm the pinned `aws-cdk-lib` exposes `eks.KubernetesVersion.V1_<minor>`.
    If it does not, bump `aws-cdk-lib` in `pyproject.toml` and re-lock; otherwise
    the stack silently uses the `.of()` fallback.
-5. kubectl pins — bump to a patch of the new minor in all three spots, staying
-   within one minor of the cluster:
+5. kubectl pins — bump to a patch of the new minor in the two committed spots,
+   staying within one minor of the cluster:
+   - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
+     the `sha256sum -c` line under it (the checksum for each release binary is
+     published alongside it as `<url>.sha256`)
    - `Dockerfile.dev` (`ARG KUBECTL_VERSION`)
-   - `lambda/helm-installer/Dockerfile` (the `dl.k8s.io/release/...` URL)
-   - `.github/workflows/deps-scan.yml` (`KUBECTL_VERSION` env)
-6. Helm pins — if a new Helm is needed for the minor, bump the `HELM_VERSION`
-   env in both `.github/workflows/deps-scan.yml` and
-   `.github/workflows/integration-tests.yml` (the `integration:helm:charts-valid`
-   job) and the `get.helm.sh` URL in `lambda/helm-installer/Dockerfile`. The
-   `deps-scan` **Version Consistency** check flags the two workflow env pins if
-   they drift apart; the Dockerfile copy is a hardcoded `RUN` line it can't see,
-   so keep that one in lockstep by hand.
-7. `.github/workflows/integration-tests.yml` — bump the kind `node_image`
-   (`kindest/node:v<minor>.<patch>`) so CI exercises the new control plane.
+
+   No workflow edits are needed: every workflow that installs kubectl derives
+   the version and checksum from the installer Dockerfile at runtime
+   (`extract_helm_installer_pins` into `GITHUB_ENV`), and
+   `test_helm_and_kubectl_pins_live_only_in_the_installer_dockerfile`
+   (`tests/test_supply_chain_integrity.py`) fails if a literal workflow pin is
+   reintroduced. The `deps-scan` **Version Consistency** check cross-checks the
+   `Dockerfile.dev` ARG against the installer pin, so a half-done bump is
+   reported rather than shipped.
+6. Helm pin — if a new Helm is needed for the minor, bump the `get.helm.sh`
+   URL and its `sha256sum -c` line in `lambda/helm-installer/Dockerfile` (the
+   checksum is published alongside the tarball as `<url>.sha256sum`). That
+   `RUN` line is the single source: workflows derive `HELM_VERSION` /
+   `HELM_SHA256` from it exactly as with kubectl, guarded by the same test.
+7. `.github/workflows/integration-tests.yml` — bump the workflow-level
+   `KIND_NODE_IMAGE` env (`kindest/node:v<minor>.<patch>`) so CI exercises the
+   new control plane; both kind-based jobs read it from there.
 8. `.github/config/.trivyignore` — revisit any suppressions tied to the old
    kubectl/helm binaries; several entries clear once the pins move.
 9. `tests/test_config_loader.py` and `tests/test_config_loader_validation.py` —
@@ -534,11 +541,16 @@ resolve, the environment is dirty — fix the environment, don't loosen the pin.
    ```bash
    docker build -f Dockerfile.dev -t gco-dev .
    docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+     pip install --quiet "pip==25.0.1" &&
      pip-compile --no-emit-index-url --strip-extras --all-extras \
        -o requirements-lock.txt pyproject.toml &&
      sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
    '
    ```
+
+   The `pip==25.0.1` downgrade is required first: `pip-tools==7.6.0` imports
+   pip internals that newer pip (as shipped in the current `python:3.14-slim`
+   base) has removed, and it only affects the throwaway container.
 
 4. Run the affected checks, then open a PR. CI rejects stale Python or npm
    lockfiles, unmanaged npm graphs, and inconsistent Node/npm/CDK pins.
@@ -624,10 +636,12 @@ There is no auto-retry wrapper — a flake is treated as a bug, not hidden.
   `hashFiles('pyproject.toml', 'requirements-lock.txt')`. Both invalidate
   automatically when dependencies change — don't hand-clear them.
 - **Runners and tools:** jobs run on `ubuntu-latest` with actions pinned by
-  major version (bumped by Dependabot). Hand-installed CI tools
-  (`TRIVY_VERSION`, `HELM_VERSION`, `KUBECTL_VERSION`, the kind node image) are
-  tracked by the scan's **CI tooling** and **Version consistency** rows, so a
-  pin that must move in lockstep across files is caught there.
+  major version (bumped by Dependabot). Hand-installed CI tools — Trivy (the
+  `install-trivy` action's `version` default), Helm and kubectl (derived at
+  runtime from the `lambda/helm-installer/Dockerfile` pins), and the kind node
+  image (`KIND_NODE_IMAGE` in `integration-tests.yml`) — are tracked by the
+  scan's **CI tooling** and **Version consistency** rows, so a pin that must
+  move in lockstep across files is caught there.
 - On an EKS bump the kind `node_image` moves too — see
   [Upgrading the EKS Kubernetes version](#upgrading-the-eks-kubernetes-version).
 
