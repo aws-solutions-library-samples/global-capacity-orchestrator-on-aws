@@ -86,6 +86,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out the commit the Unit Tests run measured
+        # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout
+        # The pwn-request pattern this rule targets is checking out ATTACKER
+        # code (a fork PR's head) into a privileged workflow_run context. The
+        # job-level `if:` above admits only successful `push` events from
+        # THIS repository's own default branch — never pull_request events,
+        # never fork heads — so head_sha here is always a commit already
+        # merged to main. Reviewed as a false positive.
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
