@@ -176,11 +176,12 @@ The scan runs as an Advanced Setup workflow rather than Default Setup so the fil
 
 ## README badges
 
-The README's badge row has three parts:
+The README's badge row has four parts:
 
 1. **Four workflow-status badges** (`Unit Tests`, `Integration Tests`, `Security`, `Linting`) from GitHub's native `badge.svg` endpoint.
-2. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the 90% gate all describe one run.
-3. **Eight stack/tech badges** (Python, CDK, EKS Auto Mode, Kubernetes, CDK-Nag, etc.) rendered by shields.io from hardcoded values, each linking to the authoritative source (pyproject.toml, cdk.json, upstream docs, etc.).
+2. **A wiki badge** — a static shields.io badge linking to the Pages site root, where `pages.yml` serves the MkDocs wiki.
+3. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the 90% gate all describe one run.
+4. **Eight stack/tech badges** (Python, CDK, EKS Auto Mode, Kubernetes, CDK-Nag, etc.) rendered by shields.io from hardcoded values, each linking to the authoritative source (pyproject.toml, cdk.json, upstream docs, etc.).
 
 ### "repo or workflow not found" on fresh or private repositories
 
