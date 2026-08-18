@@ -30,6 +30,7 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
   - [Distinct from `GCO_ENABLE_ALL_TOOLS`](#distinct-from-gco_enable_all_tools)
   - [Risk-tier scope](#risk-tier-scope)
 - [Sampling](#sampling)
+- [Mission Memory](#mission-memory)
 - [Scripted Strategies](#scripted-strategies)
 - [Loop Limits](#loop-limits)
 - [Checkpoint Cadences](#checkpoint-cadences)
@@ -806,7 +807,7 @@ Resolution precedence at session start:
 
 Defaults:
 
-- Model — `cdk.json` `context.bedrock.default_model_id` (stock value:
+- Model — `cdk.json` `context.bedrock.mission_default_model_id` (stock value:
   `global.anthropic.claude-opus-5`, Anthropic Claude Opus 5's global inference
   profile). The stock `context.bedrock.thinking.effort` is `high`, Claude's
   default adaptive-thinking level; it can materially increase billed output
@@ -837,6 +838,69 @@ The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe return
 What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `tests/test_mission_sampling.py`).
 
 Failure semantics: every AWS probe is wrapped. A total credential failure or a missing checker returns `None` so the prompt omits the section entirely — the model just sees the same prompt shape it would have seen pre-environment-context. Per-region partial failures land as zeroed metrics rather than dropping the region, so the regions list is always honest.
+
+## Mission Memory
+
+Mission memory is shared institutional recall across sessions: every mission
+that reaches a terminal verdict writes one memory item — the verbatim
+directive, its embedding, the report's lessons and recommended follow-ups,
+the verdict, and provenance (embedding model id and width) — to the
+`{project}-mission-memory` DynamoDB table, and future missions with similar
+directives get those lessons back.
+
+The infrastructure ships with the global stack (`mission_memory.enabled` in
+`cdk.json`, **on by default**; set it to `false` to opt out). The table
+carries a vector index (`directive-embedding-index`) that CloudFormation
+cannot express natively, so the stack provisions it through a custom
+resource; after the first deployment the index spends a short period
+backfilling before it is queryable. Directives are embedded with the model
+named by `context.bedrock.embedding_model_id` (stock value:
+`amazon.titan-embed-text-v2:0` at 1024 dimensions) — see
+[Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
+
+**How recall feeds the loop.** On sampling sessions, the strategy-revision
+prompt gains a `=== Prior similar missions (institutional memory) ===`
+section: the `mission_memory.top_k` (default 3) closest past missions by
+directive similarity, with their lessons, follow-ups, and verdicts, most
+similar first. Like the environment-context block it is advisory input only
+— the deterministic verdict cascade never reads it — and it has its own 4 KB
+truncation domain (least-similar missions dropped first, oversize lessons
+field-truncated) so retrieval can never crowd out the rest of the prompt.
+Retrieval happens once per session wiring and only when `use_sampling` is on:
+the deterministic Propose path stays free of network calls, which is exactly
+the property the determinism suite pins down.
+
+**Everything is best-effort.** The terminal write happens after the
+Final_Report lands and reuses the report's narrative (the sampled lessons
+overlay when one was produced — never re-sampled — else the deterministic
+templates). A missing table, a still-backfilling index, an unreachable
+Bedrock endpoint, missing credentials, or a store bug all degrade to "no
+memory written" / "no prior context" — never to a failed mission. The one
+deliberate escalation is the Anthropic first-time-use gate, which is a
+permanent account misconfiguration and surfaces its remediation instead of
+being absorbed.
+
+**One-way doors.** Three index properties are immutable after creation:
+`mission_memory.dimensions` (default 1024 — must match the embedding
+model's output width, and query vectors must come from the same model at
+the same width or results are meaningless), `mission_memory.distance_function`
+(default `COSINE`, the safe choice for text-embedding similarity), and the
+index's projected attribute set. Changing any of them means deleting and
+recreating the index (existing items re-index automatically, but plan for
+the backfill window). If the embedding model ever changes, stored items keep
+their `embedding_model_id` provenance so drift is detectable, and a
+re-embed via `gco mission memory backfill` refreshes them.
+
+**Surfaces.** `gco mission memory search DIRECTIVE` runs the same
+similarity query the engine uses (`--top-k`, `--verdict`, json/table
+output); `gco mission memory list` shows what memory holds;
+`gco mission memory backfill` seeds memory from existing
+`~/.gco/missions/*.report.json` Final_Reports so recall is useful on day
+one — see [CLI.md](CLI.md#gco-mission-memory-search-directive). The MCP
+surface mirrors it with the `mission_memory_search` tool (gated by
+`GCO_ENABLE_MISSION` like the rest of the family). Items carry a DynamoDB
+TTL of `mission_memory.retention_days` (default 365), so memory ages out on
+its own.
 
 ## Scripted Strategies
 
@@ -1009,6 +1073,9 @@ All `gco mission` subcommands require `GCO_ENABLE_MISSION=true`. Without the fla
 | `gco mission resume <id>` | Transition a paused session back to `running`. |
 | `gco mission history <id> [--format full\|summary]` | Print the iteration history. |
 | `gco mission list [--status STATUS]` | List known sessions, optionally filtered by status. |
+| `gco mission memory search <directive>` | Search [mission memory](#mission-memory) for similar past missions (`--top-k`, `--verdict`). |
+| `gco mission memory list [--limit N]` | List what mission memory holds, newest completion first. |
+| `gco mission memory backfill [--root DIR]` | Seed mission memory from existing Final_Reports. |
 
 `gco mission start --help` prints the full option list — directive text, criteria file path, the iteration and wall-clock caps (each accepting `-1` to opt out), the tool allowlist, cadence parameters, stagnation threshold, sampling toggles, and the scripted-strategy opt-in. The `--tool-allowlist` option (repeatable) is required unless `--allow-all-tools` is set; the two are mutually exclusive. `--allow-all-tools` (default disabled) resolves the session's allowlist to every registered tool and is available on both `start` and `run` — see [Tool Allowlist](#tool-allowlist).
 
@@ -1027,6 +1094,7 @@ The MCP surface mirrors the CLI. All gated tools require `GCO_ENABLE_MISSION` (o
 | `mission_resume` | Transition `paused → running`. |
 | `mission_history` | Return iteration history (`full` or `summary` format). |
 | `mission_list` | List known sessions. |
+| `mission_memory_search` | Search [mission memory](#mission-memory) for similar past missions by directive. |
 
 `mission_start` accepts an `allow_all_tools` boolean parameter (default `false`). When `true`, the session's `tool_allowlist` is resolved to every registered tool (minus the `mission_*` control tools) and `tool_allowlist` may be omitted; supplying both a non-empty `tool_allowlist` and `allow_all_tools: true` is rejected as mutually exclusive. See [Tool Allowlist](#tool-allowlist) for the full semantics, the empty-registry error, and the distinction from `GCO_ENABLE_ALL_TOOLS`.
 

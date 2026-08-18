@@ -6,6 +6,7 @@ Screenshots and visual assets for GCO (Global Capacity Orchestrator on AWS) docu
 
 - [Reference Architecture Diagrams](#reference-architecture-diagrams)
 - [MCP Server Screenshots](#mcp-server-screenshots)
+- [In-Cluster Monitoring Screenshots](#in-cluster-monitoring-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
 
 ## Reference Architecture Diagrams
@@ -29,6 +30,24 @@ Screenshots demonstrating the GCO MCP server integration with Kiro. Tool counts 
 | [pi_calculation_manifest.png](pi_calculation_manifest.png) | The PI calculation Kubernetes Job manifest |
 | [gco_mcp_ai_recommend.png](gco_mcp_ai_recommend.png) | Using the MCP capacity recommendation tool |
 | [gco_mcp_cost_summary.png](gco_mcp_cost_summary.png) | Viewing a cost summary via natural language |
+
+## In-Cluster Monitoring Screenshots
+
+The self-hosted observability UIs, all reached through
+`gco monitoring open` (ClusterIP services, no public endpoints — see
+[`docs/MONITORING.md`](../docs/MONITORING.md)). The Grafana dashboards and the
+OpenCost UI are captured by
+[`scripts/capture_monitoring_screenshots.py`](../scripts/capture_monitoring_screenshots.py).
+
+| Image | Description |
+|-------|-------------|
+| [mlflow-ui.png](mlflow-ui.png) | MLflow tracking server run view — the run logged by [`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml), with its metric, parameters, and Finished status |
+| [grafana-services.png](grafana-services.png) | GCO Services dashboard — per-service request rate and p95 latency |
+| [grafana-schedulers.png](grafana-schedulers.png) | GCO Schedulers and Queues dashboard — pending pods, Kueue workloads, active Jobs |
+| [grafana-keda.png](grafana-keda.png) | GCO KEDA Autoscaling dashboard — active scalers and scaler errors |
+| [grafana-gpu-dcgm.png](grafana-gpu-dcgm.png) | GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, power |
+| [grafana-cost.png](grafana-cost.png) | GCO Cost dashboard — cluster and projected monthly cost, node and namespace splits |
+| [opencost-ui.png](opencost-ui.png) | Native OpenCost UI — cost allocation table with per-namespace efficiency |
 
 ## SageMaker Studio Screenshots
 

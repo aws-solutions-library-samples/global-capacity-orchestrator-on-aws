@@ -2,8 +2,8 @@
 """Validate and maintain GCO's EC2 accelerator catalog.
 
 Normal CI is deliberately offline: ``validate`` compares the checked-in catalog
-with Karpenter NodePools plus the capacity-history watch lists in ``cdk.json``
-and ``ConfigLoader``. The monthly dependency workflow runs ``check-online`` to
+with Karpenter NodePools, the capacity-history watch lists in ``cdk.json`` and
+``ConfigLoader``, and the Spot Placement Score instance pools declared below. The monthly dependency workflow runs ``check-online`` to
 compare that catalog with the union of NVIDIA GPU and AWS Neuron instance types
 returned by EC2 in every enabled commercial Region.
 
@@ -270,7 +270,10 @@ class ValidationReport:
 
     def to_text(self) -> str:
         if self.ok:
-            return "Accelerator catalog validation passed: NodePools and both watch lists are current.\n"
+            return (
+                "Accelerator catalog validation passed: NodePools, both watch lists, "
+                "and the instance pools are current.\n"
+            )
         lines = [f"Accelerator catalog validation failed with {len(self.findings)} finding(s):"]
         for finding in self.findings:
             lines.append(f"\nERROR [{finding.code}] {finding.title}")
@@ -291,8 +294,9 @@ class ValidationReport:
             lines.extend(
                 [
                     "",
-                    "The checked-in EC2 catalog, Karpenter families, and capacity-history "
-                    "watch lists in `cdk.json` and `ConfigLoader` are synchronized.",
+                    "The checked-in EC2 catalog, Karpenter families, capacity-history "
+                    "watch lists in `cdk.json` and `ConfigLoader`, and the Spot "
+                    "Placement Score instance pools are synchronized.",
                 ]
             )
             return "\n".join(lines) + "\n"
@@ -659,12 +663,393 @@ def validate_config_loader_watch_instance_types(
     )
 
 
+@dataclass(frozen=True)
+class InstancePool:
+    """Named set of instance types scored together for Spot Placement Scores.
+
+    AWS documents that ``GetSpotPlacementScores`` needs at least three instance
+    types (or ``InstanceRequirements``) to return meaningful scores; querying a
+    single type yields artificially depressed values. Members are grouped by
+    accelerator class and per-instance accelerator memory so a workload can
+    plausibly run on any member without change. Pools may overlap; snapshot
+    attribution uses the first pool in ``INSTANCE_POOLS`` order that contains
+    the instance type (see ``pool_for_instance_type``).
+    """
+
+    name: str
+    members: tuple[str, ...]
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        _string(self.name, "instance pool name")
+        if not self.members:
+            raise CatalogError(f"instance pool {self.name} has no members")
+        for member in self.members:
+            _family_for_instance_type(_string(member, f"instance pool {self.name} member"))
+
+
+#: Spot Placement Score pools over ``historical.watch_instance_types``.
+#:
+#: Definition order is meaningful: where pools overlap, the first pool that
+#: contains a type wins snapshot attribution. Membership follows real per-size
+#: accelerator layouts (for example ``g5.16xlarge`` carries one A10G while
+#: ``g5.12xlarge`` carries four, and ``g5g.16xlarge`` carries two T4Gs, unlike
+#: the single-GPU smaller g5g sizes). Graviton (arm64) types never share a pool
+#: with x86_64 types because images are not interchangeable across
+#: architectures.
+INSTANCE_POOLS: tuple[InstancePool, ...] = (
+    InstancePool(
+        name="single-gpu-t4-16gb",
+        members=(
+            "g4dn.xlarge",
+            "g4dn.2xlarge",
+            "g4dn.4xlarge",
+            "g4dn.8xlarge",
+            "g4dn.16xlarge",
+        ),
+        description="One NVIDIA T4 (16 GB) per instance on the single-GPU x86_64 g4dn sizes.",
+    ),
+    InstancePool(
+        name="single-gpu-arm-16gb",
+        members=(
+            "g5g.xlarge",
+            "g5g.2xlarge",
+            "g5g.4xlarge",
+            "g5g.8xlarge",
+        ),
+        description=(
+            "One NVIDIA T4G (16 GB) per Graviton g5g instance; arm64 images keep "
+            "this pool separate from every x86_64 pool."
+        ),
+    ),
+    InstancePool(
+        name="single-gpu-24gb",
+        members=(
+            "g5.xlarge",
+            "g5.2xlarge",
+            "g5.4xlarge",
+            "g5.8xlarge",
+            "g5.16xlarge",
+            "g6.xlarge",
+            "g6.2xlarge",
+            "g6.4xlarge",
+            "g6.8xlarge",
+            "g6.16xlarge",
+            "gr6.4xlarge",
+            "gr6.8xlarge",
+        ),
+        description=(
+            "One 24 GB mid-range NVIDIA GPU per x86_64 instance: A10G on g5, L4 on "
+            "g6 and the RAM-heavy gr6 sizes."
+        ),
+    ),
+    InstancePool(
+        name="single-gpu-fractional-l4",
+        members=(
+            "g6f.large",
+            "g6f.xlarge",
+            "g6f.2xlarge",
+            "g6f.4xlarge",
+            "gr6f.4xlarge",
+        ),
+        description=(
+            "Fractional shares of one NVIDIA L4 (24 GB) on g6f and gr6f; sized by "
+            "GPU fraction rather than GPU count."
+        ),
+    ),
+    InstancePool(
+        name="single-gpu-48gb",
+        members=(
+            "g6e.xlarge",
+            "g6e.2xlarge",
+            "g6e.4xlarge",
+            "g6e.8xlarge",
+            "g6e.16xlarge",
+        ),
+        description="One NVIDIA L40S (48 GB) per instance on the single-GPU g6e sizes.",
+    ),
+    InstancePool(
+        name="single-gpu-gen7",
+        members=(
+            "g7.2xlarge",
+            "g7.4xlarge",
+            "g7.8xlarge",
+        ),
+        description="One current-generation NVIDIA GPU per instance on the small g7 sizes.",
+    ),
+    InstancePool(
+        name="single-gpu-gen7-48gb",
+        members=(
+            "g7e.2xlarge",
+            "g7e.4xlarge",
+            "g7e.8xlarge",
+        ),
+        description=(
+            "One current-generation 48 GB-class NVIDIA GPU per instance on the small g7e sizes."
+        ),
+    ),
+    InstancePool(
+        name="multi-gpu-4x",
+        members=(
+            "g5.12xlarge",
+            "g5.24xlarge",
+            "g6.12xlarge",
+            "g6.24xlarge",
+            "g6e.12xlarge",
+            "g6e.24xlarge",
+            "g7.12xlarge",
+            "g7.24xlarge",
+            "g7e.12xlarge",
+            "g7e.24xlarge",
+        ),
+        description=(
+            "Four datacenter NVIDIA GPUs per instance: the 12xlarge and 24xlarge "
+            "sizes across g5, g6, g6e, g7, and g7e."
+        ),
+    ),
+    InstancePool(
+        name="multi-gpu-8x",
+        members=(
+            "g5.48xlarge",
+            "g6.48xlarge",
+            "g6e.48xlarge",
+            "g7.48xlarge",
+            "g7e.48xlarge",
+        ),
+        description=(
+            "Eight datacenter NVIDIA GPUs per instance: the 48xlarge sizes across "
+            "g5, g6, g6e, g7, and g7e."
+        ),
+    ),
+    InstancePool(
+        name="hpc-8x-training",
+        members=(
+            "p4d.24xlarge",
+            "p4de.24xlarge",
+            "p5.48xlarge",
+            "p5e.48xlarge",
+            "p5en.48xlarge",
+            "p6-b200.48xlarge",
+            "p6-b300.48xlarge",
+        ),
+        description=(
+            "Eight EFA-attached NVIDIA training GPUs per instance (A100, H100, "
+            "H200, B200, B300). Per-GPU memory spans 40 GB upward across members, "
+            "so confirm model fit before substituting within the pool."
+        ),
+    ),
+    InstancePool(
+        name="inferentia1",
+        members=(
+            "inf1.xlarge",
+            "inf1.2xlarge",
+            "inf1.6xlarge",
+            "inf1.24xlarge",
+        ),
+        description=(
+            "AWS Inferentia (first generation) instances from one to sixteen "
+            "accelerators; interchangeable for Neuron inference that fits one "
+            "accelerator."
+        ),
+    ),
+    InstancePool(
+        name="inferentia2",
+        members=(
+            "inf2.xlarge",
+            "inf2.8xlarge",
+            "inf2.24xlarge",
+            "inf2.48xlarge",
+        ),
+        description=(
+            "AWS Inferentia2 instances from one to twelve accelerators; "
+            "interchangeable for Neuron inference that fits one accelerator."
+        ),
+    ),
+    InstancePool(
+        name="trainium",
+        members=(
+            "trn1.32xlarge",
+            "trn1n.32xlarge",
+            "trn2.48xlarge",
+        ),
+        description="Sixteen-accelerator Trainium (trn1, trn1n) and Trainium2 training instances.",
+    ),
+)
+
+#: Watch-list types deliberately outside every pool. These still get spot
+#: pricing and Capacity Block observation from the capacity poller, but no
+#: Spot Placement Score: each lacks two interchangeable peers in the watch
+#: list, and padding a pool with unrelated types just to reach the AWS
+#: three-type minimum would make the score describe hardware the workload
+#: cannot actually run on — a worse lie than having no score at all.
+#:
+#: - g4dn.12xlarge (4x T4) and g4dn.metal (8x T4): no other multi-GPU 16 GB types.
+#: - g5g.16xlarge and g5g.metal (2x T4G): a two-member arm64 pool is invalid.
+#: - p3dn.24xlarge: deprecated V100 family; not interchangeable with active pools.
+#: - p5.4xlarge: the only single-GPU H100 size in the list.
+#: - trn1.2xlarge and trn2.3xlarge: single-accelerator Trainium sizes from
+#:   different chip generations do not make an interchangeable trio.
+UNPOOLED_INSTANCE_TYPES: tuple[str, ...] = (
+    "g4dn.12xlarge",
+    "g4dn.metal",
+    "g5g.16xlarge",
+    "g5g.metal",
+    "p3dn.24xlarge",
+    "p5.4xlarge",
+    "trn1.2xlarge",
+    "trn2.3xlarge",
+)
+
+_POOLS_LOCATION = "scripts/accelerator_catalog.py (INSTANCE_POOLS)"
+
+
+def pool_for_instance_type(
+    instance_type: str,
+    pools: tuple[InstancePool, ...] = INSTANCE_POOLS,
+) -> InstancePool | None:
+    """Return the first pool in definition order containing ``instance_type``.
+
+    Pools may overlap, but a capacity snapshot records exactly one pool per
+    instance type, so attribution must be deterministic: definition order in
+    ``INSTANCE_POOLS`` decides. Returns ``None`` for unpooled types.
+    """
+    for pool in pools:
+        if instance_type in pool.members:
+            return pool
+    return None
+
+
+def validate_instance_pools(
+    catalog: Catalog,
+    pools: tuple[InstancePool, ...] = INSTANCE_POOLS,
+    unpooled_instance_types: tuple[str, ...] = UNPOOLED_INSTANCE_TYPES,
+) -> tuple[Finding, ...]:
+    """Enforce the Spot Placement Score pool policy against the catalog.
+
+    Every pool needs at least three distinct members, every member must be a
+    watched catalog type, and every watched type must be either pooled or
+    explicitly declared unpooled, so new catalog entries force a reviewed
+    pooling decision instead of silently going unscored.
+    """
+    findings: list[Finding] = []
+    watched = set(catalog.instance_types)
+
+    name_counts: dict[str, int] = {}
+    for pool in pools:
+        name_counts[pool.name] = name_counts.get(pool.name, 0) + 1
+    duplicate_names = sorted(name for name, count in name_counts.items() if count > 1)
+    if duplicate_names:
+        findings.append(
+            Finding(
+                code="instance-pool-duplicate-name",
+                title="Instance pools declare duplicate pool names",
+                locations=(_POOLS_LOCATION,),
+                detail=f"Duplicated pool name(s): {', '.join(duplicate_names)}.",
+                recommendation=(
+                    "Rename or merge the duplicated pools; snapshot attribution and "
+                    "configuration errors must name exactly one pool."
+                ),
+            )
+        )
+
+    for pool in pools:
+        duplicate_members = sorted(
+            member for member in set(pool.members) if pool.members.count(member) > 1
+        )
+        if duplicate_members:
+            findings.append(
+                Finding(
+                    code="instance-pool-duplicate-member",
+                    title=f"Pool {pool.name} lists duplicate member types",
+                    locations=(_POOLS_LOCATION,),
+                    detail=f"Duplicate member(s): {', '.join(duplicate_members)}.",
+                    recommendation=(
+                        f"Remove the duplicate entries from {pool.name}; duplicates "
+                        "must not count toward the three-distinct-type minimum."
+                    ),
+                )
+            )
+        distinct_members = set(pool.members)
+        if len(distinct_members) < 3:
+            findings.append(
+                Finding(
+                    code="instance-pool-too-small",
+                    title=f"Pool {pool.name} has fewer than three distinct member types",
+                    locations=(_POOLS_LOCATION,),
+                    detail=(
+                        f"Pool {pool.name} declares {len(distinct_members)} distinct "
+                        "member type(s), but GetSpotPlacementScores needs at least "
+                        "three instance types to return meaningful scores."
+                    ),
+                    recommendation=(
+                        f"Add interchangeable types to {pool.name} (comparable "
+                        "accelerator class and per-instance accelerator memory) or "
+                        "move its members to UNPOOLED_INSTANCE_TYPES with a rationale."
+                    ),
+                )
+            )
+        unknown_members = sorted(distinct_members - watched)
+        if unknown_members:
+            findings.append(
+                Finding(
+                    code="instance-pool-unknown-member",
+                    title=f"Pool {pool.name} contains types outside the watch list",
+                    locations=(_POOLS_LOCATION,),
+                    detail=(
+                        f"Member(s) not in the catalog watch list: {', '.join(unknown_members)}."
+                    ),
+                    recommendation=(
+                        "Pools score only observed capacity: add the type to the "
+                        f"reviewed catalog and watch lists first, or remove it from {pool.name}."
+                    ),
+                )
+            )
+
+    pooled = {member for pool in pools for member in pool.members}
+    declared_unpooled = set(unpooled_instance_types)
+    uncovered = sorted(watched - pooled - declared_unpooled)
+    if uncovered:
+        findings.append(
+            Finding(
+                code="instance-pool-uncovered-type",
+                title="Watched instance types have no reviewed pooling decision",
+                locations=(_POOLS_LOCATION,),
+                detail=(
+                    f"{len(uncovered)} watched type(s) are neither pooled nor declared "
+                    f"unpooled: {', '.join(uncovered)}."
+                ),
+                recommendation=(
+                    "Add each type to an interchangeable pool, or add it to "
+                    "UNPOOLED_INSTANCE_TYPES with a rationale so it visibly skips "
+                    "Spot Placement Scores."
+                ),
+            )
+        )
+    stale_unpooled = sorted((declared_unpooled & pooled) | (declared_unpooled - watched))
+    if stale_unpooled:
+        findings.append(
+            Finding(
+                code="instance-pool-stale-unpooled",
+                title="UNPOOLED_INSTANCE_TYPES is out of date",
+                locations=(_POOLS_LOCATION,),
+                detail=(f"Entries are pooled or no longer watched: {', '.join(stale_unpooled)}."),
+                recommendation=(
+                    "Keep UNPOOLED_INSTANCE_TYPES limited to watched types that no "
+                    "pool contains; remove entries that are pooled or retired."
+                ),
+            )
+        )
+    return tuple(findings)
+
+
 def validate_repository(
     *,
     catalog_path: Path = DEFAULT_CATALOG_PATH,
     manifests_path: Path = DEFAULT_MANIFESTS_PATH,
     cdk_path: Path = DEFAULT_CDK_PATH,
     config_loader_path: Path = DEFAULT_CONFIG_LOADER_PATH,
+    pools: tuple[InstancePool, ...] = INSTANCE_POOLS,
+    unpooled_instance_types: tuple[str, ...] = UNPOOLED_INSTANCE_TYPES,
 ) -> ValidationReport:
     """Run every deterministic repository validation without AWS access."""
     catalog = Catalog.load(catalog_path)
@@ -673,6 +1058,7 @@ def validate_repository(
         *validate_nodepools(catalog, nodepools),
         *validate_watch_instance_types(catalog, cdk_path),
         *validate_config_loader_watch_instance_types(catalog, config_loader_path),
+        *validate_instance_pools(catalog, pools, unpooled_instance_types),
     ]
     return ValidationReport(tuple(sorted(findings, key=Finding.sort_key)))
 

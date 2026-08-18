@@ -36,33 +36,18 @@ def _workflow_step(relative_path: str, step_name: str) -> str:
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v4.2.3",
-            "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
-        ),
-        (
-            ".github/workflows/integration-tests.yml",
             "v0.8.0",
             "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883",
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v3.31.5",
-            "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997",
+            "v3.32.1",
+            "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744",
         ),
         (
             ".github/workflows/integration-tests.yml",
             "v0.9.0",
             "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
-        ),
-        (
-            ".github/workflows/deps-scan.yml",
-            "v4.2.3",
-            "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
-        ),
-        (
-            ".github/workflows/deps-scan.yml",
-            "v1.36.3",
-            "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
         ),
         (
             "lambda/helm-installer/Dockerfile",
@@ -107,10 +92,13 @@ def test_downloaded_release_assets_have_committed_checksums(
             'echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -',
         ),
         (
+            # Helm pin is derived at runtime from the installer Dockerfile;
+            # the "declaration" is the derive step that loads GITHUB_ENV,
+            # and the download/verify binding is unchanged.
             ".github/workflows/integration-tests.yml",
             "Install Helm",
-            'HELM_VERSION: "v4.2.3"',
-            'HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"',
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_'",
+            "grep -q '^HELM_SHA256=' \"$GITHUB_ENV\"",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
         ),
@@ -125,8 +113,8 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/integration-tests.yml",
             "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.31.5"',
-            'CALICO_SHA256: "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997"',
+            'CALICO_VERSION: "v3.32.1"',
+            'CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"',
             "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
             'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),
@@ -141,16 +129,16 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/deps-scan.yml",
             "Install pinned Helm",
-            'HELM_VERSION: "v4.2.3"',
-            'HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"',
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '='",
+            'grep -q "^${pin}=" "$GITHUB_ENV"',
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
         ),
         (
             ".github/workflows/deps-scan.yml",
             "Install pinned kubectl",
-            'KUBECTL_VERSION: "v1.36.3"',
-            'KUBECTL_SHA256: "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"',
+            "extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '='",
+            'grep -q "^${pin}=" "$GITHUB_ENV"',
             "dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl",
             'echo "${KUBECTL_SHA256}  ${binary}" | sha256sum -c -',
         ),
@@ -171,6 +159,42 @@ def test_workflow_checksum_is_bound_to_its_download_step(
     assert checksum_declaration in workflow
     assert download_fragment in step
     assert verification_command in step
+
+
+def test_helm_and_kubectl_pins_live_only_in_the_installer_dockerfile() -> None:
+    """Workflows derive Helm/kubectl pins; literal copies must not return.
+
+    lambda/helm-installer/Dockerfile is the single source: CI jobs load
+    HELM_* / KUBECTL_* into GITHUB_ENV from it via
+    ``extract_helm_installer_pins``. A literal ``HELM_VERSION: "vX"`` in any
+    workflow would shadow the derived value inside that job and silently
+    drift from what the installer Lambda actually ships. (Runtime half of
+    this guard: the version-consistency section of dependency-scan.sh
+    reports any reintroduced workflow copy.)
+    """
+    installer = _read("lambda/helm-installer/Dockerfile")
+    assert "get.helm.sh/helm-v" in installer
+    assert "dl.k8s.io/release/v" in installer
+
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        hits = re.findall(
+            r"^\s*(?:HELM|KUBECTL)_(?:VERSION|SHA256):.*$",
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        if hits:
+            offenders[path.name] = hits
+    assert not offenders, (
+        "literal Helm/kubectl pin declarations reintroduced in workflows "
+        f"(derive them from lambda/helm-installer/Dockerfile instead): {offenders}"
+    )
+
+    # Both deriving workflows must actually run the derive step.
+    for workflow in (".github/workflows/integration-tests.yml", ".github/workflows/deps-scan.yml"):
+        assert "extract_helm_installer_pins" in _read(workflow), (
+            f"{workflow} no longer derives its Helm/kubectl pins from the installer Dockerfile"
+        )
 
 
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
@@ -254,9 +278,17 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert '"projectcalico/calico"' in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
-    assert "skopeo inspect --raw" in scanner
-    assert 'AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"' in scanner
-    assert 'AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST' in scanner
+    # The digest-freshness mechanics moved into shared lib helpers so every
+    # digest-pinned image (AWS CLI runtime + live-validation smoke images)
+    # gets the same committed-vs-published comparison.
+    library = _read(".github/scripts/lib_dependency_scan.sh")
+    assert "skopeo inspect --raw" in library
+    assert "split_pinned_image_ref" in library
+    assert "published_manifest_digest" in library
+    assert "check_pinned_digest" in scanner
+    assert 'check_pinned_digest "$AWS_CLI_RUNTIME_IMAGE"' in scanner
+    assert "scripts/live_release_validation/manifests/" in scanner
+    assert 'if [ "$committed" != "$published" ]; then' in scanner
 
 
 def test_dependency_scanner_remains_directly_executable() -> None:
@@ -393,3 +425,144 @@ def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
         )
         run_index = next(index for index, step in enumerate(steps) if image in step.get("run", ""))
         assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"
+
+
+def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:
+    """Map job name -> its job-level ``env`` pins (``*_VERSION`` / ``*_SHA256``).
+
+    Job-scoped rather than workflow-scoped on purpose: this repo pins CI
+    tooling per job so each one declares what it installs, which means the
+    same pin name can legitimately appear several times — and can therefore
+    silently disagree.
+    """
+    pins: dict[str, dict[str, str]] = {}
+    for name, job in (workflow.get("jobs") or {}).items():
+        env = (job or {}).get("env") or {}
+        pins[name] = {
+            key: str(value) for key, value in env.items() if key.endswith(("_VERSION", "_SHA256"))
+        }
+    return pins
+
+
+def test_repeated_workflow_pins_agree_across_jobs() -> None:
+    """A tool pinned by more than one job must be pinned to ONE value.
+
+    integration-tests.yml installs the same tooling in several jobs (Helm in
+    charts-valid and examples-smoke; Calico in cluster-e2e and
+    examples-smoke), and the per-step checksum tests elsewhere in this file
+    are substring assertions — they are satisfied by the FIRST matching
+    declaration and cannot see a second one that drifted. Two jobs running
+    different Calico builds would mean two different NetworkPolicy engines
+    enforcing the manifests CI claims to validate, and a version/checksum
+    pair that disagrees across jobs fails the download instead, which reads
+    as a flake rather than a pinning mistake.
+
+    Checks every ``*_VERSION`` / ``*_SHA256`` pin generically so tooling
+    added later inherits the guarantee without a new test.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    pins = _job_env_pins(workflow)
+
+    values_by_pin: dict[str, dict[str, set[str]]] = {}
+    for job_name, job_pins in pins.items():
+        for pin_name, value in job_pins.items():
+            values_by_pin.setdefault(pin_name, {}).setdefault(value, set()).add(job_name)
+
+    disagreements = {
+        pin_name: {value: sorted(jobs) for value, jobs in by_value.items()}
+        for pin_name, by_value in values_by_pin.items()
+        if len(by_value) > 1
+    }
+    assert not disagreements, (
+        "workflow pins disagree across jobs in integration-tests.yml "
+        f"(bump every declaration together): {disagreements}"
+    )
+
+    # Tooling installed by MORE than one job is single-sourced at the
+    # workflow-level env block instead of repeated per job. Guard both
+    # halves of that scheme: the shared declarations exist exactly there,
+    # and no job-level env shadows one of them — a shadow would silently
+    # fork the value while still reading as "pinned" in review.
+    workflow_env = workflow.get("env") or {}
+    shared_pins = {"KIND_VERSION", "KIND_NODE_IMAGE", "CALICO_VERSION", "CALICO_SHA256"}
+    missing = shared_pins - set(workflow_env)
+    assert not missing, (
+        f"shared kind/Calico pins missing from the workflow-level env block: {sorted(missing)}"
+    )
+    shadows = {
+        job_name: sorted(shared_pins & set(job_pins))
+        for job_name, job_pins in pins.items()
+        if shared_pins & set(job_pins)
+    }
+    assert not shadows, (
+        "job-level env re-declares a workflow-level shared pin (the shadow "
+        f"wins inside that job and can drift unseen): {shadows}"
+    )
+
+
+def test_every_calico_installing_job_pins_version_and_checksum() -> None:
+    """Every job that installs Calico must resolve both of its pins.
+
+    The pins live once, in the workflow-level ``env`` block, which inherits
+    into every job — the historical failure mode (a job curling the manifest
+    while the pins sat in a *different job's* env, expanding
+    ``${CALICO_VERSION}`` to an empty string) cannot recur as long as the
+    workflow-level declarations exist and every kind-action step references
+    the same single source rather than carrying a literal copy.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    workflow_env = workflow.get("env") or {}
+
+    installing_jobs = [
+        name
+        for name, job in workflow["jobs"].items()
+        if any("projectcalico/calico" in (step.get("run") or "") for step in job.get("steps") or [])
+    ]
+    assert installing_jobs, "no job installs Calico — has the CNI setup moved?"
+
+    assert "CALICO_VERSION" in workflow_env, "CALICO_VERSION missing from workflow-level env"
+    assert "CALICO_SHA256" in workflow_env, "CALICO_SHA256 missing from workflow-level env"
+
+    # The kind-action steps must reference the shared declarations, not
+    # carry literal version/node-image copies that can drift per job.
+    kind_steps = [
+        (job_name, step)
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps") or []
+        if str(step.get("uses", "")).startswith("helm/kind-action")
+    ]
+    assert kind_steps, "no kind-action steps found — has cluster creation moved?"
+    for job_name, step in kind_steps:
+        with_ = step.get("with") or {}
+        assert with_.get("version") == "${{ env.KIND_VERSION }}", (
+            f"{job_name} pins the kind binary inline instead of referencing "
+            "the workflow-level KIND_VERSION"
+        )
+        assert with_.get("node_image") == "${{ env.KIND_NODE_IMAGE }}", (
+            f"{job_name} pins the kind node image inline instead of referencing "
+            "the workflow-level KIND_NODE_IMAGE"
+        )
+
+
+def test_kind_clusters_without_a_default_cni_install_one() -> None:
+    """Using the Calico kind config obliges the job to install Calico.
+
+    kind-calico.yaml sets ``disableDefaultCNI: true``, so the control plane
+    cannot go Ready until a CNI is installed. A job that adopts the config
+    without the install step hangs instead of failing with a clear cause.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+
+    for job_name, job in workflow["jobs"].items():
+        steps = job.get("steps") or []
+        uses_calico_config = any(
+            str(step.get("uses", "")).startswith("helm/kind-action")
+            and "kind-calico.yaml" in str((step.get("with") or {}).get("config", ""))
+            for step in steps
+        )
+        if not uses_calico_config:
+            continue
+        assert any("projectcalico/calico" in (step.get("run") or "") for step in steps), (
+            f"{job_name} creates a kind cluster with the default CNI disabled "
+            "but never installs Calico"
+        )

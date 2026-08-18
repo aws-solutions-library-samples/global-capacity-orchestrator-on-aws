@@ -1,9 +1,15 @@
-"""The advisory Bedrock default has one checked-in source in ``cdk.json``.
+"""Every checked-in Bedrock model default has one source in ``cdk.json``.
 
-Mission sampling and the capacity advisor retain lazy compatibility aliases,
-but both resolve the value through :mod:`gco.bedrock`. The dependency scanner
-reads the same JSON path directly, and the configured model must have a
-complete captured scaffolder fixture.
+Three deliberately independent generation keys live under ``context.bedrock``,
+one per consumer: ``mission_default_model_id`` (Mission sampling),
+``capacity_advisor_default_model_id`` (the capacity advisor), and
+``claude_code_default_model_id`` (the session model ``gco autopilot`` hands to
+Claude Code; future agent runners get their own sibling keys). Each consumer
+resolves its own key through :mod:`gco.bedrock`, canonical reasoning
+translation applies only to the two Converse-path defaults, and the retired
+pre-v6 ``default_model_id`` key fails closed with rename instructions. The
+dependency scanner reads the JSON paths directly, and the configured Mission
+model must have a complete captured scaffolder fixture.
 """
 
 from __future__ import annotations
@@ -23,15 +29,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
 
 import mission.sampling as mission_sampling  # noqa: E402
+from mission.sampling import BedrockSamplingBackend  # noqa: E402
 
 import gco.bedrock as bedrock_config  # noqa: E402
 from cli.capacity.advisor import BedrockCapacityAdvisor  # noqa: E402
 from gco.bedrock import (  # noqa: E402
-    DEFAULT_BEDROCK_MODEL_ID,
     build_bedrock_converse_options,
     get_default_bedrock_configuration,
-    get_default_bedrock_model_id,
     get_default_bedrock_thinking_effort,
+    get_default_capacity_advisor_model_id,
+    get_default_claude_code_model_id,
+    get_default_mission_model_id,
 )
 from tests._scaffold_replay import (  # noqa: E402
     CANONICAL_CAPTURE_SLUGS,
@@ -40,29 +48,100 @@ from tests._scaffold_replay import (  # noqa: E402
     DEFAULT_MODEL_ID,
 )
 
-# Pin the intended default independently from the loader so an accidental
-# same-family or lower-tier change is visible in review and CI.
-_EXPECTED_DEFAULT_MODEL_ID = "global.anthropic.claude-opus-5"
+# Pin the intended defaults independently from the loader so an accidental
+# same-family or lower-tier change is visible in review and CI. The three
+# generation defaults are separate knobs that happen to ship the same profile
+# today; each pin moves on its own.
+_EXPECTED_MISSION_MODEL_ID = "global.anthropic.claude-opus-5"
+_EXPECTED_CAPACITY_ADVISOR_MODEL_ID = "global.anthropic.claude-opus-5"
+_EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5"
+_EXPECTED_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 _EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5.json"
 _EXPECTED_THINKING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
 _RUNTIME_SOURCE_SUFFIXES = {".py", ".sh"}
 
 
-def test_cdk_json_is_the_single_operational_default_source() -> None:
-    """The shared resolver and both compatibility aliases consume cdk.json."""
-    from mission.sampling import DEFAULT_BEDROCK_MODEL_ID as mission_default
+def test_cdk_json_is_the_single_mission_default_source(monkeypatch: Any) -> None:
+    """Mission sampling resolves exactly the Mission cdk.json value."""
+    monkeypatch.delenv("GCO_MISSION_BEDROCK_MODEL_ID", raising=False)
 
-    configured = get_default_bedrock_model_id(PROJECT_ROOT / "cdk.json")
+    configured = get_default_mission_model_id(PROJECT_ROOT / "cdk.json")
     configuration = get_default_bedrock_configuration(PROJECT_ROOT / "cdk.json")
 
-    assert configured == _EXPECTED_DEFAULT_MODEL_ID
-    assert configuration.model_id == _EXPECTED_DEFAULT_MODEL_ID
+    assert configured == _EXPECTED_MISSION_MODEL_ID
+    assert configuration.mission_model_id == _EXPECTED_MISSION_MODEL_ID
     assert configuration.thinking_effort == _EXPECTED_THINKING["effort"]
     assert get_default_bedrock_thinking_effort(PROJECT_ROOT / "cdk.json") == "high"
-    assert configured == DEFAULT_BEDROCK_MODEL_ID
-    assert configured == mission_default
+    assert BedrockSamplingBackend().model_id == configured
+    assert BedrockSamplingBackend.from_canonical_default().model_id == configured
+
+
+def test_cdk_json_is_the_single_capacity_advisor_default_source() -> None:
+    """The capacity advisor resolves exactly its own cdk.json value.
+
+    Asserting the advisor's lazy class attribute against the dedicated pin
+    (not against the Mission value) keeps this test honest when the two
+    generation keys eventually diverge.
+    """
+    configured = get_default_capacity_advisor_model_id(PROJECT_ROOT / "cdk.json")
+    configuration = get_default_bedrock_configuration(PROJECT_ROOT / "cdk.json")
+
+    assert configured == _EXPECTED_CAPACITY_ADVISOR_MODEL_ID
+    assert configuration.capacity_advisor_model_id == _EXPECTED_CAPACITY_ADVISOR_MODEL_ID
     assert configured == BedrockCapacityAdvisor.DEFAULT_MODEL
+
+
+def test_cdk_json_is_the_single_claude_code_default_source(monkeypatch: Any) -> None:
+    """Autopilot's model resolver consumes the Claude Code cdk.json value.
+
+    The Claude Code default is its own knob: asserting the resolver against
+    the pin (not against a generation value) keeps this test honest when the
+    keys eventually diverge.
+    """
+    from cli.autopilot import resolve_model
+
+    monkeypatch.delenv("GCO_AUTOPILOT_MODEL", raising=False)
+
+    configured = get_default_claude_code_model_id(PROJECT_ROOT / "cdk.json")
+    resolved_model, warnings = resolve_model(None)
+
+    assert configured == _EXPECTED_CLAUDE_CODE_MODEL_ID
+    assert resolved_model == configured
+    assert warnings == []
+
+
+def test_the_single_advisory_surface_is_fully_retired() -> None:
+    """The pre-v6 one-knob API is gone, not aliased.
+
+    ``DEFAULT_BEDROCK_MODEL_ID`` and ``get_default_bedrock_model_id`` steered
+    two features through one value; the split is a breaking change and the
+    old names must not quietly keep working.
+    """
+    assert not hasattr(bedrock_config, "DEFAULT_BEDROCK_MODEL_ID")
+    assert not hasattr(bedrock_config, "get_default_bedrock_model_id")
+    assert "DEFAULT_BEDROCK_MODEL_ID" not in bedrock_config.__all__
+    assert not hasattr(mission_sampling, "DEFAULT_BEDROCK_MODEL_ID")
+    assert "DEFAULT_BEDROCK_MODEL_ID" not in mission_sampling.__all__
+
+
+def test_legacy_default_model_id_key_fails_closed_with_rename_instructions() -> None:
+    """An un-migrated config is an error naming both replacement keys.
+
+    The legacy key wins over otherwise-valid new keys: silently ignoring it
+    would let a stale value linger in review while the runtime reads
+    something else.
+    """
+    payload = _bedrock_payload()
+    payload["context"]["bedrock"]["default_model_id"] = "us.amazon.nova-pro-v1:0"
+
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
+        bedrock_config._bedrock_configuration_from_payload(payload, Path("/canonical/cdk.json"))
+
+    message = str(exc_info.value)
+    assert "context.bedrock.default_model_id" in message
+    assert "mission_default_model_id" in message
+    assert "capacity_advisor_default_model_id" in message
 
 
 def test_fixture_capture_preserves_canonical_reasoning_provenance(monkeypatch: Any) -> None:
@@ -71,8 +150,8 @@ def test_fixture_capture_preserves_canonical_reasoning_provenance(monkeypatch: A
 
     monkeypatch.setenv("GCO_MISSION_BEDROCK_MODEL_ID", "anthropic.environment-override")
 
-    canonical = capture._backend_for_capture(_EXPECTED_DEFAULT_MODEL_ID, "us-east-1")
-    assert canonical.model_id == _EXPECTED_DEFAULT_MODEL_ID
+    canonical = capture._backend_for_capture(_EXPECTED_MISSION_MODEL_ID, "us-east-1")
+    assert canonical.model_id == _EXPECTED_MISSION_MODEL_ID
     assert canonical._uses_default_model is True
 
     explicit = capture._backend_for_capture("anthropic.explicit-override", "us-east-1")
@@ -80,48 +159,50 @@ def test_fixture_capture_preserves_canonical_reasoning_provenance(monkeypatch: A
     assert explicit._uses_default_model is False
 
 
-def test_lazy_mission_alias_is_discoverable_without_resolution(monkeypatch: Any) -> None:
-    """Introspection advertises the compatibility alias without loading config."""
-
-    def _unexpected_resolution() -> str:
-        raise AssertionError("dir() must not resolve the Bedrock model default")
-
-    monkeypatch.setattr(
-        mission_sampling,
-        "get_default_bedrock_model_id",
-        _unexpected_resolution,
-    )
-
-    assert "DEFAULT_BEDROCK_MODEL_ID" not in vars(mission_sampling)
-    assert "DEFAULT_BEDROCK_MODEL_ID" in dir(mission_sampling)
-
-
-def test_exact_default_literal_is_absent_from_all_runtime_sources() -> None:
-    """No runtime module or shell script may recreate the operational pin."""
+def test_exact_default_literals_are_absent_from_all_runtime_sources() -> None:
+    """No runtime module or shell script may recreate any operational pin."""
+    pins = {
+        _EXPECTED_MISSION_MODEL_ID,
+        _EXPECTED_CAPACITY_ADVISOR_MODEL_ID,
+        _EXPECTED_CLAUDE_CODE_MODEL_ID,
+    }
     violations: list[str] = []
     for root_name in _RUNTIME_SOURCE_ROOTS:
         for path in sorted((PROJECT_ROOT / root_name).rglob("*")):
             if not path.is_file() or path.suffix not in _RUNTIME_SOURCE_SUFFIXES:
                 continue
             relative_path = path.relative_to(PROJECT_ROOT).as_posix()
-            if _EXPECTED_DEFAULT_MODEL_ID in path.read_text(encoding="utf-8"):
+            content = path.read_text(encoding="utf-8")
+            if any(pin in content for pin in pins):
                 violations.append(relative_path)
 
     assert violations == []
 
 
-def test_ambient_cdk_json_cannot_override_the_canonical_default(
+def test_ambient_cdk_json_cannot_override_the_canonical_defaults(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     """Current-directory configuration is outside the model trust boundary."""
     ambient = tmp_path / "cdk.json"
     ambient.write_text(
-        json.dumps({"context": {"bedrock": {"default_model_id": "us.amazon.nova-pro-v1:0"}}}),
+        json.dumps(
+            {
+                "context": {
+                    "bedrock": {
+                        "mission_default_model_id": "us.amazon.nova-pro-v1:0",
+                        "capacity_advisor_default_model_id": "us.amazon.nova-pro-v1:0",
+                        "claude_code_default_model_id": "us.amazon.nova-pro-v1:0",
+                    }
+                }
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
 
-    assert get_default_bedrock_model_id() == _EXPECTED_DEFAULT_MODEL_ID
+    assert get_default_mission_model_id() == _EXPECTED_MISSION_MODEL_ID
+    assert get_default_capacity_advisor_model_id() == _EXPECTED_CAPACITY_ADVISOR_MODEL_ID
+    assert get_default_claude_code_model_id() == _EXPECTED_CLAUDE_CODE_MODEL_ID
 
 
 def test_default_cdk_json_is_shipped_for_installed_cli_and_mcp_use() -> None:
@@ -156,25 +237,34 @@ def test_installed_config_uses_distribution_metadata(tmp_path: Path, monkeypatch
     assert bedrock_config._installed_cdk_json_path() == installed_config.resolve()
 
 
-def test_default_model_has_the_exact_complete_replay_fixture() -> None:
-    """The configured default has all canonical live-captured responses."""
-    assert DEFAULT_MODEL_ID == _EXPECTED_DEFAULT_MODEL_ID
-    assert DEFAULT_FIXTURE.model_id == _EXPECTED_DEFAULT_MODEL_ID
+def test_mission_default_has_the_exact_complete_replay_fixture() -> None:
+    """The configured Mission default has all canonical live-captured responses."""
+    assert DEFAULT_MODEL_ID == _EXPECTED_MISSION_MODEL_ID
+    assert DEFAULT_FIXTURE.model_id == _EXPECTED_MISSION_MODEL_ID
     assert DEFAULT_FIXTURE.path == DEFAULT_FIXTURE_PATH
     assert DEFAULT_FIXTURE_PATH.name == _EXPECTED_FIXTURE_NAME
     assert set(CANONICAL_CAPTURE_SLUGS) <= {capture.slug for capture in DEFAULT_FIXTURE.captures}
 
 
-def test_default_model_is_a_system_defined_inference_profile_id() -> None:
-    """The default shape matches the dependency scanner's family comparator.
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        pytest.param(_EXPECTED_MISSION_MODEL_ID, id="mission-default"),
+        pytest.param(_EXPECTED_CAPACITY_ADVISOR_MODEL_ID, id="capacity-advisor-default"),
+        pytest.param(_EXPECTED_CLAUDE_CODE_MODEL_ID, id="claude-code-default"),
+    ],
+)
+def test_default_model_is_a_system_defined_inference_profile_id(model_id: str) -> None:
+    """Each default's shape matches the dependency scanner's family comparator.
 
     A profile id is ``<geography>.<provider>.<model>``. The trailing
     ``-vMAJOR:MINOR`` revision is optional — Anthropic ships newer profiles
     without one (``global.anthropic.claude-opus-5``) — but when it is present it
     must carry the ``:MINOR`` half, because the scanner strips exactly that
-    form when deriving a model family.
+    form when deriving a model family. The scanner reads every generation
+    default, so all must satisfy the comparator's contract (the embedding
+    default is a foundation model with its own shape test below).
     """
-    model_id = DEFAULT_BEDROCK_MODEL_ID
     assert model_id.startswith(("global.", "us.", "eu.", "apac.", "jp.")), model_id
     geography, _, remainder = model_id.partition(".")
     provider, _, model_name = remainder.partition(".")
@@ -183,15 +273,46 @@ def test_default_model_is_a_system_defined_inference_profile_id() -> None:
         assert ":" in model_name.rsplit("-v", 1)[-1], model_id
 
 
-def test_cdk_json_contains_only_one_default_model_value() -> None:
-    """The configured value is a scalar, not duplicated in sibling context keys."""
+def test_embedding_default_shape_matches_the_scanner_comparator() -> None:
+    """The embedding default stays orderable by the dependency scanner.
+
+    ``embedding_model_id`` is a plain foundation-model id (no geography
+    segment — it is not an inference profile), and the scanner's
+    ``get_latest_bedrock_embedding_model`` skips ids without a numeric
+    version key because they cannot be ranked. When the ``-v`` revision is
+    present it must carry the ``:MINOR`` half, matching exactly what the
+    family derivation strips, so one Titan embedding line stays one family.
+    """
+    provider, _, model_name = _EXPECTED_EMBEDDING_MODEL_ID.partition(".")
+    assert provider and model_name, _EXPECTED_EMBEDDING_MODEL_ID
+    assert "." not in model_name, "embedding default must not be an inference-profile id"
+    assert any(char.isdigit() for char in model_name), (
+        "the scanner cannot rank a version-less embedding id"
+    )
+    if "-v" in model_name:
+        assert ":" in model_name.rsplit("-v", 1)[-1], _EXPECTED_EMBEDDING_MODEL_ID
+
+
+def test_cdk_json_contains_exactly_the_managed_default_model_keys() -> None:
+    """Each default is one scalar; no unmanaged sibling keys can creep in."""
     payload = json.loads((PROJECT_ROOT / "cdk.json").read_text(encoding="utf-8"))
     bedrock = payload["context"]["bedrock"]
 
     assert bedrock == {
-        "default_model_id": _EXPECTED_DEFAULT_MODEL_ID,
+        "mission_default_model_id": _EXPECTED_MISSION_MODEL_ID,
+        "capacity_advisor_default_model_id": _EXPECTED_CAPACITY_ADVISOR_MODEL_ID,
+        "claude_code_default_model_id": _EXPECTED_CLAUDE_CODE_MODEL_ID,
+        "embedding_model_id": _EXPECTED_EMBEDDING_MODEL_ID,
         "thinking": _EXPECTED_THINKING,
     }
+
+
+def test_embedding_default_resolves_through_the_canonical_accessor() -> None:
+    """Mission memory's embedding model comes from the same canonical file,
+    with validation independent of the generation keys."""
+    from gco.bedrock import get_default_embedding_model_id
+
+    assert get_default_embedding_model_id(PROJECT_ROOT / "cdk.json") == _EXPECTED_EMBEDDING_MODEL_ID
 
 
 def test_default_high_thinking_translates_to_native_converse_fields() -> None:
@@ -203,7 +324,7 @@ def test_default_high_thinking_translates_to_native_converse_fields() -> None:
     still passes through for callers that supply one.
     """
     options = build_bedrock_converse_options(
-        _EXPECTED_DEFAULT_MODEL_ID,
+        _EXPECTED_MISSION_MODEL_ID,
         inference_config={"maxTokens": 2048, "temperature": 0.2, "topP": 0.9},
         cdk_json_path=PROJECT_ROOT / "cdk.json",
     )
@@ -218,7 +339,7 @@ def test_default_high_thinking_translates_to_native_converse_fields() -> None:
 
 
 def test_nova_default_still_translates_to_reasoning_config(tmp_path: Path) -> None:
-    """Moving the default back to Nova 2 keeps its own dialect intact."""
+    """Moving a generation default back to Nova 2 keeps its own dialect intact."""
     config_path = tmp_path / "cdk.json"
     config_path.write_text(
         json.dumps(_bedrock_payload("global.amazon.nova-2-lite-v1:0")),
@@ -240,6 +361,53 @@ def test_nova_default_still_translates_to_reasoning_config(tmp_path: Path) -> No
             }
         }
     }
+
+
+def test_capacity_advisor_default_alone_still_receives_reasoning_translation(
+    tmp_path: Path,
+) -> None:
+    """The converse gate matches either generation default, not only Mission's."""
+    config_path = tmp_path / "cdk.json"
+    config_path.write_text(
+        json.dumps(
+            _bedrock_payload(
+                mission_model_id="us.example.other-model-v1:0",
+                capacity_advisor_model_id="global.amazon.nova-2-lite-v1:0",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    options = build_bedrock_converse_options(
+        "global.amazon.nova-2-lite-v1:0",
+        cdk_json_path=config_path,
+        apply_default_reasoning=True,
+    )
+
+    assert options == {
+        "additionalModelRequestFields": {
+            "reasoningConfig": {
+                "type": "enabled",
+                "maxReasoningEffort": "high",
+            }
+        }
+    }
+
+
+def test_defaulted_model_matching_no_configured_default_fails_closed(tmp_path: Path) -> None:
+    """A caller-declared default that matches neither knob is a hard error."""
+    config_path = tmp_path / "cdk.json"
+    config_path.write_text(json.dumps(_bedrock_payload()), encoding="utf-8")
+
+    with pytest.raises(
+        bedrock_config.BedrockModelConfigurationError,
+        match="Default Bedrock model changed",
+    ):
+        build_bedrock_converse_options(
+            "global.anthropic.claude-mythos-5",
+            cdk_json_path=config_path,
+            apply_default_reasoning=True,
+        )
 
 
 def test_legacy_claude_models_never_receive_adaptive_thinking(tmp_path: Path) -> None:
@@ -288,9 +456,12 @@ def test_ftu_form_error_is_detected_through_the_exception_chain() -> None:
     assert is_bedrock_ftu_form_error(unrelated) is False
     assert is_bedrock_ftu_form_error(None) is False
 
-    # The remediation must name the account-scoped form and both fix paths.
+    # The remediation must name the account-scoped form, both fix paths, and
+    # both generation knobs an operator can repoint.
     assert "put-use-case-for-model-access" in BEDROCK_FTU_REMEDIATION
     assert "model-access.html" in BEDROCK_FTU_REMEDIATION
+    assert "mission_default_model_id" in BEDROCK_FTU_REMEDIATION
+    assert "capacity_advisor_default_model_id" in BEDROCK_FTU_REMEDIATION
 
 
 def test_explicit_other_model_keeps_inference_config_without_nova_reasoning(
@@ -313,7 +484,7 @@ def test_explicit_nova_override_does_not_load_or_apply_canonical_reasoning(
     inference_config = {"maxTokens": 1024, "temperature": 0.2}
 
     options = build_bedrock_converse_options(
-        _EXPECTED_DEFAULT_MODEL_ID,
+        _EXPECTED_MISSION_MODEL_ID,
         inference_config=inference_config,
         cdk_json_path=tmp_path / "missing-cdk.json",
         apply_default_reasoning=False,
@@ -322,11 +493,17 @@ def test_explicit_nova_override_does_not_load_or_apply_canonical_reasoning(
     assert options == {"inferenceConfig": inference_config}
 
 
-def _bedrock_payload(model_id: Any = _EXPECTED_DEFAULT_MODEL_ID) -> dict[str, Any]:
+def _bedrock_payload(
+    mission_model_id: Any = _EXPECTED_MISSION_MODEL_ID,
+    capacity_advisor_model_id: Any = _EXPECTED_CAPACITY_ADVISOR_MODEL_ID,
+    claude_code_model_id: Any = _EXPECTED_CLAUDE_CODE_MODEL_ID,
+) -> dict[str, Any]:
     return {
         "context": {
             "bedrock": {
-                "default_model_id": model_id,
+                "mission_default_model_id": mission_model_id,
+                "capacity_advisor_default_model_id": capacity_advisor_model_id,
+                "claude_code_default_model_id": claude_code_model_id,
                 "thinking": dict(_EXPECTED_THINKING),
             }
         }
@@ -445,7 +622,7 @@ def test_missing_source_config_does_not_fall_back_to_installed_copy(
         bedrock_config.BedrockModelConfigurationError,
         match="Canonical Bedrock config is not a file",
     ):
-        bedrock_config.get_default_bedrock_model_id()
+        bedrock_config.get_default_mission_model_id()
 
 
 def test_installed_config_is_selected_outside_source_checkout(
@@ -461,7 +638,7 @@ def test_installed_config_is_selected_outside_source_checkout(
     monkeypatch.setattr(bedrock_config, "_source_cdk_json_path", lambda: None)
     monkeypatch.setattr(bedrock_config, "_installed_cdk_json_path", lambda: installed)
 
-    assert bedrock_config.get_default_bedrock_model_id() == "installed.model-v1:0"
+    assert bedrock_config.get_default_mission_model_id() == "installed.model-v1:0"
 
 
 def test_canonical_config_errors_when_no_owned_path_exists(monkeypatch: Any) -> None:
@@ -486,35 +663,143 @@ def test_canonical_config_errors_when_no_owned_path_exists(monkeypatch: Any) -> 
         ({"context": {"bedrock": []}}, "context.bedrock must be an object"),
         (
             {"context": {"bedrock": {}}},
-            "default_model_id must be a non-empty string",
+            "mission_default_model_id must be a non-empty string",
         ),
-        (_bedrock_payload(None), "default_model_id must be a non-empty string"),
-        (_bedrock_payload(42), "default_model_id must be a non-empty string"),
-        (_bedrock_payload(""), "default_model_id must be a non-empty string"),
-        (_bedrock_payload("   \n"), "default_model_id must be a non-empty string"),
+        (_bedrock_payload(None), "mission_default_model_id must be a non-empty string"),
+        (_bedrock_payload(42), "mission_default_model_id must be a non-empty string"),
+        (_bedrock_payload(""), "mission_default_model_id must be a non-empty string"),
+        (_bedrock_payload("   \n"), "mission_default_model_id must be a non-empty string"),
+        (
+            _bedrock_payload(capacity_advisor_model_id=None),
+            "capacity_advisor_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(capacity_advisor_model_id=42),
+            "capacity_advisor_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(capacity_advisor_model_id=""),
+            "capacity_advisor_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(capacity_advisor_model_id="   \n"),
+            "capacity_advisor_default_model_id must be a non-empty string",
+        ),
     ],
 )
-def test_model_payload_validation_fails_closed(
+def test_generation_model_payload_validation_fails_closed(
     payload: Any,
     message: str,
 ) -> None:
     path = Path("/canonical/cdk.json")
 
     with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
-        bedrock_config._model_id_from_payload(payload, path)
+        bedrock_config._bedrock_configuration_from_payload(payload, path)
 
     assert str(path) in str(exc_info.value)
     assert message in str(exc_info.value)
 
 
-def test_model_payload_trims_valid_identifier() -> None:
+def test_generation_model_payloads_trim_valid_identifiers() -> None:
+    configuration = bedrock_config._bedrock_configuration_from_payload(
+        _bedrock_payload("  us.example.model-v1:0\n", "  us.example.other-v2:0 "),
+        Path("/canonical/cdk.json"),
+    )
+
+    assert configuration.mission_model_id == "us.example.model-v1:0"
+    assert configuration.capacity_advisor_model_id == "us.example.other-v2:0"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (None, "document root must be an object"),
+        ({}, "context must be an object"),
+        ({"context": {"bedrock": []}}, "context.bedrock must be an object"),
+        (
+            {"context": {"bedrock": {}}},
+            "claude_code_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(claude_code_model_id=None),
+            "claude_code_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(claude_code_model_id=42),
+            "claude_code_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(claude_code_model_id=""),
+            "claude_code_default_model_id must be a non-empty string",
+        ),
+        (
+            _bedrock_payload(claude_code_model_id="   \n"),
+            "claude_code_default_model_id must be a non-empty string",
+        ),
+    ],
+)
+def test_claude_code_payload_validation_fails_closed(payload: Any, message: str) -> None:
+    path = Path("/canonical/cdk.json")
+
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
+        bedrock_config._claude_code_model_id_from_payload(payload, path)
+
+    assert str(path) in str(exc_info.value)
+    assert message in str(exc_info.value)
+
+
+def test_missing_claude_code_key_error_names_the_remediation_command() -> None:
+    """The upgrade path (older user-edited cdk.json) gets a one-line fix."""
+    payload = _bedrock_payload()
+    del payload["context"]["bedrock"]["claude_code_default_model_id"]
+
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
+        bedrock_config._claude_code_model_id_from_payload(payload, Path("/canonical/cdk.json"))
+
+    assert "gco stacks bedrock set-claude-code-model" in str(exc_info.value)
+
+
+def test_claude_code_model_payload_trims_valid_identifier() -> None:
     assert (
-        bedrock_config._model_id_from_payload(
-            _bedrock_payload("  us.example.model-v1:0\n"),
+        bedrock_config._claude_code_model_id_from_payload(
+            _bedrock_payload(claude_code_model_id="  us.example.model-v1:0\n"),
             Path("/canonical/cdk.json"),
         )
         == "us.example.model-v1:0"
     )
+
+
+def test_claude_code_default_survives_a_malformed_generation_thinking_block(
+    tmp_path: Path,
+) -> None:
+    """Autopilot's failure domain excludes the generation reasoning contract."""
+    config_path = tmp_path / "cdk.json"
+    payload = _bedrock_payload()
+    payload["context"]["bedrock"]["thinking"] = {"effort": "maximum"}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert (
+        bedrock_config.get_default_claude_code_model_id(config_path)
+        == _EXPECTED_CLAUDE_CODE_MODEL_ID
+    )
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        bedrock_config.get_default_bedrock_configuration(config_path)
+
+
+def test_generation_defaults_survive_a_missing_claude_code_key(tmp_path: Path) -> None:
+    """Mission/advisor resolution excludes the Claude Code key's contract."""
+    config_path = tmp_path / "cdk.json"
+    payload = _bedrock_payload()
+    del payload["context"]["bedrock"]["claude_code_default_model_id"]
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert bedrock_config.get_default_mission_model_id(config_path) == _EXPECTED_MISSION_MODEL_ID
+    assert (
+        bedrock_config.get_default_capacity_advisor_model_id(config_path)
+        == _EXPECTED_CAPACITY_ADVISOR_MODEL_ID
+    )
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        bedrock_config.get_default_claude_code_model_id(config_path)
 
 
 @pytest.mark.parametrize(
@@ -554,7 +839,7 @@ def test_explicit_config_must_be_a_file(tmp_path: Path, path_kind: str) -> None:
         bedrock_config.BedrockModelConfigurationError,
         match="Canonical Bedrock config is not a file",
     ):
-        bedrock_config.get_default_bedrock_model_id(path)
+        bedrock_config.get_default_mission_model_id(path)
 
 
 @pytest.mark.parametrize("error_type", [OSError, UnicodeError])
@@ -573,7 +858,7 @@ def test_unreadable_config_is_wrapped(
     monkeypatch.setattr(Path, "read_text", _unreadable)
 
     with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
-        bedrock_config.get_default_bedrock_model_id(path)
+        bedrock_config.get_default_mission_model_id(path)
 
     assert "Unable to read" in str(exc_info.value)
     assert exc_info.value.__cause__ is cause
@@ -584,7 +869,7 @@ def test_invalid_json_is_wrapped_with_decode_error(tmp_path: Path) -> None:
     path.write_text("{not-json", encoding="utf-8")
 
     with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
-        bedrock_config.get_default_bedrock_model_id(path)
+        bedrock_config.get_default_mission_model_id(path)
 
     assert "Invalid JSON" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
@@ -608,52 +893,4 @@ def test_explicit_valid_config_does_not_consult_implicit_path(
         _unexpected_implicit_resolution,
     )
 
-    assert bedrock_config.get_default_bedrock_model_id(path) == "explicit.model-v2:0"
-
-
-def test_lazy_module_alias_resolves_through_shared_loader(monkeypatch: Any) -> None:
-    resolutions = []
-
-    def _resolve() -> str:
-        resolutions.append("resolved")
-        return "lazy.model-v1:0"
-
-    monkeypatch.setattr(bedrock_config, "get_default_bedrock_model_id", _resolve)
-
-    assert bedrock_config.DEFAULT_BEDROCK_MODEL_ID == "lazy.model-v1:0"
-    assert resolutions == ["resolved"]
-    assert "DEFAULT_BEDROCK_MODEL_ID" not in vars(bedrock_config)
-
-
-def test_lazy_module_alias_rejects_unknown_attribute_without_loading(monkeypatch: Any) -> None:
-    def _unexpected_resolution() -> str:
-        raise AssertionError("unknown attributes must not load configuration")
-
-    monkeypatch.setattr(
-        bedrock_config,
-        "get_default_bedrock_model_id",
-        _unexpected_resolution,
-    )
-
-    with pytest.raises(AttributeError) as exc_info:
-        _ = bedrock_config.NOT_A_BEDROCK_SETTING
-
-    assert "NOT_A_BEDROCK_SETTING" in str(exc_info.value)
-
-
-def test_bedrock_dir_is_sorted_and_advertises_lazy_alias_without_loading(
-    monkeypatch: Any,
-) -> None:
-    def _unexpected_resolution() -> str:
-        raise AssertionError("dir() must not load configuration")
-
-    monkeypatch.setattr(
-        bedrock_config,
-        "get_default_bedrock_model_id",
-        _unexpected_resolution,
-    )
-
-    names = bedrock_config.__dir__()
-
-    assert names == sorted(names)
-    assert "DEFAULT_BEDROCK_MODEL_ID" in names
+    assert bedrock_config.get_default_mission_model_id(path) == "explicit.model-v2:0"

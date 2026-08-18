@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``build_engine_dependencies`` -> ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.png``)
@@ -86,7 +86,13 @@ class EngineDependencies:
     without the boilerplate.
     """
 
-    __slots__ = ("final_lessons_callable", "sampling_callable", "sandbox_runner", "tool_dispatcher")
+    __slots__ = (
+        "final_lessons_callable",
+        "memory_store",
+        "sampling_callable",
+        "sandbox_runner",
+        "tool_dispatcher",
+    )
 
     def __init__(
         self,
@@ -95,11 +101,13 @@ class EngineDependencies:
         sampling_callable: Callable[..., Awaitable[Any]] | None,
         sandbox_runner: SandboxRunner | None,
         final_lessons_callable: Callable[..., Awaitable[Any]] | None = None,
+        memory_store: Any | None = None,
     ) -> None:
         self.tool_dispatcher = tool_dispatcher
         self.sampling_callable = sampling_callable
         self.sandbox_runner = sandbox_runner
         self.final_lessons_callable = final_lessons_callable
+        self.memory_store = memory_store
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +311,30 @@ def _build_sandbox_runner(session: Mapping[str, Any]) -> SandboxRunner | None:
 
 
 # ---------------------------------------------------------------------------
+# Mission-memory store
+# ---------------------------------------------------------------------------
+
+
+def _build_memory_store() -> Any | None:
+    """Construct the mission-memory store for production wiring.
+
+    One seam for both memory paths — the engine's best-effort terminal
+    write and the sampler closure's prior-missions retrieval — so the
+    test-suite conftest can neutralise real AWS reach by patching this
+    single function. Construction itself is free (table/index names
+    resolve lazily from SSM on first use), but it is still guarded: any
+    unexpected failure degrades to "no memory", never to a failed
+    engine build.
+    """
+    try:
+        from mission.memory import MissionMemoryStore  # noqa: PLC0415
+
+        return MissionMemoryStore()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Sampling callable
 # ---------------------------------------------------------------------------
 
@@ -337,6 +369,19 @@ def _build_sampling_callable(
     from mission._environment import gather_session_environment  # noqa: PLC0415
 
     env_cache: list[Mapping[str, Any] | None] = []
+    # Prior similar missions from the memory vector index. Same
+    # one-slot cache trick as ``env_cache``: retrieval costs one
+    # embedding call plus one SearchVectors round-trip, and the
+    # directive never changes mid-session, so pay it once per engine
+    # wiring. Retrieval is inherently gated on ``use_sampling`` —
+    # this closure only exists for sampling sessions — which keeps the
+    # deterministic Propose path free of network calls, exactly what
+    # the determinism suite pins down. Best-effort: any failure
+    # (absent table, backfilling index, Bedrock down, no credentials)
+    # degrades to "no prior context". An empty result list also maps
+    # to ``None`` so the prompt section only renders when there is
+    # something to say.
+    memory_cache: list[list[Mapping[str, Any]] | None] = []
 
     async def _sampler(*, session: dict[str, Any], ctx: Any | None) -> Any:
         iterations = session.get("iterations") or []
@@ -358,6 +403,18 @@ def _build_sampling_callable(
             except Exception:  # noqa: BLE001
                 env_cache.append(None)
         env_ctx = env_cache[0]
+        if not memory_cache:
+            try:
+                store = _build_memory_store()
+                results = (
+                    store.search_similar(str(session.get("directive_text") or ""))
+                    if store is not None
+                    else None
+                )
+                memory_cache.append(results or None)
+            except Exception:  # noqa: BLE001
+                memory_cache.append(None)
+        prior_missions = memory_cache[0]
         return await mission_sampling.maybe_sample_strategy_revision(
             backend=backend_obj,
             session=cast("SessionState", session),
@@ -369,6 +426,7 @@ def _build_sampling_callable(
             remaining_wall_clock_secs=remaining_wall_clock_seconds(session),
             allow_scripts=bool(session.get("allow_scripted_strategies", False)),
             environment_context=env_ctx,
+            prior_missions=prior_missions,
         )
 
     return _sampler
@@ -464,6 +522,12 @@ async def build_engine_dependencies(
         sampling_callable=sampling_callable,
         sandbox_runner=sandbox_runner,
         final_lessons_callable=final_lessons,
+        # The terminal-verdict memory write is best-effort inside the
+        # engine, so the store is wired unconditionally on the live
+        # path (the stub-dispatcher / --dry-run branch above stays
+        # memory-free: throwaway smoke sessions must not become
+        # institutional memory).
+        memory_store=_build_memory_store(),
     )
 
 
@@ -490,4 +554,5 @@ async def build_mission_engine(
         sampling_callable=deps.sampling_callable,
         sandbox_runner=deps.sandbox_runner,
         final_lessons_callable=deps.final_lessons_callable,
+        memory_store=deps.memory_store,
     )

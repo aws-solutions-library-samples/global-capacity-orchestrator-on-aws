@@ -90,6 +90,13 @@ kubectl apply -f examples/slurm-cluster-job.yaml
 kubectl logs job/slurm-test -n gco-jobs -f
 ```
 
+The gco-jobs namespace default-denies pod-to-pod traffic, so Slurm
+connectivity is label-gated by the cluster-managed policies applied with the
+Slurm toggle (`post-helm-slurm-network.yaml`): Slinky's own pods
+(`app.kubernetes.io/part-of: slurm`) may talk to each other, and any pod
+labeled `gco.aws/slurm-client: "true"` — like the example job — may reach the
+REST API on port 6820. A job pod without that label cannot reach slurmrestd.
+
 ### Interactive access via the controller pod
 
 The login set is disabled by default to avoid creating an unnecessary NLB.
@@ -131,11 +138,11 @@ The API version in the URL (e.g., `v0.0.41`) is tied to the Slurm release. Use t
 Add a GPU-enabled NodeSet in `lambda/helm-installer/charts.yaml` under `slinky-slurm`:
 
 ```yaml
-nodeSets:
-  - name: workers
+nodesets:
+  workers:
     replicas: 2
     # ... existing CPU workers
-  - name: gpu-workers
+  gpu-workers:
     replicas: 2
     slurmd:
       image:
@@ -158,6 +165,11 @@ nodeSets:
         effect: NoSchedule
 ```
 
+> The chart's key is the lowercase map ``nodesets`` (keyed by NodeSet name).
+> A camelCase ``nodeSets`` list is silently ignored by Helm — the cluster
+> deploys with zero workers. Remember to list new NodeSets in a partition
+> (or keep the ``ALL`` partition) so jobs can be scheduled onto them.
+
 Then submit GPU jobs: `sbatch --gres=gpu:1 --wrap="nvidia-smi"`
 
 ## Autoscaling
@@ -170,8 +182,8 @@ The Slurm operator supports scaling worker NodeSets based on queue depth. Combin
 Configure scaling bounds on the NodeSet:
 
 ```yaml
-nodeSets:
-  - name: workers
+nodesets:
+  workers:
     replicas: 2        # Desired count
     # minReplicas: 0   # Scale to zero when idle (requires HPA)
     # maxReplicas: 16  # Cap at 16 workers
@@ -275,8 +287,8 @@ Query accounting: `kubectl exec -n gco-jobs deploy/slinky-slurm-controller -- sa
 
 ```yaml
 # lambda/helm-installer/charts.yaml under slinky-slurm
-nodeSets:
-  - name: workers
+nodesets:
+  workers:
     replicas: 8  # Scale up from 2 to 8
 ```
 
@@ -316,8 +328,9 @@ Requires cert-manager v1.12+.
 |-------|---------|-------------|
 | `clusterName` | gco-slurm | Slurm cluster name |
 | `controller.slurmctld.image.tag` | 25.11-ubuntu24.04 | Controller image |
-| `nodeSets[].replicas` | 2 | Worker pods per NodeSet |
-| `nodeSets[].slurmd.image.tag` | 25.11-ubuntu24.04 | Worker image |
+| `nodesets.workers.replicas` | 2 | Worker pods per NodeSet |
+| `nodesets.workers.slurmd.image.tag` | 25.11-ubuntu24.04 | Worker image |
+| `partitions.all` | enabled, `Default: "YES"` | Default partition spanning all NodeSets |
 | `loginsets.slinky.enabled` | false | Login set (creates NLB — disabled by default) |
 | `restapi.slurmrestd.image.tag` | 25.11-ubuntu24.04 | REST API image |
 | `accounting.enabled` | false | Enable job accounting (MariaDB) |

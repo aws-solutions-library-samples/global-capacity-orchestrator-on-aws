@@ -79,7 +79,7 @@ from .types import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``MissionEngine.run_iteration`` -> ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.png``)
@@ -201,6 +201,16 @@ class MissionEngine:
     # :func:`mcp.mission.final_report.build_deterministic_report` stand
     # on their own in that case.
     final_lessons_callable: SamplingCallable | None = None
+    # Optional mission-memory store (duck-typed against
+    # :class:`mcp.mission.memory.MissionMemoryStore`) for the
+    # best-effort memory write on terminal verdicts — see
+    # :meth:`_maybe_write_memory`. ``None`` (the default) disables the
+    # write entirely, which is what every directly-constructed test
+    # engine gets; production wiring injects a real store and relies on
+    # the write being swallowed on any failure, because the
+    # Final_Report — not the memory item — is the durable exit
+    # artifact.
+    memory_store: Any | None = None
 
     # ------------------------------------------------------------------ #
     # Public surface
@@ -1658,6 +1668,10 @@ class MissionEngine:
         # is owned by one module.
         final_report.write_final_report(self.backend, session, verdict, reason, sampler=sampler)
 
+        # Best-effort institutional memory, after the report has landed.
+        # Reuses the overlay fetched above — never re-samples.
+        self._maybe_write_memory(session, verdict, reason, overlay)
+
     async def _maybe_sample_final_lessons(
         self,
         session: SessionState,
@@ -1721,6 +1735,58 @@ class MissionEngine:
             # validator do the structural check.
             return result
         return None
+
+    def _maybe_write_memory(
+        self,
+        session: SessionState,
+        verdict: VerdictLabel,
+        reason: VerdictReason,
+        overlay: dict[str, Any] | None,
+    ) -> None:
+        """Best-effort mission-memory write on a terminal verdict.
+
+        Persists one memory item — the directive, its embedding, and
+        the report's narrative — through :attr:`memory_store` so future
+        missions with similar directives can recall this one's lessons.
+
+        The narrative fields reuse what the Final_Report just recorded:
+        the sampled ``overlay`` when one was produced (never re-sampled
+        — it is the exact dict handed to ``write_final_report`` above),
+        else the deterministic templates from
+        :func:`mcp.mission.final_report.build_deterministic_report`,
+        which is pure and cheap to rebuild.
+
+        Every exception is swallowed, mirroring
+        :meth:`_maybe_sample_final_lessons`: the Final_Report is the
+        durable exit artifact and memory is strictly additive. An
+        absent table, a backfilling index, a missing SSM parameter, an
+        unreachable Bedrock endpoint, or a store bug must all degrade
+        to "no memory written" — never to a failed mission.
+        """
+        if self.memory_store is None:
+            return
+        try:
+            report = final_report.build_deterministic_report(session, verdict, reason)
+            lessons = report.get("lessons", "")
+            followups = report.get("recommended_followups", [])
+            if overlay:
+                overlay_lessons = overlay.get("lessons")
+                if isinstance(overlay_lessons, str) and overlay_lessons.strip():
+                    lessons = overlay_lessons
+                overlay_followups = overlay.get("recommended_followups")
+                if isinstance(overlay_followups, list) and all(
+                    isinstance(item, str) for item in overlay_followups
+                ):
+                    followups = overlay_followups
+            self.memory_store.write_memory(
+                session,
+                verdict,
+                reason,
+                str(lessons),
+                [str(item) for item in followups],
+            )
+        except Exception:
+            return
 
 
 # ---------------------------------------------------------------------------

@@ -83,12 +83,20 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
         aws_load_balancer_controller_role=SimpleNamespace(
             role_arn="arn:aws:iam::123456789012:role/test-lbc-controller"
         ),
+        cluster_shared_identity=SimpleNamespace(
+            name="gco-cluster-shared-123456789012-us-east-2",
+            arn="arn:aws:s3:::gco-cluster-shared-123456789012-us-east-2",
+            region="us-east-2",
+        ),
+        mlflow_role=SimpleNamespace(role_arn="arn:aws:iam::123456789012:role/test-mlflow"),
     )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
-    # Cost monitoring helpers ride the same stub: the override builder and the
-    # chart-enable list both consult the cost pipeline's conjunction toggle.
+    # Cost monitoring and MLflow helpers ride the same stub: the override
+    # builder and the chart-enable list both consult their conjunctions.
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
     stub._opencost_chart_values = lambda: RS._opencost_chart_values(stub)
+    stub._mlflow_active = lambda: RS._mlflow_active(stub)
+    stub._mlflow_chart_values = lambda: RS._mlflow_chart_values(stub)
     return stub
 
 
@@ -511,8 +519,8 @@ def test_node_exporter_is_not_marked_do_not_disrupt(kps_entry) -> None:
 
 
 def test_no_daemonset_manifest_is_marked_do_not_disrupt() -> None:
-    # Same hazard applied to the manifests GCO ships (nvidia-device-plugin,
-    # dcgm-exporter, ...): a DaemonSet must never carry do-not-disrupt.
+    # Same hazard applied to the manifests GCO ships (dcgm-exporter, ...):
+    # a DaemonSet must never carry do-not-disrupt.
     offenders: list[str] = []
     for path in sorted(_MANIFESTS_DIR.glob("*.yaml")):
         text = path.read_text(encoding="utf-8")

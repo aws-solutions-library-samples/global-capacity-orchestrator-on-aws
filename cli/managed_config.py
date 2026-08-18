@@ -192,18 +192,23 @@ def _scalar_region_validator(role: str) -> Callable[[dict[str, Any], str], None]
     return _validate
 
 
-def _validate_bedrock_model_result(document: dict[str, Any], candidate: str) -> None:
+def _bedrock_model_id_validator(key_id: str) -> Callable[[dict[str, Any], str], None]:
     """Mirror the reader contract in ``gco/bedrock.py``: a non-empty string.
 
     Model/inference-profile IDs are free-form by design (custom profiles,
-    marketplace models); the runtime reader only requires a non-empty
-    string, so requiring more here would reject valid configurations.
+    marketplace models); the runtime readers only require a non-empty
+    string, so requiring more here would reject valid configurations. One
+    factory serves both Bedrock model knobs so their contracts cannot drift.
     """
-    del document  # no cross-key invariants for this knob
-    if not candidate.strip():
-        raise ValueError("bedrock.default_model_id must be a non-empty string")
-    if candidate != candidate.strip():
-        raise ValueError("bedrock.default_model_id must not have leading/trailing whitespace")
+
+    def _validate(document: dict[str, Any], candidate: str) -> None:
+        del document  # no cross-key invariants for these knobs
+        if not candidate.strip():
+            raise ValueError(f"{key_id} must be a non-empty string")
+        if candidate != candidate.strip():
+            raise ValueError(f"{key_id} must not have leading/trailing whitespace")
+
+    return _validate
 
 
 #: The managed-key registry. New knobs register here instead of growing
@@ -234,13 +239,31 @@ DEPLOYMENT_REGION_SCALARS: dict[str, ManagedScalarKey] = {
     )
 }
 
-BEDROCK_DEFAULT_MODEL = ManagedScalarKey(
-    key_id="bedrock.default_model_id",
+MISSION_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.mission_default_model_id",
     container="bedrock",
-    leaf="default_model_id",
-    description="Default Bedrock model/inference-profile ID for advisory features",
+    leaf="mission_default_model_id",
+    description="Bedrock model/inference-profile ID Mission sampling uses by default",
     default="",  # the reader has no fallback: it requires the key when consulted
-    validate_result=_validate_bedrock_model_result,
+    validate_result=_bedrock_model_id_validator("bedrock.mission_default_model_id"),
+)
+
+CAPACITY_ADVISOR_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.capacity_advisor_default_model_id",
+    container="bedrock",
+    leaf="capacity_advisor_default_model_id",
+    description="Bedrock model/inference-profile ID the capacity advisor uses by default",
+    default="",  # the reader has no fallback: it requires the key when consulted
+    validate_result=_bedrock_model_id_validator("bedrock.capacity_advisor_default_model_id"),
+)
+
+CLAUDE_CODE_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.claude_code_default_model_id",
+    container="bedrock",
+    leaf="claude_code_default_model_id",
+    description="Bedrock model/inference-profile ID gco autopilot hands to Claude Code",
+    default="",  # the reader has no fallback: it requires the key when consulted
+    validate_result=_bedrock_model_id_validator("bedrock.claude_code_default_model_id"),
 )
 
 
@@ -551,17 +574,35 @@ def set_deployment_region_role(
 
 
 def get_bedrock_model_status(*, config_path: Path | str | None = None) -> dict[str, Any]:
-    """Return the configured Bedrock default model ID and its backing path."""
+    """Return every configured Bedrock model default and its backing path."""
     path = _resolve_config_path(config_path)
     document, _ = _load_document(path)
     return {
         "config_path": str(path),
-        "default_model_id": _current_scalar(document, BEDROCK_DEFAULT_MODEL),
+        "mission_default_model_id": _current_scalar(document, MISSION_DEFAULT_MODEL),
+        "capacity_advisor_default_model_id": _current_scalar(
+            document, CAPACITY_ADVISOR_DEFAULT_MODEL
+        ),
+        "claude_code_default_model_id": _current_scalar(document, CLAUDE_CODE_DEFAULT_MODEL),
     }
 
 
-def set_default_bedrock_model(
+def set_mission_default_model(
     model_id: str, *, config_path: Path | str | None = None
 ) -> ChangeReport:
-    """Set ``bedrock.default_model_id`` (advisory-feature model default)."""
-    return managed_scalar_set(BEDROCK_DEFAULT_MODEL, model_id, config_path=config_path)
+    """Set ``bedrock.mission_default_model_id`` (Mission sampling model default)."""
+    return managed_scalar_set(MISSION_DEFAULT_MODEL, model_id, config_path=config_path)
+
+
+def set_capacity_advisor_default_model(
+    model_id: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set ``bedrock.capacity_advisor_default_model_id`` (capacity-advisor model default)."""
+    return managed_scalar_set(CAPACITY_ADVISOR_DEFAULT_MODEL, model_id, config_path=config_path)
+
+
+def set_claude_code_default_model(
+    model_id: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set ``bedrock.claude_code_default_model_id`` (autopilot session model)."""
+    return managed_scalar_set(CLAUDE_CODE_DEFAULT_MODEL, model_id, config_path=config_path)

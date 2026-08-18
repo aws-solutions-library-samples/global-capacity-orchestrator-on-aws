@@ -239,6 +239,7 @@ from tools.stacks import (  # noqa: E402, F401
     stack_synth,
     valkey_status,
 )
+from tools.status import fleet_status  # noqa: E402, F401
 from tools.storage import (  # noqa: E402, F401
     files_access_points,
     files_get,
@@ -403,7 +404,9 @@ if _IS_RELOAD and (
         "add_deployment_region",
         "remove_deployment_region",
         "set_deployment_region",
-        "set_default_bedrock_model",
+        "set_mission_default_model",
+        "set_capacity_advisor_default_model",
+        "set_claude_code_default_model",
     ):
         if hasattr(_stacks_mod, _name):
             globals()[_name] = getattr(_stacks_mod, _name)
@@ -631,6 +634,7 @@ _PUBLIC_EXPORTS = [
     "find_capacity_reservations",
     "find_docs",
     "find_examples",
+    "fleet_status",
     "fsx_status",
     "get_job",
     "get_job_events",

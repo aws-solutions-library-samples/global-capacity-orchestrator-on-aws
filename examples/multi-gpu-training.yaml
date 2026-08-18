@@ -43,7 +43,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: trainer
-        image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
+        image: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

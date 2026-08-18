@@ -697,6 +697,67 @@ class TestGetOnDemandPrice:
 
                 assert price is None
 
+    def test_filters_use_region_code_never_a_location_name(self):
+        """The Price List query must filter on regionCode, not location.
+
+        The former hardcoded ten-entry region-name map silently returned
+        None for every region outside it; filtering on the regionCode
+        product attribute removes that class of bug. No location string
+        may be constructed or sent.
+        """
+        from cli.capacity import CapacityChecker
+
+        with patch("cli.capacity.checker.get_config") as mock_config:
+            mock_config.return_value = MagicMock()
+
+            with patch("boto3.Session") as mock_session:
+                mock_pricing = MagicMock()
+                mock_pricing.get_products.return_value = {"PriceList": []}
+                mock_session.return_value.client.return_value = mock_pricing
+
+                checker = CapacityChecker()
+                checker.get_on_demand_price("g5.xlarge", "eu-north-1")
+
+                kwargs = mock_pricing.get_products.call_args.kwargs
+                fields = {f["Field"]: f["Value"] for f in kwargs["Filters"]}
+                assert fields["regionCode"] == "eu-north-1"
+                assert "location" not in fields
+                assert kwargs["ServiceCode"] == "AmazonEC2"
+                assert kwargs["MaxResults"] == 1
+                # The remaining product filters are unchanged.
+                assert fields["instanceType"] == "g5.xlarge"
+                assert fields["operatingSystem"] == "Linux"
+                assert fields["tenancy"] == "Shared"
+                assert fields["preInstalledSw"] == "NA"
+                assert fields["capacitystatus"] == "Used"
+
+    def test_formerly_unmapped_region_resolves_a_price(self):
+        """A region outside the deleted name map returns a real price.
+
+        Before the regionCode filter, eu-north-1 (and every other region
+        absent from the map) fell through to a location string the Price
+        List API never matches, so this returned None.
+        """
+        from cli.capacity import CapacityChecker
+
+        with patch("cli.capacity.checker.get_config") as mock_config:
+            mock_config.return_value = MagicMock()
+
+            with patch("boto3.Session") as mock_session:
+                mock_pricing = MagicMock()
+                mock_pricing.get_products.return_value = {
+                    "PriceList": [
+                        '{"terms": {"OnDemand": {"term1": {"priceDimensions":'
+                        ' {"dim1": {"pricePerUnit": {"USD": "1.067"}}}}}}}'
+                    ]
+                }
+                mock_session.return_value.client.return_value = mock_pricing
+
+                checker = CapacityChecker()
+                price = checker.get_on_demand_price("g5.xlarge", "eu-north-1")
+
+                assert price == 1.067
+
 
 class TestCapacityCheckerNewMethods:
     """Tests for new capacity checker methods."""
@@ -1026,7 +1087,10 @@ class TestCapacityCheckerSpotPlacementScoreEdgeCases:
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
-                scores = checker.get_spot_placement_score("invalid.type", "us-east-1")
+                # A pooled type, so the request is actually issued and the
+                # API's error answer exercises the swallow branch (an
+                # unpooled type would skip the request entirely).
+                scores = checker.get_spot_placement_score("g4dn.xlarge", "us-east-1")
 
                 assert scores == {}
 
@@ -1304,7 +1368,8 @@ class TestCapacityCheckerSpotPlacementScoreExtended:
             }
 
             checker = CapacityChecker()
-            scores = checker.get_spot_placement_score("m5.large", "us-east-1")
+            # Pooled type: unpooled ones (like m5.large) never reach the API.
+            scores = checker.get_spot_placement_score("g5.xlarge", "us-east-1")
 
             assert "regional" in scores
             assert scores["regional"] == 8
@@ -1329,7 +1394,8 @@ class TestCapacityCheckerSpotPlacementScoreExtended:
             )
 
             checker = CapacityChecker()
-            scores = checker.get_spot_placement_score("invalid-type", "us-east-1")
+            # Pooled type: the request must be issued for the error to fire.
+            scores = checker.get_spot_placement_score("g5.xlarge", "us-east-1")
 
             assert scores == {}
 
@@ -1346,7 +1412,8 @@ class TestCapacityCheckerSpotPlacementScoreExtended:
             mock_ec2.get_spot_placement_scores.side_effect = Exception("Network error")
 
             checker = CapacityChecker()
-            scores = checker.get_spot_placement_score("m5.large", "us-east-1")
+            # Pooled type: the request must be issued for the error to fire.
+            scores = checker.get_spot_placement_score("g5.xlarge", "us-east-1")
 
             assert scores == {}
 
@@ -1703,7 +1770,10 @@ class TestCapacityCheckerSpotPlacementScoreAPI:
                 )
 
                 checker = CapacityChecker()
-                scores = checker.get_spot_placement_score("invalid.type", "us-east-1")
+                # A pooled type, so the request is actually issued and the
+                # API's error answer exercises the swallow branch (an
+                # unpooled type would skip the request entirely).
+                scores = checker.get_spot_placement_score("g4dn.xlarge", "us-east-1")
 
                 assert scores == {}
 

@@ -51,7 +51,7 @@ from gco.bedrock import (
     BedrockResponseTruncatedError,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
-    get_default_bedrock_model_id,
+    get_default_mission_model_id,
     raise_if_bedrock_ftu_form_error,
 )
 
@@ -60,7 +60,7 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)
@@ -69,9 +69,6 @@ from .validation import MissionValidationError
 
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
-    # Runtime access is provided lazily by ``__getattr__`` below.
-    DEFAULT_BEDROCK_MODEL_ID: str
-
     # ``fastmcp.Context`` is the concrete type expected by
     # :class:`MCPSamplingBackend`. Kept behind ``TYPE_CHECKING`` so the
     # runtime import surface stays pure-stdlib; the backend itself
@@ -81,7 +78,6 @@ if TYPE_CHECKING:  # pragma: no cover - import-time only
 __all__ = [
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
-    "DEFAULT_BEDROCK_MODEL_ID",
     "DEFAULT_BEDROCK_REGION",
     "ENV_BEDROCK_MODEL_ID",
     "ENV_BEDROCK_REGION",
@@ -92,6 +88,7 @@ __all__ = [
     "MissionValidationError",
     "OBSERVATION_FIELD_BYTE_CAP",
     "OBSERVATION_FIELD_TRUNCATE_TO",
+    "PRIOR_MISSIONS_BYTE_CAP",
     "PROMPT_BYTE_BUDGET",
     "RECENT_ITERATIONS_LIMIT",
     "STRATEGY_REVISION_SCHEMA",
@@ -108,18 +105,6 @@ __all__ = [
     "select_sampling_backend",
     "validate_strategy_against_catalog",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve the historical Mission default only when explicitly accessed."""
-    if name == "DEFAULT_BEDROCK_MODEL_ID":
-        return get_default_bedrock_model_id()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    """Advertise the lazy compatibility alias to introspection tools."""
-    return sorted({*globals(), "DEFAULT_BEDROCK_MODEL_ID"})
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +146,31 @@ RECENT_ITERATIONS_LIMIT: int = 5
 #: same flavour of structured live signal (cluster + queue snapshots
 #: in this case) and the same truncation marker convention applies.
 ENVIRONMENT_CONTEXT_BYTE_CAP: int = 4096
+
+#: Byte cap for the optional prior-missions block (``=== Prior similar
+#: missions ===``). Its own truncation domain for the same reason as
+#: :data:`ENVIRONMENT_CONTEXT_BYTE_CAP`: retrieved lessons are
+#: free-text of unbounded length and must never crowd the rest of the
+#: prompt out of :data:`PROMPT_BYTE_BUDGET`.
+PRIOR_MISSIONS_BYTE_CAP: int = 4096
+
+#: The memory-item fields the prior-missions block passes through to
+#: the prompt — the vector index's ``INCLUDE`` projection plus the key
+#: and the similarity score. Anything else a future projection might
+#: surface is dropped so the block's shape stays stable.
+_PRIOR_MISSION_FIELDS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "directive",
+        "lessons",
+        "recommended_followups",
+        "final_verdict",
+        "verdict_reason",
+        "iteration_count",
+        "completed_at",
+        "score",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -215,14 +225,56 @@ def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Prior-missions summarisation
+# ---------------------------------------------------------------------------
+
+
+def _summarise_prior_missions(
+    missions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return a JSON-safe, byte-capped summary of retrieved prior missions.
+
+    Rendered into the prompt under ``=== Prior similar missions ===``.
+    The input is the :meth:`mcp.mission.memory.MissionMemoryStore.search_similar`
+    result list, ordered most-similar-first.
+
+    Three guarantees on the output:
+
+    1. Only the fields in :data:`_PRIOR_MISSION_FIELDS` pass through,
+       emitted in sorted-key order — so two semantically-identical
+       inputs produce a byte-identical block (the determinism property
+       every prompt section pins down), and a recreated index with a
+       wider projection cannot change the block's shape.
+    2. Each mission's ``lessons`` field is truncated to
+       :data:`OBSERVATION_FIELD_TRUNCATE_TO` bytes with
+       :data:`TRUNCATION_MARKER` when it exceeds
+       :data:`OBSERVATION_FIELD_BYTE_CAP` — one verbose write-up must
+       not evict every other retrieved mission.
+    3. The serialised list fits in :data:`PRIOR_MISSIONS_BYTE_CAP`
+       UTF-8 bytes. When it does not, the *least similar* mission (the
+       list tail) is dropped first, repeating until under cap.
+    """
+    summarised: list[dict[str, Any]] = []
+    for mission in missions:
+        entry = {key: mission[key] for key in sorted(_PRIOR_MISSION_FIELDS) if key in mission}
+        lessons = entry.get("lessons")
+        if isinstance(lessons, str) and _utf8_len(lessons) > OBSERVATION_FIELD_BYTE_CAP:
+            entry["lessons"] = _truncate_serialised(lessons)
+        summarised.append(entry)
+
+    while _utf8_len(_dumps(summarised)) > PRIOR_MISSIONS_BYTE_CAP and summarised:
+        summarised.pop()
+    return summarised
+
+
+# ---------------------------------------------------------------------------
 # Bedrock backend tunables
 # ---------------------------------------------------------------------------
 
-#: Default Bedrock model identifier, loaded lazily from
-#: ``cdk.json`` ``context.bedrock.default_model_id`` through the lightweight
-#: :mod:`gco.bedrock` resolver. The module-level compatibility attribute keeps
-#: existing Mission integrations stable without coupling unrelated imports to
-#: Bedrock configuration resolution.
+#: The default Bedrock model identifier is read on demand from ``cdk.json``
+#: ``context.bedrock.mission_default_model_id`` through the lightweight
+#: :func:`gco.bedrock.get_default_mission_model_id` resolver, so unrelated
+#: imports never couple to Bedrock configuration resolution.
 #:
 #: Operators with regulatory or model-governance requirements can override per
 #: call via ``GCO_MISSION_BEDROCK_MODEL_ID`` or ``--bedrock-model-id``; see
@@ -233,7 +285,7 @@ def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
 #: in ``us-east-1`` first and our installations have it whitelisted.
 DEFAULT_BEDROCK_REGION: str = "us-east-1"
 
-#: Env var that overrides :data:`DEFAULT_BEDROCK_MODEL_ID` at runtime.
+#: Env var that overrides the canonical Mission model default at runtime.
 ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
@@ -607,6 +659,14 @@ class SamplingPrompt:
     #: stays byte-identical to the pre-environment-context shape —
     #: that's what every existing determinism test pins down.
     environment_context: Mapping[str, Any] | None = field(default=None)
+    #: Optional list of similar past missions retrieved from the
+    #: mission-memory vector index (most-similar-first), gathered once
+    #: per engine wiring and reused on every iteration's prompt.
+    #: ``None`` (the default) suppresses the ``=== Prior similar
+    #: missions ===`` section entirely — the same byte-identical
+    #: contract as :attr:`environment_context`, and what keeps every
+    #: pre-memory prompt (and the determinism suite) unchanged.
+    prior_missions: Sequence[Mapping[str, Any]] | None = field(default=None)
 
     # ---- Strategy_Revision rendering --------------------------------------
 
@@ -743,6 +803,19 @@ class SamplingPrompt:
             env_summary = _summarise_environment_context(self.environment_context)
             sections.append("=== Environment context (slow-moving live signals) ===")
             sections.append(_dumps(env_summary, indent=2))
+            sections.append("")
+        if self.prior_missions is not None:
+            # Institutional memory: the closest past missions by directive
+            # similarity, with their lessons and verdicts. Advisory only —
+            # summarised and byte-capped in its own truncation domain.
+            sections.append("=== Prior similar missions (institutional memory) ===")
+            sections.append(
+                "Lessons and outcomes from the most similar past missions, "
+                "most similar first. Treat them as advisory context: they "
+                "may suggest which tools or query shapes worked before, or "
+                "what to avoid repeating."
+            )
+            sections.append(_dumps(_summarise_prior_missions(self.prior_missions), indent=2))
             sections.append("")
         sections.append(f"=== {recent_header} ===")
         sections.append(_dumps(list(iterations), indent=2))
@@ -956,8 +1029,8 @@ class BedrockSamplingBackend:
     from (in order of precedence) the explicit constructor argument,
     the matching environment variable
     (:data:`ENV_BEDROCK_MODEL_ID` / :data:`ENV_BEDROCK_REGION`), and
-    finally the shared ``cdk.json`` default
-    (:data:`DEFAULT_BEDROCK_MODEL_ID` /
+    finally the ``cdk.json`` Mission default
+    (:func:`gco.bedrock.get_default_mission_model_id` /
     :data:`DEFAULT_BEDROCK_REGION`). The ``boto3`` client itself is
     constructed lazily on the first :meth:`sample` call so that
     ``import mission.sampling`` does not pull ``boto3`` into the
@@ -1002,8 +1075,8 @@ class BedrockSamplingBackend:
         Args:
             model_id: Optional explicit model id. When ``None``, falls
                 back to the :data:`ENV_BEDROCK_MODEL_ID` environment
-                variable, then to the shared ``cdk.json`` default exposed as
-                :data:`DEFAULT_BEDROCK_MODEL_ID`.
+                variable, then to the ``cdk.json`` Mission default from
+                :func:`gco.bedrock.get_default_mission_model_id`.
             region: Optional explicit region. When ``None``, falls back
                 to :data:`ENV_BEDROCK_REGION`, then to
                 :data:`DEFAULT_BEDROCK_REGION`.
@@ -1017,7 +1090,7 @@ class BedrockSamplingBackend:
             self.model_id = os.environ[ENV_BEDROCK_MODEL_ID]
             self._uses_default_model = False
         else:
-            self.model_id = get_default_bedrock_model_id()
+            self.model_id = get_default_mission_model_id()
             self._uses_default_model = True
         self._region: str = (
             region
@@ -1039,7 +1112,7 @@ class BedrockSamplingBackend:
         override. Fixture capture uses it to reproduce the checked-in default
         exactly, while ordinary explicit model IDs retain override semantics.
         """
-        backend = cls(model_id=get_default_bedrock_model_id(), region=region)
+        backend = cls(model_id=get_default_mission_model_id(), region=region)
         backend._uses_default_model = True
         return backend
 
@@ -1566,6 +1639,7 @@ async def maybe_sample_strategy_revision(
     remaining_wall_clock_secs: float | None,
     allow_scripts: bool,
     environment_context: Mapping[str, Any] | None = None,
+    prior_missions: Sequence[Mapping[str, Any]] | None = None,
 ) -> SamplingUsed | SamplingFallback:
     """Consult the advisory LLM for a Strategy_Revision, or fall back.
 
@@ -1619,6 +1693,7 @@ async def maybe_sample_strategy_revision(
         allow_scripts=allow_scripts,
         tool_schemas=tool_schemas,
         environment_context=environment_context,
+        prior_missions=prior_missions,
     )
 
     # ---- Transport: backend.sample. --------------------------------------

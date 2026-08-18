@@ -26,8 +26,14 @@ description: |
 
 inputs:
   version:
-    description: "Trivy version tag to install (e.g. v0.70.0). Pin in lockstep across all callers."
-    required: true
+    description: >
+      Trivy version tag to install. The default below is THE Trivy pin for
+      this repository — security.yml and cve-scan.yml deliberately carry no
+      copy of their own, so bumping it here bumps every caller at once (the
+      deps-scan drift check reads this same default via
+      extract_install_trivy_pin).
+    required: false
+    default: "v0.73.0"
   github-token:
     description: >
       Token forwarded to setup-trivy for checking out the Trivy repo when it

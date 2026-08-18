@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Monitoring stack constructor (CloudWatch + alarms + SNS)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,36 +206,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub2363=>subroutine: kwargs.setdefault('cross_region_references', True)
-sub2365=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op2367=>operation: self.config = config
-op2369=>operation: self.global_stack = global_stack
-op2371=>operation: self.regional_stacks = regional_stacks
-op2373=>operation: self.api_gateway_stack = api_gateway_stack
-op2375=>operation: self.project_name = config.get_project_name()
-op2377=>operation: self.regions = config.get_regions()
-op2379=>operation: self.alert_topic = self._create_alert_topic()
-op2381=>operation: self.dashboard = self._create_dashboard()
-sub2383=>subroutine: self._create_alarms()
-sub2385=>subroutine: self._create_composite_alarms()
-sub2387=>subroutine: self._create_custom_metrics()
-sub2389=>subroutine: self._create_outputs()
-sub2391=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2876=>subroutine: kwargs.setdefault('cross_region_references', True)
+sub2878=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2880=>operation: self.config = config
+op2882=>operation: self.global_stack = global_stack
+op2884=>operation: self.regional_stacks = regional_stacks
+op2886=>operation: self.api_gateway_stack = api_gateway_stack
+op2888=>operation: self.project_name = config.get_project_name()
+op2890=>operation: self.regions = config.get_regions()
+op2892=>operation: self.alert_topic = self._create_alert_topic()
+cond2895=>condition: if self.config.get_cost_monitoring_enabled()
+sub2899=>subroutine: self._create_cost_report_storage()
+sub2901=>subroutine: self._create_cost_analytics()
+op2906=>operation: self.dashboard = self._create_dashboard()
+sub2908=>subroutine: self._create_alarms()
+sub2910=>subroutine: self._create_composite_alarms()
+sub2912=>subroutine: self._create_custom_metrics()
+sub2914=>subroutine: self._create_outputs()
+sub2916=>subroutine: self._apply_nag_suppressions()
 
-sub2363->sub2365
-sub2365->op2367
-op2367->op2369
-op2369->op2371
-op2371->op2373
-op2373->op2375
-op2375->op2377
-op2377->op2379
-op2379->op2381
-op2381->sub2383
-sub2383->sub2385
-sub2385->sub2387
-sub2387->sub2389
-sub2389->sub2391
+sub2876->sub2878
+sub2878->op2880
+op2880->op2882
+op2882->op2884
+op2884->op2886
+op2886->op2888
+op2888->op2890
+op2890->op2892
+op2892->cond2895
+cond2895(yes)->sub2899
+sub2899->sub2901
+sub2901->op2906
+op2906->sub2908
+sub2908->sub2910
+sub2910->sub2912
+sub2912->sub2914
+sub2914->sub2916
+cond2895(no)->op2906
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -245,10 +252,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

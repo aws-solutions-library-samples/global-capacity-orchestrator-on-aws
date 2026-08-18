@@ -52,18 +52,22 @@ aws-cdk-lib==2.263.0
     #   cdk-nag
     #   gco-cli
     #   gco-cli (pyproject.toml)
+babel==2.18.0
+    # via mkdocs-material
+backrefs==8.0
+    # via mkdocs-material
 bandit==1.9.4
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
 beartype==0.22.9
     # via py-key-value-aio
-boto3==1.43.62
+boto3==1.43.67
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   moto
-botocore==1.43.62
+botocore==1.43.67
     # via
     #   boto3
     #   gco-cli (pyproject.toml)
@@ -79,7 +83,7 @@ caio==0.9.25
     # via aiofile
 cattrs==25.3.0
     # via jsii
-cdk-nag==3.0.1
+cdk-nag==3.0.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -101,12 +105,15 @@ click==8.4.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
+    #   mkdocs
     #   pip-tools
     #   typer
     #   uvicorn
 cloudpickle==3.1.2
     # via pydocket
-constructs==10.8.0
+colorama==0.4.6
+    # via mkdocs-material
+constructs==10.8.1
     # via
     #   aws-cdk-lib
     #   cdk-nag
@@ -145,11 +152,11 @@ fastapi==0.141.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==3.4.5
+fastmcp==3.4.6
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==3.4.5
+fastmcp-slim==3.4.6
     # via fastmcp
 filelock==3.29.0
     # via
@@ -159,6 +166,8 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
+ghp-import==2.1.0
+    # via mkdocs
 greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
@@ -179,7 +188,7 @@ httpx==0.28.1
     #   mcp
 httpx-sse==0.4.3
     # via mcp
-hypothesis==6.164.0
+hypothesis==6.165.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -206,6 +215,10 @@ jeepney==0.9.0
     # via
     #   keyring
     #   secretstorage
+jinja2==3.1.6
+    # via
+    #   mkdocs
+    #   mkdocs-material
 jmespath==1.1.0
     # via
     #   boto3
@@ -248,15 +261,39 @@ lazy-object-proxy==1.12.0
 librt==0.13.0
     # via mypy
 markdown==3.10.2
-    # via tensorboard
+    # via
+    #   mkdocs
+    #   mkdocs-material
+    #   pymdown-extensions
+    #   tensorboard
 markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
-    # via werkzeug
+    # via
+    #   jinja2
+    #   mkdocs
+    #   werkzeug
 mcp==1.28.1
     # via fastmcp-slim
 mdurl==0.1.2
     # via markdown-it-py
+mergedeep==1.3.4
+    # via
+    #   mkdocs
+    #   mkdocs-get-deps
+mkdocs==1.6.1
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+    #   mkdocs-material
+mkdocs-get-deps==0.2.2
+    # via mkdocs
+mkdocs-material==9.7.7
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+mkdocs-material-extensions==1.3.1
+    # via mkdocs-material
 more-itertools==11.0.2
     # via
     #   jaraco-classes
@@ -300,9 +337,12 @@ packaging==26.2
     # via
     #   build
     #   fastmcp-slim
+    #   mkdocs
     #   pytest
     #   tensorboard
     #   wheel
+paginate==0.5.7
+    # via mkdocs-material
 pandas==3.0.5
     # via
     #   gco-cli
@@ -312,6 +352,7 @@ pathable==0.6.0
     # via jsonschema-path
 pathspec==1.1.1
     # via
+    #   mkdocs
     #   mypy
     #   yamllint
 pillow==12.3.0
@@ -326,6 +367,7 @@ pip-tools==7.6.0
 platformdirs==4.9.6
     # via
     #   fastmcp-slim
+    #   mkdocs-get-deps
     #   python-discovery
     #   virtualenv
 playwright==1.62.0
@@ -401,10 +443,13 @@ pyflowchart==0.6.0
     #   gco-cli (pyproject.toml)
 pygments==2.20.0
     # via
+    #   mkdocs-material
     #   pytest
     #   rich
 pyjwt==2.13.0
     # via mcp
+pymdown-extensions==11.0.1
+    # via mkdocs-material
 pyperclip==1.11.0
     # via fastmcp-slim
 pyproject-hooks==1.2.0
@@ -438,6 +483,7 @@ pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   ghp-import
     #   jsii
     #   kubernetes
     #   pandas
@@ -461,9 +507,15 @@ pyyaml==6.0.3
     #   gco-cli (pyproject.toml)
     #   jsonschema-path
     #   kubernetes
+    #   mkdocs
+    #   mkdocs-get-deps
     #   pre-commit
+    #   pymdown-extensions
+    #   pyyaml-env-tag
     #   responses
     #   yamllint
+pyyaml-env-tag==1.1
+    # via mkdocs
 rank-bm25==0.2.2
     # via
     #   gco-cli
@@ -483,6 +535,7 @@ requests==2.34.2
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   kubernetes
+    #   mkdocs-material
     #   moto
     #   requests-oauthlib
     #   responses
@@ -506,7 +559,7 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.1
+ruff==0.16.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -525,7 +578,7 @@ sortedcontainers==2.4.0
     # via hypothesis
 sse-starlette==3.4.1
     # via mcp
-starlette==1.3.1
+starlette==1.6.0
     # via
     #   fastapi
     #   fastmcp-slim
@@ -593,7 +646,7 @@ urllib3==2.7.0
     #   requests
     #   responses
     #   types-requests
-uvicorn==0.52.0
+uvicorn==0.52.1
     # via
     #   fastmcp-slim
     #   gco-cli
@@ -601,6 +654,8 @@ uvicorn==0.52.0
     #   mcp
 virtualenv==21.3.0
     # via pre-commit
+watchdog==6.0.0
+    # via mkdocs
 watchfiles==1.1.1
     # via fastmcp-slim
 websocket-client==1.9.0

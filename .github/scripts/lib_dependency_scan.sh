@@ -147,21 +147,41 @@ for raw in requires:
 # registry is the domain and repo is the path within that registry.
 #
 # Examples:
-#   parse_image_registry "nvcr.io/nvidia/cuda"        → "nvcr.io|nvidia/cuda"
-#   parse_image_registry "pytorch/pytorch"            → "docker.io|pytorch/pytorch"
-#   parse_image_registry "python"                     → "docker.io|library/python"
-#   parse_image_registry "public.ecr.aws/eks/coredns" → "public.ecr.aws|eks/coredns"
+#   parse_image_registry "nvcr.io/nvidia/cuda"          → "nvcr.io|nvidia/cuda"
+#   parse_image_registry "pytorch/pytorch"              → "docker.io|pytorch/pytorch"
+#   parse_image_registry "python"                       → "docker.io|library/python"
+#   parse_image_registry "public.ecr.aws/eks/coredns"   → "public.ecr.aws|eks/coredns"
+#   parse_image_registry "docker.io/library/busybox"    → "docker.io|library/busybox"
+#   parse_image_registry "docker.io/python"             → "docker.io|library/python"
+#
+# A first path component containing a dot, a port colon, or the literal
+# ``localhost`` is treated as a registry domain — the same heuristic container
+# runtimes apply — so a newly referenced registry needs no code change here.
+# The previous enumerated-registry list silently misparsed fully-qualified
+# Docker Hub references (``docker.io/library/busybox`` became repository
+# ``docker.io/library/busybox`` under a second ``docker.io``), which made
+# their tag lookups fail every month.
 parse_image_registry() {
   local image="$1"
-  local registry="" repo=""
+  local registry="" repo="" first=""
   case "$image" in
-    nvcr.io/*|gcr.io/*|quay.io/*|ghcr.io/*|registry.k8s.io/*|public.ecr.aws/*)
-      registry="$(echo "$image" | cut -d'/' -f1)"
-      repo="$(echo "$image" | cut -d'/' -f2-)"
-      ;;
     */*)
-      registry="docker.io"
-      repo="$image"
+      first="${image%%/*}"
+      case "$first" in
+        *.*|*:*|localhost)
+          registry="$first"
+          repo="${image#*/}"
+          # Docker Hub keeps official images under the implicit library/
+          # namespace; restore it for a fully-qualified single-segment repo.
+          if [ "$registry" = "docker.io" ] && [ "${repo#*/}" = "$repo" ]; then
+            repo="library/$repo"
+          fi
+          ;;
+        *)
+          registry="docker.io"
+          repo="$image"
+          ;;
+      esac
       ;;
     *)
       registry="docker.io"
@@ -206,6 +226,124 @@ compare_semver() {
   fi
 }
 
+# newer_same_variant_tag <current_tag>
+#
+# Reads a raw registry tag list on stdin (one tag per line) and prints the
+# newest tag in the *same variant family* as <current_tag> that is strictly
+# newer than it — or nothing when the pin is already the family's newest.
+#
+# A variant family shares the exact literal suffix after the leading numeric
+# version: ``24.01-py3`` compares only against ``NN[.NN…]-py3`` tags,
+# ``2.6.0-cuda12.6-cudnn9-runtime`` only against its identical variant
+# suffix, ``3.14.6-slim`` only against ``-slim`` tags, and a bare ``1.38.0``
+# only against bare ``X.Y[.Z]`` tags. This mirrors the same-family scoping
+# the Bedrock model check uses: moving to a different variant (another CUDA
+# line, another base distro, dropping ``-slim``) is a human decision, not
+# drift, so it is never suggested. A leading ``v`` is accepted on either
+# side and ignored for comparison.
+#
+# The strict ``^v?X.Y.Z$`` filter this replaces matched nothing for every
+# suffix-tagged repository (NGC, GHCR Slurm, CUDA, PyTorch), which — under
+# ``pipefail`` — surfaced as a permanent "tag lookup failed" every month.
+#
+# Numeric components of five or more digits are treated as build/date
+# identifiers, not release numbers, and disqualify a candidate unless the
+# current pin itself carries one (a CalVer pin keeps comparing against
+# CalVer tags). Without this, ``alpine:3.21`` was "upgraded" to the
+# ``20260805`` date tag, ``kuberay/operator:v1.6.2`` to a ``9831375``
+# commit-numbered tag, and ``ray:2.56.1`` to the ``2.57.0.397131`` nightly.
+newer_same_variant_tag() {
+  python3 -c "
+import re, sys
+
+WIDE = 10000  # five digits: build number, date stamp, or commit counter
+
+current = sys.argv[1]
+match = re.match(r'^v?(\d+(?:\.\d+)*)(.*)\$', current)
+if not match:
+    raise SystemExit(0)
+suffix = match.group(2)
+current_key = [int(part) for part in match.group(1).split('.')]
+current_is_calver = any(part >= WIDE for part in current_key)
+
+pattern = re.compile(r'^v?(\d+(?:\.\d+)*)' + re.escape(suffix) + r'\$')
+best_key = None
+best_tag = None
+for line in sys.stdin:
+    tag = line.strip()
+    if not tag:
+        continue
+    candidate = pattern.match(tag)
+    if candidate is None:
+        continue
+    key = [int(part) for part in candidate.group(1).split('.')]
+    if not current_is_calver and any(part >= WIDE for part in key):
+        continue
+    if key <= current_key:
+        continue
+    if best_key is None or key > best_key:
+        best_key, best_tag = key, tag
+if best_tag:
+    print(best_tag)
+" "$1" 2>/dev/null
+}
+
+# tag_listed <tag> <raw_tags>
+#
+# Whether <raw_tags> (a newline-separated registry tag list passed as one
+# argument, not on stdin) lists <tag> exactly, accepting a leading ``v`` on
+# either side. Exists because the obvious spelling —
+# ``printf '%s\n' "$raw_tags" | grep -qxF …`` — is wrong under ``pipefail``
+# for large repositories: ``grep -q`` exits at the first match and closes
+# the pipe, ``printf`` takes SIGPIPE/EPIPE while still writing tag lists
+# bigger than the pipe buffer (python has ~3900 tags, tritonserver ~2600),
+# and the pipeline reports failure for a tag that is in fact listed. That
+# inverted into false "pinned tag is no longer listed" INCOMPLETE findings
+# in the 2026-09 scan. A herestring keeps grep's stdin writer-free, so
+# early exit has nothing to signal.
+tag_listed() {
+  local tag="$1" raw_tags="$2"
+  grep -qxF -e "$tag" -e "v${tag#v}" -e "${tag#v}" <<< "$raw_tags"
+}
+
+# split_pinned_image_ref <repo:tag@sha256:digest>
+#
+# Validate and decompose a digest-pinned image reference, printing
+# ``repository|tag|digest`` on one line. Returns non-zero with no output for
+# anything that is not exactly the ``repo:tag@sha256:<64 hex>`` shape —
+# tag-only references, digest-only references, and malformed digests all
+# fail, so callers can gate the digest-freshness check on the return code.
+split_pinned_image_ref() {
+  local ref="$1"
+  if ! [[ "$ref" =~ ^([^@:]+(:[0-9]+)?(/[^@:]+)*):([^@]+)@(sha256:[0-9a-f]{64})$ ]]; then
+    return 1
+  fi
+  printf '%s|%s|%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
+}
+
+# published_manifest_digest <repository:tag>
+#
+# Print the tag's current top-level manifest digest (``sha256:<64 hex>``) as
+# published by the registry. Hashes the raw manifest bytes rather than
+# selecting a platform child, because committed pins are multi-architecture
+# manifest-list digests. Returns non-zero with no output on transport
+# failure or an implausible hash, so callers distinguish "registry
+# unreachable" from "digest moved".
+published_manifest_digest() {
+  local tagged_image="$1" manifest digest
+  manifest="$(mktemp)"
+  if ! skopeo inspect --raw "docker://${tagged_image}" > "$manifest" 2>/dev/null; then
+    rm -f "$manifest"
+    return 1
+  fi
+  digest="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+  rm -f "$manifest"
+  if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+
 # parse_accelerator_drift_count <json-summary-file>
 #
 # Validates the machine-readable output from
@@ -243,36 +381,31 @@ print(count)
 
 # extract_aurora_versions <file>
 #
-# Extracts Aurora PostgreSQL engine versions from the constants module.
-# Prints one "major.minor" per line, sorted and deduplicated.
-# Falls back to reading constants.py directly if the module can't be imported.
+# Prints the pinned Aurora PostgreSQL engine version (``major.minor``) from
+# the constants module, importing it when possible and falling back to a
+# direct regex over ``constants.py``. The pin is a plain version string
+# applied through ``rds.AuroraPostgresEngineVersion.of()`` — there is no CDK
+# enum member to scan for. Output is validated to ``X.Y[.Z]`` shape so a
+# refactor of the constant can never leak a non-version into the RDS query.
 extract_aurora_versions() {
   local file="${1:-gco/stacks/regional_stack.py}"
   python3 -c "
-import sys
+import re, sys
+value = None
 try:
-    from gco.stacks.constants import AURORA_POSTGRES_VERSION_DISPLAY
-    print(AURORA_POSTGRES_VERSION_DISPLAY)
+    from gco.stacks.constants import AURORA_POSTGRES_VERSION
+    value = AURORA_POSTGRES_VERSION
 except ImportError:
-    # Fallback: read constants.py directly
-    import re, os
+    import os
     constants_path = os.path.join(os.path.dirname(sys.argv[1]), 'constants.py')
     if os.path.exists(constants_path):
         with open(constants_path) as f:
             text = f.read()
-        m = re.search(r'AURORA_POSTGRES_VERSION_DISPLAY\s*=\s*\"([^\"]+)\"', text)
+        m = re.search(r'^AURORA_POSTGRES_VERSION\s*=\s*\"([^\"]+)\"', text, re.M)
         if m:
-            print(m.group(1))
-    else:
-        # Last resort: scan the file for VER_XX_Y patterns
-        with open(sys.argv[1]) as f:
-            text = f.read()
-        seen = set()
-        for m in re.finditer(r'AuroraPostgresEngineVersion\.VER_(\d+)_(\d+)', text):
-            v = f'{m.group(1)}.{m.group(2)}'
-            if v not in seen:
-                seen.add(v)
-                print(v)
+            value = m.group(1)
+if value and re.fullmatch(r'\d+\.\d+(?:\.\d+)?', value):
+    print(value)
 " "$file" 2>/dev/null | sort -V
 }
 
@@ -658,33 +791,6 @@ if versions:
 " 2>/dev/null
 }
 
-# get_latest_aurora_postgres_version
-#
-# Imports ``aws_cdk.aws_rds`` and prints the highest ``VER_X_Y`` enum
-# member of ``AuroraPostgresEngineVersion`` (e.g. ``VER_17_9``). Empty
-# output when aws-cdk-lib isn't importable.
-#
-# Skips suffixed variants such as ``VER_17_9_LIMITLESS`` and
-# ``VER_15_4_R2`` — those aren't the canonical "latest minor" engine
-# version we pin, and including them would cause the comparison to
-# flap whenever AWS publishes a sidecar release line.
-get_latest_aurora_postgres_version() {
-  python3 -c "
-import re
-try:
-    from aws_cdk import aws_rds
-except Exception:
-    raise SystemExit(0)
-versions = []
-for name in dir(aws_rds.AuroraPostgresEngineVersion):
-    m = re.match(r'^VER_(\d+)_(\d+)$', name)
-    if m:
-        versions.append((int(m.group(1)), int(m.group(2)), name))
-if versions:
-    print(max(versions)[2])
-" 2>/dev/null
-}
-
 # get_latest_python_release
 #
 # Queries https://endoflife.date/api/python.json and prints the
@@ -839,35 +945,106 @@ if m:
 " "$file" 2>/dev/null
 }
 
-# extract_default_bedrock_model [cdk_json_path]
+# extract_chart_value_images [charts_yaml_path]
 #
-# Prints the shared default Bedrock model id from
-# ``cdk.json`` ``context.bedrock.default_model_id``. Mission sampling and
-# the capacity advisor both resolve this system-defined cross-Region inference
-# profile through ``gco.bedrock`` when no explicit override is supplied.
+# Walks every ``values:`` block in charts.yaml and prints one fully-qualified
+# ``image:tag`` per line for every mapping that pins BOTH a repository and a
+# tag. Handles the two image-pin shapes the file uses:
 #
-# This value feeds the Bedrock-model drift check in dependency-scan.sh, which
-# compares it against the newest profile in the same model family
-# (get_latest_bedrock_model). A newer release is the cue to update cdk.json and
-# re-capture the scaffold fixture under tests/fixtures/scaffold_responses/.
+#   image:                          image:
+#     repository: example/app         registry: ghcr.io
+#     tag: "1.2.3"                    repository: org/sub/app
+#                                     tag: "v1.2.3"
+#
+# The ``registry`` sibling must join the emitted reference: without it a
+# ghcr-hosted repository is emitted bare and the tag sweep resolves it
+# against docker.io — for multi-segment repositories that cannot exist
+# there, turning every monthly scan into a false INCOMPLETE (first hit by
+# kubeflow-trainer's controller pin, the first registry-split image with an
+# explicit tag; KEDA's registry-split blocks are tag-less and never emit).
+#
+# Tag-less pins stay un-emitted on purpose: their images follow the chart's
+# appVersion, which the Helm chart version sweep already reports. Registry-
+# less single-segment repositories are skipped as before (ambiguous
+# namespace). Prints nothing on a missing or unparseable file — the caller
+# treats empty output as a broken parse, matching the smoke-manifest
+# precedent (charts.yaml always carries pinned values images).
+extract_chart_value_images() {
+  local file="${1:-lambda/helm-installer/charts.yaml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import sys
+import yaml
+try:
+    with open(sys.argv[1]) as handle:
+        data = yaml.safe_load(handle)
+except Exception:
+    sys.exit(0)
+
+
+def find_images(node):
+    if isinstance(node, dict):
+        registry = node.get('registry', '')
+        repository = node.get('repository', '')
+        tag = node.get('tag', '')
+        if repository and tag:
+            if registry:
+                print(f'{registry}/{repository}:{tag}')
+            elif '/' in repository:
+                print(f'{repository}:{tag}')
+        for value in node.values():
+            find_images(value)
+    elif isinstance(node, list):
+        for item in node:
+            find_images(item)
+
+
+for _name, cfg in ((data or {}).get('charts') or {}).items():
+    if isinstance(cfg, dict):
+        find_images(cfg.get('values') or {})
+" "$file" 2>/dev/null
+}
+
+# extract_default_bedrock_model [cdk_json_path] [leaf_key]
+#
+# Prints a configured Bedrock model id from ``cdk.json``
+# ``context.bedrock.<leaf_key>`` (default leaf: ``mission_default_model_id``).
+# The managed generation leaves are ``mission_default_model_id`` — what
+# Mission sampling resolves through ``gco.bedrock`` when no explicit override
+# is supplied — ``capacity_advisor_default_model_id`` — the capacity
+# advisor's equivalent — and ``claude_code_default_model_id``, the session
+# model ``gco autopilot`` hands to Claude Code. The keys are deliberately
+# independent knobs.
+#
+# These values feed the Bedrock-model drift check in dependency-scan.sh, which
+# compares each against the newest profile in the same model family
+# (get_latest_bedrock_model). A newer release is the cue to update cdk.json
+# and, for the Mission key, re-capture the scaffold fixture under
+# tests/fixtures/scaffold_responses/.
 #
 # Prints nothing if the file is absent, malformed, or does not contain a
 # non-empty string at the expected path. The caller treats empty output as a
 # skip, matching the other extractors in this library.
 extract_default_bedrock_model() {
   local file="${1:-cdk.json}"
+  local leaf="${2:-mission_default_model_id}"
+  # Optional third argument selects the context block (default: bedrock).
+  # The vector-store feature keeps its own independent embedding model at
+  # ``context.vector_store.embedding_model_id``; passing ``vector_store``
+  # here lets the same extractor and drift plumbing manage it.
+  local block="${3:-bedrock}"
   [ -f "$file" ] || return 0
   python3 -c "
 import json, sys
 try:
     with open(sys.argv[1]) as handle:
         data = json.load(handle)
-    value = data.get('context', {}).get('bedrock', {}).get('default_model_id')
+    value = data.get('context', {}).get(sys.argv[3], {}).get(sys.argv[2])
 except Exception:
     value = None
 if isinstance(value, str) and value.strip():
     print(value.strip())
-" "$file" 2>/dev/null
+" "$file" "$leaf" "$block" 2>/dev/null
 }
 
 # bedrock_model_family <inference_profile_id>
@@ -940,8 +1117,8 @@ print('same' if a == b else ('newer' if b > a else 'older'))
 # Prints the newest system-defined inference-profile id in the same
 # model family as <current_id> (see bedrock_model_family), as reported
 # by ``aws bedrock list-inference-profiles --type-equals SYSTEM_DEFINED``.
-# Used by the Bedrock-model drift check to tell whether the pinned
-# DEFAULT_BEDROCK_MODEL_ID has a newer release available.
+# Used by the Bedrock-model drift check to tell whether a pinned
+# generation-model default has a newer release available.
 #
 # Family scoping keeps the comparison apples-to-apples: a newer Nova
 # Pro is reported against a pinned Nova Pro, but a different tier (Nova
@@ -1003,6 +1180,82 @@ if cands:
 " "$current" 2>/dev/null
 }
 
+# get_latest_bedrock_embedding_model <current_id> [region]
+#
+# Prints the newest ACTIVE text-embedding foundation model in the same
+# model family as <current_id> (see bedrock_model_family), as reported by
+# ``aws bedrock list-foundation-models --by-output-modality EMBEDDING``.
+# Used by the Bedrock-model drift check for
+# ``context.bedrock.embedding_model_id`` — Mission memory's embedding
+# default, resolved at runtime through
+# ``gco.bedrock.get_default_embedding_model_id()``.
+#
+# Embedding models are plain foundation models, not system-defined
+# inference profiles, so this is a separate lookup from
+# get_latest_bedrock_model; the family scoping and integer-tuple version
+# ranking are deliberately identical. A newer same-family release (e.g. a
+# Titan Text Embeddings v3) is reported as drift; a different provider or
+# model line never is. Embedding drift is advisory-with-a-caveat: stored
+# vectors are only comparable to vectors from the same model, so adopting
+# a newer embedding model means re-embedding or segregating existing
+# data, not just bumping the pin (the drift report's remediation text
+# says so).
+#
+# Region defaults to us-east-1 (the Mission memory default region).
+# Models without a numeric version key are ignored because they cannot be
+# ordered safely; non-ACTIVE lifecycles (e.g. LEGACY) are skipped. Empty
+# output on any failure tells the caller to mark the check skipped.
+#
+# IAM action: bedrock:ListFoundationModels (already granted to the scan
+# role alongside bedrock:ListInferenceProfiles).
+get_latest_bedrock_embedding_model() {
+  local current="$1"
+  local region="${2:-us-east-1}"
+  if [ -z "$current" ] || ! [[ "$current" =~ [0-9] ]]; then
+    return 0
+  fi
+  aws bedrock list-foundation-models \
+    --by-output-modality EMBEDDING \
+    --region "$region" \
+    --output json 2>/dev/null \
+  | python3 -c "
+import json, re, sys
+current = sys.argv[1]
+def family(mid):
+    # Keep in lockstep with bedrock_model_family above: the revision
+    # suffix is optional and its ``:MINOR`` half is too.
+    core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
+    parts = core.split('.')
+    if len(parts) >= 3:
+        geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])
+    elif len(parts) == 2:
+        geo, provider, name = '', parts[0], parts[1]
+    else:
+        geo, provider, name = '', '', core
+    tokens = [t for t in name.split('-') if t and not t.isdigit()]
+    prefix = '.'.join([p for p in (geo, provider) if p])
+    return prefix + ('.' + '-'.join(tokens) if tokens else '')
+def key(mid):
+    return [int(n) for n in re.findall(r'\d+', mid)]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+target = family(current)
+cands = []
+for model in data.get('modelSummaries', []) or []:
+    mid = model.get('modelId', '') or ''
+    lifecycle = (model.get('modelLifecycle') or {}).get('status') or 'ACTIVE'
+    if lifecycle != 'ACTIVE':
+        continue
+    if mid and key(mid) and family(mid) == target:
+        cands.append(mid)
+if cands:
+    cands.sort(key=key)
+    print(cands[-1])
+" "$current" 2>/dev/null
+}
+
 # =============================================================================
 # Expanded coverage helpers
 # =============================================================================
@@ -1050,7 +1303,7 @@ get_latest_github_release_tag() {
 # Prints the unique value(s) of a ``<VAR_NAME>: "<value>"`` env assignment
 # found across the workflow YAML under <workflows_dir> (default
 # ``.github/workflows``). Used by the CI-tooling drift check to read the
-# pinned ``TRIVY_VERSION`` / ``HELM_VERSION`` / ``KUBECTL_VERSION`` the
+# pinned ``HELM_VERSION`` / ``KUBECTL_VERSION`` / ``CALICO_VERSION`` the
 # workflows install their own tooling from — pins Dependabot doesn't watch
 # (they're plain env strings, not ``uses:`` refs or Dockerfile ``FROM``
 # lines).
@@ -1070,6 +1323,28 @@ extract_workflow_env_pin() {
     | sort -u
 }
 
+# extract_install_trivy_pin [action_yml]
+#
+# Prints the Trivy version pinned as the ``version`` input default of the
+# install-trivy composite action — the one place the Trivy pin lives, now
+# that security.yml and cve-scan.yml carry no copies of their own. Empty
+# output when the file, the input, or the default is absent.
+extract_install_trivy_pin() {
+  local file="${1:-.github/actions/install-trivy/action.yml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f)
+except Exception:
+    sys.exit(0)
+value = ((((data or {}).get('inputs') or {}).get('version') or {}).get('default') or '')
+if value:
+    print(value)
+" "$file" 2>/dev/null
+}
+
 # extract_kind_pins [workflow_file]
 #
 # Prints the kind pins configured on the ``helm/kind-action`` step:
@@ -1087,23 +1362,53 @@ extract_kind_pins() {
   local file="${1:-.github/workflows/integration-tests.yml}"
   [ -f "$file" ] || return 0
   python3 -c "
-import sys, yaml
+import re, sys, yaml
 try:
     with open(sys.argv[1]) as f:
         data = yaml.safe_load(f)
 except Exception:
     sys.exit(0)
+
+# The kind-action steps reference the single workflow-level declarations as
+# \${{ env.KIND_VERSION }} / \${{ env.KIND_NODE_IMAGE }}; resolve those here
+# so callers keep seeing concrete values. Literal with: values (the
+# pre-hoist shape) still pass through unchanged. An env reference that does
+# not resolve prints nothing — the caller's presence checks report the pin
+# as missing rather than passing a template string to a release lookup.
+workflow_env = {
+    str(k): str(v) for k, v in ((data or {}).get('env') or {}).items()
+}
+_REF = re.compile(r'^\\\$\\{\\{\\s*env\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\\}\$')
+
+def resolve(value, job_env):
+    value = str(value or '')
+    match = _REF.match(value.strip())
+    if not match:
+        return value
+    name = match.group(1)
+    if name in job_env:
+        return str(job_env[name])
+    return workflow_env.get(name, '')
+
+seen = []
 for job in (data or {}).get('jobs', {}).values():
+    job_env = {str(k): str(v) for k, v in ((job or {}).get('env') or {}).items()}
     for step in (job or {}).get('steps', []) or []:
         uses = (step or {}).get('uses', '') or ''
         if uses.startswith('helm/kind-action'):
             with_ = (step or {}).get('with', {}) or {}
-            ver = with_.get('version', '')
-            node = with_.get('node_image', '')
-            if ver:
-                print(f'kind|{ver}')
-            if node:
-                print(f'kind-node|{node}')
+            ver = resolve(with_.get('version', ''), job_env)
+            node = resolve(with_.get('node_image', ''), job_env)
+            if ver and ('kind', ver) not in seen:
+                seen.append(('kind', ver))
+            if node and ('kind-node', node) not in seen:
+                seen.append(('kind-node', node))
+# De-duplicated: multiple kind-action steps (cluster-e2e + examples-smoke)
+# resolving to the SAME versions print once. A key appearing twice therefore
+# always means the steps drifted apart — the caller's consistency check
+# reports exactly that.
+for key, value in seen:
+    print(f'{key}|{value}')
 " "$file" 2>/dev/null
 }
 
@@ -1190,7 +1495,15 @@ except Exception:
 # means the CI matrix drifted from the runtime the Lambdas actually ship on.
 extract_python_version_pins() {
   local dir="${1:-.github/workflows}"
+  local version_file="${2:-.python-version}"
   [ -d "$dir" ] || return 0
+  # The CI Python lives once, in .python-version (every setup-python step
+  # uses python-version-file). Emit that single pin, PLUS any literal
+  # python-version: leftovers in the workflows — a stray literal is
+  # exactly the drift the consistency check should surface.
+  if [ -f "$version_file" ]; then
+    grep -oE "^[0-9]+\.[0-9]+" "$version_file" | head -1
+  fi
   grep -rhoE "python-version:[[:space:]]*\"?[0-9]+\.[0-9]+\"?" "$dir" 2>/dev/null \
     | sed -E "s/python-version:[[:space:]]*//" \
     | tr -d '"'
@@ -1505,12 +1818,22 @@ extract_helm_installer_pins() {
 import re, sys
 with open(sys.argv[1]) as f:
     text = f.read()
+# Versions from the download URLs; checksums from the sha256sum trust
+# anchor bound to each download's output path. These four lines are the
+# single Helm/kubectl source the CI jobs load into GITHUB_ENV — the
+# workflows deliberately carry no literal copies of their own.
 m = re.search(r'get\.helm\.sh/helm-(v\d+\.\d+\.\d+)-', text)
 if m:
     print(f'HELM_VERSION|{m.group(1)}')
+m = re.search(r'([0-9a-f]{64})\s+/tmp/helm\.tar\.gz', text)
+if m:
+    print(f'HELM_SHA256|{m.group(1)}')
 m = re.search(r'dl\.k8s\.io/release/(v\d+\.\d+\.\d+)/', text)
 if m:
     print(f'KUBECTL_VERSION|{m.group(1)}')
+m = re.search(r'([0-9a-f]{64})\s+/tmp/kubectl', text)
+if m:
+    print(f'KUBECTL_SHA256|{m.group(1)}')
 " "$file" 2>/dev/null
 }
 

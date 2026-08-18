@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Helm teardown completion poll (continued fencing + terminal status)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,46 +206,42 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3933=>operation: 'Keep convergence fenced, then surface teardown terminal status.'
-cond3936=>condition: if event['RequestType'] != 'Delete'
-io3943=>inputoutput: output: {'IsComplete': True}
-e3941=>end: end function return
-op3949=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
-op3951=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
-op3953=>operation: execution_name = _execution_name(event)
-op3955=>operation: execution_arn = _execution_arn(state_machine_arn, execution_name)
-op3957=>operation: sfn_client = _sfn()
-sub3959=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
-op3961=>operation: response = sfn_client.describe_execution(executionArn=execution_arn)
-op3963=>operation: status = response['status']
-cond3966=>condition: if status == 'RUNNING'
-io3973=>inputoutput: output: {'IsComplete': False}
-e3971=>end: end function return
-cond3980=>condition: if status == 'SUCCEEDED'
-io3987=>inputoutput: output: {'IsComplete': True}
-e3985=>end: end function return
-op3993=>operation: detail = response.get('cause') or response.get('error') or 'no failure detail'
-sub3995=>subroutine: raise RuntimeError(f'Helm teardown execution {status}: {detail}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op4598=>operation: 'Surface teardown terminal status; the workflow owns the drain loop.'
+cond4601=>condition: if event['RequestType'] != 'Delete'
+io4608=>inputoutput: output: {'IsComplete': True}
+e4606=>end: end function return
+op4614=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
+op4616=>operation: execution_name = _execution_name(event)
+op4618=>operation: execution_arn = _execution_arn(state_machine_arn, execution_name)
+op4620=>operation: sfn_client = _sfn()
+op4622=>operation: response = sfn_client.describe_execution(executionArn=execution_arn)
+op4624=>operation: status = response['status']
+cond4627=>condition: if status == 'RUNNING'
+io4634=>inputoutput: output: {'IsComplete': False}
+e4632=>end: end function return
+cond4641=>condition: if status == 'SUCCEEDED'
+io4648=>inputoutput: output: {'IsComplete': True}
+e4646=>end: end function return
+op4654=>operation: detail = response.get('cause') or response.get('error') or 'no failure detail'
+sub4656=>subroutine: raise RuntimeError(f'Helm teardown execution {status}: {detail}')
 
-op3933->cond3936
-cond3936(yes)->io3943
-io3943->e3941
-cond3936(no)->op3949
-op3949->op3951
-op3951->op3953
-op3953->op3955
-op3955->op3957
-op3957->sub3959
-sub3959->op3961
-op3961->op3963
-op3963->cond3966
-cond3966(yes)->io3973
-io3973->e3971
-cond3966(no)->cond3980
-cond3980(yes)->io3987
-io3987->e3985
-cond3980(no)->op3993
-op3993->sub3995
+op4598->cond4601
+cond4601(yes)->io4608
+io4608->e4606
+cond4601(no)->op4614
+op4614->op4616
+op4616->op4618
+op4618->op4620
+op4620->op4622
+op4622->op4624
+op4624->cond4627
+cond4627(yes)->io4634
+io4634->e4632
+cond4627(no)->cond4641
+cond4641(yes)->io4648
+io4648->e4646
+cond4641(no)->op4654
+op4654->sub4656
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -255,10 +251,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

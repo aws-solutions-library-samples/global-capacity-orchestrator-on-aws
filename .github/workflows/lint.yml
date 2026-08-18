@@ -13,6 +13,7 @@
 #   - lint:actionlint:workflows   — validates .github/workflows/*.yml
 #   - lint:hadolint:dockerfile    — hadolint on every Dockerfile
 #   - lint:markdownlint:md        — markdownlint-cli2 across all Markdown files
+#   - lint:mkdocs:strict          — strict MkDocs build of the wiki (wiki/ + mkdocs.yml)
 #   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, gco_mcp/, scripts/
 #   - lint:mypy:stacks            — mypy on gco/stacks/ + app.py (requires CDK)
 #   - lint:mypy:lambda            — mypy on each lambda/ subdir independently
@@ -79,7 +80,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install yamllint
@@ -102,7 +103,7 @@ jobs:
         # stay in lockstep. Bump all three together.
         uses: astral-sh/ruff-action@v4.1.0
         with:
-          version: "0.16.1"
+          version: "0.16.2"
           args: "format --check --diff"
           src: >-
             gco/
@@ -120,7 +121,7 @@ jobs:
         # third-party wheels we don't own.
         uses: astral-sh/ruff-action@v4.1.0
         with:
-          version: "0.16.1"
+          version: "0.16.2"
           args: "check --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build"
           src: >-
             gco/
@@ -150,6 +151,28 @@ jobs:
         # The exact CLI and transitive graph come from package-lock.json so
         # local runs and CI execute the same dependency set.
         run: npm run lint:markdown
+
+  # The identical build pages.yml runs at deploy time. workflow_run always
+  # executes the default-branch workflow definition, so the deploy itself
+  # cannot be exercised from a PR branch — this job is what makes a broken
+  # wiki (dead internal link, nav entry without a file, config error) a
+  # pre-merge failure instead of a post-merge "Deploy Pages" surprise.
+  # `strict: true` in mkdocs.yml promotes every build warning to an error.
+  lint-mkdocs-strict:
+    name: "lint:mkdocs:strict"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install the docs toolchain
+        run: pip install -e ".[docs]"
+      - name: Strict MkDocs build of the wiki
+        run: mkdocs build --strict
 
   lint-hadolint-dockerfile:
     name: "lint:hadolint:dockerfile"
@@ -237,7 +260,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck dependencies
@@ -262,7 +285,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck + cdk dependencies
@@ -284,7 +307,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck dependencies

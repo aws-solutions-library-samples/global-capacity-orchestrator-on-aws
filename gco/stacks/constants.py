@@ -24,6 +24,21 @@ from collections.abc import Collection, Mapping
 from functools import lru_cache
 from types import MappingProxyType
 
+# Resource-governance defaults live in gco.resource_governance (a
+# runtime-shippable module) because the manifest/queue processors need the
+# same values inside their container images, whose build context deliberately
+# excludes gco/stacks/** (see _SERVICE_IMAGE_COMMON_EXCLUDES in the regional
+# stack). Re-exported here so synth-side code keeps one import home.
+from gco.resource_governance import (
+    DEFAULT_MANIFEST_RESOURCE_CAPS as DEFAULT_MANIFEST_RESOURCE_CAPS,
+)
+from gco.resource_governance import (
+    DEFAULT_RESOURCE_QUOTA as DEFAULT_RESOURCE_QUOTA,
+)
+from gco.resource_governance import (
+    parse_k8s_quantity as parse_k8s_quantity,
+)
+
 # ---------------------------------------------------------------------------
 # Lambda Runtimes
 # ---------------------------------------------------------------------------
@@ -274,7 +289,7 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 # The dependency scanner checks ``aws eks describe-addon-versions`` monthly
 # and opens an issue when newer builds are available.
 
-EKS_ADDON_POD_IDENTITY_AGENT = "v1.3.10-eksbuild.3"
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.1"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
 EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.5"
@@ -322,11 +337,16 @@ restriction. Keep in sync with the AWS EKS networking requirements doc.
 # ``aws rds describe-db-engine-versions`` monthly for newer releases
 # within the same major line.
 
-AURORA_POSTGRES_VERSION = "VER_17_9"
-"""CDK enum name for the Aurora PostgreSQL engine version (e.g. ``rds.AuroraPostgresEngineVersion.VER_17_9``)."""
+AURORA_POSTGRES_VERSION = "17.10"
+"""Aurora PostgreSQL engine version, applied via ``rds.AuroraPostgresEngineVersion.of()``.
 
-AURORA_POSTGRES_VERSION_DISPLAY = "17.9"
-"""Human-readable version string for documentation and logging."""
+A plain ``major.minor`` string rather than a CDK enum name: enum members lag
+new RDS minor releases, which needlessly coupled an Aurora engine bump to an
+aws-cdk-lib release. The dependency scanner validates this pin directly
+against ``rds describe-db-engine-versions`` — the authoritative source — so
+a newer minor is reported the day RDS ships it, independent of the CDK
+library's enum catalog.
+"""
 # ---------------------------------------------------------------------------
 # Analytics Environment Constants
 # ---------------------------------------------------------------------------

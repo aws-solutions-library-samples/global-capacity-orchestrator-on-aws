@@ -193,6 +193,17 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  # Kubeflow Trainer v2 — TrainJob is the first CRD submitted through the
+  # SQS path (the Ray/Volcano examples submit direct with the caller's own
+  # credentials, so their groups only appear in the cluster-READ role).
+  # The queue processor creates TrainJobs from queued manifests, and the
+  # manifest processor's generic-manifest REST endpoints (the CLI's
+  # status/logs/delete fallback for TrainJobs) need read + delete on the
+  # same resources. Both services run as gco-manifest-processor-sa.
+  # Caught live 2026-08-14: "TrainJob create failed: Forbidden".
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

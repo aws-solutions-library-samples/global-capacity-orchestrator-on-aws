@@ -478,8 +478,10 @@ class TestCreateManifestProcessorFromEnv:
 
             assert processor.cluster_id == "unknown-cluster"
             assert processor.region == "unknown-region"
-            assert processor.max_cpu_per_manifest == 10000  # 10 cores in millicores
-            assert processor.max_gpu_per_manifest == 4
+            # Defaults mirror gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS
+            # (two full accelerator-node slices; see the layering invariant).
+            assert processor.max_cpu_per_manifest == 384_000  # 384 cores in millicores
+            assert processor.max_gpu_per_manifest == 16
             assert processor.allowed_namespaces == {"gco-jobs"}
             assert processor.allowed_kinds == set(DEFAULT_ALLOWED_KINDS)
             assert processor.validation_enabled is True

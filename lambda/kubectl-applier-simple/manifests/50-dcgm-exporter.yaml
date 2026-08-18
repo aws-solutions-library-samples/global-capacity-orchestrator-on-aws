@@ -39,8 +39,14 @@
 #
 # Lives in kube-system (created at cluster bootstrap) so it can apply in the
 # base pass; its ServiceMonitor lives in monitoring and applies post-Helm once
-# the Prometheus Operator CRDs exist. If the NVIDIA GPU Operator is adopted
-# later it bundles DCGM and supersedes this DaemonSet (see docs/EKS_ADDONS.md).
+# the Prometheus Operator CRDs exist.
+#
+# This is the only GPU-node DaemonSet GCO ships. EKS Auto Mode provides the
+# NVIDIA *device plugin* built into the node (not visible as a DaemonSet), so
+# GCO deliberately does not install one — a community device plugin cannot
+# initialize NVML on Auto Mode nodes (the runtime never injects the driver
+# libraries for it) and would crash-loop, permanently failing convergence.
+# DCGM works here only because of the injection posture described above.
 ---
 # Curated device-level counter set (DCGM_FI_DEV_*). Kept minimal and profiling
 # -free on purpose — see the NVML/device-only notes in the file header.
@@ -88,7 +94,7 @@ metadata:
     checkov.io/skip5: CKV_K8S_22=Embedded DCGM host engine writes runtime state, so the root filesystem cannot be read-only
     checkov.io/skip6: CKV2_K8S_6=kube-system DaemonSet scraped only by the in-cluster Prometheus; no NetworkPolicy needed
     checkov.io/skip7: CKV_K8S_25=SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header)
-    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart (see 50-nvidia-device-plugin.yaml)
+    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
     checkov.io/skip9: CKV_K8S_39=CAP_SYS_ADMIN required for NVML injection on EKS Auto Mode (see header); NET_RAW and other caps dropped
 spec:
   selector:

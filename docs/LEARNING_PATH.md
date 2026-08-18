@@ -123,7 +123,9 @@ Train and serve models.
   ```
 
   Then try the other frameworks with [`examples/inference-tgi.yaml`](../examples/inference-tgi.yaml), [`examples/inference-sglang.yaml`](../examples/inference-sglang.yaml), [`examples/inference-triton.yaml`](../examples/inference-triton.yaml), and [`examples/inference-torchserve.yaml`](../examples/inference-torchserve.yaml).
-- **Distributed training:** work up through [`examples/multi-gpu-training.yaml`](../examples/multi-gpu-training.yaml), [`examples/efa-distributed-training.yaml`](../examples/efa-distributed-training.yaml), and [`examples/megatrain-sft-job.yaml`](../examples/megatrain-sft-job.yaml).
+- **Distributed training:** start with [`examples/kubeflow-trainjob.yaml`](../examples/kubeflow-trainjob.yaml) (the TrainJob API runs multi-node PyTorch without hand-written JobSets, CPU-sized so it needs no quota), then work up through [`examples/multi-gpu-training.yaml`](../examples/multi-gpu-training.yaml) and [`examples/efa-distributed-training.yaml`](../examples/efa-distributed-training.yaml).
+- **Experiment tracking:** log a run to the bundled MLflow server with [`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml), then browse it via `gco monitoring open --service mlflow`.
+- **Retrieval:** query the built-in vector store from a job with [`examples/vector-store-search-job.yaml`](../examples/vector-store-search-job.yaml) (after `gco vector ingest --demo --wait`).
 - **AWS accelerators:** try [`examples/trainium-job.yaml`](../examples/trainium-job.yaml) and [`examples/inferentia-job.yaml`](../examples/inferentia-job.yaml).
 - **Schedulers:** read the [Schedulers Overview](SCHEDULERS.md), then [Volcano](VOLCANO.md) (gang scheduling) and [Kueue](KUEUE.md) (queueing and quotas) — both on by default.
 - **Checkpoint:** you can deploy a [vLLM](https://docs.vllm.ai/en/latest/) endpoint, send it a prompt, and launch a multi-GPU training job.

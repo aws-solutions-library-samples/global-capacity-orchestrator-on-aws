@@ -11,6 +11,7 @@ reloads the handler with sys.modules cleanup so each test runs
 against a fresh import.
 """
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -33,6 +34,25 @@ def handler_module():
     finally:
         sys.path.pop(0)
         sys.modules.pop("handler", None)
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_legacy_sweep(request):
+    """Empty the legacy-removal inventory for every test by default.
+
+    ``apply_manifests`` base passes unconditionally sweep
+    ``_LEGACY_REMOVED_RESOURCES``; with an empty inventory
+    ``_delete_exact_resources`` returns before building a Kubernetes client,
+    so the many base-pass tests that mock ``handler.client`` stay isolated.
+    ``TestLegacyRemovedResources`` opts out to exercise the real inventory.
+    """
+    owner = type(request.instance).__name__ if request.instance is not None else ""
+    if "handler_module" not in request.fixturenames or owner == "TestLegacyRemovedResources":
+        yield
+        return
+    handler = request.getfixturevalue("handler_module")
+    with patch.object(handler, "_LEGACY_REMOVED_RESOURCES", ()):
+        yield
 
 
 class TestPostHelmDeferral:
@@ -410,6 +430,110 @@ class TestDisabledFeaturePruning:
         assert result["PruneFailures"] == failure
         assert result["FailedCount"] == 1
         assert result["Failed"] == f"prune:{failure}"
+
+
+class TestLegacyRemovedResources:
+    """Objects shipped by earlier releases are swept from upgraded clusters."""
+
+    def test_inventory_targets_the_removed_nvidia_device_plugin(self, handler_module):
+        # EKS Auto Mode provides the NVIDIA device plugin built into the node;
+        # the community DaemonSet GCO used to ship crash-loops there (NVML
+        # ERROR_LIBRARY_NOT_FOUND) and must be deleted from upgraded clusters.
+        assert (
+            "apps/v1",
+            "DaemonSet",
+            "kube-system",
+            "nvidia-device-plugin-daemonset",
+        ) in handler_module._LEGACY_REMOVED_RESOURCES
+
+    def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        shipped = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(manifests_dir.glob("*.yaml"))
+        )
+        for _, _, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
+            assert name not in shipped, f"{name} is swept as legacy but still shipped"
+
+    def test_sweep_deletes_exact_resource(self, handler_module):
+        mock_resource = MagicMock()
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = mock_resource
+        delete_options = MagicMock()
+
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=delete_options),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        mock_dynamic.resources.get.assert_called_once_with(api_version="apps/v1", kind="DaemonSet")
+        mock_resource.delete.assert_called_once_with(
+            name="nvidia-device-plugin-daemonset",
+            namespace="kube-system",
+            body=delete_options,
+        )
+        assert result == {
+            "pruned": ["apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"],
+            "failed": [],
+        }
+
+    def test_sweep_missing_resource_is_noop(self, handler_module):
+        from kubernetes.client.rest import ApiException
+
+        missing_resource = MagicMock()
+        missing_resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = missing_resource
+
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert result == {"pruned": [], "failed": []}
+
+    def test_base_pass_runs_the_sweep_and_post_helm_does_not(self, handler_module, tmp_path):
+        (tmp_path / "00-ns.yaml").write_text(
+            yaml.dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": "test-ns"},
+                }
+            )
+        )
+        swept = "apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(
+                handler_module,
+                "_prune_legacy_removed_resources",
+                return_value={"pruned": [swept], "failed": []},
+            ) as mock_sweep,
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+
+            base = handler_module.apply_manifests(
+                "test-cluster", "us-east-1", str(tmp_path), {}, post_helm=False
+            )
+            post_helm = handler_module.apply_manifests(
+                "test-cluster", "us-east-1", str(tmp_path), {}, post_helm=True
+            )
+
+        mock_sweep.assert_called_once_with()
+        assert base["PrunedCount"] == 1
+        assert base["Pruned"] == swept
+        assert post_helm["PrunedCount"] == 0
 
 
 class TestPrometheusOperatorCRDs:
@@ -1734,6 +1858,93 @@ class TestAuthoritativeManifestPlanner:
         assert plan["featureGates"]["base"] == ["{{OPTIONAL_FEATURE_ENABLED}}"]
         assert plan["skipped"]["base"] == ["20-optional.yaml:unreplaced-placeholders"]
 
+    def test_planner_accepts_the_real_manifest_directory_fully_enabled(self, handler_module):
+        """Every kind in the shipped manifests must pass planning.
+
+        Regression: the 2026-09 live validation deploy failed because the
+        Kueue default-queue kinds were added to the apply dispatch and the
+        custom-object map but not to _SUPPORTED_MANIFEST_KINDS — planning
+        rejected them at deploy time, hours into a live run. Plan the real
+        directory with every feature gate resolved so a kind the planner
+        does not know can never reach a live cluster first.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        token_re = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+        quantity_tokens = {"{{QUOTA_MAX_CPU}}", "{{QUOTA_MAX_MEMORY}}", "{{QUOTA_MAX_GPU}}"}
+        integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
+        replacements: dict[str, str] = {
+            "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
+        }
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for token in token_re.findall(manifest.read_text(encoding="utf-8")):
+                if token in replacements:
+                    continue
+                if token in quantity_tokens or token.startswith(integer_prefixes):
+                    replacements[token] = "1"
+                else:
+                    replacements[token] = "stub-value"
+
+        plan = handler_module.plan_manifests(str(manifests_dir), replacements)
+
+        # Post-helm files legitimately appear in base's skip list as
+        # deferred-to-post-helm; with every gate resolved, nothing may be
+        # skipped for an unreplaced placeholder in either phase.
+        unresolved_skips = [
+            entry
+            for phase in ("base", "post-helm")
+            for entry in plan["skipped"][phase]
+            if not entry.endswith(":deferred-to-post-helm")
+        ]
+        assert not unresolved_skips, (
+            f"with every gate resolved, no file may be skipped: {unresolved_skips}"
+        )
+        planned_kinds = {
+            item["kind"] for phase in ("base", "post-helm") for item in plan["phases"][phase]
+        }
+        assert {"ClusterQueue", "LocalQueue", "ResourceFlavor", "NetworkPolicy"} <= planned_kinds
+
+    def test_every_supported_kind_has_an_apply_dispatch_branch(self, handler_module):
+        """_SUPPORTED_MANIFEST_KINDS and the apply loop must agree exactly.
+
+        Regression: the 2026-08-14 shakeout deploy admitted the shipped
+        torch-distributed ClusterTrainingRuntime at planning time (the kind
+        was in _SUPPORTED_MANIFEST_KINDS) but the apply loop had no dispatch
+        branch for it, so every applier pass died on the defensive
+        "Planner admitted unsupported kind" ValueError — hours into a live
+        run. Extract every dispatch route from the handler source (literal
+        ``kind == "X"`` branches, ``kind in ("X", "Y")`` tuples, and the
+        gateway/queueing custom-object maps) and require set equality in
+        both directions, so a kind added to planning without an apply
+        branch (or a dead branch for an unplannable kind) fails here
+        instead of mid-deploy.
+        """
+        source = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "handler.py"
+        ).read_text(encoding="utf-8")
+        dispatched = set(re.findall(r'(?:el)?if kind == "([A-Za-z0-9]+)"', source))
+        for group in re.findall(r"(?:el)?if kind in \(([^)]*)\)", source):
+            dispatched.update(re.findall(r'"([A-Za-z0-9]+)"', group))
+        # Table-driven branches: `elif kind in _GATEWAY_CUSTOM_OBJECTS or
+        # kind in _QUEUEING_CUSTOM_OBJECTS`. Require the branch to exist so
+        # the maps' keys genuinely reach the apply loop.
+        assert re.search(
+            r"kind in _GATEWAY_CUSTOM_OBJECTS or kind in _QUEUEING_CUSTOM_OBJECTS", source
+        ), "table-driven custom-object dispatch branch disappeared; update this test"
+        dispatched.update(handler_module._GATEWAY_CUSTOM_OBJECTS)
+        dispatched.update(handler_module._QUEUEING_CUSTOM_OBJECTS)
+
+        supported = set(handler_module._SUPPORTED_MANIFEST_KINDS)
+        assert supported - dispatched == set(), (
+            "kinds admitted by planning but with no apply dispatch branch "
+            f"(would die on the defensive ValueError mid-deploy): {sorted(supported - dispatched)}"
+        )
+        assert dispatched - supported == set(), (
+            "apply branches exist for kinds planning rejects (dead code or a "
+            f"missing _SUPPORTED_MANIFEST_KINDS entry): {sorted(dispatched - supported)}"
+        )
+
     def test_rejects_duplicate_identity_across_phases(self, handler_module, tmp_path):
         manifest = yaml.safe_dump(
             {
@@ -2242,3 +2453,203 @@ class TestManifestValidationTaskEvidence:
             "failed",
             "token=failed-token Deployment/demo/api is not ready",
         )
+
+
+def _parse_manifest_documents(manifest: Path) -> list[dict]:
+    """Parse a repo manifest, substituting unresolved {{PLACEHOLDER}} tokens.
+
+    The applier replaces template variables before parsing; mirror that so
+    templated manifests stay parseable for these consistency checks.
+    """
+    import re as _re
+
+    text = _re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", manifest.read_text(encoding="utf-8"))
+    return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+
+
+class TestGatewayCustomObjectMapConsistency:
+    """The applier's GVK map must agree with the manifests it applies.
+
+    The 2026-08 Gateway API migration moved post-helm-gateway.yaml to
+    gateway.k8s.aws/v1 while _GATEWAY_CUSTOM_OBJECTS still said v1beta1 —
+    nothing failed until a live deploy's kubectl apply. This pins the two
+    surfaces together: every gateway-family resource in the manifests
+    directory must resolve to exactly the (group, version) the applier's
+    map will use to create, patch, and tear it down.
+    """
+
+    def test_manifest_gateway_api_versions_match_the_applier_map(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gateway_groups = {
+            group for group, _v, _p, _s in handler_module._GATEWAY_CUSTOM_OBJECTS.values()
+        }
+
+        seen: list[tuple[str, str, str]] = []
+        mismatches: list[str] = []
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                api_version = str(doc.get("apiVersion", ""))
+                kind = str(doc.get("kind", ""))
+                group, _, version = api_version.partition("/")
+                if group not in gateway_groups:
+                    continue
+                seen.append((manifest.name, kind, api_version))
+                mapped = handler_module._GATEWAY_CUSTOM_OBJECTS.get(kind)
+                if mapped is None:
+                    mismatches.append(
+                        f"{manifest.name}: {kind} ({api_version}) has no "
+                        "_GATEWAY_CUSTOM_OBJECTS entry"
+                    )
+                    continue
+                mapped_group, mapped_version = mapped[0], mapped[1]
+                if (group, version) != (mapped_group, mapped_version):
+                    mismatches.append(
+                        f"{manifest.name}: {kind} is {api_version} but "
+                        f"_GATEWAY_CUSTOM_OBJECTS maps {mapped_group}/{mapped_version} — "
+                        "the applier would create/patch/delete a different API version "
+                        "than the manifest declares"
+                    )
+
+        assert seen, "expected gateway-family resources in the manifests directory"
+        assert not mismatches, "\n".join(mismatches)
+
+    def test_every_mapped_gateway_kind_appears_in_a_manifest(self, handler_module) -> None:
+        # The inverse direction: a map entry nothing uses is dead weight that
+        # can silently rot; force it to be pruned or exercised.
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        used_kinds = set()
+        gateway_groups = {
+            group for group, _v, _p, _s in handler_module._GATEWAY_CUSTOM_OBJECTS.values()
+        }
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                group = str(doc.get("apiVersion", "")).partition("/")[0]
+                if group in gateway_groups:
+                    used_kinds.add(str(doc.get("kind", "")))
+
+        unused = set(handler_module._GATEWAY_CUSTOM_OBJECTS) - used_kinds
+        assert not unused, f"_GATEWAY_CUSTOM_OBJECTS maps kinds no manifest uses: {sorted(unused)}"
+
+
+class TestQueueingCustomObjectMapConsistency:
+    """_QUEUEING_CUSTOM_OBJECTS must agree with the manifests, both directions.
+
+    Same regression class the gateway map guards against: an applier map
+    whose (group, version) drifts from the manifests fails only on a live
+    deploy's apply. The Kueue default-queue topology gets the identical pin.
+    """
+
+    def test_manifest_kueue_api_versions_match_the_applier_map(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        queueing_groups = {
+            group for group, _v, _p, _s in handler_module._QUEUEING_CUSTOM_OBJECTS.values()
+        }
+
+        seen: list[tuple[str, str, str]] = []
+        mismatches: list[str] = []
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                api_version = str(doc.get("apiVersion", ""))
+                kind = str(doc.get("kind", ""))
+                group, _, version = api_version.partition("/")
+                if group not in queueing_groups:
+                    continue
+                seen.append((manifest.name, kind, api_version))
+                mapped = handler_module._QUEUEING_CUSTOM_OBJECTS.get(kind)
+                if mapped is None:
+                    mismatches.append(
+                        f"{manifest.name}: {kind} ({api_version}) has no "
+                        "_QUEUEING_CUSTOM_OBJECTS entry"
+                    )
+                    continue
+                if (group, version) != (mapped[0], mapped[1]):
+                    mismatches.append(
+                        f"{manifest.name}: {kind} is {api_version} but "
+                        f"_QUEUEING_CUSTOM_OBJECTS maps {mapped[0]}/{mapped[1]}"
+                    )
+        assert seen, "expected kueue queue resources in the manifests directory"
+        assert not mismatches, "\n".join(mismatches)
+
+    def test_every_mapped_queueing_kind_appears_in_a_manifest(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        queueing_groups = {
+            group for group, _v, _p, _s in handler_module._QUEUEING_CUSTOM_OBJECTS.values()
+        }
+        used_kinds = set()
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                group = str(doc.get("apiVersion", "")).partition("/")[0]
+                if group in queueing_groups:
+                    used_kinds.add(str(doc.get("kind", "")))
+        unused = set(handler_module._QUEUEING_CUSTOM_OBJECTS) - used_kinds
+        assert not unused, f"_QUEUEING_CUSTOM_OBJECTS maps kinds no manifest uses: {sorted(unused)}"
+
+    def test_the_two_custom_object_maps_never_overlap(self, handler_module) -> None:
+        # The apply dispatch consults the gateway map first; an overlapping
+        # kind would silently take the gateway (group, version) and its
+        # ALB-finalizer teardown semantics.
+        overlap = set(handler_module._GATEWAY_CUSTOM_OBJECTS) & set(
+            handler_module._QUEUEING_CUSTOM_OBJECTS
+        )
+        assert not overlap, f"custom-object maps overlap on kinds: {sorted(overlap)}"
+
+    def test_kueue_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        """Every object in the gated queue manifest is pruned on disable."""
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "post-helm-kueue-default-queues.yaml"
+        expected = {
+            (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{KUEUE_ENABLED}}", True)]
+        pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
+        assert pruned == expected
+
+    def test_slurm_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "post-helm-slurm-network.yaml"
+        expected = {
+            (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{SLURM_ENABLED}}", True)]
+        pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
+        assert pruned == expected
+
+    def test_vector_store_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        """Every ConfigMap in the gated vector-store manifest is pruned on disable.
+
+        Namespace-inclusive comparison: the same ConfigMap name exists in
+        three namespaces, so a 3-tuple check could pass with a missing or
+        misplaced namespace entry.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "26-storage-vector-store.yaml"
+        expected = {
+            (
+                str(doc.get("apiVersion")),
+                str(doc.get("kind")),
+                str(doc["metadata"]["namespace"]),
+                str(doc["metadata"]["name"]),
+            )
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[
+            ("{{VECTOR_STORE_TABLE_NAME}}", False)
+        ]
+        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
+        assert pruned == expected

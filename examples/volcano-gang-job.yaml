@@ -52,7 +52,7 @@ spec:
           fsGroup: 1000
         containers:
         - name: master
-          image: python:3.14.6-slim
+          image: python:3.14.7-slim
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -108,7 +108,7 @@ spec:
           fsGroup: 1000
         containers:
         - name: worker
-          image: python:3.14.6-slim
+          image: python:3.14.7-slim
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

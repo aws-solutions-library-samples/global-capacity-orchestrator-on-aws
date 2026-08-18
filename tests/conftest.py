@@ -5,6 +5,7 @@ This module provides common fixtures used across multiple test modules,
 including mock Kubernetes clients, sample manifests, and configuration objects.
 """
 
+import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -101,6 +102,35 @@ def _no_real_image_mirror(request):
     from cli import stacks as _stacks
 
     with patch.object(_stacks.StackManager, "_mirror_images_if_enabled", return_value=None):
+        yield
+
+
+# ============================================================================
+# Function-scoped: never touch the real mission-memory table from tests
+# ============================================================================
+#
+# The Mission engine factory wires a ``MissionMemoryStore`` into every
+# live-dispatcher engine: terminal verdicts write a memory item (SSM name
+# lookup -> Bedrock embedding -> DynamoDB PutItem) and sampling sessions
+# retrieve similar past missions. Both paths are best-effort and swallow
+# every failure, so on a credential-less CI host they silently no-op — but on
+# a developer machine with live credentials and a deployed stack they would
+# embed and write *test* sessions into the real institutional-memory table.
+# Neutralise the single construction seam for every test; memory-specific
+# tests construct engines directly with stub stores (or patch this seam
+# themselves, which nests over this one and wins).
+
+
+_GCO_MCP_PATH = str(PROJECT_ROOT / "gco_mcp")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mission_memory():
+    if _GCO_MCP_PATH not in sys.path:
+        sys.path.insert(0, _GCO_MCP_PATH)
+    from mission import _engine_factory as _factory
+
+    with patch.object(_factory, "_build_memory_store", return_value=None):
         yield
 
 

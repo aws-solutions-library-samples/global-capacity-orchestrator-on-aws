@@ -31,8 +31,9 @@ Workflows outside the four badged gates above. Most are schedule- or dispatch-dr
 | `release.yml` | `workflow_dispatch` | Bump version, tag, create GitHub Release with auto-generated notes |
 | `deps-scan.yml` | Monthly cron + manual | Check pinned dependencies (including the autopilot Claude Code pin and companion MCP server liveness), offline accelerator/NodePool policy, and online [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) accelerator-catalog drift; update one rolling issue when findings exist |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
-| `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
+| `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the project site to GitHub Pages: the MkDocs wiki (`wiki/`) at the root, the HTML coverage report at `/coverage/`, and the shields.io badge JSON at the site root. Split out of Unit Tests so a Pages outage (or wiki build failure) can't fail the test gate; `lint:mkdocs:strict` runs the same build on PRs |
 | `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
+| `grafana-dashboards.yml` | `push`: `main`, PR (paths-filtered), manual | Prove the exact Grafana image the pinned kube-prometheus-stack chart ships accepts the curated dashboard ConfigMaps: extract the payloads, resolve the image via `helm template` at the `charts.yaml` pin, boot it with sidecar-shaped file provisioning, and require every uid to answer with `meta.provisioned=true` and an error-free provisioning log. Runs only when the dashboards, the chart pin, or the check itself change |
 
 The accelerator check deliberately has two tiers: `unit-tests.yml` runs only the
 checked-in deterministic validator, while `deps-scan.yml` adds sequential,

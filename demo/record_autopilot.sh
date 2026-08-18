@@ -292,7 +292,7 @@ setup_colors
 banner "GCO Autopilot"
 narrate "One command from a plain terminal to a working Claude Code setup:"
 narrate "Claude Code + the GCO MCP server + the recommended companion MCPs,"
-narrate "on Amazon Bedrock with GCO's canonical default model."
+narrate "on Amazon Bedrock with GCO's default Claude Code model."
 sleep 3
 
 run_cmd "gco autopilot --dry-run"

@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Helm Installer Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,7 +208,7 @@ function base64ToSvgDocument(base64) {
     <body>
         <div><textarea id="code" style="width: 100%;" rows="11">op615=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
 cond618=>condition: if event.get('Action')
-sub622=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+sub622=>subroutine: logger.info('Task event: action=%s chart=%s cluster=%s region=%s', event.get('Action'), event.get('Chart'), event.get('ClusterName'), event.get('Region'))
 io627=>inputoutput: output: handle_task(event)
 e625=>end: end function return
 sub633=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
@@ -257,6 +257,8 @@ if request_type in ('Create', 'Update'):
     for chart_name, config in charts_config.items():
         if not config.get('enabled', False):
             continue
+        if chart_name == LBC_CHART_NAME:
+            _apply_gateway_crds(kubeconfig)
         value_overrides = chart_overrides.get(chart_name, {}).get('values', {})
         success, message = install_chart(chart_name, config, kubeconfig, value_overrides)
         results[chart_name] = message
@@ -328,10 +330,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

@@ -1,0 +1,88 @@
+# =============================================================================
+# mkdocs.yml — the GCO orientation wiki (GitHub Pages site root)
+# =============================================================================
+#
+# Builds the seven-page wiki under wiki/ into the site served at
+# https://awslabs.github.io/global-capacity-orchestrator-on-aws/. The wiki is
+# an orientation and routing layer ABOVE the reference docs: pages summarize
+# and link to README/docs/package READMEs on GitHub, never restate them
+# (duplicated reference content rots; the deep docs carry the CI freshness
+# guards). The coverage report is NOT built here — pages.yml drops the
+# htmlcov/ tree into site/coverage/ after this build, which is why the nav's
+# "Coverage report" entry is a full external URL rather than a local page.
+#
+# Constraints honored by this file (see .kiro spec / tests/test_wiki.py):
+#   - yaml.safe_load-able: no custom YAML tags (guard tests read the nav
+#     without importing MkDocs — rules out !!python/name: emoji config).
+#   - Self-contained site: font: false keeps Material off Google Fonts; no
+#     analytics, no external CSS/JS; search is the built-in client-side index.
+#   - strict: true — broken links and nav entries fail every build (local,
+#     lint:mkdocs:strict on PRs, and the pages.yml deploy).
+#   - Images are served from the site itself: scripts/mkdocs_hooks.py injects
+#     the tracked images/ directory as assets/images/ (no binary copies, no
+#     raw.githubusercontent.com).
+# =============================================================================
+
+site_name: Global Capacity Orchestrator on AWS
+site_description: >-
+  Orientation wiki for GCO — intelligent global capacity orchestration for
+  GPU/accelerated workloads on AWS.
+site_url: https://awslabs.github.io/global-capacity-orchestrator-on-aws/
+repo_url: https://github.com/awslabs/global-capacity-orchestrator-on-aws
+repo_name: awslabs/global-capacity-orchestrator-on-aws
+edit_uri: ""
+
+docs_dir: wiki
+strict: true
+
+theme:
+  name: material
+  # No Google Fonts fetch: the built site must make zero third-party
+  # requests. Material falls back to a system font stack.
+  font: false
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - toc.integrate
+    - search.suggest
+
+plugins:
+  - search
+
+hooks:
+  - scripts/mkdocs_hooks.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - How it works: how-it-works.md
+  - For users:
+      - Evaluating & deploying: evaluating-and-deploying.md
+      - What you can run: what-you-can-run.md
+  - For developers:
+      - Repo tour: repo-tour.md
+      - How we build & test: build-and-test.md
+  - Contributing: contributing.md
+  # The coverage report is merged into the Pages artifact by pages.yml at
+  # /coverage/ — outside this MkDocs build — so the nav entry must be the
+  # full external URL (a local path would trip strict link validation).
+  - Coverage report: https://awslabs.github.io/global-capacity-orchestrator-on-aws/coverage/

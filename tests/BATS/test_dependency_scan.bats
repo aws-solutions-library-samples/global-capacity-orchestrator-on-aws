@@ -125,6 +125,185 @@ setup() {
     [ "$result" = "nvcr.io|nvidia/k8s/dcgm-exporter" ]
 }
 
+@test "parse_image_registry: fully-qualified docker.io keeps a single registry prefix" {
+    # Regression: this used to parse as repo "docker.io/library/busybox"
+    # under a second docker.io, failing the tag lookup every month.
+    result="$(parse_image_registry "docker.io/library/busybox")"
+    [ "$result" = "docker.io|library/busybox" ]
+}
+
+@test "parse_image_registry: docker.io org repo is not given library/" {
+    result="$(parse_image_registry "docker.io/nvidia/cuda")"
+    [ "$result" = "docker.io|nvidia/cuda" ]
+}
+
+@test "parse_image_registry: docker.io single-segment repo gets library/ restored" {
+    result="$(parse_image_registry "docker.io/python")"
+    [ "$result" = "docker.io|library/python" ]
+}
+
+@test "parse_image_registry: unlisted dotted registry is honored without a code change" {
+    result="$(parse_image_registry "my.registry.example/team/app")"
+    [ "$result" = "my.registry.example|team/app" ]
+}
+
+@test "parse_image_registry: registry with a port is treated as a registry" {
+    result="$(parse_image_registry "registry.example:5000/team/app")"
+    [ "$result" = "registry.example:5000|team/app" ]
+}
+
+# ── newer_same_variant_tag ───────────────────────────────────────────────────
+
+@test "newer_same_variant_tag: suffixed family compares within the same variant" {
+    result="$(printf '%s\n' 24.01-py3 25.02-py3 26.07-py3 26.08-rockylinux9 \
+        | newer_same_variant_tag "24.01-py3")"
+    [ "$result" = "26.07-py3" ]
+}
+
+@test "newer_same_variant_tag: bare semver pin never matches suffixed tags" {
+    result="$(printf '%s\n' 1.38.0 1.39.0 1.39.1-glibc 2.0.0-musl \
+        | newer_same_variant_tag "1.38.0")"
+    [ "$result" = "1.39.0" ]
+}
+
+@test "newer_same_variant_tag: multi-part variant suffix must match exactly" {
+    result="$(printf '%s\n' 2.6.0-cuda12.6-cudnn9-runtime 2.13.0-cuda12.6-cudnn9-runtime \
+        2.13.0-cuda12.8-cudnn9-runtime 2.13.0-cuda12.6-cudnn9-devel \
+        | newer_same_variant_tag "2.6.0-cuda12.6-cudnn9-runtime")"
+    [ "$result" = "2.13.0-cuda12.6-cudnn9-runtime" ]
+}
+
+@test "newer_same_variant_tag: leading v is accepted and preserved" {
+    result="$(printf '%s\n' v0.5.16 v0.5.17 0.4.0 \
+        | newer_same_variant_tag "v0.5.16")"
+    [ "$result" = "v0.5.17" ]
+}
+
+@test "newer_same_variant_tag: empty when the pin is the family's newest" {
+    result="$(printf '%s\n' 0.11.0-gpu 0.12.0-gpu 0.12.0-cpu \
+        | newer_same_variant_tag "0.12.0-gpu")"
+    [ -z "$result" ]
+}
+
+@test "newer_same_variant_tag: numeric comparison beats lexicographic order" {
+    result="$(printf '%s\n' 9.9.9 10.0.0 \
+        | newer_same_variant_tag "9.9.9")"
+    [ "$result" = "10.0.0" ]
+}
+
+@test "newer_same_variant_tag: date tags never beat a release-numbered pin" {
+    # Regression: alpine:3.21 was suggested the 20260805 date tag.
+    result="$(printf '%s\n' 3.22 3.24.1 20260805 \
+        | newer_same_variant_tag "3.21")"
+    [ "$result" = "3.24.1" ]
+}
+
+@test "newer_same_variant_tag: commit-counter tags are ignored" {
+    # Regression: kuberay/operator:v1.6.2 was suggested a 9831375 tag.
+    result="$(printf '%s\n' v1.6.2 9831375 \
+        | newer_same_variant_tag "v1.6.2")"
+    [ -z "$result" ]
+}
+
+@test "newer_same_variant_tag: nightly build components are ignored" {
+    # Regression: ray:2.56.1 was suggested the 2.57.0.397131 nightly.
+    result="$(printf '%s\n' 2.57.0 2.57.0.397131 \
+        | newer_same_variant_tag "2.56.1")"
+    [ "$result" = "2.57.0" ]
+}
+
+@test "newer_same_variant_tag: a CalVer pin keeps comparing against CalVer tags" {
+    result="$(printf '%s\n' 20250101 20260805 \
+        | newer_same_variant_tag "20250101")"
+    [ "$result" = "20260805" ]
+}
+
+# ── tag_listed ───────────────────────────────────────────────────────────────
+
+@test "tag_listed: finds an early tag in a list larger than the pipe buffer" {
+    # Regression (2026-09 scan): the old printf-into-grep -q pipeline took
+    # SIGPIPE under pipefail whenever the match landed before the end of a
+    # >64KiB tag list (docker.io/library/python, nvcr.io tritonserver, ...),
+    # inverting "tag present" into a false INCOMPLETE. Build a list well past
+    # the pipe buffer with the pinned tag near the top.
+    local big_list
+    big_list="$(printf '3.14.7-slim\n'; seq -f 'tag-%.0f-suffix' 1 30000)"
+    set -o pipefail
+    tag_listed "3.14.7-slim" "$big_list"
+}
+
+@test "tag_listed: accepts a v-prefix mismatch in either direction" {
+    tag_listed "v1.2.3" "$(printf '%s\n' one 1.2.3 two)"
+    tag_listed "1.2.3" "$(printf '%s\n' one v1.2.3 two)"
+}
+
+@test "tag_listed: exact match only, not substrings" {
+    ! tag_listed "1.2.3" "$(printf '%s\n' 1.2.30 11.2.3 1.2.3-slim)"
+}
+
+@test "split_pinned_image_ref: decomposes a digest-pinned reference" {
+    digest="fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0@sha256:${digest}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "docker.io/library/busybox|1.38.0|sha256:${digest}" ]
+}
+
+@test "split_pinned_image_ref: rejects tag-only and digest-only references" {
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run split_pinned_image_ref "docker.io/library/busybox@sha256:$(printf 'a%.0s' {1..64})"
+    [ "$status" -ne 0 ]
+}
+
+@test "split_pinned_image_ref: rejects a malformed digest" {
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0@sha256:deadbeef"
+    [ "$status" -ne 0 ]
+}
+
+@test "split_pinned_image_ref: every committed smoke image parses" {
+    # The digest-freshness scan section is only as good as its ability to
+    # parse what the harness manifests actually commit.
+    found=0
+    while read -r ref; do
+        [ -z "$ref" ] && continue
+        found=1
+        run split_pinned_image_ref "$ref"
+        [ "$status" -eq 0 ]
+    done < <(grep -rhoE \
+        "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" \
+        scripts/live_release_validation/manifests/ | sed 's/^image: //' | sort -u)
+    [ "$found" -eq 1 ]
+}
+
+@test "published_manifest_digest: hashes the raw manifest bytes" {
+    tmpdir="$(mktemp -d)"
+    printf '%s\n' '#!/bin/bash' 'printf "manifest-bytes"' > "$tmpdir/skopeo"
+    chmod +x "$tmpdir/skopeo"
+    expected="sha256:$(printf 'manifest-bytes' | sha256sum | awk '{print $1}')"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "docker.io/library/busybox:1.38.0"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+    rm -rf "$tmpdir"
+}
+
+@test "published_manifest_digest: transport failure returns nonzero, no output" {
+    tmpdir="$(mktemp -d)"
+    printf '%s\n' '#!/bin/bash' 'exit 1' > "$tmpdir/skopeo"
+    chmod +x "$tmpdir/skopeo"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "docker.io/library/busybox:1.38.0"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "tag_listed: fails for an absent tag" {
+    # The true-positive path: rayproject/ray:2.57.0 was withdrawn upstream
+    # after being pinned; the INCOMPLETE for it was correct and the check
+    # must keep firing when the tag is genuinely unlisted.
+    ! tag_listed "2.57.0" "$(printf '%s\n' 2.56.0 2.56.1 2.57.0.106e80)"
+}
+
 # ── is_semver_tag ────────────────────────────────────────────────────────────
 
 @test "is_semver_tag: v1.2.3 is semver" {
@@ -225,62 +404,71 @@ setup() {
 
 # ── extract_aurora_versions ──────────────────────────────────────────────────
 
-@test "extract_aurora_versions: finds version from regional_stack.py" {
+@test "extract_aurora_versions: finds the pinned version via the constants module" {
     run extract_aurora_versions "gco/stacks/regional_stack.py"
     [ "$status" -eq 0 ]
-    # Should find a version like 17.9 or 16.6 (depends on constants module availability)
-    [[ "$output" =~ [0-9]+\.[0-9]+ ]]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
 }
 
-@test "extract_aurora_versions: returns sorted unique versions" {
-    # The function now imports from constants module first, so test with
-    # a file that has the VER_ pattern but also verify the regex fallback
-    # by temporarily making the import fail
-    run bash -c '
-        source .github/scripts/lib_dependency_scan.sh
-        tmpfile="$(mktemp)"
-        cat > "$tmpfile" <<EOF
-version=rds.AuroraPostgresEngineVersion.VER_16_6,
-version=rds.AuroraPostgresEngineVersion.VER_15_4,
-version=rds.AuroraPostgresEngineVersion.VER_16_6,
+# The extract_aurora_versions fallback tests shadow the installed gco package
+# with one whose __init__ raises ImportError. ``python3 -c`` puts the current
+# directory first on sys.path, so cd'ing into the shadow directory forces the
+# import branch to fail deterministically — regardless of whether the real
+# package is installed (it always is in the deps-scan workflow) — and the
+# regex-over-constants.py branch is what actually gets exercised.
+_aurora_fallback_shadow() {
+    local tmpdir="$1"
+    mkdir -p "${tmpdir}/gco"
+    echo 'raise ImportError("forced by test: exercise the regex fallback")' \
+        > "${tmpdir}/gco/__init__.py"
+    touch "${tmpdir}/regional_stack.py"
+}
+
+@test "extract_aurora_versions: regex fallback reads the plain version string" {
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    cat > "${tmpdir}/constants.py" <<'EOF'
+SOMETHING_ELSE = "x"
+AURORA_POSTGRES_VERSION = "16.6"
 EOF
-        # Force the regex fallback by running in a subshell without gco on PYTHONPATH
-        PYTHONPATH=/nonexistent python3 -c "
-import re, sys
-with open(sys.argv[1]) as f:
-    text = f.read()
-seen = set()
-for m in re.finditer(r\"AuroraPostgresEngineVersion\\.VER_(\d+)_(\d+)\", text):
-    v = f\"{m.group(1)}.{m.group(2)}\"
-    if v not in seen:
-        seen.add(v)
-        print(v)
-" "$tmpfile" | sort -V
-        rm -f "$tmpfile"
-    '
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
     [ "$status" -eq 0 ]
-    [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
-    [ "$(echo "$output" | head -1)" = "15.4" ]
-    [ "$(echo "$output" | tail -1)" = "16.6" ]
+    [ "$output" = "16.6" ]
+    rm -rf "$tmpdir"
 }
 
-@test "extract_aurora_versions: returns empty for file with no Aurora versions" {
-    # Force the regex fallback path
-    run bash -c '
-        source .github/scripts/lib_dependency_scan.sh
-        tmpfile="$(mktemp)"
-        echo "no aurora versions here" > "$tmpfile"
-        PYTHONPATH=/nonexistent python3 -c "
-import re, sys
-with open(sys.argv[1]) as f:
-    text = f.read()
-for m in re.finditer(r\"AuroraPostgresEngineVersion\\.VER_(\d+)_(\d+)\", text):
-    print(f\"{m.group(1)}.{m.group(2)}\")
-" "$tmpfile"
-        rm -f "$tmpfile"
-    '
+@test "extract_aurora_versions: non-version constant values are rejected" {
+    # A refactor that reintroduces an enum name must not leak into the RDS query.
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    cat > "${tmpdir}/constants.py" <<'EOF'
+AURORA_POSTGRES_VERSION = "VER_17_9"
+EOF
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_aurora_versions: returns empty when no constants file exists" {
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
 }
 
 # ── extract_emr_versions ─────────────────────────────────────────────────────
@@ -452,6 +640,60 @@ EOF
 
 @test "extract_helm_charts: returns empty for a missing file" {
     run extract_helm_charts "/nonexistent/charts.yaml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── extract_chart_value_images ───────────────────────────────────────────────
+
+@test "extract_chart_value_images: qualifies the trainer controller image with its registry" {
+    # The regression this extractor fixes: a registry-split pin
+    # (registry: ghcr.io + multi-segment repository) must emit fully
+    # qualified, or the tag sweep resolves it against docker.io and the
+    # monthly scan goes permanently INCOMPLETE.
+    run extract_chart_value_images "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ghcr.io/kubeflow/trainer/trainer-controller-manager:v"* ]]
+    [[ "$output" != *$'\n'"kubeflow/trainer/trainer-controller-manager:v"* ]]
+}
+
+@test "extract_chart_value_images: handles every pin shape in a fixture" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+charts:
+  demo:
+    values:
+      image:
+        registry: ghcr.io
+        repository: org/sub/app
+        tag: "v1.2.3"
+      sidecar:
+        image:
+          repository: example/tool
+          tag: "4.5.6"
+      bare:
+        image:
+          repository: single-segment
+          tag: "7.8.9"
+      tagless:
+        image:
+          registry: ghcr.io
+          repository: kedacore/keda
+EOF
+    run extract_chart_value_images "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ghcr.io/org/sub/app:v1.2.3"* ]]
+    [[ "$output" == *"example/tool:4.5.6"* ]]
+    # Ambiguous single-segment repositories and tag-less pins (their images
+    # follow the chart appVersion, which the chart version sweep reports)
+    # stay un-emitted.
+    [[ "$output" != *"single-segment"* ]]
+    [[ "$output" != *"kedacore/keda"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_chart_value_images: returns empty for a missing file" {
+    run extract_chart_value_images "/nonexistent/charts.yaml"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -912,7 +1154,9 @@ EOF
 @test "extract_constant_value: reads AURORA_POSTGRES_VERSION from real constants.py" {
     run extract_constant_value "AURORA_POSTGRES_VERSION" "gco/stacks/constants.py"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^VER_[0-9]+_[0-9]+$ ]]
+    # A plain version string applied via AuroraPostgresEngineVersion.of(),
+    # deliberately not a VER_X_Y enum name.
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
 }
 
 @test "extract_constant_value: returns empty for unknown constant" {
@@ -1029,22 +1273,6 @@ EOF
     # (the positive test above already covers that case).
     python3 -c "import aws_cdk" 2>/dev/null && skip "aws-cdk-lib is installed; positive case is tested separately"
     run get_latest_lambda_python_runtime
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-# ── get_latest_aurora_postgres_version ──────────────────────────────────────
-
-@test "get_latest_aurora_postgres_version: returns enum name when aws-cdk-lib installed" {
-    python3 -c "import aws_cdk" 2>/dev/null || skip "aws-cdk-lib not installed"
-    run get_latest_aurora_postgres_version
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ ^VER_[0-9]+_[0-9]+$ ]]
-}
-
-@test "get_latest_aurora_postgres_version: empty when aws-cdk-lib missing" {
-    python3 -c "import aws_cdk" 2>/dev/null && skip "aws-cdk-lib is installed; positive case is tested separately"
-    run get_latest_aurora_postgres_version
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -1304,7 +1532,7 @@ EOF
     expected="$(python3 -c '
 import json
 with open("cdk.json") as handle:
-    print(json.load(handle)["context"]["bedrock"]["default_model_id"])
+    print(json.load(handle)["context"]["bedrock"]["mission_default_model_id"])
 ')"
     [ -n "$expected" ]
     run extract_default_bedrock_model "cdk.json"
@@ -1312,15 +1540,35 @@ with open("cdk.json") as handle:
     [ "$output" = "$expected" ]
 }
 
-@test "extract_default_bedrock_model: parses context.bedrock.default_model_id" {
+@test "extract_default_bedrock_model: default leaf is mission_default_model_id" {
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
-{"context":{"bedrock":{"default_model_id":"us.amazon.nova-pro-v1:0"}}}
+{"context":{"bedrock":{"mission_default_model_id":"us.amazon.nova-pro-v1:0"}}}
 EOF
     run extract_default_bedrock_model "$tmpfile"
     [ "$status" -eq 0 ]
     [ "$output" = "us.amazon.nova-pro-v1:0" ]
     rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: reads the capacity advisor leaf from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["capacity_advisor_default_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "capacity_advisor_default_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: retired default_model_id leaf reads nothing" {
+    # The pre-v6 single advisory key is no longer shipped in cdk.json; the
+    # runtime fails closed on it and the scan must not resurrect it.
+    run extract_default_bedrock_model "cdk.json" "default_model_id"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "extract_default_bedrock_model: empty when the context key is absent" {
@@ -1345,6 +1593,38 @@ EOF
     run extract_default_bedrock_model "/nonexistent/cdk.json"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "extract_default_bedrock_model: reads the claude code leaf from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["claude_code_default_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: explicit leaf selects the requested key" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+{"context":{"bedrock":{"mission_default_model_id":"us.amazon.nova-pro-v1:0","claude_code_default_model_id":"us.anthropic.claude-sonnet-4-6"}}}
+EOF
+    run extract_default_bedrock_model "$tmpfile" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "us.anthropic.claude-sonnet-4-6" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when the requested leaf is absent" {
+    tmpfile="$(mktemp)"
+    echo '{"context":{"bedrock":{"mission_default_model_id":"us.amazon.nova-pro-v1:0"}}}' > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
 }
 
 # ── bedrock_model_family ────────────────────────────────────────────
@@ -1576,6 +1856,142 @@ SHIM
     [ -z "$output" ]
 }
 
+# ── get_latest_bedrock_embedding_model ──────────────────────────────────
+#
+# Mission memory's embedding default (context.bedrock.embedding_model_id)
+# is a plain foundation model, so its drift lookup shells out to
+# ``aws bedrock list-foundation-models --by-output-modality EMBEDDING``
+# instead of the inference-profile listing. Same shim pattern as the
+# get_latest_bedrock_model tests: family scoping, lifecycle filtering, and
+# version ranking run offline against canned JSON.
+
+@test "extract_default_bedrock_model: block argument reads vector_store from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["vector_store"]["embedding_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: block argument defaults to bedrock" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'JSON'
+{"context":{"bedrock":{"embedding_model_id":"from-bedrock"},"vector_store":{"embedding_model_id":"from-vector-store"}}}
+JSON
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "from-bedrock" ]
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ "$output" = "from-vector-store" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when the requested block is absent" {
+    tmpfile="$(mktemp)"
+    echo '{"context":{"bedrock":{"embedding_model_id":"x"}}}' > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile" "embedding_model_id" "vector_store"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: reads the embedding leaf from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["embedding_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "embedding_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "get_latest_bedrock_embedding_model: returns the newest ACTIVE same-family model" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v1","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v2:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v3:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-image-v9:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"cohere.embed-english-v9","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v9:0","modelLifecycle":{"status":"LEGACY"}}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    # v3:0 is the newest ACTIVE titan-embed-text; the LEGACY v9:0 is skipped
+    # and other families (titan-embed-image, cohere) are filtered out.
+    [ "$output" = "amazon.titan-embed-text-v3:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: no drift when the pin is newest" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v1","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v2:0","modelLifecycle":{"status":"ACTIVE"}}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "amazon.titan-embed-text-v2:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: tolerates a missing modelLifecycle" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v2:0"},
+  {"modelId":"amazon.titan-embed-text-v4:0"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "amazon.titan-embed-text-v4:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: empty when the aws call fails" {
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$tmpdir/aws"
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: empty for empty input" {
+    run get_latest_bedrock_embedding_model ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ── get_latest_github_release_tag ───────────────────────────────────────────
 #
 # Same split as get_latest_precommit_hook_release: the owner/repo guard
@@ -1618,19 +2034,87 @@ SHIM
 
 # ── extract_workflow_env_pin ────────────────────────────────────────────────
 
-@test "extract_workflow_env_pin: reads TRIVY_VERSION from the security workflows" {
+# ── extract_install_trivy_pin ───────────────────────────────────────────────
+
+@test "extract_install_trivy_pin: reads the version default from the composite action" {
+    # The Trivy pin lives only in .github/actions/install-trivy/action.yml;
+    # the workflows carry no TRIVY_VERSION copies of their own anymore.
+    run extract_install_trivy_pin
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
     run extract_workflow_env_pin TRIVY_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    [ -z "$output" ]
 }
 
-@test "extract_workflow_env_pin: reads the deps-scan HELM_VERSION and KUBECTL_VERSION" {
+@test "extract_install_trivy_pin: empty for a missing file" {
+    run extract_install_trivy_pin /nonexistent/action.yml
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_install_trivy_pin: empty when the default is absent" {
+    tmpdir="$(mktemp -d)"
+    printf 'inputs:\n  version:\n    required: true\n' > "$tmpdir/action.yml"
+    run extract_install_trivy_pin "$tmpdir/action.yml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+# ── extract_helm_installer_pins ─────────────────────────────────────────────
+# Load-bearing beyond the monthly scan: integration-tests.yml and
+# deps-scan.yml source the library and pipe this function's output into
+# GITHUB_ENV, so its four lines ARE the Helm/kubectl pins CI installs.
+
+@test "extract_helm_installer_pins: emits all four pins from the real Dockerfile" {
+    run extract_helm_installer_pins
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | grep -c .)" -eq 4 ]
+    [[ "$output" == *"HELM_VERSION|v"* ]]
+    [[ "$output" =~ HELM_SHA256\|[0-9a-f]{64} ]]
+    [[ "$output" == *"KUBECTL_VERSION|v1."* ]]
+    [[ "$output" =~ KUBECTL_SHA256\|[0-9a-f]{64} ]]
+}
+
+@test "extract_helm_installer_pins: GITHUB_ENV shape survives the tr pipeline" {
+    # Exactly the pipeline the workflow derive steps run.
+    run bash -c 'source .github/scripts/lib_dependency_scan.sh; extract_helm_installer_pins | tr "|" "="'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^HELM_VERSION=v[0-9]+\.[0-9]+\.[0-9]+$'\n' ]]
+    [[ "$output" == *"KUBECTL_SHA256="* ]]
+}
+
+@test "extract_helm_installer_pins: empty for a missing Dockerfile" {
+    run extract_helm_installer_pins /nonexistent/Dockerfile
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_helm_installer_pins: a version without its trust anchor emits no sha line" {
+    # The workflow derive steps grep for every expected pin afterwards, so
+    # a Dockerfile edit that drops the sha256 line fails the derive step
+    # instead of installing an unauthenticated binary.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+RUN curl -o /tmp/helm.tar.gz https://get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz
+EOF
+    run extract_helm_installer_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "HELM_VERSION|v9.9.9" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_workflow_env_pin: HELM_VERSION and KUBECTL_VERSION carry no workflow copies" {
+    # Both pins live only in lambda/helm-installer/Dockerfile; workflows
+    # derive them into GITHUB_ENV at runtime, so the env extractor must
+    # find nothing to drift.
     run extract_workflow_env_pin HELM_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v[0-9] ]]
+    [ -z "$output" ]
     run extract_workflow_env_pin KUBECTL_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v1\. ]]
+    [ -z "$output" ]
 }
 
 @test "extract_workflow_env_pin: reads the KUBECONFORM_VERSION pin from integration-tests.yml" {
@@ -1732,6 +2216,114 @@ EOF
     rm -f "$tmpfile"
 }
 
+@test "extract_kind_pins: resolves \${{ env.* }} references against workflow env" {
+    # The production shape: kind-action steps reference the single
+    # workflow-level declarations rather than carrying literal copies.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+env:
+  KIND_VERSION: "v0.98.0"
+  KIND_NODE_IMAGE: "kindest/node:v1.41.0"
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kind|v0.98.0"* ]]
+    [[ "$output" == *"kind-node|kindest/node:v1.41.0"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: an unresolvable env reference prints nothing for that key" {
+    # A template string must never reach a release lookup; the caller's
+    # presence check reports the pin as missing instead.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "${{ env.NOT_DECLARED }}"
+          node_image: "kindest/node:v1.40.0"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"kind|"* || "$output" == *"kind-node|"* ]]
+    [[ "$output" != *"NOT_DECLARED"* ]]
+    [[ "$output" == *"kind-node|kindest/node:v1.40.0"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: identical pins across two kind-action steps print once" {
+    # cluster-e2e and examples-smoke both create kind clusters; agreement on
+    # the pins must collapse to one line per key so the single-value callers
+    # (check_github_tool, the node-image minor scope) keep working unchanged.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.99.0"
+          node_image: "kindest/node:v1.40.0"
+  smoke:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.99.0"
+          node_image: "kindest/node:v1.40.0"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind|')" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind-node|')" -eq 1 ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: drifted pins across steps surface as extra lines" {
+    # A second line for the same key is the drift signal the consistency
+    # section of dependency-scan.sh turns into a report row.
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.99.0"
+          node_image: "kindest/node:v1.40.0"
+  smoke:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.98.0"
+          node_image: "kindest/node:v1.40.0"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind|')" -eq 2 ]
+    [[ "$output" == *"kind|v0.99.0"* ]]
+    [[ "$output" == *"kind|v0.98.0"* ]]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind-node|')" -eq 1 ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: real workflow pins agree across all kind-action steps" {
+    # The live guard for the two real jobs: exactly one distinct value per
+    # key in integration-tests.yml, or the jobs' clusters have diverged.
+    run extract_kind_pins ".github/workflows/integration-tests.yml"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind|')" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^kind-node|')" -eq 1 ]
+}
+
 # ── extract_ruff_pins ───────────────────────────────────────────────────────
 
 @test "extract_ruff_pins: reports all three sources from the real repo" {
@@ -1782,7 +2374,11 @@ EOF
 
 # ── extract_python_version_pins ─────────────────────────────────────────────
 
-@test "extract_python_version_pins: finds the repo's python-version pins" {
+@test "extract_python_version_pins: reads the single .python-version source" {
+    # CI Python is single-sourced: every setup-python step uses
+    # python-version-file, so the extractor emits the .python-version pin
+    # (plus any stray literal reintroduced in a workflow, for the
+    # consistency check to surface).
     run extract_python_version_pins
     [ "$status" -eq 0 ]
     [ -n "$output" ]
@@ -1790,6 +2386,7 @@ EOF
         [ -z "$line" ] && continue
         [[ "$line" =~ ^[0-9]+\.[0-9]+$ ]]
     done <<< "$output"
+    [ "$output" = "$(grep -oE '^[0-9]+\.[0-9]+' .python-version)" ]
 }
 
 @test "extract_python_version_pins: empty for a missing directory" {
@@ -1802,9 +2399,22 @@ EOF
     tmpdir="$(mktemp -d)"
     printf 'jobs:\n  a:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/a.yml"
     printf 'jobs:\n  b:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/b.yml"
-    run extract_python_version_pins "$tmpdir"
+    run extract_python_version_pins "$tmpdir" "$tmpdir/.python-version"
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | grep -c '^3\.14$')" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_python_version_pins: a drifted stray literal joins the version-file pin" {
+    # A workflow that reintroduces a literal python-version DIFFERENT from
+    # .python-version must surface as two distinct values for the
+    # consistency check to report.
+    tmpdir="$(mktemp -d)"
+    printf '3.14\n' > "$tmpdir/.python-version"
+    printf 'jobs:\n  a:\n    steps:\n      - with:\n          python-version: "3.12"\n' > "$tmpdir/a.yml"
+    run extract_python_version_pins "$tmpdir" "$tmpdir/.python-version"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | sort -u | grep -c .)" -eq 2 ]
     rm -rf "$tmpdir"
 }
 

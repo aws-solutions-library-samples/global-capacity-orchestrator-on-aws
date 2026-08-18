@@ -33,7 +33,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: pgvector-worker
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         command:
         - python
         - -c

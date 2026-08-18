@@ -102,6 +102,15 @@ spec:
 
 ### Submitting Jobs
 
+Every regional cluster ships a ready-to-use default queue topology when Kueue
+is enabled: ResourceFlavor `gco-default-flavor`, ClusterQueue
+`gco-cluster-queue` (quotas mirror the gco-jobs namespace ResourceQuota), and
+LocalQueue `gco-default` in `gco-jobs` (applied by
+`post-helm-kueue-default-queues.yaml`). Label a Job with
+`kueue.x-k8s.io/queue-name: gco-default` and it queues immediately — no
+hand-applied queue objects required. The examples below build a custom
+`user-queue` topology instead, which is the pattern for team-specific quotas.
+
 Add the `kueue.x-k8s.io/queue-name` label and set resource limits to your Job:
 
 ```yaml

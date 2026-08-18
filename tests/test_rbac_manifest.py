@@ -204,6 +204,33 @@ class TestManifestProcessorRole:
             "manifest-processor Role must grant events for events endpoint"
         )
 
+    def test_manifest_processor_manages_trainjobs(self, rbac_docs):
+        """trainer.kubeflow.org/trainjobs needs full lifecycle verbs.
+
+        Regression: the 2026-08-14 shakeout queued a TrainJob through SQS
+        and every apply failed with "Create failed: Forbidden" — TrainJob
+        is the first CRD submitted through the SQS path (Ray/Volcano
+        examples submit direct), so no CRD group had ever been granted to
+        the gco-jobs write role. The CLI's generic-manifest REST fallback
+        (TrainJob status/logs/delete) rides the same ServiceAccount.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        trainer_rules = [
+            rule for rule in role["rules"] if "trainer.kubeflow.org" in rule.get("apiGroups", [])
+        ]
+        assert trainer_rules, "gco-jobs write role must grant trainer.kubeflow.org"
+        (rule,) = trainer_rules
+        assert rule["resources"] == ["trainjobs"]
+        assert set(rule["verbs"]) == {
+            "create",
+            "get",
+            "list",
+            "watch",
+            "patch",
+            "update",
+            "delete",
+        }
+
     def test_manifest_processor_has_patch_verb_on_workload_resources(self, rbac_docs):
         """patch must be granted on every resource the dynamic client might update.
 
@@ -254,6 +281,89 @@ class TestManifestProcessorRole:
             api_groups_seen.update(rule.get("apiGroups", []))
         assert "metrics.k8s.io" in api_groups_seen, (
             "cluster-read role must allow metrics.k8s.io for /metrics endpoint"
+        )
+
+
+# ─── Submittable kinds ↔ RBAC lockstep ──────────────────────────────
+
+
+class TestSubmittableKindsRbacLockstep:
+    """Every kind users can submit must be writable by the gco-jobs role.
+
+    Generalizes the TrainJob regression above: DEFAULT_ALLOWED_KINDS (the
+    shared REST/SQS submission policy in gco/services/manifest_processor.py)
+    is the authoritative list of kinds the queue processor creates as
+    gco-manifest-processor-sa, so each one needs the full lifecycle verb set
+    in gco-manifest-processor-role — create for the initial apply, patch for
+    resubmission, get/list/watch for status, delete for teardown. A kind
+    added to the allowlist without a matching RBAC rule only fails at
+    runtime, as a bare "Forbidden" out of the SQS path (caught live
+    2026-08-14, when TrainJob became the first CRD to ride that path). The
+    integration:kind:examples-smoke CI job proves the same contract against
+    a real apiserver via explicit SubjectAccessReview (SAR) objects — the
+    authorization.k8s.io API that answers "may this user <verb> this
+    resource?"; this test is the fast local half of that pair.
+    """
+
+    REQUIRED_VERBS = {"create", "get", "list", "watch", "patch", "update", "delete"}
+
+    @staticmethod
+    def _group_and_plural(kind: str) -> tuple[str, str]:
+        """Derive the RBAC (apiGroup, resource-plural) for an allowed kind.
+
+        Groups come from RESOURCE_API_VERSIONS (the exact-GVK allowlist the
+        submission endpoints enforce), so the test can never drift from the
+        code path it guards. Every current kind pluralizes as lowercase+s;
+        a kind that doesn't (e.g. NetworkPolicy -> networkpolicies) will
+        fail the coverage assertion loudly and get an explicit entry then.
+        """
+        from gco.services.manifest_processor import RESOURCE_API_VERSIONS
+
+        api_versions = RESOURCE_API_VERSIONS[kind]
+        groups = {av.rsplit("/", 1)[0] if "/" in av else "" for av in api_versions}
+        assert len(groups) == 1, f"{kind} maps to multiple API groups: {groups}"
+        return groups.pop(), f"{kind.lower()}s"
+
+    def test_every_allowed_kind_has_an_exact_api_version_pin(self):
+        """The kind allowlist and the exact-GVK map must cover each other."""
+        from gco.services.manifest_processor import (
+            DEFAULT_ALLOWED_KINDS,
+            RESOURCE_API_VERSIONS,
+        )
+
+        assert set(DEFAULT_ALLOWED_KINDS) == set(RESOURCE_API_VERSIONS), (
+            "DEFAULT_ALLOWED_KINDS and RESOURCE_API_VERSIONS must stay in "
+            "lockstep — a kind present in only one of them is either "
+            "unsubmittable or unvalidatable"
+        )
+
+    def test_every_allowed_kind_is_writable_by_the_gco_jobs_role(self, rbac_docs):
+        """kinds ⊆ RBAC: each submittable kind carries the full verb set."""
+        from gco.services.manifest_processor import DEFAULT_ALLOWED_KINDS
+
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        assert role is not None
+
+        missing: dict[str, set[str]] = {}
+        for kind in DEFAULT_ALLOWED_KINDS:
+            group, plural = self._group_and_plural(kind)
+            granted: set[str] = set()
+            for rule in role.get("rules", []):
+                rule_groups = rule.get("apiGroups", [""])
+                rule_resources = rule.get("resources", [])
+                if ("*" in rule_groups or group in rule_groups) and (
+                    "*" in rule_resources or plural in rule_resources
+                ):
+                    granted.update(rule.get("verbs", []))
+            if "*" in granted:
+                continue
+            absent = self.REQUIRED_VERBS - granted
+            if absent:
+                missing[f"{group or 'core'}/{plural}"] = absent
+
+        assert not missing, (
+            "gco-manifest-processor-role is missing verbs for submittable "
+            f"kinds (SQS applies will fail Forbidden at runtime): {missing}"
         )
 
 

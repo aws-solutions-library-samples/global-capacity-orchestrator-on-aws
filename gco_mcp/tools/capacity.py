@@ -136,8 +136,9 @@ def ai_recommend(
         fault_tolerance: Tolerance for interruptions ("low", "medium", "high").
         max_cost: Maximum acceptable cost per hour in USD.
         model: Bedrock model ID to use for analysis. Omit to use
-            `cdk.json` `context.bedrock.default_model_id`. Mission and the
-            capacity advisor consume that one shared configuration value.
+            `cdk.json` `context.bedrock.capacity_advisor_default_model_id`,
+            the advisor's own knob (Mission sampling has a separate
+            `mission_default_model_id`).
     """
     args = ["capacity", "ai-recommend", "-w", workload]
     if instance_type:

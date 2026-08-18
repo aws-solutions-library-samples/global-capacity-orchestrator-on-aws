@@ -62,7 +62,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
 | `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
-| `50-59` | Device plugins & GPU observability | NVIDIA device plugin, DCGM exporter |
+| `50-59` | GPU observability | DCGM exporter |
 | `post-helm-*` | Post-Helm | Resources needing Helm CRDs: Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
 
 ## Files
@@ -87,6 +87,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in all namespaces — **pruned when Valkey is disabled** |
 | `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **pruned when Aurora pgvector is disabled** |
 | `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
+| `26-storage-vector-store.yaml` | `gco-vector-store` `ConfigMap` (table/index/embedding-model/region) in all namespaces, pointing pods at their local global-table replica — **pruned when the vector store is disabled** |
 
 ### System Services (30–39)
 
@@ -110,12 +111,19 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
 | `46-nodepool-mooncake-efa.yaml` | Mooncake EFA pool (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — disaggregated/store/both inference over RoCE; excludes A100-40GB p4d |
 
-### Device Plugins & GPU Observability (50–59)
+### GPU Observability (50–59)
 
 | File | Contents |
 |------|----------|
-| `50-nvidia-device-plugin.yaml` | NVIDIA device plugin `DaemonSet` (advertises `nvidia.com/gpu`) |
-| `51-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+
+There is deliberately no NVIDIA device plugin manifest: EKS Auto Mode ships
+the device plugin built into the node (it is not visible as a DaemonSet) and
+advertises `nvidia.com/gpu` natively. A community device plugin cannot
+initialize NVML on Auto Mode nodes (the runtime never injects the NVIDIA
+driver libraries for it) and crash-loops, permanently failing convergence —
+the applier's legacy sweep instead deletes the DaemonSet GCO used to ship
+here from upgraded clusters.
 
 ### Post-Helm (applied after Helm installs CRDs)
 

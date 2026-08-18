@@ -22,6 +22,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `models.py` | Model weight upload, listing, and [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) URI management |
 | `storage.py` | Human-friendly GCO S3 bucket discovery and incremental download/upload sync |
 | `stacks.py` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment, destruction, and status |
+| `status.py` | Fleet-wide status document assembly: independent section gathers, findings, degradation model |
 | `costs.py` | Cost tracking via AWS [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) |
 | `dag.py` | DAG pipeline execution with dependency ordering |
 | `files.py` | EFS/FSx file listing and download |
@@ -47,6 +48,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `nodepools_cmd.py` | `gco nodepools list`, `describe` |
 | `queue_cmd.py` | `gco queue submit`, `list`, `get`, `stats` |
 | `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy-all`, `list`, `bootstrap` |
+| `status_cmd.py` | `gco status` |
 | `templates_cmd.py` | `gco templates list`, `get`, `create`, `delete` |
 | `webhooks_cmd.py` | `gco webhooks list`, `create`, `delete`, `test` |
 

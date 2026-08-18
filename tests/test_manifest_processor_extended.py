@@ -2074,3 +2074,399 @@ class TestSATokenAutoMountInjectionProperty:
             f"but after injection it became {pod_spec['automountServiceAccountToken']} "
             f"for kind={kind}"
         )
+
+
+class TestTrustedImageSourceLockstep:
+    """Keep the fail-closed code defaults and cdk.json policy in lockstep.
+
+    ``cdk.json job_validation_policy`` is the authoritative deploy-time
+    allowlist; ``DEFAULT_TRUSTED_REGISTRIES`` / ``DEFAULT_TRUSTED_DOCKERHUB_ORGS``
+    are the fail-closed fallbacks both services use when deployment wiring is
+    absent. Divergence produces environment-dependent acceptance of the same
+    manifest — the exact drift that let ``lmsysorg`` be trusted at deploy time
+    but rejected by the fallback (and ``vllm``/``ghcr.io/huggingface``, used by
+    shipped inference examples, be rejected everywhere).
+    """
+
+    @staticmethod
+    def _policy() -> dict:
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        context = json.loads((root / "cdk.json").read_text(encoding="utf-8"))["context"]
+        return context["job_validation_policy"]
+
+    def test_registry_defaults_match_cdk_policy(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_TRUSTED_REGISTRIES
+
+        assert set(DEFAULT_TRUSTED_REGISTRIES) == set(self._policy()["trusted_registries"])
+
+    def test_dockerhub_org_defaults_match_cdk_policy(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_TRUSTED_DOCKERHUB_ORGS
+
+        assert set(DEFAULT_TRUSTED_DOCKERHUB_ORGS) == set(self._policy()["trusted_dockerhub_orgs"])
+
+    def test_shipped_inference_example_images_are_trusted(self) -> None:
+        """Every image in examples/inference-*.yaml must clear the default gate."""
+        from pathlib import Path
+
+        import yaml
+
+        from gco.services.manifest_processor import validate_image_sources
+
+        root = Path(__file__).resolve().parent.parent
+        for path in sorted((root / "examples").glob("inference-*.yaml")):
+            for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                if not doc or doc.get("kind") != "Deployment":
+                    continue
+                ok, reason = validate_image_sources(doc)
+                assert ok, f"{path.name}: {reason}"
+
+
+class TestAllowedKindsLockstep:
+    """Keep every source of the resource-kind allowlist in lockstep.
+
+    The kind policy lives in four places: ``DEFAULT_ALLOWED_KINDS`` (the
+    fail-closed fallback both services share), ``cdk.json
+    job_validation_policy.allowed_kinds`` (the deploy-time authority),
+    the inline fallback in ``regional_stack.py`` (used when the cdk.json
+    block is absent; kept inline so synth never imports service modules),
+    and ``RESOURCE_API_VERSIONS`` (the exact-GVK gate for the CRUD
+    endpoints). Divergence means a kind is accepted on one path and
+    rejected on another — the same drift class the image-source lockstep
+    test exists for.
+    """
+
+    @staticmethod
+    def _cdk_allowed_kinds() -> list[str]:
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        context = json.loads((root / "cdk.json").read_text(encoding="utf-8"))["context"]
+        return context["job_validation_policy"]["allowed_kinds"]
+
+    @staticmethod
+    def _regional_stack_fallback_kinds() -> list[str]:
+        """AST-extract the inline fallback list passed to job_policy.get()."""
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "gco" / "stacks" / "regional_stack.py").read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and len(node.args) == 2
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "allowed_kinds"
+                and isinstance(node.args[1], ast.List)
+            ):
+                return [
+                    element.value
+                    for element in node.args[1].elts
+                    if isinstance(element, ast.Constant)
+                ]
+        raise AssertionError("allowed_kinds fallback list not found in regional_stack.py")
+
+    def test_default_allowed_kinds_match_cdk_policy(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_ALLOWED_KINDS
+
+        assert set(DEFAULT_ALLOWED_KINDS) == set(self._cdk_allowed_kinds())
+
+    def test_regional_stack_fallback_matches_defaults(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_ALLOWED_KINDS
+
+        assert set(self._regional_stack_fallback_kinds()) == set(DEFAULT_ALLOWED_KINDS)
+
+    def test_every_allowed_kind_has_pinned_api_version(self) -> None:
+        """CRUD endpoints must know the exact GVK for every allowed kind.
+
+        A kind without a RESOURCE_API_VERSIONS entry is submittable but not
+        readable/deletable through the API; an entry for a non-allowed kind
+        is dead policy. Exact equality catches both.
+        """
+        from gco.services.manifest_processor import (
+            DEFAULT_ALLOWED_KINDS,
+            RESOURCE_API_VERSIONS,
+        )
+
+        assert set(RESOURCE_API_VERSIONS) == set(DEFAULT_ALLOWED_KINDS)
+
+    def test_trainjob_gvk_pin(self) -> None:
+        """TrainJob is pinned to the exact Kubeflow Trainer v2 group/version.
+
+        A custom API group defining its own 'TrainJob' kind must not be
+        reachable through the CRUD endpoints, and a trainer chart upgrade
+        that bumps the API version must be a deliberate, test-visible change.
+        """
+        from gco.services.manifest_processor import (
+            RESOURCE_API_VERSIONS,
+            TRAINJOB_API_VERSION,
+        )
+
+        assert TRAINJOB_API_VERSION == "trainer.kubeflow.org/v1alpha1"
+        assert RESOURCE_API_VERSIONS["TrainJob"] == frozenset({TRAINJOB_API_VERSION})
+
+
+def _trainjob_manifest(
+    name: str = "test-trainjob",
+    namespace: str = "gco-jobs",
+    image: str | None = "pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime",
+    num_nodes: int | None = None,
+    resources_per_node: dict | None = None,
+    runtime_patches: list | None = None,
+) -> dict:
+    """Build a Kubeflow Trainer v2 TrainJob manifest for validation tests."""
+    trainer: dict = {}
+    if image is not None:
+        trainer["image"] = image
+    if num_nodes is not None:
+        trainer["numNodes"] = num_nodes
+    if resources_per_node is not None:
+        trainer["resourcesPerNode"] = resources_per_node
+    spec: dict = {"runtimeRef": {"name": "torch-distributed"}}
+    if trainer:
+        spec["trainer"] = trainer
+    if runtime_patches is not None:
+        spec["runtimePatches"] = runtime_patches
+    return {
+        "apiVersion": "trainer.kubeflow.org/v1alpha1",
+        "kind": "TrainJob",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": spec,
+    }
+
+
+def _runtime_patch_with_pod_spec(pod_spec: dict) -> dict:
+    """Wrap a pod spec in the runtimePatches nesting the trainer API uses."""
+    return {
+        "trainingRuntimeSpec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {"spec": {"template": {"spec": pod_spec}}},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+
+class TestTrainJobValidation:
+    """TrainJob manifests get the full security pipeline, not a vacuous pass.
+
+    A TrainJob carries no ``spec.template``; its pods are assembled from the
+    referenced runtime plus ``spec.trainer`` and arbitrary pod specs nested
+    in ``runtimePatches``. Every check here failed open before the TrainJob
+    decomposition existed, so these are the security-critical pins.
+    """
+
+    def test_trusted_trainjob_accepted(self, manifest_processor):
+        manifest = _trainjob_manifest(
+            resources_per_node={"requests": {"cpu": "500m", "memory": "512Mi"}}
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert is_valid, error
+
+    def test_untrusted_trainer_image_rejected(self, manifest_processor):
+        manifest = _trainjob_manifest(image="evil.example.com/malicious:latest")
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "Untrusted image source" in error
+        assert "evil.example.com" in error
+
+    def test_untrusted_runtime_patch_image_rejected(self, manifest_processor):
+        """A trusted trainer image must not whitelist containers smuggled in
+        through runtimePatches."""
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {"containers": [{"name": "smuggled", "image": "evil.example.com/backdoor:1"}]}
+                )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "Untrusted image source" in error
+        assert "evil.example.com" in error
+
+    def test_untrusted_init_container_in_runtime_patch_rejected(self, manifest_processor):
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {
+                        "containers": [{"name": "ok", "image": "python:3.14-slim"}],
+                        "initContainers": [
+                            {"name": "smuggled-init", "image": "evil.example.com/init:1"}
+                        ],
+                    }
+                )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "evil.example.com" in error
+
+    def test_hostpath_in_runtime_patch_rejected(self, manifest_processor):
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {
+                        "containers": [{"name": "worker", "image": "python:3.14-slim"}],
+                        "volumes": [{"name": "host", "hostPath": {"path": "/etc"}}],
+                    }
+                )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "hostPath" in error
+
+    def test_privileged_container_in_runtime_patch_rejected(self, manifest_processor):
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {
+                        "containers": [
+                            {
+                                "name": "worker",
+                                "image": "python:3.14-slim",
+                                "securityContext": {"privileged": True},
+                            }
+                        ]
+                    }
+                )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "privileged" in error
+
+    def test_resource_caps_scale_with_num_nodes(self, manifest_processor):
+        """Per-node resources are multiplied by numNodes before cap checks.
+
+        Fixture cap is 4 GPUs; 2 nodes x 1 GPU passes, 8 nodes x 1 GPU must
+        not (counting a distributed job as one node would gut the cap).
+        """
+        toleration_patch = _runtime_patch_with_pod_spec(
+            {
+                "containers": [],
+                "tolerations": [
+                    {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+                ],
+            }
+        )
+
+        within_cap = _trainjob_manifest(
+            num_nodes=2,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1", "cpu": "1"}},
+            runtime_patches=[toleration_patch],
+        )
+        is_valid, error = manifest_processor.validate_manifest(within_cap)
+        assert is_valid, error
+
+        over_cap = _trainjob_manifest(
+            num_nodes=8,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1", "cpu": "1"}},
+            runtime_patches=[toleration_patch],
+        )
+        is_valid, error = manifest_processor.validate_manifest(over_cap)
+        assert not is_valid
+        assert "GPU 8 exceeds max 4" in error
+
+    def test_gpu_trainjob_without_toleration_rejected_with_trainjob_hint(self, manifest_processor):
+        """The toleration requirement sees trainer resources, and the fix hint
+        points at the TrainJob example rather than the plain-Job one."""
+        manifest = _trainjob_manifest(
+            num_nodes=2,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "toleration" in error
+        assert "kubeflow-trainjob.yaml" in error
+
+    def test_toleration_in_runtime_patch_satisfies_trainer_gpu_request(self, manifest_processor):
+        """Requests and tolerations are unioned across pod-spec views: the
+        GPU request lives in spec.trainer, the toleration can only live in a
+        runtimePatches pod spec."""
+        manifest = _trainjob_manifest(
+            num_nodes=1,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {
+                        "containers": [],
+                        "tolerations": [
+                            {
+                                "key": "nvidia.com/gpu",
+                                "operator": "Exists",
+                                "effect": "NoSchedule",
+                            }
+                        ],
+                    }
+                )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert is_valid, error
+
+    def test_inject_security_defaults_reaches_embedded_pod_specs(self, manifest_processor):
+        """automountServiceAccountToken: false lands in every runtimePatches
+        pod spec (by mutation) without inventing fields elsewhere in the spec."""
+        pod_spec = {"containers": [{"name": "worker", "image": "python:3.14-slim"}]}
+        manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
+
+        manifest_processor._inject_security_defaults(manifest)
+
+        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
+            "replicatedJobs"
+        ][0]["template"]["spec"]["template"]["spec"]
+        assert embedded["automountServiceAccountToken"] is False
+        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+
+    def test_inject_security_defaults_respects_explicit_user_choice(self, manifest_processor):
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                _runtime_patch_with_pod_spec(
+                    {
+                        "containers": [{"name": "worker", "image": "python:3.14-slim"}],
+                        "automountServiceAccountToken": True,
+                    }
+                )
+            ],
+        )
+        manifest_processor._inject_security_defaults(manifest)
+        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
+            "replicatedJobs"
+        ][0]["template"]["spec"]["template"]["spec"]
+        assert embedded["automountServiceAccountToken"] is True
+
+    def test_missing_addon_error_is_actionable(self, manifest_processor):
+        """ResourceNotFoundError for TrainJob surfaces the enable-the-addon
+        remedy instead of an inscrutable discovery error."""
+        from kubernetes.dynamic.exceptions import ResourceNotFoundError
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = ResourceNotFoundError("no CRD")
+        manifest_processor._dynamic_client = mock_dynamic
+
+        with pytest.raises(ValueError, match="kubeflow-trainer addon"):
+            manifest_processor._get_api_resource("trainer.kubeflow.org/v1alpha1", "TrainJob")
+
+    def test_unknown_kind_error_unchanged_for_non_addon_kinds(self, manifest_processor):
+        from kubernetes.dynamic.exceptions import ResourceNotFoundError
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = ResourceNotFoundError("no CRD")
+        manifest_processor._dynamic_client = mock_dynamic
+
+        with pytest.raises(ValueError, match="Unknown resource type"):
+            manifest_processor._get_api_resource("example.com/v1", "Widget")

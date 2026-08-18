@@ -66,6 +66,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
 | `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle, bind the worker-persisted Kubernetes identity, and verify/delete that exact workload |
+| `schedulers` | `topology` | Prove every enabled batch scheduler with a scheduling-gated workload: [Volcano](https://volcano.sh/) and [YuniKorn](https://yunikorn.apache.org/) probes complete only if the named scheduler binds their pods, the [Kueue](https://kueue.sigs.k8s.io/) probe only after admission through the deployed `gco-default` queue, and the Slurm probe submits a real batch job through [slurmrestd](https://slurm.schedmd.com/rest.html) and requires `COMPLETED`. Schedulers disabled in cdk.json are recorded as skipped with their configuration source unless force-enabled with `--optional-schedulers`; KEDA (proved end to end by `sqs`) and KubeRay (chart-level, its workloads are CRDs outside the manifest gateway) carry derived evidence |
 | `opencost` | `topology` | Require every Region's [OpenCost](https://opencost.io/) to be healthy and returning allocation data, then generate an ad-hoc cost report and confirm its [Parquet](https://parquet.apache.org/docs/) object in the cost report bucket (passes with a note when cost monitoring is disabled in cdk.json) |
 | `convergence` | `topology` | Require stable SQS, DLQ, and DynamoDB convergence |
 | `destroy` | `deploy` | Remove all exactly run-owned infrastructure in dependency order |
@@ -127,6 +128,8 @@ python -m scripts.live_release_validation \
 ```
 
 This command performs real AWS deployment and deletion. Reading this runbook or copying the command is not authorization to execute it.
+
+Add `--optional-schedulers all` (or a comma list of `yunikorn`, `slurm`) when the release touches scheduler charts, the helm installer, or scheduler-adjacent manifests: the run then force-enables the off-by-default schedulers through a run-scoped CDK context override (`helm_enabled_overrides`) — never by editing `cdk.json` — so the `schedulers` action proves them too. The override becomes part of the checkpoint identity, so a `--resume` must repeat it exactly. Without the flag, off-by-default schedulers are reported as skipped with their configuration source, which is valid evidence for releases that do not touch them.
 
 Do not close the terminal merely because a validation action fails. The runner records the failure, then continues through its same-process cleanup path and writes the final report. `SIGTERM`, `SIGHUP`, and keyboard interruption also route through controlled cleanup when the process is still able to run.
 

@@ -25,6 +25,7 @@ stock deployment installs it in each region; operators opt out with
 - [Accessing Grafana on a private cluster](#accessing-grafana-on-a-private-cluster)
 - [Managing Grafana users](#managing-grafana-users)
 - [Admin credential rotation](#admin-credential-rotation)
+- [MLflow experiment tracking](#mlflow-experiment-tracking)
 - [Curated dashboards](#curated-dashboards)
 - [Dashboard screenshots](#dashboard-screenshots)
 
@@ -87,6 +88,9 @@ Per regional cluster, when enabled:
   that reads this Prometheus and powers the *GCO Cost (OpenCost)* dashboard
   plus the cost report pipeline — see
   [COST_MONITORING.md](COST_MONITORING.md).
+- When MLflow is enabled (the default), an [MLflow](https://mlflow.org/)
+  tracking server in the same `monitoring` namespace — see
+  [MLflow experiment tracking](#mlflow-experiment-tracking).
 
 Grafana uses **Grafana-native authentication** (its own user database) with self
 sign-up and anonymous access disabled. All three UIs (Grafana, Prometheus,
@@ -133,7 +137,9 @@ against `https://localhost:8443` with the real endpoint as the TLS server name.
 It requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 locally and an SSM-managed instance in the VPC that can reach the endpoint.
 
-`--via-ssm auto` provisions that instance for you: a minimal `t3.micro` in the
+`--via-ssm auto` provisions that instance for you: a minimal `t3.micro` (with
+automatic fallback through `t3a.micro`, `t3.small`, then `t2.micro` when the
+preferred type isn't launchable in the Region or AZ) in the
 cluster VPC that reuses the cluster security group (no new security group, and
 **no inbound ports** — SSM is agent-initiated outbound only), requires IMDSv2,
 self-terminates after `--bastion-ttl-minutes` (default 120), and is tagged
@@ -196,6 +202,73 @@ The cadence is configurable and defaults to monthly:
 
 Rotation is transparent to the CLI, which always re-reads the current password
 from the Secret.
+
+## MLflow experiment tracking
+
+An [MLflow](https://mlflow.org/) tracking server ships with the observability
+bundle for experiment tracking from any workload on the cluster (see
+[DISTRIBUTED_TRAINING.md](DISTRIBUTED_TRAINING.md) for the training side).
+GCO deploys MLflow's [official Helm chart](https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/)
+(`oci://ghcr.io/mlflow/charts/mlflow`) with the official server image, both
+pinned in `lambda/helm-installer/charts.yaml`.
+
+**Toggle.** Controlled by `cluster_observability.mlflow.enabled` in `cdk.json`
+(default `true`), effective only while `cluster_observability.enabled` is also
+true — the server lives in the `monitoring` namespace, stores metadata on the
+observability gp3 StorageClass, and is reached through the same tunnel
+commands, so disabling observability switches MLflow off with it.
+
+**Storage.** Run *artifacts* go to the cluster-shared S3 bucket under
+`mlflow-artifacts/<region>/` through a dedicated IAM role scoped to exactly
+that prefix (IRSA on the server's service account); the server proxies
+artifact traffic, so client pods never need S3 credentials of their own. Run
+*metadata* is SQLite on a chart-managed gp3 EBS volume
+(`cluster_observability.mlflow.persistence_size`, default `10Gi`). Disabling
+MLflow deletes the metadata volume on the next deploy — artifacts in S3
+survive.
+
+**Access.** The service is `ClusterIP` only (in-cluster DNS
+`mlflow.monitoring:5000`) — no Ingress, no public endpoint:
+
+```bash
+gco monitoring open --service mlflow          # http://localhost:5000
+gco monitoring open --service mlflow --via-ssm auto   # no VPC route? ephemeral bastion
+```
+
+![MLflow tracking server run view — the smoke-run logged by examples/mlflow-tracking-job.yaml, showing its loss metric, the optimizer/learning_rate/epochs parameters, and a Finished status](../images/mlflow-ui.png)
+
+The run above is the one
+[`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
+logs, captured through the tunnel command above.
+
+> **Host-header allow-list.** MLflow 3.x validates the `Host` header and
+> rejects anything it does not recognize with a 403 ("possible DNS rebinding
+> attack detected"). Setting `--allowed-hosts` REPLACES its built-in
+> localhost/private-IP allowance rather than extending it, so GCO's list
+> carries every spelling that legitimately reaches the server: the in-cluster
+> service DNS (with and without the port), the loopback spellings this tunnel
+> forwards to, and a wildcard per `vpc_endpoint_cidrs` entry so Prometheus can
+> scrape the pod IP. The list is assembled at deploy time from that one
+> `cdk.json` key (see `_mlflow_allowed_hosts` in `gco/stacks/regional_stack.py`)
+> — arbitrary DNS names stay rejected, and `/health` is exempt so probes never
+> depend on it.
+
+**Auth posture.** The server runs without application-level authentication —
+the same posture as the OpenCost UI: it is reachable only from inside the
+cluster (workloads opt in via a NetworkPolicy label, and a GCO-owned
+NetworkPolicy fences the server pod itself — ingress on the server port from
+in-cluster pods and the VPC CIDRs, egress limited to DNS and 443) and through
+the authenticated
+SSM/port-forward tunnel, which is the security boundary. The chart supports
+MLflow's basic-auth plugin (`server.value_options.app_name` plus a
+Secret-backed CSRF key — see the chart docs) if your deployment needs an
+additional in-cluster boundary.
+
+**Logging from a job.** Point the client at the service DNS and opt into
+egress with the `gco.io/mlflow-client: "true"` pod label —
+[`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
+is the complete, validated pattern (it logs a run, reads it back through the
+API, and asserts every value round-tripped).
 
 ## Curated dashboards
 

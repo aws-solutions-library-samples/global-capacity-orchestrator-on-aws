@@ -370,10 +370,10 @@ class TestKedaCustomResourceCleanup:
                 _completed(0, stdout="deleted cluster resources"),
             ]
 
-            success, message = helm_handler._delete_keda_custom_resources("/tmp/kc")
+            success, message = helm_handler._delete_chart_custom_resources("keda", "/tmp/kc")
 
         assert success is True
-        assert "5 KEDA custom resource type" in message
+        assert "5 keda custom resource type" in message
         namespaced_delete = mock_run.call_args_list[4].args[0]
         cluster_delete = mock_run.call_args_list[5].args[0]
         assert namespaced_delete.index("delete") < namespaced_delete.index("--all-namespaces")
@@ -388,7 +388,7 @@ class TestKedaCustomResourceCleanup:
             "run",
             return_value=_completed(1, stderr="api discovery unavailable"),
         ) as mock_run:
-            success, message = helm_handler._delete_keda_custom_resources("/tmp/kc")
+            success, message = helm_handler._delete_chart_custom_resources("keda", "/tmp/kc")
 
         assert success is False
         assert "api discovery unavailable" in message
@@ -397,7 +397,7 @@ class TestKedaCustomResourceCleanup:
     def test_keda_cleanup_runs_before_helm_uninstall(self):
         calls = []
 
-        def _cleanup(_kubeconfig):
+        def _cleanup(_chart_name, _kubeconfig):
             calls.append("cleanup")
             return True, "clean"
 
@@ -406,7 +406,7 @@ class TestKedaCustomResourceCleanup:
             return 0, "", ""
 
         with (
-            patch.object(helm_handler, "_delete_keda_custom_resources", side_effect=_cleanup),
+            patch.object(helm_handler, "_delete_chart_custom_resources", side_effect=_cleanup),
             patch.object(helm_handler, "run_helm", side_effect=_helm),
         ):
             success, _ = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
@@ -418,7 +418,7 @@ class TestKedaCustomResourceCleanup:
         with (
             patch.object(
                 helm_handler,
-                "_delete_keda_custom_resources",
+                "_delete_chart_custom_resources",
                 return_value=(False, "scaledjobs remain"),
             ),
             patch.object(helm_handler, "run_helm") as mock_run,
@@ -429,15 +429,133 @@ class TestKedaCustomResourceCleanup:
         assert "scaledjobs remain" in message
         mock_run.assert_not_called()
 
-    def test_non_keda_uninstall_skips_custom_resource_cleanup(self):
+    def test_non_finalizer_chart_uninstall_skips_custom_resource_cleanup(self):
         with (
-            patch.object(helm_handler, "_delete_keda_custom_resources") as mock_cleanup,
+            patch.object(helm_handler, "_delete_chart_custom_resources") as mock_cleanup,
             patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
         ):
             success, _ = helm_handler.uninstall_chart("volcano", "volcano", "/tmp/kc")
 
         assert success is True
         mock_cleanup.assert_not_called()
+
+
+class TestKueueCustomResourceCleanup:
+    """Kueue instances must disappear while its finalizer controller is live.
+
+    Uninstalling the chart first removes the controller that clears kueue
+    finalizers, leaving CRDs wedged in Terminating — live release validation
+    run sched241-350ffc7d deadlocked teardown on exactly this (the default
+    gco-cluster-queue / gco-default-flavor objects). The purge also
+    self-heals the already-wedged state: when the delete wait stalls,
+    finalizers are stripped and the delete retried once.
+    """
+
+    def test_kueue_uninstall_purges_custom_resources_first(self):
+        calls = []
+
+        def _cleanup(chart_name, _kubeconfig):
+            calls.append(f"cleanup:{chart_name}")
+            return True, "clean"
+
+        def _helm(*_args, **_kwargs):
+            calls.append("helm")
+            return 0, "", ""
+
+        with (
+            patch.object(helm_handler, "_delete_chart_custom_resources", side_effect=_cleanup),
+            patch.object(helm_handler, "run_helm", side_effect=_helm),
+        ):
+            success, _ = helm_handler.uninstall_chart("kueue", "kueue", "/tmp/kc")
+        assert success is True
+        assert calls == ["cleanup:kueue", "helm"]
+
+    def test_kueue_discovery_targets_the_kueue_api_group(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="localqueues.kueue.x-k8s.io\nworkloads.kueue.x-k8s.io\n"),
+                _completed(
+                    0, stdout="clusterqueues.kueue.x-k8s.io\nresourceflavors.kueue.x-k8s.io\n"
+                ),
+                _completed(0, stdout="deleted namespaced"),
+                _completed(0, stdout="deleted cluster-scoped"),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is True
+        assert "4 kueue custom resource type" in message
+        discovery = mock_run.call_args_list[0].args[0]
+        assert "--api-group=kueue.x-k8s.io" in discovery
+
+    def test_stalled_delete_strips_finalizers_and_retries_once(self):
+        """The wedged-CRD state recovers without failing teardown."""
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                # discovery: namespaced then cluster-scoped
+                _completed(0, stdout="localqueues.kueue.x-k8s.io\n"),
+                _completed(
+                    0, stdout="clusterqueues.kueue.x-k8s.io\nresourceflavors.kueue.x-k8s.io\n"
+                ),
+                # namespaced delete succeeds
+                _completed(0),
+                # cluster-scoped delete stalls on finalizers
+                _completed(1, stderr="timed out waiting for the condition"),
+                # finalizer strip: list + patch per type
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                _completed(0),
+                _completed(0, stdout="resourceflavor.kueue.x-k8s.io/gco-default-flavor\n"),
+                _completed(0),
+                # retry delete now drains instantly
+                _completed(0),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is True
+        assert "3 kueue custom resource type" in message
+        patch_command = mock_run.call_args_list[5].args[0]
+        assert "patch" in patch_command
+        assert '{"metadata":{"finalizers":[]}}' in patch_command
+        retry_command = mock_run.call_args_list[8].args[0]
+        assert "delete" in retry_command and "--all-namespaces" not in retry_command
+
+    def test_failed_finalizer_strip_blocks_teardown(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout="clusterqueues.kueue.x-k8s.io\n"),
+                _completed(1, stderr="timed out waiting for the condition"),
+                # strip: list ok, patch fails hard
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                _completed(1, stderr="admission webhook denied"),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is False
+        assert "finalizer removal also failed" in message
+        assert "admission webhook denied" in message
+
+    def test_strip_helper_handles_namespaced_instances(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="gco-jobs,default-queue\n"),
+                _completed(0),
+            ]
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["localqueues.kueue.x-k8s.io"], namespaced=True
+            )
+        assert error is None
+        patch_command = mock_run.call_args_list[1].args[0]
+        assert patch_command[patch_command.index("-n") + 1] == "gco-jobs"
+        assert "default-queue" in patch_command
+
+    def test_strip_helper_tolerates_vanished_resource_types(self):
+        """A CRD that finished deleting mid-strip is success, not failure."""
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            return_value=_completed(1, stderr="the server doesn't have a resource type"),
+        ):
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["clusterqueues.kueue.x-k8s.io"], namespaced=False
+            )
+        assert error is None
 
 
 class TestHandleTask:
@@ -519,7 +637,7 @@ class TestHandleTask:
         with (
             patch.object(
                 helm_handler,
-                "_delete_keda_custom_resources",
+                "_delete_chart_custom_resources",
                 return_value=(True, "clean"),
             ),
             patch.object(
@@ -591,7 +709,7 @@ class TestHandleTask:
         with (
             patch.object(
                 helm_handler,
-                "_delete_keda_custom_resources",
+                "_delete_chart_custom_resources",
                 return_value=(True, "clean"),
             ),
             patch.object(helm_handler, "run_helm", return_value=(1, "", error)),
@@ -1776,6 +1894,42 @@ class TestHealthMonitorQuiesce:
         assert success is False
         assert "Forbidden" in message
 
+    def test_missing_namespace_is_idempotent_absence(self):
+        """A deploy that failed before base manifests never created gco-system.
+
+        Regression (2026-09 live validation, run sched241-1ae7c0d3): the
+        quiesce step treated the namespace NotFound as fatal, the HelmTeardown
+        custom resource FAILED, and the whole stack wedged DELETE_FAILED.
+        Nothing-was-ever-there must succeed exactly like
+        deployment-already-gone.
+        """
+        absence = 'Error from server (NotFound): namespaces "gco-system" not found'
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(1, stderr=absence),
+                _completed(1, stderr=absence),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is True
+        assert message == "Health monitor quiesced"
+
+    def test_missing_deployment_is_idempotent_absence(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(
+                    1,
+                    stderr=(
+                        'Error from server (NotFound): deployments.apps "health-monitor" not found'
+                    ),
+                ),
+                _completed(1, stderr="error: no matching resources found"),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is True
+        assert message == "Health monitor quiesced"
+
     def test_handle_task_surfaces_quiesce_failure_and_cleans_kubeconfig(self):
         event = {
             "Action": "quiesce_health_monitor",
@@ -1795,3 +1949,48 @@ class TestHealthMonitorQuiesce:
             helm_handler.handle_task(event)
 
         mock_remove.assert_called_once_with("/tmp/kc")
+
+
+class TestReleaseSetExpectations:
+    """The validate_releases expected set is deployment-config-driven.
+
+    There is deliberately no fixed release list anywhere: every entry in the
+    REAL charts.yaml is an expected release, and EnabledCharts decides which
+    must be deployed versus absent. These pins prove the two 6.0 charts ride
+    that mechanism — present in the expected set, enabled exactly when the
+    convergence payload enables them — so ValidateHelmReleases needs no
+    per-chart wiring.
+    """
+
+    def test_new_charts_are_expected_and_enabled_when_converged_on(self):
+        configurations, enabled = helm_handler._release_configurations(
+            {"EnabledCharts": ["keda", "kubeflow-trainer", "mlflow"], "Charts": {}}
+        )
+        names = [release for release, _ in configurations]
+        assert "kubeflow-trainer" in names
+        assert "mlflow" in names
+        assert enabled == {"keda", "kubeflow-trainer", "mlflow"}
+
+    def test_new_charts_are_expected_absent_when_not_enabled(self):
+        configurations, enabled = helm_handler._release_configurations(
+            {"EnabledCharts": ["keda"], "Charts": {}}
+        )
+        names = {release for release, _ in configurations}
+        # Still in the expected set (from charts.yaml), so validation asserts
+        # their ABSENCE — flipping a toggle off is verified, not ignored.
+        assert {"kubeflow-trainer", "mlflow"} <= names
+        assert enabled == {"keda"}
+
+    def test_release_metadata_resolves_for_both_charts(self):
+        configurations, _ = helm_handler._release_configurations(
+            {"EnabledCharts": [], "Charts": {}}
+        )
+        by_name = dict(configurations)
+        chart, version, namespace = helm_handler._release_metadata(
+            "kubeflow-trainer", by_name["kubeflow-trainer"]
+        )
+        assert (chart, namespace) == ("kubeflow-trainer", "kubeflow-trainer")
+        assert version == by_name["kubeflow-trainer"]["version"]
+        chart, version, namespace = helm_handler._release_metadata("mlflow", by_name["mlflow"])
+        assert (chart, namespace) == ("mlflow", "monitoring")
+        assert version == by_name["mlflow"]["version"]

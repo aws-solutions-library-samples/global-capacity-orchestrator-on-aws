@@ -70,7 +70,7 @@ from mission.sampling import (  # noqa: E402
 
 from gco.bedrock import (  # noqa: E402
     BedrockFTUFormNotAcceptedError,
-    get_default_bedrock_model_id,
+    get_default_mission_model_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -158,8 +158,12 @@ _CURATED_MODELS: tuple[str, ...] = (
 
 
 def _default_models() -> tuple[str, ...]:
-    """Return the configured default plus the curated set, in stable order."""
-    return tuple(dict.fromkeys((get_default_bedrock_model_id(), *_CURATED_MODELS)))
+    """Return the configured Mission default plus the curated set, in stable order.
+
+    Scaffold fixtures replay Mission sampling responses, so the canonical
+    member of the set follows ``context.bedrock.mission_default_model_id``.
+    """
+    return tuple(dict.fromkeys((get_default_mission_model_id(), *_CURATED_MODELS)))
 
 
 _FIXTURE_DIR = _REPO_ROOT / "tests" / "fixtures" / "scaffold_responses"
@@ -210,7 +214,7 @@ class _PromptAdapter:
 
 def _backend_for_capture(model_id: str, region: str) -> BedrockSamplingBackend:
     """Preserve canonical-policy provenance while keeping overrides explicit."""
-    if model_id == get_default_bedrock_model_id():
+    if model_id == get_default_mission_model_id():
         return BedrockSamplingBackend.from_canonical_default(region=region)
     return BedrockSamplingBackend(model_id=model_id, region=region)
 

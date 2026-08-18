@@ -67,7 +67,7 @@ touched. In a clean checkout the tool finds about 70 references across roughly
 |-----------|---------|----------------|
 | Repository URLs | `github.com/awslabs/global-capacity-orchestrator-on-aws` | CI badges, issue links, `tree`/`blob` links, `pyproject.toml` project URLs |
 | SSH clone URLs | `git@github.com:awslabs/...` | The clone commands in `README.md` and `QUICKSTART.md` |
-| GitHub Pages URL | `awslabs.github.io/global-capacity-orchestrator-on-aws` | The coverage report site |
+| GitHub Pages URL | `awslabs.github.io/global-capacity-orchestrator-on-aws` | The published site: orientation wiki at the root, coverage report at `/coverage/`, badge JSON at `/coverage-badge.json` (in `mkdocs.yml`, `wiki/*.md`, the README badge, and the wiki guard test) |
 | Percent-encoded Pages URL | `awslabs.github.io%2Fglobal-capacity...` | The shields.io coverage badge embeds the Pages URL as a query parameter. Missing this leaves the badge reporting upstream's coverage while every other badge reports yours |
 | Bare `owner/repo` slug | `"github_repo": "awslabs/global-capacity-orchestrator-on-aws"` | The **OIDC trust-policy subject**. Until this changes, your workflows cannot assume the deploy role |
 | Bare repository name | `cd global-capacity-orchestrator-on-aws`, `/path/to/global-capacity-orchestrator-on-aws` | Clone directory names and the MCP server setup paths |
@@ -128,11 +128,16 @@ anything that mentions forking. See
 
 ### Enable GitHub Pages
 
-The coverage badge and report are published by
+The project site is published by
 [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) to
-`https://<owner>.github.io/<repo>/`. Enable Pages on your repository —
-**Settings > Pages**, source **GitHub Actions** — or the badge 404s even with a
-correct URL.
+`https://<owner>.github.io/<repo>/`: the orientation wiki (built with MkDocs
+from [`wiki/`](../wiki)) is served at the site root, the HTML coverage report
+at `/coverage/`, and the badge endpoint JSON at `/coverage-badge.json`. Enable
+Pages on your repository — **Settings > Pages**, source **GitHub Actions** —
+or the site and badge 404 even with correct URLs. The migration rewrites the
+wiki's own URLs (`mkdocs.yml` `site_url`/`repo_url`, the nav's coverage link,
+and every GitHub deep link in `wiki/*.md`), so your fork's wiki links to your
+fork's files.
 
 ### Replace CODEOWNERS
 

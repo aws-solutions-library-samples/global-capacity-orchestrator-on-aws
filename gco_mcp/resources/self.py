@@ -103,7 +103,9 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "add_deployment_region": FLAG_CONFIG_MANAGEMENT,
     "remove_deployment_region": FLAG_CONFIG_MANAGEMENT,
     "set_deployment_region": FLAG_CONFIG_MANAGEMENT,
-    "set_default_bedrock_model": FLAG_CONFIG_MANAGEMENT,
+    "set_mission_default_model": FLAG_CONFIG_MANAGEMENT,
+    "set_capacity_advisor_default_model": FLAG_CONFIG_MANAGEMENT,
+    "set_claude_code_default_model": FLAG_CONFIG_MANAGEMENT,
     # Other destructive module-level gates
     "delete_job": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_inference": FLAG_DESTRUCTIVE_OPERATIONS,

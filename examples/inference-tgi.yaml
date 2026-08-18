@@ -47,20 +47,30 @@ spec:
         project: gco
         gco.io/type: inference
     spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+      # The TGI container runs as the image's default user (root): its
+      # startup refreshes the dynamic-linker cache for the bundled conda
+      # libraries, and as an unprivileged user the launcher dies unable to
+      # load libpython ("error while loading shared libraries") — observed
+      # live in run ex241-4bf01801.
       containers:
       - name: tgi
         image: ghcr.io/huggingface/text-generation-inference:3.3.7
         securityContext:
           allowPrivilegeEscalation: false
         ports:
-        - containerPort: 80
+        - containerPort: 8080
         env:
         - name: MODEL_ID
           value: "mistralai/Mistral-7B-Instruct-v0.3"
+        # The TGI launcher reads every flag from the environment (exactly
+        # how MODEL_ID is injected); serve on 8080 rather than the image
+        # default of 80 so nothing depends on binding a privileged port.
+        - name: PORT
+          value: "8080"
+        # Keep the model cache on the pod-lifetime volume below rather than
+        # the container's writable layer.
+        - name: HUGGINGFACE_HUB_CACHE
+          value: "/data"
         - name: MAX_INPUT_TOKENS
           value: "2048"
         - name: MAX_TOTAL_TOKENS
@@ -76,18 +86,31 @@ spec:
             cpu: "8"
             memory: "32Gi"
             nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /data
+        # Model download + load can take many minutes for Mistral-7B; the
+        # startup probe owns that window (up to 20 min) so the liveness
+        # probe never kills a pod that is still fetching weights.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          periodSeconds: 15
+          failureThreshold: 80
         livenessProbe:
           httpGet:
             path: /health
-            port: 80
-          initialDelaySeconds: 180
+            port: 8080
           periodSeconds: 15
         readinessProbe:
           httpGet:
             path: /health
-            port: 80
-          initialDelaySeconds: 90
+            port: 8080
           periodSeconds: 10
+      volumes:
+      - name: model-cache
+        emptyDir: {}
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal
@@ -110,6 +133,6 @@ spec:
     app: tgi-mistral
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP
   type: ClusterIP

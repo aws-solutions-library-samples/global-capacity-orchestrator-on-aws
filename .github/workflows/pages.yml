@@ -1,32 +1,43 @@
 # =============================================================================
-# pages.yml — Publish the coverage report to GitHub Pages
+# pages.yml — Publish the wiki + coverage report to GitHub Pages
 # =============================================================================
 #
-# Deploys the HTML coverage report (htmlcov/) plus the shields.io badge
-# endpoint JSON to GitHub Pages, served at
-# https://awslabs.github.io/global-capacity-orchestrator-on-aws/.
+# Deploys ONE Pages artifact containing two things:
+#   /            — the orientation wiki, built with MkDocs from wiki/ and
+#                  mkdocs.yml at the exact commit the triggering Unit Tests
+#                  run measured (workflow_run.head_sha)
+#   /coverage/   — the HTML coverage report (htmlcov/) from that same run,
+#                  copied as-is (no pytest re-run, no regeneration)
+#   /coverage-badge.json — the shields.io badge endpoint JSON, kept at the
+#                  site ROOT so the README badge's percent-encoded shields
+#                  URL never changes
+# served at https://awslabs.github.io/global-capacity-orchestrator-on-aws/.
+# GitHub Pages via Actions supports exactly one deployment per repository,
+# which is why the wiki and the coverage report ship together.
 #
 # Why a separate workflow (not a job inside unit-tests.yml)?
-#   Publishing the coverage site is best-effort infrastructure, not a test.
+#   Publishing the site is best-effort infrastructure, not a test.
 #   When the GitHub Pages backend stalls — the submitted deployment sits in
 #   `deployment_queued` / `in_progress` and never finalizes — a deploy job
 #   living inside "Unit Tests" drags that whole workflow red even though every
 #   test passed. Giving the deploy its own workflow gives it an independent
-#   status: a Pages outage surfaces here, on "Deploy Pages", and the
-#   "Unit Tests" gate keeps reporting purely on tests.
+#   status: a Pages outage (or a wiki build failure) surfaces here, on
+#   "Deploy Pages", and the "Unit Tests" gate keeps reporting purely on tests.
 #
 # How it gets the report:
 #   `workflow_run` fires when "Unit Tests" finishes on main. This job then
 #   downloads the `pytest-coverage` artifact from that run (via
 #   actions/download-artifact with run-id + github-token — the documented way
-#   to pull an artifact from another run), regenerates the coverage badge,
-#   packages htmlcov/ as a Pages artifact, and deploys it. No pytest re-run,
-#   so there's no duplicate compute and the published report is exactly the
-#   one the gate measured.
+#   to pull an artifact from another run), builds the wiki from the same
+#   commit, regenerates the coverage badge, merges everything into one site
+#   tree, and deploys it.
 #
 # Note: workflow_run always uses the workflow definition from the default
 # branch, so edits here only take effect once merged to main (they can't be
-# exercised from a PR branch).
+# exercised from a PR branch). The PR-side `lint:mkdocs:strict` job in
+# lint.yml runs the identical wiki build, so a broken wiki fails pre-merge;
+# the packaging steps below (mv + badge path) are the only deploy-exclusive
+# logic.
 # =============================================================================
 
 name: Deploy Pages
@@ -57,13 +68,16 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Job-level permissions replace the top-level block for this job. This job
-    # does not check out the repo, so it needs no `contents` scope — only:
+    timeout-minutes: 15
+    # Job-level permissions replace the top-level block for this job:
+    #   contents: read — checkout of the triggering commit, so the wiki is
+    #                    built from the exact code the published coverage
+    #                    measured
     #   pages: write    — actions/deploy-pages finalizes the deployment
     #   id-token: write — OIDC token the deploy action authenticates with
     #   actions: read   — download-artifact reads an artifact from another run
     permissions:
+      contents: read
       pages: write
       id-token: write
       actions: read
@@ -71,6 +85,29 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout
+      - name: Check out the commit the Unit Tests run measured
+        # The pwn-request pattern this rule targets is checking out ATTACKER
+        # code (a fork PR's head) into a privileged workflow_run context. The
+        # job-level `if:` above admits only successful `push` events from
+        # THIS repository's own default branch — never pull_request events,
+        # never fork heads — so head_sha here is always a commit already
+        # merged to main. Reviewed as a false positive.
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install the docs toolchain
+        run: pip install -e ".[docs]"
+      - name: Build the wiki (strict)
+        # Identical build to the PR-side lint:mkdocs:strict job. strict mode
+        # fails the deploy on any broken link or nav entry rather than
+        # publishing a damaged site; the previous deployment keeps serving.
+        run: mkdocs build --strict
       - name: Download coverage artifact from the Unit Tests run
         uses: actions/download-artifact@v8
         with:
@@ -78,12 +115,24 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
           path: coverage-data
+      - name: Merge the coverage report into the site at /coverage/
+        # The exact htmlcov/ tree from the triggering run, unmodified —
+        # htmlcov/index.html becomes /coverage/index.html. `mv` fails loudly
+        # if either side is missing, which is the desired behavior.
+        run: |
+          set -euo pipefail
+          mv coverage-data/htmlcov site/coverage
       - name: Generate shields.io badge endpoint JSON
         # coverage.json is written by coverage.py during the Unit Tests run
         # and ships inside the pytest-coverage artifact. Pull
         # totals.percent_covered, round to one decimal, and emit the
         # shields.io endpoint schema so the README badge can link to a static
         # JSON on Pages without calling a third-party service.
+        #
+        # The badge JSON stays at the SITE ROOT (site/coverage-badge.json):
+        # the README badge's img src percent-encodes that exact root URL, so
+        # keeping it there means the shields URL — and its fork-migration
+        # rewrite rule — never change.
         #
         # Bright green marks the same 90% --cov-fail-under floor enforced in
         # unit-tests.yml, keeping the published badge aligned with the test
@@ -106,18 +155,17 @@ jobs:
               "message": f"{pct:.1f}%",
               "color": color,
           }
-          with open("coverage-data/htmlcov/coverage-badge.json", "w") as f:
+          with open("site/coverage-badge.json", "w") as f:
               json.dump(badge, f)
           print(f"Coverage: {pct:.1f}% ({color})")
           PY
-      - name: Package htmlcov/ as a Pages artifact
+      - name: Package the merged site as a Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          # htmlcov/ holds index.html (coverage.py's report root) plus the
-          # coverage-badge.json written above. GitHub Pages serves this at
-          # the site root, so the README badge and report links keep working
-          # unchanged.
-          path: coverage-data/htmlcov
+          # site/ holds the built wiki at the root, the coverage report under
+          # coverage/, and coverage-badge.json at the root — the single
+          # deployment GitHub Pages serves.
+          path: site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

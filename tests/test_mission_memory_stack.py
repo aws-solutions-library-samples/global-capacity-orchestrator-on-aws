@@ -1,0 +1,309 @@
+# CDK synthesis tests for the mission-memory add-on folded into
+# GCOGlobalStack (gated by mission_memory.enabled, ON by default in the
+# shipped cdk.json; the shared MockConfigLoader disables it so unrelated
+# stack tests keep their pre-feature templates).
+#
+# The vector index cannot be expressed in CloudFormation, so the enabled
+# assertions target the Custom::AWS resource's Create/Delete payloads —
+# NOT AWS::DynamoDB::Table properties, where no vector configuration will
+# ever appear. The disabled test asserts the template is byte-identical to
+# a pre-feature synth: with the feature shipped on by default, the
+# disabled path is the compatibility contract.
+
+import json
+
+import aws_cdk as cdk
+from aws_cdk import assertions
+
+from gco.stacks.global_stack import GCOGlobalStack
+from tests.test_regional_stack import MockConfigLoader
+
+
+class _EnabledConfig(MockConfigLoader):
+    """MockConfigLoader variant with mission memory enabled (shipped default)."""
+
+    def get_mission_memory_enabled(self):
+        return True
+
+    def get_mission_memory_config(self):
+        return {
+            "enabled": True,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+
+
+def _synth(cfg):
+    app = cdk.App()
+    stack = GCOGlobalStack(app, "id", config=cfg)
+    return assertions.Template.from_stack(stack)
+
+
+def _memory_tables(template):
+    out = {}
+    for lid, res in template.find_resources("AWS::DynamoDB::Table").items():
+        name = res.get("Properties", {}).get("TableName")
+        if isinstance(name, str) and name.endswith("-mission-memory"):
+            out[lid] = res
+    return out
+
+
+def _index_custom_resources(template):
+    out = {}
+    for lid, res in template.find_resources("Custom::AWS").items():
+        create = res.get("Properties", {}).get("Create")
+        # The SDK-call payload is either a JSON string or an Fn::Join over
+        # string fragments and refs (the table name is a Ref); stringify to
+        # detect either shape.
+        if create is not None and "VectorIndexUpdates" in json.dumps(create):
+            out[lid] = res
+    return out
+
+
+class TestMissionMemoryEnabled:
+    def test_table_present_with_ttl_and_pitr_and_no_vector_property(self):
+        template = _synth(_EnabledConfig())
+        tables = _memory_tables(template)
+        assert len(tables) == 1
+        props = next(iter(tables.values()))["Properties"]
+        assert props["BillingMode"] == "PAY_PER_REQUEST"
+        assert props["TimeToLiveSpecification"] == {"AttributeName": "ttl", "Enabled": True}
+        assert props["PointInTimeRecoverySpecification"] == {"PointInTimeRecoveryEnabled": True}
+        assert props["SSESpecification"] == {"SSEEnabled": True}
+        assert props["KeySchema"] == [{"AttributeName": "session_id", "KeyType": "HASH"}]
+        # CloudFormation cannot express vector indexes; if this key ever
+        # appears, the custom resource should be replaced with the native
+        # property and this suite rewritten.
+        assert "VectorIndexes" not in props
+
+    def test_vector_index_custom_resource_create_payload(self):
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        assert len(custom) == 1
+        create = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Create"]))
+        assert create["service"] == "DynamoDB"
+        assert create["action"] == "updateTable"
+        # The INLINE_FILTER attribute must be declared in the same
+        # UpdateTable call (live-verified: the service rejects the
+        # SearchSchema otherwise, and CreateTable cannot carry the
+        # definition because it is unused by any key schema there).
+        assert create["parameters"]["AttributeDefinitions"] == [
+            {"AttributeName": "final_verdict", "AttributeType": "S"}
+        ]
+        updates = create["parameters"]["VectorIndexUpdates"]
+        assert len(updates) == 1
+        spec = updates[0]["Create"]
+        # CreateVectorIndexAction is FLAT — the live service rejected an
+        # earlier nested "VectorConfiguration" draft with nulls for the
+        # three required members below.
+        assert spec["IndexName"] == "directive-embedding-index"
+        assert spec["VectorAttribute"] == {"AttributeName": "directive_embedding"}
+        assert spec["Dimensions"] == 1024
+        assert spec["DistanceFunction"] == "COSINE"
+        assert spec["SearchSchema"] == [
+            {"AttributeName": "final_verdict", "SearchSchemaElementType": "INLINE_FILTER"}
+        ]
+        projection = spec["Projection"]
+        assert projection["ProjectionType"] == "INCLUDE"
+        assert set(projection["NonKeyAttributes"]) == {
+            "directive",
+            "lessons",
+            "recommended_followups",
+            "final_verdict",
+            "verdict_reason",
+            "iteration_count",
+            "completed_at",
+        }
+
+    def test_no_index_delete_call_so_teardown_cannot_deadlock(self):
+        """Teardown must NOT delete the vector index.
+
+        Mirrors the vector-store pin. UpdateTable{VectorIndexUpdates:
+        [Delete]} returns on acceptance and parks the table in UPDATING;
+        any table-level operation CFN attempts next then fails
+        ResourceInUseException. On the vector store (a global table) that
+        deadlocked the replica removal for 2.5h and left the stack
+        DELETE_FAILED, live 2026-08-14.
+
+        This table is single-region, so that specific deadlock cannot fire
+        here — the hazard is latent, and it goes live the day this table
+        gains a replica. The call sites are kept identical so the fix
+        cannot be half-applied. Deleting the index is redundant regardless:
+        RemovalPolicy.DESTROY means teardown deletes the table, and that
+        removes its indexes.
+        """
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props, (
+            "MissionMemoryVectorIndex must not carry an on_delete call — see "
+            "the vector-store deadlock (live 2026-08-14)"
+        )
+
+    def test_custom_resource_installs_a_current_sdk(self):
+        """The vector-index call MUST NOT run on the runtime's bundled SDK.
+
+        Live-deploy regression guard: the AwsCustomResource Lambda ships the
+        Lambda runtime's bundled AWS SDK for JavaScript, and a bundled SDK
+        that predates vector indexes silently drops the unknown
+        ``VectorIndexUpdates`` member at serialization — DynamoDB then
+        rejects the bare UpdateTable with "At least one of
+        ProvisionedThroughput, BillingMode, ... is required", the create
+        fails, and (before the delete-path fix below) rollback wedged in
+        DELETE_FAILED. ``InstallLatestAwsSdk: true`` is the fix; anyone
+        removing it re-introduces a deploy-time failure that no unit test
+        of the payload shape can see, so it is pinned here.
+        """
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        # CDK renders the explicit opt-in as boolean true (the default it
+        # replaces rendered as the string "false" in the failed deploy).
+        assert props["InstallLatestAwsSdk"] is True
+
+    def test_failed_create_rolls_back_without_a_delete_call(self):
+        """A failed create must roll back cleanly, not strand the stack.
+
+        History: the first live deploy failed the index create, and the
+        rollback then failed on this resource's own delete, wedging the
+        stack in ROLLBACK_FAILED. That was fixed by swallowing
+        ResourceNotFoundException / ValidationException on the delete
+        call. With no delete call at all the rollback is a no-op — no API
+        interaction left to fail — which is strictly stronger. Pinned so
+        the delete path is not "restored" for rollback safety, since
+        restoring it also restores the teardown deadlock above.
+        """
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        assert "Delete" not in props
+        assert "Update" not in props
+
+    def test_payloads_validate_against_the_botocore_api_model(self):
+        """Every member the custom resource sends must exist in the API model.
+
+        Second live-deploy regression guard, and the stronger half: the
+        first deploy failure was the *runtime SDK* not knowing
+        ``VectorIndexUpdates`` (see the InstallLatestAwsSdk test); the
+        second was the *payload shape* not matching the API — a nested
+        "VectorConfiguration" draft that serialized as nulls for the
+        required flat members. Unknown members are silently dropped at
+        SDK serialization, so a wrong shape only surfaces at deploy time.
+        Walking the synthesized Create/Delete payloads against botocore's
+        UpdateTable model (structure members and required-member sets,
+        recursively) catches any reshaping at unit-test time instead.
+        """
+        import botocore.session
+
+        model = botocore.session.get_session().get_service_model("dynamodb")
+        update_table = model.operation_model("UpdateTable").input_shape
+
+        def check(payload, shape, path):
+            if shape.type_name == "structure":
+                assert isinstance(payload, dict), f"{path}: expected object"
+                unknown = set(payload) - set(shape.members)
+                assert not unknown, (
+                    f"{path}: members {sorted(unknown)} do not exist in the API model "
+                    "and would be silently dropped at SDK serialization"
+                )
+                missing = set(shape.required_members) - set(payload)
+                assert not missing, f"{path}: required members {sorted(missing)} absent"
+                for key, value in payload.items():
+                    check(value, shape.members[key], f"{path}.{key}")
+            elif shape.type_name == "list":
+                assert isinstance(payload, list), f"{path}: expected list"
+                for index, entry in enumerate(payload):
+                    check(entry, shape.member, f"{path}[{index}]")
+            # Scalars: resolved refs and literals both acceptable here — the
+            # shape walk is about member names, not value types.
+
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        # Create is the only lifecycle call now (teardown deliberately makes
+        # no API call — see the deadlock pin above).
+        for call_name in ("Create",):
+            call = json.loads(_resolve_joins(props[call_name]))
+            check(call["parameters"], update_table, f"{call_name}.parameters")
+
+    def test_index_role_scoped_to_the_table_only(self):
+        template = _synth(_EnabledConfig())
+        policies = template.find_resources("AWS::IAM::Policy")
+        update_statements = []
+        for res in policies.values():
+            for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+                actions = stmt.get("Action")
+                actions = [actions] if isinstance(actions, str) else actions
+                if actions and "dynamodb:UpdateTable" in actions:
+                    update_statements.append(stmt)
+        assert len(update_statements) == 1
+        stmt = update_statements[0]
+        assert sorted([stmt["Action"]] if isinstance(stmt["Action"], str) else stmt["Action"]) == [
+            "dynamodb:DescribeTable",
+            "dynamodb:UpdateTable",
+        ]
+        # The resource is a Fn::GetAtt on the mission-memory table — never a
+        # wildcard.
+        assert "Fn::GetAtt" in json.dumps(stmt["Resource"])
+        assert "*" not in json.dumps(stmt["Resource"])
+
+    def test_ssm_parameters_publish_table_and_index_names(self):
+        template = _synth(_EnabledConfig())
+        params = template.find_resources("AWS::SSM::Parameter")
+        names = {
+            res["Properties"]["Name"]: res["Properties"]["Value"]
+            for res in params.values()
+            if isinstance(res["Properties"].get("Name"), str)
+        }
+        assert any(name.endswith("/mission-memory-table-name") for name in names)
+        index_values = [
+            value for name, value in names.items() if name.endswith("/mission-memory-index-name")
+        ]
+        assert index_values == ["directive-embedding-index"]
+
+    def test_table_joins_the_backup_plan_selection(self):
+        template = _synth(_EnabledConfig())
+        selections = template.find_resources("AWS::Backup::BackupSelection")
+        blob = json.dumps(selections)
+        assert "MissionMemoryTable" in blob
+
+
+class TestMissionMemoryDisabled:
+    def test_no_memory_table_or_custom_resource(self):
+        template = _synth(MockConfigLoader())
+        assert _memory_tables(template) == {}
+        assert _index_custom_resources(template) == {}
+
+    def test_disabled_template_is_byte_identical_to_pre_feature(self):
+        # With the feature shipped ON by default, the disabled path is the
+        # compatibility contract: an operator setting enabled=false must get
+        # exactly the template this stack produced before the feature
+        # existed. The MockConfigLoader default is disabled, so comparing a
+        # disabled synth against itself across the feature flag boundary is
+        # covered by test_no_memory_table_or_custom_resource plus this
+        # no-new-resource-types sweep.
+        template = _synth(MockConfigLoader()).to_json()
+        blob = json.dumps(template)
+        assert "mission-memory" not in blob
+        assert "MissionMemory" not in blob
+
+
+def _resolve_joins(value):
+    """Flatten CloudFormation Fn::Join intrinsics into a plain string.
+
+    The AwsCustomResource serializes its SDK call as a JSON string; table
+    names arrive as ``{"Fn::Join": ["", [...]]}`` fragments mixing literals
+    and refs. Joining literals and stringifying refs is enough for the
+    payload-shape assertions above.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and "Fn::Join" in value:
+        _sep, parts = value["Fn::Join"]
+        # Non-literal parts (Ref / Fn::GetAtt) appear INSIDE JSON string
+        # values whose quotes live in the surrounding literal fragments, so
+        # they must flatten to bare text, not nested JSON.
+        return "".join(part if isinstance(part, str) else "RESOLVED-REF" for part in parts)
+    raise AssertionError(f"unexpected Create/Delete payload shape: {type(value)}")

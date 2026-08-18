@@ -85,9 +85,9 @@ class MockConfigLoader:
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
-                "max_cpu_per_manifest": "10",
-                "max_memory_per_manifest": "32Gi",
-                "max_gpu_per_manifest": 4,
+                "max_cpu_per_manifest": "24",
+                "max_memory_per_manifest": "96Gi",
+                "max_gpu_per_manifest": 8,
             },
         }
 
@@ -140,6 +140,47 @@ class MockConfigLoader:
             "enabled_regions": [],
         }
 
+    def get_mission_memory_enabled(self):
+        return bool(self.get_mission_memory_config()["enabled"])
+
+    def get_mission_memory_config(self):
+        # Disabled in the mock so pre-existing stack-test templates stay
+        # unchanged; the mission-memory stack tests override this to exercise
+        # the enabled (shipped-default) path explicitly.
+        return {
+            "enabled": False,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+
+    def get_vector_store_enabled(self):
+        return bool(self.get_vector_store_config()["enabled"])
+
+    def get_vector_store_config(self):
+        # Disabled in the mock (matching the shipped default) so pre-existing
+        # stack-test templates stay unchanged; the vector-store stack tests
+        # override this to exercise the enabled path explicitly.
+        return {
+            "enabled": False,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "embedding_model_id": "amazon.titan-embed-text-v2:0",
+            "replica_regions": [],
+            "corpus_prefix": "vector-corpus/",
+        }
+
+    def get_vector_store_replica_regions(self):
+        # Mirrors ConfigLoader.get_vector_store_replica_regions: configured
+        # replica_regions when non-empty, else the regional deployment list,
+        # both minus the global region (the primary).
+        config = self.get_vector_store_config()
+        configured = [str(region) for region in config["replica_regions"]]
+        candidates = configured or self.get_regions()
+        global_region = self.get_global_region()
+        return [region for region in candidates if region != global_region]
+
     def get_cluster_observability_config(self):
         # Mirrors the on-by-default cdk.json cluster_observability defaults so
         # regional synth exercises the real (enabled) observability path.
@@ -152,10 +193,16 @@ class MockConfigLoader:
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+            "mlflow": {"enabled": True, "persistence_size": "10Gi"},
         }
 
     def get_cluster_observability_enabled(self):
         return bool(self.get_cluster_observability_config()["enabled"])
+
+    def get_mlflow_enabled(self):
+        # The real loader returns the conjunction with cluster observability.
+        obs = self.get_cluster_observability_config()
+        return bool(obs["mlflow"]["enabled"]) and bool(obs["enabled"])
 
     def get_cost_monitoring_config(self):
         # Mirrors the on-by-default cdk.json cost_monitoring defaults so
@@ -2240,7 +2287,7 @@ class TestQueueProcessorConfig:
         assert "gco-jobs" in policy["allowed_namespaces"]
         # Resource caps now live under the shared job_validation_policy
         # section (both processors read the same values).
-        assert policy["resource_quotas"]["max_gpu_per_manifest"] == 4
+        assert policy["resource_quotas"]["max_gpu_per_manifest"] == 16
 
     def test_queue_processor_defaults_match_docs(self):
         """Ensure cdk.json defaults match what's documented in CUSTOMIZATION.md."""
@@ -2253,8 +2300,8 @@ class TestQueueProcessorConfig:
 
         assert qp["successful_jobs_history"] == 20
         assert qp["failed_jobs_history"] == 10
-        assert policy["resource_quotas"]["max_cpu_per_manifest"] == "10"
-        assert policy["resource_quotas"]["max_memory_per_manifest"] == "32Gi"
+        assert policy["resource_quotas"]["max_cpu_per_manifest"] == "384"
+        assert policy["resource_quotas"]["max_memory_per_manifest"] == "4096Gi"
 
 
 class TestAuroraPgvector:
@@ -3032,3 +3079,76 @@ class TestRegionalStackEksControlPlaneAzExclusion:
         # No credentials env => no filtering => control plane uses all private subnets.
         assert stack.eks_unsupported_az_names == []
         assert {s.availability_zone for s in stack.eks_control_plane_subnets} == set(self._SIX_AZS)
+
+
+class TestAddonTolerationShapes:
+    """Accelerator tolerations must follow each add-on component's shape.
+
+    DaemonSet-shaped components (CSI node agents, the Pod Identity agent)
+    need the accelerator-taint tolerations to run on GPU/Neuron/EFA nodes.
+    Deployment-shaped components (metrics-server, CSI controllers) must NOT
+    carry them: a toleration makes EKS Auto Mode consider the tainted GPU
+    pools for plain CPU pods, and live release validation run
+    sched241-350ffc7d observed exactly that — two g4dn.xlarge NodeClaims
+    requesting ``nvidia.com/gpu: "0"`` launched for metrics-server/CSI
+    controller replicas during the deploy pod surge, then churned and
+    failed GPU DaemonSet convergence gates.
+    """
+
+    @staticmethod
+    def _synthesize_addons() -> dict[str, str]:
+        """Synthesize the regional stack; return AddonName -> ConfigurationValues."""
+        from unittest.mock import MagicMock, patch
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-addon-tolerations",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+            template = assertions.Template.from_stack(stack)
+        addons: dict[str, str] = {}
+        for resource in template.find_resources("AWS::EKS::Addon").values():
+            properties = resource.get("Properties", {})
+            addons[str(properties.get("AddonName"))] = str(
+                properties.get("ConfigurationValues", "")
+            )
+        return addons
+
+    def test_deployment_shaped_addons_do_not_tolerate_accelerator_taints(self) -> None:
+        addons = self._synthesize_addons()
+        assert "nvidia.com/gpu" not in addons.get("metrics-server", ""), (
+            "metrics-server is Deployment-shaped; an accelerator toleration lets "
+            "Auto Mode provision GPU nodes for it"
+        )
+        efs_config = addons.get("aws-efs-csi-driver", "")
+        assert (
+            '"controller"' not in efs_config
+            or "nvidia.com/gpu" not in (efs_config.split('"controller"', 1)[1])
+        ), "the EFS CSI controller (Deployment) must not tolerate accelerator taints"
+
+    def test_daemonset_shaped_addons_tolerate_accelerator_taints(self) -> None:
+        addons = self._synthesize_addons()
+        efs_config = addons.get("aws-efs-csi-driver", "")
+        assert '"node"' in efs_config and "nvidia.com/gpu" in efs_config, (
+            "the EFS CSI node DaemonSet must tolerate accelerator taints so "
+            "volumes mount on GPU/Neuron/EFA nodes"
+        )
+        assert "nvidia.com/gpu" in addons.get("eks-pod-identity-agent", "")

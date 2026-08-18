@@ -43,6 +43,45 @@ from gco.stacks.constants import (
 
 logger = logging.getLogger(__name__)
 
+#: CDK context key that force-enables optional infrastructure features for one
+#: deploy without touching cdk.json — the infrastructure sibling of the
+#: ``helm_enabled_overrides`` context handled in ``gco/stacks/regional_stack.py``.
+#: Used by validation harnesses (``gco examples validate``) whose preflight
+#: requires a clean worktree.
+FEATURE_OVERRIDE_CONTEXT_KEY = "feature_enabled_overrides"
+
+#: The cdk.json blocks whose ``enabled`` flag the override may force on. Kept
+#: deliberately narrow: each of these is a self-contained regional feature the
+#: examples exercise (Aurora pgvector, Valkey Serverless, FSx for Lustre).
+FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store"})
+
+
+def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
+    """Parse and validate the ``feature_enabled_overrides`` context value.
+
+    Accepts a comma-separated string (the only shape the CDK CLI can pass with
+    ``--context``) or a list of strings (cdk.json-style). Unknown names raise
+    at synth time with the valid list — identical semantics to
+    ``_parse_helm_enabled_overrides``.
+    """
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        names = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, list) and all(isinstance(part, str) for part in raw):
+        names = [part.strip() for part in raw if part.strip()]
+    else:
+        raise ConfigValidationError(
+            f"{FEATURE_OVERRIDE_CONTEXT_KEY} must be a comma-separated string or string list"
+        )
+    unknown = sorted(set(names) - FEATURE_OVERRIDE_KEYS)
+    if unknown:
+        valid = ", ".join(sorted(FEATURE_OVERRIDE_KEYS))
+        raise ConfigValidationError(
+            f"Unknown {FEATURE_OVERRIDE_CONTEXT_KEY} name(s): {', '.join(unknown)}. Valid: {valid}"
+        )
+    return frozenset(names)
+
 
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
@@ -127,6 +166,11 @@ class ConfigLoader:
 
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
+
+        # Validate mission-memory configuration (recall across mission sessions)
+        self._validate_mission_memory_config()
+        # Validate the vector-store configuration (global workload RAG corpus)
+        self._validate_vector_store_config()
 
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
@@ -680,6 +724,10 @@ class ConfigLoader:
         - ``retention_days`` / ``poll_interval_minutes``: positive ints if present.
         - ``watch_instance_types`` / ``enabled_regions``: lists of strings if present.
         - every region in ``enabled_regions`` must be a known AWS region.
+        - ``spot_score_target_capacities``: non-empty list of positive
+          integers (booleans rejected), every value a member of the supported
+          set exported by ``cli/capacity/history.py`` — metric fields are
+          statically named, so an unsupported capacity has nowhere to land.
         """
         historical_ctx = self.app.node.try_get_context("historical")
         if not isinstance(historical_ctx, dict):
@@ -728,6 +776,205 @@ class ConfigLoader:
                 raise ConfigValidationError(
                     f"historical.enabled_regions contains invalid region '{region}'. "
                     f"Valid regions: {sorted(self.VALID_REGIONS)}"
+                )
+
+        if "spot_score_target_capacities" in historical_ctx:
+            # Function-local import: cli/capacity/history.py owns the supported
+            # set and the capacity->field naming rule, and imports nothing from
+            # gco, so validation and storage cannot drift apart.
+            from cli.capacity.history import SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES
+
+            capacities = historical_ctx["spot_score_target_capacities"]
+            if (
+                not isinstance(capacities, list)
+                or not capacities
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool) and value > 0
+                    for value in capacities
+                )
+            ):
+                raise ConfigValidationError(
+                    "historical.spot_score_target_capacities must be a non-empty list "
+                    f"of positive integers, got {capacities!r}"
+                )
+            for value in capacities:
+                if value not in SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES:
+                    raise ConfigValidationError(
+                        "historical.spot_score_target_capacities contains unsupported "
+                        f"target capacity {value!r}. Supported target capacities: "
+                        f"{list(SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES)} (each needs a "
+                        "statically declared metric field; see cli/capacity/history.py)"
+                    )
+
+    #: Distance functions the DynamoDB vector-index API accepts. The choice is
+    #: immutable after index creation, so a typo must fail at synth time.
+    MISSION_MEMORY_DISTANCE_FUNCTIONS = frozenset({"COSINE", "DOT_PRODUCT", "EUCLIDEAN"})
+
+    #: DynamoDB vector-index maximum dimensionality (service quota).
+    MISSION_MEMORY_MAX_DIMENSIONS = 4096
+
+    def _validate_mission_memory_config(self) -> None:
+        """Validate the ``mission_memory`` block in cdk.json.
+
+        The block is optional; absence means the shipped defaults apply
+        (feature on). When present, types are validated so a typo fails fast
+        at synth time — especially the one-way-door fields (``dimensions``,
+        ``distance_function``) that cannot be corrected after the vector
+        index exists:
+
+        - ``enabled``: bool if present.
+        - ``retention_days`` / ``top_k``: positive ints if present.
+        - ``dimensions``: positive int <= 4096 if present.
+        - ``distance_function``: one of COSINE / DOT_PRODUCT / EUCLIDEAN.
+        """
+        mission_memory_ctx = self.app.node.try_get_context("mission_memory")
+        if not isinstance(mission_memory_ctx, dict):
+            return
+
+        if "enabled" in mission_memory_ctx and not isinstance(mission_memory_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"mission_memory.enabled must be a bool, got "
+                f"{type(mission_memory_ctx['enabled']).__name__}: "
+                f"{mission_memory_ctx['enabled']!r}"
+            )
+
+        for int_field in ("retention_days", "top_k"):
+            if int_field not in mission_memory_ctx:
+                continue
+            value = mission_memory_ctx[int_field]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ConfigValidationError(
+                    f"mission_memory.{int_field} must be a positive integer, got {value!r}"
+                )
+
+        if "dimensions" in mission_memory_ctx:
+            dimensions = mission_memory_ctx["dimensions"]
+            if (
+                not isinstance(dimensions, int)
+                or isinstance(dimensions, bool)
+                or dimensions <= 0
+                or dimensions > self.MISSION_MEMORY_MAX_DIMENSIONS
+            ):
+                raise ConfigValidationError(
+                    "mission_memory.dimensions must be a positive integer <= "
+                    f"{self.MISSION_MEMORY_MAX_DIMENSIONS} (DynamoDB vector-index "
+                    f"limit), got {dimensions!r}. This is a one-way door: it is "
+                    "immutable after index creation and must match the "
+                    "bedrock.embedding_model_id output width."
+                )
+
+        if "distance_function" in mission_memory_ctx:
+            distance = mission_memory_ctx["distance_function"]
+            if (
+                not isinstance(distance, str)
+                or distance not in self.MISSION_MEMORY_DISTANCE_FUNCTIONS
+            ):
+                valid = ", ".join(sorted(self.MISSION_MEMORY_DISTANCE_FUNCTIONS))
+                raise ConfigValidationError(
+                    f"mission_memory.distance_function must be one of {valid}, got "
+                    f"{distance!r}. This is immutable after index creation."
+                )
+
+    def _validate_vector_store_config(self) -> None:
+        """Validate the optional ``vector_store`` block in cdk.json.
+
+        The block is optional; absence means the feature stays off. When
+        present, types are validated so a typo fails fast at synth time —
+        especially the one-way-door fields (``dimensions``,
+        ``distance_function``) that cannot be corrected after the vector
+        index exists. The distance-function set and dimension ceiling reuse
+        the mission-memory constants because both features target the same
+        DynamoDB vector-index API limits:
+
+        - ``enabled``: bool if present.
+        - ``dimensions``: positive int <= 4096 if present.
+        - ``distance_function``: one of COSINE / DOT_PRODUCT / EUCLIDEAN.
+        - ``embedding_model_id``: non-empty string. Deliberately independent
+          of ``bedrock.embedding_model_id`` (mission memory) — the two
+          corpora may use different models.
+        - ``replica_regions``: list of known regions, no duplicates, and
+          never the global region (that is the table's primary).
+        - ``corpus_prefix``: non-empty S3 key prefix ending in ``/``.
+        """
+        vector_store_ctx = self.app.node.try_get_context("vector_store")
+        if not isinstance(vector_store_ctx, dict):
+            return
+
+        if "enabled" in vector_store_ctx and not isinstance(vector_store_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"vector_store.enabled must be a bool, got "
+                f"{type(vector_store_ctx['enabled']).__name__}: "
+                f"{vector_store_ctx['enabled']!r}"
+            )
+        if "dimensions" in vector_store_ctx:
+            dimensions = vector_store_ctx["dimensions"]
+            if (
+                not isinstance(dimensions, int)
+                or isinstance(dimensions, bool)
+                or dimensions <= 0
+                or dimensions > self.MISSION_MEMORY_MAX_DIMENSIONS
+            ):
+                raise ConfigValidationError(
+                    "vector_store.dimensions must be a positive integer <= "
+                    f"{self.MISSION_MEMORY_MAX_DIMENSIONS} (DynamoDB vector-index "
+                    f"limit), got {dimensions!r}. This is a one-way door: it is "
+                    "immutable after index creation and must match the "
+                    "vector_store.embedding_model_id output width."
+                )
+        if "distance_function" in vector_store_ctx:
+            distance = vector_store_ctx["distance_function"]
+            if (
+                not isinstance(distance, str)
+                or distance not in self.MISSION_MEMORY_DISTANCE_FUNCTIONS
+            ):
+                valid = ", ".join(sorted(self.MISSION_MEMORY_DISTANCE_FUNCTIONS))
+                raise ConfigValidationError(
+                    f"vector_store.distance_function must be one of {valid}, got "
+                    f"{distance!r}. This is immutable after index creation."
+                )
+        if "embedding_model_id" in vector_store_ctx:
+            model_id = vector_store_ctx["embedding_model_id"]
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ConfigValidationError(
+                    f"vector_store.embedding_model_id must be a non-empty string, got {model_id!r}"
+                )
+        if "replica_regions" in vector_store_ctx:
+            replica_regions = vector_store_ctx["replica_regions"]
+            if not isinstance(replica_regions, list) or not all(
+                isinstance(region, str) for region in replica_regions
+            ):
+                raise ConfigValidationError(
+                    f"vector_store.replica_regions must be a list of region strings, "
+                    f"got {replica_regions!r}"
+                )
+            if len(replica_regions) != len(set(replica_regions)):
+                raise ConfigValidationError(
+                    f"vector_store.replica_regions contains duplicates: {replica_regions!r}"
+                )
+            global_region = self.get_global_region()
+            for region in replica_regions:
+                if region not in self.VALID_REGIONS:
+                    raise ConfigValidationError(
+                        f"vector_store.replica_regions contains invalid region "
+                        f"'{region}'. Valid regions: {sorted(self.VALID_REGIONS)}"
+                    )
+                if region == global_region:
+                    raise ConfigValidationError(
+                        f"vector_store.replica_regions must not include the global "
+                        f"region '{global_region}': the primary table already lives "
+                        "there and a global table cannot replicate into its own region."
+                    )
+        if "corpus_prefix" in vector_store_ctx:
+            corpus_prefix = vector_store_ctx["corpus_prefix"]
+            if (
+                not isinstance(corpus_prefix, str)
+                or not corpus_prefix.strip()
+                or not corpus_prefix.endswith("/")
+                or corpus_prefix.startswith("/")
+            ):
+                raise ConfigValidationError(
+                    "vector_store.corpus_prefix must be a non-empty S3 key prefix "
+                    f"ending in '/' (and not starting with '/'), got {corpus_prefix!r}"
                 )
 
     def get_project_name(self) -> str:
@@ -1104,7 +1351,16 @@ class ConfigLoader:
                                 **region_node_group,
                             }
 
+        if self._feature_override_enabled("fsx_lustre"):
+            merged_config["enabled"] = True
         return merged_config
+
+    def _feature_override_enabled(self, feature_key: str) -> bool:
+        """True when ``feature_enabled_overrides`` context forces this feature on."""
+        overrides = parse_feature_enabled_overrides(
+            self.app.node.try_get_context(FEATURE_OVERRIDE_CONTEXT_KEY)
+        )
+        return feature_key in overrides
 
     def get_valkey_config(self) -> dict[str, Any]:
         """Get Valkey Serverless cache configuration.
@@ -1124,7 +1380,10 @@ class ConfigLoader:
         }
         valkey_ctx = self.app.node.try_get_context("valkey")
         valkey_config: dict[str, Any] = valkey_ctx if isinstance(valkey_ctx, dict) else {}
-        return {**default_config, **valkey_config}
+        merged = {**default_config, **valkey_config}
+        if self._feature_override_enabled("valkey"):
+            merged["enabled"] = True
+        return merged
 
     def get_aurora_pgvector_config(self) -> dict[str, Any]:
         """Get Aurora Serverless v2 + pgvector vector database configuration.
@@ -1146,7 +1405,10 @@ class ConfigLoader:
         }
         aurora_ctx = self.app.node.try_get_context("aurora_pgvector")
         aurora_config: dict[str, Any] = aurora_ctx if isinstance(aurora_ctx, dict) else {}
-        return {**default_config, **aurora_config}
+        merged = {**default_config, **aurora_config}
+        if self._feature_override_enabled("aurora_pgvector"):
+            merged["enabled"] = True
+        return merged
 
     def get_analytics_config(self) -> dict[str, Any]:
         """Get optional analytics environment configuration.
@@ -1249,6 +1511,13 @@ class ConfigLoader:
             - alertmanager: Alertmanager sub-block
               - enabled: Whether Alertmanager is deployed (default: True)
               - persistence_size: EBS PVC size for Alertmanager (default: "5Gi")
+            - mlflow: MLflow experiment-tracking sub-block
+              - enabled: Whether the MLflow tracking server is installed per
+                region (default: True). Effective only while observability
+                itself is enabled — see ``get_mlflow_enabled``.
+              - persistence_size: EBS PVC size for the tracking server's
+                SQLite run-metadata store (default: "10Gi"); artifacts go
+                to S3, not this volume
         """
         default_config: dict[str, Any] = {
             "enabled": True,
@@ -1261,6 +1530,7 @@ class ConfigLoader:
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+            "mlflow": {"enabled": True, "persistence_size": "10Gi"},
         }
         obs_ctx = self.app.node.try_get_context("cluster_observability")
         obs_config: dict[str, Any] = obs_ctx if isinstance(obs_ctx, dict) else {}
@@ -1268,7 +1538,7 @@ class ConfigLoader:
 
         # Deep-merge each nested sub-block so a partial override does not
         # drop the other defaults in the same sub-block.
-        for sub_block in ("grafana", "prometheus", "alertmanager"):
+        for sub_block in ("grafana", "prometheus", "alertmanager", "mlflow"):
             override = obs_config.get(sub_block)
             if isinstance(override, dict):
                 default_sub = cast(dict[str, Any], default_config[sub_block])
@@ -1284,6 +1554,21 @@ class ConfigLoader:
         methods, the CLI) do not have to index into the merged dict.
         """
         return bool(self.get_cluster_observability_config()["enabled"])
+
+    def get_mlflow_enabled(self) -> bool:
+        """Return whether the MLflow tracking server is effectively enabled.
+
+        The conjunction of ``cluster_observability.mlflow.enabled`` (default
+        True) and ``cluster_observability.enabled`` (default True): MLflow
+        installs into the ``monitoring`` namespace kube-prometheus-stack
+        creates, stores run metadata on the observability gp3 StorageClass,
+        and is reached through the same tunnel commands, so disabling
+        observability switches the tracking server off with it rather than
+        deploying it against missing storage — the same conjunction shape
+        ``get_cost_monitoring_enabled`` uses for OpenCost.
+        """
+        obs = self.get_cluster_observability_config()
+        return bool(obs["mlflow"]["enabled"]) and bool(obs["enabled"])
 
     def get_cost_monitoring_config(self) -> dict[str, Any]:
         """Get the cost monitoring configuration.
@@ -1374,6 +1659,11 @@ class ConfigLoader:
             - capacity_block_long_duration_hours: long Capacity Block probe
               duration in hours (default 1512 = 63 days); 0 disables the long
               probe and its ``capacity_blocks_long_*`` metrics
+            - spot_score_target_capacities: Spot Placement Score target
+              capacities the poller snapshots per instance pool (default
+              [1, 10, 50]); a subset selector over the supported set exported
+              by ``cli/capacity/history.py``, where capacity 1 keeps the
+              original ``spot_score`` field and N > 1 writes ``spot_score_at_N``
             - watch_instance_types: instance types the poller snapshots
             - enabled_regions: regions to poll; empty means all deployed regions
         """
@@ -1383,6 +1673,7 @@ class ConfigLoader:
             "poll_interval_minutes": 15,
             "capacity_block_duration_hours": 24,
             "capacity_block_long_duration_hours": 63 * 24,
+            "spot_score_target_capacities": [1, 10, 50],
             "watch_instance_types": [
                 "g4dn.12xlarge",
                 "g4dn.16xlarge",
@@ -1472,6 +1763,106 @@ class ConfigLoader:
     def get_capacity_history_enabled(self) -> bool:
         """Return whether the historical capacity surface is enabled."""
         return bool(self.get_capacity_history_config()["enabled"])
+
+    def get_mission_memory_config(self) -> dict[str, Any]:
+        """Get the mission-memory configuration (recall across mission sessions).
+
+        Returns the merged ``mission_memory`` block from cdk.json layered on
+        top of the defaults below. The feature is ON by default — memory is
+        cheap (one small PAY_PER_REQUEST item plus one embedding call per
+        completed mission) and silently missing recall is the worse failure
+        mode; set ``mission_memory.enabled: false`` to opt out.
+
+        Keys:
+            - enabled: provision the mission-memory table + vector index and
+              activate best-effort write/retrieval in the engine (default True)
+            - retention_days: DynamoDB TTL window for memory items (default 365)
+            - dimensions: embedding vector width (default 1024). ONE-WAY DOOR:
+              immutable after index creation and must match the configured
+              ``bedrock.embedding_model_id`` output width.
+            - distance_function: vector distance metric (default COSINE);
+              immutable after index creation.
+            - top_k: similar past missions retrieved into the sampling prompt
+              (default 3)
+        """
+        default_config: dict[str, Any] = {
+            "enabled": True,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+        mission_memory_ctx = self.app.node.try_get_context("mission_memory")
+        mission_memory_config = mission_memory_ctx if isinstance(mission_memory_ctx, dict) else {}
+        return {**default_config, **mission_memory_config}
+
+    def get_mission_memory_enabled(self) -> bool:
+        """Return whether mission memory is enabled."""
+        return bool(self.get_mission_memory_config()["enabled"])
+
+    def get_vector_store_config(self) -> dict[str, Any]:
+        """Get the vector-store configuration (global workload RAG corpus).
+
+        Returns the merged ``vector_store`` block from cdk.json layered on
+        top of the defaults below. The feature is OFF by default — a
+        replicated vector store carries real per-region storage and write
+        cost, so it is an explicit opt-in like ``aurora_pgvector``; set
+        ``vector_store.enabled: true`` to provision it.
+
+        Keys:
+            - enabled: provision the global vector-store table + index,
+              the S3-triggered ingest pipeline, and the regional read wiring
+              (default False)
+            - dimensions: embedding vector width (default 1024). ONE-WAY
+              DOOR: immutable after index creation and must match the
+              configured ``embedding_model_id`` output width.
+            - distance_function: vector distance metric (default COSINE);
+              immutable after index creation.
+            - embedding_model_id: Bedrock text-embedding model used by the
+              ingest pipeline and query paths (default
+              amazon.titan-embed-text-v2:0). Independent of
+              ``bedrock.embedding_model_id`` on purpose. Changing it means
+              re-ingesting the corpus: vectors from different models are
+              not comparable.
+            - replica_regions: regions to replicate the table into. Empty
+              (the default) means "follow deployment_regions.regional",
+              excluding the global region (the primary).
+            - corpus_prefix: S3 key prefix on the Cluster_Shared_Bucket
+              watched by the ingest pipeline (default vector-corpus/).
+        """
+        default_config: dict[str, Any] = {
+            "enabled": False,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "embedding_model_id": "amazon.titan-embed-text-v2:0",
+            "replica_regions": [],
+            "corpus_prefix": "vector-corpus/",
+        }
+        vector_store_ctx = self.app.node.try_get_context("vector_store")
+        vector_store_config = vector_store_ctx if isinstance(vector_store_ctx, dict) else {}
+        merged = {**default_config, **vector_store_config}
+        if self._feature_override_enabled("vector_store"):
+            merged["enabled"] = True
+        return merged
+
+    def get_vector_store_enabled(self) -> bool:
+        """Return whether the vector store is enabled (default False)."""
+        return bool(self.get_vector_store_config()["enabled"])
+
+    def get_vector_store_replica_regions(self) -> list[str]:
+        """Return the effective replica region list for the vector store.
+
+        The configured ``replica_regions`` when non-empty, otherwise the
+        regional deployment list — in both cases with the global region
+        removed, because the primary table lives there and a global table
+        cannot replicate into its own region. May legitimately be empty
+        (single-region deployments get a single-region global table).
+        """
+        config = self.get_vector_store_config()
+        configured = [str(region) for region in config["replica_regions"]]
+        candidates = configured or self.get_regions()
+        global_region = self.get_global_region()
+        return [region for region in candidates if region != global_region]
 
     def get_tags(self) -> dict[str, str]:
         """Get common tags from configuration"""

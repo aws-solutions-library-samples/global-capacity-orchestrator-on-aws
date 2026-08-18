@@ -21,7 +21,7 @@ from .advisor import (
     CapacityPredictionResult,
     get_bedrock_capacity_advisor,
 )
-from .checker import CapacityChecker, get_capacity_checker
+from .checker import CapacityChecker, SpotPlacementConfigLimitError, get_capacity_checker
 from .history import (
     CapacityHistoryStore,
     flatten_capacity_data,
@@ -54,6 +54,7 @@ __all__ = [
     "InstanceTypeInfo",
     "MultiRegionCapacityChecker",
     "RegionCapacity",
+    "SpotPlacementConfigLimitError",
     "SpotPriceInfo",
     "compute_price_trend",
     "compute_weighted_score",

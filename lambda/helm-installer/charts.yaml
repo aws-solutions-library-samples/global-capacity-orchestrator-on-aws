@@ -19,6 +19,8 @@
 #   - Slinky Slurm Operator: https://github.com/SlinkyProject/slurm-operator/tags
 #   - cert-manager: https://github.com/cert-manager/cert-manager/releases
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
+#   - Kubeflow Trainer: https://github.com/kubeflow/trainer/releases
+#   - MLflow: https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/
 
 charts:
   # AWS Load Balancer Controller - mandatory Gateway API data plane
@@ -30,7 +32,13 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-load-balancer-controller
-    version: "3.4.3"
+    # 3.5.0 requires Gateway API CRDs v1.6.0 installed BEFORE the controller
+    # (its release notes; upgrading the controller first silently stops
+    # gateway reconciliation — the 2026-08 live validation caught exactly
+    # that under the older v1.5.0 CRD bundle). Bump this version only in
+    # lockstep with PINNED_GATEWAY_CRD_BUNDLES in
+    # lambda/helm-installer/handler.py.
+    version: "3.5.0"
     namespace: kube-system
     create_namespace: false
     wait: true
@@ -417,9 +425,13 @@ charts:
         podSpec:
           nodeSelector:
             kubernetes.io/os: linux
-      # Worker nodes (slurmd)
-      nodeSets:
-        - name: workers
+      # Worker nodes (slurmd). The chart's schema is a lowercase ``nodesets``
+      # MAP keyed by NodeSet name — a camelCase ``nodeSets`` list is silently
+      # ignored by Helm and the cluster comes up with zero workers (caught by
+      # the live release validation ``schedulers`` action; see
+      # tests/test_helm_charts_validation.py for the shape guard).
+      nodesets:
+        workers:
           replicas: 2
           slurmd:
             image:
@@ -435,6 +447,20 @@ charts:
           podSpec:
             nodeSelector:
               kubernetes.io/os: linux
+      # Slurm partitions. Without an enabled partition carrying
+      # ``Default: "YES"`` slurmctld has no default partition and every
+      # partition-less submission (sbatch --wrap, the REST probe,
+      # examples/slurm-cluster-job.yaml) fails with rc 2001
+      # ("No partition specified or system default partition").
+      partitions:
+        all:
+          enabled: true
+          nodesets:
+            - ALL
+          configMap:
+            Default: "YES"
+            State: UP
+            MaxTime: UNLIMITED
       # Login pods are disabled by default. GCO submits Slurm jobs via the
       # Kubernetes API (gco jobs submit-direct), not via SSH. Enabling the
       # login set creates a separate LoadBalancer (NLB), which adds cost and is
@@ -541,7 +567,7 @@ charts:
     repo_name: prometheus-community
     repo_url: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    version: "88.0.1"
+    version: "88.2.0"
     namespace: monitoring
     create_namespace: true
     wait: false
@@ -683,7 +709,7 @@ charts:
     repo_name: opencost
     repo_url: https://opencost.github.io/opencost-helm-chart
     chart: opencost
-    version: "2.5.28"
+    version: "2.5.29"
     namespace: monitoring
     create_namespace: false
     wait: false
@@ -759,6 +785,272 @@ charts:
               memory: 55Mi
             limits:
               memory: 256Mi
+
+  # MLflow - experiment tracking server (official MLflow chart, OCI)
+  # enabled:false here because inclusion is driven by GCORegionalStack:
+  # cluster_observability.mlflow.enabled (default true) AND
+  # cluster_observability.enabled — MLflow lives in the monitoring namespace
+  # kube-prometheus-stack creates, keeps run metadata on the observability
+  # gp3 StorageClass, and is reached through the same tunnel commands.
+  # Deployment tokens (S3 artifact destination, IRSA role ARN, PVC size)
+  # are injected by the regional stack via value overrides; everything
+  # static lives here.
+  # Access posture: ClusterIP only, no Ingress, no app-level auth — the
+  # authenticated SSM/port-forward tunnel (`gco monitoring open --service
+  # mlflow`) is the security boundary, the same posture as the OpenCost UI.
+  # (The chart supports MLflow's basic-auth plugin via server options and a
+  # Secret-backed CSRF key if app-level auth is ever wanted.)
+  # Run ARTIFACTS go to the cluster-shared S3 bucket via IRSA (durable,
+  # server-proxied so client pods never need S3 credentials); run METADATA
+  # is SQLite on the chart-managed gp3 PVC below. helm uninstall never
+  # deletes chart PVCs, so the applier's feature inventory prunes the claim
+  # (monitoring/mlflow) when the feature is disabled — deliberately
+  # discarding metadata while artifacts stay in S3.
+  # The chart's pod security defaults are already hardened (runAsNonRoot +
+  # fsGroup 1000, readOnlyRootFilesystem, drop-ALL, RuntimeDefault seccomp)
+  # and it auto-selects the Recreate strategy for SQLite/ReadWriteOnce
+  # setups, so surge replicas can never deadlock on the EBS attach.
+  # wait: false for the same cold-image-pull rationale as kube-prometheus-stack.
+  # https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/
+  mlflow:
+    enabled: false
+    repo_name: mlflow-oci
+    repo_url: oci://ghcr.io/mlflow/charts
+    chart: mlflow
+    version: "0.1.0"
+    namespace: monitoring
+    create_namespace: false
+    use_oci: true
+    wait: false
+    wait_timeout: "8m"
+    values:
+      # Every resource keeps the bare release name — service DNS
+      # mlflow.monitoring:5000, ServiceAccount monitoring/mlflow (the IRSA
+      # trust condition), tunnel target svc/mlflow — instead of the chart's
+      # default <release>-<chart> doubling (mlflow-mlflow).
+      fullnameOverride: mlflow
+      image:
+        repository: ghcr.io/mlflow/mlflow
+        # Pin the -full server build explicitly (the chart defaults the tag
+        # to v<appVersion>-full) so the monthly deps-drift report covers
+        # it. -full carries the server extras (SQLAlchemy backend, boto3
+        # for the S3 artifact proxy) the tracking server needs.
+        tag: "v3.15.1-full"
+      # SQLite run-metadata store on the chart's own gp3 PVC (first-class
+      # storage support; mounted at /mlflow). The claim size is a
+      # deployment token (cluster_observability.mlflow.persistence_size).
+      # The observability StorageClass always exists here — the mlflow
+      # conjunction requires cluster_observability.
+      storage:
+        enabled: true
+        storageClassName: gco-observability-gp3
+      mlflow:
+        backendStoreUri: "sqlite:////mlflow/mlflow.db"
+      # One gunicorn worker, deliberately (chart default is 4): the metadata
+      # store is single-writer SQLite so extra workers only add lock
+      # contention, and four workers importing the full MLflow server under
+      # the CPU request starved startup past the chart's fixed liveness
+      # window (probe kills at ~100s, observed live 2026-08-14 as an exit
+      # 137 crash-loop; the chart exposes no probe knobs).
+      # allowed_hosts: MLflow 3.x ships host-validation middleware that
+      # 403s API requests whose Host header it does not recognize ("possible
+      # DNS rebinding attack detected"), and setting the flag REPLACES the
+      # built-in localhost/private-IP allowance rather than extending it.
+      # Two live incidents came from that replacement: Prometheus scrapes
+      # the pod IP directly and got 403 until the pod CIDR was listed
+      # (2026-08-14), and `gco monitoring open --service mlflow` forwards to
+      # loopback, so the UI answered 403 until the localhost/127.0.0.1
+      # spellings were listed (2026-08-15) — the in-cluster DNS names
+      # returned 200 through the very same tunnel.
+      # Static spellings live here (a DNS-name Host carries the port, hence
+      # both forms); at deploy time the regional stack REPLACES this value
+      # with the complete list, appending wildcard patterns derived from
+      # cdk.json's vpc_endpoint_cidrs (single source of truth — see
+      # _mlflow_allowed_hosts in gco/stacks/regional_stack.py) so the
+      # allow-list follows the VPC range with no edit here. Arbitrary DNS
+      # names stay rejected; /health is exempt so probes never depended on
+      # this. Verified against the pinned image.
+      server:
+        value_options:
+          workers: 1
+          allowed_hosts: >-
+            mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+      # Never voluntarily consolidate the singleton tracking server.
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+      service:
+        type: ClusterIP
+      ingress:
+        enabled: false
+      # Anonymized usage tracking stays off (posture, not just default).
+      # The official chart has no telemetry toggle, so pin the env pair the
+      # server honors — same effect the community chart's telemetry.enabled
+      # false had.
+      env:
+        - name: MLFLOW_DISABLE_TELEMETRY
+          value: "true"
+        - name: DO_NOT_TRACK
+          value: "true"
+      # Chart NetworkPolicy stays OFF; GCO ships the server's policy itself
+      # (mlflow-server in post-helm-mlflow-network.yaml, which also carries
+      # the gco-jobs client egress allow).
+      #
+      # The chart's own policy restricts ingress to POD sources
+      # (podSelector/namespaceSelector only), which silently drops the
+      # kubelet's health probes — those arrive from the node's host network.
+      # A supplemental allow fixes the steady state, but not the startup
+      # race: the VPC CNI programs a pod's policy when the pod starts, so a
+      # pod created in the window before the permissive rule has propagated
+      # is left with only the restrictive one, and nothing re-triggers the
+      # programming. Caught live 2026-08-15: the mlflow pod started 2s after
+      # the supplemental policy was applied and then crash-looped through 11
+      # containers, never receiving a single probe, while Prometheus (a pod)
+      # scraped /metrics 200 the whole time.
+      #
+      # Owning the policy removes the failure mode instead of narrowing it:
+      # before GCO's policy lands the pod is simply unisolated (probes work),
+      # and after it lands probes are explicitly allowed (they work). There is
+      # no ordering in which the server ends up unreachable by its own
+      # kubelet. It also puts the server's whole network posture in one
+      # reviewable manifest that CI exercises under a NetworkPolicy-enforcing
+      # CNI (integration:kind:examples-smoke).
+      networkPolicy:
+        enabled: false
+      resources:
+        requests:
+          # A full guaranteed core (requests == limits), measured, not
+          # guessed: against the pinned image, /health first answers
+          # within the probes' 1-second budget at ~16s of server start
+          # with 1.0 CPU but only at ~62s with 0.5 CPU — past the chart's
+          # fixed liveness window (15s delay + 3 probes x 20s), which is
+          # exactly the 18-restart crash-loop observed live 2026-08-14 on
+          # a contended node with a smaller request. The chart exposes no
+          # probe knobs, so the guaranteed share is the only lever.
+          cpu: "1"
+          # 2Gi requested / 3Gi limit, measured: the v3.15.1-full server
+          # ramps to ~1.5GiB steady state during startup (server + job
+          # schedulers) — the previous 1Gi limit OOM-killed the container
+          # at ~25s every cycle (kernel TaskOOM, caught live 2026-08-14
+          # after the CPU fix let startup get far enough to hit it).
+          memory: 2Gi
+        limits:
+          cpu: "1"
+          memory: 3Gi
+      # /metrics + ServiceMonitor: kube-prometheus-stack discovers
+      # ServiceMonitors cluster-wide and is guaranteed present (the mlflow
+      # conjunction requires observability), so the tracking server's
+      # health lands in the same Prometheus as OpenCost.
+      # path is REQUIRED alongside enabled: chart 0.1.0 renders the
+      # ServiceMonitor endpoint path as null without it, which the API
+      # server rejects and every helm upgrade then fails (caught live,
+      # 2026-08-14; upstream default bug — the chart docs always pair
+      # enabled with path).
+      metrics:
+        enabled: true
+        path: /metrics
+      serviceMonitor:
+        enabled: true
+
+  # Kubeflow Trainer v2 - distributed training operator (TrainJob CRD)
+  # Runs multi-node training through TrainJob CRs against ClusterTrainingRuntime
+  # blueprints; supersedes the legacy training-operator (PyTorchJob/TFJob/
+  # MPIJob). Installs the trainer controller plus its JobSet dependency (the
+  # replicated-Job engine TrainJobs compile to; nothing else in the platform
+  # ships JobSet). Webhooks are self-scoped — the trainer CRD group plus
+  # jobset-owned pods via an objectSelector on jobset.sigs.k8s.io/jobset-name —
+  # so installing before kueue is safe (kueue stays last).
+  # https://github.com/kubeflow/trainer
+  kubeflow-trainer:
+    enabled: true
+    repo_name: kubeflow-oci
+    repo_url: oci://ghcr.io/kubeflow/charts
+    chart: kubeflow-trainer
+    version: "2.3.0"
+    namespace: kubeflow-trainer
+    create_namespace: true
+    use_oci: true
+    wait: true
+    wait_timeout: "8m"
+    values:
+      # CRDs (TrainJob, TrainingRuntime, ClusterTrainingRuntime) are chart
+      # templates in Trainer 2.x, so install AND upgrade keep them current
+      # (no crds/-directory install-only gap). JobSet's own CRD still ships
+      # from the subchart's crds/ directory (install-time only).
+      crds:
+        enabled: true
+      jobset:
+        install: true
+        # Let cert-manager own the JobSet webhook certificate instead of the
+        # JobSet controller.
+        #
+        # With this false (the chart default) JobSet templates an EMPTY
+        # webhook-cert Secret and its controller self-signs into it at
+        # runtime. Helm 4 applies server-side, so the NEXT `helm upgrade`
+        # tries to apply that empty Secret and collides with the controller
+        # over the fields it filled in:
+        #
+        #   conflict occurred while applying object
+        #   kubeflow-trainer/jobset-webhook-server-cert /v1, Kind=Secret:
+        #   Apply failed with 4 conflicts: conflicts with "jobset" using v1:
+        #   .data.ca.crt .data.ca.key .data.tls.crt .data.tls.key
+        #
+        # That fails the chart task, so the convergence state machine never
+        # reaches its post-Helm apply — i.e. re-deploying an existing
+        # deployment breaks, and takes every post-Helm manifest with it.
+        # Caught live 2026-08-15 on the second `gco stacks deploy` of the
+        # same cluster; fresh deploys never hit it, which is why the
+        # shakeouts didn't.
+        #
+        # Setting this true flips both halves of the conflict off at once:
+        # the chart stops templating the Secret (its
+        # templates/internalcert/secret.yaml is gated on
+        # `not .Values.certManager.enable`) and the controller stops managing
+        # the cert (its ConfigMap sets internalCertManagement.enable to
+        # `not .Values.certManager.enable`). cert-manager creates and owns
+        # the Secret through a Certificate + self-signed Issuer, and the
+        # webhook configurations get its inject-ca-from annotation.
+        #
+        # Depends on cert-manager, which GCO installs unconditionally and
+        # EARLIER in this file (charts install in file order) — the same
+        # dependency the Slinky Slurm operator already declares. The
+        # upgrade-idempotency contract is exercised by the install-then-
+        # upgrade step in integration:kind:examples-smoke.
+        certManager:
+          enable: true
+      image:
+        registry: ghcr.io
+        repository: kubeflow/trainer/trainer-controller-manager
+        # Pin the tag explicitly (the chart defaults it to the chart version)
+        # so the monthly deps-drift report covers it. Bump in lockstep with
+        # `version` above and with the runtime manifest extracted from this
+        # chart (post-helm-kubeflow-trainer-runtimes.yaml) — the extraction
+        # side is CI-enforced by the trainer runtime lockstep in
+        # .github/scripts/validate_helm_charts.py.
+        tag: "v2.3.0"
+      manager:
+        replicas: 1
+        # Never voluntarily consolidate the training control plane.
+        podAnnotations:
+          karpenter.sh/do-not-disrupt: "true"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      # Built-in ClusterTrainingRuntimes stay OFF here on purpose: the chart
+      # delivers them via a post-install/post-upgrade hook Job that downloads
+      # kubectl into an alpine pod at run time (an unpinned network fetch)
+      # and burns helm --wait budget (the cert-manager startupapicheck
+      # lesson). GCO applies the torch-distributed runtime through the
+      # post-Helm kubectl pass instead — same bytes, pinned and reviewable,
+      # pruned when this chart is disabled. See
+      # lambda/kubectl-applier-simple/manifests/post-helm-kubeflow-trainer-runtimes.yaml.
+      runtimes:
+        defaultEnabled: false
+        torchDistributed:
+          enabled: false
 
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling

@@ -29,9 +29,15 @@ metadata:
   namespace: gco-jobs
   labels:
     project: gco
+    # Grants this pod NetworkPolicy access to the Slurm REST API port
+    # (see allow-slurm-client-* in the cluster-managed policies).
+    gco.aws/slurm-client: "true"
 spec:
   ttlSecondsAfterFinished: 300
   template:
+    metadata:
+      labels:
+        gco.aws/slurm-client: "true"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -39,7 +45,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: slurm-test
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         command: ["python3", "-c"]
         args:
         - |

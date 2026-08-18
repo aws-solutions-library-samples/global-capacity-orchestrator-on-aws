@@ -30,15 +30,20 @@ from cli.autopilot import (
 )
 from cli.commands.autopilot_cmd import autopilot
 from cli.config import GCOConfig
-from gco.bedrock import get_default_bedrock_model_id
+from gco.bedrock import get_default_claude_code_model_id
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AUTOPILOT_SOURCE = _REPO_ROOT / "cli" / "autopilot.py"
 _MCP_README = _REPO_ROOT / "gco_mcp" / "README.md"
 
-#: The two companions removed after they stopped starting against the
-#: current ``mcp`` SDK. They must never reappear in generated configs.
-_PRUNED_PACKAGES = ("mcp-server-fetch", "mcp-server-calculator")
+#: Companions removed from the recommendation set. The first two stopped
+#: starting against the current ``mcp`` SDK; the documentation server was
+#: dropped from the lineup. None may reappear in generated configs.
+_PRUNED_PACKAGES = (
+    "mcp-server-fetch",
+    "mcp-server-calculator",
+    "@andrea9293/mcp-documentation-server",
+)
 
 
 @pytest.fixture
@@ -87,7 +92,7 @@ def test_dry_run_defaults_to_the_canonical_bedrock_model(runner: CliRunner) -> N
     result = _invoke(runner, ["--dry-run"])
 
     assert result.exit_code == 0
-    assert get_default_bedrock_model_id() in result.output
+    assert get_default_claude_code_model_id() in result.output
     assert "Dry run only" in result.output
 
 
@@ -199,7 +204,10 @@ def test_declining_the_install_exits_with_instructions(runner: CliRunner) -> Non
         result = _invoke(runner, [], input_text="n\n")
 
     assert result.exit_code == 1
-    assert f"npm install -g {CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}" in result.output
+    assert (
+        f"npm install -g --allow-scripts={CLAUDE_CODE_PACKAGE} "
+        f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
+    ) in result.output
 
 
 def test_yes_installs_the_pin_and_execs_claude(runner: CliRunner) -> None:
@@ -225,6 +233,27 @@ def test_yes_installs_the_pin_and_execs_claude(runner: CliRunner) -> None:
     assert argv[0] == "/tmp/bin/claude"
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--mcp-config") + 1].endswith("mcp.json")
+
+
+def test_unexecutable_claude_fails_with_reinstall_guidance(runner: CliRunner) -> None:
+    """A shim whose postinstall never ran dies at exec — remediation, not traceback.
+
+    Seen live under npm >= 12, which blocks lifecycle scripts by default:
+    the install leaves a launcher on PATH but no native binary, and execvpe
+    raises ``OSError: Exec format error``.
+    """
+    with (
+        patch("cli.commands.autopilot_cmd.find_claude_binary", return_value="/tmp/bin/claude"),
+        patch(
+            "cli.commands.autopilot_cmd.exec_claude",
+            side_effect=OSError(8, "Exec format error"),
+        ),
+    ):
+        result = _invoke(runner, [])
+
+    assert result.exit_code == 1
+    assert "Failed to launch Claude Code" in result.output
+    assert "--allow-scripts" in result.output  # the remediation is the full pinned command
 
 
 def test_launch_wires_the_bedrock_environment(runner: CliRunner) -> None:
@@ -384,7 +413,7 @@ def test_json_dry_run_emits_the_plan_without_the_full_config(runner: CliRunner) 
 
     assert result.exit_code == 0
     plan = json.loads(result.output)
-    assert plan["model"] == get_default_bedrock_model_id()
+    assert plan["model"] == get_default_claude_code_model_id()
     assert "mcp_config" not in plan
     assert "resumable_session" in plan
 
@@ -444,6 +473,9 @@ def test_install_claude_code_invokes_the_pinned_npm_install() -> None:
         assert install_claude_code() == 0
     call.assert_called_once_with(claude_install_command())
     assert claude_install_command()[-1] == f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
+    # npm >= 12 blocks postinstall scripts by default; without this scoped
+    # allowance the install leaves a shim that dies with Exec format error.
+    assert f"--allow-scripts={CLAUDE_CODE_PACKAGE}" in claude_install_command()
 
 
 def test_exec_claude_replaces_the_process_on_posix() -> None:

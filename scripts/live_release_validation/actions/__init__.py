@@ -28,6 +28,7 @@ from .final_inventory import action_final_inventory
 from .jobs import action_api_lifecycle, action_sqs_lifecycle
 from .opencost import action_opencost
 from .preflight import action_preflight
+from .schedulers import action_schedulers
 from .topology import action_topology
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "action_final_inventory",
     "action_opencost",
     "action_preflight",
+    "action_schedulers",
     "action_sqs_lifecycle",
     "action_topology",
     "destroy_deployment",

@@ -628,6 +628,20 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                                 phase="checkpoint-explicit-group-absence",
                                 outcome=initial,
                             )
+                            if rolled_back:
+                                # A rolled-back create deletes non-retained
+                                # LogGroup resources; the stack resource is a
+                                # DELETE_COMPLETE tombstone widened in only to
+                                # catch groups that DID survive (retained or
+                                # recreated by late log deliveries). A group
+                                # that is genuinely gone is the expected
+                                # rollback outcome, not missing authority —
+                                # aborting here strands every remaining stack
+                                # (observed live: example-job validation run
+                                # ex241-2913b044, where the Valkey subnet
+                                # failure rolled back gco-us-east-1 and this
+                                # guard then blocked the entire teardown).
+                                continue
                             raise RuntimeError(
                                 f"CloudFormation log group is absent before teardown: "
                                 f"{region}:{name}"

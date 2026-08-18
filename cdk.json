@@ -38,9 +38,12 @@
       "Owner": "platform-team"
     },
 
-    "_comment_bedrock": "Shared defaults for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined global cross-Region inference-profile ID and its reasoning-effort preference; explicit command/environment model overrides still take precedence and do not inherit model-specific thinking fields. The stock Anthropic default requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
+    "_comment_bedrock": "Model defaults for GCO's optional Bedrock-powered features, resolved through gco/bedrock.py. Each consumer has its own clearly named knob: mission_default_model_id is what Mission sampling uses, capacity_advisor_default_model_id is what `gco capacity advise` uses, and claude_code_default_model_id is the session model `gco autopilot` hands to Claude Code (per-launch overrides: --model flag or GCO_AUTOPILOT_MODEL); future agent runners get their own sibling key. thinking.effort is shared by the two generation knobs, and canonical reasoning translation applies only when the invoked model is one of those defaults. embedding_model_id is the text-embedding model mission memory uses to embed directives; its output dimensionality must stay compatible with mission_memory.dimensions (see _comment_mission_memory - changing either after index creation invalidates search results). The pre-v6 default_model_id key (one knob that silently steered both Mission sampling and the advisor) is no longer read and fails validation with rename instructions. Explicit command/environment model overrides always take precedence and never inherit model-specific thinking fields. The three Anthropic keys ship the same profile, which requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
     "bedrock": {
-      "default_model_id": "global.anthropic.claude-opus-5",
+      "mission_default_model_id": "global.anthropic.claude-opus-5",
+      "capacity_advisor_default_model_id": "global.anthropic.claude-opus-5",
+      "claude_code_default_model_id": "global.anthropic.claude-opus-5",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
       "thinking": {
         "effort": "high"
       }
@@ -146,9 +149,9 @@
         "gco-jobs"
       ],
       "resource_quotas": {
-        "max_cpu_per_manifest": "10",
-        "max_memory_per_manifest": "32Gi",
-        "max_gpu_per_manifest": 4
+        "max_cpu_per_manifest": "384",
+        "max_memory_per_manifest": "4096Gi",
+        "max_gpu_per_manifest": 16
       },
       "require_accelerator_toleration": true,
       "trusted_registries": [
@@ -158,7 +161,8 @@
         "registry.k8s.io",
         "k8s.gcr.io",
         "public.ecr.aws",
-        "nvcr.io"
+        "nvcr.io",
+        "ghcr.io/huggingface"
       ],
       "trusted_dockerhub_orgs": [
         "nvidia",
@@ -168,6 +172,7 @@
         "huggingface",
         "amazon",
         "bitnami",
+        "vllm",
         "lmsysorg",
         "gco"
       ],
@@ -189,19 +194,20 @@
         "DaemonSet",
         "Service",
         "ConfigMap",
-        "Pod"
+        "Pod",
+        "TrainJob"
       ]
     },
 
-    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings. container_max_*: per-container ceilings (LimitRange). Tune these to match the cluster's expected multi-tenant footprint.",
+    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings on aggregate requests. container_max_*: per-container ceilings (LimitRange max), sized by default to one full accelerator-node slice (p5.48xlarge / trn2.48xlarge: 192 vCPU, 2 TiB, 8 GPUs) so full-node distributed-training pods are admissible out of the box. Values are validated at synth: each must parse as a Kubernetes quantity and every container_max_* must fit inside its max_* ceiling. Defaults live in gco/stacks/constants.py (DEFAULT_RESOURCE_QUOTA); keep this block in lockstep.",
     "resource_quota": {
-      "max_cpu": "100",
-      "max_memory": "512Gi",
+      "max_cpu": "400",
+      "max_memory": "4096Gi",
       "max_gpu": "32",
       "max_pods": "50",
-      "container_max_cpu": "10",
-      "container_max_memory": "64Gi",
-      "container_max_gpu": "4"
+      "container_max_cpu": "192",
+      "container_max_memory": "2048Gi",
+      "container_max_gpu": "8"
     },
 
     "_comment_resource_thresholds": "Health monitor thresholds that drive the /api/v1/health regional capacity report. cpu_threshold / memory_threshold / gpu_threshold are utilization percentages above which the region is reported as 'busy'; set any to -1 to disable that dimension. The 80 defaults leave headroom above the platform baseline: on right-sized EKS Auto Mode nodes an idle cluster running the observability stack already sits near 65-70% memory, which a 60 threshold misreported as unhealthy. pending_pods_threshold counts pods in Pending state. pending_requested_cpu_vcpus / pending_requested_memory_gb / pending_requested_gpus sum unscheduled resource requests across pending pods.",
@@ -260,6 +266,23 @@
       "snapshot_retention_limit": 1
     },
 
+    "_comment_mission_memory": "Mission memory - recall across mission sessions, enabled by default. When enabled, GCOGlobalStack adds a DynamoDB table ({project}-mission-memory) with a vector index over embedded mission directives; completed missions write one memory item (directive embedding + model-written lessons/followups) and later missions retrieve the most similar past sessions into their sampling prompts. Memory is SHARED INSTITUTIONAL MEMORY: items are keyed by session only, so every operator in the account sees every operator's mission lessons. Cost is negligible (PAY_PER_REQUEST table with one small item per completed mission plus one embedding call at session end); set enabled=false to opt out. retention_days: DynamoDB TTL window for memory items. dimensions: embedding vector width - MUST match the bedrock.embedding_model_id output width and is a ONE-WAY DOOR (immutable after index creation, as are the COSINE distance function and the index projection; changing any of them means deleting and recreating the index, orphaning existing embeddings). top_k: how many similar past missions retrieval feeds into the sampling prompt. Retrieval and writes are best-effort and never fail a mission. See docs/MISSION.md (Mission memory).",
+    "mission_memory": {
+      "enabled": true,
+      "retention_days": 365,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "top_k": 3
+    },
+    "_comment_vector_store": "Globally replicated vector store for workload RAG - an OPT-IN add-on (enabled=false by default; replicated storage and writes carry per-region cost). When enabled, GCOGlobalStack creates a DynamoDB GLOBAL table ({project}-vector-store, primary in the global region) with a vector index whose definition and data replicate to every replica region automatically, an S3-triggered ingest Lambda that embeds documents dropped under corpus_prefix on the cluster-shared bucket (txt/md are chunked; jsonl is pre-chunked), and per-cluster read wiring (gco-vector-store ConfigMap + SearchVectors grants on the LOCAL replica). dimensions and distance_function are ONE-WAY DOORS (immutable after index creation) and dimensions must match the embedding_model_id output width. embedding_model_id is deliberately independent of bedrock.embedding_model_id (mission memory); CHANGING IT REQUIRES RE-INGESTING THE CORPUS - vectors from different models are not comparable. replica_regions: explicit replica list; empty means follow deployment_regions.regional (minus the global region, which hosts the primary). corpus_prefix: watched S3 prefix. Deleting an S3 object does NOT delete its items. Query with `gco vector search`; load with `gco vector ingest` (or --demo). Complementary to aurora_pgvector, not a replacement: pgvector gives SQL (joins, range predicates, transactions); this gives managed global replication with equality-only inline filters. See lambda/vector-ingest/README.md.",
+    "vector_store": {
+      "enabled": false,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
+      "replica_regions": [],
+      "corpus_prefix": "vector-corpus/"
+    },
     "_comment_aurora_pgvector": "Aurora Serverless v2 PostgreSQL with pgvector. enabled: master toggle. min_acu / max_acu: Aurora Capacity Unit range; min_acu=0 enables scale-to-zero. backup_retention_days: automated backup TTL. deletion_protection: blocks accidental cluster deletion when true. See docs/CUSTOMIZATION.md (Configure Aurora pgvector) and https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html.",
     "aurora_pgvector": {
       "enabled": false,
@@ -290,7 +313,7 @@
       }
     },
 
-    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
+    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). mlflow: MLflow tracking server sub-toggle, ON BY DEFAULT and effective only while observability is enabled (it shares the monitoring namespace, gp3 StorageClass, and tunnel access path); run artifacts go to the cluster-shared S3 bucket via IRSA, run metadata to an EBS PVC of mlflow.persistence_size, and access is 'gco monitoring open --service mlflow' (ClusterIP only, no ingress, no app-level auth — the authenticated tunnel is the boundary). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
     "cluster_observability": {
       "enabled": true,
       "grafana": {
@@ -305,6 +328,10 @@
       "alertmanager": {
         "enabled": true,
         "persistence_size": "5Gi"
+      },
+      "mlflow": {
+        "enabled": true,
+        "persistence_size": "10Gi"
       }
     },
 
@@ -338,6 +365,10 @@
       },
       "_comment_kuberay": "KubeRay operator — runs Ray clusters and Ray Jobs as Kubernetes resources for distributed Python / ML workloads. See docs/KUBERAY.md.",
       "kuberay": {
+        "enabled": true
+      },
+      "_comment_kubeflow_trainer": "Kubeflow Trainer v2 — distributed-training operator (TrainJob against ClusterTrainingRuntime blueprints; supersedes the legacy training-operator's PyTorchJob/TFJob/MPIJob). Installs the trainer controller, its JobSet dependency, and the torch-distributed runtime. TrainJob manifests submit through the standard GCO job pipeline. On by default; set enabled: false to opt out. See docs/DISTRIBUTED_TRAINING.md.",
+      "kubeflow_trainer": {
         "enabled": true
       },
       "_comment_cert_manager": "cert-manager — issues and rotates TLS certs for cluster webhooks. Required by kueue and several other charts. Upstream: https://cert-manager.io/docs/.",
@@ -374,13 +405,14 @@
       "enabled": true,
       "schedule_hours": 24
     },
-    "_comment_historical": "Historical capacity surface - an OPTIONAL ADD-ON to the global stack (not a separate stack), enabled by default. When enabled, GCOGlobalStack adds a DynamoDB time-series table plus an EventBridge-scheduled Lambda that snapshots spot scores, prices, AZ coverage, and capacity-block availability. Set enabled=false to opt out. retention_days: DynamoDB TTL window for snapshots. poll_interval_minutes: schedule cadence. capacity_block_duration_hours: short Capacity Block probe duration (default 24 = 1 day, soonest-available). capacity_block_long_duration_hours: long Capacity Block probe duration in hours (default 1512 = 63 days) so history tracks extended-term block availability; set 0 to disable the long probe. watch_instance_types: instance types to snapshot. enabled_regions: regions to poll (empty = all deployed regions). Cost is ~0 within the Lambda free tier; see lambda/capacity-poller/README.md.",
+    "_comment_historical": "Historical capacity surface - an OPTIONAL ADD-ON to the global stack (not a separate stack), enabled by default. When enabled, GCOGlobalStack adds a DynamoDB time-series table plus an EventBridge-scheduled Lambda that snapshots spot scores, prices, AZ coverage, and capacity-block availability. Set enabled=false to opt out. retention_days: DynamoDB TTL window for snapshots. poll_interval_minutes: schedule cadence. capacity_block_duration_hours: short Capacity Block probe duration (default 24 = 1 day, soonest-available). capacity_block_long_duration_hours: long Capacity Block probe duration in hours (default 1512 = 63 days) so history tracks extended-term block availability; set 0 to disable the long probe. spot_score_target_capacities: Spot Placement Score target capacities snapshotted per instance pool; a subset of the supported set 1/10/50 (capacity 1 keeps the original spot_score field, N>1 writes spot_score_at_N; see cli/capacity/history.py). watch_instance_types: instance types to snapshot. enabled_regions: regions to poll (empty = all deployed regions). Cost is ~0 within the Lambda free tier; see lambda/capacity-poller/README.md.",
     "historical": {
       "enabled": true,
       "retention_days": 90,
       "poll_interval_minutes": 15,
       "capacity_block_duration_hours": 24,
       "capacity_block_long_duration_hours": 1512,
+      "spot_score_target_capacities": [1, 10, 50],
       "watch_instance_types": ["g4dn.12xlarge", "g4dn.16xlarge", "g4dn.2xlarge", "g4dn.4xlarge", "g4dn.8xlarge", "g4dn.metal", "g4dn.xlarge", "g5.12xlarge", "g5.16xlarge", "g5.24xlarge", "g5.2xlarge", "g5.48xlarge", "g5.4xlarge", "g5.8xlarge", "g5.xlarge", "g5g.16xlarge", "g5g.2xlarge", "g5g.4xlarge", "g5g.8xlarge", "g5g.metal", "g5g.xlarge", "g6.12xlarge", "g6.16xlarge", "g6.24xlarge", "g6.2xlarge", "g6.48xlarge", "g6.4xlarge", "g6.8xlarge", "g6.xlarge", "g6e.12xlarge", "g6e.16xlarge", "g6e.24xlarge", "g6e.2xlarge", "g6e.48xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.xlarge", "g6f.2xlarge", "g6f.4xlarge", "g6f.large", "g6f.xlarge", "g7.12xlarge", "g7.24xlarge", "g7.2xlarge", "g7.48xlarge", "g7.4xlarge", "g7.8xlarge", "g7e.12xlarge", "g7e.24xlarge", "g7e.2xlarge", "g7e.48xlarge", "g7e.4xlarge", "g7e.8xlarge", "gr6.4xlarge", "gr6.8xlarge", "gr6f.4xlarge", "inf1.24xlarge", "inf1.2xlarge", "inf1.6xlarge", "inf1.xlarge", "inf2.24xlarge", "inf2.48xlarge", "inf2.8xlarge", "inf2.xlarge", "p3dn.24xlarge", "p4d.24xlarge", "p4de.24xlarge", "p5.48xlarge", "p5.4xlarge", "p5e.48xlarge", "p5en.48xlarge", "p6-b200.48xlarge", "p6-b300.48xlarge", "trn1.2xlarge", "trn1.32xlarge", "trn1n.32xlarge", "trn2.3xlarge", "trn2.48xlarge"],
       "enabled_regions": []
     },

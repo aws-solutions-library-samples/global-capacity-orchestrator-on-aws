@@ -607,3 +607,62 @@ if is_enabled(FLAG_MISSION):
         filter_dict = {"status": status} if status else None
         sessions = backend.list_sessions(filter_dict)
         return json.dumps({"sessions": sessions})
+
+    # ------------------------------------------------------------------ #
+    # mission_memory_search
+    # ------------------------------------------------------------------ #
+
+    @mcp.tool(tags={"safe", "mission"})
+    @audit_logged
+    async def mission_memory_search(
+        directive: str,
+        top_k: int = 3,
+        final_verdict: str | None = None,
+    ) -> str:
+        """[gated by GCO_ENABLE_MISSION] Search mission memory for similar past missions.
+
+        Embeds ``directive`` and queries the ``{project}-mission-memory``
+        DynamoDB vector index for the closest completed missions — the
+        same institutional memory the engine consults on sampling
+        sessions. Requires the mission-memory add-on to be deployed
+        (``mission_memory.enabled`` in cdk.json, on by default).
+
+        Args:
+            directive: Natural-language mission goal to search by.
+            top_k: Number of similar missions to return (default 3,
+                mirroring the ``mission_memory.top_k`` config default).
+            final_verdict: Optional inline filter on the stored
+                terminal verdict — ``"complete"`` or ``"terminate"``.
+
+        Returns a JSON object with a ``results`` list (each entry
+        carries ``session_id``, ``directive``, ``lessons``,
+        ``recommended_followups``, ``final_verdict``, ``verdict_reason``,
+        ``iteration_count``, ``completed_at``, and a similarity
+        ``score``), or an error envelope: ``mission_memory_unavailable``
+        when the table/index is absent or still backfilling,
+        ``mission_memory_search_failed`` for anything else.
+        """
+        from mission.memory import (  # noqa: PLC0415
+            MissionMemoryStore,
+            MissionMemoryUnavailableError,
+        )
+
+        try:
+            results = MissionMemoryStore().search_similar(
+                directive, top_k=top_k, final_verdict=final_verdict
+            )
+        except MissionMemoryUnavailableError as err:
+            return json.dumps(
+                {
+                    "code": "mission_memory_unavailable",
+                    "details": {"message": str(err)},
+                }
+            )
+        except Exception as err:  # noqa: BLE001 — tool surface must envelope, not raise
+            return json.dumps(
+                {
+                    "code": "mission_memory_search_failed",
+                    "details": {"message": str(err)},
+                }
+            )
+        return json.dumps({"results": results})

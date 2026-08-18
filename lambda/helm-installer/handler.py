@@ -42,10 +42,14 @@ import urllib3
 import yaml
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png``)
+#   * ``handle_task`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.handle_task.html``
+#     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.handle_task.png``)
+#   * ``validate_releases`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.validate_releases.html``
+#     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.validate_releases.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -88,9 +92,21 @@ LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 # finalizers. Four bounded discovery calls plus two ordered deletion calls and
 # the final Helm uninstall fit inside the dedicated four-minute KEDA task.
 KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
+KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
+#: Charts whose controllers attach finalizers to their custom resources.
+#: Their instances must be deleted BEFORE ``helm uninstall`` removes the
+#: controller — uninstalling first leaves finalizer-bearing objects that
+#: nothing can clear, wedging CRD deletion (kueue: caught live by release
+#: validation run sched241-350ffc7d, where the default gco-cluster-queue /
+#: gco-default-flavor objects deadlocked teardown).
+CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
+    "keda": KEDA_API_GROUPS,
+    "kueue": KUEUE_API_GROUPS,
+}
 KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "45s"
 KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 55
 KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS = 10
+CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS = 30
 
 # Validation intentionally has tighter command caps than chart installation:
 # these are read-only convergence checks and should never consume an entire
@@ -119,25 +135,32 @@ class _PinnedManifestBundle:
 
 
 PINNED_GATEWAY_CRD_BUNDLES = (
+    # Controller v3.5.0 is built against Gateway API v1.6.0 and requires the
+    # CRDs to be updated BEFORE the controller (release notes: upgrading the
+    # controller first silently disables gateway reconciliation until the
+    # CRDs catch up — exactly the stale-Accepted failure the 2026-08 live
+    # validation caught under the v1.5.0 bundle). Keep these two bundles and
+    # the aws-load-balancer-controller chart version in charts.yaml in
+    # lockstep when bumping either.
     _PinnedManifestBundle(
-        name="gateway-api-standard-v1.5.0",
+        name="gateway-api-standard-v1.6.0",
         url=(
             "https://github.com/kubernetes-sigs/gateway-api/releases/download/"
-            "v1.5.0/standard-install.yaml"
+            "v1.6.0/standard-install.yaml"
         ),
-        size=1_023_753,
-        sha256="510338cf6709f84410efcce5269268f4c7c5067efdc5d04c75aa2fd2f8380c96",
-        object_count=10,
-        crd_count=8,
+        size=1_170_953,
+        sha256="a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d",
+        object_count=12,
+        crd_count=10,
     ),
     _PinnedManifestBundle(
-        name="aws-lbc-gateway-v3.4.2",
+        name="aws-lbc-gateway-v3.5.0",
         url=(
             "https://raw.githubusercontent.com/kubernetes-sigs/"
-            "aws-load-balancer-controller/v3.4.2/config/crd/gateway/gateway-crds.yaml"
+            "aws-load-balancer-controller/v3.5.0/config/crd/gateway/gateway-crds.yaml"
         ),
-        size=65_111,
-        sha256="89983f8b43b1b85c3d065d6f0007ee1fa2bffe8790282b9a57ccc9a355f65bd7",
+        size=129_368,
+        sha256="fce68bbfc74b4ed7dbea675f46981cbef1fffc8981cf19c0c1e7a2e9d6464862",
         object_count=3,
         crd_count=3,
     ),
@@ -626,22 +649,90 @@ def install_chart(
                 os.unlink(values_file)
 
 
-def _delete_keda_custom_resources(kubeconfig: str) -> tuple[bool, str]:
-    """Delete all KEDA custom resources before uninstalling its controller.
+def _strip_custom_resource_finalizers(
+    kubeconfig: str, resource_types: list[str], namespaced: bool
+) -> str | None:
+    """Remove finalizers from every remaining instance of the given types.
 
-    Resource discovery keeps this compatible with the exact KEDA chart version
-    in use instead of maintaining a second CRD list here. Namespaced resources
-    (including ``ScaledJob``) are deleted first across every namespace, then
-    cluster-scoped authentication resources. ``kubectl delete --wait`` does not
-    return until operator-owned finalizers are gone, so Helm can safely remove
-    the controller and CRDs afterwards.
+    Recovery path for a delete that stalled because the finalizer-clearing
+    controller is already gone (e.g. a teardown retry after a partial
+    uninstall). Returns an error string, or ``None`` on success.
+    """
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    common = ["kubectl", "--kubeconfig", kubeconfig, "--request-timeout=30s"]
+    for resource_type in resource_types:
+        if namespaced:
+            list_command = [
+                *common,
+                "get",
+                resource_type,
+                "--all-namespaces",
+                "-o",
+                'jsonpath={range .items[*]}{.metadata.namespace}{","}{.metadata.name}{"\\n"}{end}',
+            ]
+        else:
+            list_command = [*common, "get", resource_type, "-o", "name"]
+        try:
+            listing = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv, no shell=True
+                list_command,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return f"Timed out listing {resource_type} instances for finalizer removal"
+        if listing.returncode != 0:
+            # The whole resource type may already be gone with its CRD.
+            continue
+        for line in listing.stdout.split():
+            patch_command = [*common, "patch"]
+            if namespaced:
+                namespace, _, name = line.partition(",")
+                if not name:
+                    continue
+                patch_command += [resource_type, name, "-n", namespace]
+            else:
+                patch_command += [line]
+            patch_command += ["--type", "merge", "-p", '{"metadata":{"finalizers":[]}}']
+            try:
+                patched = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
+                    patch_command,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return f"Timed out removing finalizers from {line}"
+            if patched.returncode != 0 and "not found" not in (patched.stderr or "").lower():
+                error = (patched.stderr or patched.stdout).strip()
+                return f"Failed to remove finalizers from {line}: {error}"
+    return None
+
+
+def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bool, str]:
+    """Delete a chart's custom resources before uninstalling its controller.
+
+    Applies to every chart in ``CHART_CUSTOM_RESOURCE_API_GROUPS``. Resource
+    discovery keeps this compatible with the exact chart version in use
+    instead of maintaining a second CRD list here. Namespaced resources are
+    deleted first across every namespace, then cluster-scoped ones.
+    ``kubectl delete --wait`` does not return until controller-owned
+    finalizers are gone, so Helm can safely remove the controller and CRDs
+    afterwards. If the wait stalls — the controller may already be gone on a
+    teardown retry — finalizers are stripped from the survivors and the
+    delete retried once, so teardown self-heals instead of wedging CRDs in
+    Terminating.
     """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
     common = ["kubectl", "--kubeconfig", kubeconfig, "--request-timeout=30s"]
     resources_by_scope: dict[bool, list[str]] = {True: [], False: []}
 
-    for api_group in KEDA_API_GROUPS:
+    api_groups = CHART_CUSTOM_RESOURCE_API_GROUPS[chart_name]
+    for api_group in api_groups:
         for namespaced in (True, False):
             try:
                 discovery = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv, no shell=True
@@ -685,33 +776,63 @@ def _delete_keda_custom_resources(kubeconfig: str) -> tuple[bool, str]:
         if namespaced:
             command.append("--all-namespaces")
 
+        scope = "namespaced" if namespaced else "cluster-scoped"
+        failure: str | None = None
         try:
-            deletion = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered KEDA resource names, no shell=True
+            deletion = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
                 command,
                 capture_output=True,
                 text=True,
                 env=env,
                 timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
             )
+            if deletion.returncode != 0:
+                failure = (deletion.stderr or deletion.stdout).strip()
         except subprocess.TimeoutExpired:
-            scope = "namespaced" if namespaced else "cluster-scoped"
-            return False, f"Timed out deleting {scope} KEDA custom resources"
-
-        if deletion.returncode != 0:
-            error = (deletion.stderr or deletion.stdout).strip()
-            scope = "namespaced" if namespaced else "cluster-scoped"
-            return False, f"Failed to delete {scope} KEDA custom resources: {error}"
+            failure = "delete --wait timed out"
+        if failure is not None:
+            # The finalizer-clearing controller may already be gone (teardown
+            # retry after a partial uninstall). Strip finalizers from the
+            # survivors and retry the delete once before failing teardown.
+            logger.warning(
+                f"{scope} {chart_name} custom-resource delete stalled ({failure}); "
+                "stripping finalizers and retrying once"
+            )
+            strip_error = _strip_custom_resource_finalizers(kubeconfig, resources, namespaced)
+            if strip_error is not None:
+                return False, (
+                    f"Failed to delete {scope} {chart_name} custom resources "
+                    f"({failure}); finalizer removal also failed: {strip_error}"
+                )
+            try:
+                retry = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return False, (
+                    f"Timed out deleting {scope} {chart_name} custom resources "
+                    "even after finalizer removal"
+                )
+            if retry.returncode != 0:
+                error = (retry.stderr or retry.stdout).strip()
+                return False, (
+                    f"Failed to delete {scope} {chart_name} custom resources "
+                    f"even after finalizer removal: {error}"
+                )
         deleted_types += len(resources)
-
-    return True, f"Deleted and waited for {deleted_types} KEDA custom resource type(s)"
+    return True, f"Deleted and waited for {deleted_types} {chart_name} custom resource type(s)"
 
 
 def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[bool, str]:
     """Uninstall a Helm chart within the synchronous teardown budget."""
-    if chart_name == "keda":
-        cleaned, cleanup_message = _delete_keda_custom_resources(kubeconfig)
+    if chart_name in CHART_CUSTOM_RESOURCE_API_GROUPS:
+        cleaned, cleanup_message = _delete_chart_custom_resources(chart_name, kubeconfig)
         if not cleaned:
-            return False, f"KEDA pre-uninstall cleanup failed: {cleanup_message}"
+            return False, f"{chart_name} pre-uninstall cleanup failed: {cleanup_message}"
         logger.info(cleanup_message)
 
     helm_timeout = LBC_UNINSTALL_TIMEOUT if chart_name == LBC_CHART_NAME else HELM_UNINSTALL_TIMEOUT
@@ -783,6 +904,13 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             'deployments.apps "health-monitor" not found',
             'deployment.apps "health-monitor" not found',
             'deployment "health-monitor" not found',
+            # A deploy that failed before the base manifests applied never
+            # created the namespace at all; there is nothing to quiesce, and
+            # treating this as fatal wedged a stack DELETE_FAILED on the
+            # HelmTeardown custom resource (2026-09 live validation, run
+            # sched241-1ae7c0d3). Nothing-was-ever-there is as idempotent as
+            # deployment-already-gone.
+            f'namespaces "{namespace}" not found',
         )
         if not any(signature in lowered for signature in exact_absence):
             return False, f"Failed to scale health-monitor to zero: {scale_error}"
@@ -809,7 +937,13 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
 
     if wait.returncode != 0:
         wait_error = (wait.stderr or wait.stdout).strip()
-        if "no matching resources found" not in wait_error.lower():
+        lowered_wait = wait_error.lower()
+        wait_absence = (
+            "no matching resources found",
+            # Same never-created-namespace case as the scale step above.
+            f'namespaces "{namespace}" not found',
+        )
+        if not any(signature in lowered_wait for signature in wait_absence):
             return False, f"Failed waiting for health-monitor pods: {wait_error}"
 
     return True, "Health monitor quiesced"

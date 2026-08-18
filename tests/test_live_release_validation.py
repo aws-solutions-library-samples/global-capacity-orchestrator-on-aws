@@ -1563,6 +1563,106 @@ class TestDeterministicTopologyReadiness:
         assert "resource_utilization" in sample["error"]
 
 
+class TestRolledBackLogGroupCheckpoint:
+    """A rolled-back create must not fail teardown over its own deleted groups.
+
+    Live failure this pins (example-job validation run ex241-2913b044): the
+    regional stack rolled back during create, CloudFormation deleted the
+    non-retained state-machine log group, and the pre-destroy checkpoint's
+    fail-closed absence check then aborted the guaranteed cleanup — stranding
+    every remaining stack. Absence of a log group under a rolled-back stack is
+    the expected rollback outcome and must be recorded, then skipped; under a
+    live stack it stays a hard failure.
+    """
+
+    _REGION = "us-east-1"
+    _STACK = "gco-live-us-east-1"
+    _GROUP = "gco-live-us-east-1-HelmInstallStateMachineLogGroup-XYZ"
+
+    def _environment(self, *, stack_status: str, resource_status: str) -> SimpleNamespace:
+        ctx = _context(
+            state={
+                "target_stack_regions": {self._STACK: self._REGION},
+                "log_group_cleanup_token": "b" * 32,
+            }
+        )
+        ctx.checkpoint.created_at = "2026-08-11T00:00:00+00:00"
+
+        cfn = MagicMock(name="cloudformation")
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceSummaries": [
+                    {
+                        "ResourceType": "AWS::Logs::LogGroup",
+                        "LogicalResourceId": "HelmInstallStateMachineLogGroup",
+                        "PhysicalResourceId": self._GROUP,
+                        "ResourceStatus": resource_status,
+                    }
+                ]
+            }
+        ]
+        logs = MagicMock(name="logs")
+        lambda_client = MagicMock(name="lambda")
+
+        def client(service: str, *, region_name: str, **_kwargs):
+            assert region_name == self._REGION
+            return {"cloudformation": cfn, "logs": logs, "lambda": lambda_client}[service]
+
+        ctx.session.client.side_effect = client
+        stack_record = {
+            "stack_id": (
+                f"arn:aws:cloudformation:{self._REGION}:123456789012:stack/{self._STACK}/sid"
+            )
+        }
+        live_stack = {
+            "status": stack_status,
+            "tags": {constants._RUN_STACK_TAG: "run-123"},
+        }
+        return SimpleNamespace(ctx=ctx, logs=logs, stack_record=stack_record, live_stack=live_stack)
+
+    def _invoke(self, environment: SimpleNamespace) -> list[dict[str, object]]:
+        with (
+            patch_live_validation_helper(
+                "_owned_stack_record", return_value=environment.stack_record
+            ),
+            patch_live_validation_helper("describe_stack", return_value=environment.live_stack),
+            patch_live_validation_helper(
+                "_validated_owned_log_group_identity",
+                return_value=(self._REGION, self._GROUP),
+            ),
+            patch_live_validation_helper(
+                "_observe_log_group_stability",
+                return_value={"status": "absent"},
+            ),
+        ):
+            return ownership_log_groups._checkpoint_owned_log_groups(environment.ctx)
+
+    def test_rollback_deleted_group_is_recorded_and_skipped(self) -> None:
+        environment = self._environment(
+            stack_status="ROLLBACK_COMPLETE",
+            # Rolled-back creates leave DELETE_COMPLETE tombstones; the widened
+            # filter admits them precisely to catch groups that survived.
+            resource_status="DELETE_COMPLETE",
+        )
+        self._invoke(environment)
+
+        incidents = environment.ctx.checkpoint.state["log_group_checkpoint_incidents"]
+        assert [item["phase"] for item in incidents] == ["checkpoint-explicit-group-absence"], (
+            "the absent group must still be recorded as a checkpoint incident"
+        )
+        owned = environment.ctx.checkpoint.state.get("owned_log_groups", [])
+        assert owned == [], "a genuinely deleted group must not be adopted"
+        environment.logs.create_log_group.assert_not_called()
+
+    def test_live_stack_missing_group_still_fails_closed(self) -> None:
+        environment = self._environment(
+            stack_status="CREATE_COMPLETE",
+            resource_status="CREATE_COMPLETE",
+        )
+        with pytest.raises(RuntimeError, match="absent before teardown"):
+            self._invoke(environment)
+
+
 class TestRetainedLogCleanupGenerationFencing:
     _REGION = "us-east-1"
     _NAME = "gco-live-provider-log"
@@ -3841,9 +3941,12 @@ class TestReportCompletionStatus:
 
 
 class TestSmokeManifestSupplyChain:
-    _BUSYBOX_IMAGE = (
+    _PINNED_IMAGES = (
         "docker.io/library/busybox:1.38.0@"
-        "sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+        "sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616",
+        # The Slurm probe needs a Python runtime for its slurmrestd round trip.
+        "docker.io/library/python:3.14.7-slim@"
+        "sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910",
     )
 
     def test_smoke_images_are_immutable_and_dependency_scanned(self) -> None:
@@ -3853,11 +3956,190 @@ class TestSmokeManifestSupplyChain:
 
         for manifest in manifests:
             content = manifest.read_text(encoding="utf-8")
-            assert f"image: {self._BUSYBOX_IMAGE}" in content
+            assert any(f"image: {image}" in content for image in self._PINNED_IMAGES), (
+                f"{manifest.name} must use one of the digest-pinned validation images"
+            )
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("image:"):
+                    assert "@sha256:" in stripped, (
+                        f"{manifest.name} has an unpinned image: {stripped}"
+                    )
             assert "imagePullPolicy: IfNotPresent" in content
 
         dependency_scan = (root / ".github/scripts/dependency-scan.sh").read_text(encoding="utf-8")
         assert "scripts/live_release_validation/manifests/" in dependency_scan
+
+
+class TestSchedulerValidation:
+    """The schedulers action proves enabled schedulers and skips with reasons."""
+
+    @staticmethod
+    def _ctx(
+        *,
+        helm: dict[str, object] | None,
+        optional: tuple[str, ...] = (),
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            cdk_context={} if helm is None else {"helm": helm},
+            settings=SimpleNamespace(run_id="run-123", optional_schedulers=optional),
+            checkpoint=SimpleNamespace(state={}),
+            persist=MagicMock(),
+        )
+
+    def test_enablement_follows_the_cdk_json_helm_block(self) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(
+            helm={
+                "volcano": {"enabled": True},
+                "kueue": {"enabled": True},
+                "yunikorn": {"enabled": False},
+                "slurm": {"enabled": False},
+            }
+        )
+        enablement = checks_schedulers.effective_scheduler_enablement(ctx)
+        assert enablement["volcano"] == {"enabled": True, "source": "cdk.json helm.volcano"}
+        assert enablement["kueue"] == {"enabled": True, "source": "cdk.json helm.kueue"}
+        assert enablement["yunikorn"] == {"enabled": False, "source": "cdk.json helm.yunikorn"}
+        assert enablement["slurm"] == {"enabled": False, "source": "cdk.json helm.slurm"}
+
+    def test_missing_helm_keys_default_to_enabled_like_the_chart_map(self) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        enablement = checks_schedulers.effective_scheduler_enablement(self._ctx(helm=None))
+        assert all(state["enabled"] for state in enablement.values())
+
+    def test_run_overrides_force_optional_schedulers_on(self) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(
+            helm={"yunikorn": {"enabled": False}, "slurm": {"enabled": False}},
+            optional=("slurm", "yunikorn"),
+        )
+        enablement = checks_schedulers.effective_scheduler_enablement(ctx)
+        assert enablement["yunikorn"] == {"enabled": True, "source": "run-override"}
+        assert enablement["slurm"] == {"enabled": True, "source": "run-override"}
+
+    def test_non_optional_override_names_are_refused(self) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(helm={}, optional=("volcano",))
+        with pytest.raises(RuntimeError, match="not optional schedulers"):
+            checks_schedulers.effective_scheduler_enablement(ctx)
+
+    def test_action_probes_enabled_and_skips_disabled_with_reasons(self) -> None:
+        from scripts.live_release_validation.actions import schedulers as actions_schedulers
+
+        ctx = self._ctx(
+            helm={
+                "volcano": {"enabled": True},
+                "kueue": {"enabled": True},
+                "yunikorn": {"enabled": False},
+                "slurm": {"enabled": False},
+            }
+        )
+        probes: list[dict[str, object]] = []
+
+        def fake_lifecycle(_ctx, *, manifest_filename, path, marker_prefix):
+            probes.append(
+                {
+                    "manifest": manifest_filename,
+                    "path": path,
+                    "marker_prefix": marker_prefix,
+                }
+            )
+            return {"status_marker": marker_prefix}
+
+        with patch_live_validation_helper("_run_api_transport_lifecycle", fake_lifecycle):
+            evidence = actions_schedulers.action_schedulers(ctx)
+
+        results = evidence["schedulers"]
+        assert [probe["path"] for probe in probes] == ["volcano", "kueue"]
+        assert all(probe["manifest"] == f"{probe['path']}-smoke-job.yaml" for probe in probes)
+        assert results["volcano"]["status"] == "validated"
+        assert results["kueue"]["status"] == "validated"
+        assert results["yunikorn"]["status"] == "skipped"
+        assert "--optional-schedulers" in results["yunikorn"]["reason"]
+        assert "cdk.json helm.yunikorn" in results["yunikorn"]["reason"]
+        assert results["slurm"]["status"] == "skipped"
+        assert results["keda"]["status"] == "derived"
+        assert "sqs action" in results["keda"]["reason"]
+        assert results["kuberay"]["status"] == "chart-level"
+        assert "kind allowlist" in results["kuberay"]["reason"]
+        assert ctx.checkpoint.state["scheduler_validation"] == evidence
+        ctx.persist.assert_called_once_with()
+
+    def test_action_runs_every_probe_when_overrides_enable_everything(self) -> None:
+        from scripts.live_release_validation.actions import schedulers as actions_schedulers
+
+        ctx = self._ctx(
+            helm={"yunikorn": {"enabled": False}, "slurm": {"enabled": False}},
+            optional=("slurm", "yunikorn"),
+        )
+        probed: list[str] = []
+
+        def fake_lifecycle(_ctx, *, manifest_filename, path, marker_prefix):
+            probed.append(path)
+            return {}
+
+        with patch_live_validation_helper("_run_api_transport_lifecycle", fake_lifecycle):
+            evidence = actions_schedulers.action_schedulers(ctx)
+
+        assert probed == ["volcano", "kueue", "yunikorn", "slurm"]
+        assert all(evidence["schedulers"][name]["status"] == "validated" for name in probed)
+        assert evidence["schedulers"]["yunikorn"]["source"] == "run-override"
+
+    def test_probe_failure_fails_the_action(self) -> None:
+        from scripts.live_release_validation.actions import schedulers as actions_schedulers
+
+        ctx = self._ctx(helm={"yunikorn": {"enabled": False}, "slurm": {"enabled": False}})
+
+        def failing_lifecycle(_ctx, *, manifest_filename, path, marker_prefix):
+            if path == "kueue":
+                raise TimeoutError("workload was never admitted")
+            return {}
+
+        with (
+            patch_live_validation_helper("_run_api_transport_lifecycle", failing_lifecycle),
+            pytest.raises(TimeoutError, match="never admitted"),
+        ):
+            actions_schedulers.action_schedulers(ctx)
+
+    def test_every_probe_manifest_exists_with_labels_and_marker(self) -> None:
+        from scripts.live_release_validation.checks.schedulers import PROBED_SCHEDULERS
+
+        root = Path(__file__).resolve().parents[1]
+        manifests_dir = root / "scripts/live_release_validation/manifests"
+        for scheduler in PROBED_SCHEDULERS:
+            content = (manifests_dir / f"{scheduler}-smoke-job.yaml").read_text(encoding="utf-8")
+            assert f"gco.aws/validation-path: {scheduler}" in content
+            assert "gco.aws/validation-run: __RUN_TOKEN__" in content
+            assert f"GCO_LIVE_{scheduler.upper()}___RUN_TOKEN__" in content
+            assert "backoffLimit: 0" in content
+            assert "ttlSecondsAfterFinished: 600" in content
+        # Scheduling-proof fields: a foreign schedulerName or the Kueue queue
+        # label is what makes completion equal scheduling evidence.
+        volcano = (manifests_dir / "volcano-smoke-job.yaml").read_text(encoding="utf-8")
+        assert "schedulerName: volcano" in volcano
+        yunikorn = (manifests_dir / "yunikorn-smoke-job.yaml").read_text(encoding="utf-8")
+        assert "schedulerName: yunikorn" in yunikorn
+        assert "yunikorn.apache.org/queue: root.default" in yunikorn
+        kueue = (manifests_dir / "kueue-smoke-job.yaml").read_text(encoding="utf-8")
+        assert "kueue.x-k8s.io/queue-name: gco-default" in kueue
+        slurm = (manifests_dir / "slurm-smoke-job.yaml").read_text(encoding="utf-8")
+        assert 'gco.aws/slurm-client: "true"' in slurm
+        assert "slinky-slurm-auth-jwt" in slurm
+        assert "slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820" in slurm
+
+    def test_kueue_probe_queue_exists_in_the_deployed_topology(self) -> None:
+        """The queue the probe names must be the queue the applier deploys."""
+        root = Path(__file__).resolve().parents[1]
+        deployed = (
+            root / "lambda/kubectl-applier-simple/manifests/post-helm-kueue-default-queues.yaml"
+        ).read_text(encoding="utf-8")
+        assert "name: gco-default" in deployed
+        assert "kind: LocalQueue" in deployed
 
 
 class TestLocalRunbookContracts:

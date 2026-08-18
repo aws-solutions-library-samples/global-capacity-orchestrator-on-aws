@@ -36,7 +36,7 @@ Always returns SUCCESS to prevent stuck stacks. Optionally skips resource deleti
 
 ## Supported Resource Kinds
 
-Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, Deployment, DaemonSet, HorizontalPodAutoscaler (`autoscaling/v2`), Service, ConfigMap, Secret, GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration, StorageClass, PersistentVolume, PersistentVolumeClaim, PodDisruptionBudget, NetworkPolicy, NodePool, EC2NodeClass, APIService, DeviceClass, ScaledJob, ScaledObject.
+Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, Deployment, DaemonSet, HorizontalPodAutoscaler (`autoscaling/v2`), Service, ConfigMap, Secret, GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration, StorageClass, PersistentVolume, PersistentVolumeClaim, PodDisruptionBudget, NetworkPolicy, NodePool, EC2NodeClass, APIService, DeviceClass, ScaledJob, ScaledObject, ClusterTrainingRuntime.
 
 ## CloudFormation Properties
 

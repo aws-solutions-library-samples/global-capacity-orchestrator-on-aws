@@ -8,6 +8,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
 - [Global Options](#global-options)
 - [Commands](#commands)
   - [autopilot](#autopilot-command)
+  - [status](#status-commands)
   - [jobs](#jobs-commands)
   - [queue](#queue-commands)
   - [templates](#templates-commands)
@@ -27,6 +28,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [config-cmd](#config-cmd-commands)
   - [tasks](#tasks-commands)
   - [mission](#mission-commands)
+  - [vector](#vector-commands)
   - [release](#release-commands)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
@@ -114,8 +116,8 @@ Launch a fully configured [Claude Code](https://code.claude.com/docs/en/overview
 
 ```bash
 # Turn this terminal into an agent session: Claude Code on Amazon Bedrock
-# (defaults to cdk.json context.bedrock.default_model_id) with the GCO MCP
-# server + the recommended companion MCP servers wired in
+# (defaults to cdk.json context.bedrock.claude_code_default_model_id) with the
+# GCO MCP server + the recommended companion MCP servers wired in
 gco autopilot
 
 # Preview the launch plan without installing, writing, or launching
@@ -149,6 +151,99 @@ gco autopilot -y -- --continue
 ```
 
 If the `claude` binary is missing, autopilot offers to install the exact pinned release via `npm install -g` — Claude Code is intentionally not baked into the dev container, so setup happens on first use and stays reproducible (the monthly deps-scan tracks the pin).
+
+### Status Commands
+
+One read-only command that answers "what is my deployment doing right now?" across every
+configured region — the aggregate view that otherwise takes `gco stacks status`,
+`gco queue stats`, `gco jobs list --all-regions`, `gco capacity status`, and
+`gco inference list` run separately and joined by hand. The same document backs the
+`fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
+
+| Command | Description |
+|---------|-------------|
+| `gco status` | Aggregate fleet status document: stacks, queue, jobs, capacity, inference |
+
+```bash
+# Whole-fleet summary across the configured deployment regions
+gco status
+
+# One region only
+gco status -r us-east-1
+
+# The full document for scripts and agents
+gco status --output json
+
+# Include the billed and cluster-bound sections
+gco status --with-costs --with-nodepools
+
+# Refresh in place while watching a deploy or a queue drain
+gco status --watch 10
+
+# Back a health check: exit 1 when an error-severity finding is present
+gco status --fail-on-findings
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Restrict the gather to a single region |
+| `--with-costs` | Include the `costs` section (Cost Explorer bills per `GetCostAndUsage` request) |
+| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco cluster tunnel`) |
+| `--watch SECONDS` | Re-gather and redraw on an interval (minimum 5 seconds; table output only). With `--with-costs`, the costs section is re-fetched at most every 15 minutes and carries an `as_of` timestamp |
+| `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
+
+**Sections.** Each is gathered independently, in parallel, under a 30-second
+per-section timeout. The default set is Tier 1: free control-plane reads that
+need no cluster reachability. Tier 2 costs money per call and Tier 3 needs the
+Kubernetes API, so both are opt-in flags.
+
+| Section | Tier | Source |
+|---------|------|--------|
+| `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
+| `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
+| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region |
+| `jobs` | 1 | Job counts by region and status from the queue-statistics API |
+| `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
+| `inference` | 1 | Inference endpoint desired state from the global registry |
+| `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
+| `nodepools` | 3 | Karpenter NodePools per region after an endpoint reachability probe (`--with-nodepools`) |
+
+**Section status vocabulary.** Every section carries a `status`; anything that
+is not `ok` or `empty` also carries a human-readable `reason` and the raw
+`errors`. The distinction between `empty` and `unavailable` is the point:
+"there are no jobs" and "I could not find out whether there are jobs" lead to
+opposite decisions.
+
+| Status | Meaning |
+|--------|---------|
+| `ok` | Read succeeded, data present |
+| `empty` | Read succeeded, genuinely nothing there — a success, not a degradation |
+| `partial` | Some regions or signals worked, others did not |
+| `unavailable` | Could not be attempted, for a known reason (stack absent, private endpoint, no `cdk.json`) |
+| `error` | Attempted and failed unexpectedly, or exceeded the section timeout |
+| `skipped` | Not requested (an opt-in section without its flag) |
+
+**Findings.** The document carries a `findings` list of what looks wrong, each
+entry shaped `{severity, section, message}` with severity `error` or `warn` —
+for example a stack in a rollback state, a non-empty dead-letter queue, a
+region with unavailable telemetry, or a truncated job-count scan. Findings are
+derived from the gathered data only (no extra AWS calls), ordered `error`
+before `warn`, and rendered first in table mode. The top-level `overall` field
+is `ok` or `degraded`, with a `degraded` list naming the responsible sections;
+skipped sections alone never degrade the document.
+
+The JSON document — section names, the status vocabulary, and the finding
+shape — is the command's public contract: `generated_at`, `project_name`,
+`overall`, `degraded`, `findings`, and `sections`. Exit code is 0 whenever a
+document was produced, even when degraded; only `--fail-on-findings` maps an
+`error`-severity finding to exit 1.
+
+`gco status` reports the deployment that `cdk.json` declares. Without a
+checkout it degrades honestly instead of scanning every AWS region — run from
+a checkout or pass `--region`. `gco stacks list` remains the tool for
+discovering stacks wherever they exist.
 
 ### Jobs Commands
 
@@ -352,6 +447,10 @@ gco jobs logs JOB_NAME [OPTIONS]
 | `--namespace` | `-n` | Job namespace |
 | `--tail` | `-t` | Number of lines to show |
 | `--container` | `-c` | Container name (for multi-container pods) |
+| `--node` | | Node rank to fetch for a distributed TrainJob (default: 0) |
+
+Kubeflow TrainJobs are resolved automatically: logs come from the
+rank-`--node` pod of the training job (rank 0 by default).
 
 **Example:**
 
@@ -359,6 +458,7 @@ gco jobs logs JOB_NAME [OPTIONS]
 gco jobs logs my-job --region us-east-1
 gco jobs logs my-job -r us-east-1 --tail 500
 gco jobs logs multi-container-job -r us-east-1 --container sidecar
+gco jobs logs my-trainjob -r us-east-1 --node 1
 ```
 
 #### `gco jobs pod-logs`
@@ -1170,7 +1270,7 @@ gco stacks regions set monitoring us-west-2 -y
 
 #### `gco stacks bedrock`
 
-Manage the Bedrock model default in cdk.json (`context.bedrock.default_model_id`) — the model/inference-profile ID GCO's advisory Bedrock features (capacity advisor, Mission sampling, autopilot) use unless explicitly overridden. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`) are preserved.
+Manage the three Bedrock model defaults in cdk.json, one per consumer: `context.bedrock.mission_default_model_id` — the model/inference-profile ID Mission sampling uses unless explicitly overridden — `context.bedrock.capacity_advisor_default_model_id` — the capacity advisor's equivalent — and `context.bedrock.claude_code_default_model_id`, the session model `gco autopilot` hands to Claude Code. The keys are independent: repointing one never repoints the others. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`, the other model keys) are preserved.
 
 ```bash
 gco stacks bedrock COMMAND [OPTIONS]
@@ -1178,14 +1278,18 @@ gco stacks bedrock COMMAND [OPTIONS]
 
 **Subcommands:**
 
-- `show` - Show the configured default model ID and its backing cdk.json path (`gco stacks bedrock show`).
-- `set-model` - Set the default model/inference-profile ID (`gco stacks bedrock set-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `show` - Show every configured default model ID and its backing cdk.json path (`gco stacks bedrock show`).
+- `set-mission-model` - Set the Mission sampling default model/inference-profile ID (`gco stacks bedrock set-mission-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `set-capacity-advisor-model` - Set the capacity advisor default model/inference-profile ID (`gco stacks bedrock set-capacity-advisor-model`). Same free-form validation; explicit `--model` overrides still win at run time.
+- `set-claude-code-model` - Set the Claude Code session model `gco autopilot` launches with (`gco stacks bedrock set-claude-code-model`). Same free-form validation; explicit `--model`/`GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 
 **Example:**
 
 ```bash
 gco stacks bedrock show
-gco stacks bedrock set-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-mission-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
+gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
 ```
 
 #### `gco stacks fsx`
@@ -2008,8 +2112,8 @@ is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
 B200, B300).
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
-`context.bedrock.default_model_id` (Anthropic Claude Opus 5's global inference
-profile in the stock configuration). The stock
+`context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5's
+global inference profile in the stock configuration). The stock
 `context.bedrock.thinking.effort=high` runs Claude adaptive thinking at its
 default effort; reasoning tokens are billed as output and can materially
 increase latency. Explicit model overrides do not inherit the default's
@@ -2032,7 +2136,7 @@ thinking fields.
 | `--min-memory-gb` | | Minimum memory in GB |
 | `--fault-tolerance` | `-f` | Fault tolerance level: `high`, `medium`, `low` |
 | `--max-cost` | | Maximum cost per hour in USD |
-| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show raw AI response |
 
 **Example:**
@@ -2297,9 +2401,11 @@ gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
 
 Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that is enabled by default. Set `historical.enabled` to `false` in cdk.json to opt out. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
 
+Spot placement scores are collected per *instance pool* (a reviewed set of interchangeable types; the snapshot's `spot_pool` attribute names it) at each configured target capacity, because the underlying AWS API needs at least three instance types to return a meaningful score. Snapshots recorded before pooled collection used single-type requests whose scores are artificially depressed and are not comparable with pooled values; see the [capacity poller README](../lambda/capacity-poller/README.md#history-discontinuity).
+
 #### `gco capacity history show`
 
-Show the recorded capacity time-series (spot score, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region.
+Show the recorded capacity time-series (pooled spot placement scores at each configured target capacity, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region. Columns follow the store's metric registry, so newly configured metrics appear automatically.
 
 ```bash
 gco capacity history show [OPTIONS]
@@ -2344,7 +2450,7 @@ gco capacity history stats -i g5.xlarge -r us-east-1
 
 #### `gco capacity history patterns`
 
-Show a day-of-week by hour heatmap grid of average spot placement scores, plus the best historical windows.
+Show a day-of-week by hour heatmap grid of a metric's historical averages (default: the pooled spot placement score at target capacity 1), plus the best historical windows.
 
 ```bash
 gco capacity history patterns [OPTIONS]
@@ -2357,11 +2463,13 @@ gco capacity history patterns [OPTIONS]
 | `--instance-type` | `-i` | EC2 instance type (required) |
 | `--region` | `-r` | AWS region (required) |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
+| `--metric` | `-m` | Metric to aggregate (default `spot_score`); accepts any recorded metric field, including the per-target-capacity scores `spot_score_at_10` and `spot_score_at_50` |
 
 **Example:**
 
 ```bash
 gco capacity history patterns -i g5.xlarge -r us-east-1
+gco capacity history patterns -i p5.48xlarge -r us-east-1 -m spot_score_at_10
 ```
 
 #### `gco capacity predict`
@@ -2385,7 +2493,7 @@ gco capacity predict [OPTIONS]
 | `--region` | `-r` | AWS region (omit when using `--all-regions`) |
 | `--all-regions` | `-a` | Predict across every region that has historical data for the instance type |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
-| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show the raw AI response |
 
 **Example:**
@@ -3786,7 +3894,7 @@ port-forward.
 | [`gco monitoring status`](#gco-monitoring-status) | Show the current `cluster_observability.*` toggle state from `cdk.json`. |
 | [`gco monitoring enable`](#gco-monitoring-enable) | Flip `cluster_observability.enabled` to `true` in `cdk.json`. |
 | [`gco monitoring disable`](#gco-monitoring-disable) | Flip `cluster_observability.enabled` to `false` in `cdk.json`. |
-| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager / OpenCost over the private endpoint (optionally via an SSM tunnel). |
+| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager / OpenCost / MLflow over the private endpoint (optionally via an SSM tunnel). |
 | [`gco monitoring users add`](#gco-monitoring-users) | Create a Grafana user via the admin API. |
 | [`gco monitoring users list`](#gco-monitoring-users) | List Grafana organisation users. |
 | [`gco monitoring users remove`](#gco-monitoring-users) | Delete a Grafana user. |
@@ -3835,7 +3943,7 @@ gco monitoring open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), or `opencost-api` (the OpenCost allocation API, `:9003`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md). |
+| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). |
@@ -3906,7 +4014,9 @@ gco cluster tunnel [OPTIONS]
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
 
-The `auto` bastion is a minimal `t3.micro` in the cluster VPC that reuses the
+The `auto` bastion is a minimal `t3.micro` (falling back through `t3a.micro`,
+`t3.small`, then `t2.micro` when a Region or AZ can't launch the preferred
+type) in the cluster VPC that reuses the
 cluster security group (no new security group, and **no inbound ports** — SSM is
 outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
@@ -4402,11 +4512,11 @@ in this order:
 3. Bedrock credential probe — when `boto3` resolves credentials, the
    Bedrock backend is selected with the model id from
    `GCO_MISSION_BEDROCK_MODEL_ID` (or `cdk.json`
-   `context.bedrock.default_model_id`).
+   `context.bedrock.mission_default_model_id`).
 4. Otherwise sampling is off and the loop runs deterministically.
 
 <details>
-<summary>All <code>gco mission</code> commands (11) — click to expand</summary>
+<summary>All <code>gco mission</code> commands (14) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -4421,6 +4531,9 @@ in this order:
 | [`gco mission resume SESSION_ID`](#gco-mission-resume-session_id) | Transition a paused session back to `running`. |
 | [`gco mission history SESSION_ID`](#gco-mission-history-session_id) | Get the iteration history of a session. |
 | [`gco mission list`](#gco-mission-list) | List Mission sessions across the configured backend. |
+| [`gco mission memory search DIRECTIVE`](#gco-mission-memory-search-directive) | Search mission memory for missions similar to a directive. |
+| [`gco mission memory list`](#gco-mission-memory-list) | List what mission memory currently holds. |
+| [`gco mission memory backfill`](#gco-mission-memory-backfill) | Seed mission memory from existing Final_Reports. |
 
 </details>
 
@@ -4640,6 +4753,146 @@ gco mission list [OPTIONS]
 gco mission list --status running --output table
 ```
 
+#### `gco mission memory search DIRECTIVE`
+
+Search [mission memory](MISSION.md#mission-memory) for the completed missions most similar to
+`DIRECTIVE`. The directive is embedded with the configured Bedrock embedding
+model and matched against the `{project}-mission-memory` DynamoDB vector
+index — the same institutional memory the engine consults on sampling
+sessions. Results carry each mission's directive, lessons, recommended
+follow-ups, verdict, and a similarity score.
+
+```bash
+gco mission memory search "reduce validation loss on the demo model" --top-k 5
+```
+
+**Options:**
+
+- `--top-k N` — Number of similar past missions to return (default: `3`).
+- `--verdict complete|terminate` — Only return missions that ended with this terminal verdict.
+- `--output table|json` — Output format (default: `json`).
+
+Requires the mission-memory add-on (`mission_memory.enabled` in `cdk.json`,
+on by default) deployed with the global stack. When the table or index is
+absent — or the vector index is still backfilling after first deployment —
+the command prints a deployment hint and exits `1`.
+
+#### `gco mission memory list`
+
+List what mission memory currently holds, newest completion first. Summaries
+only (session id, directive, verdict, iteration count, timestamps, embedding
+model) — use [`gco mission memory search DIRECTIVE`](#gco-mission-memory-search-directive) to retrieve lessons.
+
+```bash
+gco mission memory list --limit 20 --output table
+```
+
+**Options:**
+
+- `--limit N` — Maximum memory items to return (default: `50`).
+- `--output table|json` — Output format (default: `json`).
+
+#### `gco mission memory backfill`
+
+Seed mission memory from existing Final_Reports: reads every
+`*.report.json` under the report root, embeds each terminal report's
+directive, and writes one memory item per report — so recall is useful on
+day one instead of accumulating from zero. Re-running is safe: writes are
+keyed on `session_id` and simply overwrite. Non-terminal or malformed files
+are counted as `skipped`; per-report write failures are isolated, listed in
+the output, and turn the exit code to `1`.
+
+```bash
+gco mission memory backfill
+```
+
+**Options:**
+
+- `--root DIR` — Directory holding `*.report.json` Final_Reports (default: the filesystem mission root, `~/.gco/missions`).
+
+---
+
+### Vector Commands
+
+Semantic search over an S3-ingested document corpus, backed by the opt-in
+**vector store**: a `{project}-vector-store` [DynamoDB global
+table](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GlobalTables.html)
+with a `corpus-embedding-index` vector index, replicated to every deployment
+region so workloads and searches read locally. Ships with the global stack
+when `vector_store.enabled` is `true` in `cdk.json` (**off by default** — a
+replicated table carries real per-region cost). Ingestion is S3-driven:
+objects dropped under the corpus prefix (default `vector-corpus/`) of the
+cluster-shared bucket are chunked and embedded by the
+`lambda/vector-ingest` Lambda automatically; `gco vector ingest` is a
+convenience wrapper around that upload.
+
+Corpus lifecycle notes: re-uploading a file overwrites its chunks in place
+(deterministic ids), deleting an S3 object does **not** delete its items,
+and adopting a newer `vector_store.embedding_model_id` means re-ingesting
+the corpus — vectors are only comparable to vectors from the model that
+wrote them. After the first enabled deploy the vector index takes several
+minutes to build; searches answer a "still building" hint until it is
+ACTIVE (`gco vector status` shows where things stand).
+
+#### `gco vector status`
+
+Show the table, replica, and vector-index state plus the resolved names.
+
+```bash
+gco vector status
+gco vector status --region us-east-1 --output table
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region` | Region whose replica to describe (default: the global region) |
+| `--output` | Output format: `json` (default) or `table` |
+
+#### `gco vector ingest`
+
+Upload `.txt`/`.md`/`.jsonl` files to the corpus prefix for ingestion.
+Uploading IS ingestion — the S3 event notification invokes the ingest
+Lambda, and global-table replication fans the embedded chunks out to every
+replica region. `.jsonl` files are pre-chunked (`{"text": "...", "title":
+"optional"}` per line); `.txt`/`.md` go through the deterministic paragraph
+chunker.
+
+```bash
+gco vector ingest docs/RUNBOOKS.md operations-notes.txt
+gco vector ingest --demo --wait     # seed with the checkout's docs/*.md
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--demo` | Ingest the checkout's `docs/*.md` as a self-contained demo corpus (requires a source checkout) |
+| `--wait` | Block until every uploaded document is searchable (up to 5 minutes); exits `1` if the wait times out |
+| `--output` | Output format: `json` (default) or `table` |
+
+#### `gco vector search`
+
+Search the corpus for chunks similar to QUERY. The query is embedded with
+the corpus's own model at the index width (both one-way doors), and a
+lower score is closer under the default COSINE distance.
+
+```bash
+gco vector search "how do capacity blocks work"
+gco vector search "spot interruption handling" --top-k 3 --output table
+gco vector search "runbook steps" --source vector-corpus/RUNBOOKS.md --region us-east-1
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--top-k` | Number of similar chunks to return (default: 5) |
+| `--source` | Only return chunks from this source document (full S3 key) |
+| `--region` | Region whose replica to query (default: the global region) |
+| `--output` | Output format: `json` (default) or `table` |
+
 ---
 
 ### Release Commands
@@ -4670,6 +4923,48 @@ gco release validate --expected-account 123456789012 \
 | `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
 | `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
 | `--emulator-endpoint` | Run the identical harness against a local AWS emulator ([Floci](FLOCI_TESTING.md)) instead of real AWS. The harness proves the endpoint is an emulator before touching anything. |
+
+---
+
+### Examples Commands
+
+Validate the shipped example manifests under `examples/`.
+
+#### `gco examples validate`
+
+Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks).
+
+```bash
+# Offline checks only (fast; no AWS):
+gco examples validate --static-only
+
+# Full live run of every example:
+gco examples validate --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+
+# Live-validate just the example you changed:
+gco examples validate --examples gpu-job --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--static-only` | Run only the offline checks (parse, transport-gate acceptance, namespace policy, spec/catalog symmetry) and exit; needs no account or consent flags. |
+| `--expected-account` | Exact 12-digit AWS account id the run may touch (required for live runs). |
+| `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag for live runs. |
+| `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required for live runs. |
+| `--examples` | Only validate these examples (comma-separated file stems; default: all). Required helm charts and infrastructure features are derived from the selection. |
+| `--skip-examples` | Exclude these examples from the selection. |
+| `--max-parallel` | Maximum examples running concurrently in the examples action (default `0` = all selected at once; `1` = serial). Not part of the resume identity. |
+| `--actions` | Harness actions to run (default `all`); dependencies are added automatically. |
+| `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
+| `--report-dir` | Report directory (default: `~/gco-example-job-validation-reports/<run-id>`). |
+| `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
+| `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
 
 ## Configuration
 
@@ -4729,14 +5024,14 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_CONFIG` | Path to config file |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
-| `GCO_AUTOPILOT_MODEL` | Override the Bedrock model `gco autopilot` launches Claude Code with (default: `cdk.json` `context.bedrock.default_model_id`; the `--model` flag wins over this). See [Autopilot](AUTOPILOT.md). |
+| `GCO_AUTOPILOT_MODEL` | Override the Bedrock model `gco autopilot` launches Claude Code with (default: `cdk.json` `context.bedrock.claude_code_default_model_id`; the `--model` flag wins over this). See [Autopilot](AUTOPILOT.md). |
 | `GCO_AUTOPILOT_SMALL_FAST_MODEL` | Optional Bedrock model for Claude Code's background/fast tasks (unset by default). |
 | `GCO_AUTOPILOT_CONFIG_DIR` | Directory for the generated autopilot MCP config and staged skill/agent imports (default: `~/.gco/autopilot`). |
 | `GCO_AUTOPILOT_PLUGIN_DIRS` | Colon-separated Claude Code plugin dirs/zips loaded into every `gco autopilot` session (merged with per-launch `--plugin` flags). |
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the shared `cdk.json` `context.bedrock.default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the `cdk.json` `context.bedrock.mission_default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

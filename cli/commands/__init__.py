@@ -12,6 +12,7 @@ from .cluster_cmd import cluster
 from .config_cmd import config_cmd
 from .costs_cmd import costs
 from .dag_cmd import dag
+from .examples_cmd import examples
 from .files_cmd import files
 from .images_cmd import images
 from .inference_cmd import inference
@@ -23,9 +24,11 @@ from .nodepools_cmd import nodepools
 from .queue_cmd import queue
 from .release_cmd import release
 from .stacks_cmd import stacks
+from .status_cmd import status
 from .storage_cmd import storage
 from .tasks_cmd import tasks
 from .templates_cmd import templates
+from .vector_cmd import vector
 from .webhooks_cmd import webhooks
 
 __all__ = [
@@ -36,6 +39,7 @@ __all__ = [
     "config_cmd",
     "costs",
     "dag",
+    "examples",
     "files",
     "images",
     "inference",
@@ -47,8 +51,10 @@ __all__ = [
     "queue",
     "release",
     "stacks",
+    "status",
     "storage",
     "tasks",
     "templates",
+    "vector",
     "webhooks",
 ]

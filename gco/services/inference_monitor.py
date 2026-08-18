@@ -48,7 +48,7 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.png``)
@@ -101,8 +101,8 @@ class AdminApiKeySecretError(Exception):
 # and immutable manifest-list digest together: both amd64 and arm64 inference
 # nodes resolve through this single verified index.
 AWS_CLI_IMAGE = (
-    "public.ecr.aws/aws-cli/aws-cli:2.36.14@"
-    "sha256:72180b996fad939e764434d9a69a9512ed699a061cd5db198feeb2e9533fd750"
+    "public.ecr.aws/aws-cli/aws-cli:2.36.19@"
+    "sha256:7e78b80fc653b9f6bdacc54709458910374da3213e3a19abdaf395680831a5da"
 )
 
 # Valid TCP port boundaries for KV-transfer bootstrap ports.

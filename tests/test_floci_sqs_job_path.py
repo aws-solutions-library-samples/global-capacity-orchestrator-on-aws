@@ -199,3 +199,84 @@ class TestQueueProcessorAgainstRealQueues:
         assert dlq_payload["job_id"] == "floci-privileged", (
             "the DLQ must receive the exact rejected payload for operator inspection"
         )
+
+
+class TestTrainJobThroughTheQueue:
+    """Kubeflow TrainJobs ride the same production queue pair.
+
+    A TrainJob has no ``spec.template``, so its acceptance proves the
+    kind allowlist admits it at the SQS boundary and its rejection proves
+    the trainer-image trust gate fires in prevalidation — strictly before
+    any Kubernetes call, which is the portion this layer can test honestly
+    (no cluster in Floci; the apply path belongs to the kind E2E).
+    """
+
+    @staticmethod
+    def _trainjob_body(job_id: str, image: str) -> dict:
+        return {
+            "job_id": job_id,
+            "manifests": [
+                {
+                    "apiVersion": "trainer.kubeflow.org/v1alpha1",
+                    "kind": "TrainJob",
+                    "metadata": {"name": job_id, "namespace": "gco-jobs"},
+                    "spec": {
+                        "runtimeRef": {"name": "torch-distributed"},
+                        "trainer": {
+                            "image": image,
+                            "numNodes": 2,
+                            "resourcesPerNode": {"requests": {"cpu": "250m", "memory": "256Mi"}},
+                        },
+                    },
+                }
+            ],
+        }
+
+    def test_trusted_trainjob_is_consumed_and_deleted(self, monkeypatch, sqs, job_queue):
+        body = self._trainjob_body(
+            "floci-trainjob-ok", "pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime"
+        )
+        sqs.send_message(QueueUrl=job_queue["queue_url"], MessageBody=json.dumps(body))
+
+        monkeypatch.setenv("JOB_QUEUE_URL", job_queue["queue_url"])
+        import gco.services.queue_processor as queue_processor
+
+        module = importlib.reload(queue_processor)
+
+        from gco.models import ResourceStatus
+
+        applied = []
+
+        def fake_apply(manifest):
+            applied.append((manifest.get("kind"), manifest.get("metadata", {}).get("name")))
+            return ResourceStatus(
+                api_version=manifest.get("apiVersion", ""),
+                kind=manifest.get("kind", ""),
+                name=manifest.get("metadata", {}).get("name", ""),
+                namespace=manifest.get("metadata", {}).get("namespace", "gco-jobs"),
+                status="created",
+            )
+
+        monkeypatch.setattr(module, "apply_manifest", fake_apply)
+        assert module.process_one_message() is True
+        assert applied == [("TrainJob", "floci-trainjob-ok")], (
+            "the TrainJob must clear prevalidation and reach the apply boundary"
+        )
+
+        visible, in_flight = _approximate_counts(sqs, job_queue["queue_url"])
+        assert (visible, in_flight) == (0, 0), (
+            "an accepted TrainJob must be acknowledged like any other job"
+        )
+
+    def test_untrusted_trainjob_is_rejected_and_retained(self, monkeypatch, sqs, job_queue):
+        body = self._trainjob_body("floci-trainjob-evil", "evil.example.com/backdoor:1")
+        sqs.send_message(QueueUrl=job_queue["queue_url"], MessageBody=json.dumps(body))
+
+        ok, _ = _run_queue_processor(monkeypatch, job_queue["queue_url"])
+        assert ok is False, "an untrusted trainer image must fail the consumer"
+
+        visible, in_flight = _approximate_counts(sqs, job_queue["queue_url"])
+        assert visible + in_flight == 1, (
+            "the rejected TrainJob must stay in the main queue for redrive, "
+            "never silently acknowledged"
+        )

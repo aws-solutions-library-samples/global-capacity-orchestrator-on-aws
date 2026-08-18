@@ -1,6 +1,6 @@
 """Tool gating tests for the Mission tool surface.
 
-Verifies that the nine ``mission_*`` tools are registered against the
+Verifies that the ten ``mission_*`` tools are registered against the
 FastMCP server only when ``GCO_ENABLE_MISSION`` (or the umbrella flag
 ``GCO_ENABLE_ALL_TOOLS``) is set. Mirrors the precedent established by
 ``test_mcp_destructive_gating.py``: snapshot the registry via the
@@ -12,7 +12,7 @@ Test isolation
 
 The FastMCP ``mcp`` instance is module-level in ``gco_mcp/server.py`` and
 survives ``importlib.reload(run_mcp)``. Once a flag-set test registers
-the nine ``mission_*`` tools, those registrations persist on the live
+the ten ``mission_*`` tools, those registrations persist on the live
 singleton. To keep tests independent of execution order:
 
 * Before each test, ``_force_unregister_mission_tools()`` strips every
@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
-# Canonical roster of the nine tools surfaced by ``gco_mcp/tools/mission.py``.
+# Canonical roster of the ten tools surfaced by ``gco_mcp/tools/mission.py``.
 # Frozen so accidental in-test mutation is impossible.
 _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -62,6 +62,7 @@ _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
         "mission_resume",
         "mission_history",
         "mission_list",
+        "mission_memory_search",
     }
 )
 
@@ -178,7 +179,7 @@ def _isolate_mission_tools():
     ``importlib.reload(run_mcp)``. If we leave the mission modules
     popped from ``sys.modules`` at the end of a test, the umbrella
     reload re-imports them and the gated bodies fire under the
-    umbrella flag, leaking nine tools and two resource templates into
+    umbrella flag, leaking ten tools and two resource templates into
     the live singleton with no fixture downstream that knows to clean
     them up.
 
@@ -197,10 +198,10 @@ def _isolate_mission_tools():
 
 
 class TestMissionToolGating:
-    """The nine mission_* tools follow the standard feature-flag gating contract."""
+    """The ten mission_* tools follow the standard feature-flag gating contract."""
 
     def test_mission_tools_absent_when_flag_unset(self):
-        """With both flags unset, none of the nine tools register."""
+        """With both flags unset, none of the ten tools register."""
         # Drop GCO_ENABLE_MISSION and GCO_ENABLE_ALL_TOOLS from the
         # patched environment so an inherited shell value does not
         # mask the property under test. ``clear=True`` would also
@@ -220,7 +221,7 @@ class TestMissionToolGating:
 
     @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
     def test_mission_tools_present_when_flag_set(self):
-        """With ``GCO_ENABLE_MISSION=true``, all nine tools register."""
+        """With ``GCO_ENABLE_MISSION=true``, all ten tools register."""
         _reload_run_mcp_fresh()
         names = _list_tool_names()
 
@@ -1046,3 +1047,92 @@ class TestMissionResourceFallbacks:
             _session_report_resource("mission-bare")
         # The raised exception's string mentions the not-found shape.
         assert "report not found" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# mission_memory_search — functional tests with a stubbed store
+# ---------------------------------------------------------------------------
+
+
+class TestMissionMemorySearchTool:
+    """Functional tests for ``mission_memory_search`` over the FastMCP Client.
+
+    The tool constructs its ``MissionMemoryStore`` through a local import,
+    so patching ``mission.memory.MissionMemoryStore`` swaps in a stub at
+    call time — no SSM, Bedrock, or DynamoDB is ever reached.
+    """
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_returns_results_and_forwards_arguments(self):
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        instances: list = []
+
+        class _StubStore:
+            def __init__(self) -> None:
+                instances.append(self)
+                self.calls: list = []
+
+            def search_similar(self, directive, top_k=3, final_verdict=None):
+                self.calls.append((directive, top_k, final_verdict))
+                return [
+                    {
+                        "session_id": "sess-prior-001",
+                        "directive": "old directive",
+                        "lessons": "what worked",
+                        "final_verdict": "complete",
+                        "score": 0.91,
+                    }
+                ]
+
+        with patch("mission.memory.MissionMemoryStore", _StubStore):
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool(
+                    "mission_memory_search",
+                    {"directive": "reduce loss", "top_k": 5, "final_verdict": "complete"},
+                )
+
+        payload = json.loads(result.content[0].text)
+        assert payload["results"][0]["session_id"] == "sess-prior-001"
+        assert payload["results"][0]["score"] == 0.91
+        (store,) = instances
+        assert store.calls == [("reduce loss", 5, "complete")]
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_unavailable_infrastructure_returns_envelope(self):
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+        from mission.memory import MissionMemoryUnavailableError
+
+        class _UnavailableStore:
+            def search_similar(self, *args, **kwargs):
+                raise MissionMemoryUnavailableError("table not found — not provisioned")
+
+        with patch("mission.memory.MissionMemoryStore", _UnavailableStore):
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool("mission_memory_search", {"directive": "anything"})
+
+        payload = json.loads(result.content[0].text)
+        assert payload["code"] == "mission_memory_unavailable"
+        assert "not provisioned" in payload["details"]["message"]
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_unexpected_failure_returns_envelope_not_traceback(self):
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        class _BrokenStore:
+            def search_similar(self, *args, **kwargs):
+                raise RuntimeError("embedding exploded")
+
+        with patch("mission.memory.MissionMemoryStore", _BrokenStore):
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool("mission_memory_search", {"directive": "anything"})
+
+        payload = json.loads(result.content[0].text)
+        assert payload["code"] == "mission_memory_search_failed"
+        assert "embedding exploded" in payload["details"]["message"]

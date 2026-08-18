@@ -25,6 +25,7 @@ This separation keeps the Click wiring thin and the business logic testable with
 | `jobs_cmd.py` | `gco jobs submit`, `submit-sqs`, `submit-direct`, `list`, `get`, `logs`, `events`, `delete`, `health`, `queue-status` | Job submission and lifecycle |
 | `inference_cmd.py` | `gco inference deploy`, `list`, `status`, `scale`, `update-image`, `stop`, `start`, `delete`, `canary`, `promote`, `rollback`, `invoke`, `chat`, `health`, `models` | Inference endpoint management |
 | `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `list`, `status`, `access`, `bootstrap`, `fsx`, `valkey`, `aurora` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment and management |
+| `status_cmd.py` | `gco status` | Fleet-wide status: verdict, findings, and per-section state across regions |
 | `capacity_cmd.py` | `gco capacity check`, `status`, `recommend-region`, `spot-prices`, `ai-recommend`, `reservations`, `reservation-check`, `reserve` | GPU capacity and recommendations |
 | `queue_cmd.py` | `gco queue submit`, `list`, `get`, `stats` | Global [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) job queue |
 | `costs_cmd.py` | `gco costs summary`, `regions`, `trend`, `workloads`, `forecast` | Cost tracking via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) |

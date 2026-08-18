@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import subprocess
 import sys
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .checks.schedulers import OPTIONAL_SCHEDULERS
+from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
     RunSettings,
     ValidationReport,
@@ -20,36 +21,10 @@ from .models import (
 from .registry import build_action_registry
 from .runner import LiveValidationRunner, require_local_execution
 
-
-def _repository_root(value: str | None) -> Path:
-    if value:
-        root = Path(value).expanduser().resolve()
-    else:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError("Run from a Git checkout or pass --repo-root")
-        root = Path(result.stdout.strip()).resolve()
-    if not (root / ".git").exists() or not (root / "cdk.json").is_file():
-        raise ValueError(f"Not a GCO repository root: {root}")
-    return root
-
-
-def _split_actions(value: str) -> tuple[str, ...]:
-    actions = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
-    if not actions:
-        raise argparse.ArgumentTypeError("--actions must name at least one action")
-    return actions
-
-
-def _path_from_root(root: Path, value: str | None, default: Path) -> Path:
-    path = Path(value).expanduser() if value else default
-    candidate = path if path.is_absolute() else root / path
-    return Path(os.path.abspath(os.fspath(candidate)))
+# Backwards-compatible aliases for this module's historical private helpers.
+_repository_root = repository_root
+_split_actions = split_csv_names
+_path_from_root = path_from_root
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -130,6 +105,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "KMS keys for deletion after stack teardown"
         ),
     )
+    parser.add_argument(
+        "--optional-schedulers",
+        type=_split_actions,
+        default=(),
+        metavar="NAME[,NAME...]",
+        help=(
+            "Force-enable off-by-default schedulers for this run's deploy so the "
+            "schedulers action can prove them (yunikorn, slurm, or all)"
+        ),
+    )
     parser.epilog = "Actions: " + ", ".join(registry)
     return parser
 
@@ -156,6 +141,16 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     ):
         if getattr(args, option) <= 0:
             parser.error(f"--{option.replace('_', '-')} must be positive")
+    valid_optional = set(OPTIONAL_SCHEDULERS)
+    unknown_schedulers = sorted(set(args.optional_schedulers) - valid_optional - {"all"})
+    if unknown_schedulers:
+        parser.error(
+            "--optional-schedulers accepts "
+            + ", ".join((*OPTIONAL_SCHEDULERS, "all"))
+            + f"; got: {', '.join(unknown_schedulers)}"
+        )
+    if "all" in args.optional_schedulers and len(args.optional_schedulers) != 1:
+        parser.error("--optional-schedulers 'all' cannot be combined with individual names")
 
 
 def _settings_from_args(
@@ -197,6 +192,11 @@ def _settings_from_args(
         destroy_retry_delay_seconds=args.destroy_retry_delay_seconds,
         confirm_kms_key_deletion=args.confirm_kms_key_deletion,
         resume=args.resume,
+        optional_schedulers=(
+            OPTIONAL_SCHEDULERS
+            if "all" in args.optional_schedulers
+            else tuple(sorted(set(args.optional_schedulers)))
+        ),
     )
 
 

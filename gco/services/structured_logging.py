@@ -136,13 +136,21 @@ def configure_structured_logging(
     root_logger.addHandler(handler)
 
 
+#: Unicode characters some log viewers and parsers render as line breaks.
+#: Neutralized alongside CR/LF so they cannot forge log entries either:
+#: U+0085 NEL, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR.
+_UNICODE_LINE_BREAKS = "\u0085\u2028\u2029"
+
+
 def sanitize_log_value(value: Any) -> str:
     """
     Sanitize a value for safe inclusion in log messages.
 
-    Escapes CR/LF and other control characters that could be used for log
-    injection (log forging), where an attacker embeds newlines in user input
-    to spoof log entries.
+    Neutralizes CR/LF (rendered as the literal two-character sequences
+    ``\\r``/``\\n``), Unicode line separators, and other control characters
+    that could be used for log injection (log forging), where an attacker
+    embeds line breaks or terminal escapes in user input to spoof log
+    entries. Printable text — including non-ASCII — passes through unchanged.
 
     Always call this on untrusted inputs (HTTP path/query params, job IDs,
     namespaces, etc.) before passing them to ``logger.info/warning/error``.
@@ -151,7 +159,11 @@ def sanitize_log_value(value: Any) -> str:
         value: Any value; will be coerced to ``str``.
 
     Returns:
-        A string with control characters escaped (e.g. ``\\n`` becomes the
-        literal two-character sequence backslash-n).
+        A single-line-safe string suitable for plain-text log sinks.
     """
-    return str(value).encode("unicode_escape").decode("ascii")
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    return "".join(
+        ch if ord(ch) >= 32 and ord(ch) != 127 and ch not in _UNICODE_LINE_BREAKS else "?"
+        for ch in text
+    )

@@ -11,6 +11,7 @@ Regional ALB registration is performed separately by each regional stack only
 when the accelerator topology exists.
 """
 
+import json
 from typing import Any
 
 from aws_cdk import (
@@ -40,7 +41,7 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``GCOGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.png``)
@@ -213,6 +214,22 @@ class GCOGlobalStack(Stack):
         if self.config.get_capacity_history_enabled():
             self._create_capacity_poller()
 
+        # Mission memory add-on (gated by mission_memory.enabled in cdk.json,
+        # ON by default): a DynamoDB table with a vector index over embedded
+        # mission directives, giving the mission engine recall across sessions.
+        if self.config.get_mission_memory_enabled():
+            self._create_mission_memory()
+
+        # Vector store add-on (gated by vector_store.enabled in cdk.json,
+        # OFF by default): a globally replicated DynamoDB table with a vector
+        # index over an S3-ingested document corpus, giving workloads in every
+        # deployment region local-latency semantic search. The ingest Lambda
+        # watches the cluster-shared bucket's corpus prefix and writes
+        # embedded chunks to the table's primary replica.
+        if self.config.get_vector_store_enabled():
+            self._create_vector_store()
+            self._create_vector_ingest()
+
         # Global Accelerator is available only in the commercial ``aws``
         # partition. Other coherent AWS partitions retain all shared resources
         # and use their IAM-authenticated regional API bridges directly rather
@@ -283,7 +300,17 @@ class GCOGlobalStack(Stack):
         from aws_cdk import aws_events_targets as events_targets
         from aws_cdk import aws_sqs as sqs
 
+        # Function-local on purpose: the capacity->metric-field naming rule and
+        # the Spot Placement Score pool catalog each have exactly one source of
+        # truth (cli/capacity/history.py and scripts/accelerator_catalog.py),
+        # and the poller Lambda cannot import either, so this stack serializes
+        # them into its environment at synth time. Synthesis always runs from a
+        # repository checkout (the CDK app and Lambda assets require one), but
+        # the installed wheel ships gco.stacks without scripts/, so a
+        # module-level import would break mere importability of this module.
+        from cli.capacity.history import metric_field_for_target_capacity
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from scripts.accelerator_catalog import INSTANCE_POOLS
 
         project_name = self.config.get_project_name()
         historical = self.config.get_capacity_history_config()
@@ -296,6 +323,25 @@ class GCOGlobalStack(Stack):
         # sibling fields above.
         block_duration_hours = int(historical["capacity_block_duration_hours"])
         long_block_duration_hours = int(historical["capacity_block_long_duration_hours"])
+        # Serialized with compact separators: Lambda caps the whole environment
+        # at 4 KB, and the pool catalog plus the watch list are the two big
+        # values (~2.9 KB total today). ``spot_score_target_capacities`` is
+        # validated against the supported set at config load, so the naming
+        # function cannot raise here for a config that passed validation.
+        spot_score_target_capacities_env = json.dumps(
+            [
+                {
+                    "target_capacity": capacity,
+                    "metric_field": metric_field_for_target_capacity(capacity),
+                }
+                for capacity in historical["spot_score_target_capacities"]
+            ],
+            separators=(",", ":"),
+        )
+        instance_pools_env = json.dumps(
+            [{"name": pool.name, "members": list(pool.members)} for pool in INSTANCE_POOLS],
+            separators=(",", ":"),
+        )
 
         self.capacity_history_table = dynamodb.Table(
             self,
@@ -349,6 +395,11 @@ class GCOGlobalStack(Stack):
                     "ec2:DescribeCapacityBlockOfferings",
                     "ec2:DescribeCapacityReservations",
                     "ec2:DescribeAvailabilityZones",
+                    # The poller's region-enablement pre-check probes each
+                    # configured region with a single-region DescribeRegions
+                    # call. Discovered live: without this grant the probe
+                    # fails with UnauthorizedOperation for every region.
+                    "ec2:DescribeRegions",
                 ],
                 resources=["*"],
             )
@@ -370,6 +421,8 @@ class GCOGlobalStack(Stack):
                 "CAPACITY_HISTORY_RETENTION_DAYS": str(retention_days),
                 "CAPACITY_BLOCK_DURATION_HOURS": str(block_duration_hours),
                 "CAPACITY_BLOCK_LONG_DURATION_HOURS": str(long_block_duration_hours),
+                "SPOT_SCORE_TARGET_CAPACITIES": spot_score_target_capacities_env,
+                "INSTANCE_POOLS": instance_pools_env,
             },
             tracing=lambda_.Tracing.ACTIVE,
             description=(
@@ -496,6 +549,642 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
+
+    def _create_mission_memory(self) -> None:
+        """Create the mission-memory table and its directive vector index.
+
+        Gated by ``mission_memory.enabled`` in cdk.json (ON by default).
+        Completed missions write one memory item (the operator directive, its
+        embedding, and the model-written lessons / recommended follow-ups);
+        later missions retrieve the most similar past directives into their
+        sampling prompts. Memory is shared institutional memory: items are
+        keyed by session only, so every operator in the account sees every
+        operator's mission lessons.
+
+        The vector index CANNOT be expressed declaratively — CloudFormation's
+        ``AWS::DynamoDB::Table`` has no vector-index property at all, and CDK
+        has no L1/L2 support — so it is created by an ``AwsCustomResource``
+        calling the DynamoDB ``UpdateTable`` control-plane API against the
+        freshly created (and therefore empty — no backfill wait needed)
+        table. ``UpdateTable`` returns before the index reaches ACTIVE;
+        runtime consumers tolerate a not-yet-ready index as part of their
+        best-effort posture. Index parameters (dimensions, distance function,
+        the INCLUDE projection) are one-way doors: immutable after creation.
+        """
+        from aws_cdk import custom_resources as cr
+
+        project_name = self.config.get_project_name()
+        memory_config = self.config.get_mission_memory_config()
+        dimensions = int(memory_config["dimensions"])
+        distance_function = str(memory_config["distance_function"])
+        index_name = "directive-embedding-index"
+
+        self.mission_memory_table = dynamodb.Table(
+            self,
+            "MissionMemoryTable",
+            table_name=f"{project_name}-mission-memory",
+            partition_key=dynamodb.Attribute(
+                name="session_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            # Vector indexes require on-demand billing.
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+        )
+
+        # Shared, pre-created execution role for the singleton
+        # AwsCustomResource Lambda; this feature contributes its own
+        # table-scoped statement (see _vector_index_custom_resource_role).
+        index_role = self._vector_index_custom_resource_role()
+        index_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:UpdateTable", "dynamodb:DescribeTable"],
+                resources=[self.mission_memory_table.table_arn],
+            )
+        )
+
+        # CreateVectorIndexAction is FLAT — IndexName, VectorAttribute
+        # ({AttributeName}), Dimensions, DistanceFunction, SearchSchema,
+        # Projection all sit at the same level. Verified against the live
+        # service (its validation names create.vectorAttribute /
+        # create.dimensions / create.distanceFunction as the required
+        # members) and against botocore's UpdateTable model; an earlier
+        # nested "VectorConfiguration" draft shape deployed as nulls and
+        # failed create. tests/test_mission_memory_stack.py pins this
+        # payload against the botocore model.
+        vector_index_updates = [
+            {
+                "Create": {
+                    "IndexName": index_name,
+                    "VectorAttribute": {"AttributeName": "directive_embedding"},
+                    "Dimensions": dimensions,
+                    "DistanceFunction": distance_function,
+                    "SearchSchema": [
+                        {
+                            "AttributeName": "final_verdict",
+                            "SearchSchemaElementType": "INLINE_FILTER",
+                        }
+                    ],
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "directive",
+                            "lessons",
+                            "recommended_followups",
+                            "final_verdict",
+                            "verdict_reason",
+                            "iteration_count",
+                            "completed_at",
+                        ],
+                    },
+                }
+            }
+        ]
+        vector_index = cr.AwsCustomResource(
+            self,
+            "MissionMemoryVectorIndex",
+            on_create=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="updateTable",
+                parameters={
+                    "TableName": self.mission_memory_table.table_name,
+                    # Any attribute an index references must be declared in
+                    # AttributeDefinitions, and for an index added through
+                    # UpdateTable the declaration rides in the same call —
+                    # the standard add-a-GSI pattern, verified live: without
+                    # it the service rejects the SearchSchema with "One
+                    # element in SearchSchema is not defined in attribute
+                    # definitions". It cannot ride on CreateTable instead;
+                    # CreateTable rejects definitions unused by key schemas.
+                    "AttributeDefinitions": [
+                        {"AttributeName": "final_verdict", "AttributeType": "S"}
+                    ],
+                    "VectorIndexUpdates": vector_index_updates,
+                },
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{project_name}-mission-memory-vector-index"
+                ),
+            ),
+            # DELIBERATELY NO on_delete, matching the vector store (see the
+            # long comment on VectorStoreIndex for the live incident). The
+            # table carries RemovalPolicy.DESTROY, so teardown deletes it and
+            # the index goes with it — an explicit index delete only buys an
+            # UPDATING window for the next resource to trip over. This table
+            # is single-region today, so the replica-delete deadlock that
+            # wedged the vector store cannot fire here; the hazard is latent,
+            # not absent, and it would become live the day this table gains a
+            # replica. Keeping both call sites identical means the fix cannot
+            # be half-applied. tests/test_mission_memory_stack.py pins the
+            # absence.
+            # The Lambda behind AwsCustomResource ships the runtime's bundled
+            # AWS SDK for JavaScript, which lags the API models: a bundled SDK
+            # that predates vector indexes silently DROPS the unknown
+            # VectorIndexUpdates member at serialization, and DynamoDB then
+            # rejects the bare UpdateTable with "At least one of
+            # ProvisionedThroughput, BillingMode, ... is required". boto3
+            # having the API (design §0.1) says nothing about this Lambda's
+            # SDK. install_latest_aws_sdk fetches a current SDK on first
+            # invocation so the member survives. Verified live: the bundled
+            # SDK reproduces the failure, the installed SDK creates the index.
+            # The floating fetch is bounded risk: it runs only on stack
+            # create/delete/update (never on a data path), and an npm failure
+            # falls back to the bundled SDK with a logged warning. Revisit
+            # once the bundled runtime SDK knows VectorIndexUpdates (drop the
+            # flag for determinism), or if Phase 2 multiplies these custom
+            # resources (a shared pinned provider Lambda becomes worth it).
+            install_latest_aws_sdk=True,
+            role=index_role,
+        )
+        # The table must be ACTIVE before UpdateTable can add an index.
+        vector_index.node.add_dependency(self.mission_memory_table)
+        vector_index.node.add_dependency(index_role)
+
+        # SSM is the established runtime/cross-region discovery contract;
+        # MissionMemoryStore resolves both names lazily the same way
+        # DynamoDBBackend resolves the missions table.
+        ssm.StringParameter(
+            self,
+            "MissionMemoryTableNameParam",
+            parameter_name=f"/{project_name}/mission-memory-table-name",
+            string_value=self.mission_memory_table.table_name,
+            description="DynamoDB table name for mission memory items",
+        )
+        ssm.StringParameter(
+            self,
+            "MissionMemoryIndexNameParam",
+            parameter_name=f"/{project_name}/mission-memory-index-name",
+            string_value=index_name,
+            description="Vector index name over embedded mission directives",
+        )
+        CfnOutput(
+            self,
+            "MissionMemoryTableName",
+            value=self.mission_memory_table.table_name,
+            description="DynamoDB table name for mission memory items",
+            export_name=f"{project_name}-mission-memory-table-name",
+        )
+        CfnOutput(
+            self,
+            "MissionMemoryTableArn",
+            value=self.mission_memory_table.table_arn,
+            description="DynamoDB table ARN for mission memory items",
+            export_name=f"{project_name}-mission-memory-table-arn",
+        )
+
+        # Backup coverage: join the existing DynamoDB backup plan rather than
+        # acknowledging DynamoDBInBackupPlan twice. The plan is created by
+        # _create_backup_plan earlier in __init__, so the selection exists.
+        self.backup_plan.add_selection(
+            "MissionMemoryTableSelection",
+            resources=[backup.BackupResource.from_dynamo_db_table(self.mission_memory_table)],
+        )
+
+    def _vector_index_custom_resource_role(self) -> iam.Role:
+        """Return the execution role shared by every vector-index custom resource.
+
+        ``cr.AwsCustomResource`` Lambdas are a per-stack SINGLETON: every
+        instance shares one provider function, and that function executes
+        with the role of whichever instance is constructed *first*.
+        Live-earned on the first vector-store deploy: with mission memory
+        enabled, the vector-store index's ``UpdateTable`` ran under the
+        mission-memory role and was denied on the vector-store table. One
+        shared role — created lazily by the first feature to need it, with
+        each feature adding only its own table-scoped statements — makes
+        the composition explicit and order-independent, while a deployment
+        with a single feature enabled still carries only that feature's
+        grants. Pre-created (rather than CDK's ``policy=`` auto-role) for
+        the same IAM-propagation reason as the regional stack's shared
+        AwsCustomResource role.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        existing: iam.Role | None = getattr(self, "_index_custom_resource_role", None)
+        if existing is not None:
+            return existing
+
+        role = iam.Role(
+            self,
+            "VectorIndexCustomResourceRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description=(
+                "Shared execution role for the singleton AwsCustomResource "
+                "Lambda that creates DynamoDB vector indexes (mission memory "
+                "and the vector store); each enabled feature contributes only "
+                "its own table-scoped UpdateTable/DescribeTable statement."
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        acknowledge_nag_findings(
+            role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
+                    ),
+                },
+            ],
+        )
+        self._index_custom_resource_role = role
+        return role
+
+    def _create_vector_store(self) -> None:
+        """Create the globally replicated vector-store table and its index.
+
+        Gated by ``vector_store.enabled`` in cdk.json (OFF by default — a
+        replicated table carries real per-region storage and write cost).
+        The S3-triggered ingest pipeline writes embedded document chunks to
+        the primary table in this (global) region; DynamoDB global-table
+        replication fans the items — and the vector index definition —
+        out to every replica, so workloads query their own region.
+
+        The table is a ``TableV2`` (``AWS::DynamoDB::GlobalTable``,
+        2019.11.21 replication): replicas come from
+        ``vector_store.replica_regions`` when set, otherwise they follow
+        ``deployment_regions.regional`` minus this region (the primary is
+        implicit and a global table cannot replicate into its own region).
+
+        The vector index rides the same ``AwsCustomResource`` shape that
+        mission memory live-earned, because CloudFormation still cannot
+        express vector indexes (see ``_create_mission_memory``): flat
+        ``CreateVectorIndexAction``, the INLINE_FILTER attribute declared in
+        the same ``UpdateTable`` call, ``install_latest_aws_sdk`` so the
+        member survives serialization, and delete-path error swallowing so
+        teardown never wedges. Live spike findings for the global-table
+        variant: the primary accepts the call with ACTIVE replicas, the
+        index definition propagates to replicas on its own, and the index
+        takes several minutes to reach ACTIVE — ``UpdateTable`` returns at
+        call acceptance, so deploys are not blocked, but queries answer
+        ValidationException until then (the CLI's unavailable-hint covers
+        it). Index parameters (dimensions, distance function, the INCLUDE
+        projection) are one-way doors: immutable after creation.
+        """
+        from aws_cdk import custom_resources as cr
+
+        project_name = self.config.get_project_name()
+        store_config = self.config.get_vector_store_config()
+        dimensions = int(store_config["dimensions"])
+        distance_function = str(store_config["distance_function"])
+        replica_regions = self.config.get_vector_store_replica_regions()
+        index_name = "corpus-embedding-index"
+
+        self.vector_store_table = dynamodb.TableV2(
+            self,
+            "VectorStoreTable",
+            table_name=f"{project_name}-vector-store",
+            partition_key=dynamodb.Attribute(
+                name="doc_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            # Vector indexes require on-demand billing; a bursty ingest-then-
+            # query corpus fits it anyway.
+            billing=dynamodb.Billing.on_demand(),
+            replicas=[dynamodb.ReplicaTableProps(region=region) for region in replica_regions],
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+            encryption=dynamodb.TableEncryptionV2.aws_managed_key(),
+        )
+
+        # Shared, pre-created execution role for the singleton
+        # AwsCustomResource Lambda; this feature contributes its own
+        # table-scoped statement (see _vector_index_custom_resource_role,
+        # which documents the live-earned singleton-role failure).
+        index_role = self._vector_index_custom_resource_role()
+        index_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:UpdateTable", "dynamodb:DescribeTable"],
+                resources=[self.vector_store_table.table_arn],
+            )
+        )
+
+        vector_index_updates = [
+            {
+                "Create": {
+                    "IndexName": index_name,
+                    "VectorAttribute": {"AttributeName": "embedding"},
+                    "Dimensions": dimensions,
+                    "DistanceFunction": distance_function,
+                    "SearchSchema": [
+                        {
+                            "AttributeName": "source",
+                            "SearchSchemaElementType": "INLINE_FILTER",
+                        }
+                    ],
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "text",
+                            "source",
+                            "chunk_index",
+                            "title",
+                            "embedding_model_id",
+                        ],
+                    },
+                }
+            }
+        ]
+        vector_index = cr.AwsCustomResource(
+            self,
+            "VectorStoreIndex",
+            on_create=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="updateTable",
+                parameters={
+                    "TableName": self.vector_store_table.table_name,
+                    # The INLINE_FILTER attribute must be declared in the same
+                    # UpdateTable call (live-verified on the mission-memory
+                    # index; re-verified against a 2019.11.21 global table in
+                    # the Phase 2 spike).
+                    "AttributeDefinitions": [{"AttributeName": "source", "AttributeType": "S"}],
+                    "VectorIndexUpdates": vector_index_updates,
+                },
+                physical_resource_id=cr.PhysicalResourceId.of(f"{project_name}-vector-store-index"),
+            ),
+            # DELIBERATELY NO on_delete. Deleting the index at teardown is
+            # both unnecessary and actively harmful here.
+            #
+            # Unnecessary: the table carries RemovalPolicy.DESTROY, so stack
+            # teardown deletes the table, and deleting a table removes its
+            # indexes with it. There is no path where this custom resource
+            # goes away while the table survives.
+            #
+            # Harmful: UpdateTable{VectorIndexUpdates:[Delete]} returns as
+            # soon as the call is ACCEPTED and parks the table in UPDATING
+            # for as long as the service needs. CFN then moves to the next
+            # resource in reverse-dependency order — the GlobalTable — whose
+            # first act is UpdateTable{ReplicaUpdates:[Delete <replica>]}.
+            # That call requires the table to be ACTIVE, so it fails with
+            # ResourceInUseException, and CFN retries it on a fixed interval
+            # with no backoff and no give-up. Caught live 2026-08-14: index
+            # delete accepted at 17:50:23Z, replica delete first refused at
+            # 17:50:31Z, ~130 consecutive refusals, table still UPDATING
+            # (index still ACTIVE on the primary, absent on the replica)
+            # 2.5h later, gco-global DELETE_FAILED, and every manual
+            # recovery path — update-table replica delete, delete-table in
+            # either region — refused as well. The prior mitigation here
+            # (ignore_error_codes_matching on this call) could not help: the
+            # failure surfaces in CFN's own GlobalTable handler, not in this
+            # custom resource. Removing the call removes the UPDATING window
+            # altogether, which is the only reliable fix available to an
+            # AwsCustomResource (it has no isComplete poller to wait for
+            # ACTIVE). tests/test_vector_store_stack.py pins the absence.
+            # Same live-earned requirement as mission memory: the runtime's
+            # bundled SDK silently drops the VectorIndexUpdates member.
+            install_latest_aws_sdk=True,
+            role=index_role,
+        )
+        # The table (and its replicas) must be ACTIVE before UpdateTable can
+        # add an index; the spike confirmed the call is accepted the moment
+        # the GlobalTable resource completes.
+        vector_index.node.add_dependency(self.vector_store_table)
+        vector_index.node.add_dependency(index_role)
+
+        # SSM is the established runtime/cross-region discovery contract.
+        # Regional readers resolve the SSM parameters from the global region
+        # and then query their LOCAL replica.
+        ssm.StringParameter(
+            self,
+            "VectorStoreTableNameParam",
+            parameter_name=f"/{project_name}/vector-store-table-name",
+            string_value=self.vector_store_table.table_name,
+            description="DynamoDB global-table name for the workload vector store",
+        )
+        ssm.StringParameter(
+            self,
+            "VectorStoreIndexNameParam",
+            parameter_name=f"/{project_name}/vector-store-index-name",
+            string_value=index_name,
+            description="Vector index name over embedded corpus documents",
+        )
+        CfnOutput(
+            self,
+            "VectorStoreTableName",
+            value=self.vector_store_table.table_name,
+            description="DynamoDB global-table name for the workload vector store",
+            export_name=f"{project_name}-vector-store-table-name",
+        )
+        CfnOutput(
+            self,
+            "VectorStoreTableArn",
+            value=self.vector_store_table.table_arn,
+            description="DynamoDB global-table ARN for the workload vector store",
+            export_name=f"{project_name}-vector-store-table-arn",
+        )
+
+        # Backup coverage: join the existing DynamoDB backup plan (covers the
+        # primary replica; corpus data is re-derivable from S3 by re-ingest,
+        # so replicas need no independent backups).
+        self.backup_plan.add_selection(
+            "VectorStoreTableSelection",
+            resources=[backup.BackupResource.from_dynamo_db_table(self.vector_store_table)],
+        )
+
+    def _create_vector_ingest(self) -> None:
+        """Create the S3-triggered ingest Lambda for the vector store.
+
+        Objects dropped under ``vector_store.corpus_prefix`` on the always-on
+        cluster-shared bucket invoke the ``lambda/vector-ingest`` handler
+        asynchronously; it chunks, embeds (Bedrock), and writes items to the
+        vector-store table created by :meth:`_create_vector_store`. Uploading
+        a corpus is therefore a plain S3 write — ``gco vector ingest`` wraps
+        it, but any S3 client works.
+
+        The bucket notification is additive: it synthesizes a separate
+        ``Custom::S3BucketNotifications`` resource (plus CDK's singleton
+        handler Lambda), so the disabled path leaves the cluster-shared
+        bucket's own template byte-identical. The execution role carries the
+        pipeline's write-only identity — object reads under the corpus
+        prefix, ``PutItem`` on the table, and ``InvokeModel`` on the
+        configured embedding model; the read path (``SearchVectors``)
+        belongs to the regional workload role and the CLI, never to ingest.
+        """
+        from aws_cdk import aws_s3_notifications as s3_notifications
+        from aws_cdk import aws_sqs as sqs
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        store_config = self.config.get_vector_store_config()
+        corpus_prefix = str(store_config["corpus_prefix"])
+        embedding_model_id = str(store_config["embedding_model_id"])
+        dimensions = int(store_config["dimensions"])
+
+        ingest_role = iam.Role(
+            self,
+            "VectorIngestRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description=(
+                "Execution role for the vector-store ingest Lambda: corpus-prefix "
+                "object reads, vector-store PutItem, and embedding-model InvokeModel."
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject"],
+                resources=[f"{self.cluster_shared_bucket.bucket_arn}/{corpus_prefix}*"],
+            )
+        )
+        # The bucket is KMS-encrypted with the cluster-shared key; GetObject
+        # needs Decrypt on it.
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt"],
+                resources=[self.cluster_shared_kms_key.key_arn],
+            )
+        )
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:PutItem"],
+                resources=[self.vector_store_table.table_arn],
+            )
+        )
+        # The embedding model is a foundation model (account-less ARN) in
+        # this (global) region — the same region the table's primary replica
+        # and this Lambda live in.
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    f"arn:{self.partition}:bedrock:{self.region}::foundation-model/"
+                    f"{embedding_model_id}"
+                ],
+            )
+        )
+
+        # Async-invoke failures (after Lambda's built-in retries) land here
+        # rather than vanishing; the DLQ message carries the original S3
+        # event for replay.
+        ingest_dlq = sqs.Queue(
+            self,
+            "VectorIngestDlq",
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        self.vector_ingest_lambda = lambda_.Function(
+            self,
+            "VectorIngestFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("lambda/vector-ingest"),
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            role=ingest_role,
+            dead_letter_queue=ingest_dlq,
+            environment={
+                "VECTOR_STORE_TABLE_NAME": self.vector_store_table.table_name,
+                "EMBEDDING_MODEL_ID": embedding_model_id,
+                "EMBEDDING_DIMENSIONS": str(dimensions),
+                "CORPUS_PREFIX": corpus_prefix,
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+            description=(
+                "Vector-store ingest (opt-in global-stack add-on): chunks and embeds "
+                "corpus objects from the cluster-shared bucket into the vector store."
+            ),
+        )
+
+        self.cluster_shared_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.LambdaDestination(self.vector_ingest_lambda),
+            s3.NotificationKeyFilter(prefix=corpus_prefix),
+        )
+
+        acknowledge_nag_findings(
+            ingest_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
+                    ),
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The object-read grant is scoped to the vector corpus prefix "
+                        "of the cluster-shared bucket; ingest must read every object "
+                        "dropped under it, and S3 object grants require a key wildcard."
+                    ),
+                    "appliesTo": [
+                        f"Resource::<ClusterSharedBucket45D6691E.Arn>/{corpus_prefix}*",
+                    ],
+                },
+            ],
+        )
+        acknowledge_nag_findings(
+            ingest_dlq,
+            [
+                {
+                    "id": "AwsSolutions-SQS3",
+                    "reason": (
+                        "This queue is the dead-letter queue for the ingest Lambda's "
+                        "async invocations; a DLQ for a DLQ is circular."
+                    ),
+                },
+                {
+                    "id": "Serverless-SQSRedrivePolicy",
+                    "reason": (
+                        "This queue is itself the dead-letter queue for the ingest "
+                        "Lambda's async invocations, so it does not need its own "
+                        "redrive policy; a DLQ for a DLQ is circular."
+                    ),
+                },
+            ],
+        )
+        # CDK's bucket-notification wiring synthesizes a singleton handler
+        # Lambda whose auto-generated role needs s3:PutBucketNotification on
+        # every bucket it manages — the API supports no resource scoping.
+        notifications_handler = self.node.try_find_child(
+            "BucketNotificationsHandler050a0587b7544547bf325f094a3db834"
+        )
+        if notifications_handler is not None:
+            acknowledge_nag_findings(
+                notifications_handler,
+                [
+                    {
+                        "id": "AwsSolutions-IAM4",
+                        "reason": (
+                            "CDK's singleton S3 bucket-notifications handler attaches "
+                            "AWSLambdaBasicExecutionRole for CloudWatch Logs."
+                        ),
+                    },
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            "s3:PutBucketNotification supports no resource-level "
+                            "scoping; CDK's singleton notifications handler requires "
+                            "the wildcard to manage bucket notification configuration."
+                        ),
+                        "appliesTo": ["Resource::*"],
+                    },
+                ],
+            )
 
     def _create_outputs(self) -> None:
         """Create CloudFormation outputs for cross-stack references."""

@@ -67,6 +67,7 @@ NodePool family lists keep the third concern deliberate.
 | EC2 accelerator inventory | `gco/config/accelerator_catalog.json` → `instance_types` | Sorted union of instance types with an NVIDIA GPU or AWS Neuron device across enabled commercial Regions |
 | Reviewed family policy | `gco/config/accelerator_catalog.json` → `families` | Accelerator, architecture, track, generation, lifecycle, scheduling eligibility, reason, and replacements |
 | Capacity-history observation | `cdk.json` → `historical.watch_instance_types`; fallback in `gco/config/config_loader.py` | Both copies must exactly equal the catalog's `instance_types` list |
+| Spot Placement Score pools | `scripts/accelerator_catalog.py` → `INSTANCE_POOLS` and `UNPOOLED_INSTANCE_TYPES` | Every pool has three-plus interchangeable watched members; every watched type is either pooled or explicitly declared unpooled with a rationale |
 | Karpenter scheduling | `lambda/kubectl-applier-simple/manifests/40-*.yaml` through `46-*.yaml` | Explicit `eks.amazonaws.com/instance-family` policy per workload class |
 | Rich CLI hardware/pricing metadata | `cli/capacity/models.py` and the curated defaults in `cli/capacity/advisor.py` | Add only when the CLI needs local vCPU, memory, accelerator, or advisor metadata |
 | Pinned examples and prose | `examples/*.yaml`, `gco/stacks/regional_stack.py`, `README.md`, `docs/CUSTOMIZATION.md` | Keep selectors and human guidance aligned with reviewed scheduling support |
@@ -87,7 +88,7 @@ Run this before and after every accelerator or NodePool change:
 
 ```bash
 python scripts/accelerator_catalog.py validate
-python -m pytest tests/test_accelerator_catalog.py -q
+python -m pytest tests/test_accelerator_catalog.py tests/test_accelerator_pools.py -q
 ```
 
 The validator needs no AWS credentials and fails with actionable guidance when:
@@ -96,7 +97,11 @@ The validator needs no AWS credentials and fails with actionable guidance when:
   manifest and reviewed replacements;
 - a newer active generation in the same scheduling track is absent from every
   eligible NodePool, naming the pools to review;
-- `cdk.json` or the `ConfigLoader` fallback omits or adds a watched type; or
+- `cdk.json` or the `ConfigLoader` fallback omits or adds a watched type;
+- a Spot Placement Score pool has fewer than three distinct members, includes a
+  type outside the watch list, or a watched type has no pooled-or-unpooled
+  decision (new catalog entries must be placed in a pool or added to
+  `UNPOOLED_INSTANCE_TYPES` with a rationale); or
 - the catalog, family metadata, architecture, lifecycle, or manifest policy is
   malformed or contradictory.
 
@@ -187,31 +192,38 @@ shipping a skew.
 1. `cdk.json` — set `context.kubernetes_version` to the new minor.
 2. `pyproject.toml` — bump `kubernetes==<minor>.x` so the Python client's major
    equals the cluster minor (for example `kubernetes==37.*` for EKS `1.37`),
-   then regenerate the lock:
-
-   ```bash
-   pip-compile --all-extras --strip-extras -o requirements-lock.txt pyproject.toml
-   ```
-
+   then regenerate the lock through the container exactly as described in
+   [Updating a dependency](#updating-a-dependency) step 3 — don't run
+   `pip-compile` against your host Python; the flags and platform differ from
+   what CI's staleness check expects.
 3. `gco/stacks/constants.py` — update the five `EKS_ADDON_*` constants to builds
    published for the new minor (see [validating add-ons](#validating-add-on-versions)).
 4. Confirm the pinned `aws-cdk-lib` exposes `eks.KubernetesVersion.V1_<minor>`.
    If it does not, bump `aws-cdk-lib` in `pyproject.toml` and re-lock; otherwise
    the stack silently uses the `.of()` fallback.
-5. kubectl pins — bump to a patch of the new minor in all three spots, staying
-   within one minor of the cluster:
+5. kubectl pins — bump to a patch of the new minor in the two committed spots,
+   staying within one minor of the cluster:
+   - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
+     the `sha256sum -c` line under it (the checksum for each release binary is
+     published alongside it as `<url>.sha256`)
    - `Dockerfile.dev` (`ARG KUBECTL_VERSION`)
-   - `lambda/helm-installer/Dockerfile` (the `dl.k8s.io/release/...` URL)
-   - `.github/workflows/deps-scan.yml` (`KUBECTL_VERSION` env)
-6. Helm pins — if a new Helm is needed for the minor, bump the `HELM_VERSION`
-   env in both `.github/workflows/deps-scan.yml` and
-   `.github/workflows/integration-tests.yml` (the `integration:helm:charts-valid`
-   job) and the `get.helm.sh` URL in `lambda/helm-installer/Dockerfile`. The
-   `deps-scan` **Version Consistency** check flags the two workflow env pins if
-   they drift apart; the Dockerfile copy is a hardcoded `RUN` line it can't see,
-   so keep that one in lockstep by hand.
-7. `.github/workflows/integration-tests.yml` — bump the kind `node_image`
-   (`kindest/node:v<minor>.<patch>`) so CI exercises the new control plane.
+
+   No workflow edits are needed: every workflow that installs kubectl derives
+   the version and checksum from the installer Dockerfile at runtime
+   (`extract_helm_installer_pins` into `GITHUB_ENV`), and
+   `test_helm_and_kubectl_pins_live_only_in_the_installer_dockerfile`
+   (`tests/test_supply_chain_integrity.py`) fails if a literal workflow pin is
+   reintroduced. The `deps-scan` **Version Consistency** check cross-checks the
+   `Dockerfile.dev` ARG against the installer pin, so a half-done bump is
+   reported rather than shipped.
+6. Helm pin — if a new Helm is needed for the minor, bump the `get.helm.sh`
+   URL and its `sha256sum -c` line in `lambda/helm-installer/Dockerfile` (the
+   checksum is published alongside the tarball as `<url>.sha256sum`). That
+   `RUN` line is the single source: workflows derive `HELM_VERSION` /
+   `HELM_SHA256` from it exactly as with kubectl, guarded by the same test.
+7. `.github/workflows/integration-tests.yml` — bump the workflow-level
+   `KIND_NODE_IMAGE` env (`kindest/node:v<minor>.<patch>`) so CI exercises the
+   new control plane; both kind-based jobs read it from there.
 8. `.github/config/.trivyignore` — revisit any suppressions tied to the old
    kubectl/helm binaries; several entries clear once the pins move.
 9. `tests/test_config_loader.py` and `tests/test_config_loader_validation.py` —
@@ -357,10 +369,16 @@ not inherit the default's reasoning fields.
 Because it is a deployment configuration value — not a `pyproject.toml` entry,
 a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The monthly
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
-**Bedrock default model** check reads the `cdk.json` context value, lists the
-system-defined inference profiles in `us-east-1`, and flags a newer release **in
-the same model family** — a future global Claude Opus release, never a jump to
-a different scope, tier, or provider (that is a choice, not drift). Family
+**Bedrock default model** check reads each managed `cdk.json` context value and
+flags a newer release **in the same model family** — a future global Claude
+Opus release, never a jump to a different scope, tier, or provider (that is a
+choice, not drift). The generation keys (`mission_default_model_id`,
+`capacity_advisor_default_model_id`,
+`claude_code_default_model_id`) compare against the system-defined inference
+profiles in `us-east-1`; `embedding_model_id` — Mission memory's text-embedding
+model, resolved through `gco.bedrock.get_default_embedding_model_id()` — is a
+plain foundation model, so it compares against
+`bedrock list-foundation-models --by-output-modality EMBEDDING` instead. Family
 derivation tolerates all three revision shapes Bedrock ships
 (`-vMAJOR:MINOR`, a bare `-vMAJOR`, and no suffix at all), so one model line
 stays one family. The check needs AWS
@@ -370,26 +388,53 @@ credential-less run is not a false "up to date".
 When the scan flags a newer same-family model (or you decide to move the default
 deliberately):
 
-1. Change `cdk.json` `context.bedrock.default_model_id` to the new id and set
-   `context.bedrock.thinking.effort` to a level the model supports. The stock
+1. Change the flagged `cdk.json` key — `context.bedrock.mission_default_model_id`
+   (Mission sampling) or `context.bedrock.capacity_advisor_default_model_id`
+   (capacity advisor) — to the new id and set
+   `context.bedrock.thinking.effort` to a level the model supports (the two
+   generation knobs share it). Decide
+   separately whether the sibling generation knob and
+   `context.bedrock.claude_code_default_model_id` — the
+   independent default `gco autopilot` hands to Claude Code — should move too:
+   the generation defaults can be any Converse-capable family, while the Claude
+   Code default should stay a Claude model. The stock
    value is a system-defined **global inference profile**; global profiles can
    route worldwide and are unsuitable when a geography boundary is required.
    Use an appropriate geography-scoped profile (`us.` / `eu.` / `jp.` / etc.)
    where data residency requires it. If the new model speaks a reasoning
    dialect GCO does not yet translate, add it to the dialect dispatch in
    `gco/bedrock.py` — otherwise the configured effort is silently inert. Update
-   the intentionally independent `_EXPECTED_DEFAULT_MODEL_ID`,
+   the intentionally independent `_EXPECTED_MISSION_MODEL_ID`,
+   `_EXPECTED_CAPACITY_ADVISOR_MODEL_ID`,
+   `_EXPECTED_CLAUDE_CODE_MODEL_ID` (when moving the autopilot default),
    `_EXPECTED_FIXTURE_NAME`, and thinking review
    pins in `tests/test_default_bedrock_model_consistency.py`; those assertions
    are not runtime defaults, but they make model, fixture, and reasoning changes
    explicit in review.
-2. Capture a genuine fixture for the exact profile id:
+2. When the Mission key moved, capture a genuine fixture for the exact profile
+   id:
    `python3 scripts/capture_scaffold_fixtures.py --model <id> --region us-east-1`.
    The canonical directive set makes three paid calls; high reasoning can make
-   the run substantially slower and more expensive.
+   the run substantially slower and more expensive. (Scaffold fixtures replay
+   Mission sampling, so a capacity-advisor-only move needs no re-capture.)
 3. Run the Mission and capacity suites, then open a PR. The consistency guard
-   proves both runtime aliases and the dependency scanner still resolve the
-   same `cdk.json` value.
+   proves each consumer accessor and the dependency scanner still resolve the
+   same `cdk.json` values.
+
+The scan also tracks `context.vector_store.embedding_model_id` — the workload
+RAG corpus's deliberately independent embedding model — through the same
+foundation-model lookup. Its remediation is heavier: adopting a newer model
+means re-ingesting the corpus (`gco vector ingest`), because stored vectors
+are only comparable to vectors from the model that wrote them.
+
+When the flagged key is `context.bedrock.embedding_model_id`, treat the row as
+a planning signal rather than a routine bump: vectors are only comparable to
+vectors produced by the same model, and every Mission-memory item records its
+`embedding_model_id` for exactly this reason. Adopting a newer embedding model
+means re-embedding existing items (or segregating old and new vectors) before
+changing the pin, and updating `_EXPECTED_EMBEDDING_MODEL_ID` in
+`tests/test_default_bedrock_model_consistency.py` alongside the `cdk.json`
+value.
 
 Picking a *different* model — for regulatory, data-residency, model-governance,
 or cost reasons, or to avoid the Anthropic FTU form — rather than tracking
@@ -455,8 +500,12 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
 - Versions that live outside `pyproject.toml` — workflow `*_VERSION` env pins,
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, the Python-constant Mooncake default image in
-  `cli/images.py`, and the Bedrock model at
-  `cdk.json` `context.bedrock.default_model_id` (see
+  `cli/images.py`, and the Bedrock models at `cdk.json`
+  `context.bedrock.mission_default_model_id`,
+  `context.bedrock.capacity_advisor_default_model_id`,
+  `context.bedrock.claude_code_default_model_id`, and
+  `context.bedrock.embedding_model_id`, and
+  `context.vector_store.embedding_model_id` (see
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
   These are tracked by the monthly scan rather than Dependabot.
 
@@ -492,11 +541,16 @@ resolve, the environment is dirty — fix the environment, don't loosen the pin.
    ```bash
    docker build -f Dockerfile.dev -t gco-dev .
    docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+     pip install --quiet "pip==25.0.1" &&
      pip-compile --no-emit-index-url --strip-extras --all-extras \
        -o requirements-lock.txt pyproject.toml &&
      sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
    '
    ```
+
+   The `pip==25.0.1` downgrade is required first: `pip-tools==7.6.0` imports
+   pip internals that newer pip (as shipped in the current `python:3.14-slim`
+   base) has removed, and it only affects the throwaway container.
 
 4. Run the affected checks, then open a PR. CI rejects stale Python or npm
    lockfiles, unmanaged npm graphs, and inconsistent Node/npm/CDK pins.
@@ -582,10 +636,12 @@ There is no auto-retry wrapper — a flake is treated as a bug, not hidden.
   `hashFiles('pyproject.toml', 'requirements-lock.txt')`. Both invalidate
   automatically when dependencies change — don't hand-clear them.
 - **Runners and tools:** jobs run on `ubuntu-latest` with actions pinned by
-  major version (bumped by Dependabot). Hand-installed CI tools
-  (`TRIVY_VERSION`, `HELM_VERSION`, `KUBECTL_VERSION`, the kind node image) are
-  tracked by the scan's **CI tooling** and **Version consistency** rows, so a
-  pin that must move in lockstep across files is caught there.
+  major version (bumped by Dependabot). Hand-installed CI tools — Trivy (the
+  `install-trivy` action's `version` default), Helm and kubectl (derived at
+  runtime from the `lambda/helm-installer/Dockerfile` pins), and the kind node
+  image (`KIND_NODE_IMAGE` in `integration-tests.yml`) — are tracked by the
+  scan's **CI tooling** and **Version consistency** rows, so a pin that must
+  move in lockstep across files is caught there.
 - On an EKS bump the kind `node_image` moves too — see
   [Upgrading the EKS Kubernetes version](#upgrading-the-eks-kubernetes-version).
 

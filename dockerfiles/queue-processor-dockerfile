@@ -16,7 +16,7 @@
 # zoneinfo, dpkg scanner metadata) that the FROM scratch runtime stage copies
 # wholesale. The deployed image contains no shell, package manager, or
 # coreutils. See the script's module docstring for the full rationale.
-FROM python:3.14.6-slim AS builder
+FROM python:3.14.7-slim AS builder
 
 # Set working directory
 WORKDIR /app

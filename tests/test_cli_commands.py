@@ -136,6 +136,26 @@ class TestJobsCommands:
         result = runner.invoke(cli, ["jobs", "get", "nonexistent-job", "--region", "us-east-1"])
         assert result.exit_code == 1
 
+    def test_jobs_get_missing_regional_bridge_is_not_reported_as_not_found(self):
+        """Issue #258: an unreachable regional API bridge must surface as such.
+
+        Runs the real command handler, JobManager, and AWS client request
+        path; only regional endpoint discovery is stubbed to "stack not
+        deployed" (None), exactly what happens after deploying the regional
+        stack without gco-regional-api-<region>.
+        """
+        from cli.aws_client import GCOAWSClient
+        from cli.main import cli
+
+        with patch.object(GCOAWSClient, "get_regional_api_endpoint", return_value=None):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["jobs", "get", "gpu-test-job", "--region", "us-east-1"])
+
+        assert result.exit_code == 1
+        assert "Regional API endpoint is not deployed in us-east-1" in result.output
+        # The old behavior collapsed this failure into "Job ... not found".
+        assert "not found" not in result.output.lower()
+
     @patch("cli.commands.jobs_cmd.get_job_manager")
     @patch("cli.commands.jobs_cmd.get_output_formatter")
     def test_jobs_logs(self, mock_formatter, mock_manager):

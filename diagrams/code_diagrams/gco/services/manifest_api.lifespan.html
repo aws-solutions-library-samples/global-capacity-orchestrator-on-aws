@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Manifest API lifecycle (stores + optional central queue worker)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,12 +206,12 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2716=>operation: 'Initialize API dependencies and the optional regional queue worker.'
-op2718=>operation: global manifest_processor, manifest_metrics, template_store, webhook_store, job_store
-op2720=>operation: queue_worker: CentralQueueWorker | None = None
-op2722=>operation: queue_worker_task: asyncio.Task[None] | None = None
-sub2724=>subroutine: logger.info('Starting Manifest API Service')
-op2727=>operation: manifest_processor = create_manifest_processor_from_env()
+        <div><textarea id="code" style="width: 100%;" rows="11">op3241=>operation: 'Initialize API dependencies and the optional regional queue worker.'
+op3243=>operation: global manifest_processor, manifest_metrics, template_store, webhook_store, job_store
+op3245=>operation: queue_worker: CentralQueueWorker | None = None
+op3247=>operation: queue_worker_task: asyncio.Task[None] | None = None
+sub3249=>subroutine: logger.info('Starting Manifest API Service')
+op3252=>operation: manifest_processor = create_manifest_processor_from_env()
 configure_structured_logging(service_name='manifest-api', cluster_id=manifest_processor.cluster_id, region=manifest_processor.region)
 manifest_metrics = ManifestProcessorMetrics(cluster_name=manifest_processor.cluster_id, region=manifest_processor.region)
 logger.info('Manifest processor initialized')
@@ -227,46 +227,46 @@ if _env_bool('CENTRAL_QUEUE_WORKER_ENABLED'):
 else:
     app.state.central_queue_worker = None
     app.state.central_queue_worker_task = None
-cond2726=>condition: exception raised?
-cond2729=>condition: except Exception as e
-sub2733=>subroutine: logger.error(f'Failed to initialize manifest processor: {e}')
-sub2735=>subroutine: raise
-io2743=>inputoutput: output: yield
-cond2740=>condition: exception raised?
-cond2750=>condition: if queue_worker is not None and queue_worker_task is not None
-sub2754=>subroutine: queue_worker.stop()
-op2759=>operation: await asyncio.wait_for(queue_worker_task, timeout=30)
-cond2756=>condition: exception raised?
-cond2761=>condition: except TimeoutError
-sub2765=>subroutine: queue_worker_task.cancel()
-op2767=>operation: with suppress(asyncio.CancelledError):
+cond3251=>condition: exception raised?
+cond3254=>condition: except Exception as e
+sub3258=>subroutine: logger.error(f'Failed to initialize manifest processor: {e}')
+sub3260=>subroutine: raise
+io3268=>inputoutput: output: yield
+cond3265=>condition: exception raised?
+cond3275=>condition: if queue_worker is not None and queue_worker_task is not None
+sub3279=>subroutine: queue_worker.stop()
+op3284=>operation: await asyncio.wait_for(queue_worker_task, timeout=30)
+cond3281=>condition: exception raised?
+cond3286=>condition: except TimeoutError
+sub3290=>subroutine: queue_worker_task.cancel()
+op3292=>operation: with suppress(asyncio.CancelledError):
     await queue_worker_task
-sub2775=>subroutine: logger.info('Shutting down Manifest API Service')
+sub3300=>subroutine: logger.info('Shutting down Manifest API Service')
 
-op2716->op2718
-op2718->op2720
-op2720->op2722
-op2722->sub2724
-sub2724->op2727
-op2727->cond2726
-cond2726(yes)->cond2729
-cond2729(yes)->sub2733
-sub2733->sub2735
-cond2729(no)->io2743
-io2743->cond2740
-cond2740(yes)->cond2750
-cond2750(yes)->sub2754
-sub2754->op2759
-op2759->cond2756
-cond2756(yes)->cond2761
-cond2761(yes)->sub2765
-sub2765->op2767
-op2767->sub2775
-cond2761(no)->sub2775
-cond2756(no)->sub2775
-cond2750(no)->sub2775
-cond2740(no)->cond2750
-cond2726(no)->io2743
+op3241->op3243
+op3243->op3245
+op3245->op3247
+op3247->sub3249
+sub3249->op3252
+op3252->cond3251
+cond3251(yes)->cond3254
+cond3254(yes)->sub3258
+sub3258->sub3260
+cond3254(no)->io3268
+io3268->cond3265
+cond3265(yes)->cond3275
+cond3275(yes)->sub3279
+sub3279->op3284
+op3284->cond3281
+cond3281(yes)->cond3286
+cond3286(yes)->sub3290
+sub3290->op3292
+op3292->sub3300
+cond3286(no)->sub3300
+cond3281(no)->sub3300
+cond3275(no)->sub3300
+cond3265(no)->cond3275
+cond3251(no)->io3268
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -276,10 +276,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

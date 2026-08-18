@@ -47,7 +47,16 @@ def to_jsonable(value: Any) -> Any:
 
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_REPORT_FILENAMES = frozenset({"live-release-validation.json", "live-release-validation.md"})
+_REPORT_FILENAMES = frozenset(
+    {
+        "live-release-validation.json",
+        "live-release-validation.md",
+        # The sibling example-job harness reuses this module's report/checkpoint
+        # machinery with its own report stem.
+        "example-job-validation.json",
+        "example-job-validation.md",
+    }
+)
 
 
 def _validate_private_regular_metadata(metadata: os.stat_result, path: Path) -> None:
@@ -274,6 +283,11 @@ class RunSettings:
     destroy_retry_delay_seconds: int = 30
     confirm_kms_key_deletion: bool = False
     resume: bool = False
+    #: Off-by-default schedulers force-enabled for this run's deploy (threaded
+    #: to CDK as the ``helm_enabled_overrides`` context; see the ``schedulers``
+    #: action). Part of the resume identity: a resumed run must deploy and
+    #: validate the same chart set it started with.
+    optional_schedulers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize output paths without resolving symlinks and enforce one run directory."""
@@ -288,6 +302,18 @@ class RunSettings:
                 f"Checkpoint filename is reserved for a validation report: {checkpoint_path.name}"
             )
 
+    def extra_cdk_context(self) -> dict[str, str]:
+        """Extra ``--context`` pairs every CDK invocation of this run must carry.
+
+        Subclass hook: sibling harnesses (``scripts/example_job_validation``)
+        extend this with their own per-run enablement context. Anything
+        returned here must also be reflected in :meth:`identity` fields so a
+        resumed run synthesizes the same graph it started with.
+        """
+        if self.optional_schedulers:
+            return {"helm_enabled_overrides": ",".join(self.optional_schedulers)}
+        return {}
+
     def identity(self) -> dict[str, Any]:
         """Return fields that must remain identical across resume attempts."""
         return {
@@ -300,6 +326,7 @@ class RunSettings:
             "requested_actions": list(self.requested_actions),
             "protected_stack_names": list(self.protected_stack_names),
             "confirm_kms_key_deletion": self.confirm_kms_key_deletion,
+            "optional_schedulers": list(self.optional_schedulers),
         }
 
 
@@ -446,6 +473,10 @@ class ValidationReport:
     final_inventory: dict[str, Any] | None = None
     fatal_error: str | None = None
     schema_version: int = SCHEMA_VERSION
+    #: Markdown heading and report-filename stem; sibling harnesses override
+    #: both (e.g. "GCO Example Job Validation" / "example-job-validation").
+    title: str = "GCO Live Release Validation"
+    report_stem: str = "live-release-validation"
 
     def to_dict(self) -> dict[str, Any]:
         serialized = to_jsonable(self)
@@ -456,8 +487,8 @@ class ValidationReport:
     def write(self, directory: Path) -> tuple[Path, Path]:
         """Write both report formats and return their paths."""
         ensure_private_directory(directory)
-        json_path = directory / "live-release-validation.json"
-        markdown_path = directory / "live-release-validation.md"
+        json_path = directory / f"{self.report_stem}.json"
+        markdown_path = directory / f"{self.report_stem}.md"
         atomic_write_json(json_path, self.to_dict())
         atomic_write_text(markdown_path, self.to_markdown())
         return json_path, markdown_path
@@ -467,7 +498,7 @@ class ValidationReport:
         identity = self.identity
         selected_scope = ", ".join(f"`{name}`" for name in self.selected_actions) or "_none_"
         lines = [
-            "# GCO Live Release Validation",
+            f"# {self.title}",
             "",
             f"- **Run:** `{self.run_id}`",
             f"- **Status:** **{self.status.upper()}**",

@@ -12,7 +12,8 @@
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml/badge.svg?branch=main" alt="Integration Tests"></a>
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/security.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/security.yml/badge.svg?branch=main" alt="Security"></a>
   <a href="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml"><img src="https://github.com/awslabs/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml/badge.svg?branch=main" alt="Linting"></a>
-  <a href="https://awslabs.github.io/global-capacity-orchestrator-on-aws/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fawslabs.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
+  <a href="https://awslabs.github.io/global-capacity-orchestrator-on-aws/coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fawslabs.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
+  <a href="https://awslabs.github.io/global-capacity-orchestrator-on-aws/"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"></a>
 </p>
 <!-- END BADGE TABLE -->
 
@@ -84,7 +85,7 @@ source ~/.zshrc                # or ~/.bashrc — the script prints which file i
 gco autopilot                  # offers the pinned Claude Code install, then launches
 ```
 
-`gco autopilot` turns your terminal into a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session for GCO: an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend using your AWS credentials (defaulting to GCO's canonical Claude Opus 5 inference profile, overridable to any Claude model on Bedrock with `-m`), the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`, or say yes to the prompt), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills/agents/plugins come along for the ride (`--skills`, `--agents`, `--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+`gco autopilot` turns your terminal into a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session for GCO: an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend using your AWS credentials (defaulting to GCO's Claude Code default — the Claude Opus 5 inference profile — overridable to any Claude model on Bedrock with `-m`), the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`, or say yes to the prompt), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills/agents/plugins come along for the ride (`--skills`, `--agents`, `--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
 
 **Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages ([CDK](https://docs.aws.amazon.com/cdk/v2/guide/work-with-cdk-python.html), [AWS SDKs](https://pypi.org/project/boto3/), [FastAPI](https://fastapi.tiangolo.com/), [mypy](https://mypy-lang.org/), [Ruff](https://docs.astral.sh/ruff/), etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), [AWS CLI](https://aws.amazon.com/cli/), Docker CLI + [Buildx](https://github.com/docker/buildx), all Python deps) so you skip the whole problem.
 
@@ -141,7 +142,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 134 tools by default (up to 179 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 135 tools by default (up to 183 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -265,11 +266,9 @@ See the [Quick Start Guide](QUICKSTART.md) for the full step-by-step walkthrough
 
 These curated views complement the generated CDK diagram with the multi-region platform, regional EKS data plane, and security/request flow.
 
-<p align="center">
-  <a href="images/gco_ref_architecture_part1.png"><img src="images/gco_ref_architecture_part1.png" alt="GCO multi-region reference architecture" width="32%"></a>
-  <a href="images/gco_ref_architecture_part2.png"><img src="images/gco_ref_architecture_part2.png" alt="GCO regional EKS reference architecture" width="32%"></a>
-  <a href="images/gco_ref_architecture_part3.png"><img src="images/gco_ref_architecture_part3.png" alt="GCO security controls and request flow" width="32%"></a>
-</p>
+<a href="images/gco_ref_architecture_part1.png"><img src="images/gco_ref_architecture_part1.png" alt="GCO multi-region reference architecture" width="70%"></a>
+
+*Figure 2: GCO multi-region reference architecture — global control plane and workload entry*
 
 ### Multi-Region Reference Architecture workflow
 
@@ -284,7 +283,11 @@ The generated reference architecture shows the commercial `aws` workload path. O
 7. A regional internal **AWS [Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to the platform services behind the shared Gateway API `HTTPRoute`.
 8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the [Cost Monitor](./dockerfiles/cost-monitor-dockerfile), [Health Monitor](./dockerfiles/health-monitor-dockerfile), [Manifest Processor](./dockerfiles/manifest-processor-dockerfile), [Queue Processor](./dockerfiles/queue-processor-dockerfile), [Inference Monitor](./dockerfiles/inference-monitor-dockerfile), and dedicated [Inference Proxy](./dockerfiles/inference-proxy-dockerfile).
 
-Below is the per-region workflow for a single regional stack.
+Below is the reference architecture for a single regional stack.
+
+<a href="images/gco_ref_architecture_part2.png"><img src="images/gco_ref_architecture_part2.png" alt="GCO regional EKS reference architecture" width="70%"></a>
+
+*Figure 3: GCO regional reference architecture — EKS Auto Mode data plane and regional services*
 
 ### Regional Architecture workflow
 
@@ -296,16 +299,11 @@ Below is the per-region workflow for a single regional stack.
 6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
 7. **Regional AWS services** complete the stack: [Amazon SQS](https://aws.amazon.com/sqs/) for job ingestion, [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html)-backed state where applicable, and [Amazon CloudWatch](https://docs.aws.amazon.com/cloudwatch/) [metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/working_with_metrics.html) and [logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html).
 
-<details>
-<summary>Infrastructure diagram generation details</summary>
+Below is the reference architecture for the security controls and the authenticated request path.
 
-Regenerate the full architecture and every per-stack view with [`python diagrams/infra_diagrams/generate.py`](./diagrams/infra_diagrams/generate.py). The generator synthesizes the current CDK app through [cdk-dia](https://github.com/pistazie/cdk-dia) so the committed diagrams track the deployed resource graph. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`).
+<a href="images/gco_ref_architecture_part3.png"><img src="images/gco_ref_architecture_part3.png" alt="GCO security controls and request flow" width="70%"></a>
 
-</details>
-
-Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md). They can be generated with [`python diagrams/code_diagrams/generate.py`](./diagrams/code_diagrams/generate.py). New functions in scripts can have diagrams generated for them by appending to [`diagrams/code_diagrams/_targets.py`](./diagrams/code_diagrams/_targets.py).
-
-> A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
+*Figure 4: GCO security model — layered controls and the authenticated request flow*
 
 ### Security Model
 
@@ -335,6 +333,17 @@ is optional for same-account callers in `aws` and enabled automatically as the
 supported workload ingress in other partitions.
 
 See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
+
+<details>
+<summary>Infrastructure diagram generation details</summary>
+
+Regenerate the full architecture and every per-stack view with [`python diagrams/infra_diagrams/generate.py`](./diagrams/infra_diagrams/generate.py). The generator synthesizes the current CDK app through [cdk-dia](https://github.com/pistazie/cdk-dia) so the committed diagrams track the deployed resource graph. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`).
+
+</details>
+
+Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md). They can be generated with [`python diagrams/code_diagrams/generate.py`](./diagrams/code_diagrams/generate.py). New functions in scripts can have diagrams generated for them by appending to [`diagrams/code_diagrams/_targets.py`](./diagrams/code_diagrams/_targets.py).
+
+> A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
 
 ## AWS Services in this Guidance
 
@@ -430,8 +439,9 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
 - **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml)
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
+- **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
+- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
@@ -455,12 +465,14 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **FSx for Lustre**: Optional high-performance parallel file system for ML training (toggle on/off)
 - **Valkey cache**: Optional serverless key-value cache for prompt caching and session state
 - **Aurora pgvector**: Optional serverless vector database for RAG, semantic search, and embedding storage
+- **Vector store**: Optional globally replicated DynamoDB vector index over an S3-ingested document corpus — drop files in, search from every region (`gco vector`)
 
 ### Operations
 
 - **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
 - **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard, scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
+- **MLflow experiment tracking** (on by default with observability): an in-cluster [MLflow](https://mlflow.org/) tracking server per region — run artifacts to S3 via a prefix-scoped IAM role, metadata on EBS, reached with `gco monitoring open --service mlflow` — see [MONITORING.md](docs/MONITORING.md#mlflow-experiment-tracking)
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region [monitoring](./docs/MONITORING.md)**: CloudWatch dashboards, alarms, and SNS alerts across all regions
 
@@ -479,6 +491,12 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 
 ## Documentation
 
+**Prefer a website?** The [project wiki](https://awslabs.github.io/global-capacity-orchestrator-on-aws/)
+is a short orientation site — what GCO is, how it works, what you can run, and
+where to go deeper — published from this repository with the
+[live coverage report](https://awslabs.github.io/global-capacity-orchestrator-on-aws/coverage/)
+embedded.
+
 **New to GCO?** Start here:
 
 | Your Goal | Read This |
@@ -496,6 +514,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 |-----------|-----------|
 | CLI commands and usage | [CLI Reference](docs/CLI.md) |
 | Deploy inference endpoints | [Inference Guide](docs/INFERENCE.md) |
+| Run multi-node distributed training | [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md) |
 | Use the REST API directly | [API Reference](docs/API.md) |
 | Fix issues | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Respond to incidents | [Operational Runbooks](docs/RUNBOOKS.md) |
@@ -558,10 +577,13 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 ├── app.py                               # CDK app entry point
 ├── TENETS.md                            # Prioritized project principles and north-star guidance
 ├── cdk.json                             # CDK configuration (regions, features, thresholds)
+├── mkdocs.yml                           # MkDocs configuration for the GitHub Pages wiki (sources in wiki/)
 ├── pyproject.toml                       # Project metadata, dependencies, and CLI installation
 │
 ├── cli/                                 # GCO CLI (jobs, stacks, capacity, inference, costs, DAGs)
+├── demo/                                # Recorded CLI demos (GIFs + asciinema sources) with walkthroughs and re-record scripts
 ├── diagrams/                            # Auto-generated architecture diagrams (infra_diagrams/) and code flowcharts (code_diagrams/)
+├── dockerfiles/                         # Distroless container images for the in-cluster GCO services
 ├── docs/                                # Documentation (architecture, CLI, API, inference, customization, analytics)
 ├── examples/                            # Example manifests (jobs, inference, Ray, Volcano, Kueue, Slurm, YuniKorn)
 ├── gco/
@@ -588,9 +610,11 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── gco_mcp/                             # MCP server for LLM interaction (134 tools default, up to 179 with feature flags)
+├── gco_mcp/                             # MCP server for LLM interaction (135 tools default, up to 183 with feature flags)
+├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
-└── tests/                               # PyTest + BATS test suites (counts tracked via badges)
+├── tests/                               # PyTest + BATS test suites (counts tracked via badges)
+└── wiki/                                # GitHub Pages wiki sources (published at awslabs.github.io/global-capacity-orchestrator-on-aws)
 ```
 
 ## Contributing

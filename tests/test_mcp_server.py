@@ -172,15 +172,15 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 134 read-only or low-risk
-        # tools (125 before the cost allocation/k8s/report family added 9).
-        # Optional families add 45 more when every flag is enabled:
-        # capacity purchase (2), image publish (3), destructive operations (15),
-        # model upload (2), infrastructure deploy (4), infrastructure destroy
-        # (2), local metrics (1), semantic progress (1), local storage sync (1),
-        # config management (5), and Mission (9). The all-flags ceiling is
-        # therefore 179.
-        base_count = 134
+        # The default registry intentionally contains 135 read-only or low-risk
+        # tools (134 before fleet_status; 125 before the cost
+        # allocation/k8s/report family added 9). Optional families add 48 more
+        # when every flag is enabled: capacity purchase (2), image publish (3),
+        # destructive operations (15), model upload (2), infrastructure deploy
+        # (4), infrastructure destroy (2), local metrics (1), semantic progress
+        # (1), local storage sync (1), config management (7), and Mission (10).
+        # The all-flags ceiling is therefore 183.
+        base_count = 135
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -208,12 +208,13 @@ class TestToolRegistration:
         if "sync_storage_bucket" in tool_names:
             expected += 1  # gated by GCO_ENABLE_LOCAL_STORAGE_SYNC
         if "add_deployment_region" in tool_names:
-            # list/add/remove/set_deployment_region + set_default_bedrock_model
+            # list/add/remove/set_deployment_region + set_mission_default_model
+            # + set_capacity_advisor_default_model + set_claude_code_default_model
             # register together under GCO_ENABLE_CONFIG_MANAGEMENT.
-            expected += 5
+            expected += 7
         if "mission_start" in tool_names:
-            # The nine mission_* tools register together under GCO_ENABLE_MISSION.
-            expected += 9
+            # The ten mission_* tools register together under GCO_ENABLE_MISSION.
+            expected += 10
         assert len(tools) == expected
 
     def test_all_tool_names(self):
@@ -299,6 +300,8 @@ class TestToolRegistration:
             "addons_status",
             # Mutating
             "setup_cluster_access",
+            # ── Fleet status (read-only) ──
+            "fleet_status",
             # ── Storage (all read-only) ──
             "list_storage_contents",
             "list_file_systems",
@@ -478,10 +481,12 @@ class TestToolRegistration:
                     "add_deployment_region",
                     "remove_deployment_region",
                     "set_deployment_region",
-                    "set_default_bedrock_model",
+                    "set_mission_default_model",
+                    "set_capacity_advisor_default_model",
+                    "set_claude_code_default_model",
                 }
             )
-        # The nine mission_* tools register together under GCO_ENABLE_MISSION.
+        # The ten mission_* tools register together under GCO_ENABLE_MISSION.
         if "mission_start" in names:
             expected.update(
                 {
@@ -494,6 +499,7 @@ class TestToolRegistration:
                     "mission_resume",
                     "mission_history",
                     "mission_list",
+                    "mission_memory_search",
                 }
             )
         assert names == expected

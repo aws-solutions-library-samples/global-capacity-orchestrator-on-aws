@@ -1,0 +1,117 @@
+# =============================================================================
+# grafana-dashboards.yml — Curated dashboard provisioning check
+# =============================================================================
+#
+# The GCO Grafana dashboards ship as JSON payloads inside ConfigMap manifests
+# (lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml) and are
+# imported at runtime by the kube-prometheus-stack Grafana sidecar. That
+# pipeline has no loud failure mode: a payload the shipped Grafana version
+# rejects simply never appears in the UI.
+#
+# This workflow closes the gap end to end:
+#   1. Extract every dashboard JSON from the manifests
+#      (.github/scripts/validate_grafana_dashboards.py extract).
+#   2. Resolve the Grafana image from the kube-prometheus-stack version pinned
+#      in lambda/helm-installer/charts.yaml — `helm template` at that exact
+#      chart version renders the Grafana Deployment, so the image under test
+#      always tracks the deployment's own pin (no second pin to drift).
+#   3. Boot that image with file provisioning shaped like the sidecar's load
+#      path and assert every dashboard uid answers 200 with
+#      meta.provisioned=true, then fail on any dashboard/provisioning error in
+#      the Grafana log.
+#
+# Static payload validation (JSON shape, uids, grid positions, legend-token
+# survival through the applier's real substitution) runs in the main pytest
+# suite (tests/test_grafana_dashboards.py); this workflow only adds the part
+# that needs the real Grafana binary. Paths-filtered: it runs when the
+# dashboards, the chart pin, this workflow, or its script change.
+#
+# =============================================================================
+name: Grafana Dashboards
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml"
+      - "lambda/helm-installer/charts.yaml"
+      - ".github/scripts/validate_grafana_dashboards.py"
+      - ".github/workflows/grafana-dashboards.yml"
+  pull_request:
+    paths:
+      - "lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml"
+      - "lambda/helm-installer/charts.yaml"
+      - ".github/scripts/validate_grafana_dashboards.py"
+      - ".github/workflows/grafana-dashboards.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision-check:
+    name: "grafana:dashboards:provision"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned PyYAML
+        run: python3 -m pip install --user "pyyaml==6.0.3"
+
+      - name: Extract dashboards from the applier manifests
+        run: |
+          python3 .github/scripts/validate_grafana_dashboards.py extract \
+            --manifest lambda/kubectl-applier-simple/manifests/post-helm-grafana-dashboards.yaml \
+            --manifest lambda/kubectl-applier-simple/manifests/post-helm-grafana-cost-dashboard.yaml \
+            --out-dir "${RUNNER_TEMP}/gco-dashboards"
+
+      - name: Read the pinned kube-prometheus-stack version
+        id: chart
+        run: python3 .github/scripts/validate_grafana_dashboards.py chart-version
+
+      - name: Resolve the Grafana image from the chart pin
+        id: image
+        run: |
+          helm repo add prometheus-community "${{ steps.chart.outputs.repo_url }}"
+          helm repo update prometheus-community
+          image="$(helm template gco prometheus-community/kube-prometheus-stack \
+            --version "${{ steps.chart.outputs.version }}" \
+            --set grafana.enabled=true \
+            | grep -Eo '(docker\.io/)?grafana/grafana:[A-Za-z0-9._-]+' | sort -u | head -1)"
+          if [ -z "${image}" ]; then
+            echo "Could not resolve the Grafana image from the rendered chart" >&2
+            exit 1
+          fi
+          echo "Chart ${{ steps.chart.outputs.version }} ships ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Start the pinned Grafana with the extracted dashboards provisioned
+        run: |
+          docker run -d --name grafana \
+            -p 3000:3000 \
+            -v "${RUNNER_TEMP}/gco-dashboards/provisioning:/etc/grafana/provisioning/dashboards:ro" \
+            -v "${RUNNER_TEMP}/gco-dashboards/dashboards:/var/lib/grafana/dashboards:ro" \
+            "${{ steps.image.outputs.image }}"
+
+      - name: Verify every dashboard provisioned
+        run: |
+          python3 .github/scripts/validate_grafana_dashboards.py verify \
+            --url http://127.0.0.1:3000 \
+            --dashboards-dir "${RUNNER_TEMP}/gco-dashboards/dashboards" \
+            --timeout 180
+
+      - name: Fail on dashboard errors in the Grafana log
+        run: |
+          if docker logs grafana 2>&1 | grep -i "level=error" | grep -iE "dashboard|provision"; then
+            echo "Grafana logged dashboard provisioning errors" >&2
+            exit 1
+          fi
+          echo "No dashboard provisioning errors in the Grafana log"
+
+      - name: Dump the Grafana log
+        if: failure()
+        run: docker logs grafana 2>&1 || true
+
+      - name: Remove the Grafana container
+        if: always()
+        run: docker rm -f grafana || true

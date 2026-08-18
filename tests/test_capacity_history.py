@@ -76,6 +76,39 @@ class TestMakePk:
         assert hist.make_pk("g5.xlarge", "us-east-1") == "g5.xlarge#us-east-1"
 
 
+class TestTargetCapacityNaming:
+    def test_capacity_one_keeps_the_original_field_name(self):
+        # Continuity rule: capacity 1 is the pre-pool spot_score field, so
+        # snapshots written before multi-capacity collection stay readable.
+        assert hist.metric_field_for_target_capacity(1) == "spot_score"
+
+    @pytest.mark.parametrize(
+        ("capacity", "field"),
+        [(10, "spot_score_at_10"), (50, "spot_score_at_50")],
+    )
+    def test_capacities_above_one_get_suffixed_fields(self, capacity, field):
+        assert hist.metric_field_for_target_capacity(capacity) == field
+
+    @pytest.mark.parametrize("capacity", [0, -1, 7, 100, True])
+    def test_unsupported_capacity_names_value_and_supported_set(self, capacity):
+        with pytest.raises(ValueError) as excinfo:
+            hist.metric_field_for_target_capacity(capacity)
+        message = str(excinfo.value)
+        assert repr(capacity) in message
+        assert "[1, 10, 50]" in message
+
+    def test_every_supported_capacity_has_a_declared_metric_field(self):
+        # METRIC_FIELDS is flat and statically known; the supported set must
+        # never grow without a matching field declaration.
+        for capacity in hist.SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES:
+            assert hist.metric_field_for_target_capacity(capacity) in hist.METRIC_FIELDS
+
+    def test_spot_score_keeps_its_leading_position(self):
+        # Existing column ordering stays readable: spot_score first, the
+        # higher-capacity variants directly after it.
+        assert hist.METRIC_FIELDS[:3] == ("spot_score", "spot_score_at_10", "spot_score_at_50")
+
+
 class TestFlattenCapacityData:
     def test_flattens_single_pair(self):
         records = hist.flatten_capacity_data(SAMPLE_CAPACITY_DATA)
@@ -136,6 +169,52 @@ class TestPutSnapshot:
         assert "capacity_blocks_long_available" in stats["metrics"]
         assert stats["metrics"]["capacity_blocks_long_available"]["max"] == 2
 
+    def test_put_snapshot_persists_multi_capacity_scores(self, store, mock_table):
+        now = datetime(2025, 6, 23, 14, 0, 0, tzinfo=UTC)
+        store.put_snapshot(
+            "g5.xlarge",
+            "us-east-1",
+            {"spot_score": 8, "spot_score_at_10": 6, "spot_score_at_50": 3},
+            now=now,
+        )
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert item["spot_score"] == 8
+        assert item["spot_score_at_10"] == 6
+        assert item["spot_score_at_50"] == 3
+
+    def test_put_snapshot_absent_capacity_fields_stay_absent(self, store, mock_table):
+        # A snapshot carrying only the capacity-1 score must not invent the
+        # higher-capacity fields (absence is meaningful, zero is a value).
+        now = datetime(2025, 6, 23, 14, 0, 0, tzinfo=UTC)
+        store.put_snapshot(
+            "g5.xlarge",
+            "us-east-1",
+            {"spot_score": 8, "spot_score_at_10": None},
+            now=now,
+        )
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert item["spot_score"] == 8
+        assert "spot_score_at_10" not in item
+        assert "spot_score_at_50" not in item
+
+    def test_put_snapshot_records_spot_pool_attribution(self, store, mock_table):
+        now = datetime(2025, 6, 23, 14, 0, 0, tzinfo=UTC)
+        store.put_snapshot(
+            "g5.xlarge",
+            "us-east-1",
+            {"spot_score": 8},
+            spot_pool="single-gpu-24gb",
+            now=now,
+        )
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert item["spot_pool"] == "single-gpu-24gb"
+
+    def test_put_snapshot_omits_spot_pool_for_unpooled_types(self, store, mock_table):
+        now = datetime(2025, 6, 23, 14, 0, 0, tzinfo=UTC)
+        store.put_snapshot("p3dn.24xlarge", "us-east-1", {"spot_price": 9.1}, now=now)
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert "spot_pool" not in item
+
 
 class TestRecord:
     def test_record_writes_one_item(self, store, mock_table):
@@ -176,6 +255,18 @@ class TestGetStatistics:
         stats = store.get_statistics("g5.xlarge", "us-east-1")
         assert stats["sample_count"] == 0
         assert stats["metrics"] == {}
+
+    def test_statistics_compute_over_multi_capacity_scores(self, store, monkeypatch):
+        trend = [
+            {"spot_score": 9, "spot_score_at_50": 2},
+            {"spot_score": 7, "spot_score_at_50": 4},
+        ]
+        monkeypatch.setattr(store, "get_trend", lambda *a, **k: trend)
+        stats = store.get_statistics("g5.xlarge", "us-east-1")
+        assert stats["metrics"]["spot_score_at_50"]["mean"] == 3.0
+        assert stats["metrics"]["spot_score_at_50"]["max"] == 4
+        # spot_score_at_10 never appeared in the trend: absent, not zero.
+        assert "spot_score_at_10" not in stats["metrics"]
 
 
 class TestTemporalPatterns:

@@ -1,0 +1,127 @@
+# Kubeflow Trainer v2 TrainJob Example — distributed PyTorch (CPU-sized)
+#
+# Runs a 2-node torch.distributed all-reduce through the Kubeflow Trainer
+# v2 TrainJob API against the platform-shipped `torch-distributed`
+# ClusterTrainingRuntime. The runtime provides the pod template and the
+# torchrun rendezvous wiring (PET_* environment); this manifest only
+# says WHAT to run (`spec.trainer`) and HOW WIDE (`numNodes`). Trainer v2
+# supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) —
+# one TrainJob kind + runtime blueprints instead of per-framework CRDs.
+#
+# Under the hood the trainer controller compiles this into a JobSet whose
+# single child Job `<name>-node-0` runs `numNodes` indexed pods (the
+# completion index is the node rank). Logs: `gco jobs logs
+# kubeflow-trainjob-example -r <region>` fetches rank 0; `--node N` picks
+# another rank. Deleting the TrainJob cascades to everything it created.
+#
+# Deliberately CPU-sized: the point is the distributed-training plumbing,
+# not FLOPs, so it runs on stock nodes with no accelerator quota. gloo is
+# the CPU rendezvous backend; real GPU jobs use nccl.
+#
+# Kueue (optional): TrainJobs are gang-schedulable through the default
+# Kueue integration — add the label `kueue.x-k8s.io/queue-name: gco-default`
+# under metadata.labels to admit this job through the platform queue
+# (all-or-nothing admission for every node at once). Unlabeled TrainJobs
+# run immediately, subject only to namespace quota.
+#
+# GPU variant, via runtimePatches: `spec.trainer` carries images and
+# per-node resources but NOT tolerations — accelerator jobs add them
+# through a runtime patch. Swap the resources below to request GPUs and
+# append the patch (this is the shape the platform's accelerator
+# admission check expects):
+#
+#   spec:
+#     trainer:
+#       numNodes: 2
+#       numProcPerNode: 1
+#       resourcesPerNode:
+#         limits:
+#           nvidia.com/gpu: "1"
+#     runtimePatches:
+#       - trainingRuntimeSpec:
+#           template:
+#             spec:
+#               replicatedJobs:
+#                 - name: node
+#                   template:
+#                     spec:
+#                       template:
+#                         spec:
+#                           tolerations:
+#                             - key: nvidia.com/gpu
+#                               operator: Exists
+#                               effect: NoSchedule
+#
+# Prerequisites:
+#   - helm.kubeflow_trainer.enabled = true in cdk.json (the default)
+#
+# Usage:
+#   gco jobs submit-sqs examples/kubeflow-trainjob.yaml --region us-east-1
+#
+# Docs: ../docs/CUSTOMIZATION.md (Kubeflow Trainer / allowed kinds)
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: kubeflow-trainjob-example
+  namespace: gco-jobs
+  labels:
+    app: kubeflow-trainjob-example
+    project: gco
+spec:
+  runtimeRef:
+    name: torch-distributed
+  trainer:
+    # Same pinned image the shipped runtime uses; listed explicitly so the
+    # platform's image-trust gate validates exactly what will run.
+    image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
+    numNodes: 2
+    # Plain integer, not a quoted string: TrainJob's CRD schema types this
+    # field int32 (the "auto" string lives on the runtime's mlPolicy, not
+    # here) — a quoted "1" fails apiserver validation with a bare 400
+    # (caught live, 2026-08-14).
+    numProcPerNode: 1
+    resourcesPerNode:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        cat > /tmp/allreduce.py <<'EOF'
+        """Two-node all-reduce: the smallest honest distributed proof.
+
+        torchrun (launched by the runtime with the PET_* rendezvous env the
+        trainer controller injects) starts one process per node; each rank
+        contributes a tensor of ones and all-reduce must sum them to the
+        world size on every rank — anything else means the collective did
+        not actually span the nodes.
+        """
+        import os
+
+        import torch
+        import torch.distributed as dist
+
+        dist.init_process_group(backend="gloo")
+        rank = dist.get_rank()
+        world = dist.get_world_size()
+        tensor = torch.ones(4)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        expected = float(world)
+        print(
+            f"rank {rank}/{world} node={os.environ.get('PET_NODE_RANK', '?')} "
+            f"all_reduce -> {tensor.tolist()}",
+            flush=True,
+        )
+        assert tensor.allclose(torch.full((4,), expected)), (
+            f"all_reduce produced {tensor.tolist()}, expected {expected} everywhere"
+        )
+        dist.destroy_process_group()
+        if rank == 0:
+            print("distributed all-reduce verified across the gang", flush=True)
+        EOF
+        torchrun /tmp/allreduce.py

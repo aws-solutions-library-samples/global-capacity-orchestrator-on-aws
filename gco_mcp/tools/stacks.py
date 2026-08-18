@@ -633,19 +633,66 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
 
     @mcp.tool(tags={"low-risk", "stacks"})
     @audit_logged
-    def set_default_bedrock_model(model_id: str) -> str:
+    def set_mission_default_model(model_id: str) -> str:
         """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
 
-        Set cdk.json bedrock.default_model_id (advisory-feature model default).
+        Set cdk.json bedrock.mission_default_model_id (Mission sampling).
 
-        Config-only and idempotent. Model and inference-profile IDs are
+        Config-only and idempotent. The capacity advisor and gco autopilot
+        have their own keys (set_capacity_advisor_default_model and
+        set_claude_code_default_model). Model and inference-profile IDs are
         free-form (custom profiles, marketplace models); validation mirrors
         the runtime reader (non-empty, no surrounding whitespace). Sibling
-        settings (bedrock.thinking) are preserved; explicit --model / env
-        overrides still take precedence at run time.
+        settings (bedrock.thinking, the other model keys) are preserved;
+        explicit --bedrock-model-id / env overrides still take precedence
+        at run time.
 
         Args:
             model_id: Bedrock model or inference-profile ID
                 (e.g. us.amazon.nova-2-lite-v1:0).
         """
-        return cli_runner._run_cli("stacks", "bedrock", "set-model", model_id, "-y")
+        return cli_runner._run_cli("stacks", "bedrock", "set-mission-model", model_id, "-y")
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_capacity_advisor_default_model(model_id: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set cdk.json bedrock.capacity_advisor_default_model_id.
+
+        The default model for gco capacity advise and its historical
+        variant. Config-only and idempotent; Mission sampling and gco
+        autopilot have their own keys (set_mission_default_model and
+        set_claude_code_default_model). Validation mirrors the runtime
+        reader (non-empty, no surrounding whitespace). Sibling settings
+        (bedrock.thinking, the other model keys) are preserved; explicit
+        --model overrides still take precedence at run time.
+
+        Args:
+            model_id: Bedrock model or inference-profile ID
+                (e.g. us.amazon.nova-2-lite-v1:0).
+        """
+        return cli_runner._run_cli(
+            "stacks", "bedrock", "set-capacity-advisor-model", model_id, "-y"
+        )
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_claude_code_default_model(model_id: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set cdk.json bedrock.claude_code_default_model_id (autopilot model).
+
+        The session model gco autopilot hands to Claude Code, independent of
+        the mission_default_model_id and capacity_advisor_default_model_id
+        knobs consumed by Mission sampling and the capacity advisor.
+        Config-only and idempotent; validation mirrors the runtime reader
+        (non-empty, no surrounding whitespace). Sibling settings are
+        preserved; explicit --model / GCO_AUTOPILOT_MODEL overrides still
+        take precedence at launch time.
+
+        Args:
+            model_id: Bedrock model or inference-profile ID
+                (e.g. us.anthropic.claude-sonnet-4-6).
+        """
+        return cli_runner._run_cli("stacks", "bedrock", "set-claude-code-model", model_id, "-y")

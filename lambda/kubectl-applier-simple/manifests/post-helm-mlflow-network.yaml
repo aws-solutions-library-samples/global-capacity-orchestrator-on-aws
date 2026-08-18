@@ -1,0 +1,135 @@
+# Egress for MLflow clients in gco-jobs. The namespace's zero-trust posture
+# (03-network-policies.yaml) limits job pods to DNS + 443-to-VPC-endpoints,
+# so tracking calls to the in-cluster server need an explicit allow. Scoped
+# to pods that opt in with the gco.io/mlflow-client label (see
+# examples/mlflow-tracking-job.yaml) and to the tracking server's pods only.
+# Port 5000 is both the mlflow Service port and the container port (the
+# official chart exposes the server 1:1), so one entry covers CNIs that
+# evaluate egress rules before and after the Service DNAT alike.
+#
+# The tracking server's own metadata claim is chart-managed (storage.enabled
+# in lambda/helm-installer/charts.yaml) — nothing to ship here. helm
+# uninstall never deletes chart PVCs, so the applier's feature inventory
+# still prunes the claim (monitoring/mlflow) alongside this policy when the
+# feature is disabled. Pruning DELETES run metadata (deliberate: disabling
+# the feature discards the tracking database); run artifacts live in S3 and
+# survive.
+#
+# Only applied when the MLflow conjunction holds (cdk.json
+# cluster_observability.enabled AND cluster_observability.mlflow.enabled).
+# GCORegionalStack substitutes {{MLFLOW_ENABLED}} only then; otherwise the
+# placeholder stays unreplaced, the applier skips this file, and
+# _FEATURE_RESOURCE_INVENTORY prunes previously created resources.
+---
+# The tracking server's complete network posture. GCO owns this instead of
+# the chart (charts.yaml sets networkPolicy.enabled: false).
+#
+# WHY NOT THE CHART'S POLICY: its ingress rule admits only POD sources
+#     from: [{podSelector: {}}, {namespaceSelector: {}}]
+# and the kubelet's health probes are not pod traffic — they arrive from the
+# node's host network, match neither peer, and get dropped. The server keeps
+# answering /health 200 for anything that can reach it while the kubelet sees
+# only timeouts, fails liveness, and restarts the container forever, so the
+# Deployment never reports Available. The chart hardcodes its probes (no
+# timeoutSeconds/failureThreshold knobs), so the traffic has to be allowed to
+# arrive.
+#
+# WHY OWNING IT BEATS SUPPLEMENTING IT: NetworkPolicies are additive, so a
+# second policy CAN re-allow the node — but only once the CNI has programmed
+# it. The VPC CNI resolves a pod's policies when the pod starts, and nothing
+# re-triggers that programming afterwards, so a pod created before the
+# permissive rule propagates keeps just the restrictive one. Caught live
+# 2026-08-15: the pod started 2 seconds after the supplemental policy was
+# applied and then crash-looped through 11 containers without receiving a
+# single probe, while Prometheus (a pod) scraped /metrics 200 throughout.
+# With GCO owning the only policy, every ordering is safe: before it lands
+# the pod is unisolated and probes work; after it lands probes are explicitly
+# allowed and work. The server can never end up unreachable by its own
+# kubelet.
+#
+# INGRESS: the server port only, from in-cluster pods (Prometheus scrapes
+# /metrics, gco-jobs clients log runs) and from the VPC CIDRs, which is what
+# covers the nodes the kubelet probes from. The CIDR list is the same
+# cdk.json vpc_endpoint_cidrs that _mlflow_allowed_hosts derives the
+# server's --allowed-hosts globs from, so one key governs both. GCO's own
+# services keep probes working the same way — the ingress rules in
+# 03-network-policies.yaml omit `from` entirely (allow-alb-to-health-monitor),
+# admitting any source on the port.
+#
+# EGRESS: DNS plus 443. That is everything the server needs: run metadata is
+# SQLite on its own volume (no database ports), and artifact writes reach S3
+# over the VPC endpoints on 443. Ports 5353 (UDP+TCP) ride along with 53
+# because some CNIs evaluate egress after the Service DNAT to CoreDNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlflow-server
+  namespace: monitoring
+  labels:
+    project: gco
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # In-cluster pods: Prometheus scrapes /metrics, gco-jobs clients log runs.
+    - from:
+        - podSelector: {}
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5000
+    # The VPC CIDRs, which is what covers the nodes the kubelet probes from.
+    # Kept as its own rule because the CIDR placeholder is expanded as the
+    # sole entry under `from:` (the same shape 03-network-policies.yaml uses);
+    # ingress rules are unioned, so this is equivalent to one merged list.
+    - from:
+        {{VPC_ENDPOINT_CIDR_BLOCKS}}
+      ports:
+        - protocol: TCP
+          port: 5000
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mlflow-clients
+  namespace: gco-jobs
+  labels:
+    project: gco
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      gco.io/mlflow-client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mlflow
+      ports:
+        - protocol: TCP
+          port: 5000

@@ -245,12 +245,12 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         execution_input["EndpointGroupArn"] = endpoint_group_arn
     execution_input_json = _canonical_json(execution_input)
     execution_input_bytes = execution_input_json.encode("utf-8")
-    if len(execution_input_bytes) > _SSM_PARAMETER_MAX_BYTES:
-        raise ValueError(
-            "Convergence replay input is "
-            f"{len(execution_input_bytes)} bytes; SSM Parameter Store supports at most "
-            f"{_SSM_PARAMETER_MAX_BYTES} bytes"
-        )
+    # No raw-JSON size gate here: what SSM stores is the zlib+base64 encoding,
+    # whose own bound is enforced below before any write. Gating on the raw
+    # bytes rejected deployments whose encoded form fit comfortably — caught
+    # live by example-job validation run ex241-edf33111-r2, where enabling
+    # every optional chart pushed the raw input to 8771 bytes while its
+    # encoded form stayed under half the Advanced-tier limit.
 
     project = str(props["ProjectName"])
     region = str(props["Region"])

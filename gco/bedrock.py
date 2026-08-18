@@ -8,12 +8,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 _BEDROCK_CONTEXT_KEY = "bedrock"
-_DEFAULT_MODEL_ID_KEY = "default_model_id"
+_MISSION_MODEL_ID_KEY = "mission_default_model_id"
+_CAPACITY_ADVISOR_MODEL_ID_KEY = "capacity_advisor_default_model_id"
+_CLAUDE_CODE_MODEL_ID_KEY = "claude_code_default_model_id"
+_EMBEDDING_MODEL_ID_KEY = "embedding_model_id"
 _THINKING_KEY = "thinking"
 _THINKING_EFFORT_KEY = "effort"
+#: The pre-v6 single "advisory" key that fed BOTH Mission sampling and the
+#: capacity advisor. Fully removed — one knob silently steering two features
+#: was exactly the kind of read-the-docs-to-understand-it default this
+#: project avoids — but its presence is still detected so an un-migrated
+#: config fails with rename instructions instead of a confusing missing-key
+#: error.
+_LEGACY_DEFAULT_MODEL_ID_KEY = "default_model_id"
 # Effort levels accepted in ``cdk.json``. This is deliberately the
 # *intersection* of what the supported reasoning dialects accept: Nova 2 tops
 # out at ``high``, and while Claude Opus 4.6/5 also accept ``xhigh`` and
@@ -61,20 +71,25 @@ _SOURCE_CDK_JSON = _SOURCE_ROOT / "cdk.json"
 _SOURCE_CHECKOUT_MARKERS = (_SOURCE_ROOT / "app.py", _SOURCE_ROOT / "pyproject.toml")
 _INSTALLED_DATA_PARTS = ("share", "gco", "cdk.json")
 
-if TYPE_CHECKING:
-    # Runtime access is provided lazily by ``__getattr__`` below.
-    DEFAULT_BEDROCK_MODEL_ID: str
-
 
 class BedrockModelConfigurationError(RuntimeError):
-    """The shared Bedrock model default could not be resolved safely."""
+    """A canonical Bedrock model default could not be resolved safely."""
 
 
 @dataclass(frozen=True)
 class BedrockDefaultConfiguration:
-    """Validated canonical Bedrock model and reasoning preferences."""
+    """Validated canonical Bedrock model defaults and reasoning preferences.
 
-    model_id: str
+    ``mission_model_id`` and ``capacity_advisor_model_id`` are deliberately
+    separate knobs: repointing Mission sampling and repointing the capacity
+    advisor are separate decisions. ``thinking_effort`` is shared because it
+    expresses how hard *any* defaulted generation model should reason, and the
+    translation into a model-specific request shape happens per model id in
+    :func:`build_bedrock_converse_options` anyway.
+    """
+
+    mission_model_id: str
+    capacity_advisor_model_id: str
     thinking_effort: str
 
 
@@ -126,11 +141,8 @@ def _canonical_cdk_json_path() -> Path:
     )
 
 
-def _bedrock_configuration_from_payload(
-    payload: Any,
-    path: Path,
-) -> BedrockDefaultConfiguration:
-    """Extract and strictly validate the canonical Bedrock configuration."""
+def _bedrock_block_from_payload(payload: Any, path: Path) -> dict[str, Any]:
+    """Validate the document structure down to the ``context.bedrock`` object."""
     if not isinstance(payload, dict):
         raise BedrockModelConfigurationError(f"{path}: document root must be an object")
 
@@ -143,13 +155,43 @@ def _bedrock_configuration_from_payload(
         raise BedrockModelConfigurationError(
             f"{path}: context.{_BEDROCK_CONTEXT_KEY} must be an object"
         )
+    return bedrock
 
-    model_id = bedrock.get(_DEFAULT_MODEL_ID_KEY)
+
+def _generation_model_id_from_block(
+    bedrock: Mapping[str, Any],
+    key: str,
+    path: Path,
+) -> str:
+    """Validate one generation-model default key as a non-empty string."""
+    model_id = bedrock.get(key)
     if not isinstance(model_id, str) or not model_id.strip():
         raise BedrockModelConfigurationError(
-            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_DEFAULT_MODEL_ID_KEY} "
-            "must be a non-empty string"
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{key} must be a non-empty string"
         )
+    return model_id.strip()
+
+
+def _bedrock_configuration_from_payload(
+    payload: Any,
+    path: Path,
+) -> BedrockDefaultConfiguration:
+    """Extract and strictly validate the canonical generation-model configuration."""
+    bedrock = _bedrock_block_from_payload(payload, path)
+
+    if _LEGACY_DEFAULT_MODEL_ID_KEY in bedrock:
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_LEGACY_DEFAULT_MODEL_ID_KEY} "
+            "was split into two independent knobs and is no longer read. Rename "
+            f"it to {_MISSION_MODEL_ID_KEY!r} (Mission sampling) and "
+            f"{_CAPACITY_ADVISOR_MODEL_ID_KEY!r} (capacity advisor), then remove "
+            f"the {_LEGACY_DEFAULT_MODEL_ID_KEY!r} key."
+        )
+
+    mission_model_id = _generation_model_id_from_block(bedrock, _MISSION_MODEL_ID_KEY, path)
+    capacity_advisor_model_id = _generation_model_id_from_block(
+        bedrock, _CAPACITY_ADVISOR_MODEL_ID_KEY, path
+    )
 
     thinking = bedrock.get(_THINKING_KEY)
     thinking_path = f"context.{_BEDROCK_CONTEXT_KEY}.{_THINKING_KEY}"
@@ -168,28 +210,42 @@ def _bedrock_configuration_from_payload(
         )
 
     return BedrockDefaultConfiguration(
-        model_id=model_id.strip(),
+        mission_model_id=mission_model_id,
+        capacity_advisor_model_id=capacity_advisor_model_id,
         thinking_effort=effort,
     )
 
 
-def _model_id_from_payload(payload: Any, path: Path) -> str:
-    """Extract the model id through the full canonical validation contract."""
-    return _bedrock_configuration_from_payload(payload, path).model_id
+def _claude_code_model_id_from_payload(payload: Any, path: Path) -> str:
+    """Extract and validate the Claude Code session model default."""
+    bedrock = _bedrock_block_from_payload(payload, path)
+
+    model_id = bedrock.get(_CLAUDE_CODE_MODEL_ID_KEY)
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_CLAUDE_CODE_MODEL_ID_KEY} "
+            "must be a non-empty string. Add the key to the deployment config "
+            "or run `gco stacks bedrock set-claude-code-model <model-id>`."
+        )
+    return model_id.strip()
 
 
-def get_default_bedrock_configuration(
-    cdk_json_path: Path | None = None,
-) -> BedrockDefaultConfiguration:
-    """Return the validated canonical Bedrock configuration from ``cdk.json``.
+def _embedding_model_id_from_payload(payload: Any, path: Path) -> str:
+    """Extract and validate the text-embedding model default."""
+    bedrock = _bedrock_block_from_payload(payload, path)
 
-    An explicit path is strict. Without one, resolution uses only the config
-    owned by this GCO source checkout or the config recorded in the installed
-    ``gco-cli`` distribution. Current-working-directory and ancestor files are
-    deliberately ignored so an unrelated project cannot change model routing.
-    Once selected, a missing, unreadable, malformed, or incomplete canonical
-    file fails closed rather than falling through to a stale copy.
-    """
+    model_id = bedrock.get(_EMBEDDING_MODEL_ID_KEY)
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_EMBEDDING_MODEL_ID_KEY} "
+            "must be a non-empty string. Mission memory embeds directives with "
+            "this model; add the key to the deployment config."
+        )
+    return model_id.strip()
+
+
+def _canonical_payload(cdk_json_path: Path | None) -> tuple[Any, Path]:
+    """Load and JSON-parse the selected canonical config, failing closed."""
     path = cdk_json_path.resolve() if cdk_json_path is not None else _canonical_cdk_json_path()
     if not path.is_file():
         raise BedrockModelConfigurationError(f"Canonical Bedrock config is not a file: {path}")
@@ -204,17 +260,88 @@ def get_default_bedrock_configuration(
     except json.JSONDecodeError as exc:
         raise BedrockModelConfigurationError(f"Invalid JSON in {path}: {exc}") from exc
 
+    return payload, path
+
+
+def get_default_bedrock_configuration(
+    cdk_json_path: Path | None = None,
+) -> BedrockDefaultConfiguration:
+    """Return the validated canonical Bedrock configuration from ``cdk.json``.
+
+    An explicit path is strict. Without one, resolution uses only the config
+    owned by this GCO source checkout or the config recorded in the installed
+    ``gco-cli`` distribution. Current-working-directory and ancestor files are
+    deliberately ignored so an unrelated project cannot change model routing.
+    Once selected, a missing, unreadable, malformed, or incomplete canonical
+    file fails closed rather than falling through to a stale copy.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
     return _bedrock_configuration_from_payload(payload, path)
 
 
-def get_default_bedrock_model_id(cdk_json_path: Path | None = None) -> str:
-    """Return the sole checked-in Bedrock model default from ``cdk.json``."""
-    return get_default_bedrock_configuration(cdk_json_path).model_id
+def get_default_mission_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in Mission sampling model default from ``cdk.json``.
+
+    This is the model Mission sampling uses when neither an explicit backend
+    argument nor ``GCO_MISSION_BEDROCK_MODEL_ID`` is supplied. The capacity
+    advisor resolves its own default through
+    :func:`get_default_capacity_advisor_model_id`, and ``gco autopilot``
+    through :func:`get_default_claude_code_model_id`.
+    """
+    return get_default_bedrock_configuration(cdk_json_path).mission_model_id
+
+
+def get_default_capacity_advisor_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in capacity-advisor model default from ``cdk.json``.
+
+    This is the model ``gco capacity advise`` (and its historical variant)
+    uses when no ``--model`` override is supplied. Mission sampling resolves
+    its own default through :func:`get_default_mission_model_id`, and
+    ``gco autopilot`` through :func:`get_default_claude_code_model_id`.
+    """
+    return get_default_bedrock_configuration(cdk_json_path).capacity_advisor_model_id
 
 
 def get_default_bedrock_thinking_effort(cdk_json_path: Path | None = None) -> str:
     """Return the canonical default model's validated reasoning effort."""
     return get_default_bedrock_configuration(cdk_json_path).thinking_effort
+
+
+def get_default_embedding_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in text-embedding model default from ``cdk.json``.
+
+    This is the model mission memory uses to embed directives for the
+    ``{project}-mission-memory`` vector index. It is deliberately independent
+    of the generation-model defaults (``mission_default_model_id`` and
+    ``capacity_advisor_default_model_id``): embedding and text generation are
+    different model families, and validation is equally independent — a
+    malformed generation ``thinking`` block cannot fail this accessor.
+
+    The model's output dimensionality is a one-way door: the vector index is
+    created with ``mission_memory.dimensions`` and query vectors must come
+    from the same model at the same width, or search results are meaningless.
+    Path selection and trust boundaries match
+    :func:`get_default_bedrock_configuration`.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
+    return _embedding_model_id_from_payload(payload, path)
+
+
+def get_default_claude_code_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in Claude Code session model default from ``cdk.json``.
+
+    This is the model ``gco autopilot`` hands to Claude Code, deliberately
+    independent of the generation-model defaults (``mission_default_model_id``
+    and ``capacity_advisor_default_model_id``): repointing an interactive
+    agent and repointing advisory Converse calls are separate decisions, and
+    future agent runners get their own sibling keys. Validation is equally
+    independent — a malformed generation ``thinking`` block cannot fail this
+    accessor, and a missing Claude Code key cannot fail the generation path.
+    Path selection and trust boundaries match
+    :func:`get_default_bedrock_configuration`.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
+    return _claude_code_model_id_from_payload(payload, path)
 
 
 def _supports_nova_2_reasoning(model_id: str) -> bool:
@@ -284,13 +411,14 @@ def build_bedrock_converse_options(
 ) -> dict[str, Any]:
     """Build model-safe optional kwargs for ``bedrock-runtime:Converse``.
 
-    Canonical reasoning preferences apply only when ``model_id`` is the
-    configured default. Explicit third-party or other-model overrides retain
-    their caller-provided inference controls and never receive model-specific
-    reasoning fields. Callers that know whether the model was defaulted should
-    pass ``apply_default_reasoning``; an explicit override then remains
-    independent of canonical configuration even when its model ID happens to
-    match the default. With no provenance flag, model-ID equality preserves the
+    Canonical reasoning preferences apply only when ``model_id`` is one of
+    the configured defaults (Mission sampling or capacity advisor). Explicit
+    third-party or other-model overrides retain their caller-provided
+    inference controls and never receive model-specific reasoning fields.
+    Callers that know whether the model was defaulted should pass
+    ``apply_default_reasoning``; an explicit override then remains independent
+    of canonical configuration even when its model ID happens to match a
+    default. With no provenance flag, model-ID equality preserves the
     compatibility behavior.
 
     Two reasoning dialects are translated, selected from the model id:
@@ -318,7 +446,7 @@ def build_bedrock_converse_options(
 
     configuration = get_default_bedrock_configuration(cdk_json_path)
 
-    if model_id != configuration.model_id:
+    if model_id not in (configuration.mission_model_id, configuration.capacity_advisor_model_id):
         if apply_default_reasoning is True:
             raise BedrockModelConfigurationError(
                 "Default Bedrock model changed while building its Converse request"
@@ -348,7 +476,9 @@ BEDROCK_FTU_REMEDIATION = (
     "See https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html "
     "for the form fields. Alternatively, point GCO at a model that needs no FTU "
     "form (for example an Amazon Nova profile) with --model, "
-    "GCO_MISSION_BEDROCK_MODEL_ID, or cdk.json context.bedrock.default_model_id."
+    "GCO_MISSION_BEDROCK_MODEL_ID, or the cdk.json "
+    "context.bedrock.mission_default_model_id and "
+    "context.bedrock.capacity_advisor_default_model_id keys."
 )
 
 
@@ -465,20 +595,7 @@ def extract_bedrock_converse_text(response: Mapping[str, Any]) -> str:
     raise IndexError("Bedrock response contains no non-empty text block")
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve the historical module constant only when it is requested."""
-    if name == "DEFAULT_BEDROCK_MODEL_ID":
-        return get_default_bedrock_model_id()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    """Advertise the lazy compatibility alias to introspection tools."""
-    return sorted({*globals(), "DEFAULT_BEDROCK_MODEL_ID"})
-
-
 __all__ = [
-    "DEFAULT_BEDROCK_MODEL_ID",
     "BEDROCK_FTU_FORM_ERROR_CODE",
     "BEDROCK_FTU_REMEDIATION",
     "BEDROCK_READ_TIMEOUT_SECONDS",
@@ -490,8 +607,11 @@ __all__ = [
     "build_bedrock_converse_options",
     "extract_bedrock_converse_text",
     "get_default_bedrock_configuration",
-    "get_default_bedrock_model_id",
     "get_default_bedrock_thinking_effort",
+    "get_default_capacity_advisor_model_id",
+    "get_default_claude_code_model_id",
+    "get_default_embedding_model_id",
+    "get_default_mission_model_id",
     "is_bedrock_ftu_form_error",
     "raise_if_bedrock_ftu_form_error",
 ]

@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Kubectl Applier Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -223,6 +223,10 @@ if request_type == 'Create' or request_type == 'Update':
     replacements = properties.get('ImageReplacements', {})
     post_helm = properties.get('PostHelm', 'false').lower() == 'true'
     response_data = apply_manifests(cluster_name, region, manifests_dir, replacements, post_helm)
+    failed_count = int(response_data.get('FailedCount', 0))
+    prune_failures = response_data.get('PruneFailures')
+    if failed_count > 0 or prune_failures not in (None, '', 'None'):
+        raise RuntimeError(f"Manifest application reported failures: failed_count={failed_count}, failed={response_data.get('Failed', 'unknown')}, prune_failures={prune_failures or 'None'}")
     send_response(event, context, SUCCESS, response_data, physical_resource_id)
 elif request_type == 'Delete':
     skip_deletion = properties.get('SkipDeletionOnStackDelete', 'false').lower() == 'true'
@@ -261,10 +265,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

@@ -1,0 +1,98 @@
+# NetworkPolicies that make the Slinky Slurm cluster functional inside the
+# zero-trust gco-jobs namespace.
+#
+# 03-network-policies.yaml default-denies all ingress in gco-jobs and limits
+# egress to DNS and HTTPS-to-VPC-endpoints for every pod. The Slinky charts
+# ship no NetworkPolicies of their own, so without these rules slurmctld,
+# slurmd, and slurmrestd cannot reach each other (cluster never converges)
+# and no job pod can call the Slurm REST API. Slurm was off by default and
+# never live-validated, so this gap stayed invisible until the 2026-09 live
+# release validation exercised it. Follows the ray-cluster exemption
+# precedent: scope pod-to-pod allowances by label, never namespace-wide.
+#
+# Every Slinky-managed pod carries the chart-stamped
+# `app.kubernetes.io/part-of: slurm` label; client pods opt in with
+# `gco.aws/slurm-client: "true"` (see examples/slurm-cluster-job.yaml).
+#
+# Gated on {{SLURM_ENABLED}}: substituted by GCORegionalStack only when the
+# cdk.json helm.slurm toggle (or a helm_enabled_overrides context override)
+# enables the Slinky charts; otherwise the applier skips this file and
+# _FEATURE_RESOURCE_INVENTORY prunes the policies on a later disable.
+---
+# Slurm daemons talk on 6817 (slurmctld), 6818 (slurmd), 6820 (slurmrestd),
+# plus ephemeral srun ports. Permit all protocols only among Slurm pods —
+# no other gco-jobs pod is selected or admitted (ray-cluster precedent).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-slurm-cluster-internal
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: slurm
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: slurm
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: slurm
+---
+# Labeled client pods may reach Slurm pods on the REST API port only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-slurm-client-to-restapi
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: slurm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gco.aws/slurm-client: "true"
+      ports:
+        - protocol: TCP
+          port: 6820
+---
+# The default gco-jobs egress policy only opens DNS and 443-to-VPC-endpoints;
+# client pods additionally need egress to the REST API port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-slurm-client-egress
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      gco.aws/slurm-client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: slurm
+      ports:
+        - protocol: TCP
+          port: 6820

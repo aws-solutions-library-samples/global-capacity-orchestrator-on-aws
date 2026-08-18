@@ -64,11 +64,17 @@ jobs:
           # In-memory state: every job starts from a blank emulator, which is
           # exactly the determinism these tests want.
           FLOCI_STORAGE_MODE: memory
+        volumes:
+          # Floci's ECR CreateRepository is Docker-backed and needs the host
+          # socket; without it the emulator answers InternalFailure and the
+          # image-lookup Floci tests skip themselves (see
+          # docs/FLOCI_TESTING.md gap 4). Runner-local socket, pinned image.
+          - /var/run/docker.sock:/var/run/docker.sock
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dependencies
@@ -100,6 +106,9 @@ jobs:
             tests/test_floci_secrets_and_cost.py \
             tests/test_floci_stack_discovery.py \
             tests/test_floci_harness_inventory.py \
+            tests/test_floci_lambda_orchestration.py \
+            tests/test_floci_lambda_regional.py \
+            tests/test_floci_mission_memory.py \
             -v --tb=short -n auto \
             --junitxml=floci-integration-report.xml
       - name: Floci container logs
@@ -149,7 +158,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install locked CDK + Python dependencies

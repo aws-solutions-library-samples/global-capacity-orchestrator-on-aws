@@ -132,7 +132,7 @@ on Auto Mode; the feature remains gated and off by default.
   Mode), `e4b5c95` (Kueue ServiceMonitor), `80b463f` (Kueue metrics RBAC
   manifest), `8361038` (plain-semver DCGM `4.8.3`), `78b4460` (manifest
   renumbering), `d5aa5f3` (drop `do-not-disrupt` from node-exporter).
-- `../../lambda/kubectl-applier-simple/manifests/51-dcgm-exporter.yaml`,
+- `../../lambda/kubectl-applier-simple/manifests/50-dcgm-exporter.yaml`,
   `post-helm-monitoring-servicemonitors.yaml`,
   `post-helm-monitoring-kueue-rbac.yaml`
 - `../../lambda/helm-installer/charts.yaml` — kube-prometheus-stack values

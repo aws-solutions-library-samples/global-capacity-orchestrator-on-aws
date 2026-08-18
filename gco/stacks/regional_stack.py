@@ -67,8 +67,10 @@ Modification Guide:
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,6 +118,8 @@ from gco.stacks.aws_load_balancer_controller_policy import (
 )
 from gco.stacks.constants import (
     AURORA_POSTGRES_VERSION,
+    DEFAULT_MANIFEST_RESOURCE_CAPS,
+    DEFAULT_RESOURCE_QUOTA,
     EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
     EKS_ADDON_EFS_CSI_DRIVER,
     EKS_ADDON_FSX_CSI_DRIVER,
@@ -128,12 +132,13 @@ from gco.stacks.constants import (
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
     cost_report_bucket_name,
+    parse_k8s_quantity,
     regional_shared_bucket_name_prefix,
     regional_shared_ssm_parameter_prefix,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -191,6 +196,66 @@ def _compute_kubectl_cluster_shared_replacements(
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
 
+#: In-cluster names clients use to reach the MLflow tracking server. MLflow
+#: 3.x's host-validation middleware matches the raw Host header (port
+#: included — that is why both spellings are listed), and setting
+#: ``allowed-hosts`` REPLACES its built-in localhost/private-IP allowance
+#: rather than extending it, so the value override must carry the complete
+#: list (see ``_mlflow_allowed_hosts``).
+_MLFLOW_SERVICE_HOSTS = ("mlflow.monitoring", "mlflow.monitoring:5000")
+
+#: Loopback spellings a browser sends through the access tunnel.
+#:
+#: ``gco monitoring open --service mlflow`` is the ONLY human path to this
+#: server (ClusterIP, no Ingress), and it port-forwards to localhost — so the
+#: browser sends ``Host: localhost:5000`` or ``Host: 127.0.0.1:5000``. Because
+#: the flag replaces MLflow's built-in loopback allowance instead of extending
+#: it, omitting these makes the documented UI path answer 403 "possible DNS
+#: rebinding attack detected" while the server is perfectly healthy — the
+#: in-cluster DNS spellings return 200 through the very same tunnel (caught
+#: live 2026-08-15, taking the release screenshot).
+#:
+#: This restores upstream's own loopback posture rather than widening it: the
+#: rebinding attack these checks exist for is an external DNS name resolving
+#: to an internal address, which loopback literals cannot express. Reaching
+#: the port at all still requires the authenticated SSM tunnel, and arbitrary
+#: DNS names stay rejected.
+_MLFLOW_TUNNEL_HOSTS = ("localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000")
+
+
+def _mlflow_allowed_hosts(vpc_endpoint_cidrs: list[str]) -> str:
+    """Compose the MLflow ``allowed-hosts`` list from the deployment's CIDRs.
+
+    The service-DNS and loopback spellings are static; the IP tail derives
+    from ``vpc_endpoint_cidrs`` (single source of truth — the same context key
+    the NetworkPolicy egress rules render) so widening the VPC range never
+    needs a matching charts.yaml edit. Every group is load-bearing:
+    Prometheus scrapes the pod IP directly, so dropping the pod-IP allowance
+    403s every ServiceMonitor scrape (caught live 2026-08-14); the tunnel
+    forwards to loopback, so dropping those 403s the only human UI path
+    (caught live 2026-08-15).
+
+    MLflow's allow-list is glob-based, so only octet-aligned prefixes convert
+    exactly; other masks WIDEN to the containing octet boundary (capped at
+    /24 granularity so the trailing ``.*`` still matches ``host:port``
+    Host headers). Widening is the safe direction — this is Host-header
+    hygiene layered over NetworkPolicies and a private ALB, and
+    under-matching is what breaks scrapes.
+    """
+    patterns: list[str] = []
+    for cidr in vpc_endpoint_cidrs:
+        network = ipaddress.ip_network(cidr, strict=False)
+        if network.version != 4:
+            raise ValueError(
+                f"vpc_endpoint_cidrs entry {cidr!r} is not IPv4; the MLflow "
+                "allowed-hosts derivation only understands IPv4 globs"
+            )
+        octets = str(network.network_address).split(".")
+        kept = min(max(network.prefixlen // 8, 1), 3)
+        patterns.append(".".join(octets[:kept]) + ".*")
+    return ",".join(dict.fromkeys([*_MLFLOW_SERVICE_HOSTS, *_MLFLOW_TUNNEL_HOSTS, *patterns]))
+
+
 _SERVICE_IMAGE_BUILD_INPUTS = (
     "dockerfiles/health-monitor-dockerfile",
     "dockerfiles/manifest-processor-dockerfile",
@@ -212,6 +277,235 @@ def _service_image_asset_excludes(*included_paths: str) -> list[str]:
     return list(_SERVICE_IMAGE_COMMON_EXCLUDES) + [
         path for path in _SERVICE_IMAGE_BUILD_INPUTS if path not in included
     ]
+
+
+#: CDK context key that force-enables optional Helm charts for one deploy
+#: without editing cdk.json (comma-separated cdk.json helm-block key names,
+#: e.g. ``--context helm_enabled_overrides=yunikorn,slurm``). The live release
+#: validation harness uses this to exercise off-by-default schedulers against
+#: an otherwise pristine checkout; it is equally useful for trying one
+#: scheduler ahead of a config change. Overrides can only ENABLE — a chart
+#: disabled by an operator stays disabled unless named here.
+_HELM_OVERRIDE_CONTEXT_KEY = "helm_enabled_overrides"
+
+#: Every cdk.json helm-block key _get_enabled_charts understands. Kept in
+#: lockstep with its chart_map so an override typo fails the synth loudly
+#: instead of silently deploying without the requested chart.
+_HELM_CHART_CONFIG_KEYS = frozenset(
+    {
+        "aws_load_balancer_controller",
+        "keda",
+        "aws_efa_device_plugin",
+        "aws_neuron_device_plugin",
+        "volcano",
+        "kuberay",
+        "cert_manager",
+        "slurm",
+        "yunikorn",
+        "kubeflow_trainer",
+        "kueue",
+    }
+)
+
+#: Charts that are mandatory platform components; the cdk.json toggle is
+#: ignored for these (see _get_enabled_charts for the rationale).
+_MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
+
+
+#: (container ceiling, namespace ceiling) pairs the resource-quota invariant
+#: compares; every dimension a container can request must fit the namespace.
+_RESOURCE_QUOTA_INVARIANTS = (
+    ("container_max_cpu", "max_cpu"),
+    ("container_max_memory", "max_memory"),
+    ("container_max_gpu", "max_gpu"),
+)
+
+
+def _validated_resource_quota(raw: object) -> dict[str, str]:
+    """Merge the ``resource_quota`` context over defaults and validate it.
+
+    The values are substituted verbatim into the gco-jobs ResourceQuota and
+    LimitRange manifests, where a typo or an incoherent pair (a per-container
+    ceiling that exceeds the namespace ceiling) previously deployed silently
+    and only surfaced as pods being forbidden at admission — with the reason
+    visible in namespace events alone. Fail the synth instead.
+
+    Raises:
+        ValueError: If the context is not a mapping, carries an unknown key,
+            a value that does not parse as a Kubernetes quantity, or a
+            per-container ceiling exceeding its namespace ceiling.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"cdk.json context 'resource_quota' must be an object, got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(DEFAULT_RESOURCE_QUOTA))
+    if unknown:
+        allowed = ", ".join(sorted(DEFAULT_RESOURCE_QUOTA))
+        raise ValueError(
+            f"cdk.json context 'resource_quota' has unknown key(s) {unknown}; allowed: {allowed}"
+        )
+    merged = {key: str(raw.get(key, default)) for key, default in DEFAULT_RESOURCE_QUOTA.items()}
+    parsed: dict[str, float] = {}
+    for key, value in merged.items():
+        try:
+            parsed[key] = parse_k8s_quantity(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"resource_quota.{key}={value!r} is not a valid Kubernetes quantity"
+            ) from exc
+        if parsed[key] < 0:
+            raise ValueError(f"resource_quota.{key}={value!r} must not be negative")
+    for container_key, namespace_key in _RESOURCE_QUOTA_INVARIANTS:
+        if parsed[container_key] > parsed[namespace_key]:
+            raise ValueError(
+                f"resource_quota.{container_key}={merged[container_key]!r} exceeds "
+                f"resource_quota.{namespace_key}={merged[namespace_key]!r}: a container "
+                "that passes the LimitRange could never be admitted by the namespace "
+                "ResourceQuota"
+            )
+    return merged
+
+
+#: (per-manifest cap, container ceiling, namespace ceiling) triples for the
+#: cross-layer invariant: container_max_* <= *_per_manifest <= max_*.
+_MANIFEST_CAP_INVARIANTS = (
+    ("max_cpu_per_manifest", "container_max_cpu", "max_cpu"),
+    ("max_memory_per_manifest", "container_max_memory", "max_memory"),
+    ("max_gpu_per_manifest", "container_max_gpu", "max_gpu"),
+)
+
+
+def _validated_manifest_caps(raw: object, resource_quota: dict[str, str]) -> dict[str, str]:
+    """Merge ``job_validation_policy.resource_quotas`` over defaults; validate.
+
+    Three layers govern job resources and must tell one story: the
+    manifest/queue processors cap what a single submitted manifest may total
+    (these values), the LimitRange caps each container, and the namespace
+    ResourceQuota caps the aggregate. Enforce
+    ``container_max_* <= *_per_manifest <= max_*`` at synth so the front door
+    never rejects a manifest whose pods the namespace would admit and never
+    accepts one that can never run — previously the defaults disagreed
+    (per-manifest 4 GPUs vs the platform's own 16-GPU EFA training example).
+
+    Raises:
+        ValueError: On unknown keys, unparseable quantities, or a violated
+            layering invariant.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "cdk.json context 'job_validation_policy.resource_quotas' must be an "
+            f"object, got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(DEFAULT_MANIFEST_RESOURCE_CAPS))
+    if unknown:
+        allowed = ", ".join(sorted(DEFAULT_MANIFEST_RESOURCE_CAPS))
+        raise ValueError(
+            "cdk.json context 'job_validation_policy.resource_quotas' has unknown "
+            f"key(s) {unknown}; allowed: {allowed}"
+        )
+    merged = {
+        key: str(raw.get(key, default)) for key, default in DEFAULT_MANIFEST_RESOURCE_CAPS.items()
+    }
+    parsed: dict[str, float] = {}
+    for key, value in merged.items():
+        try:
+            parsed[key] = parse_k8s_quantity(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{key}={value!r} is not a "
+                "valid Kubernetes quantity"
+            ) from exc
+    for manifest_key, container_key, namespace_key in _MANIFEST_CAP_INVARIANTS:
+        container_value = parse_k8s_quantity(resource_quota[container_key])
+        namespace_value = parse_k8s_quantity(resource_quota[namespace_key])
+        if parsed[manifest_key] < container_value:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{manifest_key}="
+                f"{merged[manifest_key]!r} is below resource_quota.{container_key}="
+                f"{resource_quota[container_key]!r}: the front door would reject a "
+                "manifest whose single container the LimitRange admits"
+            )
+        if parsed[manifest_key] > namespace_value:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{manifest_key}="
+                f"{merged[manifest_key]!r} exceeds resource_quota.{namespace_key}="
+                f"{resource_quota[namespace_key]!r}: the front door would accept a "
+                "manifest the namespace ResourceQuota can never admit"
+            )
+    return merged
+
+
+def _parse_helm_enabled_overrides(raw: object) -> frozenset[str]:
+    """Parse and validate the ``helm_enabled_overrides`` context value.
+
+    Accepts a comma-separated string (the only shape the CDK CLI can pass
+    with ``--context``) or a list of strings (cdk.json-style), returning the
+    validated set of helm-block keys to force-enable. Unknown names raise at
+    synth time with the valid list.
+    """
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        names = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, list) and all(isinstance(part, str) for part in raw):
+        names = [part.strip() for part in raw if part.strip()]
+    else:
+        raise ValueError(
+            f"{_HELM_OVERRIDE_CONTEXT_KEY} must be a comma-separated string or string list"
+        )
+    unknown = sorted(set(names) - _HELM_CHART_CONFIG_KEYS)
+    if unknown:
+        valid = ", ".join(sorted(_HELM_CHART_CONFIG_KEYS))
+        raise ValueError(
+            f"Unknown {_HELM_OVERRIDE_CONTEXT_KEY} name(s): {', '.join(unknown)}. Valid: {valid}"
+        )
+    return frozenset(names)
+
+
+def _helm_chart_enabled(
+    helm_config: Mapping[str, Any],
+    overrides: frozenset[str],
+    config_key: str,
+) -> bool:
+    """Resolve one helm-block key's effective enablement.
+
+    Single source of truth shared by _get_enabled_charts and the
+    kubectl-applier gate replacements so the installed chart set and the
+    gated manifests can never disagree: mandatory charts are always on, a
+    context override forces on, and otherwise the cdk.json toggle decides
+    (missing key defaults to enabled, matching the historical behavior).
+    """
+    if config_key in _MANDATORY_CHART_KEYS or config_key in overrides:
+        return True
+    chart_config = helm_config.get(config_key, {})
+    return bool(chart_config.get("enabled", True)) if isinstance(chart_config, dict) else True
+
+
+def _compute_kubectl_scheduler_replacements(
+    *, kueue_enabled: bool, slurm_enabled: bool, kubeflow_trainer_enabled: bool = False
+) -> dict[str, str]:
+    """Build the kubectl-applier replacements that gate scheduler manifests.
+
+    When Kueue is enabled the ``{{KUEUE_ENABLED}}`` gate resolves so the
+    default queue topology (post-helm-kueue-default-queues.yaml) applies;
+    when Slurm is enabled the ``{{SLURM_ENABLED}}`` gate resolves so the
+    Slinky NetworkPolicies (post-helm-slurm-network.yaml) apply; when the
+    Kubeflow Trainer is enabled the ``{{KUBEFLOW_TRAINER_ENABLED}}`` gate
+    resolves so the built-in ClusterTrainingRuntime blueprints
+    (post-helm-kubeflow-trainer-runtimes.yaml) apply. A disabled
+    scheduler leaves its placeholder unreplaced, the applier skips the file,
+    and _FEATURE_RESOURCE_INVENTORY prunes previously applied objects — the
+    same optional-feature gating observability, FSx, and Valkey use.
+    """
+    replacements: dict[str, str] = {}
+    if kueue_enabled:
+        replacements["{{KUEUE_ENABLED}}"] = "true"
+    if slurm_enabled:
+        replacements["{{SLURM_ENABLED}}"] = "true"
+    if kubeflow_trainer_enabled:
+        replacements["{{KUBEFLOW_TRAINER_ENABLED}}"] = "true"
+    return replacements
 
 
 def _compute_kubectl_observability_replacements(
@@ -495,6 +789,15 @@ class GCORegionalStack(Stack):
         # replacements in the KubectlApplyManifests CustomResource).
         self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
         self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+
+        # MLflow artifact storage: a dedicated OIDC-only IRSA role for the
+        # tracking server's service account, scoped to the mlflow-artifacts/
+        # prefix of the same shared bucket. Created here (not with the other
+        # IRSA roles) because it needs the resolved bucket identity above;
+        # must precede _apply_kubernetes_manifests, whose value overrides
+        # inject the role ARN into the chart's service-account annotation.
+        if self._mlflow_active():
+            self._create_mlflow_artifact_role(self.cluster_shared_identity)
 
         # Create the always-on general-purpose regional bucket (KMS key +
         # access-logs bucket + primary bucket). Provisioned unconditionally —
@@ -1248,9 +1551,18 @@ class GCORegionalStack(Stack):
     # ── Shared toleration config for EKS add-ons ──────────────────────────
     # All GCO nodepools apply taints (nvidia.com/gpu, aws.amazon.com/neuron,
     # vpc.amazonaws.com/efa) that prevent DaemonSet pods from scheduling.
-    # Every add-on that runs a DaemonSet (or may schedule on tainted nodes)
-    # must tolerate these taints so that storage drivers, metrics agents, and
-    # other infrastructure components work on every node type.
+    # Every add-on component that runs as a DaemonSet (storage drivers' node
+    # agents, metrics/log agents, node exporters) must tolerate these taints
+    # so infrastructure works on every node type.
+    #
+    # Deployment-shaped add-on components (metrics-server, the CSI
+    # *controllers*) must NOT carry these tolerations: a toleration makes
+    # EKS Auto Mode consider the tainted accelerator pools for them, and
+    # during a deploy's pod surge it will happily launch GPU instances for
+    # zero-GPU pods and then consolidation-flap them — live release
+    # validation run sched241-350ffc7d caught exactly that (two g4dn.xlarge
+    # NodeClaims requesting ``nvidia.com/gpu: "0"``, churned mid-install,
+    # failing GPU DaemonSet convergence checks).
     _ADDON_NODE_TOLERATIONS = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
@@ -1289,6 +1601,10 @@ class GCORegionalStack(Stack):
         Note: Metrics Server doesn't require an IRSA role as it only needs
         in-cluster permissions which are handled by its service account.
         """
+        # Deployment-shaped: no accelerator tolerations on purpose (see
+        # _ADDON_NODE_TOLERATIONS) — metrics-server runs fine on the default
+        # CPU pool and a toleration invites Auto Mode to launch GPU nodes
+        # for it during deploy pod surges.
         eks.Addon(
             self,
             "MetricsServerAddon",
@@ -1296,9 +1612,6 @@ class GCORegionalStack(Stack):
             addon_name="metrics-server",
             addon_version=EKS_ADDON_METRICS_SERVER,
             preserve_on_delete=False,
-            configuration_values={
-                "tolerations": self._ADDON_NODE_TOLERATIONS,
-            },
         )
 
     def _create_efs_csi_driver_addon(self) -> None:
@@ -1334,10 +1647,10 @@ class GCORegionalStack(Stack):
             addon_version=EKS_ADDON_EFS_CSI_DRIVER,
             preserve_on_delete=False,
             configuration_values={
+                # DaemonSet node agent must run on every node type; the
+                # Deployment-shaped controller deliberately carries no
+                # accelerator tolerations (see _ADDON_NODE_TOLERATIONS).
                 "node": {
-                    "tolerations": self._ADDON_NODE_TOLERATIONS,
-                },
-                "controller": {
                     "tolerations": self._ADDON_NODE_TOLERATIONS,
                 },
             },
@@ -1825,6 +2138,45 @@ class GCORegionalStack(Stack):
             ],
         )
 
+        # Vector-store read path for workloads (opt-in feature). Deliberately
+        # LOCAL-region ARNs: the store is a DynamoDB global table with a
+        # replica in this cluster's region, so pods query locally instead of
+        # crossing regions to the primary. Every resource is exact — the
+        # table and index names are deterministic from config — and the
+        # grant is read-only: writes belong to the ingest Lambda in the
+        # global stack, so a compromised workload cannot poison the corpus.
+        # The embedding-model grant lets pods embed their own query text
+        # with the exact model the corpus was ingested with.
+        if self.config.get_vector_store_enabled():
+            vector_store_table_prefix = (
+                f"arn:{self.partition}:dynamodb:{self.region}:{self.account}:"
+                f"table/{project_name}-vector-store"
+            )
+            self.service_account_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "dynamodb:SearchVectors",
+                        "dynamodb:GetItem",
+                        "dynamodb:Query",
+                    ],
+                    resources=[
+                        vector_store_table_prefix,
+                        f"{vector_store_table_prefix}/index/corpus-embedding-index",
+                    ],
+                )
+            )
+            self.service_account_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["bedrock:InvokeModel"],
+                    resources=[
+                        f"arn:{self.partition}:bedrock:{self.region}::foundation-model/"
+                        f"{self.config.get_vector_store_config()['embedding_model_id']}"
+                    ],
+                )
+            )
+
         # Add S3 permissions for model weights bucket (used by inference init containers)
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -2261,6 +2613,101 @@ class GCORegionalStack(Stack):
                     "appliesTo": [
                         "Resource::*",
                         "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
+                    ],
+                },
+            ],
+        )
+
+    def _create_mlflow_artifact_role(self, shared: SharedBucketIdentity) -> None:
+        """Create the OIDC-only IRSA role MLflow uses for S3 artifact storage.
+
+        The official mlflow chart creates a ``mlflow`` ServiceAccount in the
+        ``monitoring`` namespace (``fullnameOverride`` keeps the bare name);
+        the value overrides annotate it with this role's ARN so the tracking
+        server exchanges its webhook-injected projected token for
+        credentials, which is what feeds the server-side S3 artifact proxy
+        (``mlflow.artifactsDestination``). The chart's default
+        ``automountServiceAccountToken: false`` does not affect IRSA — the
+        EKS pod identity webhook mounts its own token volume. Controller-
+        style posture: OIDC-only (``include_pod_identity=False``), trust
+        bound to exactly one namespace/service-account pair.
+
+        Grants are deliberately narrower than the job-pod role's bucket-wide
+        grant: object access only under the ``mlflow-artifacts/`` prefix of
+        the cluster-shared bucket, ``ListBucket`` condition-scoped to the
+        same prefix, and KMS confined by ``kms:ViaService`` exactly like
+        ``_grant_cluster_shared_bucket_to_job_role``.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        self.mlflow_role = GCORegionalStack._create_irsa_role(
+            self,
+            "MlflowArtifactRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["mlflow"],
+            namespaces=["monitoring"],
+            include_pod_identity=False,
+        )
+
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+                resources=[f"{shared.arn}/mlflow-artifacts/*"],
+            )
+        )
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:ListBucket"],
+                resources=[shared.arn],
+                conditions={
+                    "StringLike": {
+                        "s3:prefix": "mlflow-artifacts/*",
+                    }
+                },
+            )
+        )
+        # GetBucketLocation cannot share the ListBucket statement: requests
+        # for it never carry the s3:prefix key, so the condition above would
+        # implicitly deny it.
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetBucketLocation"],
+                resources=[shared.arn],
+            )
+        )
+        self.mlflow_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt", "kms:GenerateDataKey"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"s3.{shared.region}.{self.url_suffix}",
+                    }
+                },
+            )
+        )
+
+        acknowledge_nag_findings(
+            self.mlflow_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The MLflow artifact grants require two wildcard shapes: a "
+                        "mlflow-artifacts/* object-key suffix within the single shared "
+                        "bucket resolved from SSM, and KMS Resource::* because the "
+                        "global key ARN is not exported to this stack. KMS use is "
+                        "constrained by kms:ViaService to S3 in the bucket's region, "
+                        "and S3 access is separately limited to the artifact prefix."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/mlflow-artifacts/*",
                     ],
                 },
             ],
@@ -2847,9 +3294,15 @@ class GCORegionalStack(Stack):
         # etc.) stay under manifest_processor.
         mp_config = self.config.get_manifest_processor_config()
         job_policy = self.node.try_get_context("job_validation_policy") or {}
-        job_quotas = job_policy.get("resource_quotas", {})
+        job_quotas = _validated_manifest_caps(
+            job_policy.get("resource_quotas", {}),
+            _validated_resource_quota(self.node.try_get_context("resource_quota") or {}),
+        )
         allowed_kinds = job_policy.get(
             "allowed_kinds",
+            # Fallback mirrors manifest_processor.DEFAULT_ALLOWED_KINDS (kept
+            # inline so CDK synth never imports service modules; lockstep is
+            # pinned by tests/test_manifest_processor_extended.py::TestAllowedKindsLockstep).
             [
                 "Job",
                 "CronJob",
@@ -2859,6 +3312,7 @@ class GCORegionalStack(Stack):
                 "Service",
                 "ConfigMap",
                 "Pod",
+                "TrainJob",
             ],
         )
 
@@ -2924,11 +3378,9 @@ class GCORegionalStack(Stack):
             # monitor's /<project>/alb-hostname-<region> sync in the global region).
             "{{GLOBAL_REGION}}": self.config.get_global_region(),
             # Manifest processor resource quotas (sourced from shared policy).
-            "{{MP_MAX_CPU_PER_MANIFEST}}": str(job_quotas.get("max_cpu_per_manifest", "10")),
-            "{{MP_MAX_MEMORY_PER_MANIFEST}}": str(
-                job_quotas.get("max_memory_per_manifest", "32Gi")
-            ),
-            "{{MP_MAX_GPU_PER_MANIFEST}}": str(job_quotas.get("max_gpu_per_manifest", 4)),
+            "{{MP_MAX_CPU_PER_MANIFEST}}": job_quotas["max_cpu_per_manifest"],
+            "{{MP_MAX_MEMORY_PER_MANIFEST}}": job_quotas["max_memory_per_manifest"],
+            "{{MP_MAX_GPU_PER_MANIFEST}}": job_quotas["max_gpu_per_manifest"],
             # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
             # toleration (shared policy). Mirrored on the SQS path via
             # {{QP_REQUIRE_ACCELERATOR_TOLERATION}} so neither path is a bypass.
@@ -3028,6 +3480,22 @@ class GCORegionalStack(Stack):
                 ),
             )
         )
+        # Scheduler gates: resolve through the same enablement helper that
+        # selects the Helm charts, so the default Kueue queue topology and the
+        # Slinky Slurm NetworkPolicies apply exactly when their scheduler does.
+        _helm_config = self.node.try_get_context("helm") or {}
+        _helm_overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
+        image_replacements.update(
+            _compute_kubectl_scheduler_replacements(
+                kueue_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "kueue"),
+                slurm_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "slurm"),
+                kubeflow_trainer_enabled=_helm_chart_enabled(
+                    _helm_config, _helm_overrides, "kubeflow_trainer"
+                ),
+            )
+        )
 
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
@@ -3052,6 +3520,15 @@ class GCORegionalStack(Stack):
                 }
             )
 
+        # MLflow (on by default, requires observability): gate the client
+        # egress NetworkPolicy (post-helm-mlflow-network.yaml) on the toggle
+        # via the same unreplaced-placeholder mechanism; a disabled
+        # deployment leaves the file unapplied and the applier prunes both
+        # the policy and the chart-managed metadata claim helm uninstall
+        # leaves behind (metadata is discarded, artifacts stay in S3).
+        if self._mlflow_active():
+            image_replacements.update({"{{MLFLOW_ENABLED}}": "true"})
+
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
 
@@ -3069,18 +3546,21 @@ class GCORegionalStack(Stack):
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate
         # resource consumption across the namespace, LimitRange caps per-container
-        # maxima. Values come from cdk.json `resource_quota` context with defaults
-        # sized for a modest multi-tenant dev cluster.
-        resource_quota = self.node.try_get_context("resource_quota") or {}
-        image_replacements["{{QUOTA_MAX_CPU}}"] = str(resource_quota.get("max_cpu", "100"))
-        image_replacements["{{QUOTA_MAX_MEMORY}}"] = str(resource_quota.get("max_memory", "512Gi"))
-        image_replacements["{{QUOTA_MAX_GPU}}"] = str(resource_quota.get("max_gpu", "32"))
-        image_replacements["{{QUOTA_MAX_PODS}}"] = str(resource_quota.get("max_pods", "50"))
-        image_replacements["{{LIMIT_MAX_CPU}}"] = str(resource_quota.get("container_max_cpu", "10"))
-        image_replacements["{{LIMIT_MAX_MEMORY}}"] = str(
-            resource_quota.get("container_max_memory", "64Gi")
+        # maxima. Values come from cdk.json `resource_quota` context merged
+        # over gco.stacks.constants.DEFAULT_RESOURCE_QUOTA (per-container
+        # maxima sized to one full accelerator-node slice) and validated at
+        # synth: every value must parse as a Kubernetes quantity and the
+        # container maxima must fit inside the namespace ceilings.
+        resource_quota = _validated_resource_quota(
+            self.node.try_get_context("resource_quota") or {}
         )
-        image_replacements["{{LIMIT_MAX_GPU}}"] = str(resource_quota.get("container_max_gpu", "4"))
+        image_replacements["{{QUOTA_MAX_CPU}}"] = resource_quota["max_cpu"]
+        image_replacements["{{QUOTA_MAX_MEMORY}}"] = resource_quota["max_memory"]
+        image_replacements["{{QUOTA_MAX_GPU}}"] = resource_quota["max_gpu"]
+        image_replacements["{{QUOTA_MAX_PODS}}"] = resource_quota["max_pods"]
+        image_replacements["{{LIMIT_MAX_CPU}}"] = resource_quota["container_max_cpu"]
+        image_replacements["{{LIMIT_MAX_MEMORY}}"] = resource_quota["container_max_memory"]
+        image_replacements["{{LIMIT_MAX_GPU}}"] = resource_quota["container_max_gpu"]
 
         if self.queue_processor_enabled:
             image_replacements["{{QUEUE_PROCESSOR_IMAGE}}"] = self.queue_processor_image.image_uri
@@ -3107,15 +3587,11 @@ class GCORegionalStack(Stack):
             # with the REST manifest processor. Source them from the
             # job_validation_policy section so a single change in cdk.json
             # takes effect on both submission paths at the next deploy.
-            image_replacements["{{QP_MAX_GPU_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_gpu_per_manifest", 4)
-            )
-            image_replacements["{{QP_MAX_CPU_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_cpu_per_manifest", "10")
-            )
-            image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_memory_per_manifest", "32Gi")
-            )
+            image_replacements["{{QP_MAX_GPU_PER_MANIFEST}}"] = job_quotas["max_gpu_per_manifest"]
+            image_replacements["{{QP_MAX_CPU_PER_MANIFEST}}"] = job_quotas["max_cpu_per_manifest"]
+            image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = job_quotas[
+                "max_memory_per_manifest"
+            ]
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(
                     job_policy.get("trusted_registries", []),
@@ -3183,6 +3659,25 @@ class GCORegionalStack(Stack):
                 image_replacements["{{AURORA_PGVECTOR_SECRET_ARN}}"] = (
                     self.aurora_cluster.secret.secret_arn
                 )
+
+        # Add vector-store discovery if enabled. Every value is deterministic
+        # at synth time (the global stack names the table and index from the
+        # same config), so no cross-stack reference is needed; the manifest's
+        # {{REGION}} key points pods at their cluster's LOCAL global-table
+        # replica. When disabled, the placeholders stay unreplaced and the
+        # applier skips 26-storage-vector-store.yaml entirely.
+        if self.config.get_vector_store_enabled():
+            vector_store_config = self.config.get_vector_store_config()
+            image_replacements["{{VECTOR_STORE_TABLE_NAME}}"] = (
+                f"{self.config.get_project_name()}-vector-store"
+            )
+            image_replacements["{{VECTOR_STORE_INDEX_NAME}}"] = "corpus-embedding-index"
+            image_replacements["{{VECTOR_STORE_EMBEDDING_MODEL_ID}}"] = str(
+                vector_store_config["embedding_model_id"]
+            )
+            image_replacements["{{VECTOR_STORE_DIMENSIONS}}"] = str(
+                vector_store_config["dimensions"]
+            )
 
         # Add FSx replacements if enabled
         if self.fsx_file_system:
@@ -3706,6 +4201,9 @@ class GCORegionalStack(Stack):
         if self._cost_monitoring_active():
             overrides["opencost"] = self._opencost_chart_values()
 
+        if self._mlflow_active():
+            overrides["mlflow"] = self._mlflow_chart_values()
+
         return overrides
 
     def _cost_monitoring_active(self) -> bool:
@@ -3718,6 +4216,67 @@ class GCORegionalStack(Stack):
         off together.
         """
         return self.config.get_cost_monitoring_enabled()
+
+    def _mlflow_active(self) -> bool:
+        """Return whether the MLflow tracking server deploys on this cluster.
+
+        Delegates to ``ConfigLoader.get_mlflow_enabled`` — the conjunction of
+        ``cluster_observability.mlflow.enabled`` and observability itself,
+        so the chart, its IRSA role, the gated backend PVC, and the value
+        overrides all switch together.
+        """
+        return self.config.get_mlflow_enabled()
+
+    def _mlflow_chart_values(self) -> dict[str, Any]:
+        """Build the MLflow value overrides that carry deployment tokens.
+
+        Only four things are dynamic — everything static (image pin, PVC
+        wiring, resources, posture toggles) lives in ``charts.yaml``:
+
+        - ``mlflow.artifactsDestination``: run artifacts go to the
+          cluster-shared bucket under ``mlflow-artifacts/<region>/`` —
+          region-suffixed because each regional tracking server numbers
+          experiments independently, so a shared root would interleave
+          unrelated runs' artifacts. The server proxies artifact traffic
+          (``--serve-artifacts`` is the server default), so client pods
+          never need S3 credentials of their own.
+        - ``serviceAccount.annotations``: the IRSA role ARN, which is how
+          the server-side artifact proxy gets its S3 credentials.
+        - ``storage.size``: the metadata claim size from
+          ``cluster_observability.mlflow.persistence_size``.
+        - ``server.value_options.allowed_hosts``: the complete
+          host-validation allow-list — service DNS plus wildcard patterns
+          derived from ``vpc_endpoint_cidrs`` (see
+          ``_mlflow_allowed_hosts``); the deep merge keeps the static
+          ``workers`` value while replacing the charts.yaml DNS-only
+          fallback with this full list.
+        """
+        s3_destination = (
+            f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
+        )
+        vpc_endpoint_cidrs = self.node.try_get_context("vpc_endpoint_cidrs") or ["10.0.0.0/16"]
+        return {
+            "values": {
+                "mlflow": {
+                    "artifactsDestination": s3_destination,
+                },
+                "serviceAccount": {
+                    "annotations": {
+                        "eks.amazonaws.com/role-arn": self.mlflow_role.role_arn,
+                    },
+                },
+                "storage": {
+                    "size": str(
+                        self.config.get_cluster_observability_config()["mlflow"]["persistence_size"]
+                    ),
+                },
+                "server": {
+                    "value_options": {
+                        "allowed_hosts": _mlflow_allowed_hosts(vpc_endpoint_cidrs),
+                    },
+                },
+            }
+        }
 
     def _opencost_chart_values(self) -> dict[str, Any]:
         """Build the OpenCost value overrides that carry deployment tokens.
@@ -3823,21 +4382,30 @@ class GCORegionalStack(Stack):
             ("cert_manager", ["cert-manager"]),
             ("slurm", ["slinky-slurm-operator", "slinky-slurm"]),
             ("yunikorn", ["yunikorn"]),
+            ("kubeflow_trainer", ["kubeflow-trainer"]),
             ("kueue", ["kueue"]),  # Must be last
         ]
 
         # Charts that are mandatory platform components and cannot be disabled
-        # via cdk.json. KEDA is always installed: it backs the built-in SQS
-        # queue processor (a ScaledJob) and is the only metrics bridge that lets
-        # autoscalers consume GPU/CloudWatch metrics (the keda-metrics-apiserver
-        # serves external.metrics.k8s.io). Disabling it would silently break
-        # both, so the cdk.json toggle is ignored for KEDA.
-        mandatory_chart_keys = {"aws_load_balancer_controller", "keda"}
+        # via cdk.json (see _MANDATORY_CHART_KEYS). KEDA is always installed:
+        # it backs the built-in SQS queue processor (a ScaledJob) and is the
+        # only metrics bridge that lets autoscalers consume GPU/CloudWatch
+        # metrics (the keda-metrics-apiserver serves external.metrics.k8s.io).
+        # Disabling it would silently break both, so the cdk.json toggle is
+        # ignored for KEDA. A `helm_enabled_overrides` context value (see
+        # _parse_helm_enabled_overrides) can force optional charts on for one
+        # deploy without editing cdk.json.
+        if {key for key, _names in chart_map} != _HELM_CHART_CONFIG_KEYS:
+            raise RuntimeError(
+                "chart_map keys drifted from _HELM_CHART_CONFIG_KEYS; update both together"
+            )
+        overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
 
         enabled_charts = []
         for config_key, chart_names in chart_map:
-            chart_config = helm_config.get(config_key, {})
-            if config_key in mandatory_chart_keys or chart_config.get("enabled", True):
+            if _helm_chart_enabled(helm_config, overrides, config_key):
                 enabled_charts.extend(chart_names)
 
         # kube-prometheus-stack is driven by the separate on-by-default
@@ -3855,6 +4423,12 @@ class GCORegionalStack(Stack):
         # Operator CRDs exist before its ServiceMonitor renders.
         if self._cost_monitoring_active():
             enabled_charts.append("opencost")
+
+        # MLflow is driven by the on-by-default cluster_observability.mlflow
+        # sub-toggle and requires observability itself (monitoring namespace,
+        # gp3 StorageClass, ServiceMonitor discovery, tunnel access path).
+        if self._mlflow_active():
+            enabled_charts.append("mlflow")
 
         return enabled_charts
 
@@ -5027,7 +5601,14 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        private_subnet_ids = [s.subnet_id for s in self.vpc.private_subnets]
+        # ElastiCache Serverless accepts only 2-3 subnets ("Serverless Cache
+        # should have total subnetIds between 2 and 3" — caught live by the
+        # example-job validation run ex241-2913b044 in us-east-1, where the
+        # VPC's span-every-AZ layout yields six private subnets). CDK orders
+        # ``vpc.private_subnets`` deterministically by AZ, so taking the
+        # first three keeps the selection stable across deploys; the cache
+        # is reachable from every subnet regardless (routing, not placement).
+        private_subnet_ids = [s.subnet_id for s in self.vpc.private_subnets[:3]]
 
         self.valkey_cache = elasticache.CfnServerlessCache(
             self,
@@ -5125,12 +5706,34 @@ class GCORegionalStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
 
+        # RDS creates the exported postgresql log group itself, outside
+        # CloudFormation, and never deletes it — live example-job validation
+        # run ex241-edf33111-r2 found it as the only post-teardown residue.
+        # Pre-creating the group under the exact name RDS uses
+        # (/aws/rds/cluster/<cluster-identifier>/<export>) hands its whole
+        # lifecycle to this stack; RDS then writes into the existing group.
+        aurora_log_group = logs.LogGroup(
+            self,
+            "AuroraPgvectorPostgresqlLogs",
+            log_group_name=(
+                f"/aws/rds/cluster/{project_name}-pgvector-{self.deployment_region}/postgresql"
+            ),
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Aurora Serverless v2 cluster with PostgreSQL 16 + pgvector
         self.aurora_cluster = rds.DatabaseCluster(
             self,
             "AuroraPgvectorCluster",
             engine=rds.DatabaseClusterEngine.aurora_postgres(
-                version=getattr(rds.AuroraPostgresEngineVersion, AURORA_POSTGRES_VERSION),
+                # ``of()`` rather than a ``VER_X_Y`` enum member: the pin in
+                # constants.py is a plain version string so an Aurora minor
+                # bump never has to wait for an aws-cdk-lib enum release.
+                version=rds.AuroraPostgresEngineVersion.of(
+                    AURORA_POSTGRES_VERSION,
+                    AURORA_POSTGRES_VERSION.split(".", 1)[0],
+                ),
             ),
             serverless_v2_min_capacity=aurora_config.get("min_acu", 0),
             serverless_v2_max_capacity=aurora_config.get("max_acu", 16),
@@ -5161,6 +5764,10 @@ class GCORegionalStack(Stack):
             monitoring_interval=Duration.seconds(60),
             cluster_identifier=f"{project_name}-pgvector-{self.deployment_region}",
         )
+        # The group must exist before the cluster starts exporting, and must
+        # outlive it on delete (reverse order) so late writes cannot recreate
+        # an unowned group.
+        self.aurora_cluster.node.add_dependency(aurora_log_group)
 
         # aws-cdk-lib >= 2.262 ships a built-in "CloudFormation Validate"
         # pack whose W9008 wants StorageEncrypted on every CfnDBInstance. The
@@ -5183,6 +5790,26 @@ class GCORegionalStack(Stack):
                     "Aurora cluster members inherit the cluster's "
                     "storage_encrypted=True; StorageEncrypted is not applicable "
                     "on Aurora member DBInstances."
+                ),
+            )
+        )
+
+        # E9006 checks EngineVersion against the enum embedded in the CDK's
+        # bundled CloudFormation resource spec, which lags new Aurora minor
+        # releases (at 17.10's release the spec listed 17.9 and even 18.3,
+        # but not 17.10). The pin in constants.py is validated against the
+        # authoritative source instead: the monthly dependency scan compares
+        # it with live ``rds describe-db-engine-versions`` output, and the
+        # live release validation deploys it for real. Same app-wide
+        # collection caveat as W9008 above; the compensating controls are
+        # those live checks, which a stale spec enum cannot see.
+        Validations.of(self.aurora_cluster).acknowledge(
+            Acknowledgment(
+                id="CloudFormation-Validate::E9006",
+                reason=(
+                    "EngineVersion is validated against live RDS (monthly "
+                    "dependency scan + live release validation); the CDK's "
+                    "embedded CloudFormation spec enum lags new Aurora minors."
                 ),
             )
         )
@@ -5350,10 +5977,10 @@ class GCORegionalStack(Stack):
             addon_version=EKS_ADDON_FSX_CSI_DRIVER,
             preserve_on_delete=False,
             configuration_values={
+                # DaemonSet node agent must run on every node type; the
+                # Deployment-shaped controller deliberately carries no
+                # accelerator tolerations (see _ADDON_NODE_TOLERATIONS).
                 "node": {
-                    "tolerations": self._ADDON_NODE_TOLERATIONS,
-                },
-                "controller": {
                     "tolerations": self._ADDON_NODE_TOLERATIONS,
                 },
             },

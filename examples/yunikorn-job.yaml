@@ -53,7 +53,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: worker
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -112,7 +112,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: gpu-worker
-        image: nvidia/cuda:12.6.3-base-ubuntu24.04
+        image: nvidia/cuda:13.3.1-base-ubuntu24.04
         command: ['sh', '-c', 'nvidia-smi && sleep 30 && echo "YuniKorn GPU job done!"']
         securityContext:
           allowPrivilegeEscalation: false
@@ -180,7 +180,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: gang-worker
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -206,4 +206,12 @@ spec:
             cpu: "1"
             memory: "512Mi"
       restartPolicy: Never
-  backoffLimit: 2
+  # Gang members bind through YuniKorn's placeholder replacement, which can
+  # race node churn (autoscaler provisioning/consolidation): a pod bound to
+  # a node that changes underneath fails at kubelet admission with no logs,
+  # and with restartPolicy Never each such casualty burns one Job retry.
+  # Observed live (run ex241-4bf01801): one mid-churn node failed three of
+  # the four gang pods at once, exhausting the previous backoffLimit of 2
+  # while the fourth member completed normally. The budget below rides out
+  # a full gang's worth of admission-race failures plus headroom.
+  backoffLimit: 6

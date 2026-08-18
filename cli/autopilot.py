@@ -6,10 +6,14 @@ ready to operate GCO:
 
 * **Amazon Bedrock backend.** The session talks to Bedrock through the
   caller's AWS credentials (``CLAUDE_CODE_USE_BEDROCK=1``) and defaults to
-  the same canonical model the rest of GCO uses —
-  ``cdk.json`` ``context.bedrock.default_model_id``, resolved through
-  :mod:`gco.bedrock` so Mission sampling, the capacity advisor, and
-  autopilot can never drift apart. Any Claude model or inference profile
+  GCO's Claude Code model default — ``cdk.json``
+  ``context.bedrock.claude_code_default_model_id``, resolved through
+  :mod:`gco.bedrock`. The key is deliberately separate from the
+  ``mission_default_model_id`` and ``capacity_advisor_default_model_id``
+  knobs consumed by Mission sampling and the capacity advisor: repointing
+  the interactive agent and repointing advisory Converse calls are
+  independent decisions, and future agent runners (Codex, opencode, ...)
+  get their own sibling keys. Any Claude model or inference profile
   available on Bedrock can be substituted with ``--model``.
 * **GCO MCP server.** Wired in automatically — from the local checkout when
   autopilot runs inside one (so uncommitted MCP changes are live), otherwise
@@ -46,14 +50,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gco.bedrock import get_default_bedrock_model_id
+from gco.bedrock import get_default_claude_code_model_id
 
 from . import __version__
 
 #: Exact Claude Code release installed by ``gco autopilot`` when the
 #: ``claude`` binary is absent. Pinned (never ``latest``) so installs are
 #: reproducible; the monthly deps-scan reports drift against npm.
-CLAUDE_CODE_VERSION = "2.1.220"
+CLAUDE_CODE_VERSION = "2.1.226"
 
 #: npm package that ships the ``claude`` binary.
 CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code"
@@ -161,13 +165,6 @@ COMPANION_MCP_SERVERS: tuple[CompanionServer, ...] = (
         package="mcp-deepwiki",
         command="npx",
         args=("-y", "mcp-deepwiki@latest"),
-    ),
-    CompanionServer(
-        name="documentation",
-        registry="npm",
-        package="@andrea9293/mcp-documentation-server",
-        command="npx",
-        args=("-y", "@andrea9293/mcp-documentation-server"),
     ),
     CompanionServer(
         name="playwright",
@@ -369,13 +366,15 @@ def resolve_model(explicit: str | None) -> tuple[str, list[str]]:
     """Resolve the Bedrock model id and return it with any advisory warnings.
 
     Precedence: ``--model`` flag > ``GCO_AUTOPILOT_MODEL`` env > the
-    canonical ``cdk.json`` default. The result is advisory-validated only:
-    Bedrock ids for Claude contain ``anthropic``/``claude``, but application
-    inference-profile ARNs are opaque, so an unfamiliar id produces a
-    warning rather than a refusal.
+    ``cdk.json`` Claude Code default
+    (``context.bedrock.claude_code_default_model_id``, deliberately separate
+    from the advisory default Mission and the capacity advisor share). The
+    result is advisory-validated only: Bedrock ids for Claude contain
+    ``anthropic``/``claude``, but application inference-profile ARNs are
+    opaque, so an unfamiliar id produces a warning rather than a refusal.
     """
     warnings: list[str] = []
-    model = explicit or os.environ.get(_MODEL_ENV) or get_default_bedrock_model_id()
+    model = explicit or os.environ.get(_MODEL_ENV) or get_default_claude_code_model_id()
     model = model.strip()
     lowered = model.lower()
     if "anthropic" not in lowered and "claude" not in lowered:
@@ -557,8 +556,21 @@ def has_resumable_session(workspace: Path) -> bool:
 
 
 def claude_install_command() -> list[str]:
-    """Return the pinned, reproducible Claude Code install command."""
-    return ["npm", "install", "-g", f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"]
+    """Return the pinned, reproducible Claude Code install command.
+
+    ``--allow-scripts`` names exactly this one package: Claude Code's
+    postinstall downloads the platform-native binary, and npm >= 12 blocks
+    lifecycle scripts by default, which would otherwise leave a shim on
+    PATH that fails with ``Exec format error`` on launch. Older npm (< 12)
+    accepts and ignores the flag, so one command form works everywhere.
+    """
+    return [
+        "npm",
+        "install",
+        "-g",
+        f"--allow-scripts={CLAUDE_CODE_PACKAGE}",
+        f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}",
+    ]
 
 
 def install_claude_code() -> int:

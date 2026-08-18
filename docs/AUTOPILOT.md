@@ -19,11 +19,11 @@ gco autopilot
 
 | What you get | Details |
 |--------------|---------|
-| **Amazon Bedrock backend** | The session uses your AWS credentials (`CLAUDE_CODE_USE_BEDROCK=1`) — no Anthropic account or API key. The model defaults to GCO's canonical Bedrock default (`cdk.json` → `context.bedrock.default_model_id`, currently the Claude Opus 5 global cross-Region inference profile) and can be any Claude model or inference profile enabled on Bedrock. |
+| **Amazon Bedrock backend** | The session uses your AWS credentials (`CLAUDE_CODE_USE_BEDROCK=1`) — no Anthropic account or API key. The model defaults to GCO's Claude Code default (`cdk.json` → `context.bedrock.claude_code_default_model_id`, currently the Claude Opus 5 global cross-Region inference profile) and can be any Claude model or inference profile enabled on Bedrock. |
 | **GCO MCP server** | Wired in automatically. From a source checkout the session runs your working tree (`gco_mcp/run_mcp.py`); from an installed `gco-cli` it runs the matching release tag via `uvx`. |
 | **Companion MCP servers** | Every server from the [Recommended Companion MCP Servers](../gco_mcp/README.md#recommended-companion-mcp-servers) list — AWS docs, pricing, EKS, filesystem, web search, memory, sequential thinking, and the rest — generated into a session-scoped config. |
 | **Hermetic MCP config** | The generated config is passed with `--strict-mcp-config`, so every autopilot session starts from the same known-good server set regardless of personal or project MCP configs on the machine. |
-| **Lazy, pinned install** | Claude Code is deliberately **not** baked into the dev container. When the `claude` binary is missing, autopilot offers to install the exact pinned release (`npm install -g @anthropic-ai/claude-code@<pin>`); the monthly deps-scan reports drift against npm's `latest`. |
+| **Lazy, pinned install** | Claude Code is deliberately **not** baked into the dev container. When the `claude` binary is missing, autopilot offers to install the exact pinned release (`npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@<pin>` — the scoped allowance lets the postinstall fetch the platform-native binary under npm ≥ 12's script blocking); the monthly deps-scan reports drift against npm's `latest`. |
 
 ## Table of Contents
 
@@ -95,7 +95,7 @@ Resolution order:
 
 1. `--model` / `-m` flag
 2. `GCO_AUTOPILOT_MODEL` environment variable
-3. `cdk.json` → `context.bedrock.default_model_id`, resolved through `gco.bedrock` — the same canonical default used by Mission sampling and the capacity advisor, so autopilot can never drift from the rest of GCO
+3. `cdk.json` → `context.bedrock.claude_code_default_model_id`, resolved through `gco.bedrock` — autopilot's own default, deliberately separate from the advisory `default_model_id` that Mission sampling and the capacity advisor share. Repointing the interactive agent (`gco stacks bedrock set-claude-code-model`) never repoints the advisory features, and vice versa; future agent runners get their own sibling keys. Both keys ship the same profile today.
 
 Any Claude model or inference profile available on Bedrock works, including application inference-profile ARNs. A model id that doesn't look like a Claude model produces a warning (Claude Code is tuned for Claude models) but is not refused.
 

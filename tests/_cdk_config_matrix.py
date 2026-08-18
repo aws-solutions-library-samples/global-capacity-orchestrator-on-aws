@@ -411,6 +411,14 @@ CONFIGS.extend(
                 }
             },
         ),
+        # Mission memory ships ON by default, so ``default-regions`` (and every
+        # other entry) already synthesizes the table + vector-index custom
+        # resource; the disabled overlay is the compatibility contract — an
+        # operator opting out must synthesize the pre-feature global stack.
+        (
+            "mission-memory-disabled",
+            {"mission_memory": {"enabled": False}},
+        ),
     ]
 )
 

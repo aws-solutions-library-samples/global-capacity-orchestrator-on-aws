@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 134 tools; with every flag enabled the
-ceiling is 179. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 135 tools; with every flag enabled the
+ceiling is 183. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -23,7 +23,8 @@ flag-to-tool mapping.
 | `capacity.py` | 18 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
 | `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
-| `stacks.py` | 27 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_default_bedrock_model` (gated) |
+| `stacks.py` | 29 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated) |
+| `status.py` | 1 | `fleet_status` |
 | `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
@@ -38,7 +39,7 @@ flag-to-tool mapping.
 | `config.py` | 1 | `config_get` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
-| `mission.py` | 9 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` — all gated by `GCO_ENABLE_MISSION` |
+| `mission.py` | 10 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` — all gated by `GCO_ENABLE_MISSION` |
 | `docs.py` | 1 | `find_docs` (documentation discovery) |
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
 | `tasks.py` | 3 | `task_status`, `task_tail` (read-only observability), `task_prune` (gated local cleanup) |
@@ -155,7 +156,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `list_deployment_regions` | `gco stacks regions list` — show the cdk.json deployment-region topology and its resolved partition (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `list_stacks` | List all GCO CDK stacks. |
 | `remove_deployment_region` | `gco stacks regions remove` — remove a workload Region from cdk.json `deployment_regions.regional`; never destroys stacks (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
-| `set_default_bedrock_model` | `gco stacks bedrock set-model` — set cdk.json `bedrock.default_model_id`, the advisory-feature model default (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
+| `set_claude_code_default_model` | `gco stacks bedrock set-claude-code-model` — set cdk.json `bedrock.claude_code_default_model_id`, the session model `gco autopilot` hands to Claude Code (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
+| `set_mission_default_model` | `gco stacks bedrock set-mission-model` — set cdk.json `bedrock.mission_default_model_id`, Mission sampling's model default (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
+| `set_capacity_advisor_default_model` | `gco stacks bedrock set-capacity-advisor-model` — set cdk.json `bedrock.capacity_advisor_default_model_id`, the capacity advisor's model default (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `set_deployment_region` | `gco stacks regions set` — set a control-plane Region scalar (global/api_gateway/monitoring) in cdk.json (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `setup_cluster_access` | Configure kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. |
 | `stack_diff` | `gco stacks diff` — show [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) diff for a stack. |
@@ -163,6 +166,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `stack_status` | Get detailed status of a CloudFormation stack. |
 | `stack_synth` | `gco stacks synth` — synthesize CloudFormation templates from CDK. |
 | `valkey_status` | `gco stacks valkey status` — show Valkey cache stack status. |
+
+### `status.py`
+
+| Tool | Description |
+|------|-------------|
+| `fleet_status` | `gco status` — whole-fleet deployment status as one document. |
 
 ### `storage.py`
 
@@ -317,6 +326,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `mission_history` | Get iteration history for a Mission session. |
 | `mission_iterate` | Run iteration(s) on a Mission session. |
 | `mission_list` | List Mission sessions. |
+| `mission_memory_search` | Search mission memory for similar past missions by directive. |
 | `mission_resume` | Resume a paused Mission session. |
 | `mission_start` | Start a new Mission session. |
 | `mission_status` | Get the full state of a Mission session. |

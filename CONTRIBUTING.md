@@ -208,11 +208,19 @@ docker build -f Dockerfile.dev -t gco-dev .
 
 # Regenerate the lockfile and strip the project self-reference
 docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+  pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
   sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
 '
 ```
+
+The `pip install "pip==25.0.1"` step works around `pip-tools==7.6.0` importing
+pip internals (`pip._internal.utils.compat.stdlib_pkgs`) that newer pip — as
+shipped in the current `python:3.14-slim` base image — has removed. The
+downgrade lives only inside the throwaway container; upgrading `pip-tools`
+past 7.6 would remove the need for it, but that is a dependency change made on
+its own PR, not silently alongside a lockfile regeneration.
 
 The `sed` step removes the `gco-cli @ file:///workspace` self-reference that
 `pip-compile` always emits (two lines — the `file://` URI and its `# via`
@@ -457,6 +465,15 @@ These are risk categories, not blanket path exemptions. A CLI command that mutat
 
 When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and post a sanitized summary comment (run ID, exact SHA, overall status, per-action statuses) on the pull request. The full reports enumerate the validation account's ID, ARNs, and endpoint URLs: keep them local alongside `checkpoint.json`, and share a full report only through a private maintainer channel. Never invoke the harness from GitHub Actions. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
 
+### Example Manifest Validation
+
+Changes under `examples/` carry their own validation bar, enforced by the same risk framing:
+
+- **Any change** (including comment/doc edits): `gco examples validate --static-only` must pass. CI runs the identical checks (`tests/test_example_job_validation.py`), covering YAML validity, transport-gate acceptance for the documented submission path, workload namespaces, and three-way symmetry between `examples/`, the spec registry (`scripts/example_job_validation/specs.py`), and the `gco_mcp` example catalog.
+- **Behavior changes** (image, command, resources, scheduler, target namespace, new or removed example): additionally run a live validation scoped to the affected examples — `gco examples validate --examples <name>` with the same account/consent/KMS flags as live release validation — and post a sanitized per-example summary on the pull request. The same report-privacy rules apply.
+
+See the [Example Job Validation guide](docs/EXAMPLE_VALIDATION.md) for the full pipeline, per-example criteria, and scoping flags.
+
 ### CI/CD Pipeline
 
 The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus four satellite workflows triggered by a successful test run, a schedule, or a manual dispatch.
@@ -589,7 +606,48 @@ gco stacks destroy-all -y
 - `docs/TROUBLESHOOTING.md`: Common issues
 - `docs/RUNBOOKS.md`: Operational runbooks for incident response
 - `docs/adr/`: Architecture Decision Records — the append-only log of significant architectural decisions
+- `wiki/` + `mkdocs.yml`: The orientation wiki published to GitHub Pages (see
+  [Developing the wiki](#developing-the-wiki))
 - `CONTRIBUTING.md`: This file
+
+### Developing the wiki
+
+The [project wiki](https://awslabs.github.io/global-capacity-orchestrator-on-aws/)
+is a small MkDocs site built from `wiki/*.md` and `mkdocs.yml`, published to
+GitHub Pages by `pages.yml` with the coverage report embedded at `/coverage/`.
+It is an orientation layer: pages **summarize and link** to the authoritative
+docs on GitHub — they must not restate reference detail (flags, config keys,
+procedures), which would rot. Deep-doc links use full
+`https://github.com/.../blob/main/...` URLs (the docs are not part of the
+built site), and images are referenced as `assets/images/<name>` — a build
+hook serves the tracked `images/` directory, so never commit image copies.
+
+To preview changes locally with live reload:
+
+```bash
+pip install -e ".[docs]"        # once, in your venv (or use the dev container)
+./scripts/preview_wiki.sh       # strict build + live server on :8000
+./scripts/preview_wiki.sh --build-only   # just the CI-equivalent strict build
+```
+
+The script's first phase runs `mkdocs build --strict` — the exact command the
+`lint:mkdocs:strict` PR gate and the Pages deploy run — so a broken link or a
+nav entry without a file fails locally before CI sees it. From the dev
+container, forward the port yourself
+(`docker run -p 8000:8000 ... ./scripts/preview_wiki.sh`); the `gco` shell
+function does not forward ports. The locally served `/coverage/` path 404s by
+design — the coverage report is merged in at deploy time, not built by MkDocs.
+
+Before pushing wiki changes, also run the wiki's guard tests and markdownlint:
+
+```bash
+pytest tests/test_wiki.py -q
+npm run lint:markdown
+```
+
+`tests/test_wiki.py` enforces the structural invariants (every page in the
+nav, every repo link and image resolving, no external image hosts); keep
+`mkdocs.yml` free of custom YAML tags so those guards can keep parsing it.
 
 ### Architecture Decision Records
 

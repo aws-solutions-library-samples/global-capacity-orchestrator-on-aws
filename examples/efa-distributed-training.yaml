@@ -20,6 +20,12 @@
 #     P6-B200 3.2 Tbps, P6e-GB200 28.8 Tbps.
 #   - EKS Auto Mode uses EKS-optimized AMIs with host-level EFA components
 #     already present.
+#   - This example intentionally exercises the platform's resource-governance
+#     ceilings: 8 GPUs per container (the gco-jobs LimitRange maximum) and
+#     16 GPUs total (the per-manifest cap), sized for one p5.48xlarge node
+#     slice per worker. If you lower the `resource_quota` context in
+#     cdk.json, admission will reject these pods — the harness's static
+#     checks verify the fit before any live run.
 #
 # Docs: ../docs/INFERENCE.md
 apiVersion: batch/v1
@@ -38,7 +44,7 @@ spec:
     spec:
       containers:
       - name: trainer
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         securityContext:
           allowPrivilegeEscalation: false
         command: ["python3", "-c"]

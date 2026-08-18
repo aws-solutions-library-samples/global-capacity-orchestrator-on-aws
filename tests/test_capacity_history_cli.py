@@ -104,6 +104,85 @@ class TestHistoryPatterns:
         )
         assert result.exit_code == 0
         assert "Monday" in result.output or "Best windows" in result.output
+        # The default metric is unchanged from the pre-pool CLI.
+        assert store.get_temporal_patterns.call_args.kwargs["metric"] == "spot_score"
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_patterns_metric_option_selects_a_capacity_field(self, mock_get_store):
+        store = MagicMock()
+        store.get_temporal_patterns.return_value = {
+            "instance_type": "p5.48xlarge",
+            "region": "us-east-1",
+            "metric": "spot_score_at_10",
+            "patterns": {"Monday": {14: {"avg": 4.0, "count": 3}}},
+            "best_windows": [{"day": "Monday", "hour": 14, "avg": 4.0, "count": 3}],
+        }
+        mock_get_store.return_value = store
+        result = CliRunner().invoke(
+            cli,
+            [
+                "capacity",
+                "history",
+                "patterns",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "--metric",
+                "spot_score_at_10",
+            ],
+        )
+        assert result.exit_code == 0
+        assert store.get_temporal_patterns.call_args.kwargs["metric"] == "spot_score_at_10"
+        assert "spot_score_at_10" in result.output
+
+    def test_patterns_metric_choices_derive_from_the_store_registry(self):
+        # Any registered metric field is accepted, and the choice list is the
+        # store's export rather than a CLI literal that could drift from it.
+        from cli.capacity.history import METRIC_FIELDS
+        from cli.commands.capacity_cmd import history_patterns
+
+        metric_option = next(param for param in history_patterns.params if param.name == "metric")
+        assert tuple(metric_option.type.choices) == METRIC_FIELDS
+
+    def test_patterns_rejects_an_unregistered_metric(self):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "capacity",
+                "history",
+                "patterns",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "--metric",
+                "not-a-metric",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not-a-metric" in result.output
+
+
+class TestHistoryShowColumns:
+    def test_show_columns_derive_from_the_store_registry(self):
+        # The multi-capacity SPS fields appear in the show table because the
+        # column list is timestamp + METRIC_FIELDS, not a hand-kept literal.
+        from cli.capacity.history import METRIC_FIELDS
+
+        with patch("cli.capacity.history.get_capacity_history_store") as mock_get_store:
+            store = MagicMock()
+            store.get_trend.return_value = [
+                {"timestamp": "2025-06-23T14:00:00+00:00", "spot_score": 8, "spot_score_at_10": 5}
+            ]
+            mock_get_store.return_value = store
+            with patch("cli.commands.capacity_cmd.get_output_formatter") as mock_formatter:
+                result = CliRunner().invoke(
+                    cli, ["capacity", "history", "show", "-i", "g5.xlarge", "-r", "us-east-1"]
+                )
+        assert result.exit_code == 0
+        columns = mock_formatter.return_value.print.call_args.kwargs["columns"]
+        assert columns == ["timestamp", *METRIC_FIELDS]
 
 
 class TestCheckEnrichHistorical:

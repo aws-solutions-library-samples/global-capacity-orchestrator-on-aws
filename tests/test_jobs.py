@@ -365,20 +365,51 @@ class TestJobManagerOperations:
                 assert job.name == "test-job"
 
     def test_get_job_not_found(self):
-        """Test getting a job that doesn't exist."""
+        """Test getting a job the API confirms does not exist (HTTP 404)."""
+        import requests
+
         from cli.jobs import JobManager
 
         with patch("cli.jobs.get_config") as mock_config:
             mock_config.return_value = MagicMock(default_region="us-east-1")
             with patch("cli.jobs.get_aws_client") as mock_aws:
                 mock_aws_client = MagicMock()
-                mock_aws_client.get_job_details.side_effect = Exception("Not found")
+                mock_aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+                    response=MagicMock(status_code=404)
+                )
+                mock_aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
                 mock_aws.return_value = mock_aws_client
 
                 manager = JobManager()
                 job = manager.get_job("nonexistent-job", "gco-jobs")
 
                 assert job is None
+
+    def test_get_job_transport_failure_propagates(self):
+        """A failure to reach the API must not be reported as "not found".
+
+        Regression test for issue #258: with the regional API bridge not
+        deployed, get_job_details raises RuntimeError; get_job used to
+        swallow it and return None, which the CLI rendered as
+        "Job <name> not found" even though the job was running.
+        """
+        from cli.jobs import JobManager
+
+        with patch("cli.jobs.get_config") as mock_config:
+            mock_config.return_value = MagicMock(default_region="us-east-1")
+            with patch("cli.jobs.get_aws_client") as mock_aws:
+                mock_aws_client = MagicMock()
+                mock_aws_client.get_job_details.side_effect = RuntimeError(
+                    "Regional API endpoint is not deployed in us-east-1; "
+                    "exact region routing requires the regional API bridge"
+                )
+                mock_aws.return_value = mock_aws_client
+
+                manager = JobManager()
+                with pytest.raises(RuntimeError, match="Regional API endpoint is not deployed"):
+                    manager.get_job("gpu-test-job", "gco-jobs")
+                # The TrainJob fallback must not run for transport failures.
+                mock_aws_client.call_api.assert_not_called()
 
     def test_get_job_logs(self):
         """Test getting job logs."""
@@ -590,14 +621,19 @@ class TestJobManagerGetJob:
         assert result.namespace == "default"
 
     def test_get_job_not_found(self):
-        """Test get_job when job is not found."""
+        """Test get_job when the API confirms the job does not exist."""
         from unittest.mock import MagicMock
+
+        import requests
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        manager._aws_client.get_job_details.side_effect = Exception("Not found")
+        manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=404)
+        )
+        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
 
         result = manager.get_job("nonexistent", "default", "us-east-1")
         assert result is None
@@ -1550,18 +1586,40 @@ class TestJobManagerWaitExtended:
     """Extended tests for job wait functionality."""
 
     def test_wait_for_job_not_found(self):
-        """Test wait_for_job raises error when job not found."""
+        """Test wait_for_job raises error when the job is confirmed absent."""
+        import requests
+
         from cli.jobs import JobManager
 
         with patch("cli.jobs.get_aws_client") as mock_get_client:
             mock_client = MagicMock()
             mock_get_client.return_value = mock_client
-            mock_client.get_job_details.side_effect = Exception("Not found")
+            mock_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+                response=MagicMock(status_code=404)
+            )
+            mock_client.call_api.side_effect = RuntimeError("API request failed: not found")
 
             manager = JobManager()
 
             with pytest.raises(ValueError, match="not found"):
                 manager.wait_for_job("nonexistent-job", "default", timeout_seconds=1)
+
+    def test_wait_for_job_transport_failure_is_not_reported_as_not_found(self):
+        """Issue #258: an unreachable bridge aborts the wait with the real reason."""
+        from cli.jobs import JobManager
+
+        with patch("cli.jobs.get_aws_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_get_client.return_value = mock_client
+            mock_client.get_job_details.side_effect = RuntimeError(
+                "Regional API endpoint is not deployed in us-east-1; "
+                "exact region routing requires the regional API bridge"
+            )
+
+            manager = JobManager()
+
+            with pytest.raises(RuntimeError, match="Regional API endpoint is not deployed"):
+                manager.wait_for_job("gpu-test-job", "default", timeout_seconds=1)
 
 
 class TestJobManagerLogsExtended:
@@ -2004,3 +2062,247 @@ class TestJobManagerGetQueueStatusSuccess:
 
             with pytest.raises(ValueError, match="Job queue not found"):
                 manager.get_queue_status("us-east-1")
+
+
+class TestTrainJobLifecycleFallbacks:
+    """A name the batch Job endpoints do not know is retried as a TrainJob.
+
+    The generic /api/v1/manifests endpoints (gated on the pinned
+    trainer.kubeflow.org/v1alpha1 GVK) back get/delete; logs resolve the
+    torch runtime's single child Job ``<name>-node-0`` and pick the rank
+    pod by completion index. A non-404 failure must never trigger the
+    fallback, and a fallback miss must surface the original outcome.
+    """
+
+    @staticmethod
+    def _manager():
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = MagicMock()
+        return manager
+
+    @staticmethod
+    def _http_404():
+        import requests
+
+        return requests.exceptions.HTTPError(response=MagicMock(status_code=404))
+
+    @staticmethod
+    def _trainjob_resource(**status_overrides):
+        status = {
+            "conditions": [],
+            "jobsStatus": [{"name": "node", "active": 2, "succeeded": 0, "failed": 0, "ready": 2}],
+        }
+        status.update(status_overrides)
+        return {
+            "api_version": "trainer.kubeflow.org/v1alpha1",
+            "kind": "TrainJob",
+            "name": "train-demo",
+            "namespace": "gco-jobs",
+            "exists": True,
+            "metadata": {
+                "name": "train-demo",
+                "namespace": "gco-jobs",
+                "creationTimestamp": "2026-08-13T00:00:00Z",
+                "labels": {"app": "demo"},
+            },
+            "spec": {
+                "runtimeRef": {"name": "torch-distributed"},
+                "trainer": {"image": "pytorch/pytorch:2.13.0", "numNodes": 2},
+            },
+            "status": status,
+        }
+
+    def test_get_job_falls_back_to_trainjob_on_404(self):
+        manager = self._manager()
+        manager._aws_client.get_job_details.side_effect = self._http_404()
+        manager._aws_client.call_api.return_value = {"resource": self._trainjob_resource()}
+
+        job = manager.get_job("train-demo", "gco-jobs", "us-east-1")
+
+        assert job is not None
+        assert job.name == "train-demo"
+        assert job.status == "running"
+        assert job.active_pods == 2
+        assert job.parallelism == 2  # numNodes
+        assert job.image_refs == ["pytorch/pytorch:2.13.0"]
+
+        method, path = manager._aws_client.call_api.call_args.args[:2]
+        params = manager._aws_client.call_api.call_args.kwargs["params"]
+        assert (method, path) == ("GET", "/api/v1/manifests/gco-jobs/train-demo")
+        assert params == {
+            "api_version": "trainer.kubeflow.org/v1alpha1",
+            "kind": "TrainJob",
+        }
+
+    def test_get_job_returns_none_when_trainjob_also_missing(self):
+        manager = self._manager()
+        manager._aws_client.get_job_details.side_effect = self._http_404()
+        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+
+        assert manager.get_job("nope", "gco-jobs", "us-east-1") is None
+
+    def test_get_job_non_404_never_probes_the_manifests_endpoint(self):
+        import requests
+
+        manager = self._manager()
+        manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=503)
+        )
+
+        # A 503 is not "absent": it propagates (issue #258) and must not
+        # trigger the TrainJob fallback.
+        with pytest.raises(requests.exceptions.HTTPError):
+            manager.get_job("train-demo", "gco-jobs", "us-east-1")
+        manager._aws_client.call_api.assert_not_called()
+
+    def test_trainjob_terminal_conditions_map_to_job_states(self):
+        manager = self._manager()
+        completed = self._trainjob_resource(
+            conditions=[
+                {
+                    "type": "Complete",
+                    "status": "True",
+                    "lastTransitionTime": "2026-08-13T01:30:00Z",
+                }
+            ],
+            jobsStatus=[{"name": "node", "active": 0, "succeeded": 2, "failed": 0}],
+        )
+        job = manager._parse_trainjob_info(completed, "us-east-1")
+        assert job.status == "succeeded"
+        assert job.succeeded_pods == 2
+        assert job.completion_time is not None
+        assert job.completion_time.isoformat() == "2026-08-13T01:30:00+00:00"
+
+        failed = self._trainjob_resource(
+            conditions=[{"type": "Failed", "status": "True"}],
+            jobsStatus=[{"name": "node", "active": 0, "succeeded": 0, "failed": 2}],
+        )
+        assert manager._parse_trainjob_info(failed, "us-east-1").status == "failed"
+
+    def test_false_terminal_condition_is_not_terminal(self):
+        manager = self._manager()
+        resource = self._trainjob_resource(
+            conditions=[{"type": "Failed", "status": "False"}],
+        )
+        assert manager._parse_trainjob_info(resource, "us-east-1").status == "running"
+
+    def test_delete_job_falls_back_to_trainjob_delete_on_404(self):
+        manager = self._manager()
+        manager._aws_client.delete_job.side_effect = self._http_404()
+        manager._aws_client.call_api.return_value = {"success": True, "resource": {}}
+
+        result = manager.delete_job("train-demo", "gco-jobs", "us-east-1")
+
+        assert result["success"] is True
+        method, path = manager._aws_client.call_api.call_args.args[:2]
+        assert (method, path) == ("DELETE", "/api/v1/manifests/gco-jobs/train-demo")
+
+    def test_delete_job_reraises_when_trainjob_delete_also_fails(self):
+        import requests
+
+        manager = self._manager()
+        manager._aws_client.delete_job.side_effect = self._http_404()
+        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: 404")
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            manager.delete_job("typo-name", "gco-jobs", "us-east-1")
+
+    def test_delete_job_non_404_never_probes_the_manifests_endpoint(self):
+        import requests
+
+        manager = self._manager()
+        manager._aws_client.delete_job.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=500)
+        )
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            manager.delete_job("train-demo", "gco-jobs", "us-east-1")
+        manager._aws_client.call_api.assert_not_called()
+
+    @staticmethod
+    def _rank_pods():
+        return {
+            "pods": [
+                {
+                    "metadata": {
+                        "name": "train-demo-node-0-1-abcde",
+                        "labels": {"batch.kubernetes.io/job-completion-index": "1"},
+                    }
+                },
+                {
+                    "metadata": {
+                        "name": "train-demo-node-0-0-fghij",
+                        "labels": {"batch.kubernetes.io/job-completion-index": "0"},
+                    }
+                },
+            ]
+        }
+
+    def test_logs_fall_back_to_the_rank0_pod_of_the_child_job(self):
+        manager = self._manager()
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'train-demo' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.return_value = self._rank_pods()
+        manager._aws_client.get_pod_logs.return_value = {"logs": "rank0 output"}
+
+        logs = manager.get_job_logs("train-demo", "gco-jobs", "us-east-1")
+
+        assert logs == "rank0 output"
+        pods_args = manager._aws_client.get_job_pods.call_args.args
+        assert pods_args[0] == "train-demo-node-0"
+        kwargs = manager._aws_client.get_pod_logs.call_args.kwargs
+        assert kwargs["job_name"] == "train-demo-node-0"
+        assert kwargs["pod_name"] == "train-demo-node-0-0-fghij"
+
+    def test_logs_node_flag_selects_the_matching_rank_pod(self):
+        manager = self._manager()
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'train-demo' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.return_value = self._rank_pods()
+        manager._aws_client.get_pod_logs.return_value = {"logs": "rank1 output"}
+
+        logs = manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", node=1)
+
+        assert logs == "rank1 output"
+        kwargs = manager._aws_client.get_pod_logs.call_args.kwargs
+        assert kwargs["pod_name"] == "train-demo-node-0-1-abcde"
+
+    def test_logs_rank_selection_survives_missing_index_labels(self):
+        # Older control planes may omit the completion-index label; the
+        # deterministic indexed-pod name prefix still resolves the rank.
+        manager = self._manager()
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'train-demo' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.return_value = {
+            "pods": [
+                {"metadata": {"name": "train-demo-node-0-0-fghij", "labels": {}}},
+                {"metadata": {"name": "train-demo-node-0-1-abcde", "labels": {}}},
+            ]
+        }
+        manager._aws_client.get_pod_logs.return_value = {"logs": "prefix-matched"}
+
+        logs = manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", node=1)
+
+        assert logs == "prefix-matched"
+        kwargs = manager._aws_client.get_pod_logs.call_args.kwargs
+        assert kwargs["pod_name"] == "train-demo-node-0-1-abcde"
+
+    def test_logs_fall_through_to_cloudwatch_when_no_child_job_exists(self):
+        manager = self._manager()
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'plain-job' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.side_effect = Exception("404 no child job")
+
+        with patch.object(
+            manager, "_get_cloudwatch_logs", return_value="[CloudWatch Logs]"
+        ) as mock_cw:
+            logs = manager.get_job_logs("plain-job", "gco-jobs", "us-east-1")
+
+        assert logs == "[CloudWatch Logs]"
+        mock_cw.assert_called_once()

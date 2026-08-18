@@ -33,8 +33,8 @@ compact: true
 #               Dockerfile.dev is for local development only
 #
 # === Kubernetes Checks ===
-# Kubernetes check skips for NVIDIA device plugin are defined inline in the manifest
-# (lambda/kubectl-applier-simple/manifests/50-nvidia-device-plugin.yaml)
+# Kubernetes check skips for third-party GPU components are defined inline in
+# the manifests (e.g. lambda/kubectl-applier-simple/manifests/50-dcgm-exporter.yaml)
 # using checkov:skip comments for better traceability.
 skip-check:
   # Dockerfile checks

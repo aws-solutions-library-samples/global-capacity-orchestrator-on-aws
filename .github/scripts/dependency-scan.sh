@@ -15,9 +15,15 @@
 #   - EKS Kubernetes minor from cdk.json (AWS creds)
 #   - Aurora PostgreSQL engine versions (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
-#   - Bedrock default model id from cdk.json context.bedrock.default_model_id
-#     compared against the newest system-defined inference profile in the same
-#     model family (AWS creds)
+#   - Bedrock default model ids from cdk.json
+#     context.bedrock.mission_default_model_id (Mission sampling),
+#     context.bedrock.capacity_advisor_default_model_id (capacity advisor),
+#     context.bedrock.claude_code_default_model_id (autopilot),
+#     context.bedrock.embedding_model_id (Mission memory), and
+#     context.vector_store.embedding_model_id (workload RAG corpus), each
+#     compared against the newest same-family release — inference profiles
+#     for the generation keys, EMBEDDING foundation models for the embedding
+#     keys (AWS creds)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
@@ -31,10 +37,11 @@
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
-#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
-#     AURORA_POSTGRES_VERSION)
+#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME;
+#     the Aurora engine is a plain version string checked against live RDS)
 #   - Latest stable Python release from endoflife.date — public endpoint
-#   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION),
+#   - CI tooling the workflows install by hand: Trivy (the install-trivy
+#     composite action's version default),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
 #     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind + its
@@ -389,26 +396,37 @@ check_image() {
   registry="$(echo "$parsed" | cut -d'|' -f1)"
   repo="$(echo "$parsed" | cut -d'|' -f2)"
 
-  local tags=""
-  if ! tags="$(skopeo list-tags "docker://${registry}/${repo}" 2>/dev/null \
-    | jq -r '.Tags[]' 2>/dev/null \
-    | grep -E "^v?[0-9]+\.[0-9]+\.[0-9]+$" \
-    | sort -V | tail -10)"; then
+  # Fetch and filter separately. A registry/network failure marks the scan
+  # incomplete, while "the registry answered and nothing newer exists in
+  # this variant family" is an up-to-date pin. The previous single pipeline
+  # conflated the two under pipefail: the strict bare-semver grep matched
+  # nothing for suffix-tagged repositories (…-py3, …-cuda…, …-ubuntu…), so
+  # they reported "tag lookup failed" every month even though the registry
+  # was fine.
+  local raw_tags=""
+  if ! raw_tags="$(skopeo list-tags --retry-times 3 "docker://${registry}/${repo}" 2>/dev/null \
+    | jq -r '.Tags[]' 2>/dev/null)" || [ -z "$raw_tags" ]; then
     mark_scan_incomplete "Container registry tag lookup failed for ${registry}/${repo}."
     return
   fi
 
-  if [ -z "$tags" ]; then
-    mark_scan_incomplete "Container registry returned no stable semver tags for ${registry}/${repo}."
+  local latest_tag
+  latest_tag="$(printf '%s\n' "$raw_tags" | newer_same_variant_tag "$current_tag")" || latest_tag=""
+
+  if [ -n "$latest_tag" ]; then
+    echo "  - ${image}:${current_tag} -> ${latest_tag}"
+    echo "${image}|${current_tag}|${latest_tag}" >> "$DOCKER_RESULTS"
     return
   fi
 
-  local latest_tag
-  latest_tag="$(echo "$tags" | tail -1)"
-
-  if [ "$(compare_semver "$current_tag" "$latest_tag")" = "newer" ]; then
-    echo "  - ${image}:${current_tag} -> ${latest_tag}"
-    echo "${image}|${current_tag}|${latest_tag}" >> "$DOCKER_RESULTS"
+  # No newer family member. If the pinned tag itself is no longer listed,
+  # the pin points at something the registry stopped advertising (renamed
+  # variant scheme, withdrawn tag) — that deserves eyes, not silence.
+  # tag_listed reads the list from an argument, not a printf pipe: under
+  # pipefail, grep -q's early exit gave printf SIGPIPE on large tag lists
+  # and inverted "tag present" into a false INCOMPLETE (2026-09 scan).
+  if ! tag_listed "$current_tag" "$raw_tags"; then
+    mark_scan_incomplete "Pinned tag ${current_tag} is no longer listed by ${registry}/${repo}."
   fi
 }
 
@@ -437,33 +455,16 @@ grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" scripts/live_release_valida
   | sed 's/image: //' >> "$ALL_IMAGES" || true
 
 echo "Checking Helm chart value images..."
-CHART_VALUE_IMAGES=""
-if ! CHART_VALUE_IMAGES="$(python3 - <<'PY'
-import yaml
-with open('lambda/helm-installer/charts.yaml') as f:
-    data = yaml.safe_load(f)
-
-
-def find_images(d):
-    if isinstance(d, dict):
-        repo = d.get('repository', '')
-        tag = d.get('tag', '')
-        if repo and tag and '/' in repo:
-            print(f'{repo}:{tag}')
-        for v in d.values():
-            find_images(v)
-    elif isinstance(d, list):
-        for item in d:
-            find_images(item)
-
-
-for name, cfg in (data or {}).get('charts', {}).items():
-    find_images(cfg.get('values', {}))
-PY
-)"; then
-  mark_scan_incomplete "Could not parse Helm chart value images."
-elif [ -n "$CHART_VALUE_IMAGES" ]; then
+# Registry-aware walk over every charts.yaml values block (see
+# extract_chart_value_images in lib_dependency_scan.sh — moved there so BATS
+# exercises the real logic). charts.yaml always pins values images, so an
+# empty result means the parse broke — surface that as an incomplete scan
+# rather than silently dropping the sweep.
+CHART_VALUE_IMAGES="$(extract_chart_value_images lambda/helm-installer/charts.yaml)"
+if [ -n "$CHART_VALUE_IMAGES" ]; then
   printf '%s\n' "$CHART_VALUE_IMAGES" >> "$ALL_IMAGES"
+else
+  mark_scan_incomplete "Could not parse Helm chart value images."
 fi
 
 # Mooncake default image — pinned as a Python constant in cli/images.py
@@ -485,31 +486,56 @@ fi
 echo "Checking AWS CLI runtime image (gco/services/inference_monitor.py)..."
 AWS_CLI_RUNTIME_IMAGE="$(extract_python_string_constant \
   AWS_CLI_IMAGE gco/services/inference_monitor.py)"
-if [[ "$AWS_CLI_RUNTIME_IMAGE" =~ ^[^@]+:[^@]+@sha256:[0-9a-f]{64}$ ]]; then
-  AWS_CLI_TAGGED_IMAGE="${AWS_CLI_RUNTIME_IMAGE%@sha256:*}"
-  AWS_CLI_REPOSITORY="${AWS_CLI_TAGGED_IMAGE%:*}"
-  AWS_CLI_TAG="${AWS_CLI_TAGGED_IMAGE##*:}"
-  AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"
-  printf '%s\n' "$AWS_CLI_TAGGED_IMAGE" >> "$ALL_IMAGES"
-
-  # Hash the raw top-level manifest rather than selecting a platform-specific
-  # child. The committed digest is a multi-architecture manifest-list digest.
-  AWS_CLI_MANIFEST="$(mktemp)"
-  if ! skopeo inspect --raw "docker://${AWS_CLI_TAGGED_IMAGE}" \
-    > "$AWS_CLI_MANIFEST" 2>/dev/null; then
-    mark_scan_incomplete "Container manifest lookup failed for ${AWS_CLI_TAGGED_IMAGE}."
-  else
-    AWS_CLI_PUBLISHED_DIGEST="sha256:$(sha256sum "$AWS_CLI_MANIFEST" | awk '{print $1}')"
-    if ! [[ "$AWS_CLI_PUBLISHED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-      mark_scan_incomplete "Container manifest digest was invalid for ${AWS_CLI_TAGGED_IMAGE}."
-    elif [ "$AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST" ]; then
-      echo "  - ${AWS_CLI_TAGGED_IMAGE}: committed digest does not match the tag"
-      echo "${AWS_CLI_REPOSITORY}|${AWS_CLI_TAG}@${AWS_CLI_COMMITTED_DIGEST}|${AWS_CLI_TAG}@${AWS_CLI_PUBLISHED_DIGEST}" >> "$DOCKER_RESULTS"
-    fi
+# check_pinned_digest <repo:tag@sha256:digest> <origin label>
+#
+# Shared digest-freshness check for every digest-pinned image the repository
+# commits: verify the tag's currently published manifest-list digest still
+# equals the committed one. A moved digest is a drift row (the tag was
+# re-pushed upstream — the pin is stale); an unreachable registry or an
+# implausible response marks the scan incomplete.
+check_pinned_digest() {
+  local pinned_ref="$1" origin="$2" parts repository tag committed published
+  if ! parts="$(split_pinned_image_ref "$pinned_ref")"; then
+    mark_scan_incomplete "Could not parse an immutable image reference from ${origin}."
+    return
   fi
-  rm -f "$AWS_CLI_MANIFEST"
+  repository="$(echo "$parts" | cut -d'|' -f1)"
+  tag="$(echo "$parts" | cut -d'|' -f2)"
+  committed="$(echo "$parts" | cut -d'|' -f3)"
+  printf '%s:%s\n' "$repository" "$tag" >> "$ALL_IMAGES"
+
+  if ! published="$(published_manifest_digest "${repository}:${tag}")"; then
+    mark_scan_incomplete "Container manifest lookup failed for ${repository}:${tag}."
+    return
+  fi
+  if [ "$committed" != "$published" ]; then
+    echo "  - ${repository}:${tag}: committed digest does not match the tag (${origin})"
+    echo "${repository}|${tag}@${committed}|${tag}@${published}" >> "$DOCKER_RESULTS"
+  fi
+}
+
+if [[ "$AWS_CLI_RUNTIME_IMAGE" =~ ^[^@]+:[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+  check_pinned_digest "$AWS_CLI_RUNTIME_IMAGE" "gco/services/inference_monitor.py"
 else
   mark_scan_incomplete "Could not parse an immutable AWS_CLI_IMAGE from gco/services/inference_monitor.py."
+fi
+
+# The live-validation smoke manifests pin every image by tag AND manifest-list
+# digest (tests/test_live_release_validation.py enforces the shape). The tag
+# half already rides the normal drift check above; this pass keeps the digest
+# half honest too, so an upstream same-tag re-push shows up as drift instead
+# of silently diverging from what a validation run would actually pull.
+echo "Checking live-validation smoke image digests (scripts/live_release_validation/manifests)..."
+SMOKE_PINNED_REFS="$(grep -rhoE \
+  "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" \
+  scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //' | sort -u)"
+if [ -z "$SMOKE_PINNED_REFS" ]; then
+  mark_scan_incomplete "No digest-pinned smoke images found under scripts/live_release_validation/manifests/."
+else
+  while read -r pinned_ref; do
+    [ -z "$pinned_ref" ] && continue
+    check_pinned_digest "$pinned_ref" "live-validation smoke manifest"
+  done <<< "$SMOKE_PINNED_REFS"
 fi
 
 sort -u "$ALL_IMAGES" | while read -r img; do
@@ -655,19 +681,27 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   EKS_K8S_SKIP_REASON="No AWS credentials available (scan needs eks:DescribeClusterVersions). Configure OIDC to enable."
   echo "  $EKS_K8S_SKIP_REASON"
 else
-  # ``--include-all`` returns every cluster version, not just the
-  # default. ``--version-status STANDARD_SUPPORT`` filters to minors
-  # still in standard support — we don't want to flag the extended-
-  # support lifecycle as "newer."
+  # ``--version-status STANDARD_SUPPORT`` returns every minor still in
+  # standard support — we don't want to flag the extended-support
+  # lifecycle as "newer." It must be the only selector: the API rejects
+  # combining it with ``--include-all`` ("Only one of the defaultOnly,
+  # clusterVersions, includeAll or status request parameters is accepted
+  # at a time"), which is exactly how this check silently broke once.
+  # stderr is captured into the skip reason so the next API-shape change
+  # is diagnosable from the report instead of reading as a generic skip.
+  EKS_K8S_ERR_FILE="$(mktemp)"
   CLUSTER_VERSIONS_JSON="$(aws eks describe-cluster-versions \
-    --include-all \
     --version-status STANDARD_SUPPORT \
-    --output json 2>/dev/null)" || CLUSTER_VERSIONS_JSON=""
+    --output json 2>"$EKS_K8S_ERR_FILE")" || CLUSTER_VERSIONS_JSON=""
 
   if [ -z "$CLUSTER_VERSIONS_JSON" ]; then
-    EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup failed or returned an empty response."
+    EKS_K8S_ERR="$(head -n 1 "$EKS_K8S_ERR_FILE" 2>/dev/null | tr -d '\r')"
+    EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup failed${EKS_K8S_ERR:+: ${EKS_K8S_ERR}}"
+    [ -z "$EKS_K8S_ERR" ] && EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup returned an empty response."
     echo "  $EKS_K8S_SKIP_REASON"
+    rm -f "$EKS_K8S_ERR_FILE"
   else
+    rm -f "$EKS_K8S_ERR_FILE"
     # Max of ``clusterVersion`` across all rows is the newest standard-
     # support minor. We use Python for a proper numeric sort so 1.10
     # beats 1.9 (sort -V already does this, but Python keeps the data
@@ -737,11 +771,12 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   AURORA_SKIP_REASON="No AWS credentials available (scan needs rds:DescribeDBEngineVersions). Configure OIDC to enable."
   echo "  $AURORA_SKIP_REASON"
 else
-  # Extract pinned Aurora PostgreSQL versions from regional_stack.py
-  # Pattern: AuroraPostgresEngineVersion.VER_XX_Y
+  # The pinned Aurora PostgreSQL version (AURORA_POSTGRES_VERSION in
+  # gco/stacks/constants.py — a plain version string applied through
+  # AuroraPostgresEngineVersion.of(), so no CDK enum is involved).
   AURORA_VERSIONS="$(extract_aurora_versions "gco/stacks/regional_stack.py")"
   if [ -z "$AURORA_VERSIONS" ]; then
-    AURORA_SKIP_REASON="Could not read Aurora PostgreSQL engine pins from gco/stacks/regional_stack.py."
+    AURORA_SKIP_REASON="Could not read AURORA_POSTGRES_VERSION from gco/stacks/constants.py."
     echo "  $AURORA_SKIP_REASON"
   else
     while read -r current_ver; do
@@ -854,47 +889,86 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # Bedrock default model (best-effort — requires AWS credentials)
 #
-# Compares the shared default Bedrock model id in
-# cdk.json (context.bedrock.default_model_id) against the newest
-# system-defined inference profile in the SAME model family, as listed by
-# aws bedrock list-inference-profiles. The Python consumers resolve this one
-# configuration value through gco.bedrock, so the scan and both advisory paths
-# cannot silently diverge.
+# Compares each configured Bedrock model default in cdk.json —
+# context.bedrock.mission_default_model_id (Mission sampling),
+# context.bedrock.capacity_advisor_default_model_id (the capacity
+# advisor), context.bedrock.claude_code_default_model_id (the session
+# model gco autopilot hands to Claude Code), and
+# context.bedrock.embedding_model_id (Mission memory's text-embedding
+# model) — against the newest release in the SAME model family. The three
+# generation keys compare against system-defined inference profiles
+# (aws bedrock list-inference-profiles); the embedding key is a plain
+# foundation model, so it compares against
+# aws bedrock list-foundation-models --by-output-modality EMBEDDING.
+# Every consumer resolves its key through gco.bedrock, so the scan and
+# the runtime paths cannot silently diverge; the keys are independent
+# knobs and each gets its own drift row.
 #
 # Same-family scoping (see bedrock_model_family) means we only flag a newer
 # release of the same model line (e.g. a newer global Amazon Nova Lite) — never a
 # different tier or provider, since switching those is a human decision,
-# not drift. When a newer release is reported, update
-# context.bedrock.default_model_id in cdk.json, then re-capture the scaffold
-# fixture with scripts/capture_scaffold_fixtures.py.
+# not drift. When a newer release is reported, update the flagged key in
+# cdk.json; for the Mission key also re-capture the scaffold
+# fixture with scripts/capture_scaffold_fixtures.py. For the embedding
+# key, remember stored vectors are only comparable to vectors from the
+# same model: adopting a newer embedding model means re-embedding or
+# segregating existing Mission-memory data, not just bumping the pin.
 #
-# IAM action: bedrock:ListInferenceProfiles. Pinned to us-east-1 (the
-# advisor + Mission sampling default region) regardless of the workflow's
-# configured region. Same credential preflight as the EKS add-on / Aurora /
-# EMR checks.
+# IAM actions: bedrock:ListInferenceProfiles and
+# bedrock:ListFoundationModels. Pinned to us-east-1 (the advisor +
+# Mission sampling + Mission memory default region) regardless of the
+# workflow's configured region. Same credential preflight as the EKS
+# add-on / Aurora / EMR checks.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking Bedrock default model ==="
 
 BEDROCK_MODEL_RESULTS="$(mktemp)"
 BEDROCK_MODEL_SKIP_REASON=""
-CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json)"
 
-if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
-  BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.default_model_id from cdk.json."
-  echo "  $BEDROCK_MODEL_SKIP_REASON"
-elif ! aws sts get-caller-identity >/dev/null 2>&1; then
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
   BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
   echo "  $BEDROCK_MODEL_SKIP_REASON"
 else
-  LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
-  if [ -z "$LATEST_BEDROCK_MODEL" ]; then
-    BEDROCK_MODEL_SKIP_REASON="Bedrock inference-profile lookup failed or returned no active profile in the configured model family."
-    echo "  $BEDROCK_MODEL_SKIP_REASON"
-  elif [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
-       && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
-    echo "  - bedrock default model: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
-    echo "context.bedrock.default_model_id|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+  for BEDROCK_MODEL_LEAF in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id embedding_model_id; do
+    CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json "$BEDROCK_MODEL_LEAF")"
+    if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
+      BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.${BEDROCK_MODEL_LEAF} from cdk.json."
+      echo "  $BEDROCK_MODEL_SKIP_REASON"
+      continue
+    fi
+    if [ "$BEDROCK_MODEL_LEAF" = "embedding_model_id" ]; then
+      # Embedding defaults are foundation models, not inference profiles.
+      LATEST_BEDROCK_MODEL="$(get_latest_bedrock_embedding_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
+    else
+      LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
+    fi
+    if [ -z "$LATEST_BEDROCK_MODEL" ]; then
+      BEDROCK_MODEL_SKIP_REASON="Bedrock model lookup failed or returned no active release in the model family of context.bedrock.${BEDROCK_MODEL_LEAF}."
+      echo "  $BEDROCK_MODEL_SKIP_REASON"
+    elif [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
+         && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
+      echo "  - bedrock ${BEDROCK_MODEL_LEAF}: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
+      echo "context.bedrock.${BEDROCK_MODEL_LEAF}|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+    fi
+  done
+  # The vector store keeps its own embedding model at
+  # context.vector_store.embedding_model_id (independent of mission memory's
+  # bedrock.embedding_model_id by design). Same foundation-model drift check,
+  # same re-embed caveat: adopting a newer model means re-ingesting the corpus.
+  # The key is optional (the block ships with defaults), so absence is not a
+  # skip condition for the whole check.
+  VECTOR_STORE_MODEL="$(extract_default_bedrock_model cdk.json embedding_model_id vector_store)"
+  if [ -n "$VECTOR_STORE_MODEL" ]; then
+    LATEST_VECTOR_STORE_MODEL="$(get_latest_bedrock_embedding_model "$VECTOR_STORE_MODEL" us-east-1)" || LATEST_VECTOR_STORE_MODEL=""
+    if [ -z "$LATEST_VECTOR_STORE_MODEL" ]; then
+      BEDROCK_MODEL_SKIP_REASON="Bedrock model lookup failed or returned no active release in the model family of context.vector_store.embedding_model_id."
+      echo "  $BEDROCK_MODEL_SKIP_REASON"
+    elif [ "$VECTOR_STORE_MODEL" != "$LATEST_VECTOR_STORE_MODEL" ] \
+         && [ "$(compare_bedrock_model "$VECTOR_STORE_MODEL" "$LATEST_VECTOR_STORE_MODEL")" = "newer" ]; then
+      echo "  - vector_store embedding_model_id: ${VECTOR_STORE_MODEL} -> ${LATEST_VECTOR_STORE_MODEL}"
+      echo "context.vector_store.embedding_model_id|${VECTOR_STORE_MODEL}|${LATEST_VECTOR_STORE_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+    fi
   fi
 fi
 
@@ -1252,11 +1326,15 @@ PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
 # library, or simply because the latest published release added one)
 # but ``constants.py`` still pins an older one.
 #
-# Three enums are tracked today:
+# Two enums are tracked today:
 #
 #   - ``LAMBDA_PYTHON_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.PYTHON_X_Y``
 #   - ``LAMBDA_NODEJS_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.NODEJS_<major>_X``
-#   - ``AURORA_POSTGRES_VERSION`` → ``aws_cdk.aws_rds.AuroraPostgresEngineVersion.VER_X_Y``
+#
+# The Aurora engine deliberately is NOT an enum: constants.py pins a plain
+# version string applied through ``AuroraPostgresEngineVersion.of()``, and
+# the "Aurora PostgreSQL engine" section validates it against the live RDS
+# API — the authoritative source — instead of the CDK library's catalog.
 #
 # The deps-scan workflow installs the latest ``aws-cdk-lib`` for this
 # section; locally the helper just reflects whatever's already on the
@@ -1305,19 +1383,6 @@ else
     fi
   fi
 
-  # Aurora PostgreSQL engine version enum
-  AURORA_ENUM_CURRENT="$(extract_constant_value AURORA_POSTGRES_VERSION)"
-  AURORA_ENUM_LATEST="$(get_latest_aurora_postgres_version)"
-  if [ -z "$AURORA_ENUM_CURRENT" ] || [ -z "$AURORA_ENUM_LATEST" ]; then
-    mark_scan_incomplete "Could not parse the current or latest Aurora PostgreSQL enum."
-  elif [ "$AURORA_ENUM_CURRENT" != "$AURORA_ENUM_LATEST" ]; then
-    cur_v="$(echo "$AURORA_ENUM_CURRENT" | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
-    lat_v="$(echo "$AURORA_ENUM_LATEST"  | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
-    if [ "$(compare_semver "$cur_v" "$lat_v")" = "newer" ]; then
-      echo "  - AURORA_POSTGRES_VERSION: ${AURORA_ENUM_CURRENT} -> ${AURORA_ENUM_LATEST}"
-      echo "AURORA_POSTGRES_VERSION|aws_rds.AuroraPostgresEngineVersion|${AURORA_ENUM_CURRENT}|${AURORA_ENUM_LATEST}" >> "$CDK_ENUM_RESULTS"
-    fi
-  fi
 fi
 
 CDK_ENUM_COUNT="$(wc -l < "$CDK_ENUM_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -1400,9 +1465,10 @@ check_github_tool() {
   fi
 }
 
-# Trivy (aquasecurity/trivy) — TRIVY_VERSION in the security workflows.
-TRIVY_PIN="$(extract_workflow_env_pin TRIVY_VERSION | head -1)"
-check_github_tool "Trivy (TRIVY_VERSION)" "$TRIVY_PIN" "aquasecurity/trivy" \
+# Trivy (aquasecurity/trivy) — the version-input default of the
+# install-trivy composite action, the single pin every caller inherits.
+TRIVY_PIN="$(extract_install_trivy_pin .github/actions/install-trivy/action.yml | head -1)"
+check_github_tool "Trivy (install-trivy action default)" "$TRIVY_PIN" "aquasecurity/trivy" \
   "https://github.com/aquasecurity/trivy/releases"
 
 # actionlint (rhysd/actionlint) — lint.yml downloads this release archive.
@@ -1410,9 +1476,11 @@ ACTIONLINT_PIN="$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
 check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/actionlint" \
   "https://github.com/rhysd/actionlint/releases"
 
-# Helm (helm/helm) — HELM_VERSION the deps-scan workflow installs.
-HELM_PIN="$(extract_workflow_env_pin HELM_VERSION | head -1)"
-check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
+# Helm (helm/helm) — the authenticated RUN-line pin in
+# lambda/helm-installer/Dockerfile, the single source every CI job derives
+# its HELM_VERSION/HELM_SHA256 from at runtime.
+HELM_PIN="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="HELM_VERSION"{print $2}' | head -1)"
+check_github_tool "Helm (helm-installer Dockerfile)" "$HELM_PIN" "helm/helm" \
   "https://github.com/helm/helm/releases"
 
 # kubeconform (yannh/kubeconform) — KUBECONFORM_VERSION the
@@ -1440,13 +1508,28 @@ check_github_tool "Calico (CALICO_VERSION)" "$CALICO_PIN" "projectcalico/calico"
   "https://github.com/projectcalico/calico/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
-KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"
+# Both kind-action steps (cluster-e2e and examples-smoke) must pin the same
+# kind binary + node image; extract_kind_pins de-duplicates identical pins,
+# so >1 value per key means the two jobs drifted apart.
+for kind_key in kind kind-node; do
+  kind_vals="$(extract_kind_pins .github/workflows/integration-tests.yml \
+    | awk -F'|' -v k="$kind_key" '$1==k{print $2}')"
+  kind_distinct="$(printf '%s\n' "$kind_vals" | sed '/^$/d' | grep -c .)"
+  if [ "$kind_distinct" -gt 1 ]; then
+    kind_list="$(printf '%s\n' "$kind_vals" | sed '/^$/d' | paste -sd',' -)"
+    echo "  - ${kind_key} pins disagree across kind-action steps: ${kind_list}"
+    echo "${kind_key} (across kind-action steps)|${kind_list}" >> "$CONSISTENCY_RESULTS"
+  fi
+done
+KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
 check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
   "https://github.com/kubernetes-sigs/kind/releases"
 
-# kubectl (workflow env) — compare against the stable release for its own
-# minor line (dl.k8s.io), the same source the Dockerfile.dev kubectl pin uses.
-KUBECTL_WF_PIN="$(extract_workflow_env_pin KUBECTL_VERSION | head -1)"
+# kubectl — the authenticated RUN-line pin in lambda/helm-installer/
+# Dockerfile (the single source the CI jobs derive from); compared against
+# the stable release for its own minor line (dl.k8s.io), the same source
+# the Dockerfile.dev kubectl pin uses.
+KUBECTL_WF_PIN="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}' | head -1)"
 if [ -n "$KUBECTL_WF_PIN" ]; then
   kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
   if ! kubectl_latest="$(curl -fsSL --max-time 15 \
@@ -1455,17 +1538,17 @@ if [ -n "$KUBECTL_WF_PIN" ]; then
     mark_scan_incomplete "kubectl stable-version lookup failed for minor ${kubectl_minor}."
   elif [ "$KUBECTL_WF_PIN" != "$kubectl_latest" ] \
      && [ "$(compare_semver "$KUBECTL_WF_PIN" "$kubectl_latest")" = "newer" ]; then
-    echo "  - kubectl (KUBECTL_VERSION): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
-    echo "kubectl (KUBECTL_VERSION)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
+    echo "  - kubectl (helm-installer Dockerfile): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
+    echo "kubectl (helm-installer Dockerfile)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
   fi
 else
-  mark_scan_incomplete "Could not parse KUBECTL_VERSION from the workflows."
+  mark_scan_incomplete "Could not parse the kubectl pin from lambda/helm-installer/Dockerfile."
 fi
 
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
 # minor only. Jumping minors is governed by the kind release, not free drift,
 # so scoping to the same minor avoids false "upgrade" noise.
-KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}')"
+KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
 if [ -n "$KIND_NODE_PIN" ]; then
   node_tag="${KIND_NODE_PIN##*:}"
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
@@ -1504,7 +1587,7 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 #   - AWS CDK CLI across the locked root npm graph and Dockerfile.dev.
 #   - every repository-owned package.json has a lockfile, exact direct pins,
 #     and a matching npm entry in Dependabot.
-#   - the same tool env pin (TRIVY_VERSION/HELM_VERSION/KUBECTL_VERSION)
+#   - the same tool env pin (HELM_VERSION/KUBECTL_VERSION/CALICO_*)
 #     resolving to different values in different workflow files.
 #   - every [build-system] requires entry in pyproject.toml is an exact
 #     ``==`` pin (the drift itself reports through the Python surface).
@@ -1526,7 +1609,7 @@ fi
 
 CANON_PY="$(echo "${LAMBDA_RT_CURRENT:-}" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
 [ -z "$CANON_PY" ] && CANON_PY="$(extract_constant_value LAMBDA_PYTHON_RUNTIME | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
-PY_PINS_UNIQUE="$(extract_python_version_pins "$WORKFLOWS_DIR" | sort -u)"
+PY_PINS_UNIQUE="$(extract_python_version_pins "$WORKFLOWS_DIR" .python-version | sort -u)"
 if [ -n "$PY_PINS_UNIQUE" ]; then
   py_distinct="$(echo "$PY_PINS_UNIQUE" | grep -c .)"
   py_list="$(echo "$PY_PINS_UNIQUE" | paste -sd',' -)"
@@ -1611,7 +1694,23 @@ if [ -n "$NPM_MANAGEMENT_PROBLEMS" ]; then
   done <<< "$NPM_MANAGEMENT_PROBLEMS"
 fi
 
-for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION; do
+# Every tool pinned in more than one workflow (or more than one job) must
+# agree. CALICO_* and METRICS_SERVER_* are here because the kind jobs install
+# them per job — two jobs on different Calico builds would enforce
+# NetworkPolicy with two different engines, and a version/checksum pair that
+# disagrees fails the download as what looks like a flake. The PR-time half of
+# this contract lives in
+# tests/test_supply_chain_integrity.py::test_repeated_workflow_pins_agree_across_jobs.
+# (Trivy is absent from this list on purpose: its pin is the install-trivy
+# composite action's input default, a single declaration that cannot
+# disagree with itself.)
+# (Helm and kubectl are absent from this list on purpose: their pins live
+# only in lambda/helm-installer/Dockerfile — workflows derive their env
+# copies from it at runtime, so a checked-in workflow declaration that
+# could disagree no longer exists. The guard below still catches a stray
+# reintroduced copy.)
+for consistency_var in \
+    CALICO_VERSION CALICO_SHA256 METRICS_SERVER_VERSION METRICS_SERVER_SHA256; do
   cvals="$(extract_workflow_env_pin "$consistency_var")"
   cnum="$(echo "$cvals" | grep -c .)"
   if [ "$cnum" -gt 1 ]; then
@@ -1632,8 +1731,15 @@ if [ -n "$INSTALLER_PINS" ]; then
     installer_val="$(printf '%s\n' "$INSTALLER_PINS" | awk -F'|' -v v="$tool_var" '$1==v{print $2}')"
     [ -n "$installer_val" ] || continue
     all_vals="$installer_val"
+    # Workflows derive their copies from the installer Dockerfile at
+    # runtime, so a checked-in workflow declaration is itself a finding:
+    # it would shadow the derive step's GITHUB_ENV export and drift.
     wf_vals="$(extract_workflow_env_pin "$tool_var")"
-    [ -n "$wf_vals" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$wf_vals")"
+    if [ -n "$wf_vals" ]; then
+      echo "  - ${tool_var} is declared literally in a workflow again (should derive from the installer Dockerfile): ${wf_vals}"
+      echo "${tool_var} (literal workflow copy reintroduced)|${wf_vals}" >> "$CONSISTENCY_RESULTS"
+      all_vals="$(printf '%s\n%s' "$all_vals" "$wf_vals")"
+    fi
     if [ "$tool_var" = "KUBECTL_VERSION" ]; then
       dev_val="$(extract_dockerfile_pins Dockerfile.dev | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}')"
       [ -n "$dev_val" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$dev_val")"
@@ -1952,6 +2058,8 @@ echo "Version consistency:      $CONSISTENCY_COUNT"
 echo "Base-image epochs:        $EPOCH_COUNT"
 echo "Suppression expiries:     $SUPPRESSION_COUNT"
 echo "Lockfile freshness:       $LOCKFILE_COUNT"
+INCOMPLETE_LOOKUP_COUNT="$(sort -u "$INCOMPLETE_REASONS_FILE" 2>/dev/null | grep -c . || true)"
+echo "Incomplete lookups:       ${INCOMPLETE_LOOKUP_COUNT:-0}"
 
 SCAN_COMPLETE=true
 if ! dependency_scan_is_complete \
@@ -2212,10 +2320,17 @@ summary_row() {
   if [ "$BEDROCK_MODEL_COUNT" -gt 0 ]; then
     echo "## Bedrock Default Model"
     echo ""
-    echo "The default Bedrock model id configured at \`cdk.json\`"
-    echo "(\`context.bedrock.default_model_id\`) is behind a newer system-defined"
-    echo "inference profile in the same model family. Update that one value, then"
-    echo "re-capture the scaffold fixture (\`scripts/capture_scaffold_fixtures.py\`)."
+    echo "A Bedrock model default configured in \`cdk.json\` is behind a newer"
+    echo "release in the same model family. For \`bedrock.mission_default_model_id\`,"
+    echo "update the value and re-capture the scaffold fixture"
+    echo "(\`scripts/capture_scaffold_fixtures.py\`). For"
+    echo "\`bedrock.capacity_advisor_default_model_id\` and"
+    echo "\`bedrock.claude_code_default_model_id\`, updating the value is enough."
+    echo "For the embedding keys — \`bedrock.embedding_model_id\` (Mission memory)"
+    echo "and \`vector_store.embedding_model_id\` (workload RAG corpus) — stored"
+    echo "vectors are only comparable to vectors from the same model: plan to"
+    echo "re-embed (for the vector store, re-ingest the corpus) or segregate"
+    echo "existing data before adopting the newer model."
     echo ""
     emit_md_table "Configuration key|Current|Latest" "$BEDROCK_MODEL_RESULTS"
     echo ""
@@ -2225,8 +2340,9 @@ summary_row() {
     echo "## Accelerator Catalog and NodePools"
     echo ""
     echo "The offline check keeps reviewed lifecycle/generation policy, Karpenter"
-    echo "NodePools, and \`historical.watch_instance_types\` synchronized. The online"
-    echo "check compares the catalog with EC2 across enabled commercial Regions."
+    echo "NodePools, \`historical.watch_instance_types\`, and the Spot Placement"
+    echo "Score instance pools synchronized. The online check compares the catalog"
+    echo "with EC2 across enabled commercial Regions."
     echo "Follow each recommended change; review family metadata before refreshing"
     echo "the checked-in catalog."
     echo ""

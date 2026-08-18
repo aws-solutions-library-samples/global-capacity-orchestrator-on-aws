@@ -6,8 +6,11 @@ to reduce code duplication and ensure consistent error handling.
 """
 
 import logging
+import os
 import re
 import subprocess
+from pathlib import Path
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +34,61 @@ def _validate_region(region: str) -> None:
         raise ValueError(f"Invalid AWS region {region!r}: expected format like 'us-east-1'")
 
 
+#: Hostnames that identify a local API-server tunnel in ``cluster.server``.
+_LOCAL_TUNNEL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _kubeconfig_file() -> Path:
+    """The kubeconfig file ``aws eks update-kubeconfig`` would write."""
+    kubeconfig_env = os.environ.get("KUBECONFIG", "")
+    if kubeconfig_env:
+        first = kubeconfig_env.split(os.pathsep)[0]
+        if first:
+            return Path(first)
+    return Path.home() / ".kube" / "config"
+
+
+def _tunnel_pinned_server(cluster_name: str) -> str | None:
+    """Return the pinned local-tunnel server for *cluster_name*, if any.
+
+    ``gco cluster tunnel`` (and callers of its machinery, e.g. the example-job
+    validation harness) rewrite the cluster's kubeconfig entry to point at a
+    localhost tunnel with ``tls-server-name`` pinned to the real endpoint
+    host. Any entry matching that shape is a deliberate operator choice.
+    """
+    import yaml
+
+    path = _kubeconfig_file()
+    try:
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except OSError, yaml.YAMLError:
+        return None
+    expected_suffix = f"cluster/{cluster_name}"
+    for entry in config.get("clusters", []) or []:
+        name = str(entry.get("name", ""))
+        if name != cluster_name and not name.endswith(expected_suffix):
+            continue
+        cluster = entry.get("cluster") or {}
+        server = str(cluster.get("server", ""))
+        host = urlsplit(server).hostname or ""
+        if host in _LOCAL_TUNNEL_HOSTS and cluster.get("tls-server-name"):
+            return server
+    return None
+
+
 def update_kubeconfig(cluster_name: str, region: str) -> None:
-    """Update kubeconfig for an EKS cluster.
+    """Update kubeconfig for an EKS cluster, preserving an active tunnel pin.
+
+    When the cluster's kubeconfig entry already points at a localhost tunnel
+    (``gco cluster tunnel`` rewrites ``cluster.server`` to the tunnel and pins
+    ``tls-server-name`` to the real endpoint host), refreshing it with
+    ``aws eks update-kubeconfig`` would silently rewrite the server back to
+    the private endpoint — unreachable from outside the VPC — and break every
+    kubectl-wrapping command mid-session. Caught live by example-job
+    validation run ex241-66c02e71, where ``gco jobs submit-direct`` clobbered
+    the harness's tunnel and every subsequent kubectl call timed out against
+    the private endpoint. A tunnel-shaped entry is preserved untouched; a
+    dead tunnel fails loudly at connect time, which beats a silent rewrite.
 
     Args:
         cluster_name: Name of the EKS cluster
@@ -45,6 +101,15 @@ def update_kubeconfig(cluster_name: str, region: str) -> None:
     """
     _validate_cluster_name(cluster_name)
     _validate_region(region)
+
+    pinned = _tunnel_pinned_server(cluster_name)
+    if pinned is not None:
+        logger.info(
+            "kubeconfig for %s points at local tunnel %s; preserving it",
+            cluster_name,
+            pinned,
+        )
+        return
 
     cmd = [
         "aws",

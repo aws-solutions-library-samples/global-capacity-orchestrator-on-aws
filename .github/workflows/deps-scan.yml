@@ -16,9 +16,12 @@
 #     via OIDC; falls back gracefully when no creds are configured)
 #   - Aurora PostgreSQL engine versions (AWS creds via OIDC)
 #   - EMR Serverless release labels (AWS creds via OIDC)
-#   - Bedrock default model id from cdk.json context.bedrock.default_model_id
-#     compared against the newest system-defined inference profile in the same
-#     model family (AWS creds via OIDC)
+#   - Bedrock default model ids from cdk.json context.bedrock
+#     (default_model_id, claude_code_default_model_id, embedding_model_id)
+#     plus context.vector_store.embedding_model_id, each compared against the
+#     newest same-family release — inference profiles for the generation
+#     keys, EMBEDDING foundation models for the embedding keys (AWS creds
+#     via OIDC)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
 #   - Dockerfile.dev ARG pins (NODE_VERSION, NPM_VERSION, CDK_VERSION,
@@ -69,10 +72,9 @@ permissions:
   id-token: write  # Required for OIDC authentication to AWS
 
 env:
-  HELM_VERSION: "v4.2.3"
-  HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
-  KUBECTL_VERSION: "v1.36.3"
-  KUBECTL_SHA256: "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"
+  # Helm/kubectl pins (version + checksum) are derived at runtime from
+  # lambda/helm-installer/Dockerfile — the production single source — by the
+  # derive step below.
   # All AWS CLI reads are sequential, and adaptive retries absorb transient
   # account-level contention without increasing the monthly request rate.
   AWS_RETRY_MODE: adaptive
@@ -94,7 +96,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install system tooling
@@ -119,6 +121,19 @@ jobs:
         # of the surfaces still report drift.
         run: |
           pip install --upgrade aws-cdk-lib
+      - name: Derive Helm/kubectl pins from the production installer Dockerfile
+        # lambda/helm-installer/Dockerfile is the single source for both
+        # pins: this loads HELM_VERSION / HELM_SHA256 / KUBECTL_VERSION /
+        # KUBECTL_SHA256 from its authenticated RUN lines, so the scan runs
+        # the exact binaries the installer Lambda ships and a bump edits one
+        # file only.
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | tr '|' '=' | tee -a "$GITHUB_ENV"
+          for pin in HELM_VERSION HELM_SHA256 KUBECTL_VERSION KUBECTL_SHA256; do
+            grep -q "^${pin}=" "$GITHUB_ENV"
+          done
       - name: Install pinned Helm
         run: |
           set -euo pipefail

@@ -16,12 +16,18 @@ Table schema (a single global table; see GCOGlobalStack._create_capacity_poller)
     GSI "by-timestamp": pk = instance_type, sk = timestamp
     (cross-region trend queries for one instance type)
 
-Item attributes: instance_type, region, timestamp, spot_score, spot_price,
-az_count, queue_depth, capacity_blocks_available, capacity_blocks_total,
-capacity_blocks_long_available, capacity_blocks_long_total, and ttl (epoch
-seconds for DynamoDB auto-expiry, default 90 days). The ``*_long_*`` fields
-track availability of extended-term blocks (the poller's long-duration probe,
-default 63 days) separately from the soonest short block.
+Item attributes: instance_type, region, timestamp, spot_score,
+spot_score_at_10, spot_score_at_50, spot_price, az_count, queue_depth,
+capacity_blocks_available, capacity_blocks_total,
+capacity_blocks_long_available, capacity_blocks_long_total, spot_pool (the
+instance pool the Spot Placement Scores were requested for, when pooled), and
+ttl (epoch seconds for DynamoDB auto-expiry, default 90 days). The
+``spot_score*`` family holds one field per configured Spot Placement Score
+target capacity (see SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES); ``spot_score``
+is target capacity 1, keeping every pre-existing snapshot readable without
+migration. The ``*_long_*`` fields track availability of extended-term blocks
+(the poller's long-duration probe, default 63 days) separately from the
+soonest short block.
 
 Numbers are stored as DynamoDB Decimal (the resource API rejects float) and
 re-hydrated to int/float on read. The poller Lambda is self-contained and
@@ -47,13 +53,52 @@ DEFAULT_TABLE_NAME = "gco-capacity-history"
 DEFAULT_RETENTION_DAYS = 90
 GSI_BY_TIMESTAMP = "by-timestamp"
 
+# Spot Placement Score target capacities the schema supports, in display
+# order. The set is closed on purpose: METRIC_FIELDS is a flat, statically
+# known tuple iterated by get_statistics and get_temporal_patterns, so every
+# capacity needs a pre-declared field. ``spot_score_target_capacities`` in
+# cdk.json selects a subset of this set; the config validator, the poller, and
+# the CLI all derive field names through metric_field_for_target_capacity so
+# the naming rule lives in exactly one place.
+SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES: tuple[int, ...] = (1, 10, 50)
+
+
+def metric_field_for_target_capacity(target_capacity: int) -> str:
+    """Map a Spot Placement Score target capacity to its metric field name.
+
+    Capacity 1 maps to the pre-existing ``spot_score`` field so every snapshot
+    written before multi-capacity collection stays readable without migration;
+    capacity N > 1 maps to ``spot_score_at_{N}``. Raises ValueError for a
+    capacity outside SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES, naming the value
+    and the supported set, because unsupported capacities have no statically
+    declared metric field.
+    """
+    # bool is a subclass of int and True == 1, so reject it explicitly rather
+    # than letting a leaked flag silently masquerade as target capacity 1.
+    if isinstance(target_capacity, bool) or (
+        target_capacity not in SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES
+    ):
+        raise ValueError(
+            f"unsupported Spot Placement Score target capacity {target_capacity!r}; "
+            f"supported target capacities: {list(SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES)}"
+        )
+    if target_capacity == 1:
+        return "spot_score"
+    return f"spot_score_at_{target_capacity}"
+
+
 # The numeric metrics tracked per snapshot. Statistics and temporal-pattern
 # aggregation iterate over this tuple, so adding a metric is a one-line change.
-# The ``capacity_blocks_long_*`` pair mirrors the short-duration block metrics
+# The ``spot_score*`` block declares one field per supported Spot Placement
+# Score target capacity (via the naming rule above); ``spot_score`` keeps its
+# leading position so existing column ordering stays readable. The
+# ``capacity_blocks_long_*`` pair mirrors the short-duration block metrics
 # but for the poller's long-duration probe (default 63 days), so trend/alerting
 # queries can distinguish soonest-available blocks from extended-term ones.
 METRIC_FIELDS: tuple[str, ...] = (
     "spot_score",
+    "spot_score_at_10",
+    "spot_score_at_50",
     "spot_price",
     "az_count",
     "queue_depth",
@@ -277,13 +322,17 @@ class CapacityHistoryStore:
         region: str,
         metrics: dict[str, Any],
         *,
+        spot_pool: str | None = None,
         timestamp: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Persist a single capacity snapshot and return the stored item.
 
         metrics is filtered to METRIC_FIELDS; None values are dropped so an
-        absent metric is never stored as zero.
+        absent metric is never stored as zero. spot_pool names the instance
+        pool the snapshot's Spot Placement Scores were requested for; it is a
+        string attribution attribute, not a metric, and is omitted when the
+        instance type is unpooled (no score was collected).
         """
         now = now or _utc_now()
         ts = timestamp or now.isoformat()
@@ -297,6 +346,8 @@ class CapacityHistoryStore:
             "timestamp": ts,
             "ttl": ttl_epoch,
         }
+        if spot_pool is not None:
+            item["spot_pool"] = spot_pool
         for field in METRIC_FIELDS:
             value = metrics.get(field)
             if value is not None:

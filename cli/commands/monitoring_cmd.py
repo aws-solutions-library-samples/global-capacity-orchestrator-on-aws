@@ -60,6 +60,16 @@ _SERVICES: dict[str, dict[str, Any]] = {
         "remote_port": 9003,
         "default_local_port": 9003,
     },
+    # MLflow tracking server (fullnameOverride keeps the bare release
+    # name). The official chart exposes the server 1:1 — Service port 5000
+    # to container port 5000 — and 5000 is also MLflow's canonical local
+    # port, so it runs alongside the Grafana (3000) and Prometheus (9090)
+    # forwards.
+    "mlflow": {
+        "target": "svc/mlflow",
+        "remote_port": 5000,
+        "default_local_port": 5000,
+    },
 }
 
 _MONITORING_NAMESPACE = "monitoring"

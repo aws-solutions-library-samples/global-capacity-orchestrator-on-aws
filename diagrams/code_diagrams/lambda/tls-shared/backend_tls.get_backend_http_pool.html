@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-14T03:46:22Z">
         <title>Private-root backend TLS trust refresh and verified connection pool</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,18 +206,18 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2674=>operation: 'Return a verified HTTPS pool, refreshing its public trust bundle safely.'
-op2676=>operation: global _cached_pool, _last_successful_refresh, _last_refresh_attempt
-op2678=>operation: server_name, parameter_name, parameter_region, ttl, max_stale, retry = _tls_settings()
-op2680=>operation: now = time.monotonic()
-op2682=>operation: age = now - _last_successful_refresh
-cond2685=>condition: if _cached_pool is not None and age < ttl
-io2692=>inputoutput: output: _cached_pool
-e2690=>end: end function return
-cond2699=>condition: if _cached_pool is not None and age <= max_stale and (now - _last_refresh_attempt < retry)
-io2706=>inputoutput: output: _cached_pool
-e2704=>end: end function return
-op2712=>operation: with _pool_lock:
+        <div><textarea id="code" style="width: 100%;" rows="11">op3199=>operation: 'Return a verified HTTPS pool, refreshing its public trust bundle safely.'
+op3201=>operation: global _cached_pool, _last_successful_refresh, _last_refresh_attempt
+op3203=>operation: server_name, parameter_name, parameter_region, ttl, max_stale, retry = _tls_settings()
+op3205=>operation: now = time.monotonic()
+op3207=>operation: age = now - _last_successful_refresh
+cond3210=>condition: if _cached_pool is not None and age < ttl
+io3217=>inputoutput: output: _cached_pool
+e3215=>end: end function return
+cond3224=>condition: if _cached_pool is not None and age <= max_stale and (now - _last_refresh_attempt < retry)
+io3231=>inputoutput: output: _cached_pool
+e3229=>end: end function return
+op3237=>operation: with _pool_lock:
     now = time.monotonic()
     age = now - _last_successful_refresh
     if _cached_pool is not None and age < ttl:
@@ -238,17 +238,17 @@ op2712=>operation: with _pool_lock:
     _last_successful_refresh = now
     return refreshed_pool
 
-op2674->op2676
-op2676->op2678
-op2678->op2680
-op2680->op2682
-op2682->cond2685
-cond2685(yes)->io2692
-io2692->e2690
-cond2685(no)->cond2699
-cond2699(yes)->io2706
-io2706->e2704
-cond2699(no)->op2712
+op3199->op3201
+op3201->op3203
+op3203->op3205
+op3205->op3207
+op3207->cond3210
+cond3210(yes)->io3217
+io3217->e3215
+cond3210(no)->cond3224
+cond3224(yes)->io3231
+io3231->e3229
+cond3224(no)->op3237
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -258,10 +258,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-14T03:46:22Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-14T03:46:22Z">2026-08-14T03:46:22Z</time>
           </p>
           <div id="canvas"></div>
         </div>

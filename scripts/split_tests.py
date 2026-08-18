@@ -51,6 +51,7 @@ DEDICATED_JOB_MODULES: dict[str, str] = {
     "tests/test_cdk_synthesis_matrix.py": "unit:cdk:config-matrix",
     "tests/test_project_name_scoping.py": "unit:cdk:project-name-scoping",
     "tests/test_accelerator_catalog.py": "unit:pytest:core, offline policy step",
+    "tests/test_accelerator_pools.py": "unit:pytest:core, offline policy step",
 }
 
 

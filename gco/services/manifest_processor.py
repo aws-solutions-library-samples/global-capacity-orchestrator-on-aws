@@ -21,9 +21,10 @@ Security Validations:
 Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster
     REGION: AWS region of the cluster
-    MAX_CPU_PER_MANIFEST: Maximum CPU (millicores) per manifest (default: 10000)
-    MAX_MEMORY_PER_MANIFEST: Maximum memory per manifest (default: 32Gi)
-    MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 4)
+    MAX_CPU_PER_MANIFEST: Maximum CPU per manifest (default: 384 cores — see
+        gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS)
+    MAX_MEMORY_PER_MANIFEST: Maximum memory per manifest (default: 4096Gi)
+    MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 16)
     ALLOWED_NAMESPACES: Comma-separated list of allowed namespaces
     VALIDATION_ENABLED: Enable/disable validation (default: true)
 
@@ -39,7 +40,7 @@ import hashlib
 import logging
 import os
 import re
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import yaml
 from kubernetes import client, config, dynamic
@@ -57,13 +58,16 @@ from gco.models import (
     ManifestSubmissionResponse,
     ResourceStatus,
 )
+from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-07-18T01:03:40Z
+# Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
+#   * ``ManifestProcessor.validate_manifest`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_validate_manifest.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_validate_manifest.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -85,6 +89,12 @@ logger = logging.getLogger(__name__)
 # gco/services/queue_processor.py::ACCELERATOR_TAINTS.
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
 
+# Exact pinned group/version for the Kubeflow Trainer v2 TrainJob kind.
+# Kept in lockstep with the kubeflow-trainer chart in
+# lambda/helm-installer/charts.yaml and the extracted runtime manifest in
+# lambda/kubectl-applier-simple/manifests/.
+TRAINJOB_API_VERSION = "trainer.kubeflow.org/v1alpha1"
+
 # Authoritative resource-kind policy shared by the REST and SQS submission
 # paths. Keep the fallback here so both services fail closed to the same set
 # when ALLOWED_KINDS is not explicitly configured.
@@ -97,6 +107,7 @@ DEFAULT_ALLOWED_KINDS = (
     "Service",
     "ConfigMap",
     "Pod",
+    "TrainJob",
 )
 
 # Authoritative image-source defaults shared by the REST and SQS submission
@@ -110,6 +121,10 @@ DEFAULT_TRUSTED_REGISTRIES = (
     "k8s.gcr.io",
     "public.ecr.aws",
     "nvcr.io",
+    # Org-scoped GHCR prefix (matched via the startswith branch) for the
+    # HuggingFace TGI image shipped in examples/inference-tgi.yaml. Scoped to
+    # the org rather than all of ghcr.io on purpose.
+    "ghcr.io/huggingface",
 )
 DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
     "nvidia",
@@ -119,6 +134,12 @@ DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
     "huggingface",
     "amazon",
     "bitnami",
+    # Official orgs of the vLLM and SGLang projects — the images shipped in
+    # examples/inference-vllm.yaml and examples/inference-sglang.yaml. Kept in
+    # lockstep with cdk.json job_validation_policy.trusted_dockerhub_orgs (see
+    # tests/test_manifest_processor_extended.py).
+    "vllm",
+    "lmsysorg",
     "gco",
 )
 
@@ -135,7 +156,210 @@ RESOURCE_API_VERSIONS: dict[str, frozenset[str]] = {
     "Service": frozenset({"v1"}),
     "ConfigMap": frozenset({"v1"}),
     "Pod": frozenset({"v1"}),
+    "TrainJob": frozenset({TRAINJOB_API_VERSION}),
 }
+
+# Actionable guidance when an allowed kind's CRD/controller is absent from
+# the cluster. Without this, a policy-allowed manifest whose addon is
+# disabled fails with an unactionable "Unknown resource type" — or worse,
+# is accepted and never reconciles.
+ADDON_KIND_HINTS: dict[str, str] = {
+    "TrainJob": (
+        "TrainJob requires the kubeflow-trainer addon; enable "
+        'helm.kubeflow_trainer ("enabled": true) in cdk.json and redeploy '
+        "the regional stack"
+    ),
+}
+
+
+def _extract_validation_pod_spec(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Locate the pod spec for image-source validation across resource shapes."""
+    spec = manifest.get("spec", {})
+    pod_spec: Any = {}
+    if "template" in spec:
+        pod_spec = spec.get("template", {}).get("spec", {})
+    elif "jobTemplate" in spec:
+        pod_spec = spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
+    elif "containers" in spec:
+        pod_spec = spec
+    return pod_spec if isinstance(pod_spec, dict) else {}
+
+
+class TrainJobPodSpecs(NamedTuple):
+    """Every pod-spec-shaped view a TrainJob manifest can cause to run.
+
+    A TrainJob has no ``spec.template``: its pods come from the referenced
+    ClusterTrainingRuntime, customized by first-class fields
+    (``spec.trainer``) and by arbitrary runtime patches
+    (``spec.runtimePatches[].trainingRuntimeSpec`` — which can nest complete
+    pod specs, including containers, volumes, and security contexts).
+    Validating only the classic single-pod-spec shapes would let every
+    image-trust, security-context, and resource-cap check pass vacuously,
+    so TrainJob validation runs over this decomposition instead.
+
+    Attributes:
+        trainer: A synthetic pod spec carrying ``spec.trainer``'s image and
+            per-node resources, or ``None`` when neither is set (the runtime
+            defaults then apply — our shipped runtimes pin trusted images).
+        embedded: Every dict carrying a container list found anywhere under
+            ``spec`` (today that means inside ``runtimePatches``); these are
+            live references into the manifest, so security-default injection
+            through them mutates the manifest.
+        num_nodes: ``spec.trainer.numNodes`` (minimum 1) — the replica
+            multiplier for the trainer spec's resource totals.
+    """
+
+    trainer: dict[str, Any] | None
+    embedded: list[dict[str, Any]]
+    num_nodes: int
+
+
+def _collect_embedded_pod_specs(node: Any, found: list[dict[str, Any]]) -> None:
+    """Recursively collect every dict that carries a container list.
+
+    Walking the whole structure — rather than enumerating known patch paths —
+    means a future TrainJob field that can smuggle a container is validated
+    by default instead of silently skipped.
+    """
+    if isinstance(node, dict):
+        if any(
+            isinstance(node.get(key), list)
+            for key in ("containers", "initContainers", "ephemeralContainers")
+        ):
+            found.append(node)
+        for value in node.values():
+            _collect_embedded_pod_specs(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_embedded_pod_specs(item, found)
+
+
+def extract_trainjob_pod_specs(manifest: dict[str, Any]) -> TrainJobPodSpecs:
+    """Decompose a TrainJob manifest into validatable pod-spec views.
+
+    Shared by the REST and SQS submission paths (the queue processor imports
+    this) so TrainJob validation semantics cannot drift between them.
+    """
+    spec = manifest.get("spec")
+    spec = spec if isinstance(spec, dict) else {}
+    trainer = spec.get("trainer")
+    trainer = trainer if isinstance(trainer, dict) else {}
+
+    pseudo: dict[str, Any] | None = None
+    if trainer.get("image") or isinstance(trainer.get("resourcesPerNode"), dict):
+        container: dict[str, Any] = {"name": "trainer"}
+        if trainer.get("image"):
+            container["image"] = trainer["image"]
+        if isinstance(trainer.get("resourcesPerNode"), dict):
+            container["resources"] = {
+                "requests": trainer["resourcesPerNode"].get("requests", {}) or {},
+                "limits": trainer["resourcesPerNode"].get("limits", {}) or {},
+            }
+        pseudo = {"containers": [container]}
+
+    embedded: list[dict[str, Any]] = []
+    _collect_embedded_pod_specs(spec, embedded)
+
+    raw_nodes = trainer.get("numNodes")
+    try:
+        num_nodes = max(1, int(raw_nodes)) if raw_nodes is not None else 1
+    except TypeError, ValueError:
+        num_nodes = 1
+    return TrainJobPodSpecs(trainer=pseudo, embedded=embedded, num_nodes=num_nodes)
+
+
+def trainjob_validation_pod_specs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """All pod-spec views of a TrainJob, synthetic trainer spec first."""
+    specs = extract_trainjob_pod_specs(manifest)
+    views = [specs.trainer] if specs.trainer is not None else []
+    views.extend(specs.embedded)
+    return views
+
+
+def _iter_all_containers(pod_spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """All (container_type, container) pairs incl. init and ephemeral containers."""
+    result: list[tuple[str, dict[str, Any]]] = []
+    for container in pod_spec.get("containers", []):
+        result.append(("container", container))
+    for container in pod_spec.get("initContainers", []):
+        result.append(("initContainer", container))
+    for container in pod_spec.get("ephemeralContainers", []):
+        result.append(("ephemeralContainer", container))
+    return result
+
+
+def _is_trusted_registry_domain(entry: str) -> bool:
+    """True when a registry entry is a domain (dot/colon) rather than a Hub org."""
+    return "." in entry or ":" in entry
+
+
+def validate_image_sources(
+    manifest: dict[str, Any],
+    trusted_registries: list[str] | tuple[str, ...] = DEFAULT_TRUSTED_REGISTRIES,
+    trusted_dockerhub_orgs: list[str] | tuple[str, ...] = DEFAULT_TRUSTED_DOCKERHUB_ORGS,
+) -> tuple[bool, str | None]:
+    """Validate container image sources against the trust allowlists.
+
+    Pure function (no Kubernetes client, no configuration loading) so offline
+    validators — the example-manifest static checks, tests — apply the exact
+    logic the deployed services enforce. ``ManifestProcessor`` delegates here.
+
+    Matching logic:
+    1. No ``/`` in the image → official Docker Hub image (always allowed)
+    2. First segment contains a dot/colon → registry domain → exact match or
+       org-scoped prefix match against ``trusted_registries``
+    3. Otherwise → Docker Hub org → match against ``trusted_dockerhub_orgs``
+
+    TrainJob manifests carry no single pod spec; every image they can run —
+    ``spec.trainer.image`` plus any container smuggled in through
+    ``runtimePatches`` — is validated through the TrainJob decomposition.
+    """
+    try:
+        if manifest.get("kind") == "TrainJob":
+            pod_specs = trainjob_validation_pod_specs(manifest)
+        else:
+            pod_specs = [_extract_validation_pod_spec(manifest)]
+        for pod_spec in pod_specs:
+            failure = _untrusted_container_in_pod_spec(
+                pod_spec, trusted_registries, trusted_dockerhub_orgs
+            )
+            if failure is not None:
+                return False, failure
+        return True, None
+    except Exception as e:
+        logger.error(f"Error validating image sources: {e}")
+        return False, f"Image source validation error: {e}"
+
+
+def _untrusted_container_in_pod_spec(
+    pod_spec: dict[str, Any],
+    trusted_registries: list[str] | tuple[str, ...],
+    trusted_dockerhub_orgs: list[str] | tuple[str, ...],
+) -> str | None:
+    """Return the failure message for the first untrusted image, or None."""
+    for container_type, container in _iter_all_containers(pod_spec):
+        image = container.get("image", "")
+        if not image:
+            continue
+        is_trusted = False
+        if "/" not in image:
+            is_trusted = True
+        else:
+            first_segment = image.split("/")[0]
+            if _is_trusted_registry_domain(first_segment):
+                for registry in trusted_registries:
+                    if first_segment == registry or image.startswith(registry + "/"):
+                        is_trusted = True
+                        break
+            elif first_segment in trusted_dockerhub_orgs:
+                is_trusted = True
+        if not is_trusted:
+            container_name = container.get("name", "unknown")
+            # image comes from the user-submitted manifest; sanitize it
+            # before logging to prevent log injection / forging (CWE-117).
+            logger.warning("Untrusted image source: %s", sanitize_log_value(image))
+            return f"{container_type} '{container_name}': Untrusted image source '{image}'"
+    return None
 
 
 class RetryableQueuedJobApplyError(RuntimeError):
@@ -315,14 +539,28 @@ class ManifestProcessor:
         # Timeout for Kubernetes API calls (seconds)
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
 
-        # Resource quotas and limits
+        # Resource quotas and limits. Defaults come from the shared source of
+        # truth (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS): two
+        # full accelerator-node slices, validated at synth against the
+        # LimitRange / namespace-quota layering invariant.
         self.max_cpu_per_manifest = self._parse_cpu_string(
-            config_dict.get("max_cpu_per_manifest", "10")
+            config_dict.get(
+                "max_cpu_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"],
+            )
         )
         self.max_memory_per_manifest = self._parse_memory_string(
-            config_dict.get("max_memory_per_manifest", "32Gi")
+            config_dict.get(
+                "max_memory_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"],
+            )
         )
-        self.max_gpu_per_manifest = int(config_dict.get("max_gpu_per_manifest", 4))
+        self.max_gpu_per_manifest = int(
+            config_dict.get(
+                "max_gpu_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"],
+            )
+        )
         # Hard-reject accelerator jobs that lack a matching node toleration.
         # Kept in sync with queue_processor.REQUIRE_ACCELERATOR_TOLERATION.
         require_accelerator_toleration = config_dict.get("require_accelerator_toleration", True)
@@ -445,7 +683,16 @@ class ManifestProcessor:
           user has explicitly set it).
 
         The method mutates *manifest* in-place and returns it for convenience.
+
+        For a TrainJob the default is injected into every pod spec embedded
+        in ``runtimePatches`` (live references into the manifest); the base
+        pod template comes from the shipped ClusterTrainingRuntime, which
+        already disables the token.
         """
+        if manifest.get("kind") == "TrainJob":
+            for embedded in extract_trainjob_pod_specs(manifest).embedded:
+                embedded.setdefault("automountServiceAccountToken", False)
+            return manifest
         pod_spec = self._extract_pod_spec(manifest)
         if pod_spec is not None:
             # Use setdefault so we don't override an explicit user choice
@@ -570,6 +817,7 @@ class ManifestProcessor:
                 "CronJob",
                 "StatefulSet",
                 "DaemonSet",
+                "TrainJob",
             ]:
                 resource_valid, resource_error = self._validate_resource_limits(manifest)
                 if not resource_valid:
@@ -607,43 +855,58 @@ class ManifestProcessor:
             errors: list[str] = []
             spec = manifest.get("spec", {})
 
-            # Get pod spec (handle different resource types)
-            pod_spec = {}
-            if "template" in spec:  # Deployment, StatefulSet, etc.
-                pod_spec = spec.get("template", {}).get("spec", {})
-            elif "jobTemplate" in spec:  # CronJob
-                pod_spec = (
-                    spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
-                )
-            elif "containers" in spec:  # Pod
-                pod_spec = spec
+            # Get pod spec(s) with a replica multiplier per spec. A TrainJob
+            # runs its trainer spec once per node, so the manifest's total is
+            # numNodes x the per-node request — counting a 16-node GPU job as
+            # one node would make the cap meaningless.
+            weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
+            if manifest.get("kind") == "TrainJob":
+                trainjob_specs = extract_trainjob_pod_specs(manifest)
+                if trainjob_specs.trainer is not None:
+                    weighted_pod_specs.append((trainjob_specs.trainer, trainjob_specs.num_nodes))
+                weighted_pod_specs.extend((item, 1) for item in trainjob_specs.embedded)
+            else:
+                pod_spec = {}
+                if "template" in spec:  # Deployment, StatefulSet, etc.
+                    pod_spec = spec.get("template", {}).get("spec", {})
+                elif "jobTemplate" in spec:  # CronJob
+                    pod_spec = (
+                        spec.get("jobTemplate", {})
+                        .get("spec", {})
+                        .get("template", {})
+                        .get("spec", {})
+                    )
+                elif "containers" in spec:  # Pod
+                    pod_spec = spec
+                weighted_pod_specs.append((pod_spec, 1))
 
             total_cpu = 0
             total_memory = 0
             total_gpu = 0
 
-            for _container_type, container in self._get_all_containers(pod_spec):
-                resources = container.get("resources", {})
-                requests = resources.get("requests", {})
-                limits = resources.get("limits", {})
+            for pod_spec, multiplier in weighted_pod_specs:
+                for _container_type, container in self._get_all_containers(pod_spec):
+                    resources = container.get("resources", {})
+                    requests = resources.get("requests", {})
+                    limits = resources.get("limits", {})
 
-                # Check CPU (use limits if available, otherwise requests)
-                cpu = limits.get("cpu") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
-                    "cpu", "0"
-                )
-                total_cpu += self._parse_cpu_string(cpu)
+                    # Check CPU (use limits if available, otherwise requests)
+                    cpu = limits.get("cpu") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
+                        "cpu", "0"
+                    )
+                    total_cpu += multiplier * self._parse_cpu_string(cpu)
 
-                # Check Memory
-                memory = limits.get("memory") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
-                    "memory", "0"
-                )
-                total_memory += self._parse_memory_string(memory)
+                    # Check Memory
+                    memory = limits.get("memory") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
+                        "memory", "0"
+                    )
+                    total_memory += multiplier * self._parse_memory_string(memory)
 
-                # Check GPU
-                gpu = limits.get("nvidia.com/gpu") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
-                    "nvidia.com/gpu", "0"
-                )
-                total_gpu += int(gpu)
+                    # Check GPU
+                    gpu = limits.get("nvidia.com/gpu") or requests.get(  # nosec B113 - dict.get(), not HTTP requests
+                        "nvidia.com/gpu", "0"
+                    )
+                    total_gpu += multiplier * int(gpu)
 
             # Validate against limits
             if total_cpu > self.max_cpu_per_manifest:
@@ -684,23 +947,38 @@ class ManifestProcessor:
         toleration would stay Pending forever, so we reject it at admission
         with an actionable message instead.
 
+        For a TrainJob the accelerator request usually lives in
+        ``spec.trainer.resourcesPerNode`` while the toleration can only be
+        expressed through a ``runtimePatches`` pod spec, so the requested set
+        and the tolerations are each unioned across every pod-spec view
+        before matching.
+
         Returns:
             Tuple of (is_valid, error_message). error_message is None if valid.
         """
-        pod_spec = self._extract_pod_spec(manifest)
-        if not pod_spec:
+        if manifest.get("kind") == "TrainJob":
+            pod_specs = trainjob_validation_pod_specs(manifest)
+            hint_example = "examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)"
+        else:
+            single = self._extract_pod_spec(manifest)
+            pod_specs = [single] if single else []
+            hint_example = "examples/gpu-job.yaml"
+        if not pod_specs:
             return True, None
 
-        requested = self._requested_accelerators(pod_spec)
+        requested: set[str] = set()
+        tolerations: list[dict[str, Any]] = []
+        for pod_spec in pod_specs:
+            requested.update(self._requested_accelerators(pod_spec))
+            tolerations.extend(pod_spec.get("tolerations", []) or [])
         if not requested:
             return True, None
 
-        tolerations = pod_spec.get("tolerations", []) or []
         for taint in requested:
             if not _toleration_matches(tolerations, taint):
                 hint = (
                     f"add a matching toleration (e.g. key '{taint}', operator "
-                    "'Exists', effect 'NoSchedule'); see examples/gpu-job.yaml"
+                    f"'Exists', effect 'NoSchedule'); see {hint_example}"
                 )
                 return (
                     False,
@@ -748,18 +1026,29 @@ class ManifestProcessor:
             # Basic security checks - prevent privileged containers
             spec = manifest.get("spec", {})
 
-            # Get pod spec (handle different resource types)
-            pod_spec = None
-            if "template" in spec:
-                pod_spec = spec.get("template", {}).get("spec", {})
-            elif "jobTemplate" in spec:
-                pod_spec = (
-                    spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
-                )
-            elif "containers" in spec:
-                pod_spec = spec
+            # Get pod spec(s) (handle different resource types). A TrainJob
+            # can nest complete pod specs inside runtimePatches, so every one
+            # of them gets the full check — otherwise privileged containers
+            # or hostPath volumes could ride in through a patch.
+            pod_specs: list[dict[str, Any]]
+            if manifest.get("kind") == "TrainJob":
+                pod_specs = trainjob_validation_pod_specs(manifest)
+            else:
+                pod_spec = None
+                if "template" in spec:
+                    pod_spec = spec.get("template", {}).get("spec", {})
+                elif "jobTemplate" in spec:
+                    pod_spec = (
+                        spec.get("jobTemplate", {})
+                        .get("spec", {})
+                        .get("template", {})
+                        .get("spec", {})
+                    )
+                elif "containers" in spec:
+                    pod_spec = spec
+                pod_specs = [pod_spec] if pod_spec else []
 
-            if pod_spec:
+            for pod_spec in pod_specs:
                 # --- Pod-level checks ---
                 if self.block_host_network and pod_spec.get("hostNetwork", False):
                     return False, "hostNetwork is not permitted"
@@ -838,87 +1127,16 @@ class ManifestProcessor:
         return "." in entry or ":" in entry
 
     def _validate_image_sources(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Validate container image sources.
+        """Validate container image sources against this deployment's allowlists.
 
-        Uses proper domain matching instead of prefix matching to prevent
-        dependency confusion attacks (e.g., 'gco-malicious/evil' should NOT
-        match a trusted registry entry 'gco').
-
-        Matching logic:
-        1. If image has no '/' → official Docker Hub image (always allowed)
-        2. If image has '/' and part before first '/' contains a dot or colon
-           → it's a registry domain → match against trusted_registries
-        3. If image has '/' but first segment has no dot/colon
-           → it's a Docker Hub org → match against trusted_dockerhub_orgs
-        4. Digest references (@sha256:) are accepted from any trusted source
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
+        Delegates to the module-level :func:`validate_image_sources` so the
+        REST/SQS services and offline validators share one implementation.
         """
-        try:
-            trusted_registries = self.trusted_registries
-            trusted_dockerhub_orgs = self.trusted_dockerhub_orgs
-
-            spec = manifest.get("spec", {})
-
-            # Get pod spec (handle different resource types)
-            pod_spec = {}
-            if "template" in spec:
-                pod_spec = spec.get("template", {}).get("spec", {})
-            elif "jobTemplate" in spec:
-                pod_spec = (
-                    spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
-                )
-            elif "containers" in spec:
-                pod_spec = spec
-
-            for container_type, container in self._get_all_containers(pod_spec):
-                image = container.get("image", "")
-                if not image:
-                    continue
-
-                is_trusted = False
-
-                # Case 1: Official Docker Hub image (no slash) — e.g., "python:3.14", "busybox"
-                if "/" not in image:
-                    is_trusted = True
-                else:
-                    # Image has a slash — determine if first segment is a domain or org
-                    first_segment = image.split("/")[0]
-
-                    if self._is_registry_domain(first_segment):
-                        # Case 2: First segment looks like a domain (has dot or colon)
-                        # Match against trusted_registries as exact domain match
-                        for registry in trusted_registries:
-                            if first_segment == registry:
-                                is_trusted = True
-                                break
-                            # Also support multi-level registry paths like "public.ecr.aws"
-                            # where the image might be "public.ecr.aws/lambda/python:3.14"
-                            if image.startswith(registry + "/"):
-                                is_trusted = True
-                                break
-                    else:
-                        # Case 3: First segment has no dot/colon — it's a Docker Hub org
-                        # Match against trusted_dockerhub_orgs
-                        if first_segment in trusted_dockerhub_orgs:
-                            is_trusted = True
-
-                if not is_trusted:
-                    container_name = container.get("name", "unknown")
-                    # image comes from the user-submitted manifest; sanitize it
-                    # before logging to prevent log injection / forging (CWE-117).
-                    logger.warning("Untrusted image source: %s", sanitize_log_value(image))
-                    return (
-                        False,
-                        f"{container_type} '{container_name}': Untrusted image source '{image}'",
-                    )
-
-            return True, None
-
-        except Exception as e:
-            logger.error(f"Error validating image sources: {e}")
-            return False, f"Image source validation error: {e}"
+        return validate_image_sources(
+            manifest,
+            trusted_registries=self.trusted_registries,
+            trusted_dockerhub_orgs=self.trusted_dockerhub_orgs,
+        )
 
     async def process_manifest_submission(
         self, request: ManifestSubmissionRequest
@@ -1330,6 +1548,11 @@ class ManifestProcessor:
                 sanitize_log_value(api_version),
                 sanitize_log_value(kind),
             )
+            # A policy-allowed kind whose addon is not installed gets the
+            # actionable remedy instead of an inscrutable discovery error.
+            addon_hint = ADDON_KIND_HINTS.get(kind)
+            if addon_hint:
+                raise ValueError(addon_hint) from e
             raise ValueError(f"Unknown resource type: {api_version}/{kind}") from e
 
     async def _create_resource(self, manifest_data: dict[str, Any]) -> Any:
@@ -1647,9 +1870,20 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
 
     # Load configuration from environment
     config_dict = {
-        "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
-        "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
-        "max_gpu_per_manifest": int(os.getenv("MAX_GPU_PER_MANIFEST", "4")),
+        "max_cpu_per_manifest": os.getenv(
+            "MAX_CPU_PER_MANIFEST",
+            str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+        ),
+        "max_memory_per_manifest": os.getenv(
+            "MAX_MEMORY_PER_MANIFEST",
+            str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+        ),
+        "max_gpu_per_manifest": int(
+            os.getenv(
+                "MAX_GPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+            )
+        ),
         "require_accelerator_toleration": parse_boolean_environment(
             "REQUIRE_ACCELERATOR_TOLERATION", True
         ),
