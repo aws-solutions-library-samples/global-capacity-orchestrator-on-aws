@@ -11,7 +11,9 @@ rather than grep-based, so a reformatted workflow cannot slip past them.
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -54,18 +56,15 @@ ALLOWED_RUNNER_LABELS = {
     "windows-latest",
 }
 
-#: A Git commit is the only immutable way to name a third-party action.
-COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
-#: ``uses: owner/action@<40-hex>`` as it appears on a raw line, with whatever
-#: trails the ref captured so the version comment can be checked.
-PINNED_USES_LINE_RE = re.compile(
-    r"^\s*(?:-\s+)?uses:\s+(?P<ref>[^\s@]+@[0-9a-f]{40})(?P<trailer>.*)$"
-)
-
-#: The trailing comment that keeps a SHA-pinned ref readable and gives
-#: Dependabot the version it rewrites alongside the SHA.
-VERSION_COMMENT_RE = re.compile(r"^\s+#\s*v\d+(?:\.\d+)*\s*$")
+#: The SHA-pinning rules (format, agreement, and the optional upstream check)
+#: live in one module so this PR-time contract and the ``lint:actions:pinning``
+#: CI job that also calls GitHub cannot drift apart.
+_PIN_MODULE = ROOT / ".github" / "scripts" / "verify_action_pins.py"
+_pin_spec = importlib.util.spec_from_file_location("verify_action_pins", _PIN_MODULE)
+assert _pin_spec is not None and _pin_spec.loader is not None
+pins = importlib.util.module_from_spec(_pin_spec)
+sys.modules.setdefault("verify_action_pins", pins)
+_pin_spec.loader.exec_module(pins)
 
 
 def _workflow_files() -> list[Path]:
@@ -297,7 +296,7 @@ def test_pages_workflow_run_trigger_stays_fenced_to_trusted_code() -> None:
 
 
 @pytest.mark.parametrize("path", _action_reference_files(), ids=_ref_id)
-def test_every_third_party_action_is_pinned_to_a_commit_sha(path: Path) -> None:
+def test_every_third_party_action_is_pinned_with_an_exact_version_comment(path: Path) -> None:
     """A tag is a mutable pointer; whoever owns the action can move it.
 
     ``uses: owner/action@v7`` — or even ``@v7.0.1`` — resolves at run time to
@@ -308,62 +307,56 @@ def test_every_third_party_action_is_pinned_to_a_commit_sha(path: Path) -> None:
     be repointed, which is why supply-chain guidance for Actions is to pin to
     one. Local ``./.github/actions/*`` refs are exempt: they resolve inside the
     checked-out commit, so they are already as pinned as the workflow itself.
-    """
-    offenders: list[str] = []
-    for label, step in _labelled_steps(_load(path)):
-        ref = step.get("uses")
-        if not isinstance(ref, str) or ref.startswith("./"):
-            continue
-        _, separator, version = ref.partition("@")
-        if not separator or not COMMIT_SHA_RE.match(version):
-            offenders.append(f"{label}: {ref}")
 
-    assert offenders == [], (
-        f"{_ref_id(path)}: action ref is not pinned to a 40-character commit SHA "
-        f"(resolve the tag with `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha` "
-        f"and keep the tag as a trailing `# vX.Y.Z` comment): {offenders}"
+    The trailing ``# vX.Y.Z`` is part of the contract, not decoration:
+    Dependabot rewrites it alongside the SHA, and it is the only thing that
+    lets a reviewer say which release a hash is *supposed* to be. It must be an
+    exact three-part version — a bare ``# v7`` is unfalsifiable, so nothing
+    downstream (including the upstream check below) could catch a wrong pin.
+
+    Rules live in ``.github/scripts/verify_action_pins.py`` so this contract and
+    the ``lint:actions:pinning`` job cannot disagree about what "pinned" means.
+    """
+    problems = pins.format_problems(pins.collect_pins(path))
+    assert problems == [], (
+        f"{_ref_id(path)}: resolve a tag with "
+        f"`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha` and keep it as a "
+        f"trailing `# vX.Y.Z` comment: {problems}"
     )
 
 
 @pytest.mark.parametrize("path", _action_reference_files(), ids=_ref_id)
-def test_every_pinned_action_records_its_human_readable_version(path: Path) -> None:
-    """A bare SHA is unreviewable, so each pin carries its tag in a comment.
+def test_pinned_refs_are_all_visible_to_the_line_parser(path: Path) -> None:
+    """The version comment can only be checked by reading raw lines.
 
-    The comment is what makes the pin maintainable rather than merely safe:
-    Dependabot recognizes the ``@<sha>  # <tag>`` shape and rewrites *both*
-    halves when it bumps an action, and a reviewer can tell v7.0.1 from v6
-    without resolving hashes by hand. Losing the comment turns future
-    dependency diffs into forty opaque characters.
-
-    Line-based on purpose — comments do not survive YAML parsing — so it also
-    asserts it saw every ref the structural walk found, meaning a pin cannot
-    hide from this check behind unusual formatting.
+    Comments do not survive YAML parsing, so ``verify_action_pins`` is
+    line-based — which means a ref written in a shape its regex misses would
+    skip every check above. Comparing its count against a structural walk of
+    the same file closes that hole: a flow-style ``- {uses: 'owner/a@sha'}``
+    step is invisible to the line parser and must therefore fail here.
     """
-    text = path.read_text(encoding="utf-8")
-    missing: list[str] = []
-    seen = 0
-    for number, line in enumerate(text.splitlines(), start=1):
-        match = PINNED_USES_LINE_RE.match(line)
-        if not match:
-            continue
-        seen += 1
-        if not VERSION_COMMENT_RE.match(match.group("trailer")):
-            missing.append(f"line {number}: {match.group('ref')}")
-
-    assert missing == [], (
-        f"{_ref_id(path)}: SHA-pinned action is missing its trailing "
-        f"`  # vX.Y.Z` version comment: {missing}"
-    )
-
+    seen = len(pins.collect_pins(path))
     structural = sum(
-        1
-        for _, step in _labelled_steps(_load(path))
-        if isinstance(step.get("uses"), str) and COMMIT_SHA_RE.match(step["uses"].partition("@")[2])
+        1 for _, step in _labelled_steps(_load(path)) if isinstance(step.get("uses"), str)
     )
     assert seen == structural, (
-        f"{_ref_id(path)}: found {seen} pinned ref(s) by line but {structural} by "
-        "structure; a ref is formatted so this check cannot see it"
+        f"{_ref_id(path)}: found {seen} ref(s) by line but {structural} by structure; "
+        "a ref is formatted so the pinning checks cannot see it"
     )
+
+
+def test_every_action_reference_agrees_on_one_commit_and_one_version() -> None:
+    """One action must mean one commit and one version, repo-wide.
+
+    Two SHAs for the same action would run two different builds of it in the
+    same pipeline — the drift this repo already forbids for tool version pins.
+    Two *versions* for one commit means at least one comment is lying, which
+    makes every version comment untrustworthy. Subpath actions
+    (``github/codeql-action/init`` and ``…/analyze``) are keyed per repository
+    because they are one repo at one commit.
+    """
+    problems = pins.consistency_problems(pins.collect_all_pins())
+    assert problems == [], f"action pins disagree with each other: {problems}"
 
 
 def test_dependabot_covers_composite_actions_that_pin_third_party_actions() -> None:

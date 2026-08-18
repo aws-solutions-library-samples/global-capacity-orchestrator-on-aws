@@ -76,7 +76,7 @@ Each file maps to one row in the README badge table.
 | `workflows/floci-tests.yml` | Floci Tests | Emulated-AWS integration + E2E layer against a digest-pinned [Floci](https://github.com/floci-io/floci) service container with zero AWS credentials: wire-level DynamoDB/SQS/S3/Secrets Manager/CloudFormation behavior through unmodified production classes, harness inventory scanners, and the live-validation preflight+baseline E2E via `gco release validate --emulator-endpoint` (see `docs/FLOCI_TESTING.md`) |
 | `workflows/integration-tests.yml` | Integration Tests | Autopilot boot probe (`gco autopilot` on a bare runner self-installs the pinned Claude Code, pre-warms and boots the in-tree gco MCP server plus every curated companion under claude, and dispatches to Bedrock with the shipped default model, stopped fail-closed at the credential boundary by fabricated keys — AWS's 403 is the success condition), per-Dockerfile build + functional container tests (boot under pod-equivalent constraints, probe/auth-fail-closed/degraded-503 HTTP contracts, kubelet exec-command shapes, SIGTERM shutdown, moto-SQS consume/reject exit codes for the queue processor), dev-container smoke (pinned toolchain incl. uv/uvx, native-arch binaries, in-container `gco autopilot` plan + config generation), kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 5 service deployments), kind examples smoke (Calico-enforced, pinned kubeflow-trainer + mlflow charts installed with the exact `charts.yaml` values via `validate_helm_charts.py --emit-ref/--emit-values`, ServiceMonitor CRD from the pinned kube-prometheus-stack, the post-Helm mlflow NetworkPolicies applied with the deployment token filled from kind's own node CIDR so the kubelet-probe allow is exercised for real — the chart's policy admits only pod sources and silently drops probes, which is invisible under kindnet, the real `examples/kubeflow-trainjob.yaml` applied as the manifest-processor ServiceAccount and run to `Complete` with the all-reduce sentinel verified, a `SubjectAccessReview` (SAR) sweep derived from the submission allowlist — SAR is the `authorization.k8s.io` object that answers "may this user *verb* this resource?", posted as an explicit body rather than through `kubectl auth can-i`, because can-i resolves its resource argument via discovery and answers "no" for a CRD kind whose chart is not installed yet, and mlflow host-validation probes — allowed Host 200 / arbitrary Host 403 / `/health` exempt), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
 | `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
-| `workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, strict MkDocs wiki build (the same build `pages.yml` runs at deploy time, so wiki breakage fails pre-merge), mypy (strict / stacks / lambda), ruff (format + check, imports included), shellcheck, yamllint |
+| `workflows/lint.yml` | Linting | actionlint, action SHA-pin verification (including each version comment resolved against GitHub), hadolint, markdownlint, strict MkDocs wiki build (the same build `pages.yml` runs at deploy time, so wiki breakage fails pre-merge), mypy (strict / stacks / lambda), ruff (format + check, imports included), shellcheck, yamllint |
 
 ### Satellites
 
@@ -129,14 +129,52 @@ Local composite refs (`uses: ./.github/actions/<name>`) are deliberately
 unpinned — they resolve inside the checked-out commit, so they are already as
 fixed as the workflow calling them.
 
-`tests/test_workflow_security_contract.py` enforces both halves across every
-workflow *and* every composite action, so a new job cannot reintroduce a tag ref
-or drop a version comment. It also checks that [Dependabot](#dependabot) is
-configured to see the composite actions, since a pin nothing bumps is a pin that
-rots. Resolve a tag to its SHA with:
+Resolve a tag to its SHA with:
 
 ```bash
 gh api repos/actions/checkout/commits/v7.0.1 --jq '.sha'
+```
+
+#### What CI enforces
+
+The rules live in [`scripts/verify_action_pins.py`](scripts/verify_action_pins.py)
+so the PR-time pytest contract and the CI job cannot disagree about what
+"pinned" means. Three layers, over every workflow **and** every composite
+action:
+
+| Layer | Checks | Where it runs |
+|---|---|---|
+| Format | Ref is a 40-hex commit SHA; comment is an exact `vX.Y.Z` | `unit:pytest:core` + `lint:actions:pinning` |
+| Agreement | Every reference to one action resolves to one commit and claims one version | same |
+| Truth | The tag in the comment really points at the pinned SHA on GitHub | `lint:actions:pinning` only (needs network) |
+
+The comment must be an exact three-part version. A bare `# v7` is
+*unfalsifiable* — nobody, human or machine, can tell which release the hash is
+supposed to be, so the truth layer would have nothing to check.
+
+Agreement is keyed per **repository**, not per action path, because
+`github/codeql-action/init` and `github/codeql-action/analyze` are one
+repository at one commit; two SHAs there would mean two builds of the same
+action in one pipeline.
+
+Truth is what makes the comment more than a claim: `lint:actions:pinning`
+resolves each `# vX.Y.Z` through `api.github.com/repos/{owner}/{repo}/commits/{tag}`
+— the same endpoint the pins were generated from — and fails when the tag points
+somewhere else. That catches a mistyped or copy-pasted comment *and* a tag the
+publisher has since moved. One request per repository (~15 total), authenticated
+with `github.token`. A lookup that cannot be completed (rate limit, timeout,
+deleted tag) is reported without failing the job: an api.github.com blip must
+not block unrelated pull requests, or people learn to ignore the check.
+
+The contract also asserts [Dependabot](#dependabot) is configured to see these
+pins, since a pin nothing bumps is a pin that rots.
+
+Run it locally:
+
+```bash
+python .github/scripts/verify_action_pins.py                    # format + agreement
+GH_TOKEN=$(gh auth token) \
+  python .github/scripts/verify_action_pins.py --verify-upstream  # + resolve every tag
 ```
 
 Because the finding is now structurally impossible, semgrep's
@@ -536,6 +574,7 @@ Most jobs map to a single command you can run locally. Quick reference:
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 yamllint -c .github/config/.yamllint.yml --strict .
+python .github/scripts/verify_action_pins.py   # add --verify-upstream to resolve each tag
 bash .github/scripts/use-pinned-npm.sh package.json
 npm ci --ignore-scripts --no-audit --no-fund
 npm run lint:markdown
