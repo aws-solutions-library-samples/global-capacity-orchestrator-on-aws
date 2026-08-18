@@ -315,10 +315,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: Install bats + deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bats jq python3 python3-yaml bash
+      - name: Install bats + deps (with retry)
+        uses: ./.github/actions/apt-install-with-retry
+        with:
+          packages: bats jq python3 python3-yaml bash
       - name: Run BATS suite
         run: bats tests/BATS/
 

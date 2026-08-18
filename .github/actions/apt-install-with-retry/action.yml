@@ -1,0 +1,96 @@
+name: "APT Install (with retry)"
+description: |
+  Runs `apt-get update` + `apt-get install` with bounded network timeouts and
+  a retry loop, so one flaky Ubuntu mirror cannot stall a job.
+
+  GitHub-hosted runners resolve archive.ubuntu.com through an Azure-internal
+  mirror list (/etc/apt/apt-mirrors.txt). When azure.archive.ubuntu.com is
+  unreachable, stock apt retries every index fetch against it with its default
+  120-second timeouts before falling back — observed in CI as ten minutes of
+  `Ign:` lines on `sudo apt-get update` while the job's actual tests never
+  ran, burning most of a 15-minute job timeout on a network fault the build
+  does not control.
+
+  This action bounds each connection attempt to seconds instead of minutes,
+  lets apt retry individual fetches, and re-runs the update+install pair with
+  backoff so a mid-install mirror blip (or a stale index causing 404s) is
+  self-healing. A genuinely missing package or broken dependency is not
+  masked — it still fails on the final attempt with the real apt error.
+
+  `apt-get update` and `apt-get install` are retried as one unit because a
+  failed install often means the index is stale; refreshing before every
+  install attempt is what makes the retry meaningful.
+inputs:
+  packages:
+    description: |
+      Whitespace- or newline-separated package names to install, e.g.
+      `bats jq python3-yaml`.
+    required: true
+  no-install-recommends:
+    description: |
+      Pass "true" to install with --no-install-recommends. Off by default so
+      call sites keep the exact package set they installed before adopting
+      this action (some packages rely on their recommends).
+    required: false
+    default: "false"
+  attempts:
+    description: "Total update+install attempts (default 3). Set to 1 to disable retries."
+    required: false
+    default: "3"
+  delay:
+    description: "Seconds to sleep between attempts (default 15)."
+    required: false
+    default: "15"
+runs:
+  using: "composite"
+  steps:
+    - name: apt-get update + install with retry
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        NO_INSTALL_RECOMMENDS: ${{ inputs.no-install-recommends }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        DELAY: ${{ inputs.delay }}
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        if [ -z "${PACKAGES// /}" ]; then
+          echo "::error::apt-install-with-retry: no packages supplied"
+          exit 1
+        fi
+        # Bound every network operation: apt's default per-connection timeout
+        # is 120s, which turns one dead mirror into minutes of Ign: retries.
+        # Acquire::Retries lets apt itself retry an individual fetch (it falls
+        # back to the next mirror in the runner's mirror list on failure).
+        apt_opts=(
+          -o Acquire::Retries=3
+          -o Acquire::http::Timeout=15
+          -o Acquire::https::Timeout=15
+          -o Acquire::ConnectionAttemptDelayMsec=250
+        )
+        install_opts=(-y)
+        if [ "${NO_INSTALL_RECOMMENDS}" = "true" ]; then
+          install_opts+=(--no-install-recommends)
+        fi
+        # Word-splitting PACKAGES is intentional: one package per word.
+        # shellcheck disable=SC2086
+        set -- $PACKAGES
+        attempt=1
+        while true; do
+          echo "::group::apt-get update + install (attempt ${attempt}/${ATTEMPTS})"
+          if sudo -E apt-get "${apt_opts[@]}" update \
+             && sudo -E apt-get "${apt_opts[@]}" "${install_opts[@]}" install "$@"; then
+            echo "::endgroup::"
+            break
+          fi
+          echo "::endgroup::"
+          if [ "$attempt" -ge "$ATTEMPTS" ]; then
+            echo "::error::apt-get install of '$*' failed after ${ATTEMPTS} attempt(s)."
+            exit 1
+          fi
+          echo "::warning::apt-get update/install failed" \
+            "(attempt ${attempt}/${ATTEMPTS}); retrying in ${DELAY}s." \
+            "Usually a transient Ubuntu-mirror/network error."
+          sleep "$DELAY"
+          attempt=$((attempt + 1))
+        done

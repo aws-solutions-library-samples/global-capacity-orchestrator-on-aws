@@ -2256,11 +2256,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Install the latest Podman
+      - name: Install the latest Podman (with retry)
+        uses: ./.github/actions/apt-install-with-retry
+        with:
+          packages: podman
+      - name: Configure rootless Podman for CI
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y podman
           podman version
           # Rootless podman in CI has no systemd user session, so crun's sd-bus
           # calls fail ("Interactive authentication required") during build/run.
@@ -2321,7 +2323,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Install the latest Finch (runfinch APT repo)
+      - name: Prepare the runfinch APT repo
         run: |
           set -euo pipefail
           # runfinch-finch depends on the distro `containerd` (+ runc >= 1.1.5),
@@ -2354,9 +2356,12 @@ jobs:
           rm -f "${finch_key}"
           echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
             | sudo tee /etc/apt/sources.list.d/runfinch-finch.list
-          sudo apt-get update
-          sudo apt-get install -y runfinch-finch
-          sudo finch --version
+      - name: Install the latest Finch (with retry)
+        uses: ./.github/actions/apt-install-with-retry
+        with:
+          packages: runfinch-finch
+      - name: Verify the Finch CLI
+        run: sudo finch --version
       - name: Start the Finch daemon stack and wait for it
         run: |
           set -uo pipefail

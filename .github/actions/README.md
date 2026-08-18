@@ -5,6 +5,7 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 ## Table of Contents
 
 - [Actions](#actions)
+  - [`apt-install-with-retry`](#apt-install-with-retry)
   - [`build-image-with-retry`](#build-image-with-retry)
   - [`build-lambda-package`](#build-lambda-package)
   - [`docker-build-with-retry`](#docker-build-with-retry)
@@ -16,6 +17,30 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 - [Adding a New Action](#adding-a-new-action)
 
 ## Actions
+
+### `apt-install-with-retry`
+
+Runs `apt-get update` + `apt-get install` with bounded network timeouts and a retry loop. GitHub-hosted runners resolve `archive.ubuntu.com` through an Azure-internal mirror list, and when `azure.archive.ubuntu.com` is unreachable, stock apt retries every index fetch against it with 120-second default timeouts before falling back — observed in CI as ten minutes of `Ign:` lines on a plain `sudo apt-get update` while the job's actual tests never started. This action caps each connection attempt at seconds (`Acquire::http::Timeout=15`, `Acquire::Retries=3`), and re-runs the update+install pair with backoff so a mid-install mirror blip or stale index is self-healing. `update` and `install` retry as one unit because a failed install often means a stale index. A genuinely missing package or dependency conflict is not masked — it still fails on the final attempt with the real apt error.
+
+**Inputs:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `packages` | (required) | Whitespace- or newline-separated package names to install. |
+| `no-install-recommends` | `false` | Pass `"true"` to install with `--no-install-recommends`. |
+| `attempts` | `3` | Total update+install attempts. Set to `1` to disable retries. |
+| `delay` | `15` | Seconds to sleep between attempts. |
+
+**Used by:** `unit-tests.yml` (`unit:bats:shell`), `deps-scan.yml` (system tooling), and `integration-tests.yml` (`integration:dev-alias:podman`, `integration:dev-alias:finch`) — every job that installs Ubuntu packages on a hosted runner. Steps that add a third-party APT repo first (the Finch job) keep that setup in their own step; this action's `update` then indexes the new source before installing from it.
+
+**Usage:**
+
+```yaml
+- name: Install bats + deps (with retry)
+  uses: ./.github/actions/apt-install-with-retry
+  with:
+    packages: bats jq python3-yaml
+```
 
 ### `build-image-with-retry`
 
