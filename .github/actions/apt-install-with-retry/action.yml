@@ -1,31 +1,51 @@
 name: "APT Install (with retry)"
 description: |
-  Runs `apt-get update` + `apt-get install` with bounded network timeouts and
-  a retry loop, so one flaky Ubuntu mirror cannot stall a job.
+  Runs `apt-get update` + `apt-get install` with ordered fallback mirrors,
+  bounded network timeouts, and a retry loop, so one flaky Ubuntu mirror
+  cannot stall or fail a job.
 
-  GitHub-hosted runners resolve archive.ubuntu.com through an Azure-internal
-  mirror list (/etc/apt/apt-mirrors.txt). When azure.archive.ubuntu.com is
-  unreachable, stock apt retries every index fetch against it with its default
-  120-second timeouts before falling back — observed in CI as ten minutes of
-  `Ign:` lines on `sudo apt-get update` while the job's actual tests never
-  ran, burning most of a 15-minute job timeout on a network fault the build
-  does not control.
+  GitHub-hosted runners resolve archive.ubuntu.com through an ordered
+  mirror list (/etc/apt/apt-mirrors.txt, the `mirror+file:` scheme in
+  ubuntu.sources). When the first mirror (azure.archive.ubuntu.com) is
+  unreachable-but-hanging, stock apt waits out a timeout for EVERY index
+  fetch before falling back, and `update` fetches 15-25 index files —
+  observed in CI as 10+ minutes of `Ign:` lines while the job's actual
+  tests never ran. Bounded timeouts alone are not enough: 15s x 3 retries
+  x ~20 files still serializes into minutes per attempt.
 
-  This action bounds each connection attempt to seconds instead of minutes,
-  lets apt retry individual fetches, and re-runs the update+install pair with
-  backoff so a mid-install mirror blip (or a stale index causing 404s) is
-  self-healing. A genuinely missing package or broken dependency is not
-  masked — it still fails on the final attempt with the real apt error.
+  Three layers make this self-healing without masking real failures:
 
-  `apt-get update` and `apt-get install` are retried as one unit because a
-  failed install often means the index is stale; refreshing before every
-  install attempt is what makes the retry meaningful.
+  1. Mirror health probe — each configured mirror is probed once with a
+     5-second cap; the reachable ones are written to the runner's mirror
+     list in the given order. apt then falls back across healthy mirrors
+     natively, per fetch, and a dead mirror costs one probe instead of a
+     timeout per index file. If no mirror answers, the list is left
+     untouched (an empty mirror list would be worse than a slow one).
+  2. Bounded fetch timeouts — a mirror that degrades mid-run costs
+     seconds per fetch, not apt's 120-second default.
+  3. update+install retried as one unit with backoff — a failed install
+     often means a stale index, so every retry refreshes first.
+
+  A genuinely missing package or dependency conflict still fails on the
+  final attempt with the real apt error.
 inputs:
   packages:
     description: |
       Whitespace- or newline-separated package names to install, e.g.
       `bats jq python3-yaml`.
     required: true
+  mirrors:
+    description: |
+      Ordered, whitespace- or newline-separated Ubuntu archive mirror base
+      URLs. The first healthy mirror is primary; later entries are apt's
+      native per-fetch fallbacks. The default keeps the runner's fast
+      Azure-internal mirror first with the canonical archive behind it.
+      Only applied when the runner resolves apt through a mirror list
+      (/etc/apt/apt-mirrors.txt); third-party repos are never touched.
+    required: false
+    default: |
+      http://azure.archive.ubuntu.com/ubuntu/
+      https://archive.ubuntu.com/ubuntu/
   no-install-recommends:
     description: |
       Pass "true" to install with --no-install-recommends. Off by default so
@@ -48,20 +68,49 @@ runs:
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
+        MIRRORS: ${{ inputs.mirrors }}
         NO_INSTALL_RECOMMENDS: ${{ inputs.no-install-recommends }}
         ATTEMPTS: ${{ inputs.attempts }}
         DELAY: ${{ inputs.delay }}
         DEBIAN_FRONTEND: noninteractive
       run: |
         set -euo pipefail
+        # APT_MIRRORS_FILE is overridable for the action's own offline tests;
+        # the default is the file ubuntu.sources references via mirror+file.
+        APT_MIRRORS_FILE="${APT_MIRRORS_FILE:-/etc/apt/apt-mirrors.txt}"
         if [ -z "${PACKAGES// /}" ]; then
           echo "::error::apt-install-with-retry: no packages supplied"
           exit 1
         fi
+        # ------------------------------------------------------------------
+        # Mirror fallback management. Probe each configured mirror once,
+        # fast, and write the healthy ones (in order) to the runner's
+        # mirror list. Any HTTP response counts as alive — curl fails only
+        # on transport errors (timeout, refused, no route), which is
+        # exactly the hang-forever mode this guards against.
+        # ------------------------------------------------------------------
+        if [ -f "$APT_MIRRORS_FILE" ] && [ -n "${MIRRORS// /}" ]; then
+          healthy=()
+          for mirror in $MIRRORS; do
+            if curl -sS --max-time 5 -o /dev/null "$mirror" 2>/dev/null; then
+              healthy+=("$mirror")
+              echo "mirror probe: $mirror is reachable"
+            else
+              echo "::warning::mirror probe: ${mirror} is unreachable; skipping it this run."
+            fi
+          done
+          if [ "${#healthy[@]}" -gt 0 ]; then
+            printf '%s\n' "${healthy[@]}" | sudo tee "$APT_MIRRORS_FILE" >/dev/null
+            echo "apt mirror order: ${healthy[*]}"
+          else
+            echo "::warning::no configured mirror answered its probe;" \
+              "leaving ${APT_MIRRORS_FILE} untouched and relying on timeouts + retries."
+          fi
+        fi
         # Bound every network operation: apt's default per-connection timeout
-        # is 120s, which turns one dead mirror into minutes of Ign: retries.
-        # Acquire::Retries lets apt itself retry an individual fetch (it falls
-        # back to the next mirror in the runner's mirror list on failure).
+        # is 120s. With the mirror list pre-probed these caps are defense in
+        # depth against a mirror that degrades mid-run, and Acquire::Retries
+        # lets apt retry an individual fetch against the next mirror.
         apt_opts=(
           -o Acquire::Retries=3
           -o Acquire::http::Timeout=15

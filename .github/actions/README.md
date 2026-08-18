@@ -20,13 +20,16 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 
 ### `apt-install-with-retry`
 
-Runs `apt-get update` + `apt-get install` with bounded network timeouts and a retry loop. GitHub-hosted runners resolve `archive.ubuntu.com` through an Azure-internal mirror list, and when `azure.archive.ubuntu.com` is unreachable, stock apt retries every index fetch against it with 120-second default timeouts before falling back — observed in CI as ten minutes of `Ign:` lines on a plain `sudo apt-get update` while the job's actual tests never started. This action caps each connection attempt at seconds (`Acquire::http::Timeout=15`, `Acquire::Retries=3`), and re-runs the update+install pair with backoff so a mid-install mirror blip or stale index is self-healing. `update` and `install` retry as one unit because a failed install often means a stale index. A genuinely missing package or dependency conflict is not masked — it still fails on the final attempt with the real apt error.
+Runs `apt-get update` + `apt-get install` with ordered fallback mirrors, bounded network timeouts, and a retry loop. GitHub-hosted runners resolve `archive.ubuntu.com` through an ordered mirror list (`/etc/apt/apt-mirrors.txt`); when the first mirror (`azure.archive.ubuntu.com`) is unreachable-but-hanging, stock apt waits out a timeout for **every** index fetch before falling back — observed in CI as ten-plus minutes of `Ign:` lines on a plain `sudo apt-get update` while the job's actual tests never started. Bounded timeouts alone don't fix that mode: 15 s × 3 retries × ~20 index files still serializes into minutes per attempt.
+
+Three layers, none of which mask real failures: each configured mirror is health-probed once with a 5-second cap and the reachable ones are written to the runner's mirror list in order (apt then falls back across healthy mirrors natively, per fetch; if nothing answers, the list is left untouched); every fetch is capped (`Acquire::http::Timeout=15`, `Acquire::Retries=3`) so a mirror that degrades mid-run costs seconds; and the update+install pair retries as one unit with backoff, because a failed install often means a stale index. A genuinely missing package or dependency conflict still fails on the final attempt with the real apt error. Steps that add a third-party APT repo keep that setup in their own step — the mirror list only governs the Ubuntu archive, and other sources are never touched.
 
 **Inputs:**
 
 | Name | Default | Description |
 |------|---------|-------------|
 | `packages` | (required) | Whitespace- or newline-separated package names to install. |
+| `mirrors` | Azure mirror, then `archive.ubuntu.com` | Ordered Ubuntu archive mirror base URLs. First healthy mirror is primary; later entries are apt's native per-fetch fallbacks. Add regional mirrors here for more fallback depth. |
 | `no-install-recommends` | `false` | Pass `"true"` to install with `--no-install-recommends`. |
 | `attempts` | `3` | Total update+install attempts. Set to `1` to disable retries. |
 | `delay` | `15` | Seconds to sleep between attempts. |
