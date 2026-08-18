@@ -713,46 +713,64 @@ We use semantic versioning (MAJOR.MINOR.PATCH):
 
 ### CI/CD Token Setup
 
-No long-lived tokens are required for the GitHub Actions pipeline. Both the release and dependency-scan workflows use the built-in `GITHUB_TOKEN`:
+No long-lived tokens are required for the GitHub Actions pipeline. The release and dependency-scan workflows use the built-in `GITHUB_TOKEN`:
 
-- `release.yml` needs `contents: write` to push the version commit, tag, and create the GitHub Release. The workflow declares this at the top of the file.
+- `release.yml` (stage 1) needs `contents: write` to push the `release/vX.Y.Z` branch, `pull-requests: write` to open the release PR, and `actions: write` to dispatch the PR-gating CI workflows against that branch. It also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests" to be enabled.
+- `release-publish.yml` (stage 2) needs `contents: write` to push the release tag and create the GitHub Release. Each workflow declares its permissions at the top of the file.
 - `deps-scan.yml` needs `issues: write` to open a dependency-drift issue. Also declared at the top of the file.
 
-If you fork and run your own copy, no setup is needed — the tokens are generated per-run by GitHub.
+If you fork and run your own copy, no PAT setup is needed — the tokens are generated per-run by GitHub. Do enable the Actions PR-creation setting above, and keep a `v*` tag ruleset (with GitHub Actions as a bypass actor) if you want released tags immutable for humans.
 
 ### Creating a Release
 
-Releases are triggered from the Actions tab:
+Releases run in two stages so `main` stays fully branch-protected — nothing,
+including the release automation, pushes to it directly.
 
 1. Go to the repository on GitHub → Actions → Release.
-2. Click "Run workflow".
-3. Pick the bump type (`patch`, `minor`, or `major`) and click "Run workflow".
+2. Click "Run workflow" on `main`, pick the bump type (`patch`, `minor`, or
+   `major`), and run it.
+3. Stage 1 (`release.yml`) bumps the version files on a `release/vX.Y.Z`
+   branch, opens a pull request titled `Release vX.Y.Z`, and dispatches the
+   PR-gating CI workflows against that branch (required checks appear on the
+   PR as those runs finish).
+4. Review, approve, and **squash-merge** the release PR. Squash keeps the
+   merge commit subject `Release vX.Y.Z (#N)`, which stage 2 verifies before
+   tagging.
+5. Stage 2 (`release-publish.yml`) fires on the merge, creates the annotated
+   `vX.Y.Z` tag on the merge commit, and creates the GitHub Release with
+   auto-generated notes (categorized per `.github/release.yml`).
 
-The workflow will:
-
-- Run `scripts/bump_version.py` with the chosen bump type.
-- Commit the version change to `main` (as `github-actions[bot]`).
-- Create and push a `v<new-version>` git tag.
-- Create a GitHub Release with auto-generated notes (categorized per `.github/release.yml`).
+If stage 2 fails partway (for example, the tag pushed but the Release wasn't
+created), re-run it from Actions → Release Publish → "Run workflow" on
+`main`; every step is idempotent and completes only what's missing. A
+VERSION change that reaches `main` without a `Release vX.Y.Z` commit subject
+is deliberately not auto-tagged — publish it explicitly the same way after
+review.
 
 #### Manual Release (Alternative)
 
-If you need to release manually:
+If you need to release without stage 1, open the version-bump PR by hand;
+merging it still triggers stage 2:
 
 ```bash
-# Bump version
+# Bump version on a release branch
+git checkout -b release/v1.2.3 main
 python scripts/bump_version.py patch  # or minor/major
 
-# Commit and tag
+# Commit and open the PR (title must stay "Release v1.2.3")
 git add VERSION gco/_version.py cli/__init__.py
 git commit -m "Release v1.2.3"
-git tag -a v1.2.3 -m "Release v1.2.3"
-git push origin main
-git push origin v1.2.3
+git push -u origin release/v1.2.3
+gh pr create --base main --title "Release v1.2.3" \
+  --body "Manual version bump. release-publish.yml tags on merge."
 
-# Create the GitHub Release with generated notes
-gh release create v1.2.3 --generate-notes
+# After approval, squash-merge; release-publish.yml tags the merge commit
+# and creates the GitHub Release with generated notes.
 ```
+
+Direct pushes of release commits or `v*` tags to `main` are blocked by
+branch protection and the `v*` tag ruleset; only the publish workflow
+creates release tags.
 
 After releasing, confirm the auto-generated GitHub Release notes read well (they are categorized by PR label per `.github/release.yml`), then deploy to production environments. The GitHub Releases page is GCO's changelog — there is no separate `CHANGELOG.md` to maintain.
 

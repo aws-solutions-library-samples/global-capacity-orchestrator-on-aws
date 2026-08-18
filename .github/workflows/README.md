@@ -28,7 +28,8 @@ Workflows outside the four badged gates above. Most are schedule- or dispatch-dr
 
 | File | Trigger | Description |
 |------|---------|-------------|
-| `release.yml` | `workflow_dispatch` | Bump version, tag, create GitHub Release with auto-generated notes |
+| `release.yml` | `workflow_dispatch` | Stage 1 of the release: bump version files on a `release/vX.Y.Z` branch, open the release PR, and dispatch the PR-gating CI workflows against the branch (pushes/PRs made with `GITHUB_TOKEN` don't trigger `push:`/`pull_request:` runs, so required checks are attached via `workflow_dispatch` — the documented exception). Never writes to `main` |
+| `release-publish.yml` | `push`: `main` (`VERSION` only), manual | Stage 2 of the release: on the squash-merged release PR, create the annotated `vX.Y.Z` tag and the GitHub Release with auto-generated notes. Idempotent (safe to re-dispatch after a partial failure), refuses to move an existing tag, and skips VERSION changes whose commit subject isn't `Release vX.Y.Z` |
 | `deps-scan.yml` | Monthly cron + manual | Check pinned dependencies (including the autopilot Claude Code pin and companion MCP server liveness), offline accelerator/NodePool policy, and online [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) accelerator-catalog drift; update one rolling issue when findings exist |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the project site to GitHub Pages: the MkDocs wiki (`wiki/`) at the root, the HTML coverage report at `/coverage/`, and the shields.io badge JSON at the site root. Split out of Unit Tests so a Pages outage (or wiki build failure) can't fail the test gate; `lint:mkdocs:strict` runs the same build on PRs |

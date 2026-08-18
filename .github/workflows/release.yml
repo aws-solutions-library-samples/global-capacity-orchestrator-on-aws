@@ -1,18 +1,35 @@
 # =============================================================================
-# release.yml — Manual version bump + GitHub Release
+# release.yml — Stage 1 of 2: open the version-bump release pull request
 # =============================================================================
 #
-# Replaces the GitLab "release:patch/minor/major" manual jobs. Triggered
-# from Actions → Release → Run workflow, with a `bump` input (patch/minor/major).
+# Triggered from Actions → Release → Run workflow, with a `bump` input
+# (patch/minor/major). Stage 1 never writes to main: it bumps the version
+# files on a `release/vX.Y.Z` branch, opens a pull request, and pre-dispatches
+# the PR-gating CI workflows against that branch. The release lands on main
+# through the same review-and-required-checks gate as every other change.
+#
+# Stage 2 — release-publish.yml — fires on the merge commit (push to main
+# touching VERSION) and publishes the annotated tag + GitHub Release.
+#
+# Why the explicit CI dispatch step exists:
+#   Pushes and pull requests created with the built-in GITHUB_TOKEN do not
+#   trigger `push:`/`pull_request:` workflow runs (GitHub suppresses them to
+#   prevent recursive workflows). workflow_dispatch is the documented
+#   exception, so this workflow dispatches each PR-gating workflow against
+#   the release branch; their check runs attach to the branch head SHA and
+#   satisfy the pull request's required status checks.
 #
 # Concurrency:
-#   Release runs are serialized repository-wide. A half-run release is worse
-#   than a slow one, so queued runs wait and in-progress runs are never canceled.
+#   Release runs are serialized repository-wide (shared group with stage 2).
+#   A half-run release is worse than a slow one, so queued runs wait and
+#   in-progress runs are never canceled.
 #
 # Permissions model:
-#   `contents: write` on the built-in GITHUB_TOKEN is enough for the push
-#   and the release creation. No long-lived PAT is required (unlike the
-#   retired GitLab RELEASE_TOKEN).
+#   The built-in GITHUB_TOKEN needs `contents: write` (push the release
+#   branch), `pull-requests: write` (open the release PR — also requires the
+#   repository setting "Allow GitHub Actions to create and approve pull
+#   requests"), and `actions: write` (dispatch the CI workflows). No
+#   long-lived PAT is required.
 #
 # =============================================================================
 
@@ -30,32 +47,36 @@ on:
           - minor
           - major
 
-# Serialize every release regardless of the selected ref. A second dispatch
-# waits for the active release instead of racing its version commit and tag.
+# Serialize every release, sharing one group with release-publish.yml. A
+# second dispatch waits for the active release instead of racing its
+# version branch and PR.
 concurrency:
   group: release
   cancel-in-progress: false
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write
 
 jobs:
-  release:
-    # A dispatch may select any branch or tag. Only a protected branch may
-    # receive a release commit; tags and unprotected branches are fail-closed.
-    if: github.ref_type == 'branch' && github.ref_protected
+  open-release-pr:
+    name: "release:open-pr"
+    # Releases always cut from main. A dispatch that selected a tag or any
+    # other branch is fail-closed.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need full history + tags so git tag -a can see them, and the
-          # token must persist so the subsequent push is authenticated.
+          # Full history + tags so the bump commit sits on the real branch
+          # tip, and the token must persist so the branch push authenticates.
           fetch-depth: 0
           persist-credentials: true
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version-file: ".python-version"
+          python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Configure git identity
@@ -78,23 +99,84 @@ jobs:
           new_version=$(python -c "from gco._version import __version__; print(__version__)")
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
           echo "Bumped to v$new_version"
-      - name: Commit, tag, push
+      - name: Push release branch
         env:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
           set -euo pipefail
+          BRANCH="release/v${NEW_VERSION}"
+          # Refuse to release a version that already shipped. The tag is the
+          # immutable record; a duplicate means the bump input was wrong.
+          if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
+            echo "Tag v${NEW_VERSION} already exists; refusing to open a duplicate release PR" >&2
+            exit 1
+          fi
+          git checkout -b "$BRANCH"
           git add VERSION gco/_version.py cli/__init__.py
           git commit -m "Release v${NEW_VERSION}"
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          # Publish the commit and its annotated tag as one transaction so a
-          # rejected ref cannot leave a branch-only or tag-only release behind.
-          git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"
-      - name: Create GitHub Release with generated notes
+          git push origin "HEAD:refs/heads/${BRANCH}"
+      - name: Open release pull request
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
-        # Release notes are categorized by PR label per .github/release.yml.
         run: |
-          gh release create "v${NEW_VERSION}" \
-            --title "v${NEW_VERSION}" \
-            --generate-notes
+          set -euo pipefail
+          BRANCH="release/v${NEW_VERSION}"
+          {
+            echo "Version bump to v${NEW_VERSION} via the two-stage release flow."
+            echo ""
+            echo "On merge, release-publish.yml tags the merge commit as v${NEW_VERSION}"
+            echo "and creates the GitHub Release with generated notes."
+            echo ""
+            echo "Merge with **squash** so the commit subject stays 'Release v${NEW_VERSION}';"
+            echo "the publish stage verifies that subject before tagging."
+          } > "${RUNNER_TEMP}/release-pr-body.md"
+          pr_url=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "Release v${NEW_VERSION}" \
+            --body-file "${RUNNER_TEMP}/release-pr-body.md")
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          # The release PR is process noise in the next release's generated
+          # notes; the ignore-for-release label excludes it (.github/release.yml).
+          # Label application is best-effort so a missing label never blocks
+          # a release.
+          gh pr edit "$pr_url" --add-label ignore-for-release \
+            || echo "ignore-for-release label missing; continuing without it"
+      - name: Dispatch required CI on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          BRANCH="release/v${NEW_VERSION}"
+          # Every workflow whose checks are required on main-bound PRs.
+          # grafana-dashboards.yml is deliberately absent: it is
+          # paths-filtered and not a required check, and a version-files-only
+          # diff can never touch its paths.
+          for workflow in \
+            unit-tests.yml \
+            lint.yml \
+            security.yml \
+            integration-tests.yml \
+            floci-tests.yml \
+            inference-streaming-proxy.yml \
+            mooncake-image.yml; do
+            gh workflow run "$workflow" --ref "$BRANCH"
+            echo "Dispatched $workflow on $BRANCH"
+          done
+      - name: Write run summary
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Release v${NEW_VERSION} PR opened"
+            echo ""
+            echo "- Pull request: ${PR_URL}"
+            echo "- CI was dispatched against the release branch; required checks appear on the PR as runs complete."
+            echo "- Next step: review, approve, and **squash-merge** the PR."
+            echo "- On merge, release-publish.yml tags the merge commit and publishes the GitHub Release."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -50,7 +50,8 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 │   ├── security.yml                  # Security workflow
 │   ├── lint.yml                      # Linting workflow
 │   ├── mooncake-image.yml            # Mooncake vLLM image contract test (push/PR)
-│   ├── release.yml                   # Manual workflow_dispatch release
+│   ├── release.yml                   # Release stage 1: open the version-bump PR
+│   ├── release-publish.yml           # Release stage 2: tag + GitHub Release on merge
 │   ├── deps-scan.yml                 # Monthly dependency scan
 │   ├── cve-scan.yml                  # Weekly CVE scan
 │   └── pages.yml                     # Publish coverage report to GitHub Pages (workflow_run)
@@ -82,7 +83,8 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 
 | File | Trigger | Purpose |
 |------|---------|---------|
-| `workflows/release.yml` | `workflow_dispatch` | Bump version, tag, create a GitHub Release with auto-generated notes. Uses the built-in `GITHUB_TOKEN` — no PAT required |
+| `workflows/release.yml` | `workflow_dispatch` | Release stage 1: bump the version files on a `release/vX.Y.Z` branch, open the release PR, and dispatch the PR-gating CI workflows against that branch so its required checks report (pushes/PRs made with `GITHUB_TOKEN` never trigger `push:`/`pull_request:` runs; `workflow_dispatch` is the documented exception). Never writes to `main`, so it works under full branch protection. Uses the built-in `GITHUB_TOKEN` — no PAT required |
+| `workflows/release-publish.yml` | `push`: `main` (paths: `VERSION`) + manual | Release stage 2: after the release PR squash-merges, verify all three version mirrors agree, create the annotated `vX.Y.Z` tag on the merge commit, and create the GitHub Release with auto-generated notes. Idempotent end to end (a partial failure is completed by re-dispatching), refuses to move an existing v-tag, and only auto-publishes push events whose commit subject is `Release vX.Y.Z` — a stray VERSION edit never becomes a release |
 | `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check pinned dependency versions, deterministic accelerator/NodePool/watch-list policy, and live EC2 accelerator-catalog drift; open or refresh one rolling issue when drift is found, then comment and close it after a complete clean scan with no skipped checks |
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
 | `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Publish the project site to GitHub Pages via `actions/deploy-pages`: build the MkDocs orientation wiki (`wiki/` + `mkdocs.yml`, strict mode) from the triggering run's commit at the site root, download that run's `pytest-coverage` artifact and serve `htmlcov/` at `/coverage/`, and regenerate the shields.io badge JSON at the site root (so the README badge's percent-encoded URL never changes). Split out of `unit-tests.yml` so a GitHub Pages backend stall — or a wiki build failure — surfaces here instead of failing the test gate; the PR-side `lint:mkdocs:strict` job runs the identical build pre-merge |
@@ -98,9 +100,9 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 
 All CI workflows share the same safety defaults:
 
-- `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** on `release.yml` — a half-run release is worse than a slow one. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight.
+- `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** for the release pair — `release.yml` and `release-publish.yml` share one repository-wide `group: release` with `cancel-in-progress: false`, so releases serialize across both stages and a half-run release is never cancelled mid-flight. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight.
 - `timeout-minutes` on every job (10 min for lint, 15 for unit, 20–30 for integration).
-- `permissions:` scoped narrowly. All CI workflows run with `contents: read`; `release.yml` upgrades to `contents: write` so the version-bump job can push a tag and create a GitHub Release. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
+- `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Caching: `actions/setup-python@v7.0.0` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v6.1.0` on `.mypy_cache/`.
 - AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials@v6.2.3` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
 

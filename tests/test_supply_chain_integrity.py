@@ -305,12 +305,61 @@ def test_incomplete_reports_do_not_claim_zero_count_surfaces_are_current() -> No
     assert "Zero-count surfaces are provisional, not confirmed current." in scanner
 
 
-def test_release_publishes_branch_and_tag_atomically() -> None:
+def test_release_stage_one_never_writes_to_main() -> None:
+    """Stage 1 (release.yml) must go through the PR gate like any other change.
+
+    The version bump lands on a release/vX.Y.Z branch and merges through
+    review + required checks. Direct pushes to the dispatching ref, tag
+    creation, and GitHub Release creation are stage-2 concerns; any of them
+    reappearing here would bypass branch protection.
+    """
     workflow = _read(".github/workflows/release.yml")
 
-    assert ('git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"') in workflow
-    assert 'git push origin "HEAD:${GITHUB_REF}"' not in workflow
-    assert 'git push origin "v${NEW_VERSION}"' not in workflow
+    assert 'git push origin "HEAD:refs/heads/${BRANCH}"' in workflow
+    assert "HEAD:${GITHUB_REF}" not in workflow
+    assert "HEAD:refs/heads/main" not in workflow
+    assert "git tag" not in workflow
+    assert "gh release create" not in workflow
+    # Only from main: a dispatch on a tag or side branch is fail-closed.
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+
+
+def test_release_stage_two_publishes_only_the_merged_release_commit() -> None:
+    """Stage 2 (release-publish.yml) tags main's merge commit, idempotently.
+
+    It reacts only to main pushes that change VERSION, refuses to move an
+    existing v-tag (immutability), verifies every version mirror agrees
+    before tagging, and gates push-event publishes on the `Release vX.Y.Z`
+    commit subject so a stray VERSION edit is never auto-tagged.
+    """
+    workflow = _read(".github/workflows/release-publish.yml")
+
+    assert "branches: [main]" in workflow
+    assert "- VERSION" in workflow
+    assert 'git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$GITHUB_SHA"' in workflow
+    assert 'git push origin "refs/tags/v${NEW_VERSION}"' in workflow
+    assert "--verify-tag" in workflow
+    # Immutability + idempotency guards.
+    assert "Released tags are immutable" in workflow
+    assert "already points at" in workflow
+    assert "gh release view" in workflow
+    # Version mirrors must agree before anything is published.
+    assert "refusing to tag" in workflow
+    # Push-event publishes require a release commit subject.
+    assert 'pattern="^Release v${NEW_VERSION//./\\\\.}( \\(#[0-9]+\\))?$"' in workflow
+
+
+def test_release_workflows_share_one_serialized_concurrency_group() -> None:
+    """Both stages share `group: release` and never cancel in-flight runs.
+
+    A publish interleaving with the next release's branch cut (or a canceled
+    half-publish) is exactly the torn state the old single-stage atomic push
+    protected against; the shared no-cancel group is its replacement.
+    """
+    for path in (".github/workflows/release.yml", ".github/workflows/release-publish.yml"):
+        workflow = _read(path)
+        assert "group: release" in workflow, path
+        assert "cancel-in-progress: false" in workflow, path
 
 
 def test_model_sync_uses_an_immutable_official_aws_cli_image() -> None:

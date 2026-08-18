@@ -1,0 +1,152 @@
+# =============================================================================
+# release-publish.yml — Stage 2 of 2: tag the merged release and publish
+# =============================================================================
+#
+# Fires when a push to main changes VERSION — normally the squash-merge of a
+# release/vX.Y.Z pull request opened by release.yml (stage 1). It creates the
+# annotated v-tag on the merge commit and publishes the GitHub Release with
+# generated notes. Both actions are idempotent, so a failed run can be
+# re-dispatched (workflow_dispatch) and it finishes whatever is missing.
+#
+# Guard rails:
+#   * The version files must agree (VERSION is the source of truth;
+#     gco/_version.py and cli/__init__.py must mirror it) — a drifted merge
+#     fails loudly instead of tagging an inconsistent tree.
+#   * On push events the head commit subject must be `Release vX.Y.Z`
+#     (optionally with the squash-merge `(#N)` suffix). A VERSION edit that
+#     arrives any other way is deliberately NOT auto-tagged; an operator can
+#     still publish it explicitly via workflow_dispatch after review.
+#   * A v-tag that already exists pointing at a different commit is an
+#     immutability violation and fails the run; pointing at this commit is
+#     the resume case and skips tag creation.
+#
+# Concurrency:
+#   Shares the `release` group with stage 1 so a publish never interleaves
+#   with the next release's branch cut.
+#
+# Permissions model:
+#   `contents: write` on the built-in GITHUB_TOKEN covers the tag push and
+#   the release creation. The v* tag ruleset grants the GitHub Actions app
+#   bypass for tag creation; humans cannot create or move v-tags by hand.
+#
+# =============================================================================
+
+name: Release Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+  # Manual re-publish for a merged release whose publish run failed midway.
+  # Every step is idempotent, so re-running completes only the missing half.
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: "release:publish"
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history + tags: the immutability check compares any existing
+          # v-tag against the commit being published, and the annotated tag
+          # needs an authenticated push.
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Resolve and verify the version
+        id: version
+        run: |
+          set -euo pipefail
+          new_version=$(tr -d '[:space:]' < VERSION)
+          mirrored=$(python3 -c "from gco._version import __version__; print(__version__)")
+          if [ "$new_version" != "$mirrored" ]; then
+            echo "VERSION ($new_version) and gco/_version.py ($mirrored) disagree; refusing to tag" >&2
+            exit 1
+          fi
+          # cli/__init__.py's literal fallback assignment (used when gco is
+          # not importable) must mirror VERSION too.
+          cli_mirrored=$(sed -n 's/^ *__version__ = "\(.*\)"$/\1/p' cli/__init__.py | head -1)
+          if [ "$new_version" != "$cli_mirrored" ]; then
+            echo "VERSION ($new_version) and cli/__init__.py ($cli_mirrored) disagree; refusing to tag" >&2
+            exit 1
+          fi
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "Publishing v$new_version"
+      - name: Require a release commit subject (push events only)
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch: operator explicitly requested publish"
+            exit 0
+          fi
+          subject=$(git log -1 --format=%s)
+          pattern="^Release v${NEW_VERSION//./\\.}( \(#[0-9]+\))?$"
+          if printf '%s\n' "$subject" | grep -qE "$pattern"; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Release publish skipped"
+              echo ""
+              echo "VERSION changed on main, but the commit subject is:"
+              echo ""
+              echo "    ${subject}"
+              echo ""
+              echo "not \`Release v${NEW_VERSION}\`, so this was not a release PR merge."
+              echo "To publish it anyway, re-run this workflow via workflow_dispatch."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Create and push the annotated tag (idempotent)
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          tag="v${NEW_VERSION}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            tagged_commit=$(git rev-parse "${tag}^{commit}")
+            if [ "$tagged_commit" != "$GITHUB_SHA" ]; then
+              echo "Tag ${tag} already exists at ${tagged_commit}, not ${GITHUB_SHA}." >&2
+              echo "Released tags are immutable; bump the version again instead." >&2
+              exit 1
+            fi
+            echo "Tag ${tag} already points at ${GITHUB_SHA}; skipping tag creation"
+          else
+            git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$GITHUB_SHA"
+            git push origin "refs/tags/v${NEW_VERSION}"
+          fi
+      - name: Create GitHub Release with generated notes (idempotent)
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        # Release notes are categorized by PR label per .github/release.yml.
+        run: |
+          set -euo pipefail
+          if gh release view "v${NEW_VERSION}" >/dev/null 2>&1; then
+            echo "Release v${NEW_VERSION} already exists; skipping creation"
+            exit 0
+          fi
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION}" \
+            --verify-tag \
+            --generate-notes
