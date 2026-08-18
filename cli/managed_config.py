@@ -306,10 +306,14 @@ def _write_document(path: Path, document: dict[str, Any], original_raw: bytes) -
     """Serialize like the existing feature-toggle writers, atomically.
 
     ``json.dumps(indent=2)`` with insertion order preserves ``_comment_*``
-    keys and their placement. The original trailing-newline state is kept so
-    diffs stay minimal regardless of how the file was last formatted.
+    keys and their placement. ``ensure_ascii=False`` keeps the em dashes and
+    other non-ASCII characters inside those comments as UTF-8 rather than
+    rewriting them to ``\\uXXXX`` escapes — without it, adding one Region
+    rewrites every documented block in the file and buries the real change in
+    hundreds of lines of encoding churn. The original trailing-newline state is
+    kept so diffs stay minimal regardless of how the file was last formatted.
     """
-    serialized = json.dumps(document, indent=2).encode("utf-8")
+    serialized = json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8")
     if original_raw.endswith(b"\n"):
         serialized += b"\n"
     _atomic_write_bytes(path, serialized, mode=stat.S_IMODE(path.stat().st_mode))
