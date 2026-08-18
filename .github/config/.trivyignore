@@ -210,3 +210,34 @@ CVE-2026-56852 exp:2026-09-22
 # then drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-09-22
+
+# CVE-2026-33818, CVE-2026-46600, CVE-2026-56853, CVE-2026-56858,
+# CVE-2026-56859, CVE-2026-56860, CVE-2026-56862 — Go standard-library
+# vulnerabilities in the Go 1.26.5 toolchain used to build the pinned Docker
+# CLI, kubectl, and Docker Buildx binaries in Dockerfile.dev. CVE-2026-46600
+# also affects golang.org/x/net v0.49.0 in kubectl. Fixed upstream in Go
+# 1.26.6 (and x/net v0.56.0 for the kubectl module finding).
+#
+# Not yet clearable by a pin bump: checked 2026-08-18 against the newest
+# vendor binaries — Docker 29.7.2 and Buildx v0.36.1 are still built with Go
+# 1.26.5, while v1.36.3 remains the latest kubectl release on the cluster's
+# supported minor line and still embeds both Go 1.26.5 and x/net v0.49.0.
+#
+# Limited runtime exposure: all three binaries are contributor/CI command-line
+# tools in Dockerfile.dev, an image that is never deployed as a service. They
+# process operator-selected daemon, registry, API-server, manifest, and URL
+# inputs rather than accepting public network traffic. Re-evaluate promptly
+# because several findings are denial-of-service issues in common parsers.
+#
+# Clears when vendor releases ship binaries built with Go >= 1.26.6 and
+# kubectl also embeds x/net >= v0.56.0: bump the corresponding Dockerfile.dev
+# pins, verify both architectures, and drop these entries. Advisories:
+# https://avd.aquasec.com/nvd/cve-2026-33818 (and the matching
+# nvd/cve-2026-XXXXX page for each additional ID above).
+CVE-2026-33818 exp:2026-09-22
+CVE-2026-46600 exp:2026-09-22
+CVE-2026-56853 exp:2026-09-22
+CVE-2026-56858 exp:2026-09-22
+CVE-2026-56859 exp:2026-09-22
+CVE-2026-56860 exp:2026-09-22
+CVE-2026-56862 exp:2026-09-22

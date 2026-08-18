@@ -17,7 +17,7 @@ FROM python:3.14.6-slim AS builder
 # patched libraries are exactly what build_scratch_rootfs.py copies into
 # the runtime rootfs, so this remains the mechanism that ships fresh
 # glibc/OpenSSL fixes.
-ARG APT_SECURITY_EPOCH=2026-07-30
+ARG APT_SECURITY_EPOCH=2026-08-18
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
     && apt-get upgrade -y \
