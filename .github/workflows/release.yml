@@ -76,7 +76,7 @@ jobs:
           persist-credentials: true
       - uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Configure git identity
