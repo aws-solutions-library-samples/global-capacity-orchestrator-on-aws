@@ -25,6 +25,47 @@ FORCED_RUNTIME=""
 RC_FILE=""
 PRINT_ONLY=0
 NO_BUILD=0
+AWS_WRITABLE=0
+UNINSTALL=0
+
+# AWS environment variables forwarded into the container, in the bare `-e NAME`
+# form: every runtime (docker, finch/nerdctl, podman) passes such a variable
+# through only when it is set in the caller's environment, so an unset variable
+# never becomes an empty override inside the container. Without this list a
+# mounted ~/.aws was the ONLY credential source that worked — `AWS_PROFILE`,
+# SSO/`assume-role` sessions exported into the shell, static keys, and
+# web-identity/OIDC setups were all silently dropped at the container boundary,
+# which surfaces as "credentials not found" or, worse, as operating against the
+# wrong account than the host shell was pointed at.
+#
+# Keep this list to variables the SDK and CLI actually read. Values naming a
+# path OUTSIDE ~/.aws (AWS_CONFIG_FILE, AWS_SHARED_CREDENTIALS_FILE,
+# AWS_WEB_IDENTITY_TOKEN_FILE, AWS_CA_BUNDLE) are forwarded because they are
+# frequently set to a path under $HOME/.aws; when they point elsewhere the file
+# is not mounted, and the installer prints that caveat.
+AWS_FORWARDED_ENV=(
+    AWS_PROFILE
+    AWS_DEFAULT_PROFILE
+    AWS_REGION
+    AWS_DEFAULT_REGION
+    AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY
+    AWS_SESSION_TOKEN
+    AWS_CREDENTIAL_EXPIRATION
+    AWS_ROLE_ARN
+    AWS_ROLE_SESSION_NAME
+    AWS_WEB_IDENTITY_TOKEN_FILE
+    AWS_CONFIG_FILE
+    AWS_SHARED_CREDENTIALS_FILE
+    AWS_CA_BUNDLE
+    AWS_ENDPOINT_URL
+    AWS_USE_FIPS_ENDPOINT
+    AWS_USE_DUALSTACK_ENDPOINT
+    AWS_RETRY_MODE
+    AWS_MAX_ATTEMPTS
+    AWS_EC2_METADATA_DISABLED
+    GCO_DEFAULT_REGION
+)
 
 # The dev image is built from Dockerfile.dev at the repository root. Resolve it
 # from this script's own location so the build works from any working directory.
@@ -72,12 +113,23 @@ Usage: scripts/setup-dev-alias.sh [options]
       --rc PATH        Target this rc file instead of the one inferred from $SHELL.
       --image NAME     Dev image to build and run (default: gco-dev).
       --no-build       Skip building the dev image; assume it already exists.
+      --aws-writable   Mount ~/.aws read-write so `aws sso login` can run in
+                       the container and cache its token for the host (default:
+                       read-only).
+      --uninstall      Remove the managed block from the rc file and exit.
   -h, --help           Show this help and exit.
 
 By default the script builds (or refreshes) the dev image from Dockerfile.dev
 with the detected runtime, then installs the `gco` function. Detection prefers
 docker, then finch, then podman (the first whose daemon answers `<rt> info`).
 GCO_CONTAINER_RUNTIME or CDK_DOCKER override detection.
+
+AWS credentials: the function mounts ~/.aws and forwards the standard AWS
+environment variables (AWS_PROFILE, AWS_REGION, static keys, session tokens,
+role/web-identity settings, endpoint and retry overrides) only when the calling
+shell has them set. So `AWS_PROFILE=prod gco status`, an exported SSO or
+assume-role session, static keys, and a plain ~/.aws/config all work the same
+way inside the container as they do on the host.
 EOF
 }
 
@@ -91,6 +143,8 @@ while [ "$#" -gt 0 ]; do
         --image) [ "$#" -ge 2 ] || die "--image needs a value"; IMAGE="$2"; shift 2 ;;
         --image=*) IMAGE="${1#*=}"; shift ;;
         --no-build) NO_BUILD=1; shift ;;
+        --aws-writable) AWS_WRITABLE=1; shift ;;
+        --uninstall) UNINSTALL=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
@@ -157,12 +211,63 @@ choose_rc_file() {
     case "$(basename "${SHELL:-sh}")" in
         zsh)  printf '%s\n' "$HOME/.zshrc" ;;
         bash) printf '%s\n' "$HOME/.bashrc" ;;
+        # fish cannot parse POSIX function syntax, so writing this block into a
+        # fish config would produce a file fish errors on at every new shell —
+        # and writing it to ~/.profile (which fish does not read) would look
+        # like a successful install that silently never provides `gco`. Fail
+        # loudly with the two real options instead.
+        fish) die "fish shell cannot source this POSIX function.
+Either run the CLI through a POSIX shell:
+    bash -lc 'gco --help'
+or add a fish wrapper of your own using the printed command as the body:
+    scripts/setup-dev-alias.sh --print
+Pass --rc PATH to install into a specific file anyway." ;;
         *)    printf '%s\n' "$HOME/.profile" ;;
     esac
 }
 
+# Remove the managed block, leaving any surrounding rc content untouched.
+remove_block() {
+    local rc="$1" tmp
+    [ -f "$rc" ] || { log "Nothing to remove: $rc does not exist."; return 0; }
+    if ! grep -qF "$MARKER_BEGIN" "$rc"; then
+        log "Nothing to remove: no gco block found in $rc."
+        return 0
+    fi
+    tmp="$(mktemp)"
+    awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+        $0 == b { skip = 1 }
+        skip != 1 { print }
+        $0 == e { skip = 0 }
+    ' "$rc" > "$tmp"
+    mv "$tmp" "$rc"
+    log "Removed the 'gco' function block from $rc."
+    log "Open a new shell (or unset it with: unset -f gco) to finish."
+}
+
+# SELinux-enforcing hosts (Fedora, RHEL, CentOS Stream and friends) deny a
+# container access to every bind mount unless the mount carries a relabel
+# option. Without it `gco` starts and then fails on "permission denied" for
+# /workspace and ~/.aws, which reads like a GCO bug rather than a host policy.
+# `z` (lowercase) applies a shared label so several containers — and the host —
+# keep access; `Z` would relabel exclusively and break other consumers of
+# ~/.aws. Non-SELinux hosts get no suffix, keeping their command lines clean.
+mount_suffix_for_host() {
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
+        printf ',z'
+    fi
+}
+
+# Emit one `-e NAME` flag per forwarded AWS variable (see AWS_FORWARDED_ENV).
+aws_env_args() {
+    local name
+    for name in "${AWS_FORWARDED_ENV[@]}"; do
+        printf -- '-e %s ' "$name"
+    done
+}
+
 emit_block() {
-    local rt="$1" socket="$2" image="$3" rt_word image_word
+    local rt="$1" socket="$2" image="$3" aws_env="$4" mount_opts="$5" rt_word image_word
     rt_word="$(shell_word "$rt")"
     image_word="$(shell_word "$image")"
     # Three persistence mounts make `gco autopilot` (and anything else that
@@ -183,12 +288,17 @@ $MARKER_BEGIN
 # Run the \`gco\` CLI inside the GCO dev container, against \$PWD.
 # Managed by scripts/setup-dev-alias.sh — re-run that script to regenerate
 # after switching container runtimes or image names.
+# ~/.aws is created (empty is fine) so hosts that authenticate purely through
+# environment variables, an OIDC/web-identity file, or instance metadata still
+# get a valid mount source instead of the runtime materialising a root-owned
+# directory on the host. Credential env vars are forwarded with bare \`-e NAME\`,
+# so each is passed only when the calling shell actually has it set.
 gco() {
-    mkdir -p "\$HOME/.claude" "\$HOME/.gco"
+    mkdir -p "\$HOME/.aws" "\$HOME/.claude" "\$HOME/.gco"
     if [ -t 0 ] && [ -t 1 ]; then
-        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude ${aws_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     else
-        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude ${aws_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     fi
 }
 $MARKER_END
@@ -244,6 +354,13 @@ install_block() {
     mv "$tmp" "$rc"
 }
 
+# Uninstall is pure rc-file surgery: it must work on a machine whose container
+# runtime is gone or broken, so it runs before any runtime detection or build.
+if [ "$UNINSTALL" -eq 1 ]; then
+    remove_block "$(choose_rc_file)"
+    exit 0
+fi
+
 runtime="$(resolve_runtime || true)"
 [ -n "$runtime" ] || die "no container runtime found. Install Docker, Finch, or Podman and start it, then re-run (or force one with --runtime NAME)."
 require_single_line "container runtime" "$runtime"
@@ -269,7 +386,18 @@ if [ "$runtime" = "podman" ]; then
 fi
 require_single_line "image name" "$image_ref"
 
-block="$(emit_block "$runtime" "$socket" "$image_ref")"
+mount_suffix="$(mount_suffix_for_host)"
+if [ "$AWS_WRITABLE" -eq 1 ]; then
+    # Writable ~/.aws lets `aws sso login` / `aws configure` run INSIDE the
+    # container and cache their tokens where the host can reuse them. Opt-in:
+    # the read-only default keeps a container that runs third-party tooling
+    # from rewriting the operator's credential files.
+    aws_mount_opts="rw${mount_suffix}"
+else
+    aws_mount_opts="ro${mount_suffix}"
+fi
+
+block="$(emit_block "$runtime" "$socket" "$image_ref" "$(aws_env_args)" "$aws_mount_opts")"
 
 if [ "$PRINT_ONLY" -eq 1 ]; then
     printf '%s\n' "$block"
@@ -295,6 +423,23 @@ log "  Container runtime : $runtime"
 log "  Socket mount      : $(socket_desc_for "$runtime")"
 log "  Dev image         : $image_ref"
 log "  Shell profile     : $rc"
+log "  AWS credentials   : ~/.aws mounted $([ "$AWS_WRITABLE" -eq 1 ] && printf 'read-write' || printf 'read-only') + AWS_PROFILE/AWS_REGION/keys/session"
+log "                      forwarded from your shell when set"
+if [ -n "$mount_suffix" ]; then
+    log "  SELinux           : enforcing host detected; bind mounts carry the ',z' shared label"
+fi
+log ""
+if [ "$AWS_WRITABLE" -eq 0 ]; then
+    log "Note: ~/.aws is mounted read-only, so an SSO/session token that expires must be"
+    log "refreshed on the host ('aws sso login'); re-run with --aws-writable to allow the"
+    log "container to refresh and cache it instead."
+fi
+if [ -n "${AWS_CONFIG_FILE:-}${AWS_SHARED_CREDENTIALS_FILE:-}${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ]; then
+    log ""
+    log "Note: you have an AWS file-path variable set. It is forwarded, but the file is"
+    log "only readable in the container when it lives under ~/.aws (the mounted path)."
+    log "Copy or symlink it under ~/.aws, or add your own -v mount to the function."
+fi
 log ""
 log "Activate it in this shell:  source \"$rc\""
 log "Then try:                   gco --help"

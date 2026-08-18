@@ -415,3 +415,152 @@ SHIM
     grep -q -- 'gco-dev-tools:/root/.npm-global' "$GCO_SHIM_LOG"
     grep -q -- 'CLAUDE_CONFIG_DIR=/root/.claude' "$GCO_SHIM_LOG"
 }
+
+# -- AWS credential support ----------------------------------------------------
+#
+# A mounted ~/.aws used to be the only credential source that survived the
+# container boundary: AWS_PROFILE, exported SSO/assume-role sessions, static
+# keys, and web-identity setups were all dropped, which reads as "credentials
+# not found" — or silently targets a different account than the host shell.
+# The bare `-e NAME` form forwards each variable only when the caller has it
+# set, so an unset variable never becomes an empty override in the container.
+
+@test "emitted block forwards the profile and region credential env vars" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'-e AWS_PROFILE'* ]]
+    [[ "$output" == *'-e AWS_REGION'* ]]
+    [[ "$output" == *'-e AWS_DEFAULT_REGION'* ]]
+}
+
+@test "emitted block forwards static-key and session credential env vars" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'-e AWS_ACCESS_KEY_ID'* ]]
+    [[ "$output" == *'-e AWS_SECRET_ACCESS_KEY'* ]]
+    [[ "$output" == *'-e AWS_SESSION_TOKEN'* ]]
+}
+
+@test "emitted block forwards role and web-identity credential env vars" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'-e AWS_ROLE_ARN'* ]]
+    [[ "$output" == *'-e AWS_WEB_IDENTITY_TOKEN_FILE'* ]]
+}
+
+@test "credential env vars are forwarded by name only, never with a value" {
+    # `-e NAME=` would override the container value with an empty string when
+    # the host has the variable unset; `-e NAME` passes through only when set.
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'-e AWS_PROFILE='* ]]
+    [[ "$output" != *'-e AWS_ACCESS_KEY_ID='* ]]
+}
+
+@test "credential forwarding is present on every runtime and both TTY branches" {
+    local rt
+    for rt in docker finch podman; do
+        run bash "$SCRIPT" --print --runtime "$rt"
+        [ "$status" -eq 0 ]
+        tty_line="$(echo "$output" | grep -- 'run --rm -it')"
+        notty_line="$(echo "$output" | grep -- 'run --rm -i ')"
+        for line in "$tty_line" "$notty_line"; do
+            [[ "$line" == *'-e AWS_PROFILE'* ]]
+            [[ "$line" == *'-e AWS_SESSION_TOKEN'* ]]
+        done
+    done
+}
+
+@test "an exported AWS_PROFILE reaches the runtime invocation" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    bash "$SCRIPT" --print --runtime docker > "$SHIMDIR/block.sh"
+    HOME="$SHIMDIR/home"
+    mkdir -p "$HOME"
+    PATH="$SHIMDIR:$PATH"
+    source "$SHIMDIR/block.sh"
+    AWS_PROFILE=some-sso-profile run gco status
+    [ "$status" -eq 0 ]
+    grep -q -- '-e AWS_PROFILE' "$GCO_SHIM_LOG"
+}
+
+@test "~/.aws is mounted read-only by default" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'.aws:/root/.aws:ro'* ]]
+}
+
+@test "--aws-writable mounts ~/.aws read-write for in-container sso login" {
+    run bash "$SCRIPT" --print --runtime docker --aws-writable
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'.aws:/root/.aws:rw'* ]]
+    [[ "$output" != *'.aws:/root/.aws:ro'* ]]
+}
+
+@test "the emitted function pre-creates ~/.aws so env-only auth has a mount source" {
+    # Hosts that authenticate purely through env vars, OIDC, or instance
+    # metadata have no ~/.aws; without this the runtime materialises a
+    # root-owned directory on the host instead.
+    make_shim "$SHIMDIR" docker 0
+    bash "$SCRIPT" --print --runtime docker > "$SHIMDIR/block.sh"
+    HOME="$SHIMDIR/home"
+    mkdir -p "$HOME"
+    [ ! -d "$HOME/.aws" ]
+    PATH="$SHIMDIR:$PATH"
+    source "$SHIMDIR/block.sh"
+    run gco --version
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/.aws" ]
+}
+
+# -- Uninstall -----------------------------------------------------------------
+
+@test "--uninstall removes the managed block and preserves other rc content" {
+    printf 'export KEEP_ME=1\n' > "$RCFILE"
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    grep -qF '# >>> gco >>>' "$RCFILE"
+    run bash "$SCRIPT" --uninstall --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    ! grep -qF '# >>> gco >>>' "$RCFILE"
+    ! grep -qF 'gco()' "$RCFILE"
+    grep -qF 'export KEEP_ME=1' "$RCFILE"
+}
+
+@test "--uninstall is a no-op success when no block is installed" {
+    printf 'export KEEP_ME=1\n' > "$RCFILE"
+    run bash "$SCRIPT" --uninstall --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Nothing to remove"* ]]
+    grep -qF 'export KEEP_ME=1' "$RCFILE"
+}
+
+@test "--uninstall needs no container runtime" {
+    # Removing an rc block must work on a machine whose runtime is gone or
+    # broken, so uninstall runs before any detection or build.
+    printf 'export KEEP_ME=1\n' > "$RCFILE"
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    # Keep the base system dirs (bash, awk, grep, mktemp) but drop the dirs
+    # container runtimes install into, so no runtime is discoverable.
+    run env PATH="$SHIMDIR:/usr/bin:/bin" bash "$SCRIPT" --uninstall --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    ! command -v docker >/dev/null 2>&1 || true
+    ! grep -qF '# >>> gco >>>' "$RCFILE"
+}
+
+# -- fish shell ----------------------------------------------------------------
+
+@test "fish shell fails loudly instead of writing an unusable block" {
+    # fish cannot parse POSIX function syntax, and ~/.profile (the old
+    # fallback) is a file fish never reads — a silent no-op install.
+    run env SHELL=/opt/homebrew/bin/fish bash "$SCRIPT" --runtime docker --no-build
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"fish"* ]]
+    [[ "$output" == *"--print"* ]]
+}
+
+@test "fish users can still target an explicit rc file with --rc" {
+    run env SHELL=/usr/bin/fish bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    grep -qF '# >>> gco >>>' "$RCFILE"
+}
