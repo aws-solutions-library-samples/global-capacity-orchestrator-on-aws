@@ -252,6 +252,62 @@ class TestEngineWriteMechanics:
         add_deployment_region("us-west-2", config_path=path)
         assert not path.read_text(encoding="utf-8").endswith("\n")
 
+    def test_non_ascii_comments_survive_as_utf8(self, tmp_path: Path):
+        """Changing one Region must not rewrite documentation into \\uXXXX escapes.
+
+        The real cdk.json documents itself with em dashes and arrows; a write
+        that re-encodes them buries the actual change in encoding churn. The
+        comment line must come back byte-identical after an unrelated edit.
+        """
+        import copy
+
+        config = copy.deepcopy(BASE_CONFIG)
+        comment = (
+            "region roles \u2014 see docs/CUSTOMIZATION.md \u2192 R\u00e9gions \u30c6\u30b9\u30c8"
+        )
+        config["context"]["_comment_deployment_regions"] = comment
+        path = tmp_path / "cdk.json"
+        path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        comment_line_before = next(
+            line
+            for line in path.read_bytes().splitlines()
+            if b"_comment_deployment_regions" in line
+        )
+
+        report = add_deployment_region("us-west-2", config_path=path)
+
+        assert report.changed is True
+        raw = path.read_bytes()
+        comment_line_after = next(
+            line for line in raw.splitlines() if b"_comment_deployment_regions" in line
+        )
+        assert comment_line_after == comment_line_before
+        assert b"\\u2014" not in raw  # no escape churn anywhere in the file
+        assert comment.encode("utf-8") in raw  # still literal UTF-8 on disk
+        written = json.loads(raw.decode("utf-8"))
+        assert written["context"]["_comment_deployment_regions"] == comment
+        assert written["context"]["deployment_regions"]["regional"] == [
+            "us-east-1",
+            "us-west-2",
+        ]
+
+    def test_non_ascii_noop_leaves_file_byte_identical(self, tmp_path: Path):
+        """The idempotent no-op guarantee holds for files with UTF-8 comments."""
+        import copy
+
+        config = copy.deepcopy(BASE_CONFIG)
+        config["context"]["_comment_deployment_regions"] = (
+            "d\u00e9j\u00e0 configur\u00e9 \u2014 \u2713"
+        )
+        path = tmp_path / "cdk.json"
+        path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        before = path.read_bytes()
+
+        report = add_deployment_region("us-east-1", config_path=path)
+
+        assert report.changed is False
+        assert path.read_bytes() == before
+
     def test_file_mode_preserved(self, cdk_json: Path):
         os.chmod(cdk_json, 0o600)
         add_deployment_region("us-west-2", config_path=cdk_json)

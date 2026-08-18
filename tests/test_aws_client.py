@@ -2871,3 +2871,136 @@ class TestGCOAWSClientSetUseRegionalApi:
 
                 client.set_use_regional_api(False)
                 assert client._use_regional_api is False
+
+
+class TestDecodeLogPayload:
+    """Branch coverage for the log-payload decoder behind both log endpoints.
+
+    The happy paths (a bytes-literal envelope through ``get_job_logs`` /
+    ``get_pod_logs``) are pinned by the endpoint tests above; these pin the
+    do-no-harm and failure branches directly so a regression cannot hide
+    behind an endpoint mock.
+    """
+
+    def test_plain_string_passes_through_unchanged(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload("step=1\nstep=2\n") == "step=1\nstep=2\n"
+
+    def test_empty_string_passes_through(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload("") == ""
+
+    def test_log_line_starting_with_bytes_prefix_is_not_mangled(self):
+        """A log whose text merely *starts* with b' must not be re-parsed."""
+        from cli.aws_client import _decode_log_payload
+
+        # Trailing tokens after the literal are a SyntaxError inside
+        # ast.literal_eval; the payload must come back byte-identical.
+        payload = "b'oken pipe' observed while streaming"
+        assert _decode_log_payload(payload) == payload
+
+    def test_concatenated_literals_are_not_evaluated(self):
+        """literal_eval raises ValueError for b'x' + b'y'; payload unchanged."""
+        from cli.aws_client import _decode_log_payload
+
+        payload = "b'x' + b'y'"
+        assert _decode_log_payload(payload) == payload
+
+    def test_unterminated_envelope_returns_original(self):
+        from cli.aws_client import _decode_log_payload
+
+        payload = "b'unterminated"
+        assert _decode_log_payload(payload) == payload
+
+    def test_double_quoted_envelope_decodes(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload('b"line1\\nline2"') == "line1\nline2"
+
+    def test_envelope_with_invalid_utf8_uses_replacement(self):
+        """Legacy envelopes carrying non-UTF-8 bytes decode lossily, not fatally."""
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload(r"b'\xff\xfe ok'") == "\ufffd\ufffd ok"
+
+    def test_raw_bytes_decode(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload(b"line1\nline2\n") == "line1\nline2\n"
+
+    def test_bytearray_decodes(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload(bytearray(b"lines")) == "lines"
+
+    def test_raw_bytes_with_invalid_utf8_use_replacement(self):
+        from cli.aws_client import _decode_log_payload
+
+        assert _decode_log_payload(b"\xffok") == "\ufffdok"
+
+    @pytest.mark.parametrize("payload", [None, 7, ["b'x'"], {"logs": "x"}])
+    def test_unsupported_payload_types_fail_loud(self, payload):
+        """Anything that is not str/bytes is a contract break, not empty logs."""
+        from cli.aws_client import _decode_log_payload
+
+        with pytest.raises(TypeError, match="unsupported log payload"):
+            _decode_log_payload(payload)
+
+    def test_get_job_logs_plain_string_response_is_unchanged(self):
+        """Modern deployments already send text; the CLI must not rewrite it."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_credentials = MagicMock()
+                mock_session.return_value.get_credentials.return_value = mock_credentials
+
+                mock_response = MagicMock()
+                mock_response.status_code = 200
+                mock_response.json.return_value = {"logs": "plain text\nwith lines\n"}
+                mock_request.return_value = mock_response
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                assert client.get_job_logs("test-job", "default") == ("plain text\nwith lines\n")
+
+    def test_get_pod_logs_without_logs_key_is_untouched(self):
+        """Error-shaped responses without a logs field must pass through."""
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(
+                regional_stack_prefix="gco",
+                project_name="gco",
+                cache_ttl_seconds=300,
+            )
+
+            with patch("boto3.Session"):
+                client = GCOAWSClient()
+
+                mock_response = MagicMock()
+                mock_response.raise_for_status = MagicMock()
+                mock_response.json.return_value = {"error": "pod not found"}
+
+                with patch.object(client, "make_authenticated_request", return_value=mock_response):
+                    result = client.get_pod_logs(
+                        job_name="test-job",
+                        pod_name="test-pod-abc",
+                        namespace="default",
+                        region="us-east-1",
+                    )
+                    assert result == {"error": "pod not found"}

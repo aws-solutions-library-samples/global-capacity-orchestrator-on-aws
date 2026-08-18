@@ -946,6 +946,105 @@ class TestGetJobLogsEndpoint:
                 assert response.status_code == 500
 
 
+class TestDecodePodLogResponse:
+    """Branch coverage for the raw Kubernetes log-body decoder.
+
+    The endpoint tests pin the happy path (bytes body decoded, connection
+    released); these pin the decoder's contract directly: str/bytes handling,
+    lossy decode of invalid UTF-8, fail-loud unsupported payloads, and the
+    guarantee that the urllib3 connection is released on every path.
+    """
+
+    def _response(self, data):
+        response = MagicMock()
+        response.data = data
+        return response
+
+    def test_bytes_body_decodes_with_real_newlines(self):
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = self._response(b"step=1\nstep=2\n")
+        assert _decode_pod_log_response(response) == "step=1\nstep=2\n"
+        response.release_conn.assert_called_once_with()
+
+    def test_bytearray_body_decodes(self):
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = self._response(bytearray(b"lines"))
+        assert _decode_pod_log_response(response) == "lines"
+        response.release_conn.assert_called_once_with()
+
+    def test_str_body_passes_through(self):
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = self._response("already text\n")
+        assert _decode_pod_log_response(response) == "already text\n"
+        response.release_conn.assert_called_once_with()
+
+    def test_invalid_utf8_decodes_lossily_instead_of_raising(self):
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = self._response(b"\xff\xfe ok")
+        assert _decode_pod_log_response(response) == "\ufffd\ufffd ok"
+        response.release_conn.assert_called_once_with()
+
+    def test_unsupported_payload_raises_but_still_releases_connection(self):
+        """A contract break must not leak the urllib3 connection."""
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = self._response(12345)
+        with pytest.raises(TypeError, match="unsupported pod log payload"):
+            _decode_pod_log_response(response)
+        response.release_conn.assert_called_once_with()
+
+    def test_raw_bytes_without_response_wrapper_decode(self):
+        """Defensive path: a client returning the body directly still works."""
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        assert _decode_pod_log_response(b"bare bytes\n") == "bare bytes\n"
+
+    def test_non_callable_release_conn_is_ignored(self):
+        from gco.services.api_routes.jobs import _decode_pod_log_response
+
+        response = MagicMock()
+        response.data = b"ok"
+        response.release_conn = "not-callable"
+        assert _decode_pod_log_response(response) == "ok"
+
+    def test_job_logs_endpoint_decodes_invalid_utf8_lossily(self, mock_manifest_processor):
+        """End to end: a pod emitting non-UTF-8 bytes still yields 200 + text."""
+        mock_container = MagicMock()
+        mock_container.name = "main"
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "test-job-abc123"
+        mock_pod.spec.containers = [mock_container]
+        mock_pod.spec.init_containers = []
+        mock_pods = MagicMock()
+        mock_pods.items = [mock_pod]
+        mock_manifest_processor.core_v1.list_namespaced_pod.return_value = mock_pods
+
+        raw_log_response = MagicMock()
+        raw_log_response.data = b"binary \xff garbage\nreadable line\n"
+        mock_manifest_processor.core_v1.read_namespaced_pod_log.return_value = raw_log_response
+
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app) as client:
+                response = client.get(
+                    "/api/v1/jobs/default/test-job/logs",
+                    headers={},
+                )
+                assert response.status_code == 200
+                assert response.json()["logs"] == "binary \ufffd garbage\nreadable line\n"
+                raw_log_response.release_conn.assert_called_once_with()
+
+
 class TestDeleteJobEndpoint:
     """Tests for DELETE /api/v1/jobs/{namespace}/{name} endpoint."""
 
