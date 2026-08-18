@@ -73,6 +73,15 @@ SEMVER_TAG_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+#: ``owner/repo`` in GitHub's own character set. Both halves are interpolated
+#: into an API path, and the strings come from workflow files — which, on a pull
+#: request from a fork, are attacker-authored. Anchoring the shape here means a
+#: crafted ``uses:`` cannot smuggle ``../``, a query string, a credential, or a
+#: second scheme into the request URL.
+REPOSITORY_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
+
 
 @dataclass(frozen=True)
 class Pin:
@@ -233,6 +242,66 @@ def consistency_problems(pins: Iterable[Pin]) -> list[str]:
     return problems
 
 
+#: HTTP codes that mean "this credential is not welcome here" rather than
+#: "this tag is wrong". An org can block the GitHub Actions app, in which case a
+#: workflow's GITHUB_TOKEN is refused for that org's public repositories even
+#: though anonymous reads of them succeed.
+_CREDENTIAL_REJECTED = {401, 403}
+
+
+def _fetch_commit(
+    repository: str,
+    version: str,
+    token: str | None,
+    timeout: float,
+) -> tuple[TagResolution, int | None]:
+    """One attempt. Returns the outcome and the HTTP status, when there was one."""
+    url = f"{GITHUB_API}/repos/{repository}/commits/{version}"
+    # Both path components were shape-checked by resolve_tag, so this holds by
+    # construction; it is asserted anyway because it is the property that makes
+    # the urlopen below safe, and a future caller reaching _fetch_commit
+    # directly should fail loudly rather than issue an unconstrained request.
+    if not url.startswith(f"{GITHUB_API}/repos/"):  # pragma: no cover - defensive
+        return TagResolution(error="refusing to request a non-GitHub URL"), None
+    request = urllib.request.Request(  # noqa: S310 - constant https host, validated path
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gco-verify-action-pins",
+            **({"Authorization": f"Bearer {token}"} if token else {}),
+        },
+    )
+    # dynamic-urllib-use-detected below is suppressed because its premise does
+    # not hold here. The rule guards against a dynamic value choosing the scheme
+    # (``file://`` and friends): the scheme and host are the GITHUB_API constant,
+    # and the only interpolated values are an ``owner/repo`` matching
+    # REPOSITORY_RE and a tag matching SEMVER_TAG_RE, both rejected by
+    # resolve_tag before this runs, with the prefix re-asserted above. Switching
+    # to ``requests`` (the rule's own suggestion) would put a third-party import
+    # in a script that has to run with no dependency install.
+    try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return TagResolution(error=f"tag {version} not found upstream (HTTP 404)"), 404
+        if error.code in _CREDENTIAL_REJECTED or error.code == 429:
+            return (
+                TagResolution(error=f"rate limited or forbidden (HTTP {error.code})"),
+                error.code,
+            )
+        return TagResolution(error=f"HTTP {error.code}"), error.code
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
+        return TagResolution(error=f"lookup failed ({error.__class__.__name__})"), None
+
+    sha = payload.get("sha") if isinstance(payload, dict) else None
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
+        return TagResolution(error="response carried no commit sha"), None
+    return TagResolution(sha=sha), None
+
+
 def resolve_tag(
     repository: str,
     version: str,
@@ -245,32 +314,33 @@ def resolve_tag(
     ``/commits/{ref}`` dereferences annotated tags to the commit, which is the
     same thing ``gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`` returns
     and therefore the same thing the pins were produced from.
-    """
-    request = urllib.request.Request(  # noqa: S310 - fixed https api.github.com host
-        f"{GITHUB_API}/repos/{repository}/commits/{version}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "gco-verify-action-pins",
-            **({"Authorization": f"Bearer {token}"} if token else {}),
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return TagResolution(error=f"tag {version} not found upstream (HTTP 404)")
-        if error.code in {403, 429}:
-            return TagResolution(error=f"rate limited or forbidden (HTTP {error.code})")
-        return TagResolution(error=f"HTTP {error.code}")
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
-        return TagResolution(error=f"lookup failed ({error.__class__.__name__})")
 
-    sha = payload.get("sha") if isinstance(payload, dict) else None
-    if not isinstance(sha, str) or not SHA_RE.match(sha):
-        return TagResolution(error="response carried no commit sha")
-    return TagResolution(sha=sha)
+    A token that is *refused* (401/403) falls back to an anonymous read. Some
+    organizations block the GitHub Actions app, so a workflow's ``GITHUB_TOKEN``
+    gets 403 on their public repositories while an unauthenticated request to
+    the same URL returns 200 — observed with ``aquasecurity/setup-trivy``.
+    Without the fallback that pin would be permanently unverified while CI still
+    reported success, which is the worst outcome available: a check that looks
+    green precisely where it has stopped looking.
+
+    Both arguments are shape-checked before any request is made. They originate
+    in workflow files, which on a fork pull request are attacker-authored, so a
+    crafted ``uses:`` must not be able to steer the URL.
+    """
+    if not REPOSITORY_RE.match(repository):
+        return TagResolution(error=f"refusing to look up malformed repository {repository!r}")
+    if not SEMVER_TAG_RE.match(version):
+        return TagResolution(error=f"refusing to look up malformed version {version!r}")
+
+    resolution, status = _fetch_commit(repository, version, token, timeout)
+    if resolution.sha is None and token and status in _CREDENTIAL_REJECTED:
+        anonymous, _ = _fetch_commit(repository, version, None, timeout)
+        if anonymous.sha is not None:
+            return anonymous
+        return TagResolution(
+            error=f"{resolution.error}; anonymous retry also failed ({anonymous.error})"
+        )
+    return resolution
 
 
 def upstream_problems(

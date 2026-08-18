@@ -373,3 +373,143 @@ def test_the_repository_pins_a_plausible_number_of_actions() -> None:
     external = verifier.third_party(verifier.collect_all_pins())
     assert len(external) > 100, f"only discovered {len(external)} third-party refs"
     assert len({pin.repository for pin in external}) > 10
+
+
+# ── Token-refused fallback ───────────────────────────────────────────────────
+#
+# Observed in CI: aquasecurity/setup-trivy answers 403 to a workflow's
+# GITHUB_TOKEN (the org blocks the GitHub Actions app) but 200 to an anonymous
+# read of the same URL. Without a fallback that pin is never verified while the
+# job still reports success — a check that looks green exactly where it stopped
+# looking.
+
+
+def _refuse_token_then_allow_anonymous(
+    monkeypatch: pytest.MonkeyPatch, code: int, anonymous_sha: str | None
+) -> list[str | None]:
+    attempts: list[str | None] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        auth = request.get_header("Authorization")
+        attempts.append(auth)
+        if auth is not None:
+            raise urllib.error.HTTPError(request.full_url, code, "no", {}, None)  # type: ignore[arg-type]
+        if anonymous_sha is None:
+            raise urllib.error.HTTPError(request.full_url, 500, "no", {}, None)  # type: ignore[arg-type]
+        return _Response({"sha": anonymous_sha})
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
+    return attempts
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_refused_token_falls_back_to_an_anonymous_read(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    attempts = _refuse_token_then_allow_anonymous(monkeypatch, code, SHA_A)
+    assert verifier.resolve_tag("aquasecurity/setup-trivy", "v0.2.6", token="t").sha == SHA_A
+    assert attempts == ["Bearer t", None]
+
+
+def test_the_fallback_reports_both_failures_when_anonymous_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _refuse_token_then_allow_anonymous(monkeypatch, 403, None)
+    error = verifier.resolve_tag("aquasecurity/setup-trivy", "v0.2.6", token="t").error or ""
+    assert "HTTP 403" in error
+    assert "anonymous retry also failed" in error
+
+
+def test_a_404_is_not_retried_anonymously(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing tag is an answer, not a credential problem; one call only."""
+    attempts: list[str | None] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        attempts.append(request.get_header("Authorization"))
+        raise urllib.error.HTTPError(request.full_url, 404, "no", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
+    assert verifier.resolve_tag("actions/checkout", "v9.9.9", token="t").sha is None
+    assert attempts == ["Bearer t"]
+
+
+def test_no_fallback_is_attempted_when_there_was_no_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying an already-anonymous request would just burn the rate limit."""
+    attempts: list[str | None] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        attempts.append(request.get_header("Authorization"))
+        raise urllib.error.HTTPError(request.full_url, 403, "no", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
+    assert verifier.resolve_tag("actions/checkout", "v7.0.1").sha is None
+    assert attempts == [None]
+
+
+# ── Request-URL safety ───────────────────────────────────────────────────────
+#
+# Both path components come from workflow files, which on a fork pull request
+# are attacker-authored. resolve_tag shape-checks them before any request, so a
+# crafted `uses:` cannot steer the URL scheme, host, or path.
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "../../etc/passwd",
+        "owner/repo/../../other",
+        "owner",
+        "owner/repo?x=1",
+        "owner/repo#frag",
+        "owner//repo",
+        "own er/repo",
+        "user:pass@host/repo",
+        "",
+    ],
+)
+def test_a_malformed_repository_is_refused_without_a_request(
+    monkeypatch: pytest.MonkeyPatch, repository: str
+) -> None:
+    def explode(request, timeout=None):  # noqa: ANN001, ANN202
+        raise AssertionError("no request may be issued for a malformed repository")
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", explode)
+    resolution = verifier.resolve_tag(repository, "v1.0.0")
+    assert resolution.sha is None
+    assert "malformed repository" in (resolution.error or "")
+
+
+@pytest.mark.parametrize("version", ["v1", "main", "../../v1.0.0", "v1.0.0 v2.0.0", ""])
+def test_a_malformed_version_is_refused_without_a_request(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    def explode(request, timeout=None):  # noqa: ANN001, ANN202
+        raise AssertionError("no request may be issued for a malformed version")
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", explode)
+    resolution = verifier.resolve_tag("actions/checkout", version)
+    assert resolution.sha is None
+    assert "malformed version" in (resolution.error or "")
+
+
+def test_the_request_url_is_always_the_github_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        seen.append(request.full_url)
+        return _Response({"sha": SHA_A})
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
+    for repository in ("actions/checkout", "github/codeql-action", "astral-sh/ruff-action"):
+        verifier.resolve_tag(repository, "v1.2.3")
+    assert all(url.startswith("https://api.github.com/repos/") for url in seen)
+    assert len(seen) == 3
+
+
+def test_every_repository_this_repo_pins_passes_the_shape_check() -> None:
+    """The guard must not reject the real action names it has to look up."""
+    repositories = {pin.repository for pin in verifier.third_party(verifier.collect_all_pins())}
+    rejected = sorted(r for r in repositories if not verifier.REPOSITORY_RE.match(r))
+    assert rejected == [], f"shape check rejects action repositories in use: {rejected}"

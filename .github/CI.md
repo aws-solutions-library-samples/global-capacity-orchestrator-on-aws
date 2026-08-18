@@ -166,6 +166,13 @@ with `github.token`. A lookup that cannot be completed (rate limit, timeout,
 deleted tag) is reported without failing the job: an api.github.com blip must
 not block unrelated pull requests, or people learn to ignore the check.
 
+One wrinkle worth knowing about: an organization can block the GitHub Actions
+app, and then a workflow's `GITHUB_TOKEN` gets 403 on that org's *public*
+repositories while an anonymous request to the same URL returns 200
+(`aquasecurity/setup-trivy` behaves this way). A refused token therefore falls
+back to an unauthenticated read, so the pin is really verified instead of
+quietly landing in the tolerated "incomplete" bucket.
+
 The contract also asserts [Dependabot](#dependabot) is configured to see these
 pins, since a pin nothing bumps is a pin that rots.
 
