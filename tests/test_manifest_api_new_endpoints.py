@@ -233,7 +233,9 @@ class TestGetPodLogsEndpoint:
         mock_pod.metadata.labels = {"job-name": "test-job"}
 
         mock_manifest_processor.core_v1.read_namespaced_pod.return_value = mock_pod
-        mock_manifest_processor.core_v1.read_namespaced_pod_log.return_value = "Log output"
+        raw_log_response = MagicMock()
+        raw_log_response.data = b"line1\nline2\nline3"
+        mock_manifest_processor.core_v1.read_namespaced_pod_log.return_value = raw_log_response
 
         with patch(
             "gco.services.manifest_api.create_manifest_processor_from_env",
@@ -250,7 +252,12 @@ class TestGetPodLogsEndpoint:
                 assert response.status_code == 200
                 data = response.json()
                 assert data["pod_name"] == "test-job-abc123"
-                assert data["logs"] == "Log output"
+                assert data["logs"] == "line1\nline2\nline3"
+                call_kwargs = (
+                    mock_manifest_processor.core_v1.read_namespaced_pod_log.call_args.kwargs
+                )
+                assert call_kwargs["_preload_content"] is False
+                raw_log_response.release_conn.assert_called_once_with()
 
     def test_get_pod_logs_wrong_job(self, mock_manifest_processor):
         """Test getting pod logs for pod not belonging to job returns 400."""

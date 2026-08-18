@@ -5,6 +5,7 @@ Provides authenticated access to AWS services with SigV4 signing,
 stack discovery, and region management.
 """
 
+import ast
 import json
 import logging
 import time
@@ -34,6 +35,22 @@ def _validate_max_attempts(max_attempts: int | None) -> None:
         isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0
     ):
         raise ValueError("max_attempts must be a positive integer")
+
+
+def _decode_log_payload(payload: Any) -> str:
+    """Return log text, decoding bytes and exact Python bytes-literal envelopes."""
+    if isinstance(payload, str):
+        if len(payload) >= 3 and payload[0] == "b" and payload[1] in {"'", '"'}:
+            try:
+                decoded = ast.literal_eval(payload)
+            except SyntaxError, ValueError:
+                return payload
+            if isinstance(decoded, bytes):
+                return decoded.decode("utf-8", errors="replace")
+        return payload
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload).decode("utf-8", errors="replace")
+    raise TypeError(f"API returned an unsupported log payload: {type(payload)!r}")
 
 
 @dataclass
@@ -682,7 +699,7 @@ class GCOAWSClient:
                 detail = response.text or response.reason
             raise RuntimeError(detail)
 
-        return str(response.json().get("logs", ""))
+        return _decode_log_payload(response.json().get("logs", ""))
 
     def delete_job(
         self,
@@ -926,6 +943,8 @@ class GCOAWSClient:
 
         response.raise_for_status()
         result: dict[str, Any] = response.json()
+        if "logs" in result:
+            result["logs"] = _decode_log_payload(result["logs"])
         return result
 
     def get_job_metrics(self, job_name: str, namespace: str, region: str) -> dict[str, Any]:

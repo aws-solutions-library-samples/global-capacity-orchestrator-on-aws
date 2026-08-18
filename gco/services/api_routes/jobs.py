@@ -28,6 +28,21 @@ _LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$"
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 
 
+def _decode_pod_log_response(response: Any) -> str:
+    """Decode the raw Kubernetes log body without converting bytes to their repr."""
+    release_conn = getattr(response, "release_conn", None)
+    try:
+        payload = response.data if hasattr(response, "data") else response
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload).decode("utf-8", errors="replace")
+        raise TypeError(f"Kubernetes returned an unsupported pod log payload: {type(payload)!r}")
+    finally:
+        if callable(release_conn):
+            release_conn()
+
+
 def _parse_exact_label_selector(selector: str | None) -> list[tuple[str, str]]:
     """Parse the API's deliberately narrow, fail-closed selector subset."""
     if selector is None:
@@ -238,7 +253,10 @@ async def get_job_logs(
             log_kwargs["since_seconds"] = since_seconds
 
         try:
-            logs = processor.core_v1.read_namespaced_pod_log(**log_kwargs)
+            log_response = processor.core_v1.read_namespaced_pod_log(
+                **log_kwargs, _preload_content=False
+            )
+            logs = _decode_pod_log_response(log_response)
         except K8sApiException as e:
             if e.status == 400:
                 error_body = str(e.body) if e.body else str(e.reason)
@@ -397,7 +415,10 @@ async def get_pod_logs(
         if container:
             log_kwargs["container"] = container
 
-        logs = processor.core_v1.read_namespaced_pod_log(**log_kwargs)
+        log_response = processor.core_v1.read_namespaced_pod_log(
+            **log_kwargs, _preload_content=False
+        )
+        logs = _decode_pod_log_response(log_response)
 
         response = {
             "cluster_id": processor.cluster_id,

@@ -561,7 +561,9 @@ class TestGCOAWSClientRequests:
 
                 mock_response = MagicMock()
                 mock_response.status_code = 200
-                mock_response.json.return_value = {"logs": "Log line 1\nLog line 2"}
+                mock_response.json.return_value = {
+                    "logs": r"b'step=1, train_loss=0.3941\nstep=15, train_loss=0.1024\n'"
+                }
                 mock_request.return_value = mock_response
 
                 client = GCOAWSClient()
@@ -574,7 +576,8 @@ class TestGCOAWSClientRequests:
 
                 logs = client.get_job_logs("test-job", "default")
 
-                assert "Log line 1" in logs
+                assert logs == "step=1, train_loss=0.3941\nstep=15, train_loss=0.1024\n"
+                assert logs.count("\n") == 2
 
     def test_delete_job(self):
         """Test deleting a job."""
@@ -2711,7 +2714,7 @@ class TestGCOAWSClientGetPodLogs:
 
                 mock_response = MagicMock()
                 mock_response.raise_for_status = MagicMock()
-                mock_response.json.return_value = {"logs": "line1\nline2\nline3"}
+                mock_response.json.return_value = {"logs": r"b'line1\nline2\nline3'"}
 
                 with patch.object(client, "make_authenticated_request", return_value=mock_response):
                     result = client.get_pod_logs(

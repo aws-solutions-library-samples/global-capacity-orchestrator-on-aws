@@ -818,9 +818,9 @@ class TestGetJobLogsEndpoint:
         mock_pods.items = [mock_pod]
 
         mock_manifest_processor.core_v1.list_namespaced_pod.return_value = mock_pods
-        mock_manifest_processor.core_v1.read_namespaced_pod_log.return_value = (
-            "Log line 1\nLog line 2"
-        )
+        raw_log_response = MagicMock()
+        raw_log_response.data = b"step=1, train_loss=0.3941\nstep=15, train_loss=0.1024\n"
+        mock_manifest_processor.core_v1.read_namespaced_pod_log.return_value = raw_log_response
 
         with patch(
             "gco.services.manifest_api.create_manifest_processor_from_env",
@@ -838,7 +838,13 @@ class TestGetJobLogsEndpoint:
                 assert response.status_code == 200
                 data = response.json()
                 assert data["job_name"] == "test-job"
-                assert data["logs"] == "Log line 1\nLog line 2"
+                assert data["logs"] == ("step=1, train_loss=0.3941\nstep=15, train_loss=0.1024\n")
+                assert data["logs"].count("\n") == 2
+                call_kwargs = (
+                    mock_manifest_processor.core_v1.read_namespaced_pod_log.call_args.kwargs
+                )
+                assert call_kwargs["_preload_content"] is False
+                raw_log_response.release_conn.assert_called_once_with()
 
     def test_get_job_logs_with_tail(self, mock_manifest_processor):
         """Test getting job logs with tail parameter."""
