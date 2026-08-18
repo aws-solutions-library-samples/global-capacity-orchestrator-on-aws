@@ -26,8 +26,11 @@
 #
 # Permissions model:
 #   `contents: write` on the built-in GITHUB_TOKEN covers the tag push and
-#   the release creation. The v* tag ruleset grants the GitHub Actions app
-#   bypass for tag creation; humans cannot create or move v-tags by hand.
+#   the release creation. The v* tag ruleset blocks update, deletion, and
+#   force-push with no bypass actors, so a published tag is immutable for
+#   everyone; creation stays open (enterprise policy prevents granting the
+#   Actions app a ruleset bypass), and this workflow's existing-tag check is
+#   what refuses to re-point a released version.
 #
 # =============================================================================
 

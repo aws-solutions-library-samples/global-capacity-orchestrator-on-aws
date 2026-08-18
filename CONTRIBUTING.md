@@ -719,7 +719,7 @@ No long-lived tokens are required for the GitHub Actions pipeline. The release a
 - `release-publish.yml` (stage 2) needs `contents: write` to push the release tag and create the GitHub Release. Each workflow declares its permissions at the top of the file.
 - `deps-scan.yml` needs `issues: write` to open a dependency-drift issue. Also declared at the top of the file.
 
-If you fork and run your own copy, no PAT setup is needed — the tokens are generated per-run by GitHub. Do enable the Actions PR-creation setting above, and keep a `v*` tag ruleset (with GitHub Actions as a bypass actor) if you want released tags immutable for humans.
+If you fork and run your own copy, no PAT setup is needed — the tokens are generated per-run by GitHub. Do enable the Actions PR-creation setting above, and keep a `v*` tag ruleset blocking update/deletion/force-push (no bypass actors) so released tags stay immutable; tag creation stays open for the publish workflow, whose existing-tag check refuses to re-point a released version.
 
 ### Creating a Release
 
@@ -768,9 +768,16 @@ gh pr create --base main --title "Release v1.2.3" \
 # and creates the GitHub Release with generated notes.
 ```
 
-Direct pushes of release commits or `v*` tags to `main` are blocked by
-branch protection and the `v*` tag ruleset; only the publish workflow
-creates release tags.
+Direct pushes of release commits to `main` are blocked by branch
+protection, and existing `v*` tags cannot be moved or deleted (tag
+ruleset with no bypass actors). Publishing through the workflow is the
+supported path; its guards are what keep manual mistakes out of the tag
+namespace.
+
+When a new required status check is introduced (for example a new
+cdk-nag matrix entry), add it to the branch protection required-checks
+list on `main` as part of the same PR review; a check that reports on
+every PR but isn't required is a silent gap in the merge gate.
 
 After releasing, confirm the auto-generated GitHub Release notes read well (they are categorized by PR label per `.github/release.yml`), then deploy to production environments. The GitHub Releases page is GCO's changelog — there is no separate `CHANGELOG.md` to maintain.
 
