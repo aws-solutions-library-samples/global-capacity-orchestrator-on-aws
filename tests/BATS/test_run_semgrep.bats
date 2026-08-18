@@ -73,10 +73,21 @@ STUB
     grep -qx 'scan' "$SEMGREP_ARGS_OUT"
 }
 
-@test "the committed default suppression file excludes mutable-action-tag" {
+# The committed list is empty on purpose: every third-party action is pinned to
+# a commit SHA, so mutable-action-tag has nothing left to flag. Re-suppressing it
+# would mask a real regression, and an all-comment file must still scan cleanly.
+@test "the committed default suppression file no longer excludes mutable-action-tag" {
     run sh "$SCRIPT"
     [ "$status" -eq 0 ]
-    grep -q 'github-actions-mutable-action-tag' "$SEMGREP_ARGS_OUT"
+    ! grep -q 'github-actions-mutable-action-tag' "$SEMGREP_ARGS_OUT"
+}
+
+@test "the committed default suppression file still drives a clean scan" {
+    run sh "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"applied rule suppressions"* ]]
+    [ "$(head -1 "$SEMGREP_ARGS_OUT")" = "scan" ]
+    [ "$(tail -1 "$SEMGREP_ARGS_OUT")" = "." ]
 }
 
 # ── Argument assembly ────────────────────────────────────────────────────────

@@ -49,15 +49,15 @@ jobs:
       # Opt the suite in (it is skipped everywhere else, e.g. the unit job).
       GCO_MOONCAKE_IMAGE_TEST: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The ~9GB vLLM image needs headroom on the runner's ~14GB root volume.
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"

@@ -86,15 +86,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -164,7 +164,7 @@ jobs:
           kubectl version --client --output=yaml | head -5
       - name: Configure AWS credentials (OIDC)
         if: env.GCO_CI_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v6.2.3
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
         env:
           GCO_CI_ROLE_ARN: ${{ secrets.GCO_CI_ROLE_ARN }}
         with:

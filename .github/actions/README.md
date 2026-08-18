@@ -47,9 +47,9 @@ Three layers, none of which mask real failures: each configured mirror is health
 
 ### `build-image-with-retry`
 
-Wraps `docker/build-push-action@v7.3.0` with retry-on-failure. Every build starts by resolving base-image metadata against Docker Hub, whose registry and token endpoints intermittently time out on GitHub runners (`failed to resolve source metadata for docker.io/library/python:3.14.6-slim ... dial tcp ...:443: i/o timeout`) — a network fault that failed an integration job before a single layer was built. The build-push action has no retry of its own, so one blip fails the job.
+Wraps `docker/build-push-action` with retry-on-failure. Every build starts by resolving base-image metadata against Docker Hub, whose registry and token endpoints intermittently time out on GitHub runners (`failed to resolve source metadata for docker.io/library/python:3.14.6-slim ... dial tcp ...:443: i/o timeout`) — a network fault that failed an integration job before a single layer was built. The build-push action has no retry of its own, so one blip fails the job.
 
-Retrying the whole action keeps the GHA layer-cache semantics identical on every attempt, and layers completed by a failed attempt are reused by the next. Genuine build failures are deterministic and still fail on the final attempt with the real error. Behaviour matches `docker/build-push-action@v7.3.0` on every successful path. Three attempts with a 15 s / 45 s backoff, matching [`setup-buildx-with-retry`](#setup-buildx-with-retry) (typically paired immediately before this action).
+Retrying the whole action keeps the GHA layer-cache semantics identical on every attempt, and layers completed by a failed attempt are reused by the next. Genuine build failures are deterministic and still fail on the final attempt with the real error. Behaviour matches `docker/build-push-action` on every successful path. Three attempts with a 15 s / 45 s backoff, matching [`setup-buildx-with-retry`](#setup-buildx-with-retry) (typically paired immediately before this action).
 
 **Inputs (passed straight through to `build-push-action`):**
 
@@ -62,7 +62,7 @@ Retrying the whole action keeps the GHA layer-cache semantics identical on every
 | `cache-from` | `""` | Cache sources |
 | `cache-to` | `""` | Cache destinations |
 
-**Used by:** every `integration:docker:*` image job and the kind E2E builds in `integration-tests.yml`, and `security:trivy:container-scan` in `security.yml`. Drop-in replacement for `docker/build-push-action@v7.3.0` for the input surface above.
+**Used by:** every `integration:docker:*` image job and the kind E2E builds in `integration-tests.yml`, and `security:trivy:container-scan` in `security.yml`. Drop-in replacement for `docker/build-push-action` for the input surface above.
 
 **Usage:**
 
@@ -101,11 +101,11 @@ Node.js from `.nvmrc` (via `actions/setup-node`) before invoking this action.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v7
-  - uses: actions/setup-node@v7.0.0
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+  - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
     with:
       node-version-file: ".nvmrc"
-  - uses: actions/setup-python@v7.0.0
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
       python-version: "3.14"
   - run: pip install -e ".[cdk]"
@@ -180,9 +180,9 @@ This action removes large preinstalled toolchains the build never uses (Android 
 
 ```yaml
 steps:
-  - uses: actions/checkout@v7
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
   - uses: ./.github/actions/free-disk-space
-  - uses: actions/setup-python@v7.0.0
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
       python-version: "3.14"
 ```
@@ -210,7 +210,7 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
 **Usage:**
 
 ```yaml
-- uses: actions/checkout@v7
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 - name: Install pinned Trivy
   uses: ./.github/actions/install-trivy
   with:
@@ -220,9 +220,9 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
 
 ### `setup-buildx-with-retry`
 
-Wraps `docker/setup-buildx-action@v4.2.0` with retry-on-failure. Creating a `docker-container` builder pulls the BuildKit image from Docker Hub, so the same token-endpoint timeouts described above can fail a job before anything is built — one such blip failed a Trivy container scan before any image existed to scan. The action has no retry of its own. Retrying the whole action rather than pre-pulling a hard-coded BuildKit tag keeps this correct if the pinned buildx version changes the image it resolves.
+Wraps `docker/setup-buildx-action` with retry-on-failure. Creating a `docker-container` builder pulls the BuildKit image from Docker Hub, so the same token-endpoint timeouts described above can fail a job before anything is built — one such blip failed a Trivy container scan before any image existed to scan. The action has no retry of its own. Retrying the whole action rather than pre-pulling a hard-coded BuildKit tag keeps this correct if the pinned buildx version changes the image it resolves.
 
-Behaviour matches `docker/setup-buildx-action@v4.2.0` for every successful path; the only observable difference is on transient failures. Three attempts with a 15 s / 45 s backoff.
+Behaviour matches `docker/setup-buildx-action` for every successful path; the only observable difference is on transient failures. Three attempts with a 15 s / 45 s backoff.
 
 **Inputs:**
 
@@ -230,7 +230,7 @@ Behaviour matches `docker/setup-buildx-action@v4.2.0` for every successful path;
 |------|---------|-------------|
 | `driver-opts` | `""` | Builder driver options, passed straight through. |
 
-**Used by:** `security.yml` (`security:trivy:container-scan`) and every `integration:docker:*` / kind E2E job in `integration-tests.yml`. Drop-in replacement for `docker/setup-buildx-action@v4.2.0`.
+**Used by:** `security.yml` (`security:trivy:container-scan`) and every `integration:docker:*` / kind E2E job in `integration-tests.yml`. Drop-in replacement for `docker/setup-buildx-action`.
 
 **Usage:**
 
@@ -245,9 +245,9 @@ Behaviour matches `docker/setup-buildx-action@v4.2.0` for every successful path;
 
 ### `upload-artifact-with-retry`
 
-Wraps `actions/upload-artifact@v7.0.1` with an inline retry loop. The GitHub Actions artifact backend occasionally returns 5xx or 403s during the finalize step (after the bytes are fully uploaded), and the default upload action surfaces those as a hard job failure. This composite retries the upload up to 3 times with a 30 s / 60 s backoff so a flaky finalize doesn't fail an otherwise-green CI run.
+Wraps `actions/upload-artifact` with an inline retry loop. The GitHub Actions artifact backend occasionally returns 5xx or 403s during the finalize step (after the bytes are fully uploaded), and the default upload action surfaces those as a hard job failure. This composite retries the upload up to 3 times with a 30 s / 60 s backoff so a flaky finalize doesn't fail an otherwise-green CI run.
 
-Behaviour matches `actions/upload-artifact@v7.0.1` for every successful path; the only observable difference is on transient failures.
+Behaviour matches `actions/upload-artifact` for every successful path; the only observable difference is on transient failures.
 
 **Inputs (passed straight through to `upload-artifact`):**
 
@@ -260,7 +260,7 @@ Behaviour matches `actions/upload-artifact@v7.0.1` for every successful path; th
 | `overwrite` | `false` | Whether to overwrite an existing artifact with the same name |
 | `include-hidden-files` | `false` | Whether to include hidden files in the upload |
 
-**Used by:** every workflow that uploads artifacts — `unit-tests.yml`, `integration-tests.yml`, `security.yml`, `cve-scan.yml`. Drop-in replacement for `actions/upload-artifact@v7.0.1`.
+**Used by:** every workflow that uploads artifacts — `unit-tests.yml`, `integration-tests.yml`, `security.yml`, `cve-scan.yml`. Drop-in replacement for `actions/upload-artifact`.
 
 **Usage:**
 

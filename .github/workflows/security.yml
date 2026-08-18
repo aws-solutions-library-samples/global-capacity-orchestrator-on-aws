@@ -52,8 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -82,8 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -142,8 +142,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
           cache: "npm"
@@ -202,7 +202,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install pinned Trivy
         # The Trivy pin lives in the composite action's `version` default —
         # one place for security.yml and cve-scan.yml alike.
@@ -275,7 +275,7 @@ jobs:
           - image: dev
             dockerfile: Dockerfile.dev
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Install pinned Trivy
         # Pin lives in the composite action's `version` default.
@@ -336,7 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull TruffleHog image (with retry)
         # A plain `docker run` pulls implicitly with no retry; pre-pulling
         # keeps a Docker Hub blip from failing the scan before it starts.
@@ -396,7 +396,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull Gitleaks image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
         with:
@@ -423,7 +423,7 @@ jobs:
     container:
       image: semgrep/semgrep:1.172.0
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Run semgrep
         # Suppressed rules live in .github/config/semgrep-excluded-rules.txt;
         # run-semgrep.sh expands them into --exclude-rule flags. shell: sh is
@@ -443,7 +443,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull Checkov image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
         with:
@@ -466,15 +466,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
           cache: "npm"
           cache-dependency-path: "package-lock.json"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -536,9 +536,9 @@ jobs:
       matrix:
         language: [python]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.6
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           languages: ${{ matrix.language }}
           # Pins paths, paths-ignore, and query-filters used by the scan.
@@ -549,7 +549,7 @@ jobs:
       # (``NotADirectoryError`` on single-file ``paths:`` entries) so
       # we avoid invoking it.
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.37.6
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -566,13 +566,13 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.6
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.37.6
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           category: "/language:javascript-typescript"

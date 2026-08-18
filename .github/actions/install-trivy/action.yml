@@ -47,7 +47,7 @@ runs:
   steps:
     # setup-trivy handles the binary cache and adds it to $GITHUB_PATH itself.
     - name: Install pinned Trivy
-      uses: aquasecurity/setup-trivy@v0.2.6
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514  # v0.2.6
       with:
         version: "${{ inputs.version }}"
         cache: "true"

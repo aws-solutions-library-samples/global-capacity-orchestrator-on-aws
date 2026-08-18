@@ -15,14 +15,18 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# github-actions-mutable-action-tag
+# The list is intentionally empty.
 # -----------------------------------------------------------------------------
-# Flags `uses: owner/action@vN` because a major-version tag can be re-pointed by
-# the action's maintainer. This project deliberately pins GitHub Actions to
-# human-readable major-version tags (e.g. `@v7`) rather than 40-character commit
-# SHAs: Dependabot (.github/dependabot.yml) tracks the github-actions ecosystem
-# and opens PRs when a new major ships, and SHA pins make every workflow diff
-# unreviewable. The residual risk — trusting the publisher of a first-party
-# `actions/*`, `aws-actions/*`, or `docker/*` action not to move a tag onto
-# malicious code — is accepted for the small set of vetted actions used here.
-yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+# It previously held `github-actions-mutable-action-tag`, which flags
+# `uses: owner/action@<tag>` because a tag is a mutable pointer the action's
+# publisher can move onto different code. That suppression is gone because the
+# finding is gone: every third-party action is now pinned to a 40-character
+# commit SHA with the tag kept as a trailing `# vX.Y.Z` comment, so Dependabot
+# still recognizes and bumps it while the ref itself cannot be repointed.
+# `tests/test_workflow_security_contract.py` fails the build if a tag ref or a
+# comment-less SHA comes back, so re-adding this rule here would hide a
+# regression that CI already refuses to merge.
+#
+# Keep the file even while empty: run-semgrep.sh degrades to "no excludes" if it
+# is missing, and an empty-but-present list is the reviewable place a future
+# suppression goes.

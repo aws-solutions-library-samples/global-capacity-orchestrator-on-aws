@@ -26,7 +26,7 @@ Used by the `integration:kind:cluster-e2e` and `integration:kind:examples-smoke`
 
 ```yaml
 - name: Create kind cluster
-  uses: helm/kind-action@v1
+  uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
   with:
     config: .github/kind/kind-calico.yaml
 ```

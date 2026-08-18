@@ -1,6 +1,6 @@
 # Upload Artifact with Retry Action
 
-This composite action wraps `actions/upload-artifact@v7.0.1` with bounded retry
+This composite action wraps `actions/upload-artifact` with bounded retry
 handling for transient artifact-service failures.
 
 ## Table of Contents

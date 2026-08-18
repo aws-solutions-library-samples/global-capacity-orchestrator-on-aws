@@ -132,7 +132,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: aws-actions/configure-aws-credentials@v6.2.3
+  - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
     with:
       role-to-assume: ${{ secrets.GCO_CI_ROLE_ARN }}
       aws-region: us-east-1

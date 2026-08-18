@@ -8,6 +8,9 @@
 version: 2
 updates:
   # Keep actions (actions/checkout, actions/setup-python, etc.) current.
+  # Every third-party ref is pinned to a commit SHA with the tag in a trailing
+  # comment; Dependabot rewrites both halves, which is what keeps SHA pinning
+  # maintainable rather than a one-time freeze. See .github/CI.md#action-pinning.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -15,6 +18,32 @@ updates:
     # Wait a week after a release before proposing an update, so a freshly
     # published (possibly compromised or broken) version isn't pulled in
     # immediately. Satisfies the dependabot-missing-cooldown semgrep rule.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Composite actions under .github/actions/*/action.yml.
+  #
+  # These need their own block: for the github-actions ecosystem a `directory`
+  # of "/" scans .github/workflows plus an action.yml at the *repository root*
+  # only, so the third-party refs inside our composite actions
+  # (docker/build-push-action, actions/upload-artifact, aquasecurity/setup-trivy,
+  # docker/setup-buildx-action) are invisible to the block above and would sit
+  # frozen at whatever SHA they were pinned at.
+  #
+  # `directories` — not `directory` — because only the plural key supports the
+  # `*` wildcard. Kept as a separate block so the proven "/" configuration above
+  # is untouched, and because the ecosystem requires directory sets not to
+  # overlap. tests/test_workflow_security_contract.py asserts this coverage
+  # still resolves to every composite action that names a third-party action.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5

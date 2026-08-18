@@ -89,6 +89,11 @@ yamllint rule overrides — line length, indentation, and ignored paths.
 ## `semgrep-excluded-rules.txt`
 
 Repo-wide semgrep rule suppressions — one rule ID per line, with rationale.
+**Currently empty:** the only entry was `github-actions-mutable-action-tag`,
+retired once every third-party action was pinned to a commit SHA (see
+[Action pinning](../CI.md#action-pinning)). The file stays in place because
+`run-semgrep.sh` degrades to "no excludes" when it is absent, and an
+empty-but-present list is the reviewable home for a future suppression.
 
 - **Used by:** `security:semgrep:sast` in `.github/workflows/security.yml`
   through `.github/scripts/run-semgrep.sh`, which expands each line into a

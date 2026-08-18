@@ -12,6 +12,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
   - [Satellites](#satellites)
   - [Naming conventions](#naming-conventions)
   - [Cross-cutting defaults](#cross-cutting-defaults)
+  - [Action pinning](#action-pinning)
 - [Live release validation stays local](#live-release-validation-stays-local)
 - [Composite actions](#composite-actions)
 - [CodeQL config](#codeql-config)
@@ -103,8 +104,44 @@ All CI workflows share the same safety defaults:
 - `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** for the release pair — `release.yml` and `release-publish.yml` share one repository-wide `group: release` with `cancel-in-progress: false`, so releases serialize across both stages and a half-run release is never cancelled mid-flight. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight.
 - `timeout-minutes` on every job (10 min for lint, 15 for unit, 20–30 for integration).
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
-- Caching: `actions/setup-python@v7.0.0` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v6.1.0` on `.mypy_cache/`.
-- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials@v6.2.3` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
+- Caching: `actions/setup-python` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache` on `.mypy_cache/`.
+- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
+
+### Action pinning
+
+Every third-party action is pinned to a **40-character commit SHA** with its tag
+kept as a trailing comment:
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+```
+
+A tag — even a patch tag like `v7.0.1` — is a mutable pointer. The action's
+publisher, or anyone who takes over their account, can move it onto code that
+reads this repository's secrets and the `GITHUB_TOKEN` of whichever job runs it,
+retroactively and with no diff here. A commit SHA is the only ref that cannot be
+repointed. The trailing comment is what keeps the pin maintainable: Dependabot
+recognizes the `@<sha>  # <tag>` shape and rewrites both halves when it bumps an
+action, so version drift stays visible in review instead of hiding inside forty
+opaque characters.
+
+Local composite refs (`uses: ./.github/actions/<name>`) are deliberately
+unpinned — they resolve inside the checked-out commit, so they are already as
+fixed as the workflow calling them.
+
+`tests/test_workflow_security_contract.py` enforces both halves across every
+workflow *and* every composite action, so a new job cannot reintroduce a tag ref
+or drop a version comment. It also checks that [Dependabot](#dependabot) is
+configured to see the composite actions, since a pin nothing bumps is a pin that
+rots. Resolve a tag to its SHA with:
+
+```bash
+gh api repos/actions/checkout/commits/v7.0.1 --jq '.sha'
+```
+
+Because the finding is now structurally impossible, semgrep's
+`github-actions-mutable-action-tag` suppression was removed from
+`.github/config/semgrep-excluded-rules.txt`; that file is intentionally empty.
 
 ### Single-source pins
 
@@ -168,7 +205,7 @@ Two details worth knowing before editing these jobs:
 
 ## CodeQL config
 
-[`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup Python and JavaScript CodeQL jobs in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init@v4`. It does three things:
+[`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup Python and JavaScript CodeQL jobs in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init`. It does three things:
 
 - **Scopes the scan** to hand-authored Python and JavaScript runtime code (`gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`). Generated output (`cdk.out/`, `lambda/*-build/`), virtualenvs, caches, tests, and the demo folder are excluded. The deployable `lambda/inference-streaming-proxy/index.mjs` remains in scope while its tests and staged build copy are excluded.
 - **Pins the query pack** to `security-and-quality` so the additional maintainability queries still surface alongside the default security suite.
@@ -210,7 +247,7 @@ Rationale: Python deps are pinned through `requirements-lock.txt` with `pip-comp
 
 Ecosystems tracked:
 
-- GitHub Actions (`uses:` versions across all workflows)
+- GitHub Actions, in **two** blocks: `directory: "/"` for `.github/workflows`, plus `directories: ["/.github/actions/*"]` for the composite actions. The second block is not redundant — for this ecosystem `/` scans `.github/workflows` and an `action.yml` at the *repository root* only, so without it the third-party refs inside `.github/actions/*/action.yml` would never be bumped. Only the plural `directories` key supports the `*` wildcard, and the two directory sets must not overlap. Since every ref is a commit SHA ([Action pinning](#action-pinning)), this is what keeps the pins current rather than frozen; `tests/test_workflow_security_contract.py` fails if a composite action pins something Dependabot cannot see.
 - npm root tooling (`/`) and the deployable streaming Lambda (`/lambda/inference-streaming-proxy`)
 - Docker (`dockerfiles/`, `lambda/helm-installer/`, `Dockerfile.dev` at repo root)
 
@@ -389,7 +426,7 @@ To turn the check on without introducing long-lived access keys, configure a Git
      issues: write
    steps:
      # ...existing checkout + tooling install steps...
-     - uses: aws-actions/configure-aws-credentials@v6.2.3
+     - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
        with:
          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GCODependencyScanRole
          aws-region: us-east-1

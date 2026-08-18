@@ -3,7 +3,7 @@
 Configuration for CodeQL Code Scanning. Run via the
 `security:codeql:python-code-analysis` job in
 [`workflows/security.yml`](../workflows/security.yml), which uses the
-`github/codeql-action/init@v3` action's `config-file:` input to load this
+`github/codeql-action/init` action's `config-file:` input to load this
 config from disk (Advanced Setup).
 
 ## Table of Contents

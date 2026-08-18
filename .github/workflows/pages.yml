@@ -93,10 +93,10 @@ jobs:
         # THIS repository's own default branch — never pull_request events,
         # never fork heads — so head_sha here is always a commit already
         # merged to main. Reviewed as a false positive.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -109,7 +109,7 @@ jobs:
         # publishing a damaged site; the previous deployment keeps serving.
         run: mkdocs build --strict
       - name: Download coverage artifact from the Unit Tests run
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: pytest-coverage
           run-id: ${{ github.event.workflow_run.id }}
@@ -160,7 +160,7 @@ jobs:
           print(f"Coverage: {pct:.1f}% ({color})")
           PY
       - name: Package the merged site as a Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
           # site/ holds the built wiki at the root, the coverage report under
           # coverage/, and coverage-badge.json at the root — the single
@@ -168,7 +168,7 @@ jobs:
           path: site
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0
         with:
           # Give up after 3 minutes rather than the action's 10-minute
           # default, so a stuck Pages deployment ends the step cleanly inside

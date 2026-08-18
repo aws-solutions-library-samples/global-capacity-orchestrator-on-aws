@@ -75,8 +75,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -128,8 +128,8 @@ jobs:
       KUBECONFORM_VERSION: "v0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -287,8 +287,8 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -310,13 +310,13 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -341,13 +341,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -387,13 +387,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -426,7 +426,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -469,7 +469,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         # Shared GHA layer cache (scope: health-monitor). Populated and
@@ -543,7 +543,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -608,7 +608,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -673,7 +673,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -713,7 +713,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -914,7 +914,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -937,7 +937,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
@@ -982,7 +982,7 @@ jobs:
             awscli-arch-grep: "aarch64"
             elf-e-machine: "0xB7"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Build dev container
         # Native build on the matching host arch — no --platform or QEMU.
         # Dockerfile.dev is parameterized on BuildKit's $TARGETARCH, which
@@ -1156,11 +1156,11 @@ jobs:
       METRICS_SERVER_VERSION: "v0.9.0"
       METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
       - name: Create kind cluster (no default CNI)
-        uses: helm/kind-action@v1.14.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
@@ -1706,10 +1706,10 @@ jobs:
       # The kind and Calico pins shared with cluster-e2e live in the
       # workflow-level env block at the top of this file — one declaration.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Reclaim runner disk space before large image pulls
         uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1751,7 +1751,7 @@ jobs:
         # kindnet accepts NetworkPolicy objects without enforcing them, and
         # the mlflow leg of this job is only a real test when the chart's
         # own policy is actually enforced.
-        uses: helm/kind-action@v1.14.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
@@ -2238,7 +2238,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Verify the preinstalled Docker runtime
         # GitHub-hosted runners include Docker. Verify that trusted runner
         # surface instead of executing a mutable internet script as root.
@@ -2255,7 +2255,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install the latest Podman (with retry)
         uses: ./.github/actions/apt-install-with-retry
         with:
@@ -2322,7 +2322,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prepare the runfinch APT repo
         run: |
           set -euo pipefail
@@ -2396,7 +2396,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prove setup-dev-alias.sh refuses when no runtime answers
         # Docker is preinstalled on the runner, so the script masks all three
         # runtimes with stubs that fail `<rt> info` to exercise the refusal
