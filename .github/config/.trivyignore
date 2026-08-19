@@ -78,6 +78,35 @@ CVE-2026-42506 exp:2026-09-22
 # drop this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-34040
 CVE-2026-34040 exp:2026-09-22
 
+# CVE-2026-17106 (GHSA-hfg8-hc9c-6c3h) — github.com/moby/go-archive v0.2.1: a
+# crafted tar archive can write outside the extraction directory during
+# untar. Statically linked into the docker-buildx CLI plugin that
+# Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
+# security:trivy:container-scan on the GCO dev image — the only scanned image
+# that carries the Buildx plugin. Fixed in moby/go-archive 0.3.0.
+#
+# Not introduced by any change of ours: the GHSA was published
+# 2026-08-18T21:17Z and reached the Trivy DB in the following hours. The
+# Security workflow was green on main at eeeab67 (2026-08-18T20:50Z), 27
+# minutes before publication, so this appeared on an unchanged buildx binary.
+#
+# Not clearable by a pin bump: checked 2026-08-19 — v0.36.1 (the release this
+# ARG already pins) is the latest buildx on any dist-tag, and its go.mod
+# requires moby/go-archive v0.2.1. buildx master is on v0.2.0, older still, so
+# the bump to >= 0.3.0 has not landed upstream at all yet — there is no
+# release or branch to move to.
+#
+# Low runtime risk: the flagged path is tar extraction. buildx is a
+# build-time CLI plugin that extracts contexts and cache artifacts authored by
+# the contributor or CI invoking it, plus the version-pinned images it pulls —
+# not attacker-supplied archives. The dev image is a contributor/CI tool that
+# is never deployed to a cluster.
+#
+# Clears when a buildx release ships requiring moby/go-archive >= 0.3.0: bump
+# BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan tracks it) and drop
+# this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-17106
+CVE-2026-17106 exp:2026-10-15
+
 # CVE-2026-14257 (GHSA-mh99-v99m-4gvg) — brace-expansion denial of service via
 # unbounded expansion length, causing an out-of-memory process crash. Present in
 # the copy npm vendors inside its own node_modules
