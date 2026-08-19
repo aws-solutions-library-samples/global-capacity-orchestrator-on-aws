@@ -443,6 +443,7 @@ if is_enabled(FLAG_SWARM):
                         registered_tags=registered_tags,
                         tool_docstrings=docstrings,
                         max_children=max_children,
+                        tool_allowlist=(None if allow_all_tools else tool_allowlist or None),
                         retries=retries,
                     )
                 except swarm_scaffold.SwarmScaffoldError as err:

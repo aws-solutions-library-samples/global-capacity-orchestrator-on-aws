@@ -218,6 +218,7 @@ def build_plan_prompt(
     registered_tools: dict[str, Any],
     tool_docstrings: Mapping[str, str] | None = None,
     max_children: int | None = None,
+    tool_allowlist: list[str] | None = None,
     feedback: str | None = None,
 ) -> str:
     """Assemble the deterministic decomposition prompt.
@@ -225,10 +226,19 @@ def build_plan_prompt(
     Deterministic given its inputs — tool names sorted, docstrings
     truncated to a fixed budget, the catalog capped — matching the
     byte-identity discipline of the wider sampling prompt builders.
+
+    ``tool_allowlist`` narrows the advertised catalog to the operator's
+    permitted set. The narrowing is advisory here and enforced by
+    :func:`generate_sampled_plan` narrowing the registry it validates
+    against; showing the model only what it may use keeps the two in
+    agreement instead of inviting rejections.
     """
     cap = max_children if max_children is not None else config["max_children"]
     cap = max(1, min(cap, config["max_children"]))
-    names = sorted(registered_tools)[:_PROMPT_TOOL_LIMIT]
+    permitted = set(registered_tools)
+    if tool_allowlist:
+        permitted &= set(tool_allowlist)
+    names = sorted(permitted)[:_PROMPT_TOOL_LIMIT]
     docs = tool_docstrings or {}
     catalog_lines = []
     for name in names:
@@ -255,8 +265,43 @@ def build_plan_prompt(
         "- Slot names: 1-64 chars, alphanumeric plus . _ - only.",
         "- Only tools from the catalog below may appear in an allowlist.",
         "- Two children must not share a non-read-only tool.",
-        '- Criteria use metric paths like "metrics.<name>" and the kinds:',
-        "  metric_threshold, metric_trend, event, tool_call_succeeded, predicate.",
+        "",
+        "Every criterion object requires all three of these keys:",
+        '  - "criterion_id": unique non-empty string (unique within the child)',
+        '  - "kind": one of "metric_threshold" / "metric_trend" / "event" /',
+        '            "tool_call_succeeded" / "predicate"',
+        '  - "required": JSON boolean',
+        "Plus the kind-specific keys:",
+        '  metric_threshold    -> "metric" (dot-path into the Observation,',
+        '                         e.g. metrics.results_count), "op" (one of',
+        '                         <, <=, >, >=, ==, !=), "target" (number)',
+        '  metric_trend        -> "metric" (dot-path), "direction" (one of',
+        "                         increasing, decreasing, non_increasing,",
+        "                         non_decreasing)",
+        '  event               -> "event_name" (non-empty string)',
+        '  tool_call_succeeded -> "tool_name" (non-empty string, from the',
+        "                         child's own allowlist). PREFER this kind",
+        '                         when the goal is "this tool ran and',
+        '                         succeeded" — it is server-evaluated.',
+        '  predicate           -> "expression" (Python expression over `obs`)',
+        "",
+        "CRITICAL — every criterion must be decidable from the Observation.",
+        "A criterion whose metric path is absent evaluates *inconclusive*, and",
+        "ANY inconclusive criterion — required or not — blocks completion for",
+        'the child\'s entire budget. "required": false does NOT make a',
+        "criterion safe to guess at. Most tools emit no metrics at all, so do",
+        "not invent metric paths: use metric_threshold / metric_trend only for",
+        "metrics you are confident the child's tools actually emit, and prefer",
+        "tool_call_succeeded otherwise. A single well-chosen criterion beats a",
+        "speculative second one that can never be decided.",
+        "",
+        "Worked example of one complete child spec:",
+        '{"slot": "docs-worker", "directive": "Find the inference docs.",',
+        ' "criteria": [{"criterion_id": "docs_found",',
+        '               "kind": "tool_call_succeeded",',
+        '               "required": true, "tool_name": "find_docs"}],',
+        ' "budget": {"max_iterations": 5, "max_wall_clock_seconds": 300},',
+        ' "tool_allowlist": ["find_docs"], "restart_policy": "never"}',
         "",
         "=== Operator directive ===",
         directive,
@@ -293,6 +338,7 @@ async def generate_sampled_plan(
     registered_tags: Mapping[str, Collection[str]],
     tool_docstrings: Mapping[str, str] | None = None,
     max_children: int | None = None,
+    tool_allowlist: list[str] | None = None,
     retries: int = DEFAULT_PLAN_RETRIES,
     flag_lookup: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -304,7 +350,22 @@ async def generate_sampled_plan(
     :class:`SwarmScaffoldError` on exhaustion. Transport failures are
     not retriable here — the backend owns its own recovery — and
     surface as ``transport_error`` immediately.
+
+    ``tool_allowlist`` is the operator's permitted tool set. When given,
+    the registry this function prompts with *and validates against* is
+    narrowed to it, so a sampled child can never carry a tool the
+    operator did not permit: the allowlist is the primary blast-radius
+    control over a fleet, and honouring it only on the deterministic
+    path would mean a successful sample silently widened it.
     """
+    if tool_allowlist:
+        permitted = set(tool_allowlist)
+        registered_tools = {
+            name: tool for name, tool in registered_tools.items() if name in permitted
+        }
+        registered_tags = {
+            name: tags for name, tags in registered_tags.items() if name in permitted
+        }
     feedback: str | None = None
     last_reason = "no_attempts"
     for _attempt in range(retries + 1):
@@ -314,6 +375,7 @@ async def generate_sampled_plan(
             registered_tools=registered_tools,
             tool_docstrings=tool_docstrings,
             max_children=max_children,
+            tool_allowlist=tool_allowlist,
             feedback=feedback,
         )
         try:

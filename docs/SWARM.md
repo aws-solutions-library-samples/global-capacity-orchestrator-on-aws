@@ -193,6 +193,34 @@ Two producers:
   mirroring the swarm directive, criteria from the Mission criteria
   scaffold, `restart_policy: never`, budget bounded by the pool.
 
+**When reviewing a plan, strike any criterion that cannot be decided.**
+Mission completes a session only when every required criterion is met
+*and no criterion is inconclusive* — and that second half counts
+criteria marked `required: false` too. A criterion over a metric path the
+child's tools never emit (`metrics.results_count`, say, when the tool
+returns a plain result list) is therefore permanently undecidable: the
+child cannot complete, burns its whole budget, terminates unmet, and the
+orchestrator's fleet criteria never go met either, so the swarm runs to
+its own cap. One speculative criterion can cost a fleet its entire pool.
+The plan prompt warns the model about this, but sampled plans are still
+worth reading for it: prefer `tool_call_succeeded`, and only use
+`metric_threshold` / `metric_trend` for metrics you know are emitted.
+
+**Review deterministic criteria before trusting a green verdict.** The
+Mission criteria scaffold derives concrete criteria (for example a
+`tool_call_succeeded` entry) only when it recognises the directive's
+shape against the allowlist. Otherwise it emits its documented
+placeholder — a `predicate` criterion whose expression is `True`,
+labelled `TODO: replace this placeholder with a real success condition`.
+A child holding that placeholder does one round of real work and then
+completes, because the criterion is met however that round turned out,
+and the orchestrator's fleet criteria in turn go `met` off the completed
+child. The swarm reports `complete` / `criteria_met` without having
+attested anything about the goal. This is inherited Mission scaffold
+behaviour, not swarm-specific, but a fleet multiplies it: prefer
+`gco swarm scaffold-plan` and read the criteria before `gco swarm run`,
+or supply a sampled plan.
+
 `gco swarm scaffold-plan` (CLI) and `swarm_plan` (MCP) expose the
 scaffolder standalone for the review-then-run workflow; `gco swarm run`
 chains scaffold → start → prime → drive. Plan spawns are dispatched through the

@@ -292,6 +292,7 @@ def _scaffold_plan(
                         registered_tags=tags,
                         tool_docstrings=_tool_docstrings(registered),
                         max_children=max_children,
+                        tool_allowlist=(None if allow_all_tools else list(tool_allowlist) or None),
                         retries=retries,
                     )
                 )

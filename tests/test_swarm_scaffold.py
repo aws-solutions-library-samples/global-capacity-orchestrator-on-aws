@@ -245,6 +245,98 @@ class TestSampledPlan:
         assert first == second
         assert first.index("find_docs") < first.index("find_examples")
 
+    async def test_operator_allowlist_is_enforced_on_the_sampled_path(self) -> None:
+        """A sampled child cannot carry a tool the operator did not permit.
+
+        Regression: the operator's ``--tool-allowlist`` reached only the
+        deterministic plan. The sampled path was prompted with — and
+        validated against — the full registry, so a successful sample
+        silently widened the fleet's blast radius past what the operator
+        asked for (observed live: a docs-only allowlist produced children
+        holding unrelated tools).
+        """
+        rogue = json.dumps(
+            [
+                child_entry("worker-1", tool_allowlist=["jobs_submit"]),
+            ]
+        )
+        backend = StubBackend([rogue, rogue, rogue, rogue])
+        with pytest.raises(SwarmScaffoldError) as excinfo:
+            await generate_sampled_plan(
+                backend,
+                "Goal.",
+                **plan_kwargs(tool_allowlist=["find_docs"]),
+            )
+        # Rejected because the narrowed registry no longer contains it.
+        assert "jobs_submit" not in backend.prompts[0]
+        assert "find_docs" in backend.prompts[0]
+        assert excinfo.value.last_reason
+
+    async def test_permitted_allowlist_still_samples_successfully(self) -> None:
+        """Narrowing must not reject a child that stays inside the set."""
+        good = json.dumps([child_entry("worker-1", tool_allowlist=["find_docs"])])
+        backend = StubBackend([good])
+        plan = await generate_sampled_plan(
+            backend,
+            "Goal.",
+            **plan_kwargs(tool_allowlist=["find_docs", "find_examples"]),
+        )
+        assert [entry["slot"] for entry in plan] == ["worker-1"]
+        assert plan[0]["tool_allowlist"] == ["find_docs"]
+
+    def test_prompt_catalog_narrows_to_the_operator_allowlist(self) -> None:
+        """The model is shown only the tools it is permitted to use."""
+        prompt = build_plan_prompt(
+            "Goal.",
+            config=CONFIG,
+            registered_tools=REGISTERED_TOOLS,
+            tool_allowlist=["find_docs"],
+        )
+        assert "find_docs" in prompt
+        assert "jobs_submit" not in prompt
+        assert "find_examples" not in prompt
+
+    def test_prompt_specifies_the_criterion_object_schema(self) -> None:
+        """The prompt must state what a criterion object requires.
+
+        Regression: the prompt asked for ``[<mission criteria objects>]``
+        and named only the *kinds*, leaving the model to guess the object
+        schema. It guessed without ``criterion_id`` every time, so live
+        sampled plans were rejected ``criterion_id_missing_or_invalid``
+        through the whole retry budget and the headline multi-child path
+        silently degraded to the deterministic single-worker fallback
+        after paying for the model round-trips.
+        """
+        prompt = build_plan_prompt("Goal.", config=CONFIG, registered_tools=REGISTERED_TOOLS)
+        # The three keys required on every criterion, whatever the kind.
+        assert "criterion_id" in prompt
+        assert '"required"' in prompt
+        assert '"kind"' in prompt
+        # The kind-specific keys the validator enforces.
+        for kind_key in ("tool_name", "event_name", "direction", "expression", "target"):
+            assert kind_key in prompt, f"prompt omits the {kind_key!r} key"
+        # A worked example the model can pattern-match against, carrying
+        # a criterion_id inside it.
+        example_at = prompt.index("Worked example")
+        assert "criterion_id" in prompt[example_at:]
+
+    def test_prompt_warns_that_inconclusive_criteria_block_completion(self) -> None:
+        """The prompt must state the rule that undecidable criteria are fatal.
+
+        Regression: a sampled plan paired a met ``tool_call_succeeded``
+        criterion with an optional ``metric_threshold`` over
+        ``metrics.results_count`` — a metric the tool never emits. Mission
+        completion requires that *no* criterion be inconclusive, required
+        or not, so both children burned their whole budget and terminated
+        unmet, the fleet criteria never went met, and the swarm ran to its
+        orchestrator cap. Observed live: ~13 minutes and the entire pool
+        spent on a plan that looked reasonable.
+        """
+        prompt = build_plan_prompt("Goal.", config=CONFIG, registered_tools=REGISTERED_TOOLS)
+        assert "inconclusive" in prompt
+        # The counterintuitive half: optional does not mean safe.
+        assert '"required": false does NOT make a' in prompt
+
 
 # ---------------------------------------------------------------------------
 # Respawn directive revision
