@@ -24,6 +24,7 @@ from mission.swarm_runner import (  # noqa: E402
     SwarmRunner,
     SwarmRunnerBusyError,
     build_children_snapshot,
+    build_fleet_rollup,
 )
 from mission.types import SCHEMA_VERSION  # noqa: E402
 
@@ -558,3 +559,64 @@ def test_snapshot_marks_unreadable_children() -> None:
     assert snapshot["children"][0]["status"] == "unreadable"
     assert snapshot["metrics"]["children_failed"] == 1
     assert snapshot["metrics"]["iteration_pool_remaining"] == 5
+
+
+def _forge_orphaned_heartbeat(tasks_dir: Path, session_id: str) -> None:
+    """Write a ``running`` heartbeat under a PID that cannot exist."""
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "task_id": f"swarm-{session_id}",
+        "tool": "swarm_run",
+        "argv": [session_id],
+        "pid": 4_100_000,
+        "started_at": "2026-08-19T00:00:00+00:00",
+        "updated_at": "2026-08-19T00:00:00+00:00",
+        "elapsed_seconds": 1,
+        "state": "running",
+        "stacks_completed": 0,
+        "last_stack": None,
+        "last_message": None,
+        "tail": [],
+        "log_path": str(tasks_dir / f"swarm-{session_id}.log"),
+    }
+    path = tasks_dir / f"swarm-{session_id}.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def test_orphan_finding_is_scoped_to_resumable_swarms(
+    backend: FilesystemBackend, _isolated_task_status: Path
+) -> None:
+    """The orphan finding must only fire where a resume can actually help.
+
+    On a live swarm an orphaned heartbeat means the driver died and
+    ``swarm iterate`` is the fix, so the finding earns its place. On a
+    terminal swarm the same orphaned record is just the trace of a runner
+    whose orchestrator went terminal under it — an external
+    ``swarm abort`` leaves exactly this state — and pointing the operator
+    at a resume that cannot happen is worse than saying nothing.
+
+    Observed live: aborting a running swarm from a second process left
+    the rollup advising ``swarm iterate resumes the fleet`` on a swarm
+    already reported ``terminated`` in the same document.
+    """
+    make_orchestrator(backend)
+    _forge_orphaned_heartbeat(_isolated_task_status, "mission-orch01")
+
+    live = load(backend, "mission-orch01")
+    rollup = build_fleet_rollup(backend, live)  # type: ignore[arg-type]
+    assert rollup["runner_state"] == "orphaned"
+    assert any("orphaned" in finding for finding in rollup["findings"]), (
+        "a resumable swarm with a dead driver must surface the orphan finding"
+    )
+
+    # Same heartbeat, terminal orchestrator: state still reported, advice dropped.
+    terminal = load(backend, "mission-orch01")
+    terminal["status"] = "terminated"
+    terminal["final_verdict"] = "terminate"
+    backend.save_session(terminal)  # type: ignore[arg-type]
+    rollup = build_fleet_rollup(backend, load(backend, "mission-orch01"))  # type: ignore[arg-type]
+    assert rollup["runner_state"] == "orphaned"
+    assert not any("orphaned" in finding for finding in rollup["findings"]), (
+        f"terminal swarm must not advise a resume, got {rollup['findings']}"
+    )

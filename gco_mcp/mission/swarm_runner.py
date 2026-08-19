@@ -863,7 +863,13 @@ def build_fleet_rollup(backend: Any, session: SessionState) -> dict[str, Any]:
     findings: list[str] = []
     heartbeat = get_task(f"swarm-{session_id}")
     runner_state = heartbeat.get("state") if heartbeat else None
-    if runner_state == "orphaned":
+    # Only actionable while the swarm can still be driven. On a terminal
+    # orchestrator an orphaned heartbeat is the expected trace of a
+    # runner whose swarm went terminal under it (an external
+    # ``swarm abort``, say) — recommending ``swarm iterate`` there points
+    # at a resume that cannot happen. Matches the pool finding below,
+    # which is likewise scoped to non-terminal sessions.
+    if runner_state == "orphaned" and session["status"] not in TERMINAL_STATES:
         findings.append(
             "runner heartbeat is orphaned: the driving process died mid-swarm; "
             "swarm iterate resumes the fleet"
