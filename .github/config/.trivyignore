@@ -344,3 +344,39 @@ CVE-2026-56858 exp:2026-10-15
 CVE-2026-56859 exp:2026-10-15
 CVE-2026-56860 exp:2026-10-15
 CVE-2026-56862 exp:2026-10-15
+# -----------------------------------------------------------------------------
+# CVE-2026-56864 (a malicious GOSUMDB could serve arbitrary module content) and
+# CVE-2026-56865 (a malicious GOPROXY could forge sumdb responses) —
+# golang.org/x/mod at v0.38.0, statically linked into the docker-buildx CLI
+# plugin that Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
+# security:trivy:container-scan on the GCO dev image, which is the only
+# scanned image carrying the Buildx plugin; every other binary in that image
+# scanned clean. Fixed in x/mod 0.40.0.
+#
+# Not introduced by any change of ours: the Security workflow was green on
+# main at 2a05133 (2026-08-19 12:14Z) and red on a pull request at
+# 2026-08-19 17:45Z whose diff touches no image contents. The two x/mod
+# advisories landed in the Trivy DB in that window, so they appeared on an
+# unchanged buildx binary — main goes red on its next scan for the same reason.
+#
+# Not clearable by a pin bump — upstream checked 2026-08-19:
+#   docker-buildx  v0.36.1 (published 2026-08-04) IS the latest release; no
+#                  v0.37.x exists, and its go.mod requires exactly the flagged
+#                  golang.org/x/mod v0.38.0. buildx `master` still requires
+#                  v0.38.0 too, so there is no released *or* unreleased build
+#                  to move to.
+#
+# Low runtime risk: both flaws sit in the Go module download and verification
+# path — they need a hostile GOSUMDB or GOPROXY serving forged module content
+# to a client that is fetching Go modules. buildx fetches no Go modules; it
+# vendors x/mod for module-path and semver parsing, so the vulnerable code
+# path is not reachable in this usage. The dev image is contributor/CI
+# tooling and is never deployed.
+#
+# Clears when a buildx release ships requiring x/mod >= 0.40.0: bump
+# ARG BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan tracks it) and
+# drop these entries.
+# Advisories: https://avd.aquasec.com/nvd/cve-2026-56864
+#             https://avd.aquasec.com/nvd/cve-2026-56865
+CVE-2026-56864 exp:2026-10-15
+CVE-2026-56865 exp:2026-10-15
