@@ -44,6 +44,14 @@ on:
       - ".github/workflows/grafana-dashboards.yml"
   workflow_dispatch:
 
+# Booting a real Grafana container is a 15-minute-timeout job, so a
+# superseded run is pure waste: it keeps holding a runner slot while the
+# push that replaced it queues behind it. Cancel per ref, matching the
+# other PR-triggered gates (lint, unit-tests, integration-tests).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
