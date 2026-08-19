@@ -52,7 +52,7 @@ modules make for tools that take an injected context.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -153,6 +153,13 @@ def _default_now() -> Callable[[], datetime]:
 # shapes settle in later slices (sampling in slice 6, sandbox in slice 5).
 ToolDispatcher = Callable[[str, dict[str, Any], Any], Awaitable[Any]]
 SamplingCallable = Callable[..., Awaitable[Any]]
+#: Synchronous contribution merged into each iteration's Observation at the
+#: end of the Observe_Phase. Takes the live session, returns a dict whose
+#: optional ``children`` key lands on the Observation verbatim and whose
+#: optional ``metrics`` dict merges via ``metrics.update(...)`` — the same
+#: contract tool results use. Synchronous and pure-by-convention so the
+#: determinism suite can pin its output byte-for-byte.
+ObservationAugmenter = Callable[[SessionState], dict[str, Any]]
 SandboxRunner = Callable[
     [str, Any, ToolDispatcher],
     Awaitable[tuple[dict[str, Any], list[ToolCallRecord]]],
@@ -211,6 +218,15 @@ class MissionEngine:
     # Final_Report — not the memory item — is the durable exit
     # artifact.
     memory_store: Any | None = None
+    # Optional sequence of :data:`ObservationAugmenter` callables applied at
+    # the end of every Observe_Phase, in order. ``None`` (the default) is
+    # byte-identical to pre-seam behavior — standalone and child sessions
+    # never carry augmenters. The swarm runner injects one on orchestrator
+    # engines to merge the supervised-children snapshot; each augmenter is
+    # best-effort (a raising augmenter records an Observation error instead
+    # of failing the phase, so criteria read inconclusive rather than the
+    # session dying on a snapshot bug).
+    observation_augmenters: Sequence[ObservationAugmenter] | None = None
 
     # ------------------------------------------------------------------ #
     # Public surface
@@ -1026,10 +1042,55 @@ class MissionEngine:
                 obs.setdefault("phase_started_at", phase_started.isoformat())
                 obs.setdefault("phase_ended_at", self.now().isoformat())
                 record["observation"] = cast(Observation, obs)
+                self._apply_observation_augmenters(session, record)
                 return
             record["observation"] = self._build_observation(executed_calls, phase_started)
+            self._apply_observation_augmenters(session, record)
 
         await self._run_phase(session, record, _OBSERVE, body)
+
+    def _apply_observation_augmenters(self, session: SessionState, record: IterationRecord) -> None:
+        """Merge each :data:`ObservationAugmenter` contribution into the Observation.
+
+        Applied at the end of the Observe_Phase for both strategy shapes.
+        A contribution's ``children`` list lands on the Observation
+        verbatim (later augmenters win, matching the ``metrics.update``
+        last-writer-wins semantics); its ``metrics`` dict merges into
+        ``observation["metrics"]``. Non-dict contributions are ignored.
+
+        Best-effort by design: an augmenter that raises records a
+        structured entry under ``observation["errors"]`` instead of
+        failing the phase — downstream criteria read ``unmet`` or
+        ``inconclusive`` and the deterministic cascade (stagnation,
+        budget caps) still terminates the session, which is strictly
+        better than dying inside Observe on a snapshot bug.
+        """
+        if not self.observation_augmenters:
+            return
+        obs = cast(dict[str, Any], record.get("observation") or {})
+        for augmenter in self.observation_augmenters:
+            try:
+                contribution = augmenter(session)
+            except Exception as exc:  # noqa: BLE001 — degrade, never fail the phase
+                obs.setdefault("errors", []).append(
+                    {
+                        "tool_name": "_observation_augmenter",
+                        "status": "failed",
+                        "error_message": str(exc),
+                    }
+                )
+                continue
+            if not isinstance(contribution, dict):
+                continue
+            children = contribution.get("children")
+            if isinstance(children, list):
+                obs["children"] = children
+            extra_metrics = contribution.get("metrics")
+            if isinstance(extra_metrics, dict):
+                metrics = obs.setdefault("metrics", {})
+                if isinstance(metrics, dict):
+                    metrics.update(extra_metrics)
+        record["observation"] = cast(Observation, obs)
 
     @staticmethod
     def _annotate_tool_result(call: ToolCallRecord | dict[str, Any]) -> Any:

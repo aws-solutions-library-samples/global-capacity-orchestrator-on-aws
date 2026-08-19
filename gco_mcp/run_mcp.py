@@ -344,6 +344,16 @@ with _contextlib.suppress(ImportError):
         mission_status,
     )
 
+with _contextlib.suppress(ImportError):
+    from tools.swarm import (  # noqa: F401
+        swarm_abort,
+        swarm_iterate,
+        swarm_list,
+        swarm_plan,
+        swarm_start,
+        swarm_status,
+    )
+
 # Explicit reload compatibility for the two gated families in capacity.py.
 # A clean startup has just imported the module under the final environment and
 # must not reload it: doing so used to emit duplicate-component warnings for
@@ -524,6 +534,21 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
     ):
         if hasattr(_mission_tools_mod, _name):
             globals()[_name] = getattr(_mission_tools_mod, _name)
+
+if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SWARM):
+    from tools import swarm as _swarm_tools_mod  # noqa: E402
+
+    _importlib.reload(_swarm_tools_mod)
+    for _name in (
+        "swarm_start",
+        "swarm_iterate",
+        "swarm_status",
+        "swarm_abort",
+        "swarm_list",
+        "swarm_plan",
+    ):
+        if hasattr(_swarm_tools_mod, _name):
+            globals()[_name] = getattr(_swarm_tools_mod, _name)
 
 # --- Re-export resource directory constants for tests ---
 from resources.ci import (  # noqa: E402, F401
@@ -727,6 +752,12 @@ _PUBLIC_EXPORTS = [
     "stop_inference",
     "submit_job_api",
     "submit_job_sqs",
+    "swarm_abort",
+    "swarm_iterate",
+    "swarm_list",
+    "swarm_plan",
+    "swarm_start",
+    "swarm_status",
     "sync_storage_bucket",
     "task_prune",
     "task_status",

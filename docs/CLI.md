@@ -4812,6 +4812,135 @@ gco mission memory backfill
 
 ---
 
+### Swarm Commands
+
+Swarm supervision: one **orchestrator** Mission session spawns and drives
+concurrent **child** Mission sessions through in-process supervisor tools,
+under hard rails (fleet cap, pooled child-iteration budget, concurrency
+bound, mandatory-finite child budgets), until the orchestrator's
+deterministic verdict cascade reaches a terminal verdict. See
+[SWARM.md](SWARM.md) for the supervisor model and the determinism boundary.
+
+The whole group is gated: set `GCO_ENABLE_SWARM=true` (or
+`GCO_ENABLE_ALL_TOOLS=true`) or every subcommand exits with code 2 and a
+hint. Enabling `GCO_ENABLE_MISSION` alongside is recommended so child
+sessions are inspectable with `gco mission status`.
+
+<details>
+<summary>All <code>gco swarm</code> commands (7) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco swarm run`](#gco-swarm-run) | Scaffold a plan from a directive, start a swarm, prime the fleet, and drive it to completion in one call. |
+| [`gco swarm start`](#gco-swarm-start) | Validate inputs and persist a new orchestrator session without driving it. |
+| [`gco swarm iterate SESSION_ID`](#gco-swarm-iterate-session_id) | Drive (or resume) an existing swarm's fleet. |
+| [`gco swarm status SESSION_ID`](#gco-swarm-status-session_id) | One-call fleet rollup: rails, pool balance, child table, findings. |
+| [`gco swarm abort SESSION_ID`](#gco-swarm-abort-session_id) | Terminate the orchestrator and abort every non-terminal child. |
+| [`gco swarm list`](#gco-swarm-list) | List swarm (orchestrator) sessions. |
+| [`gco swarm scaffold-plan`](#gco-swarm-scaffold-plan) | Draft a validated Swarm_Plan for review, without starting anything. |
+
+</details>
+
+#### `gco swarm run`
+
+Scaffold a plan from the directive (sampled when a backend resolves, with a
+deterministic single-worker fallback), persist an orchestrator whose default
+criteria require every planned child to complete with zero failures, prime
+the fleet through the spawn seam, and drive it to a terminal verdict. Spawn
+envelopes and per-iteration verdicts stream to stderr as JSON lines; the
+orchestrator's Final_Report lands on stdout. Exit code 0 on `complete`, 3 on
+any other terminal verdict.
+
+```bash
+export GCO_ENABLE_SWARM=true
+
+gco swarm run \
+  --directive "Search the docs and examples catalogs and surface hits." \
+  --tool-allowlist find_docs \
+  --max-children 3 --child-iteration-pool 15 \
+  --no-sampling --dry-run
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--directive` | The swarm-level goal, natural language (required). |
+| `--tool-allowlist NAME` | Tool allowed to scaffolded children (repeatable). |
+| `--allow-all-tools` | Resolve child allowlists to every registered tool (minus loop-management names). |
+| `--max-children` | Fleet cap on live child slots (default 3). |
+| `--child-iteration-pool` | Pooled child-iteration budget every spawn reserves from (default 15). |
+| `--max-concurrent-children` | Concurrency bound on simultaneously advancing children (default 3). |
+| `--allow-overlapping-mutating-tools` | Allow two live children to share a non-read-only tool (off by default). |
+| `--max-iterations` / `--max-wall-clock` | Orchestrator loop caps (defaults 25 / 1800s). |
+| `--stagnation-threshold` | Evaluated iterations with no criterion transition before terminating (default 3) — also the pool-exhaustion exit. |
+| `--use-sampling` / `--no-sampling` | Force the advisory sampler on/off (default: auto-detect). |
+| `--retries` | Sampled-plan retry budget before deterministic fallback (default 3). |
+| `--save-plan PATH` | Also write the scaffolded plan JSON to `PATH`. |
+| `--dry-run` | Canned-stub tool dispatcher — loop mechanics without live tools. |
+
+#### `gco swarm start`
+
+Validate the directive, criteria file (orchestrator criteria over the fleet
+metrics — `metrics.children_completed`, `metrics.children_failed`,
+`metrics.iteration_pool_remaining`, or predicates over `obs['children']`),
+budget, and swarm rails, then persist a `pending` orchestrator session. The
+persisted allowlist brackets any extra tools with the supervisor tools:
+`children_status` first, `mission_spawn` / `child_abort` last.
+
+- `--directive TEXT` (required), `--criteria-file PATH` (required)
+- `--tool-allowlist NAME` (repeatable) / `--allow-all-tools`
+- The same swarm-rail and budget options as `gco swarm run`.
+
+#### `gco swarm iterate SESSION_ID`
+
+Drive (or resume) an existing swarm's fleet. Also the crash-recovery path: a
+fresh runner re-schedules every live child and evaluates restart policy for
+children that went terminal while unsupervised. Exactly one live runner may
+drive a swarm at a time — a second invocation refuses with
+`swarm_runner_active` naming the holding PID.
+
+- `--max-orchestrator-iterations N` — detach after `N` orchestrator
+  iterations, leaving the fleet resumable (no abort cascade).
+- `--dry-run` — canned-stub dispatcher.
+
+#### `gco swarm status SESSION_ID`
+
+One-call fleet rollup: orchestrator summary, swarm rails, iteration-pool
+balance (`reserved` / `consumed` / `remaining`), runner heartbeat state,
+slot-ordered child table, and a findings list (orphaned runner heartbeat,
+unreadable children, exhausted pool). `--output table` renders a human
+summary; the default is the JSON document.
+
+#### `gco swarm abort SESSION_ID`
+
+Terminate the orchestrator and abort every non-terminal child through the
+standard abort transition, settling each slot's pool reservation. Works with
+no live runner; a live runner observes the terminal orchestrator at its next
+boundary and stands down.
+
+#### `gco swarm list`
+
+List swarm (orchestrator) sessions with child counts. `--status` filters by
+lifecycle status. Child and standalone sessions never appear here — use
+`gco mission list` for those.
+
+#### `gco swarm scaffold-plan`
+
+Draft an admission-validated Swarm_Plan from a directive without starting
+anything — the review-then-run path. The plan is a JSON array of spawn
+requests that are guaranteed to re-admit at spawn time against the same
+rails and registered-tool set.
+
+- `--directive TEXT` (required), `--tool-allowlist NAME` / `--allow-all-tools`
+- `--max-plan-children N` — cap the sampled plan's fleet size.
+- `--use-sampling` / `--no-sampling`, `--retries N`
+- `--output-file PATH` — write the plan JSON to `PATH` instead of stdout.
+- The same swarm-rail options as `gco swarm run` (the plan validates
+  against them).
+
+---
+
 ### Vector Commands
 
 Semantic search over an S3-ingested document corpus, backed by the opt-in

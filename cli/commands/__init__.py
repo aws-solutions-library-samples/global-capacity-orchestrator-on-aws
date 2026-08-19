@@ -26,6 +26,7 @@ from .release_cmd import release
 from .stacks_cmd import stacks
 from .status_cmd import status
 from .storage_cmd import storage
+from .swarm_cmd import swarm_cmd
 from .tasks_cmd import tasks
 from .templates_cmd import templates
 from .vector_cmd import vector
@@ -45,6 +46,7 @@ __all__ = [
     "inference",
     "jobs",
     "mission_cmd",
+    "swarm_cmd",
     "models",
     "monitoring",
     "nodepools",

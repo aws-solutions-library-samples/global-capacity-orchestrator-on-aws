@@ -212,6 +212,9 @@ class TestToolRegistration:
             # + set_capacity_advisor_default_model + set_claude_code_default_model
             # register together under GCO_ENABLE_CONFIG_MANAGEMENT.
             expected += 7
+        if "swarm_start" in tool_names:
+            # The six swarm_* tools register together under GCO_ENABLE_SWARM.
+            expected += 6
         if "mission_start" in tool_names:
             # The ten mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 10

@@ -67,6 +67,7 @@ EVENT_TYPE_PHASE = "mission_phase_event"
 EVENT_TYPE_VERDICT = "mission_verdict_event"
 EVENT_TYPE_SAMPLING = "mission_sampling_event"
 EVENT_TYPE_SCRIPT_CALL = "mission_script_call_event"
+EVENT_TYPE_CHILD_LIFECYCLE = "mission_child_lifecycle_event"
 
 
 # ---------------------------------------------------------------------------
@@ -273,12 +274,53 @@ def emit_script_call_event(
     _emit(entry)
 
 
+def emit_child_lifecycle_event(
+    parent_session_id: str,
+    child_session_id: str | None,
+    slot: str,
+    action: str,
+    *,
+    reason: str | None = None,
+    final_status: str | None = None,
+) -> None:
+    """Emit one ``mission_child_lifecycle_event`` audit entry.
+
+    Called by the swarm runner on every supervised-slot transition:
+    ``spawned``, ``respawned``, ``terminal`` (the child session reached a
+    terminal status on its own), ``aborted`` (the supervisor cascade or
+    ``child_abort`` ended it), and ``respawn_denied`` (the restart policy
+    wanted a replacement but spawn admission refused — ``reason`` carries
+    the admission token).
+
+    The entry's ``mission_session_id`` is the **parent** (orchestrator)
+    session id so ``entries_for(parent_id)`` reconstructs the fleet's
+    lifecycle history in one filtered read; the child's own engine events
+    keep carrying the child's session id as they always have. The child
+    id rides in its own field.
+    """
+    entry: dict[str, Any] = {
+        "event_type": EVENT_TYPE_CHILD_LIFECYCLE,
+        "mission_session_id": parent_session_id,
+        "child_session_id": child_session_id,
+        "slot": slot,
+        "action": action,
+        "timestamp": _now_iso(),
+    }
+    if reason:
+        entry["reason"] = reason
+    if final_status:
+        entry["final_status"] = final_status
+    _emit(entry)
+
+
 __all__ = [
+    "EVENT_TYPE_CHILD_LIFECYCLE",
     "EVENT_TYPE_PHASE",
     "EVENT_TYPE_SAMPLING",
     "EVENT_TYPE_SCRIPT_CALL",
     "EVENT_TYPE_VERDICT",
     "MissionAuditCollectorHandler",
+    "emit_child_lifecycle_event",
     "emit_phase_event",
     "emit_sampling_event",
     "emit_script_call_event",
@@ -325,6 +367,7 @@ class MissionAuditCollectorHandler(logging.Handler):
             EVENT_TYPE_VERDICT,
             EVENT_TYPE_SAMPLING,
             EVENT_TYPE_SCRIPT_CALL,
+            EVENT_TYPE_CHILD_LIFECYCLE,
         }
     )
 

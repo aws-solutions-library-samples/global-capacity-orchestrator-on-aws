@@ -60,6 +60,7 @@ from feature_flags import (
     FLAG_MISSION,
     FLAG_MODEL_UPLOAD,
     FLAG_SEMANTIC_PROGRESS,
+    FLAG_SWARM,
 )
 
 # Import the live FastMCP instance so the resource handlers can hit
@@ -131,6 +132,13 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "mission_resume": FLAG_MISSION,
     "mission_history": FLAG_MISSION,
     "mission_list": FLAG_MISSION,
+    # gco_mcp/tools/swarm.py — swarm supervision (orchestrator-of-missions)
+    "swarm_start": FLAG_SWARM,
+    "swarm_iterate": FLAG_SWARM,
+    "swarm_status": FLAG_SWARM,
+    "swarm_abort": FLAG_SWARM,
+    "swarm_list": FLAG_SWARM,
+    "swarm_plan": FLAG_SWARM,
 }
 
 

@@ -74,6 +74,18 @@ class _Feature:
 # Add a feature by appending one entry — no new test file required.
 _FEATURES: tuple[_Feature, ...] = (
     _Feature(
+        feature_id="gco-swarm",
+        paths=(
+            _REPO_ROOT / "gco_mcp" / "mission" / "swarm.py",
+            _REPO_ROOT / "gco_mcp" / "mission" / "swarm_runner.py",
+            _REPO_ROOT / "gco_mcp" / "mission" / "swarm_scaffold.py",
+            _REPO_ROOT / "gco_mcp" / "tools" / "swarm.py",
+            _REPO_ROOT / "cli" / "commands" / "swarm_cmd.py",
+            _TESTS_DIR,
+        ),
+        test_prefix="test_swarm_",
+    ),
+    _Feature(
         feature_id="mission-metric-reader-tools",
         paths=(
             _REPO_ROOT / "gco_mcp" / "metric_readers",

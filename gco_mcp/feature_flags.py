@@ -33,6 +33,11 @@ FLAG_SEMANTIC_PROGRESS = "GCO_ENABLE_SEMANTIC_PROGRESS"
 # validated, atomic, and audited via the managed-config engine, but still a
 # local-file mutation an agent could chain into a deploy, so default-off.
 FLAG_CONFIG_MANAGEMENT = "GCO_ENABLE_CONFIG_MANAGEMENT"
+# Swarm supervision: one orchestrator Mission session spawning and driving
+# concurrent child Mission sessions. Default-off because it multiplies the
+# blast radius of whatever tool flags are already enabled (N children acting
+# concurrently) and because loop-spawning-loops deserves an explicit opt-in.
+FLAG_SWARM = "GCO_ENABLE_SWARM"
 
 # Per-tool flags. The umbrella is intentionally not in this tuple — callers
 # iterating ALL_FLAGS for "what gates this tool?" lookups should not see
@@ -49,6 +54,7 @@ ALL_FLAGS = (
     FLAG_LOCAL_STORAGE_SYNC,
     FLAG_SEMANTIC_PROGRESS,
     FLAG_CONFIG_MANAGEMENT,
+    FLAG_SWARM,
 )
 
 

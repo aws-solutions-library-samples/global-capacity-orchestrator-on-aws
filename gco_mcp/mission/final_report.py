@@ -47,6 +47,7 @@ from .types import IterationRecord, SessionState, VerdictLabel, VerdictReason
 
 __all__ = [
     "build_deterministic_report",
+    "build_swarm_children_table",
     "write_final_report",
 ]
 
@@ -137,7 +138,47 @@ def build_deterministic_report(
         "recommended_followups": _build_followups_template(session, verdict, reason),
         "iterations": _strip_parsed_ast_from_iterations(session.get("iterations") or []),
     }
+    swarm_outcomes = build_swarm_children_table(session)
+    if swarm_outcomes is not None:
+        report["swarm_children"] = swarm_outcomes
     return report
+
+
+def build_swarm_children_table(session: SessionState) -> list[dict[str, Any]] | None:
+    """Per-child outcome rows for an orchestrator session's report.
+
+    Present only on sessions carrying a child registry (``None``
+    otherwise, so standalone and child reports are byte-identical to
+    before). Slot-ordered, built purely from the persisted registry —
+    the settled entries already carry the supervision outcome, so no
+    child session load is needed at report time and an unreadable child
+    cannot fail report assembly.
+
+    The engine writes the report during terminal finalization, which
+    happens *before* the swarm runner's abort cascade settles the last
+    registry entries; the runner refreshes this table on the written
+    report after the cascade so the durable artifact reflects final
+    states. Public for exactly that caller.
+    """
+    registry = session.get("children")
+    if registry is None:
+        return None
+    rows: list[dict[str, Any]] = []
+    for entry in sorted(registry, key=lambda e: e["slot"]):
+        row: dict[str, Any] = {
+            "slot": entry["slot"],
+            "session_id": entry["session_id"],
+            "spawned_at": entry["spawned_at"],
+            "restart_policy": entry["restart_policy"],
+            "respawn_count": entry["respawn_count"],
+            "iterations_consumed": entry["consumed_iterations"],
+            "settled": bool(entry.get("settled", False)),
+        }
+        lineage = entry.get("prior_session_ids")
+        if lineage:
+            row["prior_session_ids"] = list(lineage)
+        rows.append(row)
+    return rows
 
 
 def write_final_report(

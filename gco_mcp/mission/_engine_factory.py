@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -55,7 +55,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mission import sampling as mission_sampling  # noqa: E402
 from mission import state as mission_state  # noqa: E402
-from mission.engine import MissionEngine, SandboxRunner, ToolDispatcher  # noqa: E402
+from mission.engine import (  # noqa: E402
+    MissionEngine,
+    ObservationAugmenter,
+    SandboxRunner,
+    ToolDispatcher,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from mission.types import SessionState, ToolCallRecord
@@ -89,6 +94,7 @@ class EngineDependencies:
     __slots__ = (
         "final_lessons_callable",
         "memory_store",
+        "observation_augmenters",
         "sampling_callable",
         "sandbox_runner",
         "tool_dispatcher",
@@ -102,12 +108,14 @@ class EngineDependencies:
         sandbox_runner: SandboxRunner | None,
         final_lessons_callable: Callable[..., Awaitable[Any]] | None = None,
         memory_store: Any | None = None,
+        observation_augmenters: Sequence[ObservationAugmenter] | None = None,
     ) -> None:
         self.tool_dispatcher = tool_dispatcher
         self.sampling_callable = sampling_callable
         self.sandbox_runner = sandbox_runner
         self.final_lessons_callable = final_lessons_callable
         self.memory_store = memory_store
+        self.observation_augmenters = observation_augmenters
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +490,7 @@ async def build_engine_dependencies(
     ctx: Any | None,
     *,
     use_stub_dispatcher: bool = False,
+    extra_tool_metadata: tuple[dict[str, Any], dict[str, str]] | None = None,
 ) -> EngineDependencies:
     """Build the :class:`MissionEngine` dependency triple for ``session``.
 
@@ -495,6 +504,14 @@ async def build_engine_dependencies(
     The CLI passes ``use_stub_dispatcher=True`` only on the
     ``--dry-run`` path; the MCP tool surface always uses the live
     dispatcher.
+
+    ``extra_tool_metadata`` is an optional ``(tools_map, docstrings)``
+    pair merged over the live registry snapshot before the sampler is
+    built. The swarm layer uses it to teach an orchestrator's
+    Strategy_Revision sampler the in-process supervisor tools — which
+    are deliberately never FastMCP-registered — so spawn proposals
+    validate against the catalog like any other call. It never touches
+    dispatch: the dispatcher wrapper routes those names in-process.
     """
     if use_stub_dispatcher:
         # The stub dispatcher means real tools never run, which means
@@ -509,6 +526,10 @@ async def build_engine_dependencies(
         )
 
     registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
+    if extra_tool_metadata is not None:
+        extra_tools, extra_docs = extra_tool_metadata
+        registered_tools = {**registered_tools, **extra_tools}
+        tool_docstrings = {**tool_docstrings, **extra_docs}
     sampling_callable = _build_sampling_callable(
         session,
         ctx,
@@ -555,4 +576,5 @@ async def build_mission_engine(
         sandbox_runner=deps.sandbox_runner,
         final_lessons_callable=deps.final_lessons_callable,
         memory_store=deps.memory_store,
+        observation_augmenters=deps.observation_augmenters,
     )

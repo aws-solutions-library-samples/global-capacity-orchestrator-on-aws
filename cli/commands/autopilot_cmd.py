@@ -338,6 +338,7 @@ def autopilot(
         gco autopilot --continue
         gco autopilot --resume
         gco autopilot -e mission -e infrastructure-deploy
+        gco autopilot -e swarm -e mission
         gco autopilot -e all-tools
         gco autopilot --mcp-env GCO_MCP_TOOL_SEARCH=bm25
         gco autopilot --skills ~/team-skills --agents ~/my-agents

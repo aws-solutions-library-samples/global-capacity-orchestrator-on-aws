@@ -14,7 +14,7 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
 default registration the server exposes 135 tools; with every flag enabled the
-ceiling is 183. See [Feature Flags](../README.md#feature-flags) for the
+ceiling is 189. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -40,6 +40,7 @@ flag-to-tool mapping.
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
 | `mission.py` | 10 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` — all gated by `GCO_ENABLE_MISSION` |
+| `swarm.py` | 6 | `swarm_start`, `swarm_iterate`, `swarm_status`, `swarm_abort`, `swarm_list`, `swarm_plan` — all gated by `GCO_ENABLE_SWARM`; the in-process supervisor tools (`mission_spawn`, `children_status`, `child_abort`) are deliberately not MCP tools |
 | `docs.py` | 1 | `find_docs` (documentation discovery) |
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
 | `tasks.py` | 3 | `task_status`, `task_tail` (read-only observability), `task_prune` (gated local cleanup) |
@@ -330,6 +331,17 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `mission_resume` | Resume a paused Mission session. |
 | `mission_start` | Start a new Mission session. |
 | `mission_status` | Get the full state of a Mission session. |
+
+### `swarm.py`
+
+| Tool | Description |
+|------|-------------|
+| `swarm_abort` | Terminate a swarm and abort every non-terminal child, settling pool reservations. |
+| `swarm_iterate` | Drive (or resume) a swarm's fleet; optionally detach after N orchestrator iterations. |
+| `swarm_list` | List swarm (orchestrator) sessions. |
+| `swarm_plan` | Draft an admission-validated swarm plan from a directive (sampled, deterministic fallback). |
+| `swarm_start` | Start a new swarm (orchestrator) session with fleet criteria and swarm rails. |
+| `swarm_status` | One-call fleet rollup: rails, pool balance, child table, runner heartbeat, findings. |
 
 ### `docs.py`
 

@@ -610,13 +610,49 @@ MISSION_CONTROL_TOOLS: frozenset[str] = frozenset(
 )
 """The nine control-tool names excluded from an all-tools expansion."""
 
+SUPERVISOR_TOOLS: frozenset[str] = frozenset({"mission_spawn", "children_status", "child_abort"})
+"""The in-process swarm supervisor tool names.
+
+Injected into an orchestrator session's dispatcher and allowlist at
+engine-construction time only; never registered with the MCP server, and
+never resolvable into any session's allowlist through this module.
+"""
+
+SWARM_MCP_TOOLS: frozenset[str] = frozenset(
+    {
+        "swarm_start",
+        "swarm_iterate",
+        "swarm_status",
+        "swarm_abort",
+        "swarm_list",
+        "swarm_plan",
+    }
+)
+"""The operator-facing swarm MCP tool names.
+
+Excluded from session allowlists for the same reason the ``mission_*``
+control tools are: a goal-directed loop must never manage goal-directed
+loops except through the supervised spawn seam.
+"""
+
+SWARM_EXCLUDED_TOOLS: frozenset[str] = MISSION_CONTROL_TOOLS | SUPERVISOR_TOOLS | SWARM_MCP_TOOLS
+"""Every loop-management name kept out of resolvable session allowlists.
+
+The default ``control_tools`` exclusion set for
+:func:`resolve_effective_allowlist`: sessions of every role — standalone,
+orchestrator, child — resolve their allowlists with these names excluded
+from the all-tools expansion. Orchestrator sessions gain the three
+supervisor names through engine construction, not through allowlist
+resolution.
+"""
+
 
 def resolve_effective_allowlist(
     *,
     allow_all_tools: bool,
     explicit_allowlist: list[str] | None,
     registered_tools: dict[str, Any],
-    control_tools: Collection[str] = MISSION_CONTROL_TOOLS,
+    control_tools: Collection[str] = SWARM_EXCLUDED_TOOLS,
     flag_lookup: dict[str, str] | None = None,
 ) -> list[str]:
     """Resolve a session's effective tool allowlist.
@@ -624,7 +660,9 @@ def resolve_effective_allowlist(
     Pure: no I/O, no clocks, no environment lookups. The caller passes the
     currently-registered tool names (``registered_tools`` — only the dict keys
     are read) and the set of control-tool names to exclude from an all-tools
-    expansion (``control_tools``, defaulting to :data:`MISSION_CONTROL_TOOLS`).
+    expansion (``control_tools``, defaulting to :data:`SWARM_EXCLUDED_TOOLS` —
+    the ``mission_*`` control tools plus the swarm supervisor and ``swarm_*``
+    MCP tool names).
 
     Behaviour:
 

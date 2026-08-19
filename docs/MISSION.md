@@ -55,6 +55,8 @@ The control path is fully deterministic. Sampling, when enabled, only shapes the
 
 The whole feature is gated. Set `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) before any Mission CLI subcommand or MCP tool resolves. See [Feature Flags](../gco_mcp/README.md#feature-flags) for the table.
 
+Mission sessions can also be **supervised in fleets**: [Swarm](SWARM.md) promotes one session to the `orchestrator` role and lets it spawn and drive concurrent `child` Mission sessions under hard rails (fleet cap, pooled iteration budget, finite child budgets), with verdicts still produced by the unchanged cascade documented here. A session with no `role` field is a standalone session with exactly the behavior this document describes.
+
 ## Generating a Criteria File
 
 Hand-writing a Criteria File for every Mission session gets repetitive — most sessions fall into a few patterns (drive a metric, wait for an event, ask "did the search return anything"). The `gco mission scaffold-criteria` subcommand turns a natural-language directive into a JSON file the Mission validators accept, ready to feed straight into `gco mission start --criteria-file`. The output is **always** validated through `validate_criteria` so a scaffolded file is never rejected at session-start time.

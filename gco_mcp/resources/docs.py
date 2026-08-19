@@ -1065,6 +1065,32 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["CLI", "ARCHITECTURE", "RUNBOOKS"],
     },
+    "SWARM": {
+        "summary": "Swarm supervision — one orchestrator Mission session spawns and drives concurrent child Mission sessions under hard rails (fleet cap, pooled iteration budget, finite child budgets) until its deterministic cascade reaches a verdict.",
+        "topics": [
+            "concepts",
+            "cli",
+            "api",
+            "automation",
+            "feature-flags",
+        ],
+        "keywords": [
+            "swarm",
+            "orchestrator",
+            "supervisor",
+            "child missions",
+            "fleet",
+            "spawn",
+            "iteration pool",
+            "restart policy",
+            "respawn",
+            "children status",
+            "swarm plan",
+            "concurrency",
+            "gco_enable_swarm",
+        ],
+        "related": ["MISSION", "CLI", "ARCHITECTURE"],
+    },
     "MONITORING": {
         "summary": "Self-hosted per-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana), on by default, with private port-forward access and the gco monitoring CLI.",
         "topics": [

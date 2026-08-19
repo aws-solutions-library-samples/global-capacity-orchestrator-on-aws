@@ -43,6 +43,7 @@ from .commands import (
     stacks,
     status,
     storage,
+    swarm_cmd,
     tasks,
     templates,
     vector,
@@ -158,6 +159,7 @@ cli.add_command(analytics)
 cli.add_command(monitoring)
 cli.add_command(tasks)
 cli.add_command(mission_cmd)
+cli.add_command(swarm_cmd)
 cli.add_command(vector)
 cli.add_command(status)
 

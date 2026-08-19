@@ -73,6 +73,29 @@ SamplingStatus = Literal["used", "rejected", "fallback", "unavailable", "disable
 CadenceKind = Literal["every_iteration", "every_n_iterations", "every_t_seconds", "on_event"]
 """The four supported Checkpoint_Cadence kinds."""
 
+SessionRole = Literal["orchestrator", "child"]
+"""The two swarm roles a session can carry.
+
+A session with no ``role`` field is a standalone session — every session
+that predates swarm supervision, with behavior identical to before the
+field existed. ``orchestrator`` sessions hold a :class:`SwarmConfig` and a
+child registry and are the only sessions whose engine receives the
+in-process supervisor tools. ``child`` sessions carry
+``parent_session_id`` and are otherwise ordinary sessions.
+"""
+
+RestartPolicy = Literal["never", "on_failure", "on_failure_with_revision"]
+"""The supervision policy fixed on a child slot at spawn time.
+
+``never`` — one shot; the slot is done when its session ends. ``on_failure``
+— a child that ends ``failed`` or ``terminated`` without meeting its
+criteria is respawned with the same directive, up to ``max_respawns``.
+``on_failure_with_revision`` — same, except the replacement directive may be
+revised from the failed child's Final_Report lessons (advisory sampling;
+falls back to the verbatim directive). The respawn *decision* is always
+deterministic policy evaluation — never a sampler output.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Terminal-state sets
@@ -187,6 +210,63 @@ class Cadence(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# Swarm supervision
+# ---------------------------------------------------------------------------
+
+
+class SwarmConfig(TypedDict):
+    """Swarm-level rails persisted on an orchestrator session.
+
+    These are **loop-control** rails in the same sense as
+    :class:`BudgetControls`: they cap what the supervisor can directly
+    observe (fleet size, pooled child iterations, concurrency), never
+    money. Cost guardrails live out-of-band (AWS Budgets / Cost Anomaly
+    Detection), exactly as documented for Mission budgets.
+
+    The validator normalizes defaults, so a persisted config always
+    carries all four keys. ``max_children`` bounds the number of live
+    (non-settled) child slots. ``child_iteration_pool`` is the pooled
+    iteration budget every spawn reserves from — child budgets reject
+    the ``-1`` uncapped sentinel, so the pool is always meaningful.
+    ``max_concurrent_children`` bounds how many children advance
+    simultaneously. ``allow_overlapping_mutating_tools`` opts out of the
+    reject-by-default rule against two live children sharing a
+    non-``safe``-tagged tool.
+    """
+
+    max_children: int
+    child_iteration_pool: int
+    max_concurrent_children: int
+    allow_overlapping_mutating_tools: bool
+
+
+class ChildRegistryEntry(TypedDict):
+    """One supervised slot in an orchestrator session's child registry.
+
+    A **slot** is the stable supervision identity; the ``session_id`` it
+    points at changes on respawn (lineage is kept under
+    ``prior_session_ids``). Pool accounting reads two fields:
+    ``reserved_iterations`` counts against the pool while the entry is
+    live, and ``consumed_iterations`` accumulates the actually-recorded
+    iterations of settled (terminal) sessions. ``settled`` marks that the
+    current session's consumption has been folded into
+    ``consumed_iterations`` — the settle step is what refunds the unused
+    remainder of a reservation back to the pool.
+    """
+
+    slot: str
+    session_id: str
+    spawned_at: str  # ISO 8601 UTC
+    reserved_iterations: int
+    restart_policy: RestartPolicy
+    max_respawns: int
+    respawn_count: int
+    consumed_iterations: int
+    settled: NotRequired[bool]
+    prior_session_ids: NotRequired[list[str]]
+
+
+# ---------------------------------------------------------------------------
 # Tool calls and strategy
 # ---------------------------------------------------------------------------
 
@@ -241,6 +321,13 @@ class Observation(TypedDict):
     # strictly point-in-time and does not carry this key. Consumed by the
     # ``metric_trend`` criterion and available to predicates.
     metric_history: NotRequired[dict[str, list[float]]]
+    # Present only on orchestrator sessions: the deterministic, slot-ordered
+    # snapshot of supervised child states merged by the swarm observation
+    # augmenter at the end of the Observe_Phase. Standalone and child
+    # sessions never carry this key. Predicates read it via
+    # ``obs['children']``; the paired aggregate counts land as ordinary
+    # numeric metrics under ``metrics`` (``children_completed``, ...).
+    children: NotRequired[list[dict[str, Any]]]
     phase_started_at: str
     phase_ended_at: str
 
@@ -320,3 +407,12 @@ class SessionState(TypedDict):
     last_checkpoint_at: NotRequired[str]
     final_verdict: NotRequired[VerdictLabel]
     final_report_path: NotRequired[str]
+    # Swarm supervision fields. All NotRequired so pre-swarm session files
+    # load unchanged (loaders reject only on ``version`` mismatch, and the
+    # schema version is deliberately NOT bumped for these additive keys).
+    # ``role`` absent means standalone. ``parent_session_id`` is set on
+    # child sessions only; ``swarm`` and ``children`` on orchestrators only.
+    role: NotRequired[SessionRole]
+    parent_session_id: NotRequired[str]
+    swarm: NotRequired[SwarmConfig]
+    children: NotRequired[list[ChildRegistryEntry]]

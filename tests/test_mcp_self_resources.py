@@ -211,5 +211,13 @@ class TestFeatureFlags:
                 "set_capacity_advisor_default_model",
                 "set_claude_code_default_model",
             },
+            "GCO_ENABLE_SWARM": {
+                "swarm_start",
+                "swarm_iterate",
+                "swarm_status",
+                "swarm_abort",
+                "swarm_list",
+                "swarm_plan",
+            },
         }
         assert actual == expected
