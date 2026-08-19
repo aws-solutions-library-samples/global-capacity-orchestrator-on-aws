@@ -374,3 +374,48 @@ class TestSampleRevisedDirective:
         assert await sample_revised_directive(ExplodingBackend(), failed) is None  # type: ignore[arg-type]
         blank = StubBackend(["   "])
         assert await sample_revised_directive(blank, failed) is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Caller wiring contract
+# ---------------------------------------------------------------------------
+
+
+class TestSampledPlanCallerWiring:
+    """Both callers must forward the operator allowlist to the scaffolder.
+
+    The narrowing that keeps a sampled child inside the operator's
+    permitted tools lives in :func:`generate_sampled_plan`, so it only
+    protects anything if every caller actually passes ``tool_allowlist``.
+    Dropping that keyword at a call site silently restores the original
+    defect — sampled children scoped to the whole registry — while every
+    scaffolder-level test keeps passing. Asserted over the AST rather
+    than the text so formatting and argument order don't matter.
+    """
+
+    CALL_SITES = (
+        "cli/commands/swarm_cmd.py",
+        "gco_mcp/tools/swarm.py",
+    )
+
+    @pytest.mark.parametrize("relative_path", CALL_SITES)
+    def test_call_site_forwards_tool_allowlist(self, relative_path: str) -> None:
+        import ast
+
+        source_path = Path(__file__).parent.parent / relative_path
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "generate_sampled_plan"
+        ]
+        assert calls, f"{relative_path} no longer calls generate_sampled_plan"
+        for call in calls:
+            keywords = {kw.arg for kw in call.keywords}
+            assert "tool_allowlist" in keywords, (
+                f"{relative_path}:{call.lineno} calls generate_sampled_plan "
+                "without tool_allowlist — sampled children would be scoped to "
+                "the whole registry instead of the operator's allowlist"
+            )
