@@ -61,6 +61,8 @@ spec:
           runAsUser: 1000
           runAsGroup: 1000
           fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
         containers:
         - name: queue-processor
           image: {{QUEUE_PROCESSOR_IMAGE}}

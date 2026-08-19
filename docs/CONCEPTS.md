@@ -337,7 +337,10 @@ Outside `aws`, this global workload route is not created; the global API is regi
 **Cons:**
 
 - One shared API Gateway stage throttle and proxy hop
-- Global Accelerator selects by health/traffic policy, not GPU inventory
+- Global Accelerator selects by health checks and traffic dials, not GPU
+  inventory directly — though the optional traffic-dial controller
+  (`global_accelerator.traffic_dial`) feeds each cluster's health signal,
+  which includes its GPU thresholds, into the per-region dials
 
 ### Regional API Bridge and Direct Access
 

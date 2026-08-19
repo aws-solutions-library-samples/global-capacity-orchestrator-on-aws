@@ -61,13 +61,21 @@
 
     "_comment_networking": "Networking, security, and ingress",
 
-    "_comment_global_accelerator": "AWS Global Accelerator front door in the commercial 'aws' partition only. Other AWS partitions omit the accelerator, listener, endpoint groups, and registration resources and use the IAM-authenticated regional APIs directly. When applicable: health_check_grace_period is seconds before a new endpoint starts being probed; health_check_interval is seconds between probes; health_check_timeout is seconds to wait per probe; health_check_path is the HTTP path probed on each regional ALB; client_affinity is 'NONE' or 'SOURCE_IP'.",
+    "_comment_global_accelerator": "AWS Global Accelerator front door in the commercial 'aws' partition only. Other AWS partitions omit the accelerator, listener, endpoint groups, and registration resources and use the IAM-authenticated regional APIs directly. When applicable: health_check_interval is seconds between endpoint-group probes (Global Accelerator accepts only 10 or 30); health_check_threshold is the consecutive-probe count before an endpoint flips state (1-10); health_check_path is the HTTPS path probed on each regional ALB; client_affinity is 'NONE' or 'SOURCE_IP'. traffic_dial is the optional capacity-driven traffic-dial controller (see docs/CUSTOMIZATION.md): disabled by default; in 'monitor' mode it only computes and publishes per-region dial decisions from the GCO/HealthMonitor ClusterHealthy signal, while 'enforce' mode applies them via UpdateEndpointGroup. min_dial_percentage floors how far a degraded region is dialed down; max_step_percentage caps the change per run; full_health_percentage is the healthy fraction (percent) at or above which a region returns to 100; interval_minutes and lookback_minutes are the run cadence and the health window.",
     "global_accelerator": {
-      "health_check_grace_period": 30,
       "health_check_interval": 30,
-      "health_check_timeout": 5,
+      "health_check_threshold": 3,
       "health_check_path": "/api/v1/health",
-      "client_affinity": "NONE"
+      "client_affinity": "NONE",
+      "traffic_dial": {
+        "enabled": false,
+        "mode": "monitor",
+        "interval_minutes": 5,
+        "lookback_minutes": 15,
+        "min_dial_percentage": 10,
+        "max_step_percentage": 20,
+        "full_health_percentage": 95
+      }
     },
 
     "_comment_backend_tls": "Mandatory authenticated TLS from the proxy Lambdas through Global Accelerator/direct regional routing to each internal ALB. GCO creates a deployment-local ECDSA root CA in a customer-managed-KMS-encrypted secret, publishes only its public trust bundle, and imports short-lived signed leaves into regional ACM. The scheduled manager reimports renewed leaves into stable ACM ARNs. root_generation can be incremented for an explicit staged rollover; activation delay must exceed the maximum stale trust-cache window, and overlap must exceed leaf validity.",

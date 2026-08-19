@@ -41,6 +41,12 @@ from .multi_region import (
     compute_weighted_score,
     get_multi_region_capacity_checker,
 )
+from .traffic_dial import (
+    RegionDialStatus,
+    TrafficDialError,
+    TrafficDialManager,
+    get_traffic_dial_manager,
+)
 
 __all__ = [
     "GPU_INSTANCE_SPECS",
@@ -54,8 +60,11 @@ __all__ = [
     "InstanceTypeInfo",
     "MultiRegionCapacityChecker",
     "RegionCapacity",
+    "RegionDialStatus",
     "SpotPlacementConfigLimitError",
     "SpotPriceInfo",
+    "TrafficDialError",
+    "TrafficDialManager",
     "compute_price_trend",
     "compute_weighted_score",
     "flatten_capacity_data",
@@ -63,4 +72,5 @@ __all__ = [
     "get_capacity_checker",
     "get_capacity_history_store",
     "get_multi_region_capacity_checker",
+    "get_traffic_dial_manager",
 ]

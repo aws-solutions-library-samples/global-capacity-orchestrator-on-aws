@@ -379,6 +379,11 @@ standard Global Accelerator endpoint-group ARN and ALB target-group ARN, and
 `<REGION>` with the affected AWS region:
 
 ```bash
+# 0. Check the traffic dials first — a dialed-down or overridden region
+#    sheds new connections while looking perfectly healthy. Shows each
+#    region's dial, any manual override, and the controller's last decision.
+gco capacity traffic-dial show
+
 # 1. Inspect registered endpoints and their health
 aws globalaccelerator describe-endpoint-group \
   --endpoint-group-arn <ENDPOINT_GROUP_ARN> \
@@ -411,7 +416,9 @@ aws logs tail "$GA_LOG_GROUP" --since 1h --region <REGION>
 
 2. **If ALB health checks are failing:** GA health checks hit `/api/v1/health` on the ALB. Check that the health monitor pod is running and the ALB target group has healthy targets.
 
-3. **If GA endpoint is unhealthy:** Check the health check configuration in `cdk.json` under `global_accelerator`. The grace period and interval may need adjustment if the region takes longer to warm up.
+3. **If GA endpoint is unhealthy:** Check the health check configuration in `cdk.json` under `global_accelerator` (`health_check_path`, `health_check_interval` — 10 or 30 — and `health_check_threshold`). A larger threshold or the slower interval gives a warming region more time before it flips unhealthy.
+
+4. **If the traffic dial is below 100:** A manual override (`gco capacity traffic-dial set`) pins the region until cleared — restore it with `gco capacity traffic-dial set <REGION> 100` or hand it back to the controller with `gco capacity traffic-dial clear <REGION>`. If the scheduled controller dialed the region down (`controller_reason: degraded` in `show`), the region's `ClusterHealthy` signal is reporting threshold violations — fix the underlying saturation (see the `GCO/HealthMonitor` metrics and `resource_thresholds` in `cdk.json`) and the controller restores the dial as health recovers, `max_step_percentage` per cycle.
 
 ---
 

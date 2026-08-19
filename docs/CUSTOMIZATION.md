@@ -592,17 +592,23 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 "global_accelerator": {
   "health_check_path": "/api/v1/health",
   "health_check_interval": 30,
+  "health_check_threshold": 3,
   "client_affinity": "NONE"
 }
 ```
 
 | Setting | Default | Description |
 |---|---|---|
-| `health_check_path` | `/api/v1/health` | HTTP path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
-| `health_check_interval` | `30` | Seconds between health checks |
-| `health_check_grace_period` | `30` | Seconds to wait before first health check |
-| `health_check_timeout` | `5` | Seconds before a health check times out |
+| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
+| `health_check_interval` | `30` | Seconds between health checks. The Global Accelerator API accepts only `10` or `30`; anything else fails at synth |
+| `health_check_threshold` | `3` | Consecutive health checks (1-10) before an endpoint flips healthy/unhealthy |
 | `client_affinity` | `NONE` | Listener client affinity. `NONE` spreads connections across endpoints for even load distribution; `SOURCE_IP` pins each client IP to the same endpoint for session stickiness |
+
+The block merges over the shipped defaults, so a partial block keeps every
+unspecified default. The legacy `health_check_grace_period` and
+`health_check_timeout` keys are tolerated and ignored — Global Accelerator
+endpoint groups have no such settings (the keys were never consumed); remove
+them from existing configs at your convenience.
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
@@ -616,6 +622,50 @@ Global Accelerator listeners support two client-affinity modes, controlled by th
 - `SOURCE_IP`: GA pins connections from the same source IP to the same endpoint group for as long as it stays healthy. Use this when a workload keeps per-client state on a single region (for example, sticky sessions). Note that affinity is broken when an endpoint becomes unhealthy or the endpoint set changes.
 
 The value is validated at synth time — anything other than `NONE` or `SOURCE_IP` raises a `ConfigValidationError`. See the [AWS Global Accelerator client affinity docs](https://docs.aws.amazon.com/global-accelerator/latest/dg/about-listeners.html#about-listeners-client-affinity) for details.
+
+#### Traffic Dial Controller
+
+Each regional endpoint group has a `TrafficDialPercentage` — the share of new
+connections Global Accelerator admits to that region relative to optimal
+routing, with the remainder redirected to the next-closest region. The
+optional traffic-dial controller (an EventBridge-scheduled Lambda in the
+global stack, commercial `aws` partition only) converges each region's dial
+toward its cluster's `ClusterHealthy` signal, so a region whose GPU pools are
+degraded sheds new traffic gradually instead of waiting for a binary
+health-check failover:
+
+```json
+"global_accelerator": {
+  "traffic_dial": {
+    "enabled": false,
+    "mode": "monitor",
+    "interval_minutes": 5,
+    "lookback_minutes": 15,
+    "min_dial_percentage": 10,
+    "max_step_percentage": 20,
+    "full_health_percentage": 95
+  }
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Deploy the controller (opt-in) |
+| `mode` | `monitor` | `monitor` computes and publishes decisions (CloudWatch `GCO/TrafficDial` metrics plus the `/{project}/traffic-dial/state` SSM parameter) without touching Global Accelerator; `enforce` additionally applies them via `UpdateEndpointGroup`. Only `enforce` mode is granted that IAM action |
+| `interval_minutes` | `5` | Controller run cadence (1-1440) |
+| `lookback_minutes` | `15` | Health window averaged per region (1-1440) |
+| `min_dial_percentage` | `10` | Floor a degraded region can be dialed down to (0-100) |
+| `max_step_percentage` | `20` | Largest dial change one run may apply, in either direction (1-100) |
+| `full_health_percentage` | `95` | Healthy percent at or above which a region is restored toward 100 (1-100) |
+
+Safety rails: missing telemetry holds the current dial (an absent signal is
+neither health nor degradation), a last-healthy-region guard never leaves
+every endpoint group dialed below 100, cycles are skipped while the
+accelerator is mid-deployment, and per-region manual overrides
+(`gco capacity traffic-dial set` / `clear`) always win. Run the controller in
+`monitor` mode first and watch the `GCO/TrafficDial` metrics before promoting
+to `enforce`. Existing connections are never terminated by a dial change —
+only new connections are steered.
 
 #### Inference Health Watchdog
 

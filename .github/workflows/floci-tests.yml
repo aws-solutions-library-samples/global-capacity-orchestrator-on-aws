@@ -109,6 +109,7 @@ jobs:
             tests/test_floci_lambda_orchestration.py \
             tests/test_floci_lambda_regional.py \
             tests/test_floci_mission_memory.py \
+            tests/test_floci_traffic_dial.py \
             -v --tb=short -n auto \
             --junitxml=floci-integration-report.xml
       - name: Floci container logs

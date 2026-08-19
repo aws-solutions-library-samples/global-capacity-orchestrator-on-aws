@@ -150,10 +150,18 @@ class MockConfigLoader:
     def get_global_accelerator_config(self):
         return {
             "name": "gco-test-accelerator",
-            "health_check_grace_period": 30,
             "health_check_interval": 30,
-            "health_check_timeout": 5,
+            "health_check_threshold": 3,
             "health_check_path": "/api/v1/health",
+            "traffic_dial": {
+                "enabled": False,
+                "mode": "monitor",
+                "interval_minutes": 5,
+                "lookback_minutes": 15,
+                "min_dial_percentage": 10,
+                "max_step_percentage": 20,
+                "full_health_percentage": 95,
+            },
         }
 
     def get_backend_tls_config(self):
@@ -355,6 +363,140 @@ class TestGlobalStackSynth:
         template.has_resource_properties(
             "AWS::GlobalAccelerator::Listener",
             {"ClientAffinity": expected},
+        )
+
+
+class TestTrafficDialControllerSynth:
+    """Synthesis tests for the optional traffic-dial controller."""
+
+    @staticmethod
+    def _dial_config_class(*, enabled=True, mode="monitor", interval_minutes=5):
+        class DialConfig(MockConfigLoader):
+            def get_global_accelerator_config(self):
+                cfg = super().get_global_accelerator_config()
+                cfg["traffic_dial"] = {
+                    **cfg["traffic_dial"],
+                    "enabled": enabled,
+                    "mode": mode,
+                    "interval_minutes": interval_minutes,
+                }
+                return cfg
+
+        return DialConfig
+
+    @staticmethod
+    def _synth(config, stack_id):
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        app = cdk.App()
+        stack = GCOGlobalStack(app, stack_id, config=config)
+        return assertions.Template.from_stack(stack)
+
+    def test_controller_absent_by_default(self):
+        """The stock config (traffic_dial disabled) creates no controller."""
+        template = self._synth(MockConfigLoader(cdk.App()), "test-dial-default-off")
+        functions = template.find_resources("AWS::Lambda::Function")
+        assert not [
+            logical_id
+            for logical_id in functions
+            if logical_id.startswith("TrafficDialControllerFunction")
+        ]
+        assert "TrafficDialSchedule" not in json.dumps(template.to_json())
+
+    def test_monitor_mode_synthesizes_read_only_controller(self):
+        """Monitor mode creates the Lambda, schedule, and DLQ without the
+        UpdateEndpointGroup grant — the controller cannot mutate GA."""
+        config = self._dial_config_class(enabled=True, mode="monitor")(cdk.App())
+        template = self._synth(config, "test-dial-monitor")
+
+        functions = template.find_resources("AWS::Lambda::Function")
+        assert any(
+            logical_id.startswith("TrafficDialControllerFunction")
+            for logical_id in functions
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": assertions.Match.object_like(
+                        {
+                            "MODE": "monitor",
+                            "PROJECT_NAME": "gco-test",
+                            "REGIONS": "us-east-1",
+                            "MIN_DIAL_PERCENTAGE": "10",
+                            "MAX_STEP_PERCENTAGE": "20",
+                            "FULL_HEALTH_PERCENTAGE": "95",
+                            "LOOKBACK_MINUTES": "15",
+                        }
+                    )
+                },
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Events::Rule",
+            {"ScheduleExpression": "rate(5 minutes)"},
+        )
+        rendered = json.dumps(template.to_json())
+        assert "globalaccelerator:ListEndpointGroups" in rendered
+        assert "globalaccelerator:UpdateEndpointGroup" not in rendered
+        assert "GCO/TrafficDial" in rendered
+
+    def test_enforce_mode_grants_update_endpoint_group(self):
+        """Enforce mode is the only shape that carries the mutating action."""
+        config = self._dial_config_class(enabled=True, mode="enforce", interval_minutes=7)(
+            cdk.App()
+        )
+        template = self._synth(config, "test-dial-enforce")
+        rendered = json.dumps(template.to_json())
+        assert "globalaccelerator:UpdateEndpointGroup" in rendered
+        template.has_resource_properties(
+            "AWS::Events::Rule",
+            {"ScheduleExpression": "rate(7 minutes)"},
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": assertions.Match.object_like({"MODE": "enforce"})
+                },
+            },
+        )
+
+    def test_controller_absent_without_global_accelerator(self):
+        """No accelerator (non-commercial partition) means nothing to dial,
+        even when the traffic_dial block is enabled."""
+
+        class NoGaConfig(self._dial_config_class(enabled=True, mode="enforce")):
+            def supports_global_accelerator(self):
+                return False
+
+        template = self._synth(NoGaConfig(cdk.App()), "test-dial-no-ga")
+        template.resource_count_is("AWS::GlobalAccelerator::Accelerator", 0)
+        assert not [
+            logical_id
+            for logical_id in template.find_resources("AWS::Lambda::Function")
+            if logical_id.startswith("TrafficDialControllerFunction")
+        ]
+
+    def test_endpoint_group_consumes_configured_interval_and_threshold(self):
+        """The endpoint group renders the configured probe contract."""
+
+        class ProbeConfig(MockConfigLoader):
+            def get_global_accelerator_config(self):
+                cfg = super().get_global_accelerator_config()
+                cfg["health_check_interval"] = 10
+                cfg["health_check_threshold"] = 5
+                return cfg
+
+        template = self._synth(ProbeConfig(cdk.App()), "test-dial-probe-contract")
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::EndpointGroup",
+            {
+                "HealthCheckIntervalSeconds": 10,
+                "ThresholdCount": 5,
+                "HealthCheckProtocol": "HTTPS",
+                "HealthCheckPort": 443,
+            },
         )
 
 

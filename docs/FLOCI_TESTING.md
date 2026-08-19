@@ -90,14 +90,16 @@ committed tests, not inferred from Floci's docs):
 | ELBv2 | `regional-api-proxy` ownership validation; `ga-registration` tag/hostname ALB discovery | Meaningful behavior: real internal ALBs, tags, fail-closed rejections |
 | ECR | `image-lookup` adopt-or-create custom resource | Meaningful behavior in CI (create/adopt/delete); local Finch hosts skip (gap 4) |
 | EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners | Control-plane list/describe only |
-| CloudWatch | `metrics_publisher` | Accepts writes (no query assertions) |
+| CloudWatch | `metrics_publisher`; `traffic-dial-controller` decision metrics and its no-datapoints `GetMetricData` hold | Accepts writes (no query assertions); an empty query answer drives the controller's fail-safe hold for real |
 
 Still mocked (unit layer only): Kubernetes API interactions (kind E2E owns
 live-cluster behavior), Bedrock advisors, Cost Explorer analytics, Cognito
 analytics users, SageMaker/EFS/FSx cleanup paths (`analytics-cleanup`,
 `analytics-presigned-url`), CloudFormation drift detection
 (`drift-detection`; `DetectStackDrift` is absent from the emulator), the
-Global Accelerator and EKS halves of `ga-registration`, and every
+Global Accelerator and EKS halves of `ga-registration`, the Global
+Accelerator half of `traffic-dial-controller` (its SSM and CloudWatch halves
+run here; see `test_floci_traffic_dial.py`), and every
 kubeconfig-dependent Lambda path (`kubectl-applier-simple`,
 `helm-installer` worker, `tls-certificate-manager`): emulator EKS clusters
 never reach `ACTIVE`, so in-cluster behavior cannot be exercised honestly.

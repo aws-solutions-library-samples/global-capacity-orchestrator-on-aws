@@ -258,44 +258,129 @@ class ConfigLoader:
                         f"{opt_threshold} must be a non-negative integer (or -1 to disable), got {value}"
                     )
 
+    #: Health-check probe intervals Global Accelerator accepts. The API
+    #: constrains HealthCheckIntervalSeconds to exactly 10 or 30 seconds, so
+    #: any other value must fail at synth instead of at deploy.
+    GLOBAL_ACCELERATOR_HEALTH_CHECK_INTERVALS = frozenset({10, 30})
+
+    #: Traffic-dial controller modes. ``monitor`` computes and publishes
+    #: per-region dial decisions without mutating Global Accelerator;
+    #: ``enforce`` additionally applies them via UpdateEndpointGroup.
+    TRAFFIC_DIAL_MODES = frozenset({"monitor", "enforce"})
+
     def _validate_global_accelerator_config(self) -> None:
-        """Validate Global Accelerator configuration"""
-        ga_config = self.app.node.try_get_context("global_accelerator")
-        if not ga_config:
-            raise ConfigValidationError("global_accelerator configuration is required")
+        """Validate the ``global_accelerator`` block in cdk.json.
 
-        # ``name`` is intentionally optional: when omitted it defaults to
-        # ``<project_name>-accelerator`` (see get_global_accelerator_config /
-        # GCOGlobalStack) so a second deployment gets a project-scoped name
-        # from the single ``project_name`` knob (#139).
-        required_fields = [
-            "health_check_grace_period",
-            "health_check_interval",
-            "health_check_timeout",
-            "health_check_path",
-        ]
-        for field in required_fields:
-            if field not in ga_config:
-                raise ConfigValidationError(f"Missing global_accelerator configuration: {field}")
+        The block is optional; absence means the shipped defaults apply.
+        Validation runs against the *merged* configuration so a partial block
+        is checked together with every default it kept:
 
-        # Validate timing values
-        for field in ["health_check_grace_period", "health_check_interval", "health_check_timeout"]:
-            value = ga_config[field]
-            if not isinstance(value, int) or value <= 0:
-                raise ConfigValidationError(f"{field} must be a positive integer, got {value}")
+        - ``health_check_interval``: 10 or 30 — the only probe intervals the
+          Global Accelerator API accepts (UpdateEndpointGroup rejects others).
+        - ``health_check_threshold``: integer 1-10 (the API ThresholdCount
+          range).
+        - ``health_check_path``: must start with ``/``.
+        - ``client_affinity``: NONE or SOURCE_IP, case-insensitive.
+        - ``traffic_dial``: see :meth:`_validate_traffic_dial_config`.
 
-        # Validate health check path
-        if not ga_config["health_check_path"].startswith("/"):
+        The legacy ``health_check_grace_period`` and ``health_check_timeout``
+        keys are tolerated and ignored: Global Accelerator endpoint groups
+        have no such settings (the keys were validated but never consumed),
+        so their presence in an existing cdk.json must not fail synthesis.
+
+        ``name`` is intentionally optional: when omitted it defaults to
+        ``<project_name>-accelerator`` so a second deployment gets a
+        project-scoped name from the single ``project_name`` knob (#139).
+        """
+        ga_config = self.get_global_accelerator_config()
+
+        interval = ga_config["health_check_interval"]
+        if (
+            not isinstance(interval, int)
+            or isinstance(interval, bool)
+            or interval not in self.GLOBAL_ACCELERATOR_HEALTH_CHECK_INTERVALS
+        ):
+            raise ConfigValidationError(
+                "global_accelerator.health_check_interval must be one of "
+                f"{sorted(self.GLOBAL_ACCELERATOR_HEALTH_CHECK_INTERVALS)} — the only probe "
+                f"intervals the Global Accelerator API accepts — got {interval!r}"
+            )
+
+        threshold = ga_config["health_check_threshold"]
+        if (
+            not isinstance(threshold, int)
+            or isinstance(threshold, bool)
+            or not 1 <= threshold <= 10
+        ):
+            raise ConfigValidationError(
+                "global_accelerator.health_check_threshold must be an integer between "
+                f"1 and 10, got {threshold!r}"
+            )
+
+        path = ga_config["health_check_path"]
+        if not isinstance(path, str) or not path.startswith("/"):
             raise ConfigValidationError("health_check_path must start with '/'")
 
-        # Validate optional client affinity. Omitting the key is allowed and
-        # defaults to "NONE" in get_global_accelerator_config().
-        if "client_affinity" in ga_config:
-            allowed_affinity = {"NONE", "SOURCE_IP"}
-            value = ga_config["client_affinity"]
-            if not isinstance(value, str) or value.upper() not in allowed_affinity:
+        allowed_affinity = {"NONE", "SOURCE_IP"}
+        affinity = ga_config["client_affinity"]
+        if not isinstance(affinity, str) or affinity.upper() not in allowed_affinity:
+            raise ConfigValidationError(
+                f"client_affinity must be one of {sorted(allowed_affinity)}, got {affinity!r}"
+            )
+
+        self._validate_traffic_dial_config(ga_config["traffic_dial"])
+
+    def _validate_traffic_dial_config(self, dial_config: Any) -> None:
+        """Validate the merged ``global_accelerator.traffic_dial`` sub-block.
+
+        Ranges mirror the Global Accelerator API and the controller contract:
+
+        - ``enabled``: bool (default False — the controller is opt-in).
+        - ``mode``: ``monitor`` or ``enforce``, case-insensitive.
+        - ``interval_minutes`` / ``lookback_minutes``: 1-1440.
+        - ``min_dial_percentage``: 0-100 (TrafficDialPercentage range); the
+          floor a degraded region can be dialed down to.
+        - ``max_step_percentage``: 1-100; the largest change one run applies.
+        - ``full_health_percentage``: 1-100; the healthy fraction (percent)
+          at or above which a region is restored toward 100.
+        """
+        if not isinstance(dial_config, dict):
+            raise ConfigValidationError(
+                "global_accelerator.traffic_dial must be a mapping, got "
+                f"{type(dial_config).__name__}: {dial_config!r}"
+            )
+
+        enabled = dial_config["enabled"]
+        if not isinstance(enabled, bool):
+            raise ConfigValidationError(
+                "global_accelerator.traffic_dial.enabled must be a bool, got "
+                f"{type(enabled).__name__}: {enabled!r}"
+            )
+
+        mode = dial_config["mode"]
+        if not isinstance(mode, str) or mode.lower() not in self.TRAFFIC_DIAL_MODES:
+            raise ConfigValidationError(
+                "global_accelerator.traffic_dial.mode must be one of "
+                f"{sorted(self.TRAFFIC_DIAL_MODES)}, got {mode!r}"
+            )
+
+        int_ranges = (
+            ("interval_minutes", 1, 1_440),
+            ("lookback_minutes", 1, 1_440),
+            ("min_dial_percentage", 0, 100),
+            ("max_step_percentage", 1, 100),
+            ("full_health_percentage", 1, 100),
+        )
+        for field, minimum, maximum in int_ranges:
+            value = dial_config[field]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not minimum <= value <= maximum
+            ):
                 raise ConfigValidationError(
-                    f"client_affinity must be one of {sorted(allowed_affinity)}, got {value!r}"
+                    f"global_accelerator.traffic_dial.{field} must be an integer between "
+                    f"{minimum} and {maximum}, got {value!r}"
                 )
 
     def _validate_backend_tls_config(self) -> None:
@@ -1080,15 +1165,60 @@ class ConfigLoader:
         )
 
     def get_global_accelerator_config(self) -> dict[str, Any]:
-        """Get Global Accelerator configuration"""
-        return self.app.node.try_get_context("global_accelerator") or {
+        """Get the merged Global Accelerator configuration.
+
+        Returns the ``global_accelerator`` block from cdk.json layered on top
+        of the defaults below. This is a real merge, not the historical
+        all-or-nothing fallback: a partial block keeps every unspecified
+        default instead of silently dropping it. The ``traffic_dial``
+        sub-block is deep-merged so overriding a single dial knob does not
+        wipe the sub-block's other defaults, mirroring
+        ``get_cost_monitoring_config``.
+
+        Keys:
+            - name: accelerator name (default ``<project_name>-accelerator``)
+            - health_check_interval: seconds between endpoint-group probes;
+              the Global Accelerator API accepts only 10 or 30 (default 30)
+            - health_check_threshold: consecutive probes before an endpoint
+              flips healthy/unhealthy, 1-10 (default 3)
+            - health_check_path: HTTPS path probed on each regional ALB
+              (default ``/api/v1/health``)
+            - client_affinity: ``NONE`` or ``SOURCE_IP`` (default ``NONE``)
+            - traffic_dial: capacity-driven traffic-dial controller
+              sub-block (default disabled, ``monitor`` mode; knob reference
+              in :meth:`_validate_traffic_dial_config`)
+        """
+        default_config: dict[str, Any] = {
             "name": f"{self.get_project_name()}-accelerator",
-            "health_check_grace_period": 30,
             "health_check_interval": 30,
-            "health_check_timeout": 5,
+            "health_check_threshold": 3,
             "health_check_path": "/api/v1/health",
             "client_affinity": "NONE",
+            "traffic_dial": {
+                "enabled": False,
+                "mode": "monitor",
+                "interval_minutes": 5,
+                "lookback_minutes": 15,
+                "min_dial_percentage": 10,
+                "max_step_percentage": 20,
+                "full_health_percentage": 95,
+            },
         }
+        configured = self.app.node.try_get_context("global_accelerator") or {}
+        if not isinstance(configured, dict):
+            raise ConfigValidationError("global_accelerator must be a mapping")
+        merged: dict[str, Any] = {**default_config, **configured}
+
+        # Deep-merge the nested sub-block so a partial override does not drop
+        # the other defaults in the same sub-block. A non-mapping override is
+        # deliberately left in place for the validator to reject with a
+        # precise message.
+        override = configured.get("traffic_dial")
+        if isinstance(override, dict):
+            default_sub = cast(dict[str, Any], default_config["traffic_dial"])
+            merged["traffic_dial"] = {**default_sub, **override}
+
+        return merged
 
     def get_backend_tls_config(self) -> dict[str, Any]:
         """Return the mandatory deployment-local backend TLS lifecycle policy."""

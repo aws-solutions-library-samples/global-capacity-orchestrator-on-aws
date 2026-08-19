@@ -260,6 +260,14 @@ class GCOGlobalStack(Stack):
                 self._create_endpoint_group(region)
             self._create_outputs()
 
+            # Optional capacity-driven traffic-dial controller, gated by
+            # global_accelerator.traffic_dial.enabled (OFF by default). It
+            # lives inside the accelerator guard on purpose: outside the
+            # commercial partition there is nothing to dial.
+            traffic_dial_config = ga_config.get("traffic_dial") or {}
+            if bool(traffic_dial_config.get("enabled", False)):
+                self._create_traffic_dial_controller(ga_config)
+
         # Apply cdk-nag suppressions
         self._apply_nag_suppressions()
 
@@ -286,6 +294,204 @@ class GCOGlobalStack(Stack):
             "SOURCE_IP": ga.ClientAffinity.SOURCE_IP,
         }
         return mapping.get(affinity, ga.ClientAffinity.NONE)
+
+    def _create_traffic_dial_controller(self, ga_config: dict[str, Any]) -> None:
+        """Create the optional capacity-driven traffic-dial controller.
+
+        An EventBridge-scheduled Lambda (commercial ``aws`` partition only,
+        opt-in via ``global_accelerator.traffic_dial.enabled``) that reads
+        each region's ``GCO/HealthMonitor`` ``ClusterHealthy`` signal and
+        converges every endpoint group's TrafficDialPercentage toward the
+        observed health of its region. ``monitor`` mode only publishes
+        decisions (``GCO/TrafficDial`` CloudWatch metrics plus the
+        ``/{project}/traffic-dial/state`` SSM parameter); ``enforce`` mode
+        additionally applies them via UpdateEndpointGroup — and only
+        ``enforce`` mode is granted that IAM action.
+
+        The safety rails live in the handler: a configurable dial floor,
+        per-run step limiting, a last-healthy-region guard that never leaves
+        every endpoint group dialed below 100, a hold on missing telemetry
+        (absent metrics must never look like ideal health), a skip while the
+        accelerator is mid-deployment, and per-region manual overrides
+        (``gco capacity traffic-dial set``) that the controller respects.
+
+        This is deliberately a single writer next to the accelerator it
+        manages: regional writers would need leader election and new
+        cross-region IAM to mutate one global resource.
+        """
+        from aws_cdk import aws_events_targets as events_targets
+        from aws_cdk import aws_sqs as sqs
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        if self.listener is None:
+            raise RuntimeError("Traffic-dial controller requires the Global Accelerator listener")
+
+        project_name = self.config.get_project_name()
+        dial_config = ga_config.get("traffic_dial") or {}
+        mode = str(dial_config.get("mode", "monitor")).lower()
+        interval_minutes = int(dial_config.get("interval_minutes", 5))
+        lookback_minutes = int(dial_config.get("lookback_minutes", 15))
+        min_dial_percentage = int(dial_config.get("min_dial_percentage", 10))
+        max_step_percentage = int(dial_config.get("max_step_percentage", 20))
+        full_health_percentage = int(dial_config.get("full_health_percentage", 95))
+
+        controller_role = iam.Role(
+            self,
+            "TrafficDialControllerRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+
+        # Global Accelerator APIs do not support resource-level IAM scoping.
+        # UpdateEndpointGroup — the only mutating action — is granted solely
+        # in enforce mode; monitor mode stays read-only against GA.
+        ga_actions = [
+            "globalaccelerator:DescribeAccelerator",
+            "globalaccelerator:ListEndpointGroups",
+        ]
+        if mode == "enforce":
+            ga_actions.append("globalaccelerator:UpdateEndpointGroup")
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=sorted(ga_actions),
+                resources=["*"],
+            )
+        )
+        # Cross-region read of each cluster's ClusterHealthy metric.
+        # GetMetricData does not support resource-level permissions.
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["cloudwatch:GetMetricData"],
+                resources=["*"],
+            )
+        )
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+                conditions={"StringEquals": {"cloudwatch:namespace": "GCO/TrafficDial"}},
+            )
+        )
+        # State publication plus the manual-override parameters written by
+        # `gco capacity traffic-dial set`, scoped to this project's dial tree.
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{self.region}:{self.account}:"
+                    f"parameter/{project_name}/traffic-dial",
+                    f"arn:{self.partition}:ssm:{self.region}:{self.account}:"
+                    f"parameter/{project_name}/traffic-dial/*",
+                ],
+            )
+        )
+
+        self.traffic_dial_lambda = lambda_.Function(
+            self,
+            "TrafficDialControllerFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("lambda/traffic-dial-controller"),
+            timeout=Duration.minutes(5),
+            memory_size=256,
+            role=controller_role,
+            environment={
+                "LISTENER_ARN": self.listener.listener_arn,
+                "PROJECT_NAME": project_name,
+                "MODE": mode,
+                "REGIONS": ",".join(self.config.get_regions()),
+                "LOOKBACK_MINUTES": str(lookback_minutes),
+                "MIN_DIAL_PERCENTAGE": str(min_dial_percentage),
+                "MAX_STEP_PERCENTAGE": str(max_step_percentage),
+                "FULL_HEALTH_PERCENTAGE": str(full_health_percentage),
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+            description=(
+                "Capacity-driven Global Accelerator traffic-dial controller "
+                f"({mode} mode): converges per-region TrafficDialPercentage "
+                "toward each cluster's ClusterHealthy signal."
+            ),
+        )
+
+        dial_dlq = sqs.Queue(
+            self,
+            "TrafficDialRuleDlq",
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        events.Rule(
+            self,
+            "TrafficDialSchedule",
+            description=(
+                f"Traffic-dial controller for {project_name} "
+                f"({mode} mode, every {interval_minutes} min)"
+            ),
+            schedule=events.Schedule.rate(Duration.minutes(interval_minutes)),
+            targets=[
+                events_targets.LambdaFunction(
+                    self.traffic_dial_lambda, dead_letter_queue=dial_dlq, retry_attempts=2
+                )
+            ],
+        )
+
+        acknowledge_nag_findings(
+            controller_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
+                    ),
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The Global Accelerator Describe/List/Update APIs and CloudWatch "
+                        "GetMetricData do not support resource-level permissions and "
+                        "require a wildcard resource; PutMetricData is namespace-"
+                        "conditioned and the SSM wildcard is scoped to this project's "
+                        "traffic-dial parameter tree."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        f"Resource::arn:<AWS::Partition>:ssm:{self.region}:"
+                        f"<AWS::AccountId>:parameter/{project_name}/traffic-dial/*",
+                    ],
+                },
+            ],
+        )
+        acknowledge_nag_findings(
+            dial_dlq,
+            [
+                {
+                    "id": "AwsSolutions-SQS3",
+                    "reason": (
+                        "This queue is the dead-letter queue for the TrafficDialSchedule "
+                        "EventBridge rule; a DLQ for a DLQ is circular."
+                    ),
+                },
+                {
+                    "id": "Serverless-SQSRedrivePolicy",
+                    "reason": (
+                        "This queue is itself the dead-letter queue for the "
+                        "TrafficDialSchedule EventBridge rule, so it does not need its "
+                        "own redrive policy; a DLQ for a DLQ is circular."
+                    ),
+                },
+            ],
+        )
 
     def _create_capacity_poller(self) -> None:
         """Create the optional Historical Capacity Surface add-on.
@@ -1258,7 +1464,7 @@ class GCOGlobalStack(Stack):
             health_check_protocol=ga.HealthCheckProtocol.HTTPS,
             health_check_path=ga_config.get("health_check_path", "/api/v1/health"),
             health_check_interval=Duration.seconds(ga_config.get("health_check_interval", 30)),
-            health_check_threshold=3,
+            health_check_threshold=ga_config.get("health_check_threshold", 3),
         )
 
         self.endpoint_groups[region] = endpoint_group

@@ -408,8 +408,17 @@ def ensure_https_health_check(
     endpoint_group_arn: str,
     health_check_path: str = "/api/v1/health",
     expected_alb_arn: str | None = None,
+    health_check_interval: int = 30,
+    health_check_threshold: int = 3,
 ) -> None:
-    """Enforce the endpoint group's HTTPS/443 health-check contract.
+    """Enforce the endpoint group's configured HTTPS/443 health-check contract.
+
+    Interval and threshold come from the cdk.json ``global_accelerator`` block
+    (baked into the convergence task payload at synth time); the defaults
+    match the values this handler historically hardcoded, so legacy payloads
+    without the keys keep converging identically. Comparing them here also
+    means a non-default configured interval is no longer silently reset to 30
+    whenever the path or protocol drifts.
 
     When ``expected_alb_arn`` is supplied, only that endpoint is preserved in an
     update, preventing an eventually consistent stale endpoint description from
@@ -421,10 +430,14 @@ def ensure_https_health_check(
         current_protocol = group.get("HealthCheckProtocol", "TCP")
         current_port = int(group.get("HealthCheckPort", 0))
         current_path = group.get("HealthCheckPath", "")
+        current_interval = int(group.get("HealthCheckIntervalSeconds", 0))
+        current_threshold = int(group.get("ThresholdCount", 0))
         if (
             current_protocol == "HTTPS"
             and current_port == 443
             and current_path == health_check_path
+            and current_interval == health_check_interval
+            and current_threshold == health_check_threshold
         ):
             return
 
@@ -443,11 +456,16 @@ def ensure_https_health_check(
             HealthCheckPort=443,
             HealthCheckProtocol="HTTPS",
             HealthCheckPath=health_check_path,
-            HealthCheckIntervalSeconds=30,
-            ThresholdCount=3,
+            HealthCheckIntervalSeconds=health_check_interval,
+            ThresholdCount=health_check_threshold,
             EndpointConfigurations=existing_endpoints,
         )
-        logger.info("Global Accelerator health check set to HTTPS/443 %s", health_check_path)
+        logger.info(
+            "Global Accelerator health check set to HTTPS/443 %s (interval %ss, threshold %s)",
+            health_check_path,
+            health_check_interval,
+            health_check_threshold,
+        )
     except ClientError as exc:
         logger.error("Failed to enforce GA health-check configuration: %s", exc)
         raise
@@ -600,12 +618,31 @@ def _optional_endpoint_group_arn(properties: dict[str, Any]) -> str | None:
     return normalized or None
 
 
+def _health_check_contract(properties: dict[str, Any]) -> dict[str, Any]:
+    """Extract the optional ``GaHealthCheck*`` payload keys with legacy defaults.
+
+    The regional stack bakes the configured contract into the convergence
+    payload at synth time. Payloads persisted before these keys existed (and
+    raw CloudFormation properties from older deployments) fall back to the
+    values this handler historically hardcoded.
+    """
+    return {
+        "health_check_path": str(properties.get("GaHealthCheckPath", "/api/v1/health")),
+        "health_check_interval": int(properties.get("GaHealthCheckInterval", 30)),
+        "health_check_threshold": int(properties.get("GaHealthCheckThreshold", 3)),
+    }
+
+
 def register_ga_endpoint(
     cluster_name: str,
     region: str,
     endpoint_group_arn: str | None = None,
     registry_region: str = DEFAULT_REGISTRY_REGION,
     project_name: str = "gco",
+    *,
+    health_check_path: str = "/api/v1/health",
+    health_check_interval: int = 30,
+    health_check_threshold: int = 3,
 ) -> dict[str, str]:
     """Converge the Gateway ALB, optional GA endpoint, registry, and migration."""
     ca_path: str | None = None
@@ -653,7 +690,10 @@ def register_ga_endpoint(
             ensure_https_health_check(
                 ga_client,
                 normalized_endpoint_group,
+                health_check_path=health_check_path,
                 expected_alb_arn=alb_arn,
+                health_check_interval=health_check_interval,
+                health_check_threshold=health_check_threshold,
             )
             # AddEndpoints/RemoveEndpoints/UpdateEndpointGroup only submit a
             # configuration change; the accelerator serves it from its edge
@@ -732,6 +772,7 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
         registry_region=_get_registry_region(event, DEFAULT_REGISTRY_REGION)
         or DEFAULT_REGISTRY_REGION,
         project_name=str(event.get("ProjectName", "gco")),
+        **_health_check_contract(event),
     )
 
 
@@ -746,6 +787,7 @@ def handle_create_update(
         registry_region=_get_registry_region(props, DEFAULT_REGISTRY_REGION)
         or DEFAULT_REGISTRY_REGION,
         project_name=str(props.get("ProjectName", "gco")),
+        **_health_check_contract(props),
     )
     send_response(event, context, "SUCCESS", data, physical_id)
 

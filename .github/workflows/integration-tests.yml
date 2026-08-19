@@ -524,7 +524,11 @@ jobs:
         # the apiserver is unreachable, auth fail-closed (503, no
         # AUTH_SECRET_ARN and no GCO_DEV_MODE), the manifest's preStop
         # ["python","-c",...] exec shape against the live shell-less
-        # container, 10s stability, and graceful SIGTERM exit 0.
+        # container, 10s stability, and graceful SIGTERM exit 0. The final
+        # exec payload pins the shipped artifact's side of the ClusterHealthy
+        # contract the traffic-dial controller consumes (namespace +
+        # dimension injection; tests/test_health_metric_contract.py pins the
+        # full query shape at the unit layer).
         run: |
           .github/scripts/functional_container_test.sh \
             --image health-monitor:ci --name health-monitor-fn --host-port 18080 \
@@ -535,6 +539,7 @@ jobs:
             --probe "/api/v1/health=503=unhealthy" \
             --probe "/api/v1/status=503=authentication not configured" \
             --exec-python "import time; time.sleep(0)" \
+            --exec-python "import gco.services.metrics_publisher as mp; p = mp.HealthMonitorMetrics(cluster_name='ci-cluster', region='us-east-1'); assert p.namespace == 'GCO/HealthMonitor', p.namespace; assert p.cluster_name == 'ci-cluster'" \
             --min-uptime 10 \
             --expect-stop-exit 0
 

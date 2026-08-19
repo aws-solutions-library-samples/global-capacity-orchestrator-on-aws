@@ -549,12 +549,130 @@ class TestGlobalAcceleratorConvergence:
                 "HealthCheckProtocol": "HTTPS",
                 "HealthCheckPort": 443,
                 "HealthCheckPath": "/api/v1/health",
+                "HealthCheckIntervalSeconds": 30,
+                "ThresholdCount": 3,
             }
         }
 
         handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
         ga.update_endpoint_group.assert_not_called()
+
+    def test_reconciles_drifted_interval_and_threshold(self, ga_module):
+        """A group matching on protocol/port/path but not interval is updated.
+
+        The historical behavior early-returned on protocol/port/path alone,
+        which both left a drifted interval unreconciled and silently reset a
+        configured non-default interval back to 30 during path repairs.
+        """
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "HealthCheckProtocol": "HTTPS",
+                "HealthCheckPort": 443,
+                "HealthCheckPath": "/api/v1/health",
+                "HealthCheckIntervalSeconds": 30,
+                "ThresholdCount": 3,
+                "EndpointDescriptions": [{"EndpointId": PLATFORM_ALB_ARN, "Weight": 100}],
+            }
+        }
+
+        handler.ensure_https_health_check(
+            ga,
+            ENDPOINT_GROUP_ARN,
+            expected_alb_arn=PLATFORM_ALB_ARN,
+            health_check_interval=10,
+            health_check_threshold=2,
+        )
+
+        ga.update_endpoint_group.assert_called_once_with(
+            EndpointGroupArn=ENDPOINT_GROUP_ARN,
+            HealthCheckPort=443,
+            HealthCheckProtocol="HTTPS",
+            HealthCheckPath="/api/v1/health",
+            HealthCheckIntervalSeconds=10,
+            ThresholdCount=2,
+            EndpointConfigurations=[
+                {
+                    "EndpointId": PLATFORM_ALB_ARN,
+                    "Weight": 100,
+                    "ClientIPPreservationEnabled": True,
+                }
+            ],
+        )
+
+    def test_configured_contract_matching_group_is_left_alone(self, ga_module):
+        """A group already matching a non-default contract is not rewritten."""
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "HealthCheckProtocol": "HTTPS",
+                "HealthCheckPort": 443,
+                "HealthCheckPath": "/custom/health",
+                "HealthCheckIntervalSeconds": 10,
+                "ThresholdCount": 2,
+            }
+        }
+
+        handler.ensure_https_health_check(
+            ga,
+            ENDPOINT_GROUP_ARN,
+            health_check_path="/custom/health",
+            health_check_interval=10,
+            health_check_threshold=2,
+        )
+
+        ga.update_endpoint_group.assert_not_called()
+
+    def test_health_check_contract_defaults_match_legacy_hardcoding(self, ga_module):
+        """Payloads without GaHealthCheck* keys resolve to the legacy values."""
+        handler, _, _ = ga_module
+        assert handler._health_check_contract({}) == {
+            "health_check_path": "/api/v1/health",
+            "health_check_interval": 30,
+            "health_check_threshold": 3,
+        }
+        assert handler._health_check_contract(
+            {
+                "GaHealthCheckPath": "/custom",
+                "GaHealthCheckInterval": 10,
+                "GaHealthCheckThreshold": "2",
+            }
+        ) == {
+            "health_check_path": "/custom",
+            "health_check_interval": 10,
+            "health_check_threshold": 2,
+        }
+
+    def test_handle_task_threads_health_check_contract(self, ga_module):
+        """The Step Functions payload's GaHealthCheck* keys reach registration."""
+        handler, _, _ = ga_module
+        event = {
+            "Action": "publish_gateway_endpoint",
+            "ClusterName": "test-cluster",
+            "Region": "us-east-1",
+            "RegistryRegion": "eu-west-1",
+            "ProjectName": "gco",
+            "EndpointGroupArn": ENDPOINT_GROUP_ARN,
+            "GaHealthCheckPath": "/custom/health",
+            "GaHealthCheckInterval": 10,
+            "GaHealthCheckThreshold": 2,
+        }
+        with patch.object(handler, "register_ga_endpoint", return_value={"ok": "yes"}) as task:
+            assert handler.handle_task(event) == {"ok": "yes"}
+
+        task.assert_called_once_with(
+            cluster_name="test-cluster",
+            region="us-east-1",
+            endpoint_group_arn=ENDPOINT_GROUP_ARN,
+            registry_region="eu-west-1",
+            project_name="gco",
+            health_check_path="/custom/health",
+            health_check_interval=10,
+            health_check_threshold=2,
+        )
 
     def test_https_enforcement_failure_is_not_treated_as_success(self, ga_module):
         handler, _, _ = ga_module
@@ -644,7 +762,10 @@ class TestRegisterGatewayEndpoint:
         health.assert_called_once_with(
             ga,
             ENDPOINT_GROUP_ARN,
+            health_check_path="/api/v1/health",
             expected_alb_arn=PLATFORM_ALB_ARN,
+            health_check_interval=30,
+            health_check_threshold=3,
         )
         # AddEndpoints only submits a configuration change: publication (and
         # therefore deploy success) must wait for the accelerator to serve the
@@ -980,6 +1101,9 @@ class TestInvocationContracts:
             endpoint_group_arn=None,
             registry_region="eu-west-1",
             project_name="project",
+            health_check_path="/api/v1/health",
+            health_check_interval=30,
+            health_check_threshold=3,
         )
 
     def test_step_functions_cleanup_strictly_fences_registry_and_ga(self, ga_module):

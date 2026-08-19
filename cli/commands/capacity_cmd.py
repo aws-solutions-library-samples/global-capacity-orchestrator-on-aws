@@ -1553,3 +1553,126 @@ def predict_capacity(
         )
     for prediction in predictions:
         _print_prediction(prediction, raw)
+
+
+@capacity.group("traffic-dial")
+@pass_config
+def traffic_dial(config: Any) -> None:
+    """Inspect and control Global Accelerator traffic dials.
+
+    Each workload region's endpoint group has a TrafficDialPercentage: the
+    share of traffic Global Accelerator sends that region relative to optimal
+    routing. `show` reads the current dials plus the scheduled controller's
+    last decisions; `set` applies a manual dial and records an override the
+    controller honors; `clear` removes the override so the controller (when
+    enabled in enforce mode) resumes managing the region.
+    """
+    pass
+
+
+@traffic_dial.command("show")
+@pass_config
+def traffic_dial_show(config: Any) -> None:
+    """Show per-region traffic dials, endpoint health, and overrides."""
+    from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
+
+    formatter = get_output_formatter(config)
+    manager = get_traffic_dial_manager(config)
+    try:
+        statuses = manager.get_status()
+        state = manager.read_controller_state()
+    except TrafficDialError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to read traffic-dial status: {e}")
+        sys.exit(1)
+
+    if config.output_format == "table" and state:
+        formatter.print_info(
+            f"Controller: {state.get('mode', 'unknown')} mode, "
+            f"last run {state.get('timestamp', 'unknown')}"
+        )
+    formatter.print(
+        statuses,
+        columns=[
+            "region",
+            "traffic_dial",
+            "endpoint_health",
+            "healthy_percent",
+            "override",
+            "controller_reason",
+        ],
+    )
+
+
+@traffic_dial.command("set")
+@click.argument("region")
+@click.argument("percentage", type=click.IntRange(0, 100))
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@pass_config
+def traffic_dial_set(config: Any, region: Any, percentage: Any, yes: Any) -> None:
+    """Manually dial REGION to PERCENTAGE and pin it against the controller.
+
+    Applies UpdateEndpointGroup immediately and records an override parameter
+    so the scheduled controller leaves the region alone until
+    `gco capacity traffic-dial clear` removes it. Dial changes converge to the
+    accelerator's edge locations over a few minutes.
+    """
+    from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
+
+    formatter = get_output_formatter(config)
+    if not yes and not click.confirm(
+        f"Dial {region} to {percentage}% of its optimally routed traffic?"
+    ):
+        formatter.print_info("Aborted; no changes made.")
+        return
+
+    manager = get_traffic_dial_manager(config)
+    try:
+        status = manager.set_dial(region, percentage)
+    except TrafficDialError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to set traffic dial: {e}")
+        sys.exit(1)
+
+    for warning in status.warnings:
+        formatter.print_warning(warning)
+    formatter.print_success(
+        f"Dialed {region} to {percentage}% and recorded the override "
+        "(clear it with `gco capacity traffic-dial clear`)."
+    )
+    if config.output_format != "table":
+        formatter.print(status)
+
+
+@traffic_dial.command("clear")
+@click.argument("region")
+@pass_config
+def traffic_dial_clear(config: Any, region: Any) -> None:
+    """Clear REGION's manual override so the controller resumes managing it.
+
+    The dial itself is left unchanged: with the controller disabled or in
+    monitor mode it keeps the last manual value; in enforce mode the
+    controller re-converges it from the region's health signal on its next
+    cycle.
+    """
+    from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
+
+    formatter = get_output_formatter(config)
+    manager = get_traffic_dial_manager(config)
+    try:
+        existed = manager.clear_override(region)
+    except TrafficDialError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to clear traffic-dial override: {e}")
+        sys.exit(1)
+
+    if existed:
+        formatter.print_success(f"Cleared the {region} traffic-dial override.")
+    else:
+        formatter.print_info(f"No traffic-dial override was set for {region}.")

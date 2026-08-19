@@ -2001,6 +2001,10 @@ Check and manage cluster capacity.
 | [`gco capacity history show`](#gco-capacity-history-show) | Show the recorded capacity time-series for an instance type in a region. |
 | [`gco capacity history stats`](#gco-capacity-history-stats) | Show p25/p50/p75/min/max/stddev per metric over a time window. |
 | [`gco capacity history patterns`](#gco-capacity-history-patterns) | Show a day-of-week by hour heatmap of average spot scores. |
+| [`gco capacity traffic-dial`](#gco-capacity-traffic-dial) | Inspect and control Global Accelerator traffic dials (commercial `aws` partition only). |
+| [`gco capacity traffic-dial show`](#gco-capacity-traffic-dial-show) | Show per-region traffic dials, endpoint health, overrides, and the controller's last decisions. |
+| [`gco capacity traffic-dial set`](#gco-capacity-traffic-dial-set) | Manually dial a region and pin it against the scheduled controller. |
+| [`gco capacity traffic-dial clear`](#gco-capacity-traffic-dial-clear) | Clear a manual override so the controller resumes managing the region. |
 | [`gco capacity predict`](#gco-capacity-predict) | Predict the best time to acquire capacity from historical patterns (Bedrock). |
 
 </details>
@@ -2470,6 +2474,84 @@ gco capacity history patterns [OPTIONS]
 ```bash
 gco capacity history patterns -i g5.xlarge -r us-east-1
 gco capacity history patterns -i p5.48xlarge -r us-east-1 -m spot_score_at_10
+```
+
+#### `gco capacity traffic-dial`
+
+Inspect and control Global Accelerator traffic dials (commercial `aws`
+partition only). Each workload region's endpoint group has a
+`TrafficDialPercentage`: the share of new connections Global Accelerator
+admits to that region relative to optimal routing, with the remainder
+redirected to the next-closest region. The optional scheduled controller
+(`global_accelerator.traffic_dial` in `cdk.json`, see
+[CUSTOMIZATION.md](CUSTOMIZATION.md#traffic-dial-controller)) converges dials
+from each cluster's health signal; these commands read its state and provide
+the manual escape hatch.
+
+```bash
+gco capacity traffic-dial [COMMAND]
+```
+
+#### `gco capacity traffic-dial show`
+
+Show each region's current dial, endpoint health, any manual override, and
+the scheduled controller's last decision (reason plus the observed healthy
+percent). The controller line reports its mode (`monitor` or `enforce`) and
+last run time.
+
+```bash
+gco capacity traffic-dial show
+```
+
+**Example:**
+
+```bash
+gco capacity traffic-dial show
+gco capacity traffic-dial show --output json   # via the global --output flag
+```
+
+#### `gco capacity traffic-dial set`
+
+Manually dial `REGION` to `PERCENTAGE` (0-100) and record an override the
+scheduled controller honors: the region is left alone until the override is
+cleared. Applies `UpdateEndpointGroup` carrying only the dial, so the
+registered ALB endpoint is untouched. Prompts for confirmation unless
+`--yes` is passed; changes apply to new connections only and converge to the
+accelerator's edge locations over a few minutes. Warns when the change would
+leave no fully dialed region on the listener.
+
+```bash
+gco capacity traffic-dial set REGION PERCENTAGE [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--yes` | `-y` | Skip the confirmation prompt |
+
+**Example:**
+
+```bash
+gco capacity traffic-dial set us-west-2 20 --yes   # drain to 20% for maintenance
+gco capacity traffic-dial set us-west-2 100        # restore full dial
+```
+
+#### `gco capacity traffic-dial clear`
+
+Clear `REGION`'s manual override so the scheduled controller resumes managing
+it. The dial itself is left unchanged: with the controller disabled or in
+`monitor` mode it keeps the last manual value; in `enforce` mode the
+controller re-converges it from the region's health signal on its next cycle.
+
+```bash
+gco capacity traffic-dial clear REGION
+```
+
+**Example:**
+
+```bash
+gco capacity traffic-dial clear us-west-2
 ```
 
 #### `gco capacity predict`

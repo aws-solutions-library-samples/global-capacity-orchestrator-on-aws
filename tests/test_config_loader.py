@@ -261,14 +261,40 @@ class TestGlobalAcceleratorValidation:
         with pytest.raises(ConfigValidationError, match="health_check_path must start with '/'"):
             ConfigLoader(app)
 
-    def test_invalid_timing_value(self, valid_context):
-        """Test non-positive timing value raises error."""
-        valid_context["global_accelerator"]["health_check_interval"] = 0
+    @pytest.mark.parametrize("interval", [0, 15, 60, True, "30"])
+    def test_invalid_health_check_interval(self, valid_context, interval):
+        """The API accepts only 10 or 30 seconds; everything else fails synth."""
+        valid_context["global_accelerator"]["health_check_interval"] = interval
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="health_check_interval must be a positive integer"
+            ConfigValidationError,
+            match="global_accelerator.health_check_interval must be one of",
         ):
             ConfigLoader(app)
+
+    @pytest.mark.parametrize("interval", [10, 30])
+    def test_valid_health_check_interval(self, valid_context, interval):
+        """Both API-supported probe intervals pass validation."""
+        valid_context["global_accelerator"]["health_check_interval"] = interval
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["health_check_interval"] == interval
+
+    @pytest.mark.parametrize("threshold", [0, 11, -1, True, "3"])
+    def test_invalid_health_check_threshold(self, valid_context, threshold):
+        """ThresholdCount outside the API's 1-10 range fails synth."""
+        valid_context["global_accelerator"]["health_check_threshold"] = threshold
+        app = MockApp(valid_context)
+        with pytest.raises(
+            ConfigValidationError,
+            match="global_accelerator.health_check_threshold must be an integer between",
+        ):
+            ConfigLoader(app)
+
+    def test_valid_health_check_threshold(self, valid_context):
+        """An in-range threshold passes validation and survives the merge."""
+        valid_context["global_accelerator"]["health_check_threshold"] = 5
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["health_check_threshold"] == 5
 
     def test_client_affinity_defaults_to_none(self, valid_context):
         """Test client_affinity defaults to NONE when omitted."""
@@ -303,6 +329,100 @@ class TestGlobalAcceleratorValidation:
         app = MockApp(valid_context)
         with pytest.raises(ConfigValidationError, match="client_affinity must be one of"):
             ConfigLoader(app)
+
+
+class TestTrafficDialValidation:
+    """Tests for the global_accelerator.traffic_dial sub-block."""
+
+    def test_defaults_are_disabled_monitor(self, valid_context):
+        """The dial controller defaults to disabled, monitor mode."""
+        config = ConfigLoader(MockApp(valid_context))
+        dial = config.get_global_accelerator_config()["traffic_dial"]
+        assert dial == {
+            "enabled": False,
+            "mode": "monitor",
+            "interval_minutes": 5,
+            "lookback_minutes": 15,
+            "min_dial_percentage": 10,
+            "max_step_percentage": 20,
+            "full_health_percentage": 95,
+        }
+
+    def test_partial_traffic_dial_block_deep_merges(self, valid_context):
+        """Overriding one dial knob keeps the sub-block's other defaults."""
+        valid_context["global_accelerator"]["traffic_dial"] = {"enabled": True}
+        config = ConfigLoader(MockApp(valid_context))
+        dial = config.get_global_accelerator_config()["traffic_dial"]
+        assert dial["enabled"] is True
+        assert dial["mode"] == "monitor"
+        assert dial["min_dial_percentage"] == 10
+
+    def test_non_mapping_traffic_dial_rejected(self, valid_context):
+        """A scalar traffic_dial value fails with a precise message."""
+        valid_context["global_accelerator"]["traffic_dial"] = 5
+        with pytest.raises(
+            ConfigValidationError, match="global_accelerator.traffic_dial must be a mapping"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("enabled", [1, "true", None])
+    def test_non_bool_enabled_rejected(self, valid_context, enabled):
+        """traffic_dial.enabled must be a literal JSON boolean."""
+        valid_context["global_accelerator"]["traffic_dial"] = {"enabled": enabled}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"global_accelerator\.traffic_dial\.enabled must be a bool",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("mode", ["MONITOR", "Enforce", "monitor", "enforce"])
+    def test_mode_is_case_insensitive(self, valid_context, mode):
+        """Both controller modes validate regardless of case."""
+        valid_context["global_accelerator"]["traffic_dial"] = {"mode": mode}
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["traffic_dial"]["mode"] == mode
+
+    @pytest.mark.parametrize("mode", ["observe", "dry-run", 1, None])
+    def test_invalid_mode_rejected(self, valid_context, mode):
+        """Unknown controller modes fail synth."""
+        valid_context["global_accelerator"]["traffic_dial"] = {"mode": mode}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"global_accelerator\.traffic_dial\.mode must be one of",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("interval_minutes", 0),
+            ("interval_minutes", 1_441),
+            ("lookback_minutes", 0),
+            ("min_dial_percentage", -1),
+            ("min_dial_percentage", 101),
+            ("max_step_percentage", 0),
+            ("full_health_percentage", 0),
+            ("full_health_percentage", 101),
+            ("max_step_percentage", True),
+            ("interval_minutes", "5"),
+        ],
+    )
+    def test_out_of_range_dial_knobs_rejected(self, valid_context, field, value):
+        """Every numeric dial knob enforces its documented range."""
+        valid_context["global_accelerator"]["traffic_dial"] = {field: value}
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"global_accelerator\.traffic_dial\.{field} must be an integer between",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_min_dial_zero_is_valid(self, valid_context):
+        """A zero floor is legal — TrafficDialPercentage accepts 0."""
+        valid_context["global_accelerator"]["traffic_dial"] = {"min_dial_percentage": 0}
+        config = ConfigLoader(MockApp(valid_context))
+        assert (
+            config.get_global_accelerator_config()["traffic_dial"]["min_dial_percentage"] == 0
+        )
 
 
 class TestApiGatewayValidation:
@@ -675,14 +795,18 @@ class TestConfigValidationEdgeCases:
         with pytest.raises(ConfigValidationError, match="At least one region must be specified"):
             ConfigLoader(app)
 
-    def test_missing_global_accelerator_config(self, valid_context):
-        """Test that missing global_accelerator config raises error."""
+    def test_missing_global_accelerator_config_applies_defaults(self, valid_context):
+        """An absent global_accelerator block synthesizes with the defaults."""
         del valid_context["global_accelerator"]
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="global_accelerator configuration is required"
-        ):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+        ga_config = config.get_global_accelerator_config()
+        assert ga_config["health_check_interval"] == 30
+        assert ga_config["health_check_threshold"] == 3
+        assert ga_config["health_check_path"] == "/api/v1/health"
+        assert ga_config["client_affinity"] == "NONE"
+        assert ga_config["traffic_dial"]["enabled"] is False
+        assert ga_config["traffic_dial"]["mode"] == "monitor"
 
     def test_missing_alb_config(self, valid_context):
         """Test that missing alb_config raises error."""
@@ -776,24 +900,33 @@ class TestConfigValidationEdgeCases:
         with pytest.raises(ConfigValidationError, match="tracing_enabled must be a boolean"):
             ConfigLoader(app)
 
-    def test_negative_health_check_timeout(self, valid_context):
-        """Test that negative health_check_timeout raises error."""
-        valid_context["global_accelerator"]["health_check_timeout"] = -5
-        app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="health_check_timeout must be a positive integer"
-        ):
-            ConfigLoader(app)
+    def test_legacy_health_check_keys_are_tolerated(self, valid_context):
+        """Legacy grace-period/timeout keys are ignored, never validated.
 
-    def test_missing_ga_field(self, valid_context):
-        """Test that missing GA field raises error."""
+        Global Accelerator endpoint groups have no such settings; the keys
+        were historically validated but never consumed. Existing cdk.json
+        files that still carry them (with any value) must keep synthesizing.
+        """
+        valid_context["global_accelerator"]["health_check_timeout"] = -5
+        valid_context["global_accelerator"]["health_check_grace_period"] = "bogus"
+        app = MockApp(valid_context)
+        config = ConfigLoader(app)
+        assert config.get_global_accelerator_config()["health_check_interval"] == 30
+
+    def test_partial_ga_block_keeps_defaults(self, valid_context):
+        """A partial block keeps every unspecified default (merge, not fallback).
+
+        Previously the getter fell back all-or-nothing, so a block missing
+        health_check_path lost the default and failed validation. The merged
+        getter fills it in.
+        """
         del valid_context["global_accelerator"]["health_check_path"]
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError,
-            match="Missing global_accelerator configuration: health_check_path",
-        ):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+        ga_config = config.get_global_accelerator_config()
+        assert ga_config["health_check_path"] == "/api/v1/health"
+        # Explicit keys still override their defaults.
+        assert ga_config["name"] == "gco-accelerator"
 
     def test_missing_alb_field(self, valid_context):
         """Test that missing ALB field raises error."""
