@@ -449,6 +449,45 @@ class TestLambdaHandler:
         assert by_region["us-west-2"]["applied"] is False
         assert "AccessDenied" in by_region["us-west-2"]["error"]
 
+    def test_recovering_region_is_guard_promoted_past_the_step_limit(
+        self, dial_module, dial_env
+    ):
+        """A recovering region overlapping a draining one triggers the guard.
+
+        Observed live (2026-08-19, account-validation run): east recovering at
+        dial 73 with full health (step limit would allow only 93) while west
+        drained from 100 toward 80 left *no* region at 100 for that cycle. The
+        guard must promote the fully healthy region straight to 100 — past its
+        step limit — rather than leave the listener with no absorber.
+        """
+        handler, mock_boto_client = dial_module
+        ga = _ga_stub(east_dial=73.0, west_dial=100.0)
+        _route_clients(
+            mock_boto_client,
+            ga=ga,
+            ssm=_ssm_stub(),
+            cloudwatch=MagicMock(),
+            regional_cloudwatch={
+                "us-east-1": _cloudwatch_stub([1.0] * 10),
+                "us-west-2": _cloudwatch_stub([0.0] * 10),
+            },
+        )
+
+        summary = handler.lambda_handler({}, MagicMock())
+
+        by_region = {d["region"]: d for d in summary["decisions"]}
+        assert by_region["us-east-1"]["reason"] == "guard-last-healthy-region"
+        assert by_region["us-east-1"]["new_dial"] == 100  # not the step-limited 93
+        assert by_region["us-east-1"]["applied"] is True
+        assert by_region["us-west-2"]["new_dial"] == 80
+        assert by_region["us-west-2"]["applied"] is True
+        assert summary["updates_applied"] == 2
+        applied_dials = {
+            call.kwargs["EndpointGroupArn"]: call.kwargs["TrafficDialPercentage"]
+            for call in ga.update_endpoint_group.call_args_list
+        }
+        assert applied_dials == {GROUP_EAST: 100.0, GROUP_WEST: 80.0}
+
     def test_all_regions_degraded_keeps_one_fully_dialed(self, dial_module, dial_env):
         handler, mock_boto_client = dial_module
         ga = _ga_stub()
