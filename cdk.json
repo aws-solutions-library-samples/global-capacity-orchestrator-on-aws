@@ -441,6 +441,8 @@
     "@aws-cdk/aws-sns-subscriptions:restrictSqsDescryption": true,
     "@aws-cdk/aws-stepfunctions-tasks:enableLogging": true,
     "@aws-cdk/core:checkSecretUsage": true,
+    "_comment_defaultCrossStackReferences": "Strength of cross-stack references. Pinned to 'strong' (CDK's own default) to lock in producer-protecting behavior and silence the unset-flag warning — synthesized templates are unchanged from every prior GCO release. 'strong' means same-region references use Fn::ImportValue and cross-region references (GCOMonitoringStack consuming FSx/Aurora identifiers from the regional stacks via cross_region_references=True) use a pair of ExportWriter/ExportReader custom resources, whose CloudFormation response bodies are capped at 4096 bytes. Migrating to 'weak' would swap all of that for Fn::GetStackOutput — no custom resources, no size cap, no deadly embrace — but it is NOT a drop-in edit: existing deployments must go 'strong' -> 'both' -> deploy every stack in every Region -> 'weak' -> deploy again, and Fn::GetStackOutput availability outside the commercial 'aws' partition must be confirmed first. Do not change this value without that migration.",
+    "@aws-cdk/core:defaultCrossStackReferences": "strong",
     "@aws-cdk/core:enablePartitionLiterals": true,
     "@aws-cdk/core:includePrefixInUniqueNameGeneration": true,
     "@aws-cdk/core:stackRelativeExports": true,
