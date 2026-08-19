@@ -340,7 +340,11 @@ settling wakes the supervisor. Two properties follow:
   `DEFAULT_FLEET_PROGRESS_TIMEOUT` (30s), the orchestrator iterates
   anyway, so a genuinely wedged fleet still reaches the stagnation
   cascade — it just takes `stagnation_threshold` patience windows to get
-  there instead of burning through them in one event-loop turn.
+  there instead of burning through them in one event-loop turn. The
+  timeout has to be bounded rather than "wait until a child moves":
+  a child's mandatory-finite wall clock is only enforced *between* its
+  iterations, so a tool call that hangs would otherwise hang the
+  supervisor with it.
 - **Exits never wait.** Budget caps, pauses, terminal verdicts, and the
   bounded-iteration (`swarm iterate`) shape are all checked before the
   gate, so detaching and finalizing stay prompt.
@@ -348,6 +352,19 @@ settling wakes the supervisor. Two properties follow:
 Consequence worth knowing when reading a report: an orchestrator that
 supervised a healthy fleet runs *few* iterations, because it only spends
 one when the fleet has something new to show it.
+
+**Known limit — very slow child iterations.** Because patience is bounded
+per iteration, a child whose *single* iteration takes longer than
+`stagnation_threshold × 30s` never shows the orchestrator any progress
+inside the stagnation window, and a healthy fleet is terminated
+`no_progress` anyway. At the defaults that ceiling is 90 seconds per child
+iteration, which the shipped defaults stay well clear of — children
+default to `use_sampling: false`, and the safe-tier tools return in
+roughly a second. It becomes reachable when a plan sets
+`use_sampling: true` on a child (several model round-trips per iteration)
+or points one at a genuinely slow aggregation. If you expect child
+iterations that slow, raise the orchestrator's `stagnation_threshold` so
+`stagnation_threshold × 30s` clears your slowest expected iteration.
 
 ## Cost
 
