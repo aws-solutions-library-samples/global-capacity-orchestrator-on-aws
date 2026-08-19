@@ -94,6 +94,13 @@ DepsBuilder = Callable[[Mapping[str, Any]], Awaitable[EngineDependencies]]
 #: the respawn *decision* never consults it.
 DirectiveReviser = Callable[[SessionState], Awaitable[str | None]]
 
+#: Seconds the orchestrator waits for observable fleet progress before
+#: taking another iteration anyway. Bounds patience without removing it:
+#: a wedged fleet still reaches the stagnation cascade, it just takes
+#: ``stagnation_threshold`` windows to get there instead of spinning
+#: through them in one event-loop turn.
+DEFAULT_FLEET_PROGRESS_TIMEOUT = 30.0
+
 
 class SwarmRunnerBusyError(RuntimeError):
     """Another live process already drives this swarm.
@@ -194,6 +201,7 @@ class SwarmRunner:
         flag_lookup: dict[str, str] | None = None,
         revise_directive: DirectiveReviser | None = None,
         on_orchestrator_iteration: Callable[[Mapping[str, Any]], None] | None = None,
+        fleet_progress_timeout: float = DEFAULT_FLEET_PROGRESS_TIMEOUT,
     ) -> None:
         session = backend.load_session(orchestrator_id)
         if session is None:
@@ -222,6 +230,17 @@ class SwarmRunner:
         self._allowlists: dict[str, list[str]] = {}
         self._semaphore = asyncio.Semaphore(self._config["max_concurrent_children"])
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        # Fleet-progress signal. The orchestrator observes children
+        # through their persisted sessions, so it must not out-run them:
+        # a real child iteration suspends many times, and an orchestrator
+        # that only yielded one event-loop turn per iteration would spend
+        # its whole stagnation window watching an untouched "pending"
+        # fleet and terminate a swarm that was working fine. Drivers bump
+        # the tick on every observable change (iteration recorded, slot
+        # settled) and set the event to wake a waiting orchestrator.
+        self._fleet_progress_timeout = fleet_progress_timeout
+        self._progress_ticks = 0
+        self._progress_event = asyncio.Event()
         self._dirty = False
         self._swarm_writer: TaskStatusWriter | None = None
         self._child_writers: dict[str, TaskStatusWriter] = {}
@@ -512,6 +531,40 @@ class SwarmRunner:
     # Child drivers
     # ------------------------------------------------------------------ #
 
+    def _note_fleet_progress(self) -> None:
+        """Record observable child progress and wake a waiting orchestrator."""
+        self._progress_ticks += 1
+        self._progress_event.set()
+
+    async def _await_fleet_progress(self, observed_ticks: int) -> None:
+        """Yield until the fleet changes under the orchestrator's feet.
+
+        ``observed_ticks`` is the tick count captured *before* the
+        orchestrator iteration that just ran, so progress that landed
+        while that iteration was in flight counts and costs no wait.
+
+        With no live children there is nothing to wait for: yield one
+        turn and let the orchestrator's own criteria and cascade decide.
+        A wedged fleet falls through on timeout, which is the honest
+        outcome — the orchestrator waited and nothing moved.
+        """
+        if not self._live_entries() or self._progress_ticks != observed_ticks:
+            await asyncio.sleep(0)
+            return
+        if not any(not task.done() for task in self._tasks.values()):
+            # Live slots but no running driver (e.g. a cancelled driver
+            # left a slot unsettled): nothing can produce progress, so
+            # waiting would only stall the cascade.
+            await asyncio.sleep(0)
+            return
+        # No await between the tick check and the clear, so no driver can
+        # interleave and have its signal dropped (single-threaded loop).
+        self._progress_event.clear()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                self._progress_event.wait(), timeout=self._fleet_progress_timeout
+            )
+
     def _schedule_child(self, slot: str) -> None:
         existing = self._tasks.get(slot)
         if existing is not None and not existing.done():
@@ -540,6 +593,7 @@ class SwarmRunner:
                     f" reason={record.get('verdict_reason')}",
                     stream="stdout",
                 )
+                self._note_fleet_progress()
                 # No explicit yield here: when the iteration that just ran
                 # was the child's last, the next loop pass must reach the
                 # settle + restart-policy step without the orchestrator
@@ -568,6 +622,7 @@ class SwarmRunner:
             return
         self._registry[index] = swarm_rules.settle_entry(entry, consumed)
         self._dirty = True
+        self._note_fleet_progress()
         mission_audit.emit_child_lifecycle_event(
             self._orchestrator_id,
             entry["session_id"],
@@ -666,6 +721,7 @@ class SwarmRunner:
                 self._schedule_child(entry["slot"])
             terminal = False
             ran = 0
+            observed_ticks = self._progress_ticks
             while True:
                 current = self._backend.load_session(self._orchestrator_id)
                 if current is None:
@@ -677,6 +733,15 @@ class SwarmRunner:
                     break
                 if max_orchestrator_iterations is not None and ran >= max_orchestrator_iterations:
                     break
+                # Gate *before* the next iteration, never after the last
+                # one: every exit above must leave without paying the
+                # wait, or bounded (``mission_iterate``-shaped) calls and
+                # terminal cascades would stall on a fleet nobody is
+                # waiting for. The first iteration is the orchestrator's
+                # initial assessment and never waits.
+                if ran > 0:
+                    await self._await_fleet_progress(observed_ticks)
+                observed_ticks = self._progress_ticks
                 record = await engine.run_iteration(self._orchestrator_id)
                 ran += 1
                 self._flush_registry()
@@ -689,7 +754,6 @@ class SwarmRunner:
                 if record.get("verdict") in ("complete", "terminate"):
                     terminal = True
                     break
-                await asyncio.sleep(0)
             if terminal:
                 await self._cascade_shutdown()
                 self._flush_registry()

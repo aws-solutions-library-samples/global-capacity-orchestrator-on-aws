@@ -214,6 +214,63 @@ async def test_swarm_completes_when_children_complete(
     assert "swarm-mission-orch01-worker-b" in stems
 
 
+async def test_orchestrator_waits_for_slow_children_instead_of_stagnating(
+    backend: FilesystemBackend,
+) -> None:
+    """A child slower than one event-loop turn must not read as no progress.
+
+    Regression: the orchestrator used to concede exactly one
+    ``asyncio.sleep(0)`` per iteration, so any child whose work spans
+    several suspension points — every real child, once a live tool
+    dispatch is in the path — stayed ``pending`` for the whole stagnation
+    window and the fleet was terminated ``no_progress`` while it was
+    working fine. The orchestrator must wait for observable fleet
+    progress before spending another iteration.
+    """
+
+    async def slow_dispatcher(tool_name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+        # Stand in for a live dispatch: many real suspension points, far
+        # more than the single turn the orchestrator used to concede.
+        for _ in range(25):
+            await asyncio.sleep(0)
+        return {"payload": "ok"}
+
+    # A production-shaped threshold: low enough that out-running the
+    # fleet terminates the swarm, which is exactly the bug.
+    make_orchestrator(
+        backend,
+        criteria=[
+            {
+                "criterion_id": "fleet_done",
+                "kind": "metric_threshold",
+                "required": True,
+                "metric": "metrics.children_completed",
+                "op": ">=",
+                "target": 1,
+            }
+        ],
+    )
+    session = load(backend, "mission-orch01")
+    session["stagnation_threshold"] = 3
+    backend.save_session(session)  # type: ignore[arg-type]
+
+    runner = make_runner(backend, dispatcher=slow_dispatcher)
+    assert (await runner.spawn(child_request("worker-a")))["spawned"] is True
+
+    final = await runner.run_to_completion()
+
+    assert final["final_verdict"] == "complete", (
+        f"expected the orchestrator to wait for its fleet, got "
+        f"{final['final_verdict']}/{final.get('final_verdict_reason')}"
+    )
+    assert final["iterations"][-1]["verdict_reason"] == "criteria_met"
+    entry = final["children"][0]
+    assert entry["settled"] is True
+    child = load(backend, entry["session_id"])
+    assert child["status"] == "completed"
+    assert len(child["iterations"]) >= 1
+
+
 async def test_orchestrator_observation_carries_children(
     backend: FilesystemBackend,
 ) -> None:

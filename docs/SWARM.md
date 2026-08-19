@@ -294,6 +294,33 @@ Any terminal verdict triggers the abort cascade: live children are
 terminated through the standard abort transition and every slot settles
 its reservation before finalization completes.
 
+### The orchestrator paces itself to its fleet
+
+Stagnation is judged from what the orchestrator *observes*, and it
+observes children through their persisted sessions — so a supervisor
+that iterated as fast as it could would spend its whole stagnation
+window watching a fleet that had not yet had a chance to run, and
+terminate `no_progress` on a swarm that was working fine. Real children
+suspend many times per iteration (every live tool dispatch does), so
+this is the common case, not an edge case.
+
+The runner therefore gates each orchestrator iteration after the first
+on observable fleet progress: a child recording an iteration or a slot
+settling wakes the supervisor. Two properties follow:
+
+- **Patience is bounded.** If nothing moves within
+  `DEFAULT_FLEET_PROGRESS_TIMEOUT` (30s), the orchestrator iterates
+  anyway, so a genuinely wedged fleet still reaches the stagnation
+  cascade — it just takes `stagnation_threshold` patience windows to get
+  there instead of burning through them in one event-loop turn.
+- **Exits never wait.** Budget caps, pauses, terminal verdicts, and the
+  bounded-iteration (`swarm iterate`) shape are all checked before the
+  gate, so detaching and finalizing stay prompt.
+
+Consequence worth knowing when reading a report: an orchestrator that
+supervised a healthy fleet runs *few* iterations, because it only spends
+one when the fleet has something new to show it.
+
 ## Cost
 
 Swarm deliberately has **no cost cap**, for the same documented reasons
