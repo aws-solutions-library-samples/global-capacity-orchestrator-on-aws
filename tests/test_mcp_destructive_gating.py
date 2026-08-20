@@ -91,6 +91,7 @@ UMBRELLA_FLAG_TOOLS = (
     "mission_resume",
     "mission_history",
     "mission_list",
+    "mission_memory_search",
 )
 
 

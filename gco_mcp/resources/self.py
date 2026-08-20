@@ -132,6 +132,7 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "mission_resume": FLAG_MISSION,
     "mission_history": FLAG_MISSION,
     "mission_list": FLAG_MISSION,
+    "mission_memory_search": FLAG_MISSION,
     # gco_mcp/tools/swarm.py — swarm supervision (orchestrator-of-missions)
     "swarm_start": FLAG_SWARM,
     "swarm_iterate": FLAG_SWARM,

@@ -339,6 +339,7 @@ with _contextlib.suppress(ImportError):
         mission_history,
         mission_iterate,
         mission_list,
+        mission_memory_search,
         mission_resume,
         mission_start,
         mission_status,
@@ -531,6 +532,7 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
         "mission_resume",
         "mission_history",
         "mission_list",
+        "mission_memory_search",
     ):
         if hasattr(_mission_tools_mod, _name):
             globals()[_name] = getattr(_mission_tools_mod, _name)
@@ -714,6 +716,7 @@ _PUBLIC_EXPORTS = [
     "mission_history",
     "mission_iterate",
     "mission_list",
+    "mission_memory_search",
     "mission_resume",
     "mission_start",
     "mission_status",

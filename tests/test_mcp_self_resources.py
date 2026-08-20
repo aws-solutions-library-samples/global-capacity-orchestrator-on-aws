@@ -125,7 +125,7 @@ class TestFeatureFlags:
     """``mcp://gco/feature-flags`` exposes the gating table."""
 
     def test_feature_flags_lists_mission(self):
-        """``GCO_ENABLE_MISSION`` appears with its nine gated tools."""
+        """``GCO_ENABLE_MISSION`` appears with its ten gated tools."""
         body = _read_resource_text("mcp://gco/feature-flags")
         payload = json.loads(body)
         flags = {f["name"]: f for f in payload["flags"]}
@@ -134,7 +134,8 @@ class TestFeatureFlags:
         assert mission["default"] is False
         assert "mission_start" in mission["gated_tools"]
         assert "mission_iterate" in mission["gated_tools"]
-        assert len(mission["gated_tools"]) == 9
+        assert "mission_memory_search" in mission["gated_tools"]
+        assert len(mission["gated_tools"]) == 10
 
     def test_feature_flags_includes_umbrella(self):
         """``GCO_ENABLE_ALL_TOOLS`` appears with empty gated_tools (it's the umbrella)."""
@@ -198,6 +199,7 @@ class TestFeatureFlags:
                 "mission_resume",
                 "mission_history",
                 "mission_list",
+                "mission_memory_search",
             },
             "GCO_ENABLE_LOCAL_METRICS": {"metrics_from_local_file"},
             "GCO_ENABLE_LOCAL_STORAGE_SYNC": {"sync_storage_bucket"},
