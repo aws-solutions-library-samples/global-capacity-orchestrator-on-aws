@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.2
+    rev: v0.16.3
     hooks:
       # Formatter. Run before ``ruff`` so the check sees formatter output.
       - id: ruff-format
@@ -11,7 +11,7 @@ repos:
         args: [--fix, --exclude, lambda/kubectl-applier-simple-build, --exclude, lambda/helm-installer-build]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.3.0
+    rev: v2.3.1
     hooks:
       - id: mypy
         additional_dependencies: [types-requests, types-PyYAML]

@@ -65,12 +65,12 @@ def _dev_outputs() -> dict[tuple[str, ...], str]:
     return {
         ("node", "--version"): "v24.19.0",
         ("npm", "--version"): "12.0.2",
-        ("cdk", "--version"): "2.1135.1 (build abc123)",
-        ("aws", "--version"): "aws-cli/2.36.19 Python/3.13.11 Linux/6.11",
+        ("cdk", "--version"): "2.1138.0 (build abc123)",
+        ("aws", "--version"): "aws-cli/2.36.26 Python/3.13.11 Linux/6.11",
         ("docker", "--version"): "Docker version 29.7.2, build deadbeef",
         ("docker", "buildx", "version"): "github.com/docker/buildx v0.36.1 abc123",
-        ("uv", "--version"): "uv 0.12.3 (abc123 2026-08-01)",
-        ("uvx", "--version"): "uvx 0.12.3 (abc123 2026-08-01)",
+        ("uv", "--version"): "uv 0.12.5 (abc123 2026-08-01)",
+        ("uvx", "--version"): "uvx 0.12.5 (abc123 2026-08-01)",
         (
             "kubectl",
             "version",
@@ -98,12 +98,12 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
     assert actual == {
         "Node.js": "v24.19.0",
         "npm": "12.0.2",
-        "CDK": "2.1135.1",
-        "AWS CLI": "2.36.19",
+        "CDK": "2.1138.0",
+        "AWS CLI": "2.36.26",
         "Docker CLI": "29.7.2",
         "Buildx": "v0.36.1",
-        "uv": "0.12.3",
-        "uvx": "0.12.3",
+        "uv": "0.12.5",
+        "uvx": "0.12.5",
         "kubectl": "v1.36.3",
     }
 
@@ -133,7 +133,7 @@ def _helm_runner(*, kubectl_version: str = "v1.36.3"):
             "helm-installer:ci",
             "version",
             "--short",
-        ): "v4.2.3+gabcdef",
+        ): "v4.2.4+gabcdef",
         (
             "docker",
             "run",
@@ -162,7 +162,7 @@ def test_helm_installer_verifier_accepts_matching_runtime_versions(
         runner=_helm_runner(),
     )
 
-    assert actual == {"Helm": "v4.2.3", "kubectl": "v1.36.3"}
+    assert actual == {"Helm": "v4.2.4", "kubectl": "v1.36.3"}
 
 
 def test_helm_installer_verifier_rejects_a_mismatched_runtime_version(

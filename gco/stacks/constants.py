@@ -298,10 +298,10 @@ EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.5"
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.1-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.4.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.5.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
-EKS_ADDON_FSX_CSI_DRIVER = "v1.9.0-eksbuild.1"
+EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.1"
 """Amazon FSx CSI Driver — mounts FSx for Lustre file systems as Kubernetes persistent volumes."""
 
 # ---------------------------------------------------------------------------
@@ -549,7 +549,7 @@ def cost_athena_workgroup_name(project_name: str) -> str:
     return f"{project_name}-cost"
 
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.26.0"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.27.1"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP

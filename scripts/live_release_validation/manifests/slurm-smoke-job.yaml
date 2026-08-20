@@ -35,7 +35,7 @@ spec:
         - name: probe
           # Python 3.14.7-slim multi-platform index from the official Docker Hub tag API:
           # https://hub.docker.com/v2/repositories/library/python/tags/3.14.7-slim
-          image: docker.io/library/python:3.14.7-slim@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910
+          image: docker.io/library/python:3.14.7-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
           imagePullPolicy: IfNotPresent
           command: ["python3", "-c"]
           args:

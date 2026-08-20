@@ -84,7 +84,7 @@ For GPU tasks, `limits.nvidia.com/gpu` must equal `requests.nvidia.com/gpu`:
 ```yaml
 containers:
 - name: gpu-worker
-  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+  image: nvidia/cuda:13.3.1-base-ubuntu24.04
   resources:
     requests:
       cpu: "4"

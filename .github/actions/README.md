@@ -202,7 +202,7 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `version` | `v0.73.0` | Trivy version tag. **The default is THE Trivy pin for this repository** — callers pass no version, so bumping the default bumps every workflow at once. Tracked for drift by dependency-scan.sh via `extract_install_trivy_pin`. |
+| `version` | `v0.74.0` | Trivy version tag. **The default is THE Trivy pin for this repository** — callers pass no version, so bumping the default bumps every workflow at once. Tracked for drift by dependency-scan.sh via `extract_install_trivy_pin`. |
 | `github-token` | `""` | Token forwarded to `setup-trivy` for the install-script checkout (authenticated API limit vs anonymous). Pass `${{ github.token }}`. |
 
 **Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml` — all inherit the pin from the `version` default. `setup-trivy` is pinned to its `v0.2.6` release tag in `action.yml`; bump that tag there after reviewing a newer release.

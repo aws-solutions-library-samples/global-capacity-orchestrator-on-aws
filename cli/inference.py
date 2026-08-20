@@ -502,7 +502,7 @@ class InferenceManager:
 
         Args:
             endpoint_name: Unique name for the endpoint
-            image: Container image (e.g. vllm/vllm-openai:v0.26.0). Optional
+            image: Container image (e.g. vllm/vllm-openai:v0.27.1). Optional
                 when ``mooncake_mode`` is set: a disaggregated/store deploy
                 with no image falls back to the default upstream
                 Mooncake-enabled vLLM image. A plain deploy still requires an

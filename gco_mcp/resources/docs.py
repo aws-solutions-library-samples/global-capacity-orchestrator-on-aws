@@ -207,7 +207,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
         "summary": "vLLM OpenAI-compatible LLM serving with PagedAttention.",
         "gpu": "NVIDIA",
         "opt_in": "",
-        "submission": "gco inference deploy my-llm -i vllm/vllm-openai:v0.26.0 --gpu-count 1",
+        "submission": "gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1",
         "keywords": [
             "vllm",
             "openai",

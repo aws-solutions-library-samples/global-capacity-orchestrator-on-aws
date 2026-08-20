@@ -33,7 +33,7 @@ inputs:
       deps-scan drift check reads this same default via
       extract_install_trivy_pin).
     required: false
-    default: "v0.73.0"
+    default: "v0.74.0"
   github-token:
     description: >
       Token forwarded to setup-trivy for checking out the Trivy repo when it

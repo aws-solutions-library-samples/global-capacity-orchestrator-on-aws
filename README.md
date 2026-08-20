@@ -249,7 +249,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an Inference Endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.26.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```

@@ -154,7 +154,7 @@ Beyond batch GPU jobs, GCO supports long-running inference endpoints — deploy 
 
 Inference serving uses a reconciliation pattern similar to Kubernetes controllers:
 
-1. You run `gco inference deploy my-llm -i vllm/vllm-openai:v0.26.0 --gpu-count 1`
+1. You run `gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1`
 2. The CLI writes the endpoint spec to a DynamoDB table (desired state)
 3. An `inference_monitor` service running in each target region polls the table
 4. The monitor creates Kubernetes Deployments, Services, scaling objects, and supporting configuration to match the desired state
@@ -502,7 +502,7 @@ GCO supports long-running inference endpoints across regions with automatic reco
 
 ```bash
 # Deploy a vLLM endpoint
-gco inference deploy my-llm -i vllm/vllm-openai:v0.26.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1
 
 # Check status
 gco inference status my-llm

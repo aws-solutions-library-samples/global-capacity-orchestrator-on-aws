@@ -41,13 +41,13 @@ attrs==25.4.0
     #   referencing
 authlib==1.7.1
     # via fastmcp-slim
-aws-cdk-asset-awscli-v1==2.2.282
+aws-cdk-asset-awscli-v1==2.2.292
     # via aws-cdk-lib
 aws-cdk-asset-node-proxy-agent-v6==2.1.2
     # via aws-cdk-lib
 aws-cdk-cloud-assembly-schema==54.15.0
     # via aws-cdk-lib
-aws-cdk-lib==2.263.0
+aws-cdk-lib==2.265.0
     # via
     #   cdk-nag
     #   gco-cli
@@ -62,12 +62,12 @@ bandit==1.9.4
     #   gco-cli (pyproject.toml)
 beartype==0.22.9
     # via py-key-value-aio
-boto3==1.43.67
+boto3==1.43.74
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   moto
-botocore==1.43.67
+botocore==1.43.74
     # via
     #   boto3
     #   gco-cli (pyproject.toml)
@@ -152,11 +152,11 @@ fastapi==0.141.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==3.4.6
+fastmcp==3.4.7
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==3.4.6
+fastmcp-slim==3.4.7
     # via fastmcp
 filelock==3.29.0
     # via
@@ -188,7 +188,7 @@ httpx==0.28.1
     #   mcp
 httpx-sse==0.4.3
     # via mcp
-hypothesis==6.165.2
+hypothesis==6.165.10
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -306,7 +306,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-mypy==2.3.0
+mypy==2.3.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -360,7 +360,7 @@ pillow==12.3.0
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   tensorboard
-pip-tools==7.6.0
+pip-tools==7.6.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -378,7 +378,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-pre-commit==4.6.1
+pre-commit==4.6.2
     # via gco-cli (pyproject.toml)
 prometheus-client==0.26.0
     # via
@@ -406,7 +406,7 @@ py-key-value-aio==0.4.4
     # via
     #   fastmcp-slim
     #   pydocket
-pyarrow==25.0.0
+pyarrow==25.0.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -559,7 +559,7 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.2
+ruff==0.16.3
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -597,12 +597,11 @@ tensorboard-data-server==0.7.2
     # via tensorboard
 typeguard==2.13.3
     # via
-    #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
     #   jsii
 typer==0.25.1
     # via pydocket
-types-pyyaml==6.0.12.20260724
+types-pyyaml==6.0.12.20260815
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -646,7 +645,7 @@ urllib3==2.7.0
     #   requests
     #   responses
     #   types-requests
-uvicorn==0.52.1
+uvicorn==0.52.4
     # via
     #   fastmcp-slim
     #   gco-cli
