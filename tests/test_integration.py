@@ -264,6 +264,8 @@ class TestKubernetesManifests:
             "gateway.k8s.aws/v1",
             "rbac.authorization.k8s.io/v1",
             "storage.k8s.io/v1",
+            # gco-platform-critical PriorityClass (05-priority-classes.yaml).
+            "scheduling.k8s.io/v1",
             "policy/v1",
             "karpenter.sh/v1",
             "karpenter.k8s.aws/v1",
