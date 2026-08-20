@@ -438,6 +438,229 @@ CONFIGS.append(
     )
 )
 
+# ---------------------------------------------------------------------------
+# Coverage sweep — every remaining ConfigLoader context surface.
+# ---------------------------------------------------------------------------
+# tests/test_cdk_synthesis_matrix.py::test_every_config_knob_is_matrix_covered
+# asserts that every context key the loader reads is varied by at least one
+# entry (or sits on MATRIX_COVERAGE_ALLOWLIST with a justification). These
+# entries close the gap that guard found on first run: the Global
+# Accelerator block (traffic dial, health-check contract, legacy-key
+# tolerance), the Historical Capacity Surface, and several long-standing
+# blind spots that had never synthesized off their defaults.
+CONFIGS.extend(
+    [
+        # Traffic-dial controller, monitor mode (the shipped default when
+        # enabled): controller Lambda + EventBridge schedule + DLQ
+        # synthesize through the real ConfigLoader merge path.
+        (
+            "ga-traffic-dial-monitor",
+            {"global_accelerator": {"traffic_dial": {"enabled": True}}},
+        ),
+        # Enforce mode is the only shape granted
+        # globalaccelerator:UpdateEndpointGroup — a distinct IAM surface
+        # (also in NAG_CONFIGS). Knob edges ride along: a 7-minute cadence
+        # and a zero dial floor.
+        (
+            "ga-traffic-dial-enforce",
+            {
+                "global_accelerator": {
+                    "traffic_dial": {
+                        "enabled": True,
+                        "mode": "enforce",
+                        "interval_minutes": 7,
+                        "min_dial_percentage": 0,
+                    }
+                }
+            },
+        ),
+        # Every non-dial Global Accelerator knob at a non-default value:
+        # the 10-second probe interval (the only other value the GA API
+        # accepts), a tuned threshold, a custom health path, SOURCE_IP
+        # affinity, and a custom accelerator name.
+        (
+            "ga-health-check-tuned",
+            {
+                "global_accelerator": {
+                    "name": "gco-matrix-accelerator",
+                    "health_check_interval": 10,
+                    "health_check_threshold": 5,
+                    "health_check_path": "/healthz",
+                    "client_affinity": "SOURCE_IP",
+                }
+            },
+        ),
+        # Legacy configs carrying the never-consumed
+        # health_check_grace_period / health_check_timeout keys must still
+        # synthesize: the keys were removed from the schema but are
+        # documented as tolerated, so an existing cdk.json upgrading in
+        # place cannot fail synth.
+        (
+            "ga-legacy-keys-tolerated",
+            {
+                "global_accelerator": {
+                    "health_check_grace_period": 300,
+                    "health_check_timeout": 10,
+                }
+            },
+        ),
+        # Historical Capacity Surface off: the shipped cdk.json enables it,
+        # so the poller-absent shape (no table, no schedule, no SSM param)
+        # only synthesizes here.
+        ("historical-disabled", {"historical": {"enabled": False}}),
+        # Historical tuned: long-block probe disabled (0 hours), a single
+        # spot-score target capacity, an explicit region subset, and a
+        # trimmed watch list — env-serialization branches the defaults
+        # never exercise.
+        (
+            "historical-tuned",
+            {
+                "historical": {
+                    "enabled": True,
+                    "retention_days": 30,
+                    "poll_interval_minutes": 60,
+                    "capacity_block_duration_hours": 48,
+                    "capacity_block_long_duration_hours": 0,
+                    "spot_score_target_capacities": [1],
+                    "watch_instance_types": [
+                        "g5.xlarge",
+                        "p5.48xlarge",
+                        "trn2.48xlarge",
+                    ],
+                    "enabled_regions": ["us-east-1"],
+                }
+            },
+        ),
+        # The vector store defaults OFF, so its entire optional surface
+        # (global table + vector index + S3-triggered ingest + regional
+        # read wiring) synthesizes only through this entry.
+        (
+            "vector-store-enabled",
+            {"vector_store": {"enabled": True, "replica_regions": ["us-east-1"]}},
+        ),
+        # Backend TLS lifecycle knobs at non-defaults that still satisfy
+        # every cross-field validator (leaf < root validity, overlap >
+        # leaf validity, activation delay > max stale trust window).
+        (
+            "backend-tls-tuned",
+            {
+                "backend_tls": {
+                    "leaf_validity_days": 14,
+                    "leaf_rotate_before_days": 7,
+                    "rotation_schedule_hours": 6,
+                    "trust_cache_ttl_seconds": 120,
+                    "trust_cache_max_stale_seconds": 1800,
+                }
+            },
+        ),
+        # Observability and cost monitoring off together (cost reporting
+        # reads OpenCost, so the coherent disable is both at once).
+        (
+            "observability-and-cost-disabled",
+            {
+                "cluster_observability": {"enabled": False},
+                "cost_monitoring": {"enabled": False},
+            },
+        ),
+        # Cost monitoring kept on but tuned: report cadence, retention,
+        # and the infrequent-access transition age.
+        (
+            "cost-monitoring-tuned",
+            {
+                "cost_monitoring": {
+                    "reports": {
+                        "interval_minutes": 120,
+                        "retention_days": 90,
+                        "transition_to_infrequent_access_days": 30,
+                    }
+                }
+            },
+        ),
+        # Grafana/Prometheus persistence sizing flows through to Helm values.
+        (
+            "observability-tuned",
+            {
+                "cluster_observability": {
+                    "grafana": {"persistence_size": "20Gi"},
+                    "prometheus": {"persistence_size": "100Gi", "retention": "30d"},
+                }
+            },
+        ),
+        # Regional ALB probe contract at non-defaults.
+        (
+            "alb-tuned",
+            {
+                "alb_config": {
+                    "health_check_interval": 15,
+                    "health_check_timeout": 10,
+                    "healthy_threshold": 3,
+                    "unhealthy_threshold": 4,
+                }
+            },
+        ),
+        # FSx enabled for a subset of a multi-region topology:
+        # fsx_lustre_regions gates which regional stacks grow the FSx
+        # surface, and only a multi-region deployment exercises the subset.
+        (
+            "fsx-region-subset",
+            {
+                "deployment_regions": {
+                    "global": "us-east-2",
+                    "api_gateway": "us-east-2",
+                    "monitoring": "us-east-2",
+                    "regional": ["us-east-1", "us-west-2"],
+                },
+                "fsx_lustre": {"enabled": True},
+                "fsx_lustre_regions": ["us-east-1"],
+            },
+        ),
+        # Non-default project name: #139 made every physical name derive
+        # from this single knob, so one full-app synth under a different
+        # prefix guards the derivation end to end (the dedicated scoping
+        # test asserts the details; this proves the whole graph builds).
+        # Custom tags ride along — they stamp every taggable resource.
+        (
+            "custom-project-and-tags",
+            {
+                "project_name": "gcoalt",
+                "tags": {
+                    "Project": "GCOALT",
+                    "Environment": "staging",
+                    "CostCenter": "ml-1234",
+                },
+            },
+        ),
+        # Manifest-processor service shape (replica count + request-body
+        # cap) and a tightened job-validation policy flow into the regional
+        # stack's container env and the queue processor.
+        (
+            "manifest-processor-tuned",
+            {
+                "manifest_processor": {
+                    "replicas": 5,
+                    "max_request_body_bytes": 524288,
+                },
+                "job_validation_policy": {
+                    "resource_quotas": {"max_gpu_per_manifest": 8},
+                },
+            },
+        ),
+    ]
+)
+
+# Context keys the loader reads that the matrix deliberately does NOT vary.
+# Every entry needs a justification; the coverage guard fails if an
+# allowlisted key gains matrix coverage (stale allowlist) or a read key is
+# neither covered nor listed.
+MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
+    "kubernetes_version": (
+        "Pinned platform version: valid values are coupled to the aws-cdk-lib "
+        "release and the EKS standard-support window, both owned by the "
+        "monthly dependency scan and the documented upgrade runbook — a "
+        "matrix entry would hardcode a second copy of that moving target."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # NAG_CONFIGS — subset of CONFIGS used by tests/test_nag_compliance.py
@@ -493,6 +716,13 @@ _NAG_CONFIG_NAMES = {
     # because both sub-toggles layer on top of the baseline
     # ``analytics-enabled`` IAM surface independently.
     "analytics-enabled-hyperpod-canvas",
+    # The traffic-dial controller's IAM role is new in v6.4: enforce mode is
+    # its maximal shape (adds globalaccelerator:UpdateEndpointGroup to the
+    # wildcard-resource GA statement) and carries every suppression the
+    # monitor shape uses (namespace-conditioned PutMetricData, project-scoped
+    # SSM tree, DLQ without its own redrive) — so the single enforce entry
+    # covers the whole controller surface under cdk-nag.
+    "ga-traffic-dial-enforce",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

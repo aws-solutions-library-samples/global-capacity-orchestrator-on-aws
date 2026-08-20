@@ -195,3 +195,56 @@ def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
 
             _build_all_stacks(app)
             app.synth()
+
+
+def test_every_config_knob_is_matrix_covered() -> None:
+    """Every context key the loader reads is varied by the matrix or allowlisted.
+
+    The knob inventory is extracted from ``gco/config/config_loader.py``'s
+    AST (every ``try_get_context("...")`` literal — the loader's real read
+    surface, not cdk.json's incidental contents), so a new configuration
+    block cannot ship without either a synthesis-matrix entry exercising it
+    or an explicit justification in ``MATRIX_COVERAGE_ALLOWLIST``. This
+    guard exists because the matrix had silently drifted 11-of-22 knobs
+    behind the loader: ``global_accelerator``, ``historical``,
+    ``vector_store``, ``backend_tls``, and others had never synthesized off
+    their defaults.
+    """
+    import ast
+
+    from tests._cdk_config_matrix import MATRIX_COVERAGE_ALLOWLIST
+
+    loader_path = Path(__file__).resolve().parent.parent / "gco" / "config" / "config_loader.py"
+    tree = ast.parse(loader_path.read_text(encoding="utf-8"))
+    read_keys = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "try_get_context"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+    assert read_keys, "no try_get_context reads found; the extraction is broken"
+
+    covered = {key for _, overrides in CONFIGS for key in overrides}
+    allowlisted = set(MATRIX_COVERAGE_ALLOWLIST)
+
+    uncovered = sorted(read_keys - covered - allowlisted)
+    assert not uncovered, (
+        "ConfigLoader reads these context keys but no synthesis-matrix entry "
+        "varies them and they carry no allowlist justification — add a config "
+        f"to tests/_cdk_config_matrix.CONFIGS or allowlist with a reason: {uncovered}"
+    )
+
+    stale_allowlist = sorted(allowlisted & covered)
+    assert not stale_allowlist, (
+        "these keys are allowlisted as deliberately-unvaried but a matrix "
+        f"entry now covers them — delete the stale allowlist entries: {stale_allowlist}"
+    )
+
+    unknown_allowlist = sorted(allowlisted - read_keys)
+    assert not unknown_allowlist, (
+        f"these allowlist entries name keys the loader no longer reads: {unknown_allowlist}"
+    )
