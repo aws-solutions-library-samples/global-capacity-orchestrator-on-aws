@@ -28,31 +28,68 @@ The flag list is taken from ``feature_flags.ALL_FLAGS`` at run time, so a new
 flag is covered the day it is added, and a tool added to any gated family
 without full roster wiring fails here instead of shipping half-exported.
 
-Snapshots are expensive (each rebuilds the FastMCP instance and re-fires
-every decorator), so a module-scoped fixture computes both once, evaluates
-the attribute/``__all__`` checks while the umbrella state is live, and then
-restores the clean default posture for neighbouring test files.
+Each snapshot runs in a **subprocess** with the target env, importing
+``run_mcp`` fresh and shipping results back as JSON. A first draft instead
+reloaded ``server``/``run_mcp`` in-process (the ``test_mcp_transforms.py``
+recipe) and restored afterwards — and the restore was not faithful: resource
+registrations went missing on the shared FastMCP singleton and every
+resource-reading test that sorted after this file failed in CI
+(``Unknown resource: 'images://gco/index'``). Subprocess isolation makes the
+guard hermetic: the test process's singleton is never touched, so file
+ordering and xdist scheduling cannot be affected.
 """
 
 from __future__ import annotations
 
-import asyncio
-import importlib
+import json
 import os
+import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import patch
 
-# Ensure gco_mcp/ is importable, mirroring every other test module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
+import pytest
+
+_GCO_MCP_DIR = Path(__file__).resolve().parent.parent / "gco_mcp"
+
+# Ensure gco_mcp/ is importable in THIS process only for feature_flags —
+# a plain constants module whose import has no registration side effects.
+sys.path.insert(0, str(_GCO_MCP_DIR))
 
 import feature_flags  # noqa: E402
-import pytest  # noqa: E402
+
+# Sentinel separating the snapshot JSON from anything the server import
+# writes to stdout (audit records target logging handlers, but the guard
+# must not depend on that staying true).
+_MARKER = "<<<GCO_GATING_SNAPSHOT_JSON>>>"
 
 # Transform-synthesized tools are not ``@mcp.tool`` functions and are never
 # re-exported on run_mcp (same set test_mcp_transforms.py excludes).
-_SYNTHETIC_TOOLS = frozenset({"search_tools", "call_tool", "list_resources", "read_resource"})
+_SNAPSHOT_SCRIPT = textwrap.dedent(
+    """
+    import asyncio
+    import json
+    import sys
+
+    sys.path.insert(0, {gco_mcp_dir!r})
+
+    import run_mcp
+    from resources.self import _TOOL_GATING_TABLE
+
+    synthetic = {{"search_tools", "call_tool", "list_resources", "read_resource"}}
+    registered = sorted(
+        {{t.name for t in asyncio.run(run_mcp.mcp._list_tools())}} - synthetic
+    )
+    payload = {{
+        "registered": registered,
+        "missing_attr": sorted(n for n in registered if not hasattr(run_mcp, n)),
+        "missing_all": sorted(n for n in registered if n not in run_mcp.__all__),
+        "gating_table": dict(_TOOL_GATING_TABLE),
+    }}
+    print({marker!r} + json.dumps(payload))
+    """
+)
 
 
 def _clean_env() -> dict[str, str]:
@@ -63,35 +100,30 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _reload_mcp_with_env() -> object:
-    """Rebuild the FastMCP instance and re-register every tool/resource.
-
-    Same recipe as ``tests/test_mcp_transforms.py``: drop every cached
-    ``tools.*`` / ``resources.*`` module so the freshly reloaded ``server``
-    builds a clean FastMCP and every decorator re-fires against it under the
-    *current* environment. Returns the reloaded ``run_mcp`` module.
-    """
-    import run_mcp
-    import server
-
-    cached_submodules = [
-        name
-        for name in list(sys.modules)
-        if name.startswith("tools.")
-        or name.startswith("resources.")
-        or name in ("tools", "resources")
-    ]
-    for name in cached_submodules:
-        sys.modules.pop(name, None)
-    importlib.reload(server)
-    importlib.reload(run_mcp)
-    return run_mcp
-
-
-def _registered_tool_names(run_mcp: object) -> set[str]:
-    """Full registered set via ``_list_tools()`` (bypasses search transforms)."""
-    tools = asyncio.run(run_mcp.mcp._list_tools())
-    return {t.name for t in tools} - _SYNTHETIC_TOOLS
+def _snapshot(flag_overrides: dict[str, str]) -> dict[str, object]:
+    """Import run_mcp in a subprocess under ``flag_overrides``; return its report."""
+    env = {**os.environ, **_clean_env(), **flag_overrides}
+    script = _SNAPSHOT_SCRIPT.format(gco_mcp_dir=str(_GCO_MCP_DIR), marker=_MARKER)
+    result = subprocess.run(  # noqa: S603 — fixed interpreter, generated script
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"snapshot subprocess failed (rc={result.returncode}); stderr tail:\n"
+        + "\n".join(result.stderr.splitlines()[-25:])
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith(_MARKER):
+            payload: dict[str, object] = json.loads(line[len(_MARKER) :])
+            return payload
+    raise AssertionError(
+        "snapshot subprocess produced no report line; stdout tail:\n"
+        + "\n".join(result.stdout.splitlines()[-25:])
+    )
 
 
 @dataclass
@@ -105,35 +137,16 @@ class _Snapshots:
 
 @pytest.fixture(scope="module")
 def snapshots() -> _Snapshots:
-    """Default and umbrella registry snapshots; default posture restored after."""
-    result = _Snapshots()
-    clean = _clean_env()
-    try:
-        with patch.dict(os.environ, clean, clear=False):
-            run_mcp = _reload_mcp_with_env()
-            result.default_registered = _registered_tool_names(run_mcp)
-
-        umbrella = dict(clean)
-        umbrella["GCO_ENABLE_ALL_TOOLS"] = "true"
-        with patch.dict(os.environ, umbrella, clear=False):
-            run_mcp = _reload_mcp_with_env()
-            result.umbrella_registered = _registered_tool_names(run_mcp)
-            # Attribute / __all__ membership must be evaluated while the
-            # umbrella state is live on the module.
-            result.umbrella_missing_attr = sorted(
-                name for name in result.umbrella_registered if not hasattr(run_mcp, name)
-            )
-            result.umbrella_missing_all = sorted(
-                name for name in result.umbrella_registered if name not in run_mcp.__all__
-            )
-            from resources.self import _TOOL_GATING_TABLE
-
-            result.gating_table = dict(_TOOL_GATING_TABLE)
-    finally:
-        # Restore the flag-free default registry for neighbouring test files.
-        with patch.dict(os.environ, clean, clear=False):
-            _reload_mcp_with_env()
-    return result
+    """Default and umbrella registry snapshots, each from a fresh subprocess."""
+    default = _snapshot({})
+    umbrella = _snapshot({"GCO_ENABLE_ALL_TOOLS": "true"})
+    return _Snapshots(
+        default_registered=set(default["registered"]),
+        umbrella_registered=set(umbrella["registered"]),
+        umbrella_missing_attr=list(umbrella["missing_attr"]),
+        umbrella_missing_all=list(umbrella["missing_all"]),
+        gating_table=dict(umbrella["gating_table"]),
+    )
 
 
 class TestSnapshotSanity:
@@ -141,7 +154,7 @@ class TestSnapshotSanity:
 
     def test_default_registry_is_populated(self, snapshots: _Snapshots):
         assert len(snapshots.default_registered) > 50, (
-            "flag-free reload produced an implausibly small registry; "
+            "flag-free subprocess produced an implausibly small registry; "
             "the snapshot machinery is broken, not the rosters"
         )
 
