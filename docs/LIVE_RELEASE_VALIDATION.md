@@ -195,6 +195,8 @@ Two ECR residual classes are accepted and reported after exact identity revalida
 
 They are retained because ECR has no conditional repository or tag deletion primitive. Deleting after a separate read would create a time-of-check/time-of-use race and could remove content another principal changed. Review and remove accepted ECR residuals manually only under the account's normal ownership and retention procedure.
 
+One further residual class is accepted with evidence in both `baseline` and `final-inventory`: DynamoDB streams of deleted tables. Deleting a table leaves its stream readable (`DISABLED`) for roughly 24 hours, there is no delete API for it, and the Resource Groups Tagging API keeps returning its ARN, so a prior run's correctly destroyed `gco-*` table would otherwise block the next run's clean-account gate. A tagged stream ARN is stripped only after DynamoDB itself confirms the parent table absent (`DescribeTable` → `ResourceNotFoundException`); a live table keeps its stream entry as genuine residue. Every acceptance is reported as `accepted_expired_dynamodb_streams` with the table check and observed stream status.
+
 If the local process is killed before cleanup finishes:
 
 1. Do not start a fresh run to adopt or delete the remaining stacks.

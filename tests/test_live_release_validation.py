@@ -42,6 +42,7 @@ from scripts.live_release_validation.cleanup import ecr as cleanup_ecr
 from scripts.live_release_validation.cleanup import log_groups as cleanup_log_groups
 from scripts.live_release_validation.cleanup import workloads as cleanup_workloads_module
 from scripts.live_release_validation.inventory import scanners as inventory_scanners
+from scripts.live_release_validation.ownership import dynamodb_streams as ownership_streams
 from scripts.live_release_validation.ownership import ecr as ownership_ecr
 from scripts.live_release_validation.ownership import log_groups as ownership_log_groups
 from scripts.live_release_validation.ownership import stacks as ownership_stacks
@@ -4382,3 +4383,160 @@ class TestThrottleResilientSession:
         source = inspect.getsource(runner.LiveValidationRunner.__init__)
         assert "ThrottleResilientSession()" in source
         assert "boto3.Session()" not in source
+
+
+class TestStripExpiredTableStreams:
+    """``_strip_expired_table_streams`` — deleted-table stream acceptance.
+
+    Pins the exact live failure from 2026-08-20: the previous run's
+    ``gco-vector-store`` stream ARNs stayed in the Tagging API index (and the
+    streams themselves stayed describable, DISABLED) hours after their tables
+    were destroyed, failing the next run's ``baseline`` gate. Acceptance is
+    conditional on DynamoDB itself proving the parent table absent; a live
+    table keeps its stream entry as genuine residue.
+    """
+
+    _ACCOUNT = "123456789012"
+    _REGION = "us-east-1"
+    _STREAM_ARN = (
+        f"arn:aws:dynamodb:{_REGION}:{_ACCOUNT}:table/gco-live-vector-store"
+        "/stream/2026-08-20T08:23:45.112"
+    )
+
+    @staticmethod
+    def _not_found(operation: str) -> ClientError:
+        return ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "gone"}},
+            operation,
+        )
+
+    def _inventory(self, *entries: dict[str, object]) -> dict[str, object]:
+        return {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": list(entries),
+                    "dynamodb_tables": [],
+                }
+            }
+        }
+
+    def _clients(
+        self,
+        *,
+        table_exists: bool,
+        stream_status: str | None = "DISABLED",
+    ) -> tuple[SimpleNamespace, MagicMock, MagicMock]:
+        dynamodb = MagicMock()
+        if table_exists:
+            dynamodb.describe_table.return_value = {"Table": {"TableStatus": "ACTIVE"}}
+        else:
+            dynamodb.describe_table.side_effect = self._not_found("DescribeTable")
+        streams = MagicMock()
+        if stream_status is None:
+            streams.describe_stream.side_effect = self._not_found("DescribeStream")
+        else:
+            streams.describe_stream.return_value = {
+                "StreamDescription": {"StreamStatus": stream_status}
+            }
+        session = MagicMock()
+        session.client.side_effect = lambda service, region_name=None: {
+            "dynamodb": dynamodb,
+            "dynamodbstreams": streams,
+        }[service]
+        ctx = _context()
+        ctx.session = session
+        return ctx, dynamodb, streams
+
+    def test_absent_table_stream_is_stripped_with_evidence(self):
+        ctx, dynamodb, streams = self._clients(table_exists=False, stream_status="DISABLED")
+        inventory = self._inventory({"arn": self._STREAM_ARN, "tags": {"Project": "GCO"}})
+        residual, accepted = ownership_streams._strip_expired_table_streams(ctx, inventory)
+        # The stripped entry was the region's only content, so the emptied
+        # bucket is popped — the same shape the pending-KMS strip produces.
+        assert self._REGION not in residual["regional"]
+        assert len(accepted) == 1
+        evidence = accepted[0]
+        assert evidence["arn"] == self._STREAM_ARN
+        assert evidence["table_name"] == "gco-live-vector-store"
+        assert evidence["table_absent"] is True
+        assert evidence["stream_status"] == "DISABLED"
+        assert evidence["tags"] == {"Project": "GCO"}
+        dynamodb.describe_table.assert_called_once_with(TableName="gco-live-vector-store")
+        streams.describe_stream.assert_called_once_with(StreamArn=self._STREAM_ARN)
+
+    def test_fully_expired_stream_records_absent_status(self):
+        ctx, _dynamodb, _streams = self._clients(table_exists=False, stream_status=None)
+        inventory = self._inventory({"arn": self._STREAM_ARN, "tags": {}})
+        residual, accepted = ownership_streams._strip_expired_table_streams(ctx, inventory)
+        assert self._REGION not in residual["regional"]
+        assert accepted[0]["stream_status"] == "ABSENT"
+
+    def test_live_table_keeps_its_stream_entry(self):
+        ctx, dynamodb, streams = self._clients(table_exists=True)
+        entry = {"arn": self._STREAM_ARN, "tags": {}}
+        residual, accepted = ownership_streams._strip_expired_table_streams(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        dynamodb.describe_table.assert_called_once()
+        streams.describe_stream.assert_not_called()
+
+    def test_non_stream_and_foreign_entries_are_untouched(self):
+        ctx, dynamodb, _streams = self._clients(table_exists=False)
+        table_arn = {"arn": f"arn:aws:dynamodb:{self._REGION}:{self._ACCOUNT}:table/gco-live-x"}
+        wrong_account = {
+            "arn": (
+                f"arn:aws:dynamodb:{self._REGION}:999999999999:table/gco-live-y"
+                "/stream/2026-01-01T00:00:00.000"
+            )
+        }
+        wrong_region = {
+            "arn": (
+                f"arn:aws:dynamodb:eu-west-1:{self._ACCOUNT}:table/gco-live-z"
+                "/stream/2026-01-01T00:00:00.000"
+            )
+        }
+        nat = {"arn": f"arn:aws:ec2:{self._REGION}:{self._ACCOUNT}:natgateway/nat-abc"}
+        residual, accepted = ownership_streams._strip_expired_table_streams(
+            ctx, self._inventory(table_arn, wrong_account, wrong_region, nat)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [
+            table_arn,
+            wrong_account,
+            wrong_region,
+            nat,
+        ]
+        assert accepted == []
+        dynamodb.describe_table.assert_not_called()
+
+    def test_region_bucket_is_popped_when_emptied(self):
+        ctx, _dynamodb, _streams = self._clients(table_exists=False)
+        inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [{"arn": self._STREAM_ARN, "tags": {}}],
+                }
+            }
+        }
+        residual, accepted = ownership_streams._strip_expired_table_streams(ctx, inventory)
+        assert residual["regional"] == {}
+        assert len(accepted) == 1
+
+    def test_unexpected_describe_table_error_propagates(self):
+        ctx, dynamodb, _streams = self._clients(table_exists=False)
+        dynamodb.describe_table.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+            "DescribeTable",
+        )
+        with pytest.raises(ClientError):
+            ownership_streams._strip_expired_table_streams(
+                ctx, self._inventory({"arn": self._STREAM_ARN})
+            )
+
+    def test_input_inventory_is_not_mutated(self):
+        ctx, _dynamodb, _streams = self._clients(table_exists=False)
+        inventory = self._inventory({"arn": self._STREAM_ARN, "tags": {}})
+        snapshot = json.loads(json.dumps(inventory))
+        ownership_streams._strip_expired_table_streams(ctx, inventory)
+        assert inventory == snapshot

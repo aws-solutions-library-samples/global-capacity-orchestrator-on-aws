@@ -1,0 +1,38 @@
+# Scheduling priority for the always-on GCO platform services.
+#
+# Every user-submitted job and the platform's own control-plane pods compete
+# for the same nodes. Without an explicit PriorityClass they all share the
+# cluster default (0), so a burst of user workloads can starve — or, under
+# node pressure, outlive — the services that keep the platform functioning:
+# job intake (manifest-processor, the SQS consumer), inference routing
+# (inference-proxy), and the health/cost telemetry the control plane and the
+# traffic-dial controller act on.
+#
+# gco-platform-critical sits far above workload priority (0 by default) and
+# far below the reserved system classes (system-cluster-critical /
+# system-node-critical, 2000000000+), so platform pods preempt user jobs when
+# a node must be shared but never contend with kube-system itself.
+#
+# The class is applied in the main pass before the platform Deployments
+# (30-34) that reference it, because pod admission rejects an unresolvable
+# priorityClassName. The post-Helm SQS consumer's pod template references it
+# too — by then the class has long existed.
+#
+# ``value`` and ``preemptionPolicy`` are immutable after creation; the
+# applier converges the mutable fields on re-apply and fails loudly on an
+# attempted value change (delete the class and redeploy to change it).
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: gco-platform-critical
+  labels:
+    project: gco
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  GCO platform services (health-monitor, manifest-processor,
+  inference-monitor, inference-proxy, cost-monitor, sqs-consumer). Preempts
+  default-priority user workloads under node pressure; never competes with
+  the reserved system-* classes.

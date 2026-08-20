@@ -131,6 +131,7 @@ def main() -> None:
     if not args.skip_marker:
         if full_catalog:
             upsert_markers(results, project_root=project_root)
+            _sync_shared_lambda_copies(project_root)
         else:
             print(
                 "\n🖋  Skipping source-marker refresh for a partial run; "
@@ -146,6 +147,40 @@ def main() -> None:
     print("\n" + "=" * 50)
     print("✅ Code flowchart generation complete!")
     print(f"   Output directory: {output_dir.absolute()}")
+
+
+def _sync_shared_lambda_copies(project_root: Path) -> None:
+    """Propagate refreshed canonical shared Lambda sources to their copies.
+
+    ``upsert_markers`` rewrites the pyflowchart header inside canonical
+    shared sources (``lambda/tls-shared/backend_tls.py``,
+    ``lambda/proxy-shared/proxy_utils.py``), but the checked-in per-function
+    copies are not diagram targets, so a regeneration used to leave them one
+    header behind. That drift is exactly what
+    ``tests/test_lambda_shared_sources.py`` rejects and what made every
+    deploy rewrite tracked files mid-run (``StackManager._sync_lambda_sources``
+    re-syncs at deploy time). Reuse the deploy path's own map so the two
+    sync points can never disagree about what a copy is.
+    """
+    from cli.stacks import LAMBDA_SHARED_SOURCE_TARGETS  # noqa: PLC0415 — heavy import, CLI-only
+
+    synced = 0
+    for source_rel, target_rels in LAMBDA_SHARED_SOURCE_TARGETS.items():
+        source = project_root / source_rel
+        if not source.is_file():
+            continue
+        source_bytes = source.read_bytes()
+        for target_rel in target_rels:
+            target = project_root / target_rel
+            if not target.parent.is_dir():
+                continue
+            if target.is_file() and target.read_bytes() == source_bytes:
+                continue
+            target.write_bytes(source_bytes)
+            synced += 1
+            print(f"   Synced shared copy: {target_rel} <- {source_rel}")
+    if synced:
+        print(f"🔁 Refreshed {synced} shared Lambda cop{'y' if synced == 1 else 'ies'}.")
 
 
 def _filter_targets(

@@ -22,6 +22,7 @@ spec:
         project: gco
     spec:
       serviceAccountName: gco-inference-monitor-sa
+      priorityClassName: gco-platform-critical
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

@@ -14,6 +14,9 @@ from ..inventory import (
     project_resources_are_absent,
 )
 from ..models import RunContext
+from ..ownership.dynamodb_streams import (
+    _strip_expired_table_streams,
+)
 from ..ownership.ecr import (
     _strip_baseline_ecr,
 )
@@ -43,6 +46,10 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         validation_run_id=ctx.settings.run_id,
     )
     disallowed_inventory = _strip_baseline_ecr(project_inventory, baseline)
+    disallowed_inventory, accepted_expired_streams = _strip_expired_table_streams(
+        ctx,
+        disallowed_inventory,
+    )
     if not project_resources_are_absent(disallowed_inventory):
         raise RuntimeError(
             "Fresh baseline contains project resources not owned by this run: "
@@ -51,4 +58,7 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
 
     ctx.checkpoint.baseline = baseline
     ctx.persist()
-    return baseline
+    # The accepted-stream evidence rides the action result (report) only; the
+    # persisted checkpoint baseline stays exactly the protected-stack/ECR
+    # capture that final-inventory's compare_baseline expects.
+    return {**baseline, "accepted_expired_dynamodb_streams": accepted_expired_streams}

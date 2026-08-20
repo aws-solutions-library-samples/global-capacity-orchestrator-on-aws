@@ -30,6 +30,7 @@ spec:
         gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
     spec:
       serviceAccountName: gco-health-monitor-sa
+      priorityClassName: gco-platform-critical
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true

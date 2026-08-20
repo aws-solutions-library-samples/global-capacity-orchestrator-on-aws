@@ -50,6 +50,7 @@ spec:
         karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: gco-cost-monitor-sa
+      priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:

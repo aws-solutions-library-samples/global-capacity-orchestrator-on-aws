@@ -160,6 +160,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "LocalQueue",
         "PodDisruptionBudget",
         "PodMonitor",
+        "PriorityClass",
         "ResourceFlavor",
         "ResourceQuota",
         "Role",
@@ -189,6 +190,7 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "Namespace",
         "NodePool",
         "PersistentVolume",
+        "PriorityClass",
         "ResourceFlavor",
         "StorageClass",
     }
@@ -1198,6 +1200,23 @@ def apply_manifests(
                             if e.status == 409:
                                 # StorageClass already exists - skip patching as most fields are immutable
                                 logger.info(f"StorageClass {name} already exists, skipping update")
+                            else:
+                                raise
+                    elif kind == "PriorityClass":
+                        scheduling_v1 = client.SchedulingV1Api()
+                        try:
+                            scheduling_v1.create_priority_class(body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                # Converge the mutable fields (description,
+                                # labels, globalDefault). ``value`` and
+                                # ``preemptionPolicy`` are immutable: patching
+                                # them with an unchanged value is a no-op,
+                                # while a genuine change fails loudly (422)
+                                # instead of silently keeping the old
+                                # priority — delete the class and redeploy to
+                                # change a value.
+                                scheduling_v1.patch_priority_class(name, body=doc)
                             else:
                                 raise
 
