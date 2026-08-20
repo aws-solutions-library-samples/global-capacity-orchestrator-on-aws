@@ -402,6 +402,7 @@ class TestStacksCommands:
         with patch("cli.stacks.get_stack_manager") as mock_manager:
             mock_sm = MagicMock()
             mock_sm.destroy.return_value = True
+            mock_sm.cleanup_regional_volumes_after_destroy.return_value = None
             mock_manager.return_value = mock_sm
 
             result = runner.invoke(cli, ["stacks", "destroy", "test-stack", "-y"])

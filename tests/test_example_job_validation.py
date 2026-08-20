@@ -173,7 +173,8 @@ class TestActionRegistry:
 
         The previous literal guard omitted ``opencost`` even though it
         depends on topology (and therefore deploy) — deriving from the
-        dependency graph closed that gap.
+        dependency graph closed that gap. Every action added since then
+        (e.g. ``volume-inventory``) is picked up by the same derivation.
         """
         from scripts.live_release_validation.registry import (
             build_action_registry as build_live_registry,
@@ -185,6 +186,7 @@ class TestActionRegistry:
             {
                 "deploy",
                 "topology",
+                "volume-inventory",
                 "api",
                 "sqs",
                 "central-queue",

@@ -17,6 +17,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, TextIO, cast
 
+from .volume_scenario import VolumeScenarioCase, validated_volume_scenario_settings
+
 SCHEMA_VERSION = 2
 ActionStatus = Literal["passed", "failed", "skipped"]
 
@@ -288,9 +290,16 @@ class RunSettings:
     #: action). Part of the resume identity: a resumed run must deploy and
     #: validate the same chart set it started with.
     optional_schedulers: tuple[str, ...] = ()
+    #: Exact E2E volume-scenario case this identity is fenced to; see volume_scenario.py.
+    volume_scenario_case: VolumeScenarioCase = "disabled"
+    #: Explicit authorization to delete only this run's exact retained fixture volumes.
+    confirm_ebs_fixture_cleanup: bool = False
 
     def __post_init__(self) -> None:
         """Normalize output paths without resolving symlinks and enforce one run directory."""
+        validated_volume_scenario_settings(
+            self.volume_scenario_case, confirm_fixture_cleanup=self.confirm_ebs_fixture_cleanup
+        )
         report_dir = Path(os.path.abspath(os.fspath(self.report_dir)))
         checkpoint_path = Path(os.path.abspath(os.fspath(self.checkpoint_path)))
         object.__setattr__(self, "report_dir", report_dir)
@@ -327,6 +336,8 @@ class RunSettings:
             "protected_stack_names": list(self.protected_stack_names),
             "confirm_kms_key_deletion": self.confirm_kms_key_deletion,
             "optional_schedulers": list(self.optional_schedulers),
+            "volume_scenario_case": self.volume_scenario_case,
+            "confirm_ebs_fixture_cleanup": self.confirm_ebs_fixture_cleanup,
         }
 
 

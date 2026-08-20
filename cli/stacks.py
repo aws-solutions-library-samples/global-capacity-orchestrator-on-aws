@@ -68,6 +68,21 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
 )
 
+from .volume_cleanup import (
+    ClientFactory,
+    ClusterAbsenceVerifier,
+    RegionalVolumeTarget,
+    TargetResolution,
+    TargetResolutionKind,
+    TargetVolumeCleanupOutcome,
+    VolumeCleanupRequest,
+    VolumeCleanupService,
+    blocked_target_outcome,
+    normalize_safe_error,
+    resolve_regional_volume_target,
+)
+from .volume_cleanup_reporting import publish_volume_cleanup_outcome
+
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-08-14T03:46:22Z
 # Flowchart(s) generated from this file:
@@ -148,6 +163,16 @@ LAMBDA_SHARED_SOURCE_TARGETS: dict[str, tuple[str, ...]] = {
         "lambda/regional-api-proxy/backend_tls.py",
     ),
 }
+# Follow-up text for the two prerequisites that stop regional volume cleanup
+# before any EKS or EC2 request is made.
+_VOLUME_TARGET_BLOCKED_FOLLOW_UP = (
+    "Resolve the reported regional target identity and retry destroy; no EKS or "
+    "EC2 request was made for this stack."
+)
+_VOLUME_ABSENCE_BLOCKED_FOLLOW_UP = (
+    "Confirm the regional stack is deleted and its EKS cluster is absent, then "
+    "retry destroy; no EBS discovery or deletion request was made."
+)
 StackAuthorizationCallback = Callable[[str, str, str], None]
 CleanupOutcomeCallback = Callable[[str, dict[str, Any]], None]
 ChangeSetPreparedCallback = Callable[[str, str, str, str, str], None]
@@ -1008,6 +1033,60 @@ class StackManager:
         # to force-enable optional Helm charts (helm_enabled_overrides) for a
         # run without mutating the checked-out cdk.json.
         self._extra_cdk_context: dict[str, str] = {}
+        # Volume-cleanup collaborators are injected rather than constructed
+        # inline: ordinary destroys create one Region-scoped boto3 client per
+        # target, strict validation supplies its throttling-resilient session,
+        # and tests supply mocked EKS/EC2 clients.
+        self._volume_cleanup_client_factory: ClientFactory | None = None
+        self._volume_cleanup_absence_verifier: ClusterAbsenceVerifier | None = None
+        self._volume_cleanup_service: VolumeCleanupService | None = None
+
+    def set_volume_cleanup_dependencies(
+        self,
+        *,
+        client_factory: ClientFactory | None = None,
+        absence_verifier: ClusterAbsenceVerifier | None = None,
+        cleanup_service: VolumeCleanupService | None = None,
+    ) -> None:
+        """Inject the AWS client factory or collaborators used by volume cleanup.
+
+        A new client factory also discards any previously derived verifier and
+        service, so every EKS and EC2 request for the next cleanup comes from the
+        injected session rather than a stale collaborator.
+        """
+        if client_factory is not None:
+            self._volume_cleanup_client_factory = client_factory
+            self._volume_cleanup_absence_verifier = None
+            self._volume_cleanup_service = None
+        if absence_verifier is not None:
+            self._volume_cleanup_absence_verifier = absence_verifier
+        if cleanup_service is not None:
+            self._volume_cleanup_service = cleanup_service
+
+    def _volume_cleanup_clients(self) -> ClientFactory:
+        """Return the injected client factory, or the default boto3 factory."""
+        if self._volume_cleanup_client_factory is None:
+            import boto3
+
+            def create_client(service_name: str, *, region_name: str) -> Any:
+                return boto3.client(service_name, region_name=region_name)
+
+            self._volume_cleanup_client_factory = create_client
+        return self._volume_cleanup_client_factory
+
+    def _volume_absence_verifier(self) -> ClusterAbsenceVerifier:
+        """Return the verifier that proves one exact target cluster is absent."""
+        if self._volume_cleanup_absence_verifier is None:
+            self._volume_cleanup_absence_verifier = ClusterAbsenceVerifier(
+                self._volume_cleanup_clients()
+            )
+        return self._volume_cleanup_absence_verifier
+
+    def _volume_cleanup_worker(self) -> VolumeCleanupService:
+        """Return the EBS cleanup service bound to the resolved client factory."""
+        if self._volume_cleanup_service is None:
+            self._volume_cleanup_service = VolumeCleanupService(self._volume_cleanup_clients())
+        return self._volume_cleanup_service
 
     def set_extra_cdk_context(self, context: Mapping[str, str]) -> None:
         """Register `--context` pairs for every subsequent CDK invocation.
@@ -4336,16 +4415,21 @@ class StackManager:
                 if item.get("ResourceType") == "AWS::EKS::Cluster"
                 and item.get("PhysicalResourceId")
             }
-            if len(vpc_ids) > 1 or len(cluster_names) > 1:
-                raise RuntimeError(f"Exact stack {stack_id} returned ambiguous VPC/EKS resources")
+            if len(vpc_ids) > 1:
+                raise RuntimeError(f"Exact stack {stack_id} returned ambiguous VPC resources")
 
             details = {
                 "stack_name": stack_name,
                 "stack_id": stack_id,
                 "region": region,
             }
+            if len(cluster_names) > 1:
+                details["cluster_identity_error"] = "ambiguous EKS physical IDs"
+            elif not cluster_names:
+                details["cluster_identity_error"] = "missing EKS physical ID"
+
             vpc_id = next(iter(vpc_ids), "")
-            cluster_name = next(iter(cluster_names), "")
+            cluster_name = next(iter(cluster_names), "") if len(cluster_names) == 1 else ""
             if vpc_id:
                 details["vpc_id"] = vpc_id
             if cluster_name:
@@ -4402,6 +4486,309 @@ class StackManager:
             resolved[stack_name] = details
         return resolved
 
+    # ------------------------------------------------------------------
+    # Post-destroy regional EBS volume cleanup
+    # ------------------------------------------------------------------
+    def _configured_regional_volume_regions(self) -> list[str] | None:
+        """Return the configured regional Regions, or None when unreadable.
+
+        Volume targeting never infers a Region from a stack name, so a missing,
+        unreadable, malformed, empty, or different-project ``cdk.json`` returns
+        ``None`` instead of a partial list the resolver could act on.
+        """
+        path = self.project_root / "cdk.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError, UnicodeError, json.JSONDecodeError:
+            logger.debug(
+                "Could not read the configured regional Regions from %s",
+                path,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(data, dict):
+            return None
+        context = data.get("context")
+        if not isinstance(context, dict):
+            return None
+        configured_project = context.get("project_name")
+        if configured_project is not None and configured_project != self.config.project_name:
+            return None
+        deployment_regions = context.get("deployment_regions")
+        if not isinstance(deployment_regions, dict):
+            return None
+        configured = deployment_regions.get("regional")
+        if not isinstance(configured, list) or not configured:
+            return None
+        if any(not isinstance(value, str) or not value for value in configured):
+            return None
+        return [str(value) for value in configured]
+
+    def _may_be_regional_volume_stack(self, stack_name: str) -> bool:
+        """Return whether an unresolved stack could still be a regional stack.
+
+        This is consulted only when the configured Region list cannot be read. A
+        project-scoped name whose suffix is an SDK-known CloudFormation Region
+        must fail closed with a blocked outcome rather than silently skip cleanup,
+        while every other name keeps its existing non-regional behavior.
+        """
+        prefix = f"{self.config.project_name}-"
+        if not stack_name.startswith(prefix):
+            return False
+        suffix = stack_name[len(prefix) :]
+        if not suffix:
+            return False
+        try:
+            return suffix in _known_cloudformation_regions()
+        except Exception:
+            logger.debug(
+                "Could not validate a possible regional volume stack for %s",
+                stack_name,
+                exc_info=True,
+            )
+            return True
+
+    def _unreadable_regional_configuration(self, stack_name: str) -> TargetResolution:
+        """Resolve a stack when the configured Region list cannot be read.
+
+        A project-scoped name that could still be regional fails closed so cleanup
+        reports a blocked outcome instead of silently skipping a real target, while
+        every other name keeps its existing non-regional behavior.
+        """
+        if self._may_be_regional_volume_stack(stack_name):
+            return TargetResolution(
+                kind=TargetResolutionKind.BLOCKED,
+                reason_code="regional-configuration-unreadable",
+                reason=(
+                    "Could not read the configured regional Regions that would "
+                    f"authorize volume cleanup for {stack_name!r}"
+                ),
+            )
+        return TargetResolution(
+            kind=TargetResolutionKind.NOT_REGIONAL,
+            reason_code="stack-is-not-configured-regional",
+            reason=f"Stack {stack_name!r} is not one exact configured regional stack",
+        )
+
+    def _resolve_volume_cleanup_target(
+        self,
+        stack_name: str,
+        strict_target: RegionalVolumeTarget | None,
+    ) -> TargetResolution:
+        """Resolve one exact regional cleanup target without making AWS calls."""
+        if strict_target is not None:
+            if strict_target.stack_name != stack_name:
+                return TargetResolution(
+                    kind=TargetResolutionKind.BLOCKED,
+                    reason_code="strict-target-stack-mismatch",
+                    reason=(
+                        f"The captured strict target authorizes "
+                        f"{strict_target.stack_name!r}, not {stack_name!r}"
+                    ),
+                )
+            return TargetResolution(kind=TargetResolutionKind.TARGET, target=strict_target)
+
+        configured_regions = self._configured_regional_volume_regions()
+        if configured_regions is None:
+            return self._unreadable_regional_configuration(stack_name)
+
+        return resolve_regional_volume_target(
+            project_name=self.config.project_name,
+            stack_name=stack_name,
+            configured_regions=configured_regions,
+        )
+
+    def cleanup_regional_volumes_after_destroy(
+        self,
+        *,
+        stack_name: str,
+        stack_deleted: bool,
+        request: VolumeCleanupRequest,
+        strict_target: RegionalVolumeTarget | None = None,
+    ) -> TargetVolumeCleanupOutcome | None:
+        """Dispose of one destroyed regional stack's cluster volumes, or report a block.
+
+        ``destroy()`` keeps its stack-only boolean contract; single and orchestrated
+        destruction both call this one helper afterwards so their cleanup semantics
+        cannot drift. The helper resolves an exact regional target, requires a
+        definitive successful stack deletion, verifies the exact cluster is absent,
+        and only then invokes the injected cleanup service with evidence bound to
+        that same stack, Region, and cluster.
+
+        ``None`` means the stack is not an exact configured regional stack, so no
+        EBS discovery or deletion happens and no outcome is reported at all. Every
+        missing prerequisite instead returns a zero-discovery blocked outcome that
+        carries the reason work stopped, because an unresolved identity, an
+        unverified deletion, or a still-present cluster must never reach EC2.
+        """
+        resolution = self._resolve_volume_cleanup_target(stack_name, strict_target)
+        if resolution.kind is TargetResolutionKind.NOT_REGIONAL:
+            return None
+
+        target = resolution.target
+        if resolution.kind is TargetResolutionKind.BLOCKED or target is None:
+            return blocked_target_outcome(
+                stack_name=stack_name,
+                request=request,
+                reason_code=resolution.reason_code or "regional-target-unresolved",
+                reason=(
+                    resolution.reason
+                    or f"Could not authorize an exact regional volume target for {stack_name!r}"
+                ),
+                follow_up=_VOLUME_TARGET_BLOCKED_FOLLOW_UP,
+            )
+
+        verification = self._volume_absence_verifier().verify(
+            target=target,
+            stack_deleted=stack_deleted,
+        )
+        if not verification.verified_absent:
+            return blocked_target_outcome(
+                stack_name=target.stack_name,
+                request=request,
+                reason_code=verification.reason_code or "cluster-absence-unverified",
+                reason=(
+                    verification.reason
+                    or f"Could not verify absence of cluster {target.cluster_name}"
+                ),
+                follow_up=_VOLUME_ABSENCE_BLOCKED_FOLLOW_UP,
+                target=target,
+            )
+
+        return self._volume_cleanup_worker().cleanup(
+            target=target,
+            absence=verification.proof_for(target),
+            request=request,
+        )
+
+    def _capture_strict_volume_targets(
+        self,
+        *,
+        regional_stacks: Collection[str],
+        strict_resources: Mapping[str, Mapping[str, str]],
+    ) -> dict[str, TargetResolution]:
+        """Capture one strict volume resolution per regional stack before deletion.
+
+        Strict teardown identity can only be read while the stacks and their EKS
+        resources still exist, so every resolution is decided here and reused at
+        the cleanup barrier. A missing or ambiguous identity is captured as a
+        blocked resolution rather than falling back to ordinary name resolution,
+        which keeps strict cleanup fenced to pre-destroy evidence.
+        """
+        configured_regions = self._configured_regional_volume_regions()
+        captured: dict[str, TargetResolution] = {}
+        for stack_name in regional_stacks:
+            if configured_regions is None:
+                captured[stack_name] = self._unreadable_regional_configuration(stack_name)
+                continue
+            captured[stack_name] = resolve_regional_volume_target(
+                project_name=self.config.project_name,
+                stack_name=stack_name,
+                configured_regions=configured_regions,
+                strict=True,
+                strict_resource=strict_resources.get(stack_name),
+            )
+        return captured
+
+    def _regional_volume_cleanup_barrier(
+        self,
+        *,
+        regional_stacks: Collection[str],
+        successful: Collection[str],
+        failed: Collection[str],
+        request: VolumeCleanupRequest,
+        strict_targets: Mapping[str, TargetResolution] | None,
+        record_cleanup: CleanupOutcomeCallback,
+    ) -> bool:
+        """Dispose of every exact regional target's volumes and report each outcome.
+
+        This barrier runs once, after every regional stack worker and its EKS
+        security-group watchdog have finished, and before destruction progresses to
+        the global stacks. Running it after the workers avoids concurrent mutation
+        of the shared report while keeping targets isolated, and it costs nothing in
+        safety: each eligible target has already reached stack absence, and cluster
+        absence is proven per target inside the shared helper.
+
+        Targets are processed in one deterministic order regardless of the order
+        the workers completed in, so parallel destruction publishes the same
+        sequence of ``ebs-volumes`` outcomes as sequential destruction. A stack that
+        failed or whose absence was not confirmed yields a blocked outcome without
+        any EKS or EC2 request, and a failure for one target never stops another.
+
+        Returns whether cleanup and its required reporting succeeded for every
+        target. Stack results are untouched: an unsuccessful cleanup never adds a
+        stack to the failed list or relabels a stack that was deleted.
+        """
+        deleted_stacks = set(successful) - set(failed)
+        cleanup_successful = True
+        for stack_name in sorted(regional_stacks):
+            outcome = self._regional_volume_cleanup_outcome(
+                stack_name=stack_name,
+                stack_deleted=stack_name in deleted_stacks,
+                request=request,
+                strict_targets=strict_targets,
+            )
+            if outcome is None:
+                continue
+            publication = publish_volume_cleanup_outcome(outcome, publisher=record_cleanup)
+            if not publication.successful:
+                cleanup_successful = False
+        return cleanup_successful
+
+    def _regional_volume_cleanup_outcome(
+        self,
+        *,
+        stack_name: str,
+        stack_deleted: bool,
+        request: VolumeCleanupRequest,
+        strict_targets: Mapping[str, TargetResolution] | None,
+    ) -> TargetVolumeCleanupOutcome | None:
+        """Return one target's cleanup outcome, isolating it from other targets."""
+        strict_target: RegionalVolumeTarget | None = None
+        if strict_targets is not None:
+            resolution = strict_targets.get(stack_name)
+            if resolution is None or resolution.kind is TargetResolutionKind.BLOCKED:
+                return blocked_target_outcome(
+                    stack_name=stack_name,
+                    request=request,
+                    reason_code=(
+                        "strict-target-unavailable"
+                        if resolution is None
+                        else (resolution.reason_code or "strict-target-unresolved")
+                    ),
+                    reason=(
+                        f"Strict teardown captured no volume target identity for {stack_name!r}"
+                        if resolution is None
+                        else (
+                            resolution.reason
+                            or f"Strict teardown could not authorize a target for {stack_name!r}"
+                        )
+                    ),
+                    follow_up=_VOLUME_TARGET_BLOCKED_FOLLOW_UP,
+                )
+            if resolution.kind is TargetResolutionKind.NOT_REGIONAL:
+                return None
+            strict_target = resolution.target
+
+        try:
+            return self.cleanup_regional_volumes_after_destroy(
+                stack_name=stack_name,
+                stack_deleted=stack_deleted,
+                request=request,
+                strict_target=strict_target,
+            )
+        except Exception as exc:
+            logger.exception("Regional EBS volume cleanup failed for %s", stack_name)
+            error = normalize_safe_error(exc)
+            return blocked_target_outcome(
+                stack_name=stack_name,
+                request=request,
+                reason_code="cleanup-helper-error",
+                reason=f"Volume cleanup could not complete: {error.message}",
+                follow_up=_VOLUME_TARGET_BLOCKED_FOLLOW_UP,
+                target=strict_target,
+            )
+
     def _destroy_phase_remaining_stacks(
         self,
         phase_name: str,
@@ -4453,8 +4840,14 @@ class StackManager:
         strict_deployment_token: str | None = None,
         on_change_set_prepared: ChangeSetPreparedCallback | None = None,
         on_ecr_repository_created: EcrRepositoryCreatedCallback | None = None,
+        volume_cleanup_request: VolumeCleanupRequest | None = None,
     ) -> tuple[bool, list[str], list[str]]:
-        """Destroy stacks in dependency order with optional exact-ARN authority."""
+        """Destroy stacks in dependency order with optional exact-ARN authority.
+
+        ``volume_cleanup_request`` carries one resolved command policy for every
+        exact regional target of this operation. Omitting it keeps the teardown on
+        its existing stack-only path with no EBS discovery or deletion at all.
+        """
         app_stacks = self.list_stacks()
         strict_identity = expected_stack_ids is not None
         if strict_identity:
@@ -4517,6 +4910,16 @@ class StackManager:
                 authorize_stack=authorize_stack,
             )
 
+        # Strict volume identity can only be read while the stacks and their EKS
+        # resources exist, so it is captured before any deletion begins and reused
+        # unchanged by the post-worker cleanup barrier.
+        strict_volume_targets: dict[str, TargetResolution] | None = None
+        if strict_identity and volume_cleanup_request is not None:
+            strict_volume_targets = self._capture_strict_volume_targets(
+                regional_stacks=regional_stacks,
+                strict_resources=strict_resources,
+            )
+
         destroy_safety: _StackOperationSafetyKwargs = {
             "expected_stack_ids": expected_stack_ids,
             "prepared_change_sets": prepared_change_sets,
@@ -4567,6 +4970,9 @@ class StackManager:
 
         successful: list[str] = []
         failed: list[str] = []
+        # Volume cleanup is tracked separately from stack results: it can make the
+        # overall teardown unsuccessful without relabeling a stack that was deleted.
+        volume_cleanup_success = True
 
         # Capture implicit log-group names while the source stacks still
         # exist; the exact derived names are deleted by ``finish`` below
@@ -4770,7 +5176,25 @@ class StackManager:
         for stack_name in phase_remaining:
             if stack_name not in failed:
                 failed.append(stack_name)
-        if any(stack in failed for stack in regional_stacks) or phase_remaining:
+
+        # Regional volume-cleanup barrier: every regional worker and watchdog has
+        # finished, so each target's outcome is produced and published here before
+        # destruction may progress to the global stacks.
+        if volume_cleanup_request is not None:
+            volume_cleanup_success = self._regional_volume_cleanup_barrier(
+                regional_stacks=regional_stacks,
+                successful=successful,
+                failed=failed,
+                request=volume_cleanup_request,
+                strict_targets=strict_volume_targets,
+                record_cleanup=record_cleanup,
+            )
+
+        if (
+            any(stack in failed for stack in regional_stacks)
+            or phase_remaining
+            or not volume_cleanup_success
+        ):
             return finish(False)
 
         for stack_name in pre_regional_stacks:
@@ -4797,7 +5221,7 @@ class StackManager:
             if not success or phase_remaining:
                 return finish(False)
 
-        return finish(len(failed) == 0)
+        return finish(len(failed) == 0 and volume_cleanup_success)
 
     def _destroy_stacks_parallel(
         self,

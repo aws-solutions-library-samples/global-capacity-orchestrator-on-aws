@@ -1,14 +1,143 @@
 """Stack deployment and management commands."""
 
 import sys
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import click
 
 from ..config import GCOConfig, _load_cdk_json
 from ..output import get_output_formatter
+from ..volume_cleanup import (
+    DestroyCommandKind,
+    VolumeCleanupRequest,
+    VolumePolicyConflictError,
+    resolve_volume_cleanup_request,
+)
+from ..volume_cleanup_reporting import (
+    EBS_VOLUME_CLEANUP_NAME,
+    EXIT_SUCCESS,
+    CleanupFormatter,
+    VolumeCleanupCommandResult,
+    VolumeCleanupExitReason,
+    VolumeCleanupTargetStatus,
+    destroy_command_exit_code,
+    evaluate_volume_cleanup_result,
+    publish_volume_cleanup_outcome,
+    render_volume_cleanup_command_result,
+    render_volume_cleanup_publication,
+    volume_cleanup_publication_from_details,
+)
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+#: Actionable follow-up when the cleanup helper itself could not produce an
+#: outcome. The stack result is reported separately and is never rewritten here.
+_CLEANUP_UNAVAILABLE_FOLLOW_UP = (
+    "The stack result above is unchanged. Re-run the destroy command to retry "
+    "EBS volume cleanup; discovery and deletion re-verify every safety condition."
+)
+
+
+def _resolve_destroy_volume_policy(
+    *,
+    command: DestroyCommandKind,
+    retain_volumes: bool,
+    delete_volumes: bool,
+    yes: bool,
+) -> VolumeCleanupRequest:
+    """Resolve volume policy and obtain any required irreversible confirmation."""
+    try:
+        decision = resolve_volume_cleanup_request(
+            command=command,
+            retain_volumes=retain_volumes,
+            delete_volumes=delete_volumes,
+            yes=yes,
+        )
+    except VolumePolicyConflictError as error:
+        raise click.UsageError(str(error)) from error
+
+    if decision.requires_volume_confirmation:
+        click.confirm(
+            "Permanently delete eligible dynamically provisioned EBS volumes? "
+            "This is irreversible and cannot be undone.",
+            abort=True,
+        )
+        return decision.confirm_volume_deletion()
+    return decision.request
+
+
+def _cleanup_single_stack_volumes(
+    *,
+    manager: Any,
+    formatter: CleanupFormatter,
+    stack_name: str,
+    request: VolumeCleanupRequest,
+) -> VolumeCleanupCommandResult:
+    """Dispose of one destroyed regional stack's volumes and report the result.
+
+    This runs only after ``destroy()`` reported success, which for a single named
+    stack means CloudFormation reconciliation already established absence; a retry
+    against an already-absent stack reaches the same point and is handled the same
+    way. The shared helper resolves the exact regional target, so a non-regional
+    stack returns ``None`` and produces no cleanup outcome, no AWS call, and no
+    change to the existing exit status.
+
+    The stack result stays separate from the cleanup result: cleanup renders and
+    aggregates its own status, and a failure inside cleanup never rewrites the
+    stack outcome the operator was already shown.
+    """
+    try:
+        outcome = manager.cleanup_regional_volumes_after_destroy(
+            stack_name=stack_name,
+            stack_deleted=True,
+            request=request,
+        )
+    except Exception as error:  # noqa: BLE001 - cleanup must not mask the stack result
+        formatter.print_error(f"EBS volume cleanup could not complete for {stack_name}: {error}")
+        formatter.print_warning(_CLEANUP_UNAVAILABLE_FOLLOW_UP)
+        return VolumeCleanupCommandResult(
+            targets=(
+                VolumeCleanupTargetStatus(
+                    stack_name=stack_name,
+                    cleanup_successful=False,
+                    reporting_successful=False,
+                    reasons=(
+                        VolumeCleanupExitReason.CLEANUP_FAILED,
+                        VolumeCleanupExitReason.REPORTING_INCOMPLETE,
+                    ),
+                ),
+            )
+        )
+
+    if outcome is None:
+        return VolumeCleanupCommandResult()
+
+    publication = publish_volume_cleanup_outcome(outcome)
+    render_volume_cleanup_publication(formatter, publication)
+    result = evaluate_volume_cleanup_result([publication])
+    render_volume_cleanup_command_result(formatter, result)
+    return result
+
+
+def _report_orchestrated_volume_cleanup(
+    *,
+    formatter: CleanupFormatter,
+    published: Sequence[Mapping[str, Any]],
+) -> VolumeCleanupCommandResult:
+    """Render and aggregate the outcomes orchestration published for this attempt.
+
+    Orchestrated destruction publishes one complete ``ebs-volumes`` outcome per
+    exact regional target through the existing cleanup channel. The command reads
+    that published evidence back, so both destroy paths render the same fields and
+    derive the same command-level status from the same records.
+    """
+    publications = [volume_cleanup_publication_from_details(details) for details in published]
+    for publication in publications:
+        render_volume_cleanup_publication(formatter, publication)
+    result = evaluate_volume_cleanup_result(publications)
+    render_volume_cleanup_command_result(formatter, result)
+    return result
 
 
 @click.group()
@@ -144,16 +273,63 @@ def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag:
 @stacks.command("destroy")
 @click.argument("stack_name")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option(
+    "--retain-volumes",
+    is_flag=True,
+    help="Retain the cluster's dynamically provisioned EBS volumes after destruction",
+)
+@click.option(
+    "--delete-volumes",
+    is_flag=True,
+    help="Delete eligible detached, owned EBS volumes after the cluster is gone "
+    "(prompts for irreversible confirmation unless -y is given)",
+)
 @pass_config
-def destroy_stack(config: Any, stack_name: Any, yes: Any) -> None:
+def destroy_stack(
+    config: Any,
+    stack_name: Any,
+    yes: Any,
+    retain_volumes: Any,
+    delete_volumes: Any,
+) -> None:
     """Destroy a single CDK stack.
 
     For destroying all stacks in the correct order, use 'destroy-all'.
 
+    For a regional stack (<project>-<region>), EBS volumes that its EKS cluster
+    dynamically provisioned (for example the Prometheus and Alertmanager PVCs)
+    can outlive CloudFormation teardown. After the stack is deleted and the
+    cluster is confirmed gone, this command discovers those volumes in the
+    stack's Region by the exact cluster tag and, by the selected policy, either
+    retains or deletes them. Non-regional stacks perform no EBS work.
+
+    Volume policy for single-stack destroy defaults to RETAIN. Deletion is never
+    implicit here: pass --delete-volumes to delete eligible volumes (owned,
+    available, and detached; anything else is preserved and reported), which
+    prompts for an irreversible-data confirmation unless -y is also given.
+    --retain-volumes is the explicit non-destructive opposite. Passing both
+    --retain-volumes and --delete-volumes is rejected before any action.
+
+    Retained volumes continue to incur EBS storage cost; the command prints a
+    warning identifying them and the policy that preserved them.
+
     Examples:
-        gco stacks destroy gco-us-east-1
-        gco stacks destroy gco-us-east-1 -y
+        gco stacks destroy gco-us-east-1                     # retain volumes
+        gco stacks destroy gco-us-east-1 -y                  # retain volumes
+        gco stacks destroy gco-us-east-1 --delete-volumes    # prompt, then delete
+        gco stacks destroy gco-us-east-1 --delete-volumes -y # delete, no prompt
+        gco stacks destroy gco-us-east-1 --retain-volumes -y # explicit retain
     """
+    volume_cleanup_request = _resolve_destroy_volume_policy(
+        command=DestroyCommandKind.SINGLE,
+        retain_volumes=bool(retain_volumes),
+        delete_volumes=bool(delete_volumes),
+        yes=bool(yes),
+    )
+    # Cleanup only runs for a reconciled successful deletion below, so a failed
+    # stack keeps its existing exit status and performs no EBS work at all.
+    volume_cleanup_result = VolumeCleanupCommandResult()
+
     from ..stacks import get_stack_manager
 
     formatter = get_output_formatter(config)
@@ -173,9 +349,23 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any) -> None:
 
         if success:
             formatter.print_success(f"Stack {stack_name} destroyed successfully")
+            volume_cleanup_result = _cleanup_single_stack_volumes(
+                manager=manager,
+                formatter=formatter,
+                stack_name=str(stack_name),
+                request=volume_cleanup_request,
+            )
         else:
             formatter.print_error("Destroy failed")
-            sys.exit(1)
+
+        # Stack failure keeps its existing exit status; volume cleanup can only
+        # add an unsuccessful exit for a stack that otherwise succeeded.
+        exit_code = destroy_command_exit_code(
+            stack_successful=bool(success),
+            cleanup=volume_cleanup_result,
+        )
+        if exit_code != EXIT_SUCCESS:
+            sys.exit(exit_code)
 
     except Exception as e:
         formatter.print_error(f"Destroy failed: {e}")
@@ -263,10 +453,29 @@ def deploy_all_orchestrated(
 
 @stacks.command("destroy-all")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option(
+    "--retain-volumes",
+    is_flag=True,
+    help="Retain dynamically provisioned EBS volumes; overrides the implicit "
+    "delete authorized by 'destroy-all -y'",
+)
+@click.option(
+    "--delete-volumes",
+    is_flag=True,
+    help="Delete eligible EBS volumes; redundant with 'destroy-all -y', which "
+    "already authorizes deletion unless --retain-volumes is given",
+)
 @click.option("--parallel", "-p", is_flag=True, help="Destroy regional stacks in parallel")
 @click.option("--max-workers", "-w", default=4, help="Max parallel destructions (default: 4)")
 @pass_config
-def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: Any) -> None:
+def destroy_all_orchestrated(
+    config: Any,
+    yes: Any,
+    retain_volumes: Any,
+    delete_volumes: Any,
+    parallel: Any,
+    max_workers: Any,
+) -> None:
     """Destroy all stacks in the correct order.
 
     Destroys in four dependency phases:
@@ -286,11 +495,34 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
     significantly reduce total teardown time when destroying multiple
     regional stacks.
 
+    EBS volume policy: 'gco stacks destroy-all -y' implicitly AUTHORIZES DELETION
+    of eligible dynamically provisioned EBS volumes (owned, available, and
+    detached) for every regional cluster it destroys, unless --retain-volumes is
+    supplied. --delete-volumes is not required and there is no separate volume
+    prompt on this path. Pass --retain-volumes to keep the volumes instead; that
+    explicit retention overrides the implicit delete. An interactive destroy-all
+    (without -y) defaults to retain after the existing stack confirmation.
+    Passing both --retain-volumes and --delete-volumes is rejected before any
+    action. Only owned, available, detached volumes are deleted; attached,
+    non-available, or non-owned tagged volumes are always preserved and reported,
+    and retained volumes trigger a continuing-storage-cost warning.
+
     Examples:
-        gco stacks destroy-all -y
+        gco stacks destroy-all -y                       # deletes eligible volumes
+        gco stacks destroy-all -y --retain-volumes      # keeps all volumes
         gco stacks destroy-all -y --parallel
         gco stacks destroy-all -y -p --max-workers 8
     """
+    volume_cleanup_request = _resolve_destroy_volume_policy(
+        command=DestroyCommandKind.ALL,
+        retain_volumes=bool(retain_volumes),
+        delete_volumes=bool(delete_volumes),
+        yes=bool(yes),
+    )
+    # One resolved policy authorizes every exact regional target of this
+    # operation; the barrier inside orchestration publishes one outcome per target.
+    volume_cleanup_result = VolumeCleanupCommandResult()
+
     import time
 
     from ..stacks import get_stack_destroy_order, get_stack_manager
@@ -317,6 +549,13 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
             click.confirm("\nAre you sure you want to destroy all stacks?", abort=True)
 
         total_stacks = len(stacks)
+        # Each attempt republishes a complete set of target outcomes, so only the
+        # outcomes of the attempt that ran last determine the exit status.
+        published_volume_cleanups: list[Mapping[str, Any]] = []
+
+        def collect_volume_cleanup(name: str, details: dict[str, Any]) -> None:
+            if name == EBS_VOLUME_CLEANUP_NAME:
+                published_volume_cleanups.append(details)
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
@@ -349,29 +588,58 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
                 else:
                     formatter.print_error(f"  ✗ {stack_name} failed")
 
+            published_volume_cleanups.clear()
             success, successful, failed = manager.destroy_orchestrated(
                 force=True,
                 on_stack_start=on_start,
                 on_stack_complete=on_complete,
                 parallel=parallel,
                 max_workers=max_workers,
+                on_cleanup_complete=collect_volume_cleanup,
+                volume_cleanup_request=volume_cleanup_request,
+            )
+            volume_cleanup_result = _report_orchestrated_volume_cleanup(
+                formatter=formatter,
+                published=published_volume_cleanups,
             )
 
             if success:
                 break
 
             if attempt < max_attempts:
-                formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
+                if failed:
+                    formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
+                else:
+                    formatter.print_warning(
+                        "All stacks were deleted but EBS volume cleanup was unsuccessful"
+                    )
 
         formatter.print_info("")
         formatter.print_info(f"Destroyed: {total_stacks - len(failed)}/{total_stacks} stacks")
 
         if success:
             formatter.print_success("All stacks destroyed successfully")
-        else:
+        elif failed:
             formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
-            sys.exit(1)
+        else:
+            formatter.print_error(
+                "All stacks were destroyed but EBS volume cleanup was unsuccessful"
+            )
 
+        # Retry semantics above are unchanged; only the final exit status also
+        # accounts for the volume-cleanup result of an otherwise successful run.
+        exit_code = destroy_command_exit_code(
+            stack_successful=bool(success),
+            cleanup=volume_cleanup_result,
+        )
+        if exit_code != EXIT_SUCCESS:
+            sys.exit(exit_code)
+
+    except click.Abort:
+        # A declined stack confirmation aborts exactly like the single-stack
+        # destroy path: let Click emit "Aborted!" and exit non-zero instead of
+        # reporting it as a destroy failure.
+        raise
     except Exception as e:
         formatter.print_error(f"Destroy failed: {e}")
         sys.exit(1)

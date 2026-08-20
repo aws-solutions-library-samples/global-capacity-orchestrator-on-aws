@@ -6,6 +6,7 @@ import copy
 import json
 from typing import Any
 
+from ..checks.volume_outcomes import volume_residual_inventory
 from ..context import (
     _topology_regions,
 )
@@ -78,9 +79,16 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         residual_inventory,
     )
     summary = summarize_project_resources(residual_inventory)
+    # PVC-provisioned EBS volumes are not CloudFormation resources, so the project
+    # scanners cannot see them. Accounting for this run's recorded volume IDs here
+    # is what makes an unresolved validation-fixture cleanup fail the run instead
+    # of leaving billable storage behind quietly.
+    ebs_volume_residuals = volume_residual_inventory(ctx)
+    summary["ebs_fixture_volumes"] = len(ebs_volume_residuals["residual_volume_ids"])
     result = {
         "summary": summary,
         "stack_absence": stack_absence,
+        "ebs_volume_residuals": ebs_volume_residuals,
         "baseline_differences": differences,
         "protected_and_ecr_inventory": final_baseline,
         "comparison_inventory": comparison_baseline,
@@ -114,5 +122,17 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         raise RuntimeError(
             "Project resources remain after teardown: "
             + json.dumps(residual_inventory, sort_keys=True)
+        )
+    if ebs_volume_residuals["residual_volume_ids"]:
+        raise RuntimeError(
+            "Recorded EBS volumes remain after teardown: "
+            + json.dumps(
+                {
+                    "residual_volume_ids": ebs_volume_residuals["residual_volume_ids"],
+                    "fixture_cleanup_status": ebs_volume_residuals["fixture_cleanup_status"],
+                    "follow_up": ebs_volume_residuals["follow_up"],
+                },
+                sort_keys=True,
+            )
         )
     return result

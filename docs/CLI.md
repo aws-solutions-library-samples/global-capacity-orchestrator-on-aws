@@ -1172,6 +1172,47 @@ gco stacks destroy STACK_NAME [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--yes` | `-y` | Skip confirmation |
+| `--retain-volumes` | | Retain the cluster's dynamically provisioned EBS volumes after destruction |
+| `--delete-volumes` | | Delete eligible detached, owned EBS volumes after the cluster is gone (prompts for irreversible confirmation unless `-y` is given) |
+
+For a regional stack (`<project>-<region>`), the EKS cluster dynamically
+provisions EBS volumes for PVCs — including the default observability install's
+Prometheus and Alertmanager volumes — that outlive CloudFormation teardown.
+After the stack is deleted and the cluster is confirmed absent, `destroy` finds
+those volumes in the stack's Region by the exact `kubernetes.io/cluster/<cluster>`
+tag and applies the selected volume policy. Non-regional stacks perform no EBS
+discovery or deletion.
+
+Single-stack destroy defaults to **retain**. Deletion is never implicit on this
+path:
+
+- No volume flags (with or without `-y`): retain.
+- `--delete-volumes`: delete eligible volumes. Without `-y` this first prompts
+  for an irreversible-data confirmation; with `-y` it deletes without a prompt.
+- `--retain-volumes`: explicit non-destructive retention.
+- `--retain-volumes` and `--delete-volumes` together: rejected as a usage error
+  before any stack or volume action.
+
+"Eligible" means owned (the exact cluster tag value is `owned`), `available`, and
+detached, revalidated immediately before each delete. Non-owned, attached, or
+non-`available` volumes are always preserved and reported with a reason and
+follow-up. Retained volumes keep incurring EBS storage cost, so the command
+prints a warning naming them and the policy that preserved them.
+
+Exit status: stack failure keeps its existing exit code and runs no EBS work.
+On an otherwise successful destroy, retain cleanup succeeds after complete
+reporting; a delete policy is unsuccessful if any owned volume is skipped by a
+safety condition or fails, while an already-absent volume counts as an
+idempotent success. Reporting that cannot emit a required field is unsuccessful
+independently of stack success.
+
+```bash
+gco stacks destroy gco-us-east-1                     # retain volumes
+gco stacks destroy gco-us-east-1 -y                  # retain volumes
+gco stacks destroy gco-us-east-1 --delete-volumes    # prompt, then delete
+gco stacks destroy gco-us-east-1 --delete-volumes -y # delete, no prompt
+gco stacks destroy gco-us-east-1 --retain-volumes -y # explicit retain
+```
 
 #### `gco stacks destroy-all`
 
@@ -1186,8 +1227,47 @@ gco stacks destroy-all [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--yes` | `-y` | Skip confirmation |
+| `--retain-volumes` | | Retain dynamically provisioned EBS volumes; overrides the implicit delete authorized by `destroy-all -y` |
+| `--delete-volumes` | | Delete eligible EBS volumes; redundant with `destroy-all -y`, which already authorizes deletion unless `--retain-volumes` is given |
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
+
+**`gco stacks destroy-all -y` implicitly authorizes deletion of eligible
+dynamically provisioned EBS volumes for every regional cluster it destroys,
+unless `--retain-volumes` is supplied.** This is a deliberate behavior of the
+non-interactive teardown path: `--delete-volumes` is **not** required, and there
+is no separate volume-deletion prompt. To keep the volumes instead, add
+`--retain-volumes`, which overrides the implicit delete. An interactive
+`destroy-all` (without `-y`) defaults to **retain** after the existing stack
+confirmation.
+
+The command resolves one volume policy for the whole operation and applies it to
+every exact regional target. `--retain-volumes` combined with `--delete-volumes`
+is rejected before any action; `destroy-all -y --delete-volumes` is accepted as a
+redundant spelling of the already-authorized delete.
+
+Cleanup runs per regional target after that stack is deleted and its cluster is
+confirmed absent, and it deletes only owned, `available`, detached volumes,
+revalidated immediately before each delete. Attached, non-`available`, or
+non-owned tagged volumes are always preserved and reported; retained volumes
+trigger a continuing-storage-cost warning. Each target publishes one structured
+`ebs-volumes` outcome (identifier, Region, Availability Zone, size, state, tag
+value, attachments, policy, action, result, and counts for discovered / deleted
+/ retained / skipped / already-absent / failed).
+
+The three-attempt retry loop (30s waits) is unchanged. Successfully deleted
+stacks are never relabeled as failed because volume cleanup was incomplete, but
+an unsuccessful volume cleanup on an otherwise-successful run makes the command
+exit non-zero and blocks progression to the global stacks. A volume that is
+already absent on a retry is an idempotent success and unrelated volumes are
+never touched.
+
+```bash
+gco stacks destroy-all -y                       # deletes eligible volumes
+gco stacks destroy-all -y --retain-volumes      # keeps all volumes
+gco stacks destroy-all -y --parallel
+gco stacks destroy-all -y -p --max-workers 8
+```
 
 After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups

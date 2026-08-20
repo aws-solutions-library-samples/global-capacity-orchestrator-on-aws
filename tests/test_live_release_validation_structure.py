@@ -64,6 +64,12 @@ ALLOWED_LAYER_IMPORTS = {
 #: (see ``tests/test_no_python_315_deprecation_surface.py``).
 _RUNBOOK_ACTION_ROW = re.compile(r"^\|\s*`([a-z-]+)`\s*\|([^|]*)\|")
 
+#: Header of the action contract table. Only rows under this header are action
+#: rows; the separate ``--volume-scenario`` options table below it lists
+#: scenario-driver instructions (``retain-override``, ``delete``, ``both``),
+#: which are not registered actions and must not be read as such.
+_RUNBOOK_ACTION_TABLE_HEADER = re.compile(r"^\|\s*Action\s*\|\s*Depends on\s*\|")
+
 #: Root modules that carry no layer of their own.
 ROOT_LAYER_MODULES = {
     "_shared",
@@ -72,6 +78,10 @@ ROOT_LAYER_MODULES = {
     "inventory",
     "models",
     "protected",
+    # Pure E2E volume-scenario contract (cases, selections, per-case run
+    # identities). Sits at the root so models can validate RunSettings without
+    # importing a layer above it.
+    "volume_scenario",
 }
 
 
@@ -97,10 +107,26 @@ def _action_modules() -> dict[str, Path]:
 
 
 def _runbook_action_rows() -> list[tuple[str, str]]:
-    """Return ``(action, dependency-cell)`` rows from the runbook table."""
+    """Return ``(action, dependency-cell)`` rows from the action contract table.
+
+    Only the action contract table (the one headed ``| Action | Depends on |
+    Contract |``) is read. The later ``--volume-scenario`` options table lists
+    scenario-driver instructions rather than registered actions, so its rows are
+    intentionally excluded.
+    """
     rows = []
+    in_action_table = False
     for line in RUNBOOK.read_text(encoding="utf-8").splitlines():
-        match = _RUNBOOK_ACTION_ROW.match(line.strip())
+        stripped = line.strip()
+        if _RUNBOOK_ACTION_TABLE_HEADER.match(stripped):
+            in_action_table = True
+            continue
+        if not in_action_table:
+            continue
+        if not stripped.startswith("|"):
+            # A blank line or prose ends the action contract table.
+            break
+        match = _RUNBOOK_ACTION_ROW.match(stripped)
         if match:
             rows.append((match.group(1), match.group(2).strip()))
     return rows

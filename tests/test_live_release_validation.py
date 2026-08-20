@@ -80,6 +80,10 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
         destroy_attempts=1,
         destroy_retry_delay_seconds=0,
         confirm_kms_key_deletion=True,
+        # These cases exercise stack teardown, not the E2E volume scenario, so
+        # destroy captures no volume target identity for them.
+        volume_scenario_case="disabled",
+        confirm_ebs_fixture_cleanup=False,
     )
     context = SimpleNamespace(
         checkpoint=checkpoint,
@@ -3780,7 +3784,12 @@ class TestLocalOnlyRuntime:
             requested_actions=("all",),
         )
         parser = MagicMock()
-        parser.parse_args.return_value = SimpleNamespace(list_actions=False)
+        parser.parse_args.return_value = SimpleNamespace(
+            list_actions=False,
+            # One case, so main runs this settings object directly instead of
+            # expanding into the two-lifecycle volume-scenario driver.
+            volume_scenario="disabled",
+        )
 
         with (
             patch.object(live_main, "_build_parser", return_value=parser),

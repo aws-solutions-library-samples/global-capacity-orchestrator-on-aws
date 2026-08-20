@@ -70,6 +70,12 @@ gco stacks deploy-all -y      # stand up every region defined in cdk.json
 gco stacks destroy-all -y     # destroy stacks, then best-effort cleanup of known resources
 ```
 
+`gco stacks destroy-all -y` also **deletes** each cluster's eligible dynamically
+provisioned EBS volumes (owned, available, and detached) once the cluster is
+gone — no `--delete-volumes` flag or extra prompt. Add `--retain-volumes` to keep
+them. Single-stack `gco stacks destroy` retains by default and deletes only with
+`--delete-volumes`.
+
 Teardown is not an account-wide emptiness guarantee: retained ECR repositories,
 resources configured for retention, and unexpected resources can remain. See
 [`gco stacks destroy-all`](docs/CLI.md#gco-stacks-destroy-all) for the exact

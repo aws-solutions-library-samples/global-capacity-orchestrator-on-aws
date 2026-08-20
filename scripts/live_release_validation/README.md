@@ -26,6 +26,8 @@ guide: how the code is organized and where a new check belongs.
 | `registry.py` | The ordered action registry: names, descriptions, dependencies, handlers. Single source of truth for `--actions`. |
 | `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting on every exit path (including signals). |
 | `models.py` | `RunSettings`, `RunCheckpoint`, `RunContext`, `ActionResult`, `ValidationReport`, and the owner-only artifact I/O. |
+| `volume_scenario.py` | The pure E2E EBS volume-scenario contract: which cases exist, which of them a checkpoint identity may be fenced to, and each case's isolated run identity. |
+| `scenario_driver.py` | Expands `--volume-scenario both` into two sequential, separately fenced runs (`<run-id>-volumes-retain-override`, then `<run-id>-volumes-delete`), each with its own report directory, checkpoint, identity, and complete deploy/destroy lifecycle. |
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
 | `ownership/` | Durable proof of what this run created and may therefore destroy. |
@@ -41,6 +43,61 @@ matches the action name printed in the run log. The one deliberate exception is
 `actions/jobs.py`, which holds both `api` and `sqs`: they are the same Job
 lifecycle over two different transports, and splitting them would duplicate the
 lifecycle rather than clarify it.
+
+The `volume-inventory` action (`actions/volume_inventory.py`, live observation
+helpers in `checks/volumes.py`, identity fencing in `ownership/volumes.py`) runs
+straight after `topology` and only for an explicitly selected
+`--volume-scenario` case. It records what the volume-policy assertions are later
+measured against: each PVC's identity and requested size, its bound PV's
+identity/CSI driver/`volumeHandle`, and the normalized EBS facts for the volumes
+those PVCs produced — reusing `cli.volume_cleanup.normalize_volume_snapshot` so
+the harness records exactly what production decides against. PVCs that produced
+no EBS volume get an explicit non-participation reason and the rest continue.
+Every Region passes the scenario authorization gate before any EKS or EC2 call,
+and each Region's evidence is persisted as it is observed.
+
+`ownership/volume_targets.py` turns that inventory into the strict destroy-time
+targets. Volume cleanup runs after the stack and cluster are gone, but the
+identity that authorizes it — exact CloudFormation stack ARN, Region, EKS
+cluster physical ID, exact cluster tag key, and the recorded volume identities —
+is readable only while they still exist, so `destroy_deployment` captures and
+checkpoints it before the first deletion. A missing or ambiguous target identity
+is persisted as a blocked target and then raised, so teardown stops rather than
+destroying evidence the scenario still needed; only complete targets are
+reconstructed for the shared `StackManager` cleanup helper.
+
+`ownership/volume_requests.py` decides *what command* that teardown exercises,
+through the same command-aware resolver Click uses: the retain-override case
+supplies exactly the inputs of `gco stacks destroy-all -y --retain-volumes`, and
+the delete case supplies exactly the inputs of `gco stacks destroy-all -y` with
+`delete_volumes=False` — which is what proves the implicit-delete path needs
+neither a `--delete-volumes` flag nor a second volume confirmation. The one
+resolved request is passed into `destroy_orchestrated` so every exact regional
+target shares it, and the same module holds the completion barrier: teardown is
+marked complete only once every published `ebs-volumes` callback is durable in
+the persisted checkpoint, one per captured strict target and each carrying this
+run's policy.
+
+Those callbacks come from the code under test, so they cannot also be the proof
+that it was right. `checks/volume_outcomes.py` is the independent half: it
+re-describes the exact checkpointed volume IDs in their own Region and decides
+from live EC2 facts whether the case actually happened — retain-override needs
+every recorded volume still present with its exact recorded tag and a retention
+outcome, delete needs every volume the pre-destroy inventory showed as owned,
+`available`, and detached to be *absent* (proved only by the exact not-found
+error) while ineligible volumes remain with a safety outcome. Any disagreement is
+persisted and then raised, before teardown can be marked complete.
+
+Only once that evidence is durable and verified does
+`cleanup/volume_fixtures.py` delete what the retain case deliberately kept, so a
+passing validation does not leave a recurring bill. It is fenced four ways: only
+after verified retention evidence, only for exact checkpointed identities, only
+with `--confirm-ebs-fixture-cleanup` (the `fixture_cleanup=True` gate in
+`ownership/volumes.py`), and only through `VolumeCleanupService.delete_candidates`
+so the same just-in-time recheck operators get applies to fixtures too. It never
+raises to hide a leftover: `volume_residual_inventory` re-runs the observation
+during `final-inventory`, which fails the run on any recorded volume that still
+exists, cannot be proved gone, or was never authorized for deletion.
 
 The `schedulers` action (`actions/schedulers.py`, enablement resolution in
 `checks/schedulers.py`) runs one scheduling-gated probe Job per enabled batch

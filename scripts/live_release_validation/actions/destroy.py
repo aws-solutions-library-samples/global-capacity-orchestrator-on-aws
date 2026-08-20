@@ -8,7 +8,9 @@ import json
 import time
 from typing import Any
 
+from ..checks.volume_outcomes import verify_post_destroy_volume_outcomes
 from ..cleanup.retained import _retained_resource_cleanup
+from ..cleanup.volume_fixtures import cleanup_validation_fixture_volumes
 from ..cleanup.workloads import cleanup_workloads
 from ..models import RunContext, to_jsonable, utc_now
 from ..ownership.cleanup_role import (
@@ -30,6 +32,14 @@ from ..ownership.stacks import (
     _reconcile_stack_ownership,
     _record_prepared_stack_identity,
     _verify_target_stack_absence,
+)
+from ..ownership.volume_requests import (
+    resolve_strict_volume_cleanup_request,
+    verify_volume_cleanup_evidence,
+)
+from ..ownership.volume_targets import (
+    capture_strict_volume_targets,
+    strict_volume_cleanup_targets,
 )
 
 
@@ -237,6 +247,23 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
     _checkpoint_new_ecr_images(ctx)
     _checkpoint_retained_kms_keys(ctx)
 
+    # Volume-cleanup identity is readable only while the regional stacks and
+    # their EKS clusters exist, so it is captured and checkpointed here, before
+    # the first deletion. A missing or ambiguous target identity raises from this
+    # call with its blocked reason already persisted, so no EKS or EC2 request is
+    # ever made from an identity this run could not establish.
+    volume_targets = capture_strict_volume_targets(ctx)
+    volume_cleanup_targets = strict_volume_cleanup_targets(volume_targets)
+
+    # One command-equivalent request for every exact regional target of this
+    # teardown, resolved by the same policy resolver Click uses: the retain case
+    # supplies `destroy-all -y --retain-volumes`, the delete case supplies
+    # `destroy-all -y` with delete_volumes=False. A disabled scenario resolves no
+    # request at all, which keeps teardown on its existing stack-only path.
+    volume_cleanup_request, volume_cleanup_request_evidence = resolve_strict_volume_cleanup_request(
+        ctx
+    )
+
     attempts = ctx.checkpoint.state.setdefault("destroy_attempts", [])
     for invocation_attempt in range(1, ctx.settings.destroy_attempts + 1):
         sequence = len(attempts) + 1
@@ -316,6 +343,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 on_ecr_repository_created=lambda region, repository: (
                     _record_ecr_repository_creation(ctx, region, repository)
                 ),
+                volume_cleanup_request=volume_cleanup_request,
             )
             attempt: dict[str, Any] = {
                 "sequence": sequence,
@@ -328,6 +356,32 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 "log_cleanup_helper": helper_authority,
             }
             if overall:
+                # Teardown may not be marked complete while any target's
+                # `ebs-volumes` callback is missing from the persisted checkpoint.
+                attempt["volume_cleanup_evidence"] = verify_volume_cleanup_evidence(
+                    ctx,
+                    request=volume_cleanup_request,
+                    expected_stack_names=volume_cleanup_targets,
+                    destroy_sequence=sequence,
+                )
+                # The published callbacks come from the code under test, so the
+                # policy is proved independently: every checkpointed volume ID is
+                # re-described in its own Region and compared with what the case
+                # requires. Only once that evidence is durable and verified may the
+                # harness delete the fixtures the retain case deliberately kept.
+                observations = verify_post_destroy_volume_outcomes(
+                    ctx,
+                    request=volume_cleanup_request,
+                    targets=volume_cleanup_targets,
+                    destroy_sequence=sequence,
+                )
+                attempt["volume_post_destroy_observations"] = observations
+                attempt["volume_fixture_cleanup"] = cleanup_validation_fixture_volumes(
+                    ctx,
+                    request=volume_cleanup_request,
+                    targets=volume_cleanup_targets,
+                    observations=observations,
+                )
                 absence_before_cleanup = _verify_target_stack_absence(ctx)
                 attempt["stack_absence_before_retained_cleanup"] = absence_before_cleanup
                 if not absence_before_cleanup["all_absent"]:
@@ -394,6 +448,17 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                     "retained_cleanup_attempts", []
                 ),
                 "stack_absence": attempt["stack_absence_before_completion"],
+                "volume_targets": volume_targets,
+                # Only complete strict targets are ever handed to the common
+                # cleanup helper; blocked targets are absent by construction.
+                "volume_cleanup_targets": sorted(volume_cleanup_targets),
+                "volume_cleanup_request": volume_cleanup_request_evidence,
+                "volume_cleanup_evidence": attempt["volume_cleanup_evidence"],
+                # Persisted before `destroyed=True` above, so the pre-destroy
+                # inventory, the callbacks, the independent observations, and the
+                # fixture cleanup are all durable evidence of one teardown.
+                "volume_post_destroy_observations": attempt["volume_post_destroy_observations"],
+                "volume_fixture_cleanup": attempt["volume_fixture_cleanup"],
             }
         if invocation_attempt < ctx.settings.destroy_attempts:
             time.sleep(ctx.settings.destroy_retry_delay_seconds)

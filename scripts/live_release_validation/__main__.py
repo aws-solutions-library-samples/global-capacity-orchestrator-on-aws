@@ -20,11 +20,22 @@ from .models import (
 )
 from .registry import build_action_registry
 from .runner import LiveValidationRunner, require_local_execution
+from .scenario_driver import run_volume_scenario_driver
+from .volume_scenario import (
+    VOLUME_SCENARIO_BOTH,
+    VOLUME_SCENARIO_SELECTIONS,
+    VolumeScenarioCase,
+    expand_volume_scenario_selection,
+)
 
 # Backwards-compatible aliases for this module's historical private helpers.
 _repository_root = repository_root
 _split_actions = split_csv_names
 _path_from_root = path_from_root
+
+#: One safe run/checkpoint identifier, shared by the operator's ``--run-id``
+#: and by the per-case identities the volume-scenario driver derives from it.
+_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -115,6 +126,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "schedulers action can prove them (yunikorn, slurm, or all)"
         ),
     )
+    parser.add_argument(
+        "--volume-scenario",
+        choices=VOLUME_SCENARIO_SELECTIONS,
+        default="disabled",
+        help=(
+            "End-to-end EBS volume case to validate: 'retain-override' proves "
+            "destroy-all -y --retain-volumes, 'delete' proves implicit authorized "
+            "deletion under destroy-all -y, and 'both' runs each case as its own "
+            "isolated deployment lifecycle (default: disabled)"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-ebs-fixture-cleanup",
+        action="store_true",
+        help=(
+            "Explicitly authorize deleting only this run's exact checkpointed, "
+            "run-owned validation EBS volumes after retain-override evidence is durable"
+        ),
+    )
     parser.epilog = "Actions: " + ", ".join(registry)
     return parser
 
@@ -126,8 +156,30 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--expected-sha must be an exact 40-character commit SHA")
     if not args.expected_branch or not args.expected_branch.strip():
         parser.error("--expected-branch is required")
-    if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", args.run_id):
+    if args.run_id and not _RUN_ID_PATTERN.fullmatch(args.run_id):
         parser.error("--run-id must be 1-80 safe filename characters")
+    if args.confirm_ebs_fixture_cleanup and args.volume_scenario == "disabled":
+        parser.error(
+            "--confirm-ebs-fixture-cleanup requires --volume-scenario retain-override, "
+            "delete, or both"
+        )
+    if args.volume_scenario == VOLUME_SCENARIO_BOTH:
+        # `both` is two fresh, separately fenced lifecycles. A shared report
+        # directory, checkpoint, or resume would let one case observe or
+        # overwrite the other's evidence.
+        if args.resume:
+            parser.error(
+                f"--volume-scenario {VOLUME_SCENARIO_BOTH} runs two fresh lifecycles; "
+                "resume one case with --volume-scenario retain-override|delete and its "
+                "own --run-id <run-id>-volumes-<case>"
+            )
+        for option, value in (("--report-dir", args.report_dir), ("--checkpoint", args.checkpoint)):
+            if value:
+                parser.error(
+                    f"{option} pins one location and cannot be shared by the two "
+                    f"--volume-scenario {VOLUME_SCENARIO_BOTH} lifecycles; each case derives "
+                    "its own private report directory and checkpoint from --run-id"
+                )
     for name in args.protected_stack:
         if not name or not re.fullmatch(r"[A-Za-z][-A-Za-z0-9]{0,127}", name):
             parser.error(f"Invalid --protected-stack name: {name!r}")
@@ -153,15 +205,60 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--optional-schedulers 'all' cannot be combined with individual names")
 
 
+def _resolve_volume_scenario_case(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    requested_case: VolumeScenarioCase | None,
+) -> VolumeScenarioCase:
+    """Resolve one checkpoint-fenced case from the operator's selection.
+
+    ``both`` is a driver instruction rather than a run identity: the scenario
+    driver supplies each case (and its derived run ID) explicitly, so a single
+    invocation must never silently pick one of the two lifecycles.
+    """
+    cases = expand_volume_scenario_selection(args.volume_scenario)
+    if requested_case is None:
+        if len(cases) != 1:
+            parser.error(
+                f"--volume-scenario {args.volume_scenario} selects "
+                f"{len(cases)} isolated lifecycles; the scenario driver supplies each "
+                "case with its own run identity"
+            )
+        return cases[0]
+    if requested_case not in cases:
+        parser.error(
+            f"--volume-scenario {args.volume_scenario} does not include case {requested_case}"
+        )
+    return requested_case
+
+
+def _resolved_run_id(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    run_id_override: str | None = None,
+) -> str:
+    """Resolve one safe run identity: driver-supplied, operator-supplied, or derived."""
+    run_id = (
+        run_id_override
+        or args.run_id
+        or (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + args.expected_sha[:12].lower())
+    )
+    if not _RUN_ID_PATTERN.fullmatch(run_id):
+        parser.error(f"Derived run ID must be 1-80 safe filename characters: {run_id!r}")
+    return run_id
+
+
 def _settings_from_args(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
+    *,
+    volume_scenario_case: VolumeScenarioCase | None = None,
+    run_id_override: str | None = None,
 ) -> RunSettings:
     _validate_args(parser, args)
     root = _repository_root(args.repo_root)
-    run_id = args.run_id or (
-        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + args.expected_sha[:12].lower()
-    )
+    scenario_case = _resolve_volume_scenario_case(parser, args, volume_scenario_case)
+    run_id = _resolved_run_id(parser, args, run_id_override)
     report_dir = _path_from_root(
         root,
         args.report_dir,
@@ -197,6 +294,34 @@ def _settings_from_args(
             if "all" in args.optional_schedulers
             else tuple(sorted(set(args.optional_schedulers)))
         ),
+        volume_scenario_case=scenario_case,
+        confirm_ebs_fixture_cleanup=args.confirm_ebs_fixture_cleanup,
+    )
+
+
+def _run_scenario_driver(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run each volume-scenario case this selection expands into as its own run.
+
+    One base run ID is resolved here so both lifecycles derive sibling
+    identities from the same operator input; everything else about each case —
+    settings, report directory, checkpoint, resume identity, deploy/destroy
+    lifecycle — belongs to that case alone.
+    """
+    _validate_args(parser, args)
+    base_run_id = _resolved_run_id(parser, args)
+
+    def build_settings(case: VolumeScenarioCase, run_id: str) -> RunSettings:
+        return _settings_from_args(
+            parser,
+            args,
+            volume_scenario_case=case,
+            run_id_override=run_id,
+        )
+
+    return run_volume_scenario_driver(
+        args.volume_scenario,
+        base_run_id=base_run_id,
+        settings_factory=build_settings,
     )
 
 
@@ -218,6 +343,8 @@ def main() -> int:
 
     settings: RunSettings | None = None
     try:
+        if len(expand_volume_scenario_selection(args.volume_scenario)) > 1:
+            return _run_scenario_driver(parser, args)
         settings = _settings_from_args(parser, args)
         return LiveValidationRunner(settings).run()
     except KeyboardInterrupt:

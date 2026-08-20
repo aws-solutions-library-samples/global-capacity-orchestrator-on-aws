@@ -30,6 +30,7 @@ from .actions import (
     action_schedulers,
     action_sqs_lifecycle,
     action_topology,
+    action_volume_inventory,
 )
 from .models import RunContext
 
@@ -72,6 +73,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Verify stacks, EKS, API endpoints, queues, and DynamoDB",
             ("deploy",),
             action_topology,
+        ),
+        ActionDefinition(
+            "volume-inventory",
+            "Record the pre-destroy PVC, PV, and PVC-derived EBS volume inventory",
+            ("topology",),
+            action_volume_inventory,
         ),
         ActionDefinition(
             "api",

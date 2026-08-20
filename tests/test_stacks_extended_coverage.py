@@ -2130,6 +2130,63 @@ class TestStrictTeardownHelpers:
         paginator.paginate.assert_called_once_with(StackName=self._STACK_ID)
         eks.describe_cluster.assert_called_once_with(name=self._STACK_NAME)
 
+    @pytest.mark.parametrize(
+        ("cluster_ids", "identity_error"),
+        [
+            ([], "missing EKS physical ID"),
+            ([_STACK_NAME, "unexpected-cluster"], "ambiguous EKS physical IDs"),
+        ],
+    )
+    def test_records_unresolved_cluster_identity_without_blocking_other_capture(
+        self,
+        manager: Any,
+        cluster_ids: list[str],
+        identity_error: str,
+    ) -> None:
+        cfn = MagicMock()
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceSummaries": [
+                    {
+                        "ResourceType": "AWS::EC2::VPC",
+                        "PhysicalResourceId": "vpc-exact",
+                    },
+                    *[
+                        {
+                            "ResourceType": "AWS::EKS::Cluster",
+                            "PhysicalResourceId": cluster_id,
+                        }
+                        for cluster_id in cluster_ids
+                    ],
+                ]
+            }
+        ]
+        stack = {"StackName": self._STACK_NAME, "StackId": self._STACK_ID}
+        with (
+            patch.object(
+                manager,
+                "_describe_stack_target",
+                return_value=(self._REGION, cfn, stack),
+            ),
+            patch.object(manager, "_get_deploy_region", return_value=self._REGION),
+            patch("boto3.client") as client,
+        ):
+            result = manager._resolve_strict_teardown_resources(
+                stacks=[self._STACK_NAME],
+                regional_stacks=[self._STACK_NAME],
+                expected_stack_ids={self._STACK_NAME: self._STACK_ID},
+                authorize_stack=MagicMock(),
+            )
+
+        assert result[self._STACK_NAME] == {
+            "stack_name": self._STACK_NAME,
+            "stack_id": self._STACK_ID,
+            "region": self._REGION,
+            "vpc_id": "vpc-exact",
+            "cluster_identity_error": identity_error,
+        }
+        client.assert_not_called()
+
     def test_exact_helper_targets_are_used_and_sg_errors_block_progress(
         self,
         manager: Any,

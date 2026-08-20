@@ -30,6 +30,7 @@ from .opencost import action_opencost
 from .preflight import action_preflight
 from .schedulers import action_schedulers
 from .topology import action_topology
+from .volume_inventory import action_volume_inventory
 
 __all__ = [
     "action_api_lifecycle",
@@ -44,5 +45,6 @@ __all__ = [
     "action_schedulers",
     "action_sqs_lifecycle",
     "action_topology",
+    "action_volume_inventory",
     "destroy_deployment",
 ]

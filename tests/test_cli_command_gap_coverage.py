@@ -639,6 +639,9 @@ def test_stacks_deploy_rejects_manager_failure_and_ignores_malformed_tags(
 def test_stacks_destroy_confirmation_preserves_force_false(runner: CliRunner) -> None:
     manager = MagicMock()
     manager.destroy.return_value = True
+    # A non-regional stack produces no volume-cleanup outcome, keeping this test
+    # on the existing stack-only exit path.
+    manager.cleanup_regional_volumes_after_destroy.return_value = None
 
     with patch("cli.stacks.get_stack_manager", return_value=manager):
         result = _invoke(

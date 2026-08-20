@@ -63,6 +63,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state |
 | `deploy` | `baseline` | Deploy the checked-in GCO topology |
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB |
+| `volume-inventory` | `topology` | Record the pre-destroy volume inventory for the selected `--volume-scenario` case: every PVC's namespace/name/UID/requested size, its bound PV identity, CSI driver, and `volumeHandle`, and the normalized identity, Region, Availability Zone, size, state, attachments, and exact cluster tag of each PVC-derived EBS volume. PVCs that produced no EBS volume are recorded with an explicit reason and validation continues. Prometheus and Alertmanager PVCs are discovered from their live component labels and their observed sizes asserted separately against `cluster_observability` (defaults `50Gi` and `5Gi`). Skipped with a reason when no volume scenario is selected |
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
 | `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle, bind the worker-persisted Kubernetes identity, and verify/delete that exact workload |
@@ -73,6 +74,71 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `final-inventory` | `destroy` | Prove target-stack absence, accepted retained resources, and exact protected-baseline preservation |
 
 The `configured` profile accepts the number of regional Regions already in `cdk.json`. `single-region` requires exactly one regional Region. `multi-region` requires at least two. When Job actions are selected, multi-Region validation also requires `api_gateway.regional_api_enabled=true` so observations are attributable to one Region.
+
+## EBS Volume Cleanup Scenario
+
+The optional EBS volume scenario proves the `destroy-all` volume-cleanup
+behavior end to end against live EBS volumes. It is off by default and is
+selected with `--volume-scenario`:
+
+| `--volume-scenario` | What it exercises |
+|---|---|
+| `disabled` (default) | No volume inventory, no volume assertions; the `volume-inventory` action is skipped with a reason |
+| `retain-override` | One lifecycle exercising `gco stacks destroy-all -y --retain-volumes`; every recorded volume must survive with its exact cluster tag |
+| `delete` | One lifecycle exercising `gco stacks destroy-all -y` (implicit delete, **no** `--delete-volumes` flag and **no** volume prompt); every eligible recorded volume must be absent |
+| `both` | Runs the retain-override lifecycle and then the delete lifecycle as two fully isolated, sequential deployments |
+
+`--volume-scenario both` is a scenario-driver instruction, not a checkpoint
+identity. The driver launches two sequential runs with distinct run IDs and
+sibling private report directories — `<run-id>-volumes-retain-override` then
+`<run-id>-volumes-delete` — each with its own checkpoint, deployment identity,
+and complete deploy/destroy lifecycle. Neither case can resume or mutate the
+other case's checkpoint. The single-case values (`retain-override`, `delete`)
+become part of resume identity, so a `--resume` must repeat the same case.
+
+Both lifecycles resolve their destroy command through the same command-aware
+policy resolver the CLI uses. The delete case supplies the exact inputs of
+`gco stacks destroy-all -y` with `delete_volumes=False`, which is what proves the
+implicit-delete path needs neither a `--delete-volumes` flag nor a second volume
+confirmation. The retain case supplies the exact inputs of
+`gco stacks destroy-all -y --retain-volumes`. Selecting the scenario and the
+credential preflight are test-harness safety gates only; they never add a CLI
+volume prompt or a `--delete-volumes` requirement to the `destroy-all -y` path.
+
+Post-destroy verification is independent of the code under test: the harness
+re-describes the exact checkpointed volume IDs in their Region and requires the
+retain case to find every recorded volume still present with its recorded tag,
+and the delete case to find every eligible (owned, `available`, detached) volume
+absent while ineligible attached or non-`available` volumes remain with a safety
+outcome. The pre-destroy inventory, every `ebs-volumes` callback, the independent
+post-destroy observations, and any fixture cleanup are persisted before teardown
+is marked complete.
+
+Because the retain-override case deliberately keeps paid volumes, deleting those
+retained fixtures afterward requires the extra `--confirm-ebs-fixture-cleanup`
+authorization. Fixture cleanup runs only after retention evidence is durable,
+only for exact checkpointed run-owned identities, and only through the same
+just-in-time safety recheck production uses. EBS volumes participate in
+`final-inventory`, so an unresolved residual fails the run rather than leaving a
+recurring bill. Without `--confirm-ebs-fixture-cleanup`, the retain case keeps
+its volumes and reports them as accepted residuals for manual cleanup.
+
+```bash
+# Retain-override and implicit-delete lifecycles, cleaning up retained fixtures
+python -m scripts.live_release_validation \
+  --repo-root "$PWD" \
+  --expected-account "$EXPECTED_ACCOUNT" \
+  --expected-sha "$EXPECTED_SHA" \
+  --expected-branch "$EXPECTED_BRANCH" \
+  --profile configured \
+  --actions all \
+  --volume-scenario both \
+  --confirm-ebs-fixture-cleanup \
+  --run-id "$RUN_ID" \
+  --report-dir "$REPORT_DIR" \
+  --checkpoint "$REPORT_DIR/checkpoint.json" \
+  --confirm-kms-key-deletion
+```
 
 ## Local Prerequisites
 
