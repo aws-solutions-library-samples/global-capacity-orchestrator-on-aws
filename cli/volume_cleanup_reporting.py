@@ -115,23 +115,18 @@ class CleanupFormatter(Protocol):
 
     def print(self, data: Any, columns: list[str] | None = None) -> None:
         """Print formatted data in the configured output format."""
-        ...
 
     def print_info(self, message: str) -> None:
         """Print an informational message."""
-        ...
 
     def print_success(self, message: str) -> None:
         """Print a success message."""
-        ...
 
     def print_warning(self, message: str) -> None:
         """Print a warning message."""
-        ...
 
     def print_error(self, message: str) -> None:
         """Print an error message."""
-        ...
 
 
 @dataclass(frozen=True)

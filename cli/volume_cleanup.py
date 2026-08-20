@@ -220,7 +220,6 @@ class ClientFactory(Protocol):
 
     def __call__(self, service_name: str, *, region_name: str) -> Any:
         """Return a client for ``service_name`` in exactly ``region_name``."""
-        ...
 
 
 @dataclass(frozen=True)
