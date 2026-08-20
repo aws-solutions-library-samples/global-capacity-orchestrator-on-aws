@@ -742,6 +742,117 @@ class TestCronJobApply:
         assert patch_args[1] == "monitoring"
 
 
+class TestPriorityClassApply:
+    """scheduling.k8s.io/v1 PriorityClass is applied via SchedulingV1Api.
+
+    The planning/dispatch lockstep test proves the branch exists; these pin
+    its behavior: cluster-scoped create (no namespace argument), patch on 409
+    so the mutable fields (description, labels, globalDefault) converge on
+    re-apply, and a loud per-resource failure when the patch is rejected —
+    an attempted change to the immutable ``value`` must never silently keep
+    the old priority.
+    """
+
+    @staticmethod
+    def _write_manifest(tmp_path):
+        (tmp_path / "05-priority-classes.yaml").write_text(
+            yaml.dump(
+                {
+                    "apiVersion": "scheduling.k8s.io/v1",
+                    "kind": "PriorityClass",
+                    "metadata": {"name": "gco-platform-critical"},
+                    "value": 1000000,
+                    "globalDefault": False,
+                    "preemptionPolicy": "PreemptLowerPriority",
+                    "description": "GCO platform services",
+                }
+            )
+        )
+
+    @staticmethod
+    def _client_mocks(mock_client):
+        mock_client.CoreV1Api.return_value = MagicMock()
+        mock_client.AppsV1Api.return_value = MagicMock()
+        mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+        mock_client.NetworkingV1Api.return_value = MagicMock()
+        mock_client.CustomObjectsApi.return_value = MagicMock()
+        scheduling = MagicMock()
+        mock_client.SchedulingV1Api.return_value = scheduling
+        return scheduling
+
+    def test_priority_class_created_cluster_scoped(self, handler_module, tmp_path):
+        self._write_manifest(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            scheduling = self._client_mocks(mock_client)
+            result = handler_module.apply_manifests("c", "us-east-1", str(tmp_path), {})
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        scheduling.create_priority_class.assert_called_once()
+        create_kwargs = scheduling.create_priority_class.call_args.kwargs
+        assert create_kwargs["body"]["metadata"]["name"] == "gco-platform-critical"
+        # Cluster-scoped: no namespace rides the call.
+        assert "namespace" not in create_kwargs
+        scheduling.patch_priority_class.assert_not_called()
+
+    def test_priority_class_patched_on_conflict(self, handler_module, tmp_path):
+        """A 409 on create falls back to patch (idempotent re-apply)."""
+        from kubernetes.client.rest import ApiException
+
+        self._write_manifest(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            scheduling = self._client_mocks(mock_client)
+            scheduling.create_priority_class.side_effect = ApiException(status=409)
+            result = handler_module.apply_manifests("c", "us-east-1", str(tmp_path), {})
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        scheduling.patch_priority_class.assert_called_once()
+        patch_args = scheduling.patch_priority_class.call_args
+        assert patch_args.args[0] == "gco-platform-critical"
+        assert patch_args.kwargs["body"]["value"] == 1000000
+
+    def test_rejected_patch_fails_loudly(self, handler_module, tmp_path):
+        """An immutable-field change (422 on patch) is a per-resource failure.
+
+        The manifest header promises a changed ``value`` fails loudly instead
+        of silently keeping the old priority; the apply loop's per-resource
+        isolation must record the failure, not swallow it.
+        """
+        from kubernetes.client.rest import ApiException
+
+        self._write_manifest(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            scheduling = self._client_mocks(mock_client)
+            scheduling.create_priority_class.side_effect = ApiException(status=409)
+            scheduling.patch_priority_class.side_effect = ApiException(status=422)
+            result = handler_module.apply_manifests("c", "us-east-1", str(tmp_path), {})
+        assert result["FailedCount"] == 1
+        assert result["AppliedCount"] == 0
+
+    def test_non_conflict_create_error_fails_loudly(self, handler_module, tmp_path):
+        """Only 409 routes to patch; any other create failure is recorded."""
+        from kubernetes.client.rest import ApiException
+
+        self._write_manifest(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            scheduling = self._client_mocks(mock_client)
+            scheduling.create_priority_class.side_effect = ApiException(status=403)
+            result = handler_module.apply_manifests("c", "us-east-1", str(tmp_path), {})
+        assert result["FailedCount"] == 1
+        scheduling.patch_priority_class.assert_not_called()
+
+
 class TestPersistentVolumeHandling:
     """Tests for PV smart recreate logic."""
 

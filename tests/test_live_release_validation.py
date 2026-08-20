@@ -4540,3 +4540,121 @@ class TestStripExpiredTableStreams:
         snapshot = json.loads(json.dumps(inventory))
         ownership_streams._strip_expired_table_streams(ctx, inventory)
         assert inventory == snapshot
+
+
+class TestActionBaselineCheckpointPurity:
+    """``action_baseline`` — report enrichment must not leak into the checkpoint.
+
+    The action returns ``{**baseline, "accepted_expired_dynamodb_streams"}``
+    for the report, but persists the *unadorned* capture as
+    ``ctx.checkpoint.baseline``: ``final-inventory`` later feeds that
+    checkpoint straight into ``compare_baseline`` against a fresh capture, so
+    any extra key smuggled into the persisted copy would surface as a
+    phantom protected-baseline difference and fail an otherwise clean run.
+    """
+
+    _BASELINE = {
+        "protected_stacks": {},
+        "ecr_regions": ["us-east-1"],
+        "ecr_repositories": {"us-east-1": []},
+    }
+
+    @staticmethod
+    def _inventory(*tagged: dict[str, object]) -> dict[str, object]:
+        """A shape-valid inventory: the absence gate is fail-closed on
+        coverage, so the mocked collect_project_resources must return the
+        full scanner/category attestation a real scan produces."""
+        from scripts.live_release_validation.inventory import project as inventory_project
+
+        return {
+            "coverage": {
+                "complete": True,
+                "required_scanners": list(inventory_project._PROJECT_RESOURCE_SCANNERS),
+                "completed_scanners": list(inventory_project._PROJECT_RESOURCE_SCANNERS),
+                "resource_categories": list(inventory_project._PROJECT_RESOURCE_CATEGORIES),
+            },
+            "regional": {"us-east-1": {"tagged_resources": list(tagged)}},
+        }
+
+    def _ctx(self):
+        ctx = _context(state={"enabled_regions": ["us-east-1"]})
+        ctx.checkpoint.baseline = None
+        ctx.settings.protected_stack_names = ("CDKToolkit",)
+        return ctx
+
+    def _run(self, ctx, inventory):
+        from scripts.live_release_validation.actions import baseline as actions_baseline
+
+        with (
+            patch.object(actions_baseline, "capture_baseline", return_value=dict(self._BASELINE)),
+            patch.object(actions_baseline, "collect_project_resources", return_value=inventory),
+            patch.object(actions_baseline, "_topology_regions", return_value=["us-east-1"]),
+        ):
+            return actions_baseline.action_baseline(ctx)
+
+    def test_accepted_streams_ride_the_result_not_the_checkpoint(self):
+        ctx = self._ctx()
+        stream_arn = (
+            "arn:aws:dynamodb:us-east-1:123456789012:table/gco-live-vector-store"
+            "/stream/2026-08-20T08:23:45.112"
+        )
+        dynamodb = MagicMock()
+        dynamodb.describe_table.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "gone"}},
+            "DescribeTable",
+        )
+        streams = MagicMock()
+        streams.describe_stream.return_value = {"StreamDescription": {"StreamStatus": "DISABLED"}}
+        ctx.session = MagicMock()
+        ctx.session.client.side_effect = lambda service, region_name=None: {
+            "dynamodb": dynamodb,
+            "dynamodbstreams": streams,
+        }[service]
+        result = self._run(ctx, self._inventory({"arn": stream_arn, "tags": {}}))
+
+        accepted = result["accepted_expired_dynamodb_streams"]
+        assert len(accepted) == 1
+        assert accepted[0]["arn"] == stream_arn
+        # The persisted checkpoint is the pure capture — byte-for-byte what
+        # compare_baseline will re-capture against after teardown.
+        assert ctx.checkpoint.baseline == self._BASELINE
+        assert "accepted_expired_dynamodb_streams" not in ctx.checkpoint.baseline
+        ctx.persist.assert_called()
+
+    def test_live_table_stream_still_fails_the_gate(self):
+        """A stream whose parent table exists is genuine residue: hard fail."""
+        ctx = self._ctx()
+        dynamodb = MagicMock()
+        dynamodb.describe_table.return_value = {"Table": {"TableStatus": "ACTIVE"}}
+        ctx.session = MagicMock()
+        ctx.session.client.return_value = dynamodb
+        inventory = self._inventory(
+            {
+                "arn": (
+                    "arn:aws:dynamodb:us-east-1:123456789012:table/"
+                    "gco-live-x/stream/2026-01-01T00:00:00.000"
+                ),
+                "tags": {},
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="not owned by this run"):
+            self._run(ctx, inventory)
+        # A failed gate must not persist a baseline for a later resume.
+        assert ctx.checkpoint.baseline is None
+
+    def test_clean_account_returns_empty_acceptance(self):
+        ctx = self._ctx()
+        result = self._run(ctx, self._inventory())
+        assert result["accepted_expired_dynamodb_streams"] == []
+        assert ctx.checkpoint.baseline == self._BASELINE
+
+    def test_reused_checkpoint_short_circuits(self):
+        ctx = self._ctx()
+        ctx.checkpoint.baseline = dict(self._BASELINE)
+        from scripts.live_release_validation.actions import baseline as actions_baseline
+
+        with patch.object(actions_baseline, "capture_baseline") as capture:
+            result = actions_baseline.action_baseline(ctx)
+        capture.assert_not_called()
+        assert result["reused_checkpoint_baseline"] is True

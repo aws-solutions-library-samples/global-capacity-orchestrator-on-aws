@@ -295,6 +295,54 @@ class TestKubernetesManifests:
                     f"{filepath.name} doc {i}: invalid apiVersion '{api_version}'"
                 )
 
+    def test_priority_class_references_resolve(self, manifest_files):
+        """Every priorityClassName names a class the manifest set defines.
+
+        Pod admission rejects an unresolvable priorityClassName outright, so
+        a pod spec referencing a class no manifest ships would brick its
+        Deployment on a fresh cluster (observed live in the kind E2E when
+        05-priority-classes.yaml was not applied before the deployments).
+        The reserved system-* classes exist on every cluster and are exempt.
+        """
+        defined: set[str] = set()
+        referenced: dict[str, list[str]] = {}
+
+        def walk(node, source):
+            if isinstance(node, dict):
+                value = node.get("priorityClassName")
+                if isinstance(value, str) and "{{" not in value:
+                    referenced.setdefault(value, []).append(source)
+                for child in node.values():
+                    walk(child, source)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child, source)
+
+        for filepath in manifest_files:
+            for doc in load_yaml_file(filepath, allow_templates=True):
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get("kind") == "PriorityClass":
+                    name = (doc.get("metadata") or {}).get("name")
+                    if isinstance(name, str):
+                        defined.add(name)
+                walk(doc, filepath.name)
+
+        assert referenced, (
+            "no priorityClassName references found; if platform pods no "
+            "longer carry one, update this guard alongside that change"
+        )
+        reserved = {"system-cluster-critical", "system-node-critical"}
+        unresolved = {
+            name: sorted(set(sources))
+            for name, sources in referenced.items()
+            if name not in defined and name not in reserved
+        }
+        assert not unresolved, (
+            f"priorityClassName references with no defining PriorityClass "
+            f"manifest (pod admission would reject these pods): {unresolved}"
+        )
+
     def test_manifests_have_metadata_name(self, manifest_files):
         """Test that all manifests have metadata.name."""
         for filepath in manifest_files:

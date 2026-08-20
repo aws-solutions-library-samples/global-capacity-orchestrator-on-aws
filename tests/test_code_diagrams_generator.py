@@ -542,3 +542,69 @@ class TestRenderReadme:
             "README must document the one-time ``playwright install chromium`` "
             "step, otherwise users hit a confusing warning and skip PNG output."
         )
+
+
+# ---------------------------------------------------------------------------
+# Shared Lambda copy sync
+# ---------------------------------------------------------------------------
+
+generate_mod = _load("_cd_generate", _CD_DIR / "generate.py")
+_sync_shared_lambda_copies = generate_mod._sync_shared_lambda_copies
+
+
+class TestSyncSharedLambdaCopies:
+    """The generator propagates canonical shared sources to their copies.
+
+    ``upsert_markers`` rewrites the pyflowchart header inside canonical
+    shared Lambda sources; without this sync a full regeneration left the
+    checked-in copies one header behind — the exact drift
+    ``tests/test_lambda_shared_sources.py`` rejects. These tests build a fake
+    project tree so they exercise the sync against the real
+    ``cli.stacks.LAMBDA_SHARED_SOURCE_TARGETS`` map without touching the
+    checkout.
+    """
+
+    @staticmethod
+    def _tree(tmp_path: Path) -> Path:
+        from cli.stacks import LAMBDA_SHARED_SOURCE_TARGETS
+
+        for source_rel, target_rels in LAMBDA_SHARED_SOURCE_TARGETS.items():
+            source = tmp_path / source_rel
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(b"# canonical v2\n")
+            for target_rel in target_rels:
+                target = tmp_path / target_rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"# stale v1\n")
+        return tmp_path
+
+    def test_drifted_copies_are_rewritten_to_canonical_bytes(self, tmp_path: Path) -> None:
+        from cli.stacks import LAMBDA_SHARED_SOURCE_TARGETS
+
+        root = self._tree(tmp_path)
+        _sync_shared_lambda_copies(root)
+        for source_rel, target_rels in LAMBDA_SHARED_SOURCE_TARGETS.items():
+            expected = (root / source_rel).read_bytes()
+            for target_rel in target_rels:
+                assert (root / target_rel).read_bytes() == expected, target_rel
+
+    def test_identical_copies_are_left_untouched(self, tmp_path: Path) -> None:
+        from cli.stacks import LAMBDA_SHARED_SOURCE_TARGETS
+
+        root = self._tree(tmp_path)
+        _sync_shared_lambda_copies(root)
+        # Second run: nothing differs, so no mtimes may change (the sync
+        # must not churn tracked files on every regeneration).
+        stats = {
+            target_rel: (root / target_rel).stat().st_mtime_ns
+            for target_rels in LAMBDA_SHARED_SOURCE_TARGETS.values()
+            for target_rel in target_rels
+        }
+        _sync_shared_lambda_copies(root)
+        for target_rel, mtime in stats.items():
+            assert (root / target_rel).stat().st_mtime_ns == mtime, target_rel
+
+    def test_missing_canonical_or_target_dir_is_skipped(self, tmp_path: Path) -> None:
+        # An empty tree exercises both guards: absent canonical sources and
+        # absent consumer directories must be non-fatal no-ops.
+        _sync_shared_lambda_copies(tmp_path)
