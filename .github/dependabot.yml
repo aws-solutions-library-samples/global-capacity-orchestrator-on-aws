@@ -24,6 +24,15 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    # codeql-action's subpath actions (init, analyze) live in one repo and
+    # must move to one commit together: lint:actions:pinning requires every
+    # reference to an action repo to resolve to a single SHA, so per-subpath
+    # PRs (observed as #287/#284) can never pass CI individually. Grouping
+    # makes Dependabot open one atomic PR for the whole repo.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   # Composite actions under .github/actions/*/action.yml.
   #
@@ -52,6 +61,12 @@ updates:
       - "github-actions"
 
   # Locked repository tooling (AWS CDK CLI, cdk-dia, markdownlint-cli2).
+  #
+  # Grouped for CI economy: these are independent tools, but their
+  # minor/patch updates are low-risk and each separate PR costs a full
+  # ~90-check CI run plus a lockfile rebase of every sibling PR. Majors are
+  # deliberately excluded from the group so a breaking bump still arrives
+  # as its own reviewable PR.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -61,8 +76,21 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - "dependencies"
+    groups:
+      repo-tooling-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Bundled AWS SDK clients for the inference response-streaming Lambda.
+  #
+  # The @aws-sdk/* clients version in lockstep from one monorepo release
+  # train; ungrouped they arrive as one PR per client (observed as
+  # #286/#285/#283 for a single release), each invalidating the others'
+  # package-lock.json. One grouped PR is the semantically honest unit.
+  # Majors stay individual for scrutiny.
   - package-ecosystem: "npm"
     directory: "/lambda/inference-streaming-proxy"
     schedule:
@@ -72,6 +100,13 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - "dependencies"
+    groups:
+      aws-sdk-minor-patch:
+        patterns:
+          - "@aws-sdk/*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Service image base layers.
   - package-ecosystem: "docker"
