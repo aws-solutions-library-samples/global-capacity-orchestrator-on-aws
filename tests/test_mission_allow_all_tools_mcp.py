@@ -38,7 +38,11 @@ import mission.state as mission_state  # noqa: E402
 import run_mcp  # noqa: E402
 from mission.state import FilesystemBackend  # noqa: E402
 
-# Canonical roster of the nine session-management tools.
+# Every tool the GCO_ENABLE_MISSION gate registers. Used only to strip the
+# singleton registry back to its default shape, so it has to be complete:
+# omitting one leaves it registered for whatever test runs next in this
+# process, and the registration assertions in tests/test_mcp_server.py then
+# see a tool their expectations don't allow for.
 _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "mission_start",
@@ -50,6 +54,7 @@ _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
         "mission_resume",
         "mission_history",
         "mission_list",
+        "mission_memory_search",
     }
 )
 

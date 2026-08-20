@@ -489,6 +489,18 @@ class TestToolRegistration:
                     "set_claude_code_default_model",
                 }
             )
+        # The six swarm_* tools register together under GCO_ENABLE_SWARM.
+        if "swarm_start" in names:
+            expected.update(
+                {
+                    "swarm_start",
+                    "swarm_iterate",
+                    "swarm_status",
+                    "swarm_abort",
+                    "swarm_list",
+                    "swarm_plan",
+                }
+            )
         # The ten mission_* tools register together under GCO_ENABLE_MISSION.
         if "mission_start" in names:
             expected.update(
