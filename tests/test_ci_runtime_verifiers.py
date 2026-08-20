@@ -28,6 +28,7 @@ EXPECTED_HANDLER_ENTRYPOINTS = {
     "regional-api-proxy": "lambda_handler",
     "secret-rotation": "lambda_handler",
     "tls-certificate-manager": "lambda_handler",
+    "traffic-dial-controller": "lambda_handler",
     "vector-ingest": "lambda_handler",
 }
 

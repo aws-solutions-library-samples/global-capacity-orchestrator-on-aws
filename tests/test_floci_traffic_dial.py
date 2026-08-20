@@ -138,16 +138,14 @@ class TestTrafficDialController:
         # The run summary must have really landed in SSM and round-trip as
         # JSON — this is what `gco capacity traffic-dial show` reads.
         stored = json.loads(
-            boto3.client("ssm").get_parameter(Name=f"/{project}/traffic-dial/state")[
-                "Parameter"
-            ]["Value"]
+            boto3.client("ssm").get_parameter(Name=f"/{project}/traffic-dial/state")["Parameter"][
+                "Value"
+            ]
         )
         assert stored["mode"] == "enforce"
         assert {d["region"] for d in stored["decisions"]} == {"us-east-1", "us-west-2"}
 
-    def test_decision_metrics_are_accepted_by_real_cloudwatch(
-        self, project, dial_environment
-    ):
+    def test_decision_metrics_are_accepted_by_real_cloudwatch(self, project, dial_environment):
         """PutMetricData into GCO/TrafficDial succeeds over the wire.
 
         Floci accepts CloudWatch writes (docs/FLOCI_TESTING.md); a malformed

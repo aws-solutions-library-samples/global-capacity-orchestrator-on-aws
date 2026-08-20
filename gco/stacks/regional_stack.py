@@ -4701,9 +4701,7 @@ class GCORegionalStack(Stack):
                 # would fail the whole convergence pipeline. The handler's
                 # defaults match the values it historically hardcoded.
                 ga_config = self.config.get_global_accelerator_config()
-                payload["GaHealthCheckPath"] = ga_config.get(
-                    "health_check_path", "/api/v1/health"
-                )
+                payload["GaHealthCheckPath"] = ga_config.get("health_check_path", "/api/v1/health")
                 payload["GaHealthCheckInterval"] = ga_config.get("health_check_interval", 30)
                 payload["GaHealthCheckThreshold"] = ga_config.get("health_check_threshold", 3)
 

@@ -325,9 +325,7 @@ def publish_metrics(cloudwatch_client: Any, decisions: list[dict[str, Any]]) -> 
         logger.warning("Failed to publish traffic-dial metrics: %s", exc)
 
 
-def store_state(
-    ssm_client: Any, project_name: str, state: dict[str, Any]
-) -> None:
+def store_state(ssm_client: Any, project_name: str, state: dict[str, Any]) -> None:
     """Persist the run summary for `gco capacity traffic-dial show`."""
     try:
         ssm_client.put_parameter(
@@ -352,9 +350,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     lookback_minutes = int(os.environ.get("LOOKBACK_MINUTES", str(DEFAULT_LOOKBACK_MINUTES)))
     min_dial = int(os.environ.get("MIN_DIAL_PERCENTAGE", str(DEFAULT_MIN_DIAL_PERCENTAGE)))
     max_step = int(os.environ.get("MAX_STEP_PERCENTAGE", str(DEFAULT_MAX_STEP_PERCENTAGE)))
-    full_health = int(
-        os.environ.get("FULL_HEALTH_PERCENTAGE", str(DEFAULT_FULL_HEALTH_PERCENTAGE))
-    )
+    full_health = int(os.environ.get("FULL_HEALTH_PERCENTAGE", str(DEFAULT_FULL_HEALTH_PERCENTAGE)))
     if not regions:
         logger.warning("REGIONS is empty; nothing to evaluate")
 
@@ -368,9 +364,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
     accelerator_status = str(accelerator.get("Accelerator", {}).get("Status", "UNKNOWN"))
     if accelerator_status != "DEPLOYED":
-        logger.info(
-            "Accelerator status is %s; skipping this cycle entirely", accelerator_status
-        )
+        logger.info("Accelerator status is %s; skipping this cycle entirely", accelerator_status)
         return {
             "mode": mode,
             "timestamp": now.isoformat(),
@@ -406,9 +400,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         current = int(group["traffic_dial"])
         if region in overrides:
-            decision.update(
-                {"new_dial": current, "target_dial": current, "reason": "override"}
-            )
+            decision.update({"new_dial": current, "target_dial": current, "reason": "override"})
             decisions.append(decision)
             continue
 
@@ -432,8 +424,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     guarded_region = apply_last_healthy_region_guard(decisions)
     if guarded_region:
         logger.warning(
-            "Every computed dial fell below 100; holding %s at 100 as the last "
-            "fully dialed region",
+            "Every computed dial fell below 100; holding %s at 100 as the last fully dialed region",
             guarded_region,
         )
 
@@ -466,9 +457,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         except ClientError as exc:
             errors += 1
             decision["error"] = str(exc)
-            logger.error(
-                "Failed to update traffic dial for %s: %s", decision["region"], exc
-            )
+            logger.error("Failed to update traffic dial for %s: %s", decision["region"], exc)
 
     # Phase 6 — publication.
     summary: dict[str, Any] = {

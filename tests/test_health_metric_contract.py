@@ -43,12 +43,8 @@ def _published_health_payload(is_healthy: bool) -> dict:
         return cloudwatch.put_metric_data.call_args.kwargs
 
 
-@pytest.mark.parametrize(
-    ("is_healthy", "expected_percent"), [(True, 100.0), (False, 0.0)]
-)
-def test_controller_query_matches_publisher_payload(
-    dial_handler, is_healthy, expected_percent
-):
+@pytest.mark.parametrize(("is_healthy", "expected_percent"), [(True, 100.0), (False, 0.0)])
+def test_controller_query_matches_publisher_payload(dial_handler, is_healthy, expected_percent):
     """The controller's query must select exactly what the monitor publishes.
 
     The published ClusterHealthy datapoint is fed back as the query result,
@@ -57,32 +53,25 @@ def test_controller_query_matches_publisher_payload(
     """
     published = _published_health_payload(is_healthy)
     cluster_healthy = next(
-        metric
-        for metric in published["MetricData"]
-        if metric["MetricName"] == "ClusterHealthy"
+        metric for metric in published["MetricData"] if metric["MetricName"] == "ClusterHealthy"
     )
 
     cloudwatch = MagicMock()
     cloudwatch.get_metric_data.return_value = {
         "MetricDataResults": [{"Values": [cluster_healthy["Value"]]}]
     }
-    value = dial_handler.healthy_percent(
-        REGION, CLUSTER, 15, cloudwatch_client=cloudwatch
-    )
+    value = dial_handler.healthy_percent(REGION, CLUSTER, 15, cloudwatch_client=cloudwatch)
     assert value == expected_percent
 
-    queried = cloudwatch.get_metric_data.call_args.kwargs["MetricDataQueries"][0][
-        "MetricStat"
-    ]["Metric"]
+    queried = cloudwatch.get_metric_data.call_args.kwargs["MetricDataQueries"][0]["MetricStat"][
+        "Metric"
+    ]
     assert queried["Namespace"] == published["Namespace"]
     assert queried["MetricName"] == cluster_healthy["MetricName"]
     # GetMetricData matches only on the exact dimension set: name-value pairs
     # must agree precisely, with nothing extra on either side.
-    assert {
-        (dimension["Name"], dimension["Value"]) for dimension in queried["Dimensions"]
-    } == {
-        (dimension["Name"], dimension["Value"])
-        for dimension in cluster_healthy["Dimensions"]
+    assert {(dimension["Name"], dimension["Value"]) for dimension in queried["Dimensions"]} == {
+        (dimension["Name"], dimension["Value"]) for dimension in cluster_healthy["Dimensions"]
     }
 
 

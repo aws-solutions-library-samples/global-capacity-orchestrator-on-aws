@@ -420,9 +420,7 @@ class TestTrafficDialValidation:
         """A zero floor is legal — TrafficDialPercentage accepts 0."""
         valid_context["global_accelerator"]["traffic_dial"] = {"min_dial_percentage": 0}
         config = ConfigLoader(MockApp(valid_context))
-        assert (
-            config.get_global_accelerator_config()["traffic_dial"]["min_dial_percentage"] == 0
-        )
+        assert config.get_global_accelerator_config()["traffic_dial"]["min_dial_percentage"] == 0
 
 
 class TestApiGatewayValidation:

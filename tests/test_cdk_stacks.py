@@ -411,8 +411,7 @@ class TestTrafficDialControllerSynth:
 
         functions = template.find_resources("AWS::Lambda::Function")
         assert any(
-            logical_id.startswith("TrafficDialControllerFunction")
-            for logical_id in functions
+            logical_id.startswith("TrafficDialControllerFunction") for logical_id in functions
         )
         template.has_resource_properties(
             "AWS::Lambda::Function",
@@ -456,9 +455,7 @@ class TestTrafficDialControllerSynth:
         template.has_resource_properties(
             "AWS::Lambda::Function",
             {
-                "Environment": {
-                    "Variables": assertions.Match.object_like({"MODE": "enforce"})
-                },
+                "Environment": {"Variables": assertions.Match.object_like({"MODE": "enforce"})},
             },
         )
 

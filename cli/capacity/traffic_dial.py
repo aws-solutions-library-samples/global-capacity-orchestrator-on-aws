@@ -139,7 +139,7 @@ class TrafficDialManager:
             raise
         try:
             state = json.loads(str(response["Parameter"]["Value"]))
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             logger.warning("Traffic-dial state parameter holds invalid JSON")
             return None
         return state if isinstance(state, dict) else None
@@ -149,9 +149,7 @@ class TrafficDialManager:
         descriptions = group.get("EndpointDescriptions", [])
         if not descriptions:
             return "no endpoints"
-        healthy = sum(
-            1 for endpoint in descriptions if endpoint.get("HealthState") == "HEALTHY"
-        )
+        healthy = sum(1 for endpoint in descriptions if endpoint.get("HealthState") == "HEALTHY")
         return f"{healthy}/{len(descriptions)} healthy"
 
     def get_status(self) -> list[RegionDialStatus]:
@@ -170,9 +168,7 @@ class TrafficDialManager:
         for region in sorted(groups):
             arn = groups[region]
             try:
-                group = ga.describe_endpoint_group(EndpointGroupArn=arn).get(
-                    "EndpointGroup", {}
-                )
+                group = ga.describe_endpoint_group(EndpointGroupArn=arn).get("EndpointGroup", {})
             except ClientError as exc:
                 raise TrafficDialError(
                     f"Failed to describe the {region} endpoint group: {exc}"
@@ -199,9 +195,7 @@ class TrafficDialManager:
         if not isinstance(percentage, int) or isinstance(percentage, bool):
             raise TrafficDialError(f"Percentage must be an integer, got {percentage!r}")
         if not 0 <= percentage <= 100:
-            raise TrafficDialError(
-                f"Percentage must be between 0 and 100, got {percentage}"
-            )
+            raise TrafficDialError(f"Percentage must be between 0 and 100, got {percentage}")
 
         groups = self.discover_endpoint_groups()
         if region not in groups:
@@ -242,9 +236,7 @@ class TrafficDialManager:
                 TrafficDialPercentage=float(percentage),
             ).get("EndpointGroup", {})
         except ClientError as exc:
-            raise TrafficDialError(
-                f"Failed to update the {region} traffic dial: {exc}"
-            ) from exc
+            raise TrafficDialError(f"Failed to update the {region} traffic dial: {exc}") from exc
 
         ssm = self._ssm_client()
         ssm.put_parameter(

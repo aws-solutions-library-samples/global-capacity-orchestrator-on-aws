@@ -251,9 +251,7 @@ class TestAwsHelpers:
             {"Error": {"Code": "Throttling", "Message": "slow down"}}, "GetMetricData"
         )
         assert (
-            handler.healthy_percent(
-                "us-east-1", "gco-us-east-1", 15, cloudwatch_client=cloudwatch
-            )
+            handler.healthy_percent("us-east-1", "gco-us-east-1", 15, cloudwatch_client=cloudwatch)
             is None
         )
 
@@ -277,9 +275,7 @@ class TestLambdaHandler:
         ga.list_endpoint_groups.assert_not_called()
         ga.update_endpoint_group.assert_not_called()
 
-    def test_enforce_dials_degraded_region_with_dial_only_update(
-        self, dial_module, dial_env
-    ):
+    def test_enforce_dials_degraded_region_with_dial_only_update(self, dial_module, dial_env):
         handler, mock_boto_client = dial_module
         ga = _ga_stub()
         ssm = _ssm_stub()
@@ -351,9 +347,7 @@ class TestLambdaHandler:
     def test_override_region_is_left_alone(self, dial_module, dial_env):
         handler, mock_boto_client = dial_module
         ga = _ga_stub(west_dial=25.0)
-        ssm = _ssm_stub(
-            [{"Name": "/gco/traffic-dial/override-us-west-2", "Value": "25"}]
-        )
+        ssm = _ssm_stub([{"Name": "/gco/traffic-dial/override-us-west-2", "Value": "25"}])
         west_cloudwatch = MagicMock()
         _route_clients(
             mock_boto_client,
@@ -449,9 +443,7 @@ class TestLambdaHandler:
         assert by_region["us-west-2"]["applied"] is False
         assert "AccessDenied" in by_region["us-west-2"]["error"]
 
-    def test_recovering_region_is_guard_promoted_past_the_step_limit(
-        self, dial_module, dial_env
-    ):
+    def test_recovering_region_is_guard_promoted_past_the_step_limit(self, dial_module, dial_env):
         """A recovering region overlapping a draining one triggers the guard.
 
         Observed live (2026-08-19, account-validation run): east recovering at
@@ -510,6 +502,4 @@ class TestLambdaHandler:
         assert by_region["us-east-1"]["new_dial"] == 100
         assert by_region["us-west-2"]["new_dial"] == 80
         ga.update_endpoint_group.assert_called_once()
-        assert (
-            ga.update_endpoint_group.call_args.kwargs["EndpointGroupArn"] == GROUP_WEST
-        )
+        assert ga.update_endpoint_group.call_args.kwargs["EndpointGroupArn"] == GROUP_WEST

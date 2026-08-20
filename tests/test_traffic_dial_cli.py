@@ -38,8 +38,8 @@ def manager():
     ssm = MagicMock()
     ga = MagicMock()
     with patch("cli.capacity.traffic_dial.boto3.Session") as session_cls:
-        session_cls.return_value.client.side_effect = (
-            lambda service, region_name=None: ssm if service == "ssm" else ga
+        session_cls.return_value.client.side_effect = lambda service, region_name=None: (
+            ssm if service == "ssm" else ga
         )
         yield TrafficDialManager(config), ssm, ga
 
@@ -277,22 +277,17 @@ class TestClearOverride:
         dial_manager, ssm, _ = manager
         assert dial_manager.clear_override("us-west-2") is True
         assert (
-            ssm.delete_parameter.call_args.kwargs["Name"]
-            == "/gco/traffic-dial/override-us-west-2"
+            ssm.delete_parameter.call_args.kwargs["Name"] == "/gco/traffic-dial/override-us-west-2"
         )
 
     def test_returns_false_when_no_override_existed(self, manager):
         dial_manager, ssm, _ = manager
-        ssm.delete_parameter.side_effect = _client_error(
-            "ParameterNotFound", "DeleteParameter"
-        )
+        ssm.delete_parameter.side_effect = _client_error("ParameterNotFound", "DeleteParameter")
         assert dial_manager.clear_override("us-west-2") is False
 
     def test_other_errors_propagate(self, manager):
         dial_manager, ssm, _ = manager
-        ssm.delete_parameter.side_effect = _client_error(
-            "AccessDeniedException", "DeleteParameter"
-        )
+        ssm.delete_parameter.side_effect = _client_error("AccessDeniedException", "DeleteParameter")
         with pytest.raises(ClientError):
             dial_manager.clear_override("us-west-2")
 
@@ -300,9 +295,7 @@ class TestClearOverride:
 class TestCommands:
     @pytest.fixture
     def mock_manager(self):
-        with patch(
-            "cli.capacity.traffic_dial.get_traffic_dial_manager"
-        ) as factory:
+        with patch("cli.capacity.traffic_dial.get_traffic_dial_manager") as factory:
             yield factory.return_value
 
     def test_show_renders_status_and_controller_line(self, mock_manager):
