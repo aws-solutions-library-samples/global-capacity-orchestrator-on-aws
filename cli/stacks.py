@@ -129,6 +129,25 @@ _CLOUDFORMATION_DELETE_POLL_SECONDS = 15.0
 _CLOUDFORMATION_DELETE_HEARTBEAT_SECONDS = 60.0
 _BOOTSTRAP_HEALTHY_STATUSES = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE"})
 _LIVE_VALIDATION_PROVIDER_LOG_CONTEXT = "gco_live_validation_retain_provider_log_groups"
+
+# Canonical shared Lambda sources and the checked-in copies that must mirror
+# them, as POSIX paths relative to the project root. This is the single map
+# behind StackManager._sync_lambda_sources (deploy-time enforcement) and
+# tests/test_lambda_shared_sources.py (commit-time enforcement): the copies
+# exist so each Lambda's build directory is self-contained, and they must stay
+# byte-identical to their canonical source or a deploy rewrites tracked files
+# and dirties the worktree mid-run.
+LAMBDA_SHARED_SOURCE_TARGETS: dict[str, tuple[str, ...]] = {
+    "lambda/proxy-shared/proxy_utils.py": (
+        "lambda/api-gateway-proxy/proxy_utils.py",
+        "lambda/regional-api-proxy/proxy_utils.py",
+    ),
+    "lambda/tls-shared/backend_tls.py": (
+        "lambda/proxy-shared/backend_tls.py",
+        "lambda/api-gateway-proxy/backend_tls.py",
+        "lambda/regional-api-proxy/backend_tls.py",
+    ),
+}
 StackAuthorizationCallback = Callable[[str, str, str], None]
 CleanupOutcomeCallback = Callable[[str, dict[str, Any]], None]
 ChangeSetPreparedCallback = Callable[[str, str, str, str, str], None]
@@ -1235,27 +1254,20 @@ class StackManager:
 
         Checked-in copies keep raw CDK evaluation deterministic. Deploy updates
         those copies before generated assets are checked, and never mutates a
-        generated final build tree in place.
+        generated final build tree in place. The source->targets mapping lives
+        in the module-level ``LAMBDA_SHARED_SOURCE_TARGETS`` so
+        ``tests/test_lambda_shared_sources.py`` can hold the checked-in copies
+        byte-identical to their canonical sources without restating the map.
         """
         if getattr(self, "_lambda_sources_synced", False):
             return
 
-        lambda_dir = self.project_root / "lambda"
-        shared_source_targets = {
-            lambda_dir / "proxy-shared" / "proxy_utils.py": [
-                lambda_dir / "api-gateway-proxy" / "proxy_utils.py",
-                lambda_dir / "regional-api-proxy" / "proxy_utils.py",
-            ],
-            lambda_dir / "tls-shared" / "backend_tls.py": [
-                lambda_dir / "proxy-shared" / "backend_tls.py",
-                lambda_dir / "api-gateway-proxy" / "backend_tls.py",
-                lambda_dir / "regional-api-proxy" / "backend_tls.py",
-            ],
-        }
-        for shared_source, targets in shared_source_targets.items():
+        for source_rel, target_rels in LAMBDA_SHARED_SOURCE_TARGETS.items():
+            shared_source = self.project_root / source_rel
             if not shared_source.exists():
                 continue
-            for target in targets:
+            for target_rel in target_rels:
+                target = self.project_root / target_rel
                 if target.parent.exists():
                     _atomic_copy_file(shared_source, target)
         self._lambda_sources_synced = True
