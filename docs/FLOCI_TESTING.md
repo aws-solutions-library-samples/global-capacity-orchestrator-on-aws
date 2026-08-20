@@ -36,11 +36,18 @@ image as a service container and runs two jobs — `floci:integration` (the
 `gco release validate --emulator-endpoint`, preflight + baseline subset).
 No AWS credentials exist anywhere in the workflow.
 
+Neither job names its modules: each discovers them by glob, so a new Floci
+test runs without a workflow edit and cannot silently go uncollected. The
+split is a filename convention — name a module `tests/test_floci_*_e2e.py`
+to place it in `floci:e2e:release-validate` (which provides Node, npm, and
+the CDK CLI); any other `tests/test_floci_*.py` lands in `floci:integration`.
+The globs are complements, so their union is always the whole layer.
+
 **Locally (optional):**
 
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
-  floci/floci:1.6.0    # finch/podman work identically
+  floci/floci:1.7.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
 

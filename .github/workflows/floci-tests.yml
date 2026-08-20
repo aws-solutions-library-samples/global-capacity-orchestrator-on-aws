@@ -16,6 +16,14 @@
 #     full preflight (identity pinning, STS, region discovery, cdk list over
 #     the real cloud assembly, CDKToolkit health), baseline capture, reports
 #
+# Both jobs DISCOVER their modules instead of naming them, so adding a Floci
+# test never needs a workflow edit and can never silently go unrun. The split
+# is a filename convention: `tests/test_floci_*_e2e.py` belongs to
+# floci:e2e:release-validate (it needs Node, npm, and the CDK CLI), and every
+# other `tests/test_floci_*.py` belongs to floci:integration. The two globs
+# are complements, so their union is always the full Floci layer. Name a new
+# E2E-shaped module `*_e2e.py` and it lands in the right job automatically.
+#
 # Safety: NO AWS credentials exist anywhere in this workflow. The test layer
 # invents a random 12-digit account id per session and refuses to run unless
 # STS echoes it back — behavior real AWS cannot imitate, because a fabricated
@@ -99,17 +107,32 @@ jobs:
         # -n auto is safe against one shared emulator: the session fixture
         # gives each xdist worker its own random emulator account, and every
         # resource name carries a per-test suffix.
+        #
+        # Every tests/test_floci_*.py runs here except the *_e2e.py modules,
+        # which need Node/CDK and run in floci:e2e:release-validate. The list
+        # is discovered so a new Floci test cannot be added without running.
+        # `pytest --ignore-glob` is deliberately NOT used: pytest applies it to
+        # directory recursion only, not to paths named on the command line, so
+        # it would silently let the E2E module through. The glob + case filter
+        # keeps shellcheck happy (no `ls | grep`) and the `-e` test covers the
+        # no-match case, where bash leaves the pattern unexpanded.
         run: |
-          pytest \
-            tests/test_floci_dynamodb_stores.py \
-            tests/test_floci_sqs_job_path.py \
-            tests/test_floci_secrets_and_cost.py \
-            tests/test_floci_stack_discovery.py \
-            tests/test_floci_harness_inventory.py \
-            tests/test_floci_lambda_orchestration.py \
-            tests/test_floci_lambda_regional.py \
-            tests/test_floci_mission_memory.py \
-            tests/test_floci_traffic_dial.py \
+          set -euo pipefail
+          integration_tests=()
+          for test_file in tests/test_floci_*.py; do
+            [ -e "$test_file" ] || continue
+            case "$test_file" in
+              *_e2e.py) continue ;;
+            esac
+            integration_tests+=("$test_file")
+          done
+          if [ "${#integration_tests[@]}" -eq 0 ]; then
+            echo "::error::No Floci integration modules matched tests/test_floci_*.py"
+            exit 1
+          fi
+          printf 'Discovered %d Floci integration module(s):\n' "${#integration_tests[@]}"
+          printf '  %s\n' "${integration_tests[@]}"
+          pytest "${integration_tests[@]}" \
             -v --tb=short -n auto \
             --junitxml=floci-integration-report.xml
       - name: Floci container logs
@@ -182,9 +205,25 @@ jobs:
           exit 1
       - name: Run the live-validation E2E against the emulator
         # The Node CDK CLI must be resolvable for the harness's `cdk list`.
+        #
+        # Discovered, not transcribed: these are exactly the modules
+        # floci:integration excludes, so the two jobs stay mutually exhaustive
+        # over tests/test_floci_*.py without a hand-maintained list.
         run: |
+          set -euo pipefail
           export PATH="$PWD/node_modules/.bin:$PATH"
-          pytest tests/test_floci_live_validation_e2e.py \
+          e2e_tests=()
+          for test_file in tests/test_floci_*_e2e.py; do
+            [ -e "$test_file" ] || continue
+            e2e_tests+=("$test_file")
+          done
+          if [ "${#e2e_tests[@]}" -eq 0 ]; then
+            echo "::error::No Floci E2E modules matched tests/test_floci_*_e2e.py"
+            exit 1
+          fi
+          printf 'Discovered %d Floci E2E module(s):\n' "${#e2e_tests[@]}"
+          printf '  %s\n' "${e2e_tests[@]}"
+          pytest "${e2e_tests[@]}" \
             -v --tb=short \
             --junitxml=floci-e2e-report.xml
       - name: Floci container logs
