@@ -1317,10 +1317,14 @@ jobs:
           kind load docker-image inference-monitor:ci --name gco-ci
           kind load docker-image inference-proxy:ci --name gco-ci
       - name: Apply namespaces + RBAC
+        # 05-priority-classes.yaml must land before the deployments: pod
+        # admission rejects an unresolvable priorityClassName, and every
+        # platform pod spec references gco-platform-critical.
         run: |
           kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/05-priority-classes.yaml
       - name: Apply NetworkPolicies (Calico-enforced)
         # The whole point of the Calico CNI install is that kindnet silently
         # accepts NetworkPolicy but does not enforce it. Apply the policies
