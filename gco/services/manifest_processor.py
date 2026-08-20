@@ -441,7 +441,7 @@ class NoAliasSafeLoader(yaml.SafeLoader):
     """
 
     def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(yaml.AliasEvent):  # type: ignore[no-untyped-call]
+        if self.check_event(yaml.AliasEvent):
             event = self.get_event()  # type: ignore[no-untyped-call]
             raise yaml.composer.ComposerError(
                 None,
