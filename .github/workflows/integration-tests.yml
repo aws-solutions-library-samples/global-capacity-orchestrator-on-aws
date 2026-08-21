@@ -15,12 +15,12 @@
 #   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
-#   - integration:docker:helm-installer           — build + `helm version`/`kubectl version`
+#   - integration:docker:helm-installer           — build + `helm version`/`kubectl version` + RIE invoke + read-only helm render
 #   - integration:docker:inference-monitor        — build + import smoke + functional metrics/resilience/shutdown contract
 #   - integration:docker:inference-proxy          — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:manifest-processor       — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:queue-processor          — build + import smoke + moto-SQS consume/reject/exit-code contract
-#   - integration:docker:tls-certificate-manager  — build + Lambda handler import
+#   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
@@ -943,6 +943,39 @@ jobs:
         run: >-
           python3 .github/scripts/verify_container_tool_versions.py
           helm-installer --image helm-installer:ci
+      - name: Invoke the handler through the Runtime Interface Emulator
+        # Boots the image exactly as Lambda does (read-only root, tmpfs /tmp)
+        # and invokes handler.lambda_handler through the bundled RIE. The
+        # probe event omits "Chart" so handle_task raises KeyError('Chart')
+        # at dispatch — deterministically, before its first AWS SDK call —
+        # proving the runtime bootstrap, the handler's full import graph,
+        # the CMD wiring, and event decode inside the deployable artifact.
+        run: >-
+          bash .github/scripts/rie_smoke_test.sh
+          --image helm-installer:ci
+          --name helm-installer-rie
+          --host-port 19000
+          --event '{"Action": "install_chart", "ClusterName": "ci-smoke", "Region": "us-east-1"}'
+          --expect-error-type KeyError
+          --expect-message-substring "Chart"
+      - name: Render a chart under the Lambda filesystem contract
+        # helm must operate with a read-only root and every writable path on
+        # /tmp — the exact HELM_*_HOME redirection handler.py performs
+        # (Lambda's filesystem is read-only outside /tmp). A helm release
+        # that starts writing anywhere else fails here instead of at the
+        # first stack deploy. kubectl's client-side generator is asserted
+        # under the same constraints.
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --entrypoint /bin/sh helm-installer:ci -c '
+            set -e
+            export HOME=/tmp HELM_CACHE_HOME=/tmp/.helm/cache HELM_CONFIG_HOME=/tmp/.helm/config HELM_DATA_HOME=/tmp/.helm/data
+            mkdir -p /tmp/ci-chart/templates
+            printf "apiVersion: v2\nname: ci-smoke\nversion: 0.0.1\n" > /tmp/ci-chart/Chart.yaml
+            printf "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ci-smoke-cm\n" > /tmp/ci-chart/templates/cm.yaml
+            helm template ci-smoke /tmp/ci-chart | grep -q "name: ci-smoke-cm"
+            kubectl create configmap ci-smoke --from-literal=k=v --dry-run=client -o yaml | grep -q "name: ci-smoke"
+            echo "helm render + kubectl client dry-run OK under read-only root"
+          '
 
   integration-docker-tls-certificate-manager:
     name: "integration:docker:tls-certificate-manager"
@@ -964,6 +997,24 @@ jobs:
         run: |
           docker run --rm --entrypoint python tls-certificate-manager:ci \
             -c "import handler; print('tls-certificate-manager import OK:', handler.__name__)"
+      - name: Invoke the handler through the Runtime Interface Emulator
+        # Boots the image exactly as Lambda does (read-only root, tmpfs /tmp)
+        # and invokes handler.lambda_handler through the bundled RIE. The
+        # probe event carries a full valid ResourceProperties block, so the
+        # whole ManagerConfig.from_event + validate() layer runs before the
+        # unsupported RequestType raises at dispatch — deterministically,
+        # before the handler's first AWS SDK call.
+        run: >-
+          bash .github/scripts/rie_smoke_test.sh
+          --image tls-certificate-manager:ci
+          --name tls-certificate-manager-rie
+          --host-port 19001
+          --event '{"RequestType": "CiSmoke", "ResourceProperties": {"Regions": ["us-east-1"],
+          "ServerName": "backend.ci.internal", "ProjectName": "gco", "RegistryRegion": "us-east-2",
+          "RootCaParameterName": "/gco/backend-tls/root-ca",
+          "CertificateParameterPrefix": "/gco/backend-tls/certificate-"}}'
+          --expect-error-type ValueError
+          --expect-message-substring "Unsupported certificate manager event"
 
   integration-docker-dev-container:
     name: "integration:docker:dev-container (${{ matrix.arch }})"
