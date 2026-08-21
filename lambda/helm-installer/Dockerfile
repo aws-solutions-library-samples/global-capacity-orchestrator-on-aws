@@ -47,8 +47,8 @@ RUN dnf install -y tar gzip \
 # the exact release binary against a non-overridable trust anchor.
 RUN curl --fail --show-error --location --retry 3 \
         --output /tmp/kubectl \
-        "https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl" \
-    && echo "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336  /tmp/kubectl" \
+        "https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl" \
+    && echo "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a  /tmp/kubectl" \
         | sha256sum -c - \
     && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
     && rm -f /tmp/kubectl \

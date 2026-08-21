@@ -76,7 +76,7 @@ def _dev_outputs() -> dict[tuple[str, ...], str]:
             "version",
             "--client=true",
             "--output=json",
-        ): json.dumps({"clientVersion": {"gitVersion": "v1.36.3"}}),
+        ): json.dumps({"clientVersion": {"gitVersion": "v1.36.4"}}),
     }
 
 
@@ -104,7 +104,7 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
         "Buildx": "v0.36.1",
         "uv": "0.12.5",
         "uvx": "0.12.5",
-        "kubectl": "v1.36.3",
+        "kubectl": "v1.36.4",
     }
 
 
@@ -122,7 +122,7 @@ def test_dev_verifier_rejects_a_valid_but_wrong_runtime_version(
         )
 
 
-def _helm_runner(*, kubectl_version: str = "v1.36.3"):
+def _helm_runner(*, kubectl_version: str = "v1.36.4"):
     outputs = {
         (
             "docker",
@@ -162,7 +162,7 @@ def test_helm_installer_verifier_accepts_matching_runtime_versions(
         runner=_helm_runner(),
     )
 
-    assert actual == {"Helm": "v4.2.4", "kubectl": "v1.36.3"}
+    assert actual == {"Helm": "v4.2.4", "kubectl": "v1.36.4"}
 
 
 def test_helm_installer_verifier_rejects_a_mismatched_runtime_version(

@@ -56,8 +56,8 @@ def _workflow_step(relative_path: str, step_name: str) -> str:
         ),
         (
             "lambda/helm-installer/Dockerfile",
-            "v1.36.3",
-            "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
+            "v1.36.4",
+            "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a",
         ),
     ],
 )
@@ -405,9 +405,9 @@ def test_helm_installer_checksums_are_non_overridable_trust_anchors() -> None:
     assert (
         "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3  /tmp/helm.tar.gz"
     ) in helm_section
-    assert "release/v1.36.3/bin/linux/amd64/kubectl" in kubectl_section
+    assert "release/v1.36.4/bin/linux/amd64/kubectl" in kubectl_section
     assert (
-        "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336  /tmp/kubectl"
+        "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a  /tmp/kubectl"
     ) in kubectl_section
 
 

@@ -19,41 +19,6 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# CVE-2026-25680, CVE-2026-25681, CVE-2026-27136, CVE-2026-33814,
-# CVE-2026-39821, CVE-2026-42502, CVE-2026-42506 — golang.org/x/net v0.49.0,
-# statically linked into the pinned kubectl binary (ARG KUBECTL_VERSION in
-# Dockerfile.dev; the identical v1.36.3 is fetched by
-# lambda/helm-installer/Dockerfile). Surfaced by security:trivy:container-scan
-# on the GCO dev image and the helm-installer Lambda image — the only two
-# scanned images that carry kubectl. Fixed in x/net 0.53.0 (CVE-2026-33814)
-# and 0.55.0 (the other six).
-#
-# Not yet clearable by a pin bump: v1.36.3 is the latest stable kubectl
-# (https://dl.k8s.io/release/stable-1.36.txt) and the whole release-1.36
-# branch still pins x/net v0.49.0. The bump to x/net >= 0.55.0 currently lives
-# only on kubernetes master, so it lands in a future kubectl patch, not a
-# release we can pull today.
-#
-# Low runtime risk: the flagged surfaces are not reached by kubectl acting as
-# an HTTP/2 client against a trusted EKS API server — x/net/html.Render
-# (CVE-2026-25680 / -25681 / -27136 / -42502 / -42506) renders HTML the client
-# never produces, x/net/idna punycode (CVE-2026-39821) is off the API path,
-# and the HTTP/2 SETTINGS-frame DoS (CVE-2026-33814) is a server-side parse
-# while kubectl is the client. The dev image is a contributor/CI tool that is
-# never deployed.
-#
-# Clears when a kubectl release ships with x/net >= 0.55.0: bump KUBECTL_VERSION
-# in Dockerfile.dev and the pin in lambda/helm-installer/Dockerfile, then drop
-# these entries. Advisory: https://avd.aquasec.com/nvd/cve-2026-25680 (and the
-# matching nvd/cve-2026-XXXXX page for each ID above).
-CVE-2026-25680 exp:2026-09-22
-CVE-2026-25681 exp:2026-09-22
-CVE-2026-27136 exp:2026-09-22
-CVE-2026-33814 exp:2026-09-22
-CVE-2026-39821 exp:2026-09-22
-CVE-2026-42502 exp:2026-09-22
-CVE-2026-42506 exp:2026-09-22
-
 # CVE-2026-34040 — github.com/docker/docker v28.5.2 (Moby authorization
 # bypass), statically linked into the docker-buildx CLI plugin that
 # Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
@@ -187,44 +152,21 @@ CVE-2026-69152 exp:2026-09-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-69192
 CVE-2026-69192 exp:2026-09-22
 
-# CVE-2026-56852 — golang.org/x/text at v0.33.0, statically linked into the
-# pinned kubectl binary (ARG KUBECTL_VERSION in Dockerfile.dev; the identical
-# v1.36.3 is fetched by lambda/helm-installer/Dockerfile). Surfaced by
-# security:trivy:container-scan on the GCO dev image and the helm-installer
-# Lambda image. Fixed in x/text 0.39.0.
-#
-# Not yet clearable by a pin bump: re-checked 2026-07-30 — v1.36.3 is still
-# the latest stable kubectl on any release line
-# (https://dl.k8s.io/release/stable.txt). The docker-buildx half of this
-# entry cleared with the bump to buildx v0.36.0, which pins x/text v0.40.0;
-# kubectl is now the only binary carrying the flagged module.
-#
-# Low runtime risk: the flaw is a denial-of-service only — norm.Iter enters
-# an infinite loop on invalid UTF-8 input (golang/go#80142). kubectl here
-# processes operator-authored manifests, not untrusted remote input, and both
-# images are contributor/CI/deploy tooling rather than long-lived network
-# services.
-#
-# Clears when a kubectl release ships with x/text >= 0.39.0: bump
-# KUBECTL_VERSION in Dockerfile.dev and the kubectl pin in
-# lambda/helm-installer/Dockerfile, then drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-56852
-CVE-2026-56852 exp:2026-09-22
-
 # CVE-2026-50163 (GHSA-77gc-fj98-665h) — oras.land/oras-go/v2 v2.6.1
 # information disclosure / arbitrary file access via crafted tarball
 # hardlinks, statically linked into the pinned Helm binary
-# (helm-v4.2.3-linux-amd64, lambda/helm-installer/Dockerfile). Surfaced by
+# (helm-v4.2.4-linux-amd64, lambda/helm-installer/Dockerfile). Surfaced by
 # security:trivy:container-scan on the helm-installer Lambda image — the
 # only scanned image that carries helm. Fixed in oras-go v2.6.2.
 #
 # Not introduced by any change of ours: the advisory reached the Trivy DB
 # after the last green main run and appeared on an unchanged helm binary.
 #
-# Not yet clearable by a pin bump: checked 2026-08-05 — v4.2.3 is the
-# latest helm release on both active lines (v3.21.3 likewise) and both
-# still pin oras-go v2.6.1; the bump to v2.6.2 is merged on helm master
-# only, so it lands in a future helm patch release.
+# Not yet clearable by a pin bump: re-checked 2026-08-21 — v4.2.4 (the
+# release this branch now pins) is the latest helm on both active lines
+# and `go version -m` on its release binary still reports oras-go v2.6.1;
+# the bump to v2.6.2 is merged on helm master only, so it lands in a
+# future helm patch release.
 #
 # Low runtime risk: the flagged path is OCI-registry chart *pull*
 # extraction. The helm-installer Lambda pulls exactly the four
@@ -241,52 +183,18 @@ CVE-2026-56852 exp:2026-09-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-09-22
 
-# CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
-# (msgpack 1.1.2, fixed 1.2.1) — both live only inside the AWS CLI v2
-# vendored bundle (usr/local/aws-cli/v2/2.36.19/dist/) in the dev image,
-# not in our resolvable dependency tree (msgpack appears nowhere in
-# requirements-lock.txt, and site-packages setuptools is current).
-#
-# Not clearable by a pin bump: 2.36.19 is the newest AWS CLI v2 release
-# (this PR just bumped to it); the vendored versions are chosen by the AWS
-# CLI's own build. Clears when a newer AWS CLI release rebuilds its bundle
-# with patched deps — bump AWSCLI_VERSION in Dockerfile.dev and re-check.
-#
-# Low runtime risk: the dev image is a contributor/CI tool that is never
-# deployed; the flagged code paths run only inside `aws` CLI invocations
-# against operator-supplied input.
-#
-# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
-#             https://github.com/advisories/GHSA-6v7p-g79w-8964
-CVE-2025-47273 exp:2026-10-15
-GHSA-6v7p-g79w-8964 exp:2026-10-15
-
-# -----------------------------------------------------------------------------
-# CVE-2026-46600 — golang.org/x/net/dns/dnsmessage panic on crafted SVCB/HTTPS
-# resource records (HIGH, fixed in x/net 0.56.0).
-#
-# Flagged in two pinned Go binaries: helm v4.2.3 in the helm-installer
-# image, and kubectl in the dev image. Not clearable by a pin bump today:
-# helm v4.2.3 is the newest upstream release (checked 2026-08-12) with no
-# rebuild against patched x/net yet. Clears per binary as upstream ships
-# rebuilds with x/net >= 0.56.0 — bump the helm pin in
-# lambda/helm-installer/Dockerfile and the kubectl pin in Dockerfile.dev,
-# then re-check both scans.
-#
-# Low runtime risk: the flaw is in DNS response parsing. The helm-installer
-# Lambda only invokes helm against pinned chart registries inside the VPC
-# with VPC-provided DNS, and the dev image is a contributor/CI tool that is
-# never deployed.
-#
-# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2026-46600
-#             https://access.redhat.com/security/cve/cve-2026-46600
-CVE-2026-46600 exp:2026-10-15
 # -----------------------------------------------------------------------------
 # CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
 # HTTP/2), CVE-2026-56858 (html/template XSS), CVE-2026-56859 (encoding/xml
-# DoS), CVE-2026-56860 (net/url DoS), CVE-2026-56862 (crypto/tls DoS) — all
-# six are Go STDLIB flaws in binaries built with go1.26.5, fixed in Go
-# 1.25.13 / 1.26.6 / 1.27.0-rc.3.
+# DoS), CVE-2026-56860 (net/url DoS), CVE-2026-56862 (crypto/tls DoS),
+# CVE-2026-39821 (x/net punycode flaw with a matching net/idna stdlib copy)
+# and CVE-2026-46600 (dns/dnsmessage panic on crafted SVCB/HTTPS records,
+# likewise present in the stdlib resolver) — all eight are Go STDLIB flaws
+# in binaries built with go1.26.5, fixed in Go 1.25.13 / 1.26.6 /
+# 1.27.0-rc.3. The last two formerly sat in this file as golang.org/x/net
+# suppressions; the kubectl v1.36.4 / helm v4.2.4 pins ship x/net 0.56.0,
+# which cleared the module finding and left only this stdlib copy
+# (verified 2026-08-21 with trivy rootfs against both release binaries).
 #
 # Not introduced by any change of ours: the Security workflow was green on
 # 29f8aeca (2026-08-15 06:53Z) and red on the next commit three hours later,
@@ -300,12 +208,13 @@ CVE-2026-46600 exp:2026-10-15
 #   tls-certificate-manager                 aws-lambda-rie
 #
 # Not clearable by a pin bump — each upstream checked 2026-08-15:
-#   kubectl        v1.36.3 IS stable and stable-1.36
-#                  (https://dl.k8s.io/release/stable.txt), so there is no
+#   kubectl        v1.36.4 (the release this branch now pins) IS stable and
+#                  stable-1.36 (https://dl.k8s.io/release/stable.txt), and
+#                  `go version -m` on it reports go1.26.5, so there is no
 #                  newer release to move to.
-#   helm           v4.2.4 exists (we pin v4.2.3), but BOTH release binaries
-#                  report go1.26.5 via `go version -m`, so the bump would not
-#                  clear these findings. Deferred to the next helm release
+#   helm           v4.2.4 (the release this branch now pins) is the newest
+#                  upstream and its release binary likewise reports go1.26.5
+#                  (re-checked 2026-08-21). Deferred to the next helm release
 #                  that is actually rebuilt on a patched Go.
 #   docker         29.7.2 is the newest static build on
 #                  download.docker.com/linux/static/stable.
@@ -344,6 +253,8 @@ CVE-2026-56858 exp:2026-10-15
 CVE-2026-56859 exp:2026-10-15
 CVE-2026-56860 exp:2026-10-15
 CVE-2026-56862 exp:2026-10-15
+CVE-2026-39821 exp:2026-10-15
+CVE-2026-46600 exp:2026-10-15
 # -----------------------------------------------------------------------------
 # CVE-2026-56864 (a malicious GOSUMDB could serve arbitrary module content) and
 # CVE-2026-56865 (a malicious GOPROXY could forge sumdb responses) —
