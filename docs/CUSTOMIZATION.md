@@ -667,6 +667,11 @@ accelerator is mid-deployment, and per-region manual overrides
 to `enforce`. Existing connections are never terminated by a dial change —
 only new connections are steered.
 
+The controller state and any manual overrides live as runtime SSM parameters
+under `/{project}/traffic-dial` (written outside CloudFormation). A fully
+successful `gco stacks destroy-all` purges that tree so a stale override
+cannot silently pin a region's dial in the account's next deployment.
+
 #### Inference Health Watchdog
 
 The inference monitor tracks how long each endpoint has zero ready replicas. Inference traffic uses the shared Gateway API route but terminates at the dedicated authenticated inference-proxy service, so an individual model does not own an ALB target group and the watchdog never changes shared ALB rules.

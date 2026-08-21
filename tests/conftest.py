@@ -155,6 +155,7 @@ _DESTROY_CLEANUP_OWNERS = {
     "TestEksSgWatchdog",
     "TestImplicitLogGroupCleanup",
     "TestBastionIamCleanup",
+    "TestTrafficDialParameterCleanup",
     "TestDestroyOrchestratedImplicitCleanupWiring",
 }
 
@@ -218,6 +219,13 @@ def _no_real_destroy_cleanup_aws_calls(request):
             _stacks.StackManager,
             "_cleanup_bastion_iam",
             return_value={"completed_steps": 0, "absent_steps": 0, "errors": []},
+        ),
+        # The success-only runtime traffic-dial parameter purge is SSM-backed;
+        # left real it would delete /{project}/traffic-dial/* in a live account.
+        patch.object(
+            _stacks.StackManager,
+            "_cleanup_traffic_dial_parameters",
+            return_value={"deleted": [], "errors": []},
         ),
     ):
         yield

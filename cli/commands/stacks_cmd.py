@@ -278,6 +278,10 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
     Automatically retries up to 3 times (with 30s waits) if any stacks fail,
     which handles transient issues like orphaned resources during teardown.
 
+    After a fully successful teardown this also purges the runtime
+    /{project}/traffic-dial SSM parameters (controller state and manual
+    overrides), which are written outside CloudFormation.
+
     Use --parallel to destroy regional stacks concurrently, which can
     significantly reduce total teardown time when destroying multiple
     regional stacks.

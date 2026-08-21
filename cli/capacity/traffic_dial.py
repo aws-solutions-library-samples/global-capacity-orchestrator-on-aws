@@ -11,6 +11,11 @@ scheduled controller (``lambda/traffic-dial-controller``):
   by ``set``; the controller never touches an overridden region until
   ``clear`` removes the parameter.
 
+Both are runtime-written, so CloudFormation never deletes them;
+``purge_runtime_parameters`` removes the whole tree and is invoked by a
+fully successful ``gco stacks destroy-all`` so a stale override can never
+pin a region in this account's next deployment.
+
 ``set`` applies the dial via ``UpdateEndpointGroup`` carrying *only*
 ``TrafficDialPercentage``: the API patches omitted fields, and omitting
 ``EndpointConfigurations`` preserves the registered ALB endpoint.
@@ -258,6 +263,40 @@ class TrafficDialManager:
             endpoint_group_arn=groups[region],
             warnings=warnings,
         )
+
+    def purge_runtime_parameters(self) -> list[str]:
+        """Delete every runtime parameter under ``/{project}/traffic-dial``.
+
+        The controller Lambda writes ``state`` and ``gco capacity
+        traffic-dial set`` writes ``override-{region}`` at runtime, so
+        CloudFormation never owns or deletes them. Left behind after a full
+        teardown, a stale override is the hazard: the controller honors
+        overrides indefinitely, so a later redeployment would silently pin
+        that region until an operator noticed. Returns the deleted names.
+        """
+        ssm = self._ssm_client()
+        prefix = f"/{self.config.project_name}/traffic-dial"
+        names: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Path": prefix, "Recursive": True}
+            if token:
+                kwargs["NextToken"] = token
+            response = ssm.get_parameters_by_path(**kwargs)
+            names.extend(
+                str(parameter.get("Name", ""))
+                for parameter in response.get("Parameters", [])
+                if parameter.get("Name")
+            )
+            token = response.get("NextToken")
+            if not token:
+                break
+        deleted: list[str] = []
+        # DeleteParameters accepts at most ten names per call.
+        for start in range(0, len(names), 10):
+            response = ssm.delete_parameters(Names=names[start : start + 10])
+            deleted.extend(str(name) for name in response.get("DeletedParameters", []))
+        return sorted(deleted)
 
     def clear_override(self, region: str) -> bool:
         """Remove a manual override; returns whether one existed.

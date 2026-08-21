@@ -4577,16 +4577,29 @@ class StackManager:
             implicit_log_groups = self._collect_implicit_log_groups(stacks)
 
         def finish(overall: bool) -> tuple[bool, list[str], list[str]]:
-            """Funnel every exit through the implicit log-group sweep.
+            """Funnel every exit through the teardown sweeps.
 
             Called at each return point so a partially failed teardown
-            still cleans up the stacks that DID delete. New exit paths
-            must return through here as well.
+            still cleans up the stacks that DID delete (implicit log
+            groups), while the success-only sweeps (runtime traffic-dial
+            parameters) run exactly when everything is gone. New exit
+            paths must return through here as well.
             """
             if implicit_log_groups:
                 record_cleanup(
                     "implicit-log-groups",
                     self._cleanup_implicit_log_groups(implicit_log_groups, successful),
+                )
+            if overall:
+                # Only after a complete teardown: while any stack survives,
+                # the accelerator may still be live and a manual override on
+                # it is standing operator intent the purge must not erase.
+                # Strict teardowns run this too — the runtime dial parameters
+                # are untagged, so the harness's tagging-index audit cannot
+                # see them and no one else owns their removal.
+                record_cleanup(
+                    "traffic-dial-parameters",
+                    self._cleanup_traffic_dial_parameters(),
                 )
             return overall, successful, failed
 
@@ -5360,6 +5373,35 @@ class StackManager:
             )
         for failure in outcome["errors"]:
             logger.warning("Implicit log-group cleanup failed for %s", failure)
+        return outcome
+
+    def _cleanup_traffic_dial_parameters(self) -> dict[str, Any]:
+        """Best-effort purge of the runtime traffic-dial SSM parameter tree.
+
+        The traffic-dial controller Lambda writes ``/{project}/traffic-dial/
+        state`` and ``gco capacity traffic-dial set`` writes ``override-*``
+        siblings at runtime; CloudFormation never owns them, so stack
+        deletion leaves them behind. A surviving override is the real
+        hazard: the scheduled controller honors overrides indefinitely, so
+        the next deployment in this account would silently pin that region's
+        dial until someone noticed. Runs only after a *fully* successful
+        teardown — while any stack remains, the accelerator may still be
+        live and an override on it is standing operator intent.
+        """
+        from .capacity.traffic_dial import TrafficDialManager
+
+        outcome: dict[str, Any] = {"deleted": [], "errors": []}
+        try:
+            outcome["deleted"] = TrafficDialManager(self.config).purge_runtime_parameters()
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+            outcome["errors"].append(f"{type(exc).__name__}: {exc}")
+        if outcome["deleted"]:
+            print(
+                f"  Deleted {len(outcome['deleted'])} runtime traffic-dial SSM "
+                "parameter(s) (controller state / manual overrides)."
+            )
+        for failure in outcome["errors"]:
+            logger.warning("Traffic-dial parameter cleanup failed: %s", failure)
         return outcome
 
     def _cleanup_bastion_iam(self) -> dict[str, Any]:

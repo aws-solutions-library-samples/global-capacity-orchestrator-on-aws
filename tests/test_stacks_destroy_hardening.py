@@ -909,6 +909,56 @@ class TestBastionIamCleanup:
         assert outcome["errors"]
 
 
+class TestTrafficDialParameterCleanup:
+    """destroy-all purges the runtime /{project}/traffic-dial SSM tree.
+
+    The controller Lambda writes ``state`` and ``gco capacity traffic-dial
+    set`` writes ``override-*`` at runtime, so CloudFormation never deletes
+    them. A stale override surviving into the account's next deployment
+    would silently pin that region's dial forever — the controller honors
+    overrides indefinitely by design.
+    """
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        return StackManager(config)
+
+    def test_reports_the_purged_names(self, capsys):
+        manager = self._manager()
+        deleted = ["/gco/traffic-dial/override-us-east-1", "/gco/traffic-dial/state"]
+        with patch("cli.capacity.traffic_dial.TrafficDialManager") as dial_manager:
+            dial_manager.return_value.purge_runtime_parameters.return_value = deleted
+            outcome = manager._cleanup_traffic_dial_parameters()
+
+        assert outcome == {"deleted": deleted, "errors": []}
+        dial_manager.assert_called_once_with(manager.config)
+        assert "2 runtime traffic-dial SSM" in capsys.readouterr().out
+
+    def test_empty_tree_is_silent(self, capsys):
+        manager = self._manager()
+        with patch("cli.capacity.traffic_dial.TrafficDialManager") as dial_manager:
+            dial_manager.return_value.purge_runtime_parameters.return_value = []
+            outcome = manager._cleanup_traffic_dial_parameters()
+
+        assert outcome == {"deleted": [], "errors": []}
+        assert capsys.readouterr().out == ""
+
+    def test_purge_failure_is_recorded_not_raised(self):
+        manager = self._manager()
+        with patch("cli.capacity.traffic_dial.TrafficDialManager") as dial_manager:
+            dial_manager.return_value.purge_runtime_parameters.side_effect = RuntimeError(
+                "AccessDenied"
+            )
+            outcome = manager._cleanup_traffic_dial_parameters()
+
+        assert outcome["deleted"] == []
+        assert outcome["errors"] == ["RuntimeError: AccessDenied"]
+
+
 class TestDestroyOrchestratedImplicitCleanupWiring:
     """The sweep runs on every non-strict exit path and never in strict mode."""
 
@@ -980,17 +1030,24 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
                     return_value={"completed_steps": 0, "absent_steps": 4, "errors": []},
                 )
             )
+            dial = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_traffic_dial_parameters",
+                    return_value={"deleted": [], "errors": []},
+                )
+            )
             manager = StackManager(config)
             result = manager.destroy_orchestrated(
                 force=True,
                 on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
                 **kwargs,
             )
-        return result, collect, cleanup, bastion_iam, cleanups
+        return result, collect, cleanup, bastion_iam, dial, cleanups
 
     def test_full_success_sweeps_collected_groups(self):
         collected = {"gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]}}
-        (ok, successful, failed), collect, cleanup, bastion_iam, cleanups = self._run(
+        (ok, successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
             destroy_results=[True, True],
             collected=collected,
         )
@@ -1001,7 +1058,13 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         assert cleanup.call_args.args[0] == collected
         assert sorted(cleanup.call_args.args[1]) == ["gco-global", "gco-us-east-1"]
         bastion_iam.assert_called_once()
-        assert {name for name, _ in cleanups} >= {"bastions", "bastion-iam", "implicit-log-groups"}
+        dial.assert_called_once()
+        assert {name for name, _ in cleanups} >= {
+            "bastions",
+            "bastion-iam",
+            "implicit-log-groups",
+            "traffic-dial-parameters",
+        }
 
     def test_partial_failure_still_sweeps_the_destroyed_stacks(self):
         """gco-us-east-1 deletes, gco-global fails: its groups still go."""
@@ -1009,7 +1072,7 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
             "gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]},
             "gco-global": {"region": "us-east-2", "log_groups": ["/aws/lambda/y"]},
         }
-        (ok, successful, failed), _collect, cleanup, _bastion, _cleanups = self._run(
+        (ok, successful, failed), _collect, cleanup, _bastion, dial, _cleanups = self._run(
             destroy_results=[True, False],
             collected=collected,
         )
@@ -1019,9 +1082,12 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         assert failed == ["gco-global"]
         cleanup.assert_called_once()
         assert cleanup.call_args.args[1] == ["gco-us-east-1"]
+        # A surviving stack can mean a live accelerator whose manual override
+        # is standing operator intent: the purge must not run.
+        dial.assert_not_called()
 
     def test_nothing_collected_records_no_sweep(self):
-        (ok, _successful, _failed), collect, cleanup, bastion_iam, cleanups = self._run(
+        (ok, _successful, _failed), collect, cleanup, bastion_iam, _dial, cleanups = self._run(
             destroy_results=[True, True],
             collected={},
         )
@@ -1032,10 +1098,13 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         bastion_iam.assert_called_once()
         assert "implicit-log-groups" not in {name for name, _ in cleanups}
 
-    def test_strict_teardown_runs_neither_sweep(self):
+    def test_strict_teardown_skips_log_and_iam_sweeps_but_purges_dial_tree(self):
         """The live-validation harness owns fenced log-group deletion and
-        audits IAM itself — strict mode must stay byte-identical."""
-        (ok, _successful, failed), collect, cleanup, bastion_iam, _cleanups = self._run(
+        audits IAM itself — strict mode must skip both. The runtime
+        traffic-dial parameters are different: they are untagged, so the
+        harness's tagging-index audit cannot see them and nothing else owns
+        their removal. A fully successful strict teardown purges them too."""
+        (ok, _successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
             destroy_results=[True, True],
             strict=True,
         )
@@ -1044,3 +1113,5 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         collect.assert_not_called()
         cleanup.assert_not_called()
         bastion_iam.assert_not_called()
+        dial.assert_called_once()
+        assert "traffic-dial-parameters" in {name for name, _ in cleanups}

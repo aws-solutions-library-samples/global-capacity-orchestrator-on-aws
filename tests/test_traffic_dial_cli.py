@@ -292,6 +292,65 @@ class TestClearOverride:
             dial_manager.clear_override("us-west-2")
 
 
+class TestPurgeRuntimeParameters:
+    """Full-teardown purge of the runtime dial tree (state + overrides)."""
+
+    def test_purges_across_pages_in_delete_batches_of_ten(self, manager):
+        dial_manager, ssm, _ = manager
+        first_page = [{"Name": f"/gco/traffic-dial/override-region-{i}"} for i in range(8)]
+        second_page = [
+            {"Name": "/gco/traffic-dial/override-region-8"},
+            {"Name": "/gco/traffic-dial/override-region-9"},
+            {"Name": "/gco/traffic-dial/override-region-10"},
+            {"Name": "/gco/traffic-dial/state"},
+        ]
+
+        def by_path(Path, Recursive, NextToken=None):  # noqa: N803 - boto3 kwargs
+            assert Path == "/gco/traffic-dial"
+            assert Recursive is True
+            if NextToken is None:
+                return {"Parameters": first_page, "NextToken": "page2"}
+            assert NextToken == "page2"
+            return {"Parameters": second_page}
+
+        ssm.get_parameters_by_path.side_effect = by_path
+        ssm.delete_parameters.side_effect = lambda Names: {  # noqa: N803 - boto3 kwargs
+            "DeletedParameters": Names
+        }
+
+        deleted = dial_manager.purge_runtime_parameters()
+
+        batches = [call.kwargs["Names"] for call in ssm.delete_parameters.call_args_list]
+        assert [len(batch) for batch in batches] == [10, 2]
+        assert deleted == sorted(
+            [param["Name"] for param in first_page] + [param["Name"] for param in second_page]
+        )
+
+    def test_empty_tree_deletes_nothing(self, manager):
+        dial_manager, ssm, _ = manager
+        ssm.get_parameters_by_path.side_effect = None
+        ssm.get_parameters_by_path.return_value = {"Parameters": []}
+
+        assert dial_manager.purge_runtime_parameters() == []
+        ssm.delete_parameters.assert_not_called()
+
+    def test_reports_only_what_ssm_confirmed_deleted(self, manager):
+        dial_manager, ssm, _ = manager
+        ssm.get_parameters_by_path.side_effect = None
+        ssm.get_parameters_by_path.return_value = {
+            "Parameters": [
+                {"Name": "/gco/traffic-dial/state"},
+                {"Name": "/gco/traffic-dial/override-us-east-1"},
+            ]
+        }
+        ssm.delete_parameters.return_value = {
+            "DeletedParameters": ["/gco/traffic-dial/state"],
+            "InvalidParameters": ["/gco/traffic-dial/override-us-east-1"],
+        }
+
+        assert dial_manager.purge_runtime_parameters() == ["/gco/traffic-dial/state"]
+
+
 class TestCommands:
     @pytest.fixture
     def mock_manager(self):
