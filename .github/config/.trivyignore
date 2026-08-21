@@ -183,6 +183,34 @@ CVE-2026-69192 exp:2026-09-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-09-22
 
+# CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
+# (msgpack 1.1.2, fixed 1.2.1) — both live only inside the AWS CLI v2
+# vendored bundle (usr/local/aws-cli/v2/2.36.26/dist/) in the dev image,
+# not in our resolvable dependency tree (msgpack appears nowhere in
+# requirements-lock.txt, and site-packages setuptools is current).
+#
+# Re-confirmed 2026-08-21 by the pinned CI scanner after a trial removal:
+# the 2.36.19 -> 2.36.26 bump did NOT clear them — the dev-image scan
+# (Trivy v0.74.0) still reports both against the vendored bundle. Note for
+# the next sweep: the finding does not reproduce from the release zip's
+# dist/ tree with an older local Trivy (0.69.3 finds no python-pkg
+# metadata there); only the CI-pinned scanner against the built image is
+# authoritative, per rule 5 above.
+#
+# Not clearable by a pin bump: 2.36.26 is the newest AWS CLI v2 release
+# (checked 2026-08-21); the vendored versions are chosen by the AWS CLI's
+# own build. Clears when a newer AWS CLI release rebuilds its bundle with
+# patched deps — bump AWSCLI_VERSION in Dockerfile.dev and re-check.
+#
+# Low runtime risk: the dev image is a contributor/CI tool that is never
+# deployed; the flagged code paths run only inside `aws` CLI invocations
+# against operator-supplied input.
+#
+# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
+#             https://github.com/advisories/GHSA-6v7p-g79w-8964
+CVE-2025-47273 exp:2026-10-15
+GHSA-6v7p-g79w-8964 exp:2026-10-15
+
 # -----------------------------------------------------------------------------
 # CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
 # HTTP/2), CVE-2026-56858 (html/template XSS), CVE-2026-56859 (encoding/xml
