@@ -528,3 +528,46 @@ def volume_residual_inventory(ctx: RunContext) -> dict[str, Any]:
         ),
         "verified_at": utc_now(),
     }
+
+
+def accepted_pending_volume_deletions(residuals: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the in-flight volume deletions this run tolerated, as flat evidence.
+
+    :func:`volume_residual_inventory` already decides which recorded volumes are
+    residual and which carry an accepted deletion that EC2 has begun but not
+    finished. Only the residual half fails the run; the accepted half is a real
+    tolerance, and an undisclosed tolerance is exactly what the accepted-residue
+    precedents exist to prevent — see ``ownership/dynamodb_streams`` for expired
+    table streams and ``ownership/kms`` for keys pending deletion.
+
+    This lifts that tolerance into the same disclosure shape those two use: one
+    flat list of self-describing records, each naming the exact API observation
+    that established it, always a list so ``final-inventory`` consumers see a
+    uniform key whether or not anything was tolerated. Deletes nothing and makes
+    no AWS call — it reprojects the observation the caller already paid for, so
+    the disclosure cannot disagree with the accounting it came from.
+    """
+    accepted: list[dict[str, Any]] = []
+    for stack_name, region_entry in sorted((residuals.get("regions") or {}).items()):
+        region = str(region_entry.get("region") or "")
+        for record in region_entry.get("volumes") or []:
+            if record.get("disposition") != "deleting":
+                continue
+            state = str(record.get("state") or "")
+            accepted.append(
+                {
+                    "stack_name": stack_name,
+                    "region": region,
+                    "volume_id": str(record.get("volume_id") or ""),
+                    "state": state,
+                    "size_gib": record.get("size_gib"),
+                    "availability_zone": record.get("availability_zone"),
+                    "authority": f"ec2:DescribeVolumes reported state {state!r}",
+                    "note": (
+                        "an authorized deletion is already in flight, so the volume is "
+                        "accounted for rather than residual and stops incurring storage "
+                        "cost once EC2 finishes releasing it"
+                    ),
+                }
+            )
+    return accepted

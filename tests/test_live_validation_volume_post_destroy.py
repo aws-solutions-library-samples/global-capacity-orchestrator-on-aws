@@ -854,6 +854,62 @@ class TestFinalInventoryFailsOnResiduals:
         assert result["ebs_volume_residuals"]["status"] == "clear"
         assert result["summary"]["ebs_fixture_volumes"] == 0
 
+    def test_an_in_flight_deletion_is_tolerated_and_disclosed_as_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """A volume EC2 is still releasing passes, but must not pass silently.
+
+        This is the same tolerance the expired-DynamoDB-stream and pending-deletion
+        KMS acceptances make: the resource is still visible, nothing can remove it
+        faster, and the run is allowed to proceed. Those two disclose what they
+        tolerated under a top-level ``accepted_*`` key, so an in-flight volume
+        deletion is disclosed the same way instead of staying buried in the
+        per-Region accounting.
+        """
+        releasing = _snapshot("vol-0000000000000001", state="deleting")
+        ctx = _context(
+            _settings(tmp_path),
+            session=_FakeSession(
+                {_PRIMARY: _FakeEc2({releasing.volume_id: _volume_dto(releasing)})}
+            ),
+            recorded=(releasing,),
+        )
+
+        result = self._run(ctx)
+
+        # Tolerated: an accepted deletion in flight is not residual, so no raise.
+        residuals = result["ebs_volume_residuals"]
+        assert residuals["status"] == "clear"
+        assert residuals["residual_volume_ids"] == []
+        assert residuals["pending_deletion_volume_ids"] == [releasing.volume_id]
+        assert result["summary"]["ebs_fixture_volumes"] == 0
+        # Disclosed: flat, self-describing, and naming the observation that
+        # established it, exactly like its accepted_* siblings.
+        accepted = result["accepted_pending_deletion_volumes"]
+        assert len(accepted) == 1
+        assert accepted[0]["volume_id"] == releasing.volume_id
+        assert accepted[0]["region"] == _PRIMARY
+        assert accepted[0]["state"] == "deleting"
+        assert accepted[0]["authority"] == "ec2:DescribeVolumes reported state 'deleting'"
+        # The disclosure is durable evidence, not just a return value.
+        persisted = ctx.checkpoint.state["final_inventory"]
+        assert persisted["accepted_pending_deletion_volumes"] == accepted
+
+    def test_the_accepted_key_is_always_a_list_when_nothing_is_tolerated(
+        self, tmp_path: Path
+    ) -> None:
+        """Uniform shape: consumers read a list whether or not anything was kept."""
+        kept = _snapshot("vol-0000000000000001")
+        ctx = _context(
+            _settings(tmp_path),
+            session=_FakeSession({_PRIMARY: _FakeEc2({})}),
+            recorded=(kept,),
+        )
+
+        result = self._run(ctx)
+
+        assert result["accepted_pending_deletion_volumes"] == []
+
 
 class TestDestroyPersistsEvidenceBeforeCompletion:
     """Observations and fixture cleanup are durable before ``destroyed=True``."""

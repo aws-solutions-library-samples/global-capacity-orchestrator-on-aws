@@ -363,6 +363,7 @@ def test_strict_target_for_another_stack_is_blocked(tmp_path):
     service.cleanup.assert_not_called()
 
 
+@pytest.mark.volume_cleanup_boto3_owner
 def test_default_dependencies_create_one_region_scoped_boto3_client(tmp_path, monkeypatch):
     write_cdk_json(tmp_path)
     manager = make_manager(tmp_path)

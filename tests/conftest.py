@@ -159,6 +159,32 @@ _DESTROY_CLEANUP_OWNERS = {
     "TestDestroyOrchestratedImplicitCleanupWiring",
 }
 
+# The regional EBS volume-cleanup barrier reaches AWS through one seam only:
+# ``StackManager._volume_cleanup_clients``, whose fallback builds real boto3 EKS
+# and EC2 clients. Everything above it (``ClusterAbsenceVerifier``,
+# ``VolumeCleanupService``) takes that factory by injection and holds no boto3
+# reference of its own, so guarding the single seam covers the whole feature.
+#
+# It cannot be no-oped like the helpers above: the barrier tests DO exercise the
+# real barrier, publishing outcomes through injected fakes, so a blanket no-op
+# would silently neuter them. Instead the guard keeps the injected-factory path
+# exactly as it is and removes only the boto3 fallback, so a test that passes
+# ``volume_cleanup_request`` without calling ``set_volume_cleanup_dependencies``
+# fails loudly instead of issuing live ``DescribeVolumes``/``DeleteVolume``
+# against whatever ``config.project_name`` resolved to. That is the one
+# destructive path in this feature, and no test needs the fallback to reach
+# boto3 for real.
+#
+# Opting out: a test that must exercise the boto3 fallback itself (and mocks
+# ``boto3.client`` to do so) carries the ``volume_cleanup_boto3_owner`` marker.
+# The sibling fixtures above key their opt-out on the test's class name, which
+# cannot work here: every volume-cleanup test in this suite is a module-level
+# function, so ``request.cls`` is ``None`` for all of them. The marker keeps the
+# same allowlist intent while working for both styles; the class set is kept so a
+# future ``Test...`` class can opt out the way the destroy-cleanup owners do.
+_VOLUME_CLEANUP_BOTO3_OWNERS: set[str] = set()
+_VOLUME_CLEANUP_BOTO3_OWNER_MARKER = "volume_cleanup_boto3_owner"
+
 
 # ============================================================================
 # Function-scoped: never run the stuck-stack pre-check against real AWS
@@ -227,6 +253,36 @@ def _no_real_destroy_cleanup_aws_calls(request):
             "_cleanup_traffic_dial_parameters",
             return_value={"deleted": [], "errors": []},
         ),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_volume_cleanup_boto3_clients(request):
+    if request.node.get_closest_marker(_VOLUME_CLEANUP_BOTO3_OWNER_MARKER) is not None or (
+        request.cls is not None and request.cls.__name__ in _VOLUME_CLEANUP_BOTO3_OWNERS
+    ):
+        yield
+        return
+    from cli import stacks as _stacks
+
+    def _injected_factory_only(self):
+        """Return the injected client factory, refusing the boto3 fallback."""
+        if self._volume_cleanup_client_factory is None:
+            raise AssertionError(
+                "EBS volume cleanup tried to build real boto3 clients. Call "
+                "StackManager.set_volume_cleanup_dependencies(...) with a fake "
+                "client factory before passing volume_cleanup_request. If this "
+                "test owns the boto3 fallback and mocks boto3.client itself, "
+                "mark it @pytest.mark.volume_cleanup_boto3_owner (or add its "
+                "class to _VOLUME_CLEANUP_BOTO3_OWNERS)."
+            )
+        return self._volume_cleanup_client_factory
+
+    with patch.object(
+        _stacks.StackManager,
+        "_volume_cleanup_clients",
+        _injected_factory_only,
     ):
         yield
 

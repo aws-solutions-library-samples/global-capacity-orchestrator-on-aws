@@ -5180,6 +5180,15 @@ class StackManager:
         # Regional volume-cleanup barrier: every regional worker and watchdog has
         # finished, so each target's outcome is produced and published here before
         # destruction may progress to the global stacks.
+        #
+        # Deliberately NOT one of the ``finish`` sweeps, even though it publishes
+        # through the same ``record_cleanup`` funnel. Those sweeps run at every
+        # exit, after teardown has stopped; this one is a gate *within* teardown —
+        # cluster identity is only readable at this point, and an unaccounted
+        # volume has to stop the global phase below rather than be reported once
+        # the stacks are already gone. Its result feeds ``finish(overall)``, so a
+        # failed cleanup withholds the success-only sweeps there exactly as a
+        # surviving stack does.
         if volume_cleanup_request is not None:
             volume_cleanup_success = self._regional_volume_cleanup_barrier(
                 regional_stacks=regional_stacks,

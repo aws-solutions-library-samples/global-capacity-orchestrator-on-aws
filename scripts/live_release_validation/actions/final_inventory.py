@@ -6,7 +6,10 @@ import copy
 import json
 from typing import Any
 
-from ..checks.volume_outcomes import volume_residual_inventory
+from ..checks.volume_outcomes import (
+    accepted_pending_volume_deletions,
+    volume_residual_inventory,
+)
 from ..context import (
     _topology_regions,
 )
@@ -85,6 +88,10 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
     # of leaving billable storage behind quietly.
     ebs_volume_residuals = volume_residual_inventory(ctx)
     summary["ebs_fixture_volumes"] = len(ebs_volume_residuals["residual_volume_ids"])
+    # A volume EC2 has begun releasing is tolerated rather than failed below, so
+    # it is disclosed here in the same shape as the other accepted residues
+    # instead of staying buried in the per-Region accounting.
+    accepted_pending_volumes = accepted_pending_volume_deletions(ebs_volume_residuals)
     result = {
         "summary": summary,
         "stack_absence": stack_absence,
@@ -96,6 +103,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         "project_resources": project_inventory,
         "accepted_pending_kms_keys": accepted_pending_kms,
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
+        "accepted_pending_deletion_volumes": accepted_pending_volumes,
         "residual_project_resources": residual_inventory,
     }
     ctx.report.final_inventory = result

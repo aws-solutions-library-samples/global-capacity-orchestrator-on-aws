@@ -45,7 +45,7 @@ from cli.volume_cleanup import (
     VolumePolicy,
     VolumeReasonCode,
 )
-from tests.test_volume_cleanup_ec2_integration import FakeAWS, FakeEC2, dto
+from tests.test_volume_cleanup_ec2_integration import FakeAWS, FakeEC2, dto, throttled
 
 _PROJECT = "gco"
 _EAST = "us-east-1"
@@ -499,3 +499,66 @@ def test_retry_after_partial_teardown_only_processes_newly_verified_targets(
     for region in (_EAST, _WEST):
         assert set(clients[region].volumes) == {unrelated_volume_id(region)}
     assert ("destroy", _GLOBAL_STACK) in second.events
+
+
+def test_failed_volume_cleanup_withholds_the_success_only_traffic_dial_purge(
+    tmp_path: Path,
+) -> None:
+    """An unaccounted volume is an incomplete teardown, so the dial purge waits.
+
+    ``destroy_orchestrated`` funnels every exit through ``finish(overall)``, and the
+    runtime traffic-dial SSM purge inside it is success-only. Volume cleanup feeds
+    that same ``overall``, so these two independent teardown sweeps meet here: a
+    Region whose volumes could not be disposed of must hold the purge back exactly
+    as a surviving stack does, without being reported as a failed stack.
+    """
+    prepared = scenario(tmp_path, (_EAST, _WEST))
+    # Every stack deletes cleanly and only the EC2 deletion fails, so the
+    # unsuccessful cleanup is the single reason this teardown is not complete.
+    prepared.clients[_EAST].delete_errors[owned_volume_id(_EAST)] = throttled("DeleteVolume")
+
+    with patch.object(
+        StackManager,
+        "_cleanup_traffic_dial_parameters",
+        return_value={"deleted": [], "errors": []},
+    ) as dial:
+        result = run_teardown(
+            prepared.manager,
+            stacks=[_GLOBAL_STACK, stack_for(_EAST), stack_for(_WEST)],
+        )
+
+    assert result.overall is False
+    # Stack results stay untouched: an unsuccessful cleanup never fails a stack
+    # nor relabels one that was deleted.
+    assert result.failed == []
+    assert stack_for(_EAST) in result.successful
+    assert result.volume_outcomes[stack_for(_EAST)]["successful"] is False
+    # One target's failure never suppresses another's disposal.
+    assert result.volume_outcomes[stack_for(_WEST)]["successful"] is True
+    assert owned_volume_id(_WEST) not in prepared.clients[_WEST].volumes
+    # The barrier gates the global phase, so teardown stopped before it.
+    assert ("destroy", _GLOBAL_STACK) not in result.events
+    dial.assert_not_called()
+
+
+def test_complete_teardown_purges_the_dial_tree_after_every_volume_is_disposed(
+    tmp_path: Path,
+) -> None:
+    """The positive control for the seam above: nothing left, so the purge runs."""
+    prepared = scenario(tmp_path, (_EAST, _WEST))
+
+    with patch.object(
+        StackManager,
+        "_cleanup_traffic_dial_parameters",
+        return_value={"deleted": [], "errors": []},
+    ) as dial:
+        result = run_teardown(
+            prepared.manager,
+            stacks=[_GLOBAL_STACK, stack_for(_EAST), stack_for(_WEST)],
+        )
+
+    assert result.overall is True and result.failed == []
+    assert all(details["successful"] is True for details in result.published_details)
+    assert ("destroy", _GLOBAL_STACK) in result.events
+    dial.assert_called_once()
+    assert "traffic-dial-parameters" in {name for name, _details in result.cleanups}
