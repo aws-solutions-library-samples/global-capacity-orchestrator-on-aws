@@ -10,8 +10,10 @@ from ..config import GCOConfig, _load_cdk_json
 from ..output import get_output_formatter
 from ..volume_cleanup import (
     DestroyCommandKind,
+    TargetResolutionKind,
     VolumeCleanupRequest,
     VolumePolicyConflictError,
+    resolve_regional_volume_target_from_stack_name,
     resolve_volume_cleanup_request,
 )
 from ..volume_cleanup_reporting import (
@@ -86,12 +88,29 @@ def _cleanup_single_stack_volumes(
     The stack result stays separate from the cleanup result: cleanup renders and
     aggregates its own status, and a failure inside cleanup never rewrites the
     stack outcome the operator was already shown.
+
+    Resolves the regional target from ``stack_name`` itself rather than GCO's
+    live ``deployment_regions`` config: this operator-named ``destroy`` call is
+    its own authorization, and GCO's recommended per-region teardown ordering
+    (``remove_deployment_region`` before ``destroy_stack``, to release the
+    control plane's ENIs first) already edits that config before this command
+    ever runs. Orchestrated ``destroy-all`` is unaffected — it keeps consulting
+    live config, captured once before any of its own stacks are destroyed.
     """
+    strict_target = None
+    resolution = resolve_regional_volume_target_from_stack_name(
+        project_name=manager.config.project_name,
+        stack_name=stack_name,
+    )
+    if resolution.kind is TargetResolutionKind.TARGET:
+        strict_target = resolution.target
+
     try:
         outcome = manager.cleanup_regional_volumes_after_destroy(
             stack_name=stack_name,
             stack_deleted=True,
             request=request,
+            strict_target=strict_target,
         )
     except Exception as error:  # noqa: BLE001 - cleanup must not mask the stack result
         formatter.print_error(f"EBS volume cleanup could not complete for {stack_name}: {error}")

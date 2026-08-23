@@ -836,6 +836,39 @@ class TestInfrastructureDestroyTools:
         assert "-y" not in argv
 
     @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
+    def test_destroy_stack_omits_delete_volumes_by_default(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.destroy_stack(
+                    stack_name="gco-us-east-1",
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        argv = mock_task.call_args.args[0]
+        assert "--delete-volumes" not in argv
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
+    def test_destroy_stack_argv_includes_delete_volumes_when_requested(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.destroy_stack(
+                    stack_name="gco-us-east-1",
+                    delete_volumes=True,
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        argv = mock_task.call_args.args[0]
+        assert argv[:4] == ["gco", "stacks", "destroy", "gco-us-east-1"]
+        assert "-y" in argv
+        assert "--delete-volumes" in argv
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
     def test_destroy_all_argv_includes_yes_and_parallel(self):
         importlib.reload(run_mcp)
         with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:

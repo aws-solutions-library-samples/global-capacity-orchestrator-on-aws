@@ -215,6 +215,58 @@ def resolve_regional_volume_target(
     )
 
 
+def resolve_regional_volume_target_from_stack_name(
+    *,
+    project_name: str,
+    stack_name: str,
+    region_partitions: Mapping[str, str] | None = None,
+) -> TargetResolution:
+    """Resolve an exact regional target from the stack name the operator named.
+
+    Single-stack ``gco stacks destroy <stack_name> --delete-volumes`` is itself
+    the authorization: the operator (or an orchestrator acting on their behalf)
+    named this exact CloudFormation stack and asked GCO to destroy it and clean
+    up its volumes. Requiring that same Region to *also* still be listed in
+    ``cdk.json``'s live ``deployment_regions.regional`` is not an extra safety
+    check here — GCO's own recommended per-region teardown ordering calls
+    ``remove_deployment_region`` before ``destroy_stack`` (to release the
+    control plane's Global Accelerator ENIs first), so by the time this
+    resolves, the config the ordinary resolver would consult has already been
+    edited by this same teardown. Consulting it again would make cleanup fail
+    silently and only for the one ordering GCO itself recommends.
+
+    Still never accepts an arbitrary suffix: the Region must be one exact,
+    SDK-known CloudFormation Region, or resolution reports not-regional. This
+    is deliberately narrower than ``resolve_regional_volume_target`` and is
+    used only for the single, explicitly-named destroy path — orchestrated
+    ``destroy-all`` keeps consulting live config, captured once before any of
+    its own stacks are torn down, which does not have this ordering problem.
+    """
+    prefix = f"{project_name}-"
+    if not stack_name.startswith(prefix) or stack_name == prefix:
+        return _non_regional(f"Stack {stack_name!r} is not a project-scoped stack name")
+    region = stack_name[len(prefix) :]
+
+    metadata = (
+        cloudformation_region_partitions() if region_partitions is None else region_partitions
+    )
+    if region not in metadata:
+        return _non_regional(
+            f"Stack {stack_name!r} does not name one exact known CloudFormation Region"
+        )
+
+    return TargetResolution(
+        kind=TargetResolutionKind.TARGET,
+        target=RegionalVolumeTarget(
+            stack_name=stack_name,
+            stack_id=None,
+            region=region,
+            cluster_name=stack_name,
+            cluster_tag_key=f"kubernetes.io/cluster/{stack_name}",
+        ),
+    )
+
+
 class ClientFactory(Protocol):
     """Create one AWS service client in an explicitly selected Region."""
 

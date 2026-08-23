@@ -8,6 +8,7 @@ from cli.volume_cleanup import (
     RegionalVolumeTarget,
     TargetResolutionKind,
     resolve_regional_volume_target,
+    resolve_regional_volume_target_from_stack_name,
 )
 
 _PARTITIONS = {
@@ -187,3 +188,56 @@ def test_unresolved_changed_or_ambiguous_strict_identity_blocks_without_aws_call
     assert resolution.reason_code == reason_code
     assert resolution.target is None
     assert aws_client_calls == []
+
+
+# --- Single-stack destroy: resolve from the stack name, not live config ----- #
+#
+# Bug reproduced live: Autodidact's teardown calls GCO's remove_deployment_region
+# (to release the control plane's Global Accelerator ENIs) before destroy_stack.
+# By the time destroy_stack --delete-volumes ran, the region was already gone
+# from cdk.json's deployment_regions.regional, so the ordinary config-checked
+# resolver returned NOT_REGIONAL and volume cleanup silently never ran — the
+# Prometheus/Alertmanager PVs it exists to catch survived a "successful" destroy.
+
+
+def test_resolves_from_stack_name_even_when_config_no_longer_lists_the_region():
+    # The exact live scenario: configured_regions is EMPTY (as remove_deployment_region
+    # would leave it), yet the operator-named destroy of gco-us-east-1 must still
+    # resolve a target so cleanup actually runs.
+    resolution = resolve_regional_volume_target_from_stack_name(
+        project_name="gco",
+        stack_name=_STACK,
+        region_partitions=_PARTITIONS,
+    )
+
+    assert resolution.kind is TargetResolutionKind.TARGET
+    assert resolution.target == RegionalVolumeTarget(
+        stack_name=_STACK,
+        stack_id=None,
+        region="us-east-1",
+        cluster_name=_STACK,
+        cluster_tag_key=f"kubernetes.io/cluster/{_STACK}",
+    )
+
+
+@pytest.mark.parametrize(
+    "stack_name",
+    [
+        "gco-global",
+        "gco-regional-api-us-east-1",
+        "gco-us-east-1-extra",
+        "other-us-east-1",
+        "gco-ap-moon-1",  # syntactically stack-shaped but not an SDK-known Region
+        "gco-",
+        "gco",
+    ],
+)
+def test_non_regional_or_unknown_region_names_are_not_regional(stack_name):
+    resolution = resolve_regional_volume_target_from_stack_name(
+        project_name="gco",
+        stack_name=stack_name,
+        region_partitions=_PARTITIONS,
+    )
+
+    assert resolution.kind is TargetResolutionKind.NOT_REGIONAL
+    assert resolution.target is None

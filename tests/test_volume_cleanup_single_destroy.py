@@ -42,9 +42,17 @@ from cli.volume_cleanup_reporting import (
     render_volume_cleanup_publication,
 )
 
+_PROJECT = "gco"
 _REGION = "us-east-1"
 _STACK = f"gco-{_REGION}"
 _TAG_KEY = f"kubernetes.io/cluster/{_STACK}"
+_STRICT_TARGET = RegionalVolumeTarget(
+    stack_name=_STACK,
+    stack_id=None,
+    region=_REGION,
+    cluster_name=_STACK,
+    cluster_tag_key=_TAG_KEY,
+)
 
 _RETAIN_REQUEST = VolumeCleanupRequest(
     policy=VolumePolicy.RETAIN,
@@ -104,6 +112,7 @@ def runner() -> CliRunner:
 def destroy_cli():
     """Mock the stack manager and formatter used by the single destroy command."""
     manager = MagicMock()
+    manager.config.project_name = _PROJECT
     manager.destroy.return_value = True
     manager.cleanup_regional_volumes_after_destroy.return_value = None
     formatter = FakeFormatter()
@@ -195,6 +204,7 @@ def test_retain_cleanup_runs_after_reconciled_stack_success(runner, destroy_cli)
         stack_name=_STACK,
         stack_deleted=True,
         request=_RETAIN_REQUEST,
+        strict_target=_STRICT_TARGET,
     )
     assert f"Stack {_STACK} destroyed successfully" in destroy_cli.formatter.success
     # Retention completes successfully and still warns about continuing cost.
@@ -241,6 +251,7 @@ def test_non_regional_stack_keeps_the_existing_exit_path(runner, destroy_cli):
         stack_name="gco-global",
         stack_deleted=True,
         request=_RETAIN_REQUEST,
+        strict_target=None,
     )
     assert destroy_cli.formatter.errors == []
     assert destroy_cli.formatter.warnings == []
@@ -271,6 +282,7 @@ def test_authorized_delete_with_remaining_owned_volume_fails_the_command(runner,
         stack_name=_STACK,
         stack_deleted=True,
         request=_DELETE_WITH_YES_REQUEST,
+        strict_target=_STRICT_TARGET,
     )
     # The stack result the operator was shown is preserved, not relabeled.
     assert f"Stack {_STACK} destroyed successfully" in destroy_cli.formatter.success
@@ -327,6 +339,7 @@ def test_already_absent_retry_uses_the_same_successful_path(runner, destroy_cli)
         stack_name=_STACK,
         stack_deleted=True,
         request=_DELETE_WITH_YES_REQUEST,
+        strict_target=_STRICT_TARGET,
     )
     assert any("EBS volume cleanup succeeded" in line for line in destroy_cli.formatter.success)
 
@@ -359,4 +372,5 @@ def test_interactive_volume_confirmation_reaches_the_cleanup_helper(runner, dest
         stack_name=_STACK,
         stack_deleted=True,
         request=_INTERACTIVE_DELETE_REQUEST,
+        strict_target=_STRICT_TARGET,
     )

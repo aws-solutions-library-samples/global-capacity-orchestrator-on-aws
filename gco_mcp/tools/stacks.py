@@ -475,6 +475,7 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
         async def destroy_stack(
             stack_name: str,
             yes: bool = True,
+            delete_volumes: bool = False,
             *,
             ctx: Any = CurrentContext(),
             progress: Any = Progress(),
@@ -494,10 +495,16 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
             Args:
                 stack_name: Stack to destroy (e.g. ``gco-us-east-1``).
                 yes: Skip the confirmation prompt (passes ``-y``). Defaults to True.
+                delete_volumes: Delete eligible dynamically-provisioned EBS
+                    volumes (owned, available, detached) once the cluster is
+                    confirmed gone. Defaults to False, matching the CLI's
+                    retain-by-default policy for a single-stack destroy.
             """
             argv = ["gco", "stacks", "destroy", stack_name]
             if yes:
                 argv.append("-y")
+            if delete_volumes:
+                argv.append("--delete-volumes")
             return await _run_long_task(
                 argv,
                 ctx=ctx,
