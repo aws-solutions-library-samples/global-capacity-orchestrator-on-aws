@@ -275,6 +275,11 @@ def _ec2_items(client: Any, operation: str, response_key: str) -> list[dict[str,
 
 _CLUSTER_TAG_PREFIX = "kubernetes.io/cluster/"
 
+#: Volume states that mean EC2 is already removing the volume, so it is not
+#: residual. Everything else -- ``available``, ``in-use``, ``creating``,
+#: ``error`` -- counts against the all-zero teardown gate.
+_VOLUME_TERMINAL_STATES = frozenset({"deleting", "deleted"})
+
 
 def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[str]:
     """Return EBS volumes tagged for a project cluster by the EKS CSI driver.
@@ -288,9 +293,16 @@ def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[
 
     Ownership is decided from the cluster name inside the tag key, which is the
     regional stack name, so a volume belonging to another project's cluster in
-    the same account is never claimed. State is deliberately not filtered: any
-    surviving volume tagged for a project cluster is residual, whether it is
-    ``available``, still detaching, or in ``error``.
+    the same account is never claimed.
+
+    Volumes EC2 is already removing (``deleting``/``deleted``) are not counted.
+    The cluster tag is not exclusive to CSI-provisioned PersistentVolumes: EKS
+    Auto Mode writes it onto node root volumes too, which live and die with
+    their instances. Those pass through ``deleting`` while a cluster tears
+    down, and a run that observed one mid-transition would fail the all-zero
+    gate for a volume that was already on its way out. Every other state --
+    ``available``, ``in-use``, ``creating``, ``error`` -- still counts, because
+    after teardown nothing should be holding a cluster-tagged volume at all.
 
     Enumerates unfiltered and matches client-side, like the other EC2 scanners
     here. A server-side ``tag-key`` filter would need wildcard semantics to
@@ -303,6 +315,8 @@ def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[
         volume_id = str(volume.get("VolumeId") or "")
         if not volume_id:
             raise RuntimeError(f"EC2 returned a volume without an ID in {region}")
+        if str(volume.get("State") or "") in _VOLUME_TERMINAL_STATES:
+            continue
         for key in _tags_to_dict(volume.get("Tags", [])):
             if not key.startswith(_CLUSTER_TAG_PREFIX):
                 continue

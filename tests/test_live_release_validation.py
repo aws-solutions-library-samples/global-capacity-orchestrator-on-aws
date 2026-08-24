@@ -2938,10 +2938,61 @@ class TestProtectedBaselineIdentity:
         assert volumes == ["vol-00000000000000001"]
         ec2.get_paginator.assert_called_once_with("describe_volumes")
         # Enumerated unfiltered and matched client-side, like the sibling EC2
-        # scanners: no dependence on server-side tag-key wildcard semantics, and
-        # no state filter, since a volume still detaching or in error is just as
-        # residual as an available one.
+        # scanners: no dependence on server-side tag-key wildcard semantics.
         paginator.paginate.assert_called_once_with()
+
+    def test_cluster_volume_scanner_ignores_volumes_already_being_deleted(self) -> None:
+        """EKS Auto Mode node root volumes share the cluster tag and die with
+        their instances; one observed mid-``deleting`` is not a leak."""
+        ec2 = MagicMock()
+        ec2.get_paginator.return_value.paginate.return_value = [
+            {
+                "Volumes": [
+                    {
+                        "VolumeId": "vol-00000000000000010",
+                        "State": "deleting",
+                        "Tags": [
+                            {"Key": "kubernetes.io/cluster/gco-live-us-east-1", "Value": "owned"}
+                        ],
+                    },
+                    {
+                        "VolumeId": "vol-00000000000000011",
+                        "State": "deleted",
+                        "Tags": [
+                            {"Key": "kubernetes.io/cluster/gco-live-us-east-1", "Value": "owned"}
+                        ],
+                    },
+                ]
+            }
+        ]
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        assert inventory_scanners._list_cluster_volumes(session, self._REGION, "gco-live") == []
+
+    @pytest.mark.parametrize("state", ["available", "in-use", "creating", "error"])
+    def test_cluster_volume_scanner_counts_every_non_terminal_state(self, state: str) -> None:
+        """After teardown nothing should hold a cluster-tagged volume at all."""
+        ec2 = MagicMock()
+        ec2.get_paginator.return_value.paginate.return_value = [
+            {
+                "Volumes": [
+                    {
+                        "VolumeId": "vol-00000000000000020",
+                        "State": state,
+                        "Tags": [
+                            {"Key": "kubernetes.io/cluster/gco-live-us-east-1", "Value": "owned"}
+                        ],
+                    }
+                ]
+            }
+        ]
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        volumes = inventory_scanners._list_cluster_volumes(session, self._REGION, "gco-live")
+
+        assert volumes == ["vol-00000000000000020"]
 
     def test_cluster_volume_scanner_rejects_a_volume_without_an_id(self) -> None:
         ec2 = MagicMock()

@@ -178,6 +178,56 @@ class TestProjectResourceScanners:
         )
 
 
+class TestClusterVolumeResidualScoping:
+    """The cluster tag is shared with node root volumes, which are not leaks."""
+
+    def test_a_volume_already_being_deleted_is_not_residual(self, harness_session, floci_account):
+        from scripts.live_release_validation.inventory.project import (
+            collect_project_resources,
+            project_resources_are_absent,
+        )
+
+        project = unique_name("gcovolstate").replace("-", "")[:14]
+        region = "us-east-1"
+        ec2 = boto3.client("ec2", region_name=region)
+        zone = ec2.describe_availability_zones()["AvailabilityZones"][0]["ZoneName"]
+        volume_id = ec2.create_volume(
+            AvailabilityZone=zone,
+            Size=1,
+            VolumeType="gp3",
+            TagSpecifications=[
+                {
+                    "ResourceType": "volume",
+                    "Tags": [
+                        {"Key": f"kubernetes.io/cluster/{project}-{region}", "Value": "owned"}
+                    ],
+                }
+            ],
+        )["VolumeId"]
+        ec2.get_waiter("volume_available").wait(VolumeIds=[volume_id])
+
+        def inventory():
+            return collect_project_resources(
+                harness_session,
+                enabled_regions=[region],
+                expected_account=floci_account,
+                project_name=project,
+                seed_region=region,
+            )
+
+        # While it exists it is residual and must fail the gate.
+        assert project_resources_are_absent(inventory()) is False
+
+        # Once EC2 is removing it, it must not. An EKS Auto Mode node root
+        # volume carries the same tag and passes through this state on every
+        # teardown; counting it would fail the gate for a volume already gone.
+        ec2.delete_volume(VolumeId=volume_id)
+        ec2.get_waiter("volume_deleted").wait(VolumeIds=[volume_id])
+        assert project_resources_are_absent(inventory()) is True, (
+            "a volume EC2 has finished removing must not count against the all-zero teardown gate"
+        )
+
+
 class TestProtectedBaseline:
     def test_baseline_is_stable_and_detects_protected_stack_loss(self, harness_session):
         from scripts.live_release_validation.inventory.project import (
