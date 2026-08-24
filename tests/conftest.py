@@ -156,6 +156,10 @@ _DESTROY_CLEANUP_OWNERS = {
     "TestImplicitLogGroupCleanup",
     "TestBastionIamCleanup",
     "TestTrafficDialParameterCleanup",
+    "TestClusterVolumeCleanup",
+    # Floci layer: drives the real method against the local emulator, so the
+    # no-op stub would defeat the entire point of the module.
+    "TestClusterVolumeSweepOverTheWire",
     "TestDestroyOrchestratedImplicitCleanupWiring",
 }
 
@@ -226,6 +230,14 @@ def _no_real_destroy_cleanup_aws_calls(request):
             _stacks.StackManager,
             "_cleanup_traffic_dial_parameters",
             return_value={"deleted": [], "errors": []},
+        ),
+        # The post-regional EBS sweep calls EC2 DeleteVolume. Left real, an
+        # orchestration test that names a live regional stack would destroy that
+        # cluster's Prometheus/Grafana data — the most destructive helper here.
+        patch.object(
+            _stacks.StackManager,
+            "_cleanup_cluster_volumes",
+            return_value={"deleted": [], "surviving": [], "errors": []},
         ),
     ):
         yield

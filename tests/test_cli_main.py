@@ -407,6 +407,55 @@ class TestStacksCommands:
             result = runner.invoke(cli, ["stacks", "destroy", "test-stack", "-y"])
             assert result.exit_code == 0
 
+    def test_stacks_destroy_sweeps_cluster_volumes_by_default(self):
+        """The single-stack path has no cleanup barrier, so it sweeps here (#268)."""
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with patch("cli.stacks.get_stack_manager") as mock_manager:
+            mock_sm = MagicMock()
+            mock_sm.destroy.return_value = True
+            mock_manager.return_value = mock_sm
+
+            result = runner.invoke(cli, ["stacks", "destroy", "gco-us-east-1", "-y"])
+
+        assert result.exit_code == 0
+        mock_sm.cleanup_cluster_volumes.assert_called_once_with("gco-us-east-1", retain=False)
+
+    def test_stacks_destroy_retain_volumes_flag_is_forwarded(self):
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with patch("cli.stacks.get_stack_manager") as mock_manager:
+            mock_sm = MagicMock()
+            mock_sm.destroy.return_value = True
+            mock_manager.return_value = mock_sm
+
+            result = runner.invoke(
+                cli, ["stacks", "destroy", "gco-us-east-1", "-y", "--retain-volumes"]
+            )
+
+        assert result.exit_code == 0
+        mock_sm.cleanup_cluster_volumes.assert_called_once_with("gco-us-east-1", retain=True)
+
+    def test_stacks_destroy_failure_skips_the_volume_sweep(self):
+        """A stack that did not delete may still have a live cluster."""
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with patch("cli.stacks.get_stack_manager") as mock_manager:
+            mock_sm = MagicMock()
+            mock_sm.destroy.return_value = False
+            mock_manager.return_value = mock_sm
+
+            result = runner.invoke(cli, ["stacks", "destroy", "gco-us-east-1", "-y"])
+
+        assert result.exit_code == 1
+        mock_sm.cleanup_cluster_volumes.assert_not_called()
+
     def test_stacks_destroy_all_orchestrated(self):
         """Test stacks destroy-all command."""
         from cli.main import cli

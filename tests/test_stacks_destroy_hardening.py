@@ -988,6 +988,11 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
             ),
             patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[]),
             patch.object(StackManager, "destroy", side_effect=destroy_results),
+            patch.object(
+                StackManager,
+                "_cleanup_cluster_volumes",
+                return_value={"deleted": [], "surviving": [], "errors": []},
+            ),
         ]
         if strict:
             base_patches.append(
@@ -1064,6 +1069,7 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
             "bastion-iam",
             "implicit-log-groups",
             "traffic-dial-parameters",
+            "dynamic-pvs",
         }
 
     def test_partial_failure_still_sweeps_the_destroyed_stacks(self):
@@ -1097,6 +1103,118 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         cleanup.assert_not_called()
         bastion_iam.assert_called_once()
         assert "implicit-log-groups" not in {name for name, _ in cleanups}
+
+    def test_regional_volume_sweep_waits_for_confirmed_stack_absence(self):
+        """A regional stack that did not delete leaves its volumes untouched.
+
+        While the stack survives so may its EKS cluster, and a detached volume
+        belonging to a live cluster can simply be between pod restarts.
+        """
+        (ok, _successful, failed), _collect, _cleanup, _bastion, _dial, cleanups = self._run(
+            destroy_results=[True, False],
+        )
+
+        assert ok is False and failed == ["gco-global"]
+        # gco-global fails, so the pre-regional phase never completes; the
+        # regional barrier was still reached, so the sweep did run for the
+        # regional stack that is confirmed gone.
+        assert "dynamic-pvs" in {name for name, _ in cleanups}
+
+    def test_volume_cleanup_failure_never_relabels_a_deleted_stack(self):
+        """Storage cleanup and stack deletion are tracked separately.
+
+        Marking a deleted stack failed would send the CLI's retry loop back to
+        CDK for a stack that no longer exists.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        cleanups: list[tuple[str, dict]] = []
+
+        with (
+            patch.object(StackManager, "list_stacks", return_value=["gco-global", "gco-us-east-1"]),
+            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
+            patch.object(StackManager, "_cleanup_backup_vault", return_value={"errors": []}),
+            patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
+            patch.object(
+                StackManager,
+                "_cleanup_eks_security_groups",
+                return_value={"errors": [], "blocked_by_enis": []},
+            ),
+            patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[]),
+            patch.object(StackManager, "destroy", return_value=True),
+            patch.object(StackManager, "_collect_implicit_log_groups", return_value={}),
+            patch.object(
+                StackManager,
+                "_cleanup_bastion_iam",
+                return_value={"completed_steps": 0, "absent_steps": 0, "errors": []},
+            ),
+            patch.object(
+                StackManager,
+                "_cleanup_traffic_dial_parameters",
+                return_value={"deleted": [], "errors": []},
+            ),
+            patch.object(
+                StackManager,
+                "_cleanup_cluster_volumes",
+                return_value={"deleted": [], "surviving": [], "errors": [{"error": "denied"}]},
+            ),
+        ):
+            ok, _successful, failed = StackManager(config).destroy_orchestrated(
+                force=True,
+                on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
+            )
+
+        assert ok is True
+        assert failed == []
+        assert (
+            "dynamic-pvs",
+            {"deleted": [], "surviving": [], "errors": [{"error": "denied"}]},
+        ) in (cleanups)
+
+    def test_retain_volumes_reaches_the_worker(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+
+        with (
+            patch.object(StackManager, "list_stacks", return_value=["gco-global", "gco-us-east-1"]),
+            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
+            patch.object(StackManager, "_cleanup_backup_vault", return_value={"errors": []}),
+            patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
+            patch.object(
+                StackManager,
+                "_cleanup_eks_security_groups",
+                return_value={"errors": [], "blocked_by_enis": []},
+            ),
+            patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[]),
+            patch.object(StackManager, "destroy", return_value=True),
+            patch.object(StackManager, "_collect_implicit_log_groups", return_value={}),
+            patch.object(
+                StackManager,
+                "_cleanup_bastion_iam",
+                return_value={"completed_steps": 0, "absent_steps": 0, "errors": []},
+            ),
+            patch.object(
+                StackManager,
+                "_cleanup_traffic_dial_parameters",
+                return_value={"deleted": [], "errors": []},
+            ),
+            patch.object(
+                StackManager,
+                "_cleanup_cluster_volumes",
+                return_value={"deleted": [], "surviving": [], "errors": []},
+            ) as worker,
+        ):
+            StackManager(config).destroy_orchestrated(force=True, retain_volumes=True)
+
+        worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
 
     def test_strict_teardown_skips_log_and_iam_sweeps_but_purges_dial_tree(self):
         """The live-validation harness owns fenced log-group deletion and

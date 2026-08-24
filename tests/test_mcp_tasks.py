@@ -820,6 +820,35 @@ class TestInfrastructureDestroyTools:
         assert mock_task.call_args.kwargs["is_stack_op"] is True
 
     @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
+    def test_destroy_stack_forwards_retain_volumes(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.destroy_stack(
+                    stack_name="gco-us-east-1",
+                    retain_volumes=True,
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        assert "--retain-volumes" in mock_task.call_args.args[0]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
+    def test_destroy_stack_deletes_volumes_by_default(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.destroy_stack(
+                    stack_name="gco-us-east-1",
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        assert "--retain-volumes" not in mock_task.call_args.args[0]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
     def test_destroy_stack_omits_yes_when_disabled(self):
         importlib.reload(run_mcp)
         with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:

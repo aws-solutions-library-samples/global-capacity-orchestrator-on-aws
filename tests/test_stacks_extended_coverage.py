@@ -22,6 +22,10 @@ plumbing that the existing test suite doesn't reach:
   EKS-managed SG + orphaned-ENI cleanup.
 * ``_start_eks_sg_watchdog`` — the background thread that drives the
   cleanup helper between destroy retries.
+* ``_cleanup_cluster_volumes`` / ``cleanup_cluster_volumes`` — the
+  post-teardown sweep of EBS volumes the cluster's CSI driver
+  provisioned, including the cluster-absence gate and the
+  just-in-time recheck that runs before each delete.
 """
 
 from __future__ import annotations
@@ -785,6 +789,242 @@ class TestEksSecurityGroupCleanup:
         # Only the regional stack is cleaned.
         called_stacks = [c.args[0] for c in mock_clean.call_args_list]
         assert called_stacks == ["gco-us-east-1"]
+
+
+class TestClusterVolumeCleanup:
+    """Orphaned CSI-provisioned EBS volumes are disposed of after cluster absence."""
+
+    _CLUSTER_TAG = "kubernetes.io/cluster/gco-us-east-1"
+
+    @classmethod
+    def _volume(
+        cls,
+        volume_id: str = "vol-1",
+        *,
+        size: int = 50,
+        state: str = "available",
+        attachments: list[dict[str, Any]] | None = None,
+        tagged: bool = True,
+    ) -> dict[str, Any]:
+        tags = [{"Key": "kubernetes.io/created-for/pvc/name", "Value": "prometheus-db"}]
+        if tagged:
+            tags.append({"Key": cls._CLUSTER_TAG, "Value": "owned"})
+        return {
+            "VolumeId": volume_id,
+            "Size": size,
+            "VolumeType": "gp3",
+            "AvailabilityZone": "us-east-1a",
+            "State": state,
+            "Attachments": attachments or [],
+            "Tags": tags,
+        }
+
+    @classmethod
+    def _clients(
+        cls,
+        *,
+        volumes: list[dict[str, Any]] | None = None,
+        cluster_present: bool = False,
+        recheck: list[dict[str, Any]] | None = None,
+        delete_error: Exception | None = None,
+        gib_month_usd: float | None = 0.08,
+    ) -> tuple[Any, Any, Any]:
+        eks = MagicMock()
+        if cluster_present:
+            eks.describe_cluster.return_value = {"cluster": {"name": "gco-us-east-1"}}
+        else:
+            eks.describe_cluster.side_effect = ClientError(
+                {"Error": {"Code": "ResourceNotFoundException", "Message": "gone"}},
+                "DescribeCluster",
+            )
+        discovered = volumes if volumes is not None else []
+        ec2 = MagicMock()
+        ec2.get_paginator.return_value = _make_paginator([{"Volumes": discovered}])
+        # The just-in-time recheck re-reads each volume immediately before delete.
+        ec2.describe_volumes.return_value = {
+            "Volumes": recheck if recheck is not None else discovered
+        }
+        if delete_error is not None:
+            ec2.delete_volume.side_effect = delete_error
+
+        pricing = MagicMock()
+        if gib_month_usd is None:
+            pricing.get_products.side_effect = ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+                "GetProducts",
+            )
+        else:
+            pricing.get_products.return_value = {
+                "PriceList": [
+                    json.dumps(
+                        {
+                            "terms": {
+                                "OnDemand": {
+                                    "t1": {
+                                        "priceDimensions": {
+                                            "d1": {"pricePerUnit": {"USD": str(gib_month_usd)}}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    )
+                ]
+            }
+
+        def client(service: str, **_kwargs: Any) -> Any:
+            if service == "eks":
+                return eks
+            if service == "pricing":
+                return pricing
+            return ec2
+
+        return eks, ec2, client
+
+    def test_present_cluster_blocks_every_ec2_call(self, manager: Any) -> None:
+        eks, ec2, client = self._clients(cluster_present=True)
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        assert outcome["cluster_present"] is True
+        eks.describe_cluster.assert_called_once_with(name="gco-us-east-1")
+        ec2.get_paginator.assert_not_called()
+        ec2.delete_volume.assert_not_called()
+
+    def test_no_volumes_is_a_noop(self, manager: Any) -> None:
+        _eks, ec2, client = self._clients(volumes=[])
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        assert outcome["inspected"] == 0
+        assert outcome["deleted"] == []
+        ec2.delete_volume.assert_not_called()
+
+    def test_discovery_is_scoped_to_the_exact_cluster_tag_and_available_state(
+        self, manager: Any
+    ) -> None:
+        _eks, ec2, client = self._clients(volumes=[])
+        with patch("boto3.client", side_effect=client):
+            manager._cleanup_cluster_volumes("gco-us-east-1")
+        ec2.get_paginator.assert_called_once_with("describe_volumes")
+        filters = ec2.get_paginator.return_value.paginate.call_args.kwargs["Filters"]
+        assert {"Name": "tag-key", "Values": [self._CLUSTER_TAG]} in filters
+        assert {"Name": "status", "Values": ["available"]} in filters
+
+    def test_deletes_orphaned_volume_and_reports_it(self, manager: Any, capsys: Any) -> None:
+        _eks, ec2, client = self._clients(volumes=[self._volume()])
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        ec2.delete_volume.assert_called_once_with(VolumeId="vol-1")
+        assert [record["volume_id"] for record in outcome["deleted"]] == ["vol-1"]
+        assert outcome["deleted"][0]["pvc"] == "prometheus-db"
+        out = capsys.readouterr().out
+        assert "Cleaned up 1 orphaned EBS volume(s) (50 GiB)" in out
+        assert "vol-1 (50 GiB gp3, us-east-1a, pvc=prometheus-db)" in out
+
+    def test_retain_reports_without_deleting_and_prices_the_region(
+        self, manager: Any, capsys: Any
+    ) -> None:
+        _eks, ec2, client = self._clients(volumes=[self._volume(size=50)], gib_month_usd=0.096)
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1", retain=True)
+        ec2.delete_volume.assert_not_called()
+        assert outcome["retained"] is True
+        assert outcome["surviving"][0]["reason"] == "retained-by-request"
+        # 50 GiB at the rate the Pricing API returned, not a checked-in constant.
+        assert outcome["monthly_cost_usd"] == 4.8
+        out = capsys.readouterr().out
+        assert "1 EBS volume(s) (50 GiB, $4.80/month at current us-east-1 rates)" in out
+        assert "Nothing can reattach these" in out
+
+    def test_pricing_is_queried_for_the_teardown_region_and_volume_type(self, manager: Any) -> None:
+        _eks, _ec2, client = self._clients(volumes=[self._volume()])
+        with patch("boto3.client", side_effect=client) as boto:
+            manager._cleanup_cluster_volumes("gco-us-east-1", retain=True)
+        pricing_calls = [c for c in boto.call_args_list if c.args and c.args[0] == "pricing"]
+        # The Price List API is only offered in a few Regions; the Region being
+        # priced travels as a filter rather than as the endpoint.
+        assert pricing_calls and pricing_calls[0].kwargs["region_name"] == "us-east-1"
+        filters = client("pricing").get_products.call_args.kwargs["Filters"]
+        assert {"Type": "TERM_MATCH", "Field": "regionCode", "Value": "us-east-1"} in filters
+        assert {"Type": "TERM_MATCH", "Field": "volumeApiName", "Value": "gp3"} in filters
+
+    def test_unavailable_pricing_says_so_instead_of_guessing(
+        self, manager: Any, capsys: Any
+    ) -> None:
+        _eks, _ec2, client = self._clients(volumes=[self._volume()], gib_month_usd=None)
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1", retain=True)
+        assert "monthly_cost_usd" not in outcome
+        assert "gp3" in outcome["monthly_cost_unavailable"]
+        out = capsys.readouterr().out
+        assert "/month" not in out
+        assert "Ongoing cost: could not retrieve current EBS pricing" in out
+
+    def test_complete_cleanup_makes_no_pricing_call(self, manager: Any) -> None:
+        _eks, _ec2, client = self._clients(volumes=[self._volume()])
+        with patch("boto3.client", side_effect=client) as boto:
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        assert outcome["deleted"] and outcome["surviving"] == []
+        assert [c for c in boto.call_args_list if c.args and c.args[0] == "pricing"] == []
+
+    def test_recheck_spares_a_volume_that_became_attached(self, manager: Any) -> None:
+        _eks, ec2, client = self._clients(
+            volumes=[self._volume()],
+            recheck=[self._volume(state="in-use", attachments=[{"InstanceId": "i-1"}])],
+        )
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        ec2.delete_volume.assert_not_called()
+        assert outcome["surviving"][0]["reason"] == "state-is-in-use"
+
+    def test_recheck_spares_a_volume_whose_ownership_tag_vanished(self, manager: Any) -> None:
+        _eks, ec2, client = self._clients(
+            volumes=[self._volume()], recheck=[self._volume(tagged=False)]
+        )
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        ec2.delete_volume.assert_not_called()
+        assert outcome["surviving"][0]["reason"] == "cluster-ownership-tag-absent"
+
+    def test_already_absent_volume_is_not_an_error(self, manager: Any) -> None:
+        _eks, _ec2, client = self._clients(
+            volumes=[self._volume()],
+            delete_error=ClientError(
+                {"Error": {"Code": "InvalidVolume.NotFound", "Message": "gone"}},
+                "DeleteVolume",
+            ),
+        )
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        assert outcome["absent"] is True
+        assert outcome["errors"] == []
+
+    def test_one_delete_failure_does_not_stop_the_others(self, manager: Any) -> None:
+        volumes = [self._volume("vol-1"), self._volume("vol-2")]
+        _eks, ec2, client = self._clients(volumes=volumes)
+        ec2.describe_volumes.side_effect = lambda VolumeIds: {
+            "Volumes": [v for v in volumes if v["VolumeId"] == VolumeIds[0]]
+        }
+        ec2.delete_volume.side_effect = [RuntimeError("throttled"), None]
+        with patch("boto3.client", side_effect=client):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")
+        assert ec2.delete_volume.call_count == 2
+        assert [record["volume_id"] for record in outcome["deleted"]] == ["vol-2"]
+        assert outcome["errors"][0]["volume_id"] == "vol-1"
+
+    def test_top_level_failure_is_swallowed(self, manager: Any) -> None:
+        eks = MagicMock()
+        eks.describe_cluster.side_effect = RuntimeError("denied")
+        with patch("boto3.client", return_value=eks):
+            outcome = manager._cleanup_cluster_volumes("gco-us-east-1")  # no raise
+        assert outcome["errors"] and "denied" in outcome["errors"][0]["error"]
+
+    def test_public_wrapper_skips_global_stacks(self, manager: Any) -> None:
+        with patch.object(manager, "_cleanup_cluster_volumes") as worker:
+            for stack in ("gco-global", "gco-api-gateway", "gco-monitoring"):
+                assert manager.cleanup_cluster_volumes(stack)["skipped"] == "not-a-regional-stack"
+            worker.assert_not_called()
+            manager.cleanup_cluster_volumes("gco-us-east-1", retain=True)
+        worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
 
 
 class TestEksSgWatchdog:
