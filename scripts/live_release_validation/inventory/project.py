@@ -21,6 +21,7 @@ from .scanners import (
     _list_api_gateway_v1_apis,
     _list_api_gateway_v2_apis,
     _list_cloudwatch_log_groups,
+    _list_cluster_volumes,
     _list_dynamodb_tables,
     _list_eks_clusters,
     _list_global_accelerators,
@@ -191,6 +192,10 @@ def collect_project_resources(
             _list_cloudwatch_log_groups,
         ),
         ("secrets_manager", "secretsmanager", "secrets", _list_secrets),
+        # Last of the regional collectors: the CSI driver's volumes are the one
+        # category identified purely by a Kubernetes tag, so they are scanned
+        # independently of the stack- and project-tag matching above.
+        ("cluster_volumes", "ec2", "cluster_volumes", _list_cluster_volumes),
     )
     for scanner, service, category, collector in regional_collectors:
         applicable_regions = sorted(set(regions) & service_regions[service])

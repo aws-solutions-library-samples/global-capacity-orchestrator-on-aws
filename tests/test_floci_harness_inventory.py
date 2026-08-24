@@ -93,6 +93,7 @@ class TestProjectResourceScanners:
         region = "us-east-1"
         sqs = boto3.client("sqs", region_name=region)
         dynamodb = boto3.client("dynamodb", region_name=region)
+        ec2 = boto3.client("ec2", region_name=region)
         queue_url = sqs.create_queue(QueueName=f"{project}-jobs")["QueueUrl"]
         dynamodb.create_table(
             TableName=f"{project}-jobs",
@@ -102,6 +103,25 @@ class TestProjectResourceScanners:
         )
         dynamodb.get_waiter("table_exists").wait(TableName=f"{project}-jobs")
         _deploy_marker_stack(region, f"{project}-{region}")
+        # An EBS volume tagged the way the EKS CSI driver tags a PersistentVolume.
+        # It carries no CloudFormation or gco:project tag, so every other scanner
+        # is blind to it -- the exact leak #268 reported.
+        zone = ec2.describe_availability_zones()["AvailabilityZones"][0]["ZoneName"]
+        volume_id = ec2.create_volume(
+            AvailabilityZone=zone,
+            Size=1,
+            VolumeType="gp3",
+            TagSpecifications=[
+                {
+                    "ResourceType": "volume",
+                    "Tags": [
+                        {"Key": f"kubernetes.io/cluster/{project}-{region}", "Value": "owned"},
+                        {"Key": "kubernetes.io/created-for/pvc/name", "Value": "prometheus-db"},
+                    ],
+                }
+            ],
+        )["VolumeId"]
+        ec2.get_waiter("volume_available").wait(VolumeIds=[volume_id])
 
         inventory = collect_project_resources(
             harness_session,
@@ -114,6 +134,11 @@ class TestProjectResourceScanners:
         assert summary["sqs_queues"] >= 1, f"scanner missed the project queue: {summary}"
         assert summary["dynamodb_tables"] >= 1, f"scanner missed the project table: {summary}"
         assert summary["cloudformation_stacks"] >= 1, f"scanner missed the stack: {summary}"
+        assert summary["cluster_volumes"] >= 1, (
+            f"scanner missed the CSI-provisioned volume: {summary}. Without this the "
+            "final-inventory gate would call a teardown clean while billable volumes survive"
+        )
+        assert volume_id in inventory["regional"][region]["cluster_volumes"]
         assert project_resources_are_absent(inventory) is False
 
         # Tear the project down and require the scanners to PROVE absence —
@@ -123,6 +148,21 @@ class TestProjectResourceScanners:
         dynamodb.delete_table(TableName=f"{project}-jobs")
         dynamodb.get_waiter("table_not_exists").wait(TableName=f"{project}-jobs")
         _delete_stack(region, f"{project}-{region}")
+
+        # Deleting everything else is not enough: while the volume survives the
+        # inventory must still refuse to call the run clean.
+        still_leaking = collect_project_resources(
+            harness_session,
+            enabled_regions=[region],
+            expected_account=floci_account,
+            project_name=project,
+            seed_region=region,
+        )
+        assert project_resources_are_absent(still_leaking) is False, (
+            "a stranded CSI volume must fail the all-zero gate even once every "
+            "stack- and project-tagged resource is gone"
+        )
+        ec2.delete_volume(VolumeId=volume_id)
 
         after = collect_project_resources(
             harness_session,

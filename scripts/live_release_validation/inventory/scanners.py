@@ -273,6 +273,46 @@ def _ec2_items(client: Any, operation: str, response_key: str) -> list[dict[str,
     return items
 
 
+_CLUSTER_TAG_PREFIX = "kubernetes.io/cluster/"
+
+
+def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[str]:
+    """Return EBS volumes tagged for a project cluster by the EKS CSI driver.
+
+    These are the only project resources whose sole ownership marker is a
+    Kubernetes tag: the CSI driver writes ``kubernetes.io/cluster/<cluster>``
+    and never the CloudFormation or ``gco:project`` tags every other scanner
+    matches on. Deleting a cluster does not delete the PersistentVolumes its
+    driver provisioned, so without this scanner a teardown could strand
+    billable volumes and still pass the all-zero final-inventory gate.
+
+    Ownership is decided from the cluster name inside the tag key, which is the
+    regional stack name, so a volume belonging to another project's cluster in
+    the same account is never claimed. State is deliberately not filtered: any
+    surviving volume tagged for a project cluster is residual, whether it is
+    ``available``, still detaching, or in ``error``.
+
+    Enumerates unfiltered and matches client-side, like the other EC2 scanners
+    here. A server-side ``tag-key`` filter would need wildcard semantics to
+    match the cluster-name suffix, and depending on that in the gate that
+    authorizes calling a teardown clean is not worth the round-trip saved.
+    """
+    client = session.client("ec2", region_name=region)
+    volume_ids: set[str] = set()
+    for volume in _ec2_items(client, "describe_volumes", "Volumes"):
+        volume_id = str(volume.get("VolumeId") or "")
+        if not volume_id:
+            raise RuntimeError(f"EC2 returned a volume without an ID in {region}")
+        for key in _tags_to_dict(volume.get("Tags", [])):
+            if not key.startswith(_CLUSTER_TAG_PREFIX):
+                continue
+            cluster_name = key[len(_CLUSTER_TAG_PREFIX) :]
+            if cluster_name and _project_owned_name(cluster_name, project_name):
+                volume_ids.add(volume_id)
+                break
+    return sorted(volume_ids)
+
+
 def _list_project_ec2_networking(
     session: Any,
     region: str,

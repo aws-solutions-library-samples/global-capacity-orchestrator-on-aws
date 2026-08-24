@@ -2897,6 +2897,61 @@ class TestProtectedBaselineIdentity:
             ]
         )
 
+    def test_cluster_volume_scanner_claims_only_project_cluster_volumes(self) -> None:
+        """CSI-provisioned volumes carry only a Kubernetes tag, never a project tag."""
+        ec2 = MagicMock()
+        paginator = ec2.get_paginator.return_value
+        paginator.paginate.return_value = [
+            {
+                "Volumes": [
+                    {
+                        "VolumeId": "vol-00000000000000001",
+                        "Tags": [
+                            {
+                                "Key": "kubernetes.io/cluster/gco-live-us-east-1",
+                                "Value": "owned",
+                            },
+                            {
+                                "Key": "kubernetes.io/created-for/pvc/name",
+                                "Value": "prometheus-db",
+                            },
+                        ],
+                    },
+                    {
+                        "VolumeId": "vol-00000000000000002",
+                        "Tags": [
+                            {
+                                "Key": "kubernetes.io/cluster/other-project-us-east-1",
+                                "Value": "owned",
+                            }
+                        ],
+                    },
+                    {"VolumeId": "vol-00000000000000003", "Tags": []},
+                ]
+            }
+        ]
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        volumes = inventory_scanners._list_cluster_volumes(session, self._REGION, "gco-live")
+
+        assert volumes == ["vol-00000000000000001"]
+        ec2.get_paginator.assert_called_once_with("describe_volumes")
+        # Enumerated unfiltered and matched client-side, like the sibling EC2
+        # scanners: no dependence on server-side tag-key wildcard semantics, and
+        # no state filter, since a volume still detaching or in error is just as
+        # residual as an available one.
+        paginator.paginate.assert_called_once_with()
+
+    def test_cluster_volume_scanner_rejects_a_volume_without_an_id(self) -> None:
+        ec2 = MagicMock()
+        ec2.get_paginator.return_value.paginate.return_value = [{"Volumes": [{"Tags": []}]}]
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        with pytest.raises(RuntimeError, match="volume without an ID"):
+            inventory_scanners._list_cluster_volumes(session, self._REGION, "gco-live")
+
     def test_ec2_networking_inventory_separates_owned_from_live_authority(self) -> None:
         project_vpc = "vpc-11111111111111111"
         unrelated_vpc = "vpc-22222222222222222"
