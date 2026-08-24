@@ -4453,8 +4453,13 @@ class StackManager:
         strict_deployment_token: str | None = None,
         on_change_set_prepared: ChangeSetPreparedCallback | None = None,
         on_ecr_repository_created: EcrRepositoryCreatedCallback | None = None,
+        retain_volumes: bool = False,
     ) -> tuple[bool, list[str], list[str]]:
-        """Destroy stacks in dependency order with optional exact-ARN authority."""
+        """Destroy stacks in dependency order with optional exact-ARN authority.
+
+        ``retain_volumes`` reports the destroyed clusters' orphaned CSI volumes
+        instead of deleting them; see ``_cleanup_cluster_volumes``.
+        """
         app_stacks = self.list_stacks()
         strict_identity = expected_stack_ids is not None
         if strict_identity:
@@ -4772,6 +4777,24 @@ class StackManager:
                 failed.append(stack_name)
         if any(stack in failed for stack in regional_stacks) or phase_remaining:
             return finish(False)
+
+        # Every regional stack is verifiably absent here, so each EKS cluster and
+        # its CSI driver are gone and the volumes it provisioned can never
+        # reattach. Running after the barrier (rather than inside the per-stack
+        # loop above) means parallel and sequential teardowns publish the same
+        # outcomes in the same order, with no concurrent access to the report.
+        # Cleanup results deliberately do not feed ``failed``: these stacks are
+        # already deleted, and relabeling one as failed would send the CLI's
+        # retry loop back to CDK for a stack that no longer exists.
+        for stack_name in regional_stacks:
+            record_cleanup(
+                "dynamic-pvs",
+                self._cleanup_cluster_volumes(
+                    stack_name,
+                    region=strict_resources.get(stack_name, {}).get("region"),
+                    retain=retain_volumes,
+                ),
+            )
 
         for stack_name in pre_regional_stacks:
             if on_stack_start:
@@ -5699,6 +5722,261 @@ class StackManager:
             logger.debug("EKS security group cleanup for %s failed: %s", stack_name, exc)
         return outcome
 
+    def cleanup_cluster_volumes(
+        self,
+        stack_name: str,
+        *,
+        region: str | None = None,
+        retain: bool = False,
+    ) -> dict[str, Any]:
+        """Sweep one regional stack's orphaned CSI volumes; no-op for global stacks.
+
+        Entry point for the single-stack ``gco stacks destroy`` path, which has no
+        orchestrated cleanup barrier of its own. Global stacks host no cluster, so
+        they resolve to no work rather than a derived pseudo-Region.
+        """
+        if stack_name.endswith(("-global", "-api-gateway", "-monitoring")):
+            return {"stack": stack_name, "skipped": "not-a-regional-stack"}
+        return self._cleanup_cluster_volumes(stack_name, region=region, retain=retain)
+
+    def _cleanup_cluster_volumes(
+        self,
+        stack_name: str,
+        *,
+        region: str | None = None,
+        retain: bool = False,
+    ) -> dict[str, Any]:
+        """Delete the EBS volumes a destroyed cluster's CSI driver left behind.
+
+        Deleting an EKS cluster does not delete the PersistentVolumes its EBS CSI
+        driver provisioned, so every deploy/destroy cycle strands ``available``
+        volumes tagged ``kubernetes.io/cluster/<cluster>`` for a cluster that no
+        longer exists. Nothing can reattach them and they bill indefinitely (#268).
+        They carry the CSI driver's tags rather than the CDK ``Project`` tag, so no
+        project-scoped sweep or cost query can see them.
+
+        Deletion is the default because it honors intent already declared
+        elsewhere: the ``gco-observability-gp3`` StorageClass sets
+        ``reclaimPolicy: Delete``, and these volumes survive only because the
+        cluster is torn down before its PVCs are, so the CSI driver never receives
+        the delete event. ``retain=True`` reports them instead, and either way
+        every volume is named in the outcome — a silent leak is the actual bug.
+
+        Fail-closed on ordering: the sweep first proves the cluster is absent, so a
+        still-reconciling CSI driver is never raced. Ownership, ``available``
+        state, and zero attachments are then rechecked immediately before each
+        delete rather than trusted from the discovery snapshot. One volume's
+        failure never stops the others, and nothing raises into the destroy flow.
+        """
+        import boto3
+
+        project_name = self.config.project_name
+        region = region or stack_name.replace(f"{project_name}-", "", 1)
+        cluster_name = stack_name
+        cluster_tag = f"kubernetes.io/cluster/{cluster_name}"
+        outcome: dict[str, Any] = {
+            "stack": stack_name,
+            "region": region,
+            "cluster": cluster_name,
+            "retained": retain,
+            "inspected": 0,
+            "deleted": [],
+            "surviving": [],
+            "errors": [],
+        }
+
+        try:
+            # Ordering gate: a live cluster means its CSI driver may still be
+            # reconciling, so a detached volume can simply be between pod
+            # restarts. Only a proven-absent cluster makes these volumes garbage.
+            try:
+                boto3.client("eks", region_name=region).describe_cluster(name=cluster_name)
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+                    raise
+            else:
+                outcome["cluster_present"] = True
+                logger.debug(
+                    "Skipping volume cleanup for %s: cluster is still present",
+                    cluster_name,
+                )
+                return outcome
+
+            ec2 = boto3.client("ec2", region_name=region)
+            volumes: list[dict[str, Any]] = []
+            for page in ec2.get_paginator("describe_volumes").paginate(
+                Filters=[
+                    {"Name": "tag-key", "Values": [cluster_tag]},
+                    {"Name": "status", "Values": ["available"]},
+                ]
+            ):
+                volumes.extend(page.get("Volumes", []))
+
+            for volume in volumes:
+                outcome["inspected"] += 1
+                volume_id = str(volume["VolumeId"])
+                record = {
+                    "volume_id": volume_id,
+                    "size_gib": volume.get("Size"),
+                    "volume_type": volume.get("VolumeType"),
+                    "availability_zone": volume.get("AvailabilityZone"),
+                    "pvc": _volume_pvc_name(volume),
+                }
+                if retain:
+                    outcome["surviving"].append({**record, "reason": "retained-by-request"})
+                    continue
+                blocked = self._volume_delete_blocked(ec2, volume_id, cluster_tag=cluster_tag)
+                if blocked is not None:
+                    outcome["surviving"].append({**record, "reason": blocked})
+                    logger.debug("Leaving volume %s in place: %s", volume_id, blocked)
+                    continue
+                try:
+                    ec2.delete_volume(VolumeId=volume_id)
+                    outcome["deleted"].append(record)
+                except ClientError as exc:
+                    if exc.response.get("Error", {}).get("Code") == "InvalidVolume.NotFound":
+                        outcome["absent"] = True
+                        continue
+                    outcome["errors"].append(
+                        {"volume_id": volume_id, "error": f"{type(exc).__name__}: {exc}"}
+                    )
+                except Exception as exc:
+                    outcome["errors"].append(
+                        {"volume_id": volume_id, "error": f"{type(exc).__name__}: {exc}"}
+                    )
+        except Exception as exc:
+            outcome["errors"].append({"error": f"{type(exc).__name__}: {exc}"})
+            logger.debug("Cluster volume cleanup for %s failed: %s", stack_name, exc)
+        self._price_surviving_volumes(outcome)
+        _print_cluster_volume_outcome(outcome)
+        return outcome
+
+    @staticmethod
+    def _volume_storage_price_per_gib_month(region: str, volume_type: str) -> float | None:
+        """Return the current on-demand $/GiB-month for a volume type in a Region.
+
+        Priced at teardown time against the target Region rather than from a
+        constant in this file: EBS rates differ per Region and change over time, so
+        a checked-in number would quietly drift into misinforming the operator.
+
+        Returns ``None`` whenever the real rate cannot be established — no
+        credentials for ``pricing:GetProducts``, an unroutable endpoint, an
+        emulator that does not implement the Price List API, or an unrecognized
+        response shape. Callers must say the cost is unknown rather than
+        substitute a guess. Timeouts are short and retries few because this is a
+        cosmetic annotation on the teardown path and must never hold it up.
+        """
+        try:
+            import boto3
+            from botocore.config import Config
+
+            # The Price List API is only offered in a few Regions; us-east-1 is
+            # the canonical endpoint and is what cli/capacity/checker.py uses.
+            # The Region being priced is a filter, not the endpoint.
+            pricing = boto3.client(
+                "pricing",
+                region_name="us-east-1",
+                config=Config(
+                    connect_timeout=3,
+                    read_timeout=5,
+                    retries={"max_attempts": 2},
+                ),
+            )
+            response = pricing.get_products(
+                ServiceCode="AmazonEC2",
+                Filters=[
+                    {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Storage"},
+                    {"Type": "TERM_MATCH", "Field": "volumeApiName", "Value": volume_type},
+                    {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+                ],
+                MaxResults=1,
+            )
+            for entry in response.get("PriceList") or []:
+                product = json.loads(entry)
+                for term in (product.get("terms") or {}).get("OnDemand", {}).values():
+                    for dimension in (term.get("priceDimensions") or {}).values():
+                        usd = (dimension.get("pricePerUnit") or {}).get("USD")
+                        if usd is not None:
+                            return float(usd)
+        except Exception as exc:
+            logger.debug(
+                "Could not price %s storage in %s: %s",
+                volume_type,
+                region,
+                exc,
+            )
+        return None
+
+    def _price_surviving_volumes(self, outcome: dict[str, Any]) -> None:
+        """Annotate an outcome with the monthly cost of the volumes left behind.
+
+        Sets ``monthly_cost_usd`` when every surviving volume's type could be
+        priced, and ``monthly_cost_unavailable`` with the reason otherwise. Only
+        runs when volumes actually survived, so a teardown that cleaned up
+        completely makes no pricing call at all.
+        """
+        surviving = list(outcome.get("surviving") or [])
+        if not surviving:
+            return
+        region = str(outcome.get("region") or "")
+        rates: dict[str, float | None] = {}
+        for record in surviving:
+            volume_type = str(record.get("volume_type") or "")
+            if volume_type and volume_type not in rates:
+                rates[volume_type] = self._volume_storage_price_per_gib_month(region, volume_type)
+
+        unpriced = sorted({name for name, rate in rates.items() if rate is None})
+        if not rates or unpriced:
+            outcome["monthly_cost_unavailable"] = (
+                "could not retrieve current EBS pricing for "
+                + (", ".join(unpriced) if unpriced else "these volumes")
+                + f" in {region}"
+            )
+            return
+        outcome["monthly_cost_usd"] = round(
+            sum(
+                int(record.get("size_gib") or 0)
+                * (rates.get(str(record.get("volume_type"))) or 0.0)
+                for record in surviving
+            ),
+            2,
+        )
+
+    @staticmethod
+    def _volume_delete_blocked(
+        ec2: Any,
+        volume_id: str,
+        *,
+        cluster_tag: str,
+    ) -> str | None:
+        """Return why ``volume_id`` must not be deleted, or None when it may be.
+
+        Re-reads the volume immediately before deletion so a volume that was
+        reattached, or whose ownership tag changed, since discovery is left alone.
+        An unreadable volume is reported as blocked: acting without confirmation
+        is worse than leaving one volume behind for the operator to see.
+        """
+        try:
+            described = ec2.describe_volumes(VolumeIds=[volume_id]).get("Volumes", [])
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "InvalidVolume.NotFound":
+                return "already-absent"
+            return f"recheck-failed: {exc.response.get('Error', {}).get('Code') or 'ClientError'}"
+        except Exception as exc:
+            return f"recheck-failed: {type(exc).__name__}"
+        if len(described) != 1:
+            return "recheck-returned-ambiguous-identity"
+        current = described[0]
+        if str(current.get("VolumeId") or "") != volume_id:
+            return "recheck-returned-changed-identity"
+        if str(current.get("State") or "") != "available":
+            return f"state-is-{current.get('State') or 'unknown'}"
+        if current.get("Attachments"):
+            return "volume-has-attachments"
+        if not any(str(tag.get("Key") or "") == cluster_tag for tag in current.get("Tags") or []):
+            return "cluster-ownership-tag-absent"
+        return None
+
     def _start_eks_sg_watchdog(
         self,
         stack_name: str,
@@ -5751,6 +6029,74 @@ class StackManager:
 def get_stack_manager(config: GCOConfig) -> StackManager:
     """Factory function to get a StackManager instance."""
     return StackManager(config)
+
+
+def _volume_pvc_name(volume: Mapping[str, Any]) -> str | None:
+    """Return the PVC name the CSI driver recorded on a volume, when present."""
+    for tag in volume.get("Tags") or []:
+        if str(tag.get("Key") or "") == "kubernetes.io/created-for/pvc/name":
+            return str(tag.get("Value") or "") or None
+    return None
+
+
+def _describe_volume_record(record: Mapping[str, Any]) -> str:
+    """Render one volume as ``vol-x (50 GiB gp3, us-west-2a, pvc=prometheus-db)``."""
+    size = f"{record['size_gib']} GiB" if record.get("size_gib") else "unknown size"
+    if record.get("volume_type"):
+        size = f"{size} {record['volume_type']}"
+    parts = [size]
+    if record.get("availability_zone"):
+        parts.append(str(record["availability_zone"]))
+    if record.get("pvc"):
+        parts.append(f"pvc={record['pvc']}")
+    return f"{record['volume_id']} ({', '.join(parts)})"
+
+
+def _print_cluster_volume_outcome(outcome: Mapping[str, Any]) -> None:
+    """Report what a cluster-volume sweep deleted, left behind, or could not do.
+
+    Silent retention is the defect this feature exists to fix (#268), so every
+    surviving volume is named on stdout — not only the deleted ones.
+    """
+    deleted = list(outcome.get("deleted") or [])
+    surviving = list(outcome.get("surviving") or [])
+    errors = list(outcome.get("errors") or [])
+    cluster = outcome.get("cluster")
+
+    if deleted:
+        total_gib = sum(int(record.get("size_gib") or 0) for record in deleted)
+        print(
+            f"  Cleaned up {len(deleted)} orphaned EBS volume(s) "
+            f"({total_gib} GiB) left by cluster {cluster}:"
+        )
+        for record in deleted:
+            print(f"    - {_describe_volume_record(record)}")
+
+    if surviving:
+        total_gib = sum(int(record.get("size_gib") or 0) for record in surviving)
+        cost = outcome.get("monthly_cost_usd")
+        if cost is not None:
+            billing = f", ${cost:.2f}/month at current {outcome.get('region')} rates"
+        else:
+            billing = ""
+        print(
+            f"  {len(surviving)} EBS volume(s) ({total_gib} GiB{billing}) from "
+            f"cluster {cluster} were left in place:"
+        )
+        for record in surviving:
+            print(f"    - {_describe_volume_record(record)} [{record.get('reason')}]")
+        if cost is None:
+            print(f"    Ongoing cost: {outcome.get('monthly_cost_unavailable')}.")
+        print(
+            "    Nothing can reattach these once the cluster is gone. Delete them "
+            "with: aws ec2 delete-volume --region "
+            f"{outcome.get('region')} --volume-id <vol-id>"
+        )
+
+    for failure in errors:
+        target = failure.get("volume_id") or cluster
+        logger.warning("Could not dispose of EBS volume %s: %s", target, failure.get("error"))
+        print(f"  Could not dispose of EBS volume {target}: {failure.get('error')}")
 
 
 def _is_regional_api_bridge_stack(
