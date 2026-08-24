@@ -475,6 +475,7 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
         async def destroy_stack(
             stack_name: str,
             yes: bool = True,
+            retain_volumes: bool = False,
             *,
             ctx: Any = CurrentContext(),
             progress: Any = Progress(),
@@ -494,10 +495,17 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
             Args:
                 stack_name: Stack to destroy (e.g. ``gco-us-east-1``).
                 yes: Skip the confirmation prompt (passes ``-y``). Defaults to True.
+                retain_volumes: Report the cluster's orphaned EBS volumes instead
+                    of deleting them (passes ``--retain-volumes``). Defaults to
+                    False, matching the CLI: deleting an EKS cluster does not
+                    delete the volumes its CSI driver provisioned, so they bill
+                    indefinitely with nothing able to reattach them.
             """
             argv = ["gco", "stacks", "destroy", stack_name]
             if yes:
                 argv.append("-y")
+            if retain_volumes:
+                argv.append("--retain-volumes")
             return await _run_long_task(
                 argv,
                 ctx=ctx,
@@ -512,6 +520,7 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
             yes: bool = True,
             parallel: bool = False,
             max_workers: int | None = None,
+            retain_volumes: bool = False,
             *,
             ctx: Any = CurrentContext(),
             progress: Any = Progress(),
@@ -533,6 +542,9 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
                 yes: Skip the confirmation prompt (passes ``-y``). Defaults to True.
                 parallel: Destroy regional stacks concurrently when True.
                 max_workers: Cap on parallel destructions when ``parallel=True``.
+                retain_volumes: Report each cluster's orphaned EBS volumes instead
+                    of deleting them (passes ``--retain-volumes``). Defaults to
+                    False, matching the CLI.
             """
             argv = ["gco", "stacks", "destroy-all"]
             if yes:
@@ -541,6 +553,8 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
                 argv.append("--parallel")
             if max_workers is not None:
                 argv += ["--max-workers", str(max_workers)]
+            if retain_volumes:
+                argv.append("--retain-volumes")
             return await _run_long_task(
                 argv,
                 ctx=ctx,

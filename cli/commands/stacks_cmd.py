@@ -144,15 +144,27 @@ def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag:
 @stacks.command("destroy")
 @click.argument("stack_name")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option(
+    "--retain-volumes",
+    is_flag=True,
+    help="Report the cluster's orphaned EBS volumes instead of deleting them",
+)
 @pass_config
-def destroy_stack(config: Any, stack_name: Any, yes: Any) -> None:
+def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -> None:
     """Destroy a single CDK stack.
 
     For destroying all stacks in the correct order, use 'destroy-all'.
 
+    For a regional stack this also deletes the EBS volumes the cluster's CSI
+    driver provisioned for in-cluster PVCs (Prometheus, Grafana, Alertmanager,
+    MLflow). Deleting an EKS cluster does not delete them, so they would
+    otherwise remain billable forever with nothing able to reattach them. Pass
+    --retain-volumes to list them instead of deleting them.
+
     Examples:
         gco stacks destroy gco-us-east-1
         gco stacks destroy gco-us-east-1 -y
+        gco stacks destroy gco-us-east-1 -y --retain-volumes
     """
     from ..stacks import get_stack_manager
 
@@ -176,6 +188,12 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any) -> None:
         else:
             formatter.print_error("Destroy failed")
             sys.exit(1)
+
+        # Unlike destroy-all, this path has no orchestrated cleanup barrier, so
+        # the cluster's dynamically provisioned volumes are swept here. Runs only
+        # after a reported success, and the sweep itself re-proves the cluster is
+        # absent before touching anything (#268).
+        manager.cleanup_cluster_volumes(stack_name, retain=retain_volumes)
 
     except Exception as e:
         formatter.print_error(f"Destroy failed: {e}")
@@ -265,8 +283,15 @@ def deploy_all_orchestrated(
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @click.option("--parallel", "-p", is_flag=True, help="Destroy regional stacks in parallel")
 @click.option("--max-workers", "-w", default=4, help="Max parallel destructions (default: 4)")
+@click.option(
+    "--retain-volumes",
+    is_flag=True,
+    help="Report each cluster's orphaned EBS volumes instead of deleting them",
+)
 @pass_config
-def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: Any) -> None:
+def destroy_all_orchestrated(
+    config: Any, yes: Any, parallel: Any, max_workers: Any, retain_volumes: Any
+) -> None:
     """Destroy all stacks in the correct order.
 
     Destroys in four dependency phases:
@@ -277,6 +302,11 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
 
     Automatically retries up to 3 times (with 30s waits) if any stacks fail,
     which handles transient issues like orphaned resources during teardown.
+
+    Once every regional stack is gone this deletes the EBS volumes their
+    clusters' CSI drivers provisioned for in-cluster PVCs, which CloudFormation
+    does not own and deleting an EKS cluster does not remove. Pass
+    --retain-volumes to list them instead of deleting them.
 
     After a fully successful teardown this also purges the runtime
     /{project}/traffic-dial SSM parameters (controller state and manual
@@ -355,6 +385,7 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
                 on_stack_complete=on_complete,
                 parallel=parallel,
                 max_workers=max_workers,
+                retain_volumes=retain_volumes,
             )
 
             if success:
