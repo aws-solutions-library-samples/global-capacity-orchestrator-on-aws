@@ -1172,6 +1172,7 @@ gco stacks destroy STACK_NAME [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--yes` | `-y` | Skip confirmation |
+| `--retain-volumes` | | Report the cluster's orphaned EBS volumes instead of deleting them |
 
 #### `gco stacks destroy-all`
 
@@ -1188,6 +1189,28 @@ gco stacks destroy-all [OPTIONS]
 | `--yes` | `-y` | Skip confirmation |
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
+| `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
+
+##### Dynamically provisioned EBS volumes
+
+Deleting an EKS cluster does not delete the PersistentVolumes its EBS CSI driver
+provisioned, so in-cluster PVCs (Prometheus, Grafana, Alertmanager, MLflow) leave
+`available` volumes behind that nothing can reattach and that keep billing. They
+carry the driver's `kubernetes.io/cluster/<cluster>` tags rather than the CDK
+`Project` tag, so no project-scoped cleanup or cost query sees them.
+
+Both `destroy` and `destroy-all` therefore delete them once the owning cluster is
+confirmed absent, matching the `reclaimPolicy: Delete` the observability
+StorageClass already declares. The sweep is scoped to volumes carrying the exact
+cluster tag in the target Region, and each volume's ownership, `available` state,
+and zero attachments are rechecked immediately before deletion. Pass
+`--retain-volumes` to list them instead, with their current monthly cost priced
+against the target Region at teardown time; when that price cannot be retrieved
+the command says so rather than reporting a stale figure. Either way every volume
+is named, so nothing survives silently.
+
+Deletion is irreversible, so use `--retain-volumes` if you want to keep
+Prometheus history or take snapshots first.
 
 After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
