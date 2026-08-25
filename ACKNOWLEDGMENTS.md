@@ -16,9 +16,9 @@ This project would not have been possible without the support of some incredible
 
 **Carlos Manzanedo Rueda** — For helping navigate security reviews and getting the project released.
 
-**Daniel Zilberman** — For getting the solution published to the AWS Solutions Library and helping land the project in its new home under `aws-solutions-library-samples`.
+**Daniel Zilberman** — For getting the solution published to the AWS Solutions Library and helping land the repository in its new GitHub home.
 
-**Anindith Reddy Bujala** — For getting the solution published to the AWS Solutions Library and helping land the project in its new home under `aws-solutions-library-samples`.
+**Anindith Reddy Bujala** — For getting the solution published to the AWS Solutions Library and helping land the repository in its new GitHub home.
 
 **John Dzialo** — For being an early tester and adopter of the project.
 
