@@ -1,0 +1,64 @@
+# =============================================================================
+# pr-type-label.yml — Sync the type label to the declared "Type of change"
+# =============================================================================
+#
+# `.github/pull_request_template.md` asks every author to tick one "Type of
+# change" box, and `.github/release.yml` groups generated release notes by
+# label. Nothing joined the two, so a PR could declare `feat:` in its body and
+# still be filed under "Other changes" for want of a label. v6.5.0 and v6.5.1
+# both shipped that way, with a genuinely breaking change sitting in the same
+# undifferentiated list as a docs tweak.
+#
+# This applies the label the PR already declares, so the changelog falls out of
+# the checkbox the author filled in rather than a second step someone has to
+# remember. `.github/scripts/apply_pr_type_labels.py` owns the logic and is
+# covered by `tests/test_pr_type_labels.py`; this file only decides when it runs
+# and with what privilege.
+#
+# Two deliberate constraints, both from tests/test_workflow_security_contract.py:
+#
+#   * `pull_request`, never `pull_request_target`. The latter would hand a
+#     writable token to fork code and is banned repository-wide.
+#   * The pull-request body is attacker-controlled text, so it is never
+#     interpolated into a `run:` script. The script fetches it through `gh`
+#     using only the PR number, which rides in `env:`.
+#
+# Consequence of that first constraint: a fork PR gets a read-only token, so the
+# job is skipped for forks rather than failing on every one. Fork
+# contributions need the label applied by a maintainer at review time.
+#
+# =============================================================================
+name: PR Type Label
+
+on:
+  pull_request:
+    # `edited` is the load-bearing trigger: authors routinely open a PR and
+    # tick the box afterwards, and without it the label would only ever reflect
+    # the body as first submitted.
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: "pr:type-label"
+    runs-on: ubuntu-latest
+    # Forks cannot be labelled from a `pull_request` run: the token is
+    # read-only. Skipping is quieter than a job that always fails.
+    if: github.event.pull_request.head.repo.fork == false
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sync type label to the declared type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .github/scripts/apply_pr_type_labels.py --pr "$PR_NUMBER"

@@ -8,27 +8,43 @@ changelog:
       - ignore-for-release
     authors:
       - dependabot[bot]
+  # One label per category, each the conventional-commit type named in the
+  # "Type of change" list in .github/pull_request_template.md. The pr-type-label
+  # workflow applies these from the ticked checkbox, so a category is only as
+  # good as the label it keys on being unambiguous: the former `feature` /
+  # `enhancement` and `breaking-change` aliases meant two labels produced one
+  # heading, and a reader could not tell from the label which had been used.
+  #
+  # `Maintenance` exists so the five non-shipping types land somewhere
+  # meaningful. Left to the catch-all they were indistinguishable from an
+  # uncategorized change, which is how v6.5.0 and v6.5.1 came to list a breaking
+  # change and a docs tweak in the same undifferentiated "Other changes" block.
   categories:
     - title: Breaking changes
       labels:
         - breaking
-        - breaking-change
     - title: Features
       labels:
         - feat
-        - feature
-        - enhancement
     - title: Bug fixes
       labels:
         - fix
-        - bug
     - title: Documentation
       labels:
         - docs
-        - documentation
     - title: Dependencies
       labels:
         - dependencies
+    - title: Maintenance
+      labels:
+        - chore
+        - ci
+        - refactor
+        - perf
+        - test
+    # Anything reaching here declared no type, which the pr-type-label workflow
+    # cannot fix on the author's behalf. Keep it last: GitHub assigns each PR to
+    # the first category it matches.
     - title: Other changes
       labels:
         - "*"
