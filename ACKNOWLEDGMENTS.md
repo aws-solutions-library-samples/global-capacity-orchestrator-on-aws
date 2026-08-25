@@ -20,6 +20,10 @@ This project would not have been possible without the support of some incredible
 
 **Anindith Reddy Bujala** — For getting the solution published to the AWS Solutions Library and helping land the repository in its new GitHub home.
 
+**Joshua Yoon** — For being an important internal advocate for the project.
+
+**Luka Ralic** — For being an important internal advocate for the project.
+
 **John Dzialo** — For being an early tester and adopter of the project.
 
 **Mark Vinciguerra** — For being an early tester and adopter of the project.
