@@ -293,13 +293,9 @@ class ImageManager:
         """Return the detected container runtime, or raise a friendly error."""
         runtime = detect_container_runtime()
         if not runtime:
-            raise RuntimeError(
-                "No container runtime found. Install Docker, Finch, or "
-                "Podman, or set CDK_DOCKER=<path>.\n"
-                "  - Docker: https://docs.docker.com/get-docker/\n"
-                "  - Finch:  brew install finch && finch vm init\n"
-                "  - Podman: https://podman.io/getting-started/installation"
-            )
+            from ._container_runtime import container_runtime_error_message
+
+            raise RuntimeError(container_runtime_error_message(allow_cdk_docker=True))
         return runtime
 
     def _ecr_login(self, runtime: str) -> None:

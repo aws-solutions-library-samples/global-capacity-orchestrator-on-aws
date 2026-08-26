@@ -1823,12 +1823,9 @@ class StackManager:
         # Ensure container runtime is available for building images
         runtime = _detect_container_runtime()
         if not runtime:
-            raise RuntimeError(
-                "No container runtime found. Please install Docker, Finch, or Podman.\n"
-                "  - Docker: https://docs.docker.com/get-docker/\n"
-                "  - Finch: brew install finch && finch vm init\n"
-                "  - Podman: https://podman.io/getting-started/installation"
-            )
+            from cli._container_runtime import container_runtime_error_message
+
+            raise RuntimeError(container_runtime_error_message())
 
         # Mirror third-party images into ECR only after strict bootstrap and
         # target checks. Repository creation acknowledgements are persisted

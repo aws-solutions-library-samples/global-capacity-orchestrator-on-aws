@@ -118,3 +118,53 @@ def _detect_container_runtime_uncached() -> str | None:
             logger.debug("podman info check failed: %s", e)
 
     return None
+
+
+def container_runtime_error_message(*, allow_cdk_docker: bool = False) -> str:
+    """Build an actionable "no runtime" message for the situation on this host.
+
+    Detection requires a runtime that is *running*, not merely installed, so the
+    two failure modes need different advice and conflating them wastes real time:
+    a stopped Finch VM was reported as "please install Finch" during a live
+    release-validation run on 2026-08-26, on a machine that already had it. The
+    install hint sent the reader to a page they had already followed.
+
+    So: if a runtime binary is on PATH but did not answer, say so and give the
+    command that starts it. Only suggest installing when nothing is present.
+    """
+    import shutil
+
+    installed = [name for name in ("docker", "finch", "podman") if shutil.which(name)]
+
+    if installed:
+        start_hints = {
+            "docker": "start Docker Desktop (or `open -a Docker` on macOS)",
+            "finch": "finch vm start   (first time: finch vm init)",
+            "podman": "podman machine start   (first time: podman machine init)",
+        }
+        lines = [
+            "No container runtime is running. These are installed but did not "
+            f"respond: {', '.join(installed)}.",
+            "",
+            "Start one and retry:",
+        ]
+        lines += [f"  - {name}: {start_hints[name]}" for name in installed]
+        lines += [
+            "",
+            "Detection runs `<runtime> info` with a 5s timeout, so a runtime whose "
+            "VM is still booting also reports as unavailable — give it a moment "
+            "and retry.",
+        ]
+        if allow_cdk_docker:
+            lines.append("Alternatively set CDK_DOCKER=<path> to a runtime binary.")
+        return "\n".join(lines)
+
+    lines = [
+        "No container runtime found. Install Docker, Finch, or Podman.",
+        "  - Docker: https://docs.docker.com/get-docker/",
+        "  - Finch: brew install finch && finch vm init && finch vm start",
+        "  - Podman: https://podman.io/getting-started/installation",
+    ]
+    if allow_cdk_docker:
+        lines.append("Alternatively set CDK_DOCKER=<path> to a runtime binary.")
+    return "\n".join(lines)

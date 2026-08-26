@@ -1182,7 +1182,7 @@ class TestStackManagerOperations:
         with patch("cli.stacks._detect_container_runtime", return_value=None):
             manager = StackManager(config)
 
-            with pytest.raises(RuntimeError, match="No container runtime found"):
+            with pytest.raises(RuntimeError, match="container runtime"):
                 manager.deploy("test-stack")
 
     def test_deploy_failure(self):

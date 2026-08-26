@@ -326,7 +326,7 @@ def test_images_build_no_runtime_raises(manager: ImageManager, tmp_path: Any) ->
 
     with (
         patch("cli.images.detect_container_runtime", return_value=None),
-        pytest.raises(RuntimeError, match="No container runtime found"),
+        pytest.raises(RuntimeError, match="container runtime"),
     ):
         manager.build(str(ctx), name="my-app", tag="v1")
 
