@@ -167,7 +167,31 @@ Writes a small JSON artifact to the always-on `Cluster_Shared_Bucket` using `env
 gco jobs submit-direct examples/cluster-shared-bucket-upload-job.yaml -r us-east-1
 ```
 
-**When to use:** Any cluster job that needs a project-wide artifact store — ETL outputs, batch training checkpoints, cron dumps, hand-off to downstream analytics.
+**When to use:** Any cluster job that needs one project-wide artifact store reachable from every region — ETL outputs, cron dumps, hand-off to downstream analytics. For large or chatty writes such as training checkpoints, prefer the same-region `Regional_Shared_Bucket` below.
+
+---
+
+### Regional Shared Bucket Upload Job
+
+**File:** `regional-shared-bucket-upload-job.yaml`
+
+Writes a small JSON artifact to the always-on `Regional_Shared_Bucket` using `envFrom` against the `gco-regional-shared-bucket` ConfigMap. The bucket's name, ARN, and region are exposed directly as env vars (`regionalBucketName`, `regionalBucketArn`, `regionalBucketRegion`) — no hardcoded bucket names.
+
+**Same-region by construction:** this bucket lives in the same region as the cluster running the job, so S3 calls never cross a region boundary — no cross-region egress charge and no added latency. That is the difference from `Cluster_Shared_Bucket` above, which is central but remote.
+
+Because the two ConfigMaps use different key names (`regionalBucket*` vs `sharedBucket*`), a job can `envFrom` both and read central inputs while writing local outputs.
+
+**Teardown caveat:** the bucket is `RemovalPolicy.DESTROY` with `auto_delete_objects=True`, so `gco stacks destroy gco-<region>` deletes its contents. Copy anything you need to keep before tearing a region down.
+
+**Prerequisites:** none — `Regional_Shared_Bucket` is always provisioned with `gco stacks deploy gco-<region>`.
+
+**Usage:**
+
+```bash
+gco jobs submit-direct examples/regional-shared-bucket-upload-job.yaml -r us-east-1
+```
+
+**When to use:** Training checkpoints, model artifacts, intermediate shards — anything large, write-heavy, or latency-sensitive that does not need to be reachable from other regions.
 
 ---
 

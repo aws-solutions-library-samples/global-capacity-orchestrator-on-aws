@@ -568,6 +568,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_mooncake_region_services.py` | In-region service resolution for mooncake endpoints. |
 | `test_mooncake_regional_bucket_provisioning.py` | Property-based test — the general-purpose regional bucket is always-on. |
 | `test_mooncake_regional_bucket_synthesis.py` | Synthesis checks for the always-on general-purpose regional bucket. |
+| `test_regional_shared_configmap.py` | The `gco-regional-shared-bucket` ConfigMap's three `{{REGIONAL_SHARED_BUCKET*}}` replacements are always present in the convergence pipeline's `ImageReplacements` (an absent one would make the applier silently skip the ConfigMap), resolve to this stack's own bucket and its own region, and stay disjoint from the cluster-shared keys so a pod can `envFrom` both. |
 | `test_mooncake_regional_bucket_targeting.py` | Property-based test — a regional upload only ever touches its own region. |
 | `test_mooncake_regional_scope.py` | Regional confinement of disaggregated KV-transfer wiring. |
 | `test_mooncake_regional_upload.py` | Tests for ``RegionalBucketManager`` bucket resolution and upload error paths. |

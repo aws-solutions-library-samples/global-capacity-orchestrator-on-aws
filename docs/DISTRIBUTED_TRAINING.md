@@ -145,7 +145,7 @@ Distributed training on Spot is a cost/interruption trade:
 
 - **Metadata-cheap, restart-tolerant jobs** (the shipped example, short fine-tunes with frequent checkpoints) tolerate Spot well. A reclaimed node fails its rank; the JobSet restart policy re-runs the gang from the last checkpoint.
 - **Long gangs without checkpointing** should stay on On-Demand: one interruption discards the whole gang's progress, and large gangs multiply the interruption probability.
-- Checkpoint to durable storage — the [cluster-shared bucket](CLUSTER_SHARED_BUCKET.md), [EFS](CONCEPTS.md#storage-options), or [FSx for Lustre](CUSTOMIZATION.md#configure-fsx-for-lustre) — never to node-local disk.
+- Checkpoint to durable storage — the same-region [regional-shared bucket](REGIONAL_SHARED_BUCKET.md) (preferred for checkpoints: no cross-region egress), the [cluster-shared bucket](CLUSTER_SHARED_BUCKET.md), [EFS](CONCEPTS.md#storage-options), or [FSx for Lustre](CUSTOMIZATION.md#configure-fsx-for-lustre) — never to node-local disk. Note that both shared buckets are `RemovalPolicy.DESTROY`, so copy anything you need to keep before destroying a stack.
 - Track spend with the built-in [cost monitoring](COST_MONITORING.md); track run metrics with [MLflow](MONITORING.md#mlflow-experiment-tracking).
 
 ## Runtimes

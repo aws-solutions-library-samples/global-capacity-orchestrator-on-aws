@@ -145,6 +145,15 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
         ),
         ExampleSpec("cluster-shared-bucket-upload-job", SUBMIT_DIRECT, JOB_COMPLETES),
         ExampleSpec(
+            "regional-shared-bucket-upload-job",
+            SUBMIT_DIRECT,
+            JOB_COMPLETES,
+            notes=(
+                "no overrides needed: the regional bucket, its RW grant, and "
+                "the gco-regional-shared-bucket ConfigMap are all unconditional"
+            ),
+        ),
+        ExampleSpec(
             "analytics-s3-upload-job",
             SUBMIT_DIRECT,
             JOB_COMPLETES,

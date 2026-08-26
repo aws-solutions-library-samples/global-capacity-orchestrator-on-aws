@@ -187,6 +187,35 @@ def _compute_kubectl_cluster_shared_replacements(
     }
 
 
+def _compute_kubectl_regional_shared_replacements(
+    name: str,
+    arn: str,
+    region: str,
+) -> dict[str, str]:
+    """Build the ``{{REGIONAL_SHARED_BUCKET*}}`` kubectl-applier replacements.
+
+    Pure helper kept at module scope so property and presence tests can
+    inspect the output without synthesizing a full regional stack, mirroring
+    :func:`_compute_kubectl_cluster_shared_replacements`.
+
+    The three keys are always populated — there is no feature toggle —
+    because ``_create_regional_shared_bucket`` provisions the bucket
+    unconditionally, so the ``gco-regional-shared-bucket`` ConfigMap is
+    applied on every regional cluster and is never gated out of the
+    applier by an unresolved placeholder.
+
+    Unlike the cluster-shared helper this takes the three values directly
+    rather than a :class:`SharedBucketIdentity`: the regional bucket is a
+    local construct in this stack, so its name/ARN are CDK tokens resolved
+    at deploy time instead of values read back from cross-region SSM.
+    """
+    return {
+        "{{REGIONAL_SHARED_BUCKET}}": name,
+        "{{REGIONAL_SHARED_BUCKET_ARN}}": arn,
+        "{{REGIONAL_SHARED_BUCKET_REGION}}": region,
+    }
+
+
 #: StorageClass name for in-cluster observability PVCs (Prometheus, Grafana,
 #: Alertmanager). The value overrides reference this name, and the gated gp3
 #: StorageClass manifest (25-storage-observability-gp3.yaml) declares it. A
@@ -3464,6 +3493,21 @@ class GCORegionalStack(Stack):
         # regional cluster.
         image_replacements.update(
             _compute_kubectl_cluster_shared_replacements(self.cluster_shared_identity)
+        )
+
+        # Always-on Regional_Shared_Bucket replacements. Read straight off the
+        # local constructs created by _create_regional_shared_bucket (which
+        # runs earlier in __init__, before _apply_kubernetes_manifests), so no
+        # SSM round-trip is needed — unlike the cluster-shared bucket, this one
+        # is owned by this stack. Never gated on a toggle: the bucket is
+        # unconditional, so the gco-regional-shared-bucket ConfigMap is applied
+        # to every regional cluster.
+        image_replacements.update(
+            _compute_kubectl_regional_shared_replacements(
+                name=self.regional_shared_bucket.bucket_name,
+                arn=self.regional_shared_bucket.bucket_arn,
+                region=self.deployment_region,
+            )
         )
 
         # Cluster observability (on by default): gate the gp3 StorageClass and

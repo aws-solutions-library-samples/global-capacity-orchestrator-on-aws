@@ -281,8 +281,11 @@ Recommendations:
   inputs): use `Cluster_Shared_Bucket`. The cross-region cost is
   negligible at single-digit MB per day.
 - **Large regional data** (training checkpoints, shards, model
-  weights staged for training jobs): keep on each region's local
-  EFS/FSx. Those are same-region and don't cross the boundary.
+  weights staged for training jobs): keep it in-region. Either the
+  always-on `Regional_Shared_Bucket` — same-region S3, exposed to pods
+  by the `gco-regional-shared-bucket` ConfigMap, see
+  [`docs/REGIONAL_SHARED_BUCKET.md`](REGIONAL_SHARED_BUCKET.md) — or
+  each region's local EFS/FSx. Neither crosses the boundary.
 - **Bulk uploads**: batch many small objects into one tarball or
   [Parquet](https://parquet.apache.org/docs/) file before uploading — one cross-region `PUT` is cheaper
   than thousands.

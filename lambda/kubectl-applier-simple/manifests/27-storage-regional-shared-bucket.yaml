@@ -1,0 +1,55 @@
+# Regional-shared bucket ConfigMap — provides the always-on
+# Regional_Shared_Bucket's name, ARN, and region to pods via
+# configMapKeyRef/envFrom. Owned by GCORegionalStack (unconditional): the
+# bucket, its KMS key, and the job-pod RW grant are provisioned on every
+# regional deploy with no cdk.json toggle, so these placeholders always
+# resolve and this file is never feature-gated out.
+#
+# Keys are deliberately named regionalBucket* rather than sharedBucket* so a
+# pod can `envFrom` this ConfigMap AND gco-cluster-shared-bucket at the same
+# time without either set of env vars clobbering the other — the common
+# read-from-central, write-to-local shape.
+#
+# Unlike Cluster_Shared_Bucket (which lives in the global region), this bucket
+# is in the same region as the cluster, so S3 calls stay in-region: no
+# cross-region egress charge and no added latency. See
+# docs/REGIONAL_SHARED_BUCKET.md for the full schema and the teardown caveat.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-regional-shared-bucket
+  namespace: gco-jobs
+  labels:
+    app: gco
+    project: gco
+data:
+  regionalBucketName: "{{REGIONAL_SHARED_BUCKET}}"
+  regionalBucketArn: "{{REGIONAL_SHARED_BUCKET_ARN}}"
+  regionalBucketRegion: "{{REGIONAL_SHARED_BUCKET_REGION}}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-regional-shared-bucket
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+data:
+  regionalBucketName: "{{REGIONAL_SHARED_BUCKET}}"
+  regionalBucketArn: "{{REGIONAL_SHARED_BUCKET_ARN}}"
+  regionalBucketRegion: "{{REGIONAL_SHARED_BUCKET_REGION}}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-regional-shared-bucket
+  namespace: gco-inference
+  labels:
+    app: gco
+    project: gco
+data:
+  regionalBucketName: "{{REGIONAL_SHARED_BUCKET}}"
+  regionalBucketArn: "{{REGIONAL_SHARED_BUCKET_ARN}}"
+  regionalBucketRegion: "{{REGIONAL_SHARED_BUCKET_REGION}}"

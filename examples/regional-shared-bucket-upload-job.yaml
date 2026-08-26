@@ -1,0 +1,113 @@
+# Regional Shared Bucket Upload Job Example
+#
+# Writes a small JSON artifact to the always-on Regional_Shared_Bucket using
+# envFrom against the gco-regional-shared-bucket ConfigMap. The bucket's
+# name, ARN, and region are exposed as env vars (regionalBucketName,
+# regionalBucketArn, regionalBucketRegion) — no hardcoded bucket names.
+#
+# Prerequisites:
+#   - None — Regional_Shared_Bucket is always provisioned with
+#     `gco stacks deploy gco-<region>`.
+#
+# Usage:
+#   gco jobs submit-direct examples/regional-shared-bucket-upload-job.yaml -r us-east-1
+#
+# Notes:
+#   - Same-region by construction: this bucket lives in the SAME region as the
+#     cluster running the job, so S3 calls never cross a region boundary. No
+#     cross-region egress charge, no added latency. That makes it the right
+#     target for large or chatty writes such as training checkpoints — use
+#     Cluster_Shared_Bucket (see cluster-shared-bucket-upload-job.yaml) when you
+#     need one central bucket reachable from every region instead.
+#   - Both ConfigMaps can be consumed at once: the regional keys are named
+#     regionalBucket* and the cluster-shared keys sharedBucket*, so a job can
+#     `envFrom` both and read central inputs while writing local outputs.
+#   - Teardown caveat: the bucket is RemovalPolicy.DESTROY with
+#     auto_delete_objects=True, so `gco stacks destroy gco-<region>` deletes its
+#     contents. Copy anything you need to keep before tearing a region down.
+#
+# Docs: ../docs/REGIONAL_SHARED_BUCKET.md
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: regional-shared-bucket-upload
+  namespace: gco-jobs
+  labels:
+    app: regional-shared-bucket-upload
+    project: gco
+spec:
+  template:
+    spec:
+      serviceAccountName: gco-service-account
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: uploader
+        image: python:3.14.7-slim
+        command:
+        - python
+        - -c
+        - |
+          import json, os, subprocess, sys
+          from datetime import datetime, timezone
+
+          # Install boto3 into a writable prefix (non-root pod)
+          subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                 "--target", "/tmp/pylib", "boto3", "-q"])
+          sys.path.insert(0, "/tmp/pylib")
+          import boto3
+
+          bucket = os.environ["regionalBucketName"]
+          bucket_region = os.environ["regionalBucketRegion"]
+          bucket_arn = os.environ["regionalBucketArn"]
+
+          # The bucket is in this cluster's own region, so the default client
+          # region already matches. Passing it explicitly keeps the call
+          # correct even if the pod inherits a different default.
+          s3 = boto3.client("s3", region_name=bucket_region)
+
+          timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+          key = f"uploads/{timestamp}.json"
+
+          payload = {
+              "timestamp": timestamp,
+              "bucket_arn": bucket_arn,
+              "bucket_region": bucket_region,
+              "message": "Hello from the GCO regional-shared bucket example",
+          }
+          body = json.dumps(payload, indent=2).encode("utf-8")
+
+          s3.put_object(
+              Bucket=bucket,
+              Key=key,
+              Body=body,
+              ContentType="application/json",
+          )
+
+          uri = f"s3://{bucket}/{key}"
+          print(f"Uploaded {len(body)} bytes to {uri}")
+          print(f"Bucket region: {bucket_region} (same region as this cluster)")
+          print("Regional-shared bucket upload completed successfully!")
+        # Inject regionalBucketName / regionalBucketArn / regionalBucketRegion
+        # directly as env vars from the ConfigMap.
+        envFrom:
+        - configMapRef:
+            name: gco-regional-shared-bucket
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      restartPolicy: Never
+  backoffLimit: 2

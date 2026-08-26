@@ -89,6 +89,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **pruned when Aurora pgvector is disabled** |
 | `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
 | `26-storage-vector-store.yaml` | `gco-vector-store` `ConfigMap` (table/index/embedding-model/region) in all namespaces, pointing pods at their local global-table replica — **pruned when the vector store is disabled** |
+| `27-storage-regional-shared-bucket.yaml` | `gco-regional-shared-bucket` `ConfigMap` (name/ARN/region) in all namespaces, pointing pods at their own region's always-on general-purpose bucket — always present |
 
 ### System Services (30–39)
 
