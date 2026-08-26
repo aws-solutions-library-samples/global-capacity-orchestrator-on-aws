@@ -353,8 +353,31 @@ class TestDedupeSortRank:
 
 
 class TestValidateInstanceType:
-    def test_known_offline_spec(self):
+    @staticmethod
+    def _checker_describing_8_gpus():
+        """A checker whose EC2 client reports an 8-GPU type.
+
+        These cases used to need no mock because a checked-in offline catalog
+        answered them without touching AWS. That catalog is gone, so the EC2 call
+        must be stubbed — otherwise the test passes only on a machine that
+        happens to have credentials and silently makes a live API call in CI.
+        """
         checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_instance_types.return_value = {
+            "InstanceTypes": [
+                {
+                    "GpuInfo": {
+                        "Gpus": [{"Count": 8, "Name": "H100", "Manufacturer": "NVIDIA"}],
+                    }
+                }
+            ]
+        }
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        return checker
+
+    def test_confirmed_type_is_valid_and_known(self):
+        checker = self._checker_describing_8_gpus()
         result = checker.validate_instance_type("p5.48xlarge")
         assert result["valid"] is True
         assert result["known"] is True
@@ -362,16 +385,20 @@ class TestValidateInstanceType:
         assert result["instance_type"] == "p5.48xlarge"
 
     def test_alias_expands_and_is_known(self):
-        checker = _make_checker()
+        checker = self._checker_describing_8_gpus()
         result = checker.validate_instance_type("p6-b200")
         assert result["instance_type"] == "p6-b200.48xlarge"
         assert result["valid"] is True
         assert result["known"] is True
         assert result["gpu_count"] == 8
         assert "p6-b200.48xlarge" in result["note"]
+        # The canonical name is what reaches EC2, not the friendly alias.
+        checker._session.client.return_value.describe_instance_types.assert_called_once_with(
+            InstanceTypes=["p6-b200.48xlarge"]
+        )
 
     def test_b300_is_valid_standalone(self):
-        checker = _make_checker()
+        checker = self._checker_describing_8_gpus()
         result = checker.validate_instance_type("p6-b300")
         assert result["instance_type"] == "p6-b300.48xlarge"
         assert result["valid"] is True

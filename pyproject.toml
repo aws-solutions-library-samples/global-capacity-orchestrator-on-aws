@@ -352,14 +352,24 @@ module = "gco.stacks.*"
 disallow_subclassing_any = false
 warn_unused_ignores = false
 
-# NOTE: there is deliberately no `tests.*` override here. One existed, relaxing
-# disallow_untyped_defs and friends, but nothing ever applied it: no mypy job
-# typechecks tests/ (lint:mypy:strict runs `mypy gco/ cli/ gco_mcp/ scripts/`),
-# so `warn_unused_configs` reported it as an unused section on every run. It was
-# removed rather than made real: `mypy tests/` currently reports ~3.3k errors
-# across 229 modules, so adding the suite to CI is its own project, not a
-# config tweak. Reinstate the override in the same change that adds tests/ to a
-# mypy job — not before, or the note comes back.
+# Tests can use looser rules — the test runner resolves fixtures at runtime so
+# `disallow_untyped_defs` creates too much noise for little real-world benefit.
+#
+# This override IS live, despite appearances. No mypy job passes tests/ on the
+# command line, so a narrow run like `mypy cli/` reports it as an unused section
+# — but lint:mypy:strict reaches test modules by following imports out of the
+# packages it does check, and without this it fails on them (e.g.
+# tests/test_nag_compliance.py under disallow_untyped_decorators). Do not delete
+# it on the strength of that note: confirm against the real CI command,
+# `mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'`, which does not
+# report the section as unused. Typechecking tests/ wholesale is a separate
+# project — it currently reports ~3.3k errors across 229 modules.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = false
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 # Single source of truth for pytest configuration. This block previously
