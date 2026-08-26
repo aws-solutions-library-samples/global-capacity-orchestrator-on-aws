@@ -204,6 +204,53 @@ class TestManifestProcessorRole:
             "manifest-processor Role must grant events for events endpoint"
         )
 
+    def test_manifest_processor_can_read_resource_governance(self, rbac_docs):
+        """resourcequotas + limitranges must be readable for GET /api/v1/policy.
+
+        Regression: the 2026-08-26 release-validation run had /api/v1/policy
+        return ``cluster_enforcement.gco-jobs = {"status": "unavailable",
+        "reason": "403 Forbidden"}``. Three layers govern admission — the
+        front-door per-manifest caps, the LimitRange per-container ceiling, and
+        the namespace ResourceQuota aggregate — and without these two resources
+        the endpoint can only report the first. It reports a caller a job is
+        admissible that pod creation then rejects, and the endpoint degrades
+        rather than failing, so the gap is silent in the response body.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        resource_names = {item[1] for item in _get_all_resources(role)}
+        missing = {"resourcequotas", "limitranges"} - resource_names
+        assert not missing, (
+            "manifest-processor Role must grant read on the resource-governance "
+            f"objects GET /api/v1/policy reports; missing: {sorted(missing)}"
+        )
+
+    def test_resource_governance_access_is_read_only(self, rbac_docs):
+        """Nothing at runtime may widen its own guardrail.
+
+        The ceilings come from 04-resource-quotas.yaml, substituted from
+        cdk.json at deploy time. A service that could patch its own
+        ResourceQuota could lift the cap it is being held to, so the policy
+        endpoint's access is deliberately get/list only.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        governance_rules = [
+            rule
+            for rule in role["rules"]
+            if {"resourcequotas", "limitranges"} & set(rule.get("resources", []))
+        ]
+        assert governance_rules, "expected a rule covering the governance objects"
+        for rule in governance_rules:
+            assert set(rule["verbs"]) <= READ_ONLY_VERBS, (
+                "resourcequotas/limitranges must be read-only for the manifest "
+                f"processor; found verbs {sorted(rule['verbs'])}"
+            )
+            # Kept on their own rule rather than folded into the pods/services
+            # write rule, which would silently grant write on them too.
+            assert not set(rule["resources"]) - {"resourcequotas", "limitranges"}, (
+                "keep the governance read on its own rule so a future verb "
+                "added for another resource cannot widen it"
+            )
+
     def test_manifest_processor_manages_trainjobs(self, rbac_docs):
         """trainer.kubeflow.org/trainjobs needs full lifecycle verbs.
 

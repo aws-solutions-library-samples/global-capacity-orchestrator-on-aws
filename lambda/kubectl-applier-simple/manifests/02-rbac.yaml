@@ -184,6 +184,28 @@ rules:
     resources: ["events"]
     verbs: ["get", "list", "watch"]
 
+  # ResourceQuota + LimitRange — read-only, for GET /api/v1/policy.
+  #
+  # Three layers govern admission and a caller needs all three to answer "will
+  # this job be admitted": the front-door per-manifest caps this service
+  # enforces itself, the LimitRange per-container ceiling, and the namespace
+  # ResourceQuota aggregate ceiling. A manifest can clear the front door and
+  # still be rejected at pod creation by either of the other two, so reporting
+  # only the caps would tell a caller a job is admissible when it is not — and
+  # they may have provisioned a region on the strength of that answer.
+  #
+  # Caught live 2026-08-26: /api/v1/policy returned
+  # cluster_enforcement.gco-jobs = {"status": "unavailable", "reason":
+  # "403 Forbidden"} on a full release-validation run. The endpoint degrades
+  # rather than failing, so the gap was silent in the response body.
+  #
+  # Read-only on purpose: these ceilings are set by 04-resource-quotas.yaml
+  # from cdk.json at deploy time, and nothing at runtime may widen its own
+  # guardrail.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list"]
+
   # Apps resources
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
