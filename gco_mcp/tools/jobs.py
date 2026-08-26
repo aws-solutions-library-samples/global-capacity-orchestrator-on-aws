@@ -247,6 +247,32 @@ def cluster_health(region: str | None = None) -> str:
 
 @mcp.tool(tags={"safe", "jobs"})
 @audit_logged
+def get_job_validation_policy(region: str) -> str:
+    """Get the job validation policy a region actually enforces, as deployed.
+
+    Use this before submitting to check whether a manifest will be admitted,
+    rather than paying to provision a region and discovering the conflict at
+    submit time. Returns the per-manifest cpu/memory/gpu caps,
+    allowed_namespaces, allowed_kinds, trusted_registries, the pod-security
+    block_* flags, and the namespace's live ResourceQuota / LimitRange
+    ceilings.
+
+    This reads the deployed cluster, not a local cdk.json. The two diverge
+    whenever a stack was deployed from a different checkout, and CDK augments
+    trusted_registries with the project's own ECR hostnames at synth time, so
+    the effective allowlist is strictly larger than the configured one.
+
+    A manifest must clear all three layers: the front-door policy, the
+    per-container LimitRange, and the aggregate ResourceQuota.
+
+    Args:
+        region: AWS region (e.g. us-east-1).
+    """
+    return cli_runner._run_cli("jobs", "policy", "-r", region)
+
+
+@mcp.tool(tags={"safe", "jobs"})
+@audit_logged
 def queue_status(region: str | None = None) -> str:
     """View SQS queue status (pending, in-flight, DLQ counts).
 

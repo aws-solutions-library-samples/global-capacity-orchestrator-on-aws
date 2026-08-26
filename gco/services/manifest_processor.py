@@ -608,6 +608,130 @@ class ManifestProcessor:
         self.block_added_capabilities = security_policy.get("block_added_capabilities", True)
         self.block_run_as_root = security_policy.get("block_run_as_root", False)
 
+    # ------------------------------------------------------------------
+    # Effective-policy introspection (read-only)
+    # ------------------------------------------------------------------
+
+    def effective_job_validation_policy(self) -> dict[str, Any]:
+        """Return the validation policy this instance actually enforces.
+
+        Read straight off the instance attributes that ``validate_manifest``
+        and its helpers compare against, so the answer is the *deployed*
+        policy rather than whatever ``cdk.json`` currently says on some
+        operator's disk. The two can differ for two independent reasons: the
+        cluster may have been deployed from a different checkout, and CDK
+        augments ``trusted_registries`` with the project's own ECR registry
+        hostnames at synth time, so the effective allowlist is strictly
+        larger than the configured one.
+
+        Numeric caps are reported in the units the validator compares in
+        (millicores, bytes, whole GPUs) alongside the raw configured strings,
+        because ``384`` vCPU and ``384000`` millicores are the same cap and a
+        consumer doing a local pre-check needs to know which it is holding.
+
+        Sets are returned as sorted lists so the payload is stable across
+        calls and diffable between regions.
+        """
+        return {
+            "validation_enabled": self.validation_enabled,
+            "manifest_caps": {
+                "max_cpu_millicores": self.max_cpu_per_manifest,
+                "max_memory_bytes": self.max_memory_per_manifest,
+                "max_gpu_count": self.max_gpu_per_manifest,
+                "configured": {
+                    "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST"),
+                    "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST"),
+                    "max_gpu_per_manifest": os.getenv("MAX_GPU_PER_MANIFEST"),
+                },
+            },
+            "allowed_namespaces": sorted(self.allowed_namespaces),
+            "allowed_kinds": sorted(self.allowed_kinds),
+            "allowed_api_versions": {
+                kind: sorted(versions)
+                for kind, versions in sorted(RESOURCE_API_VERSIONS.items())
+                if kind in self.allowed_kinds
+            },
+            "trusted_registries": sorted(self.trusted_registries),
+            "trusted_dockerhub_orgs": sorted(self.trusted_dockerhub_orgs),
+            "require_accelerator_toleration": self.require_accelerator_toleration,
+            "yaml_max_depth": self.yaml_max_depth,
+            "manifest_security_policy": {
+                "block_privileged": self.block_privileged,
+                "block_privilege_escalation": self.block_privilege_escalation,
+                "block_host_network": self.block_host_network,
+                "block_host_pid": self.block_host_pid,
+                "block_host_ipc": self.block_host_ipc,
+                "block_host_path": self.block_host_path,
+                "block_added_capabilities": self.block_added_capabilities,
+                "block_run_as_root": self.block_run_as_root,
+            },
+        }
+
+    def cluster_resource_governance(self) -> dict[str, Any]:
+        """Return the live ResourceQuota / LimitRange ceilings per namespace.
+
+        The per-manifest caps in
+        :meth:`effective_job_validation_policy` are only the **first** of three
+        layers. A manifest that clears the front door can still be rejected by
+        the namespace's LimitRange (per-container ceiling) or its ResourceQuota
+        (aggregate ceiling). Reporting only the first layer would let a caller
+        conclude a job is admissible when it is not, so this reads the other
+        two straight from the Kubernetes API.
+
+        Fail-soft by design: a Kubernetes read failure yields
+        ``status="unavailable"`` with the reason attached rather than raising,
+        because a partial policy answer is more useful than a 500 — and the
+        caller can see explicitly that the layer is missing instead of
+        inferring absence from a silently truncated payload.
+        """
+        namespaces: dict[str, Any] = {}
+        for namespace in sorted(self.allowed_namespaces):
+            entry: dict[str, Any] = {}
+            try:
+                quotas = self.core_v1.list_namespaced_resource_quota(
+                    namespace, _request_timeout=self._k8s_timeout
+                )
+                entry["resource_quotas"] = {
+                    item.metadata.name: dict(item.status.hard or {})
+                    if item.status and item.status.hard
+                    else dict(item.spec.hard or {})
+                    for item in quotas.items
+                }
+
+                limit_ranges = self.core_v1.list_namespaced_limit_range(
+                    namespace, _request_timeout=self._k8s_timeout
+                )
+                entry["limit_ranges"] = {
+                    item.metadata.name: [
+                        {
+                            "type": limit.type,
+                            "max": dict(limit.max or {}),
+                            "min": dict(limit.min or {}),
+                            "default": dict(limit.default or {}),
+                            "defaultRequest": dict(limit.default_request or {}),
+                        }
+                        for limit in (item.spec.limits or [])
+                    ]
+                    for item in limit_ranges.items
+                }
+                entry["status"] = "ok"
+            except ApiException as e:
+                logger.warning(
+                    "Failed to read resource governance for namespace %s: %s",
+                    sanitize_log_value(namespace),
+                    e.reason,
+                )
+                entry = {"status": "unavailable", "reason": f"{e.status} {e.reason}"}
+            except Exception as e:  # noqa: BLE001 - any read failure is "unavailable"
+                logger.warning(
+                    "Failed to read resource governance for namespace %s: %s",
+                    sanitize_log_value(namespace),
+                    e,
+                )
+                entry = {"status": "unavailable", "reason": str(e)}
+            namespaces[namespace] = entry
+        return namespaces
+
     def _resource_access_error(self, api_version: str, kind: str, namespace: str) -> str | None:
         """Return an authorization error for a CRUD resource identifier."""
         if namespace not in self.allowed_namespaces:

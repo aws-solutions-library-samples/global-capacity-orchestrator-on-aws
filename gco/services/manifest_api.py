@@ -263,6 +263,7 @@ async def root() -> dict[str, Any]:
             },
             "health": "GET /api/v1/health",
             "status": "GET /api/v1/status",
+            "policy": "GET /api/v1/policy",
         },
     }
 
@@ -381,6 +382,49 @@ async def get_service_status() -> dict[str, Any]:
         )
 
     return status_info
+
+
+@app.get("/api/v1/policy", tags=["Health"])
+async def get_job_validation_policy() -> dict[str, Any]:
+    """The validation policy this region actually enforces, as deployed.
+
+    Answers "will this cluster admit the job I am about to pay to run?"
+    before submission, so a policy conflict surfaces at plan time instead of
+    after a region has been provisioned and billed.
+
+    Reads the live ``ManifestProcessor`` instance rather than any config file.
+    A local ``cdk.json`` is the *input* to a deploy, not the state of one:
+    the cluster may have been deployed from a different checkout, and CDK
+    augments ``trusted_registries`` with the project's own ECR hostnames at
+    synth time, so the effective allowlist is strictly larger than the
+    configured one.
+
+    Three layers govern admission and all three are reported:
+
+    1. ``policy`` — the front-door checks the manifest processor and the SQS
+       queue processor both apply (they read the same env vars, so neither
+       submission path is a bypass).
+    2. ``cluster_enforcement.limit_ranges`` — per-container ceilings.
+    3. ``cluster_enforcement.resource_quotas`` — namespace aggregate ceilings.
+
+    A manifest must clear all three. Layers 2 and 3 are read live from the
+    Kubernetes API and degrade to ``status="unavailable"`` rather than
+    failing the whole response.
+    """
+    if manifest_processor is None:
+        raise HTTPException(status_code=503, detail="Manifest processor not ready")
+
+    return {
+        "service": "GCO Manifest Processor API",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "cluster_id": manifest_processor.cluster_id,
+        "region": manifest_processor.region,
+        # Names the origin of these values so a caller never mistakes this for
+        # a config-file read.
+        "source": "deployed-cluster-runtime",
+        "policy": manifest_processor.effective_job_validation_policy(),
+        "cluster_enforcement": manifest_processor.cluster_resource_governance(),
+    }
 
 
 # =============================================================================

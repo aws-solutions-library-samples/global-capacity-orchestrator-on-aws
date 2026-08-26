@@ -463,7 +463,7 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
    gco stacks deploy gco-<REGION> -y
    ```
 
-3. **If manifests are rejected:** Check `job_validation_policy` in `cdk.json`, including `allowed_kinds`, `allowed_namespaces`, resource quotas, image registries, and security controls. Rejected, unsupported, and apply-failed messages are deliberately left unacknowledged so SQS retries them and eventually moves them to the DLQ. Change policy/RBAC intentionally, redeploy, and only then replay the DLQ.
+3. **If manifests are rejected:** Read the region's deployed policy with `gco jobs policy --region <region>` — including `allowed_kinds`, `allowed_namespaces`, resource caps, image registries, and security controls. (Check `job_validation_policy` in `cdk.json` only to decide what to *change*; it is not what the cluster is currently enforcing.) Rejected, unsupported, and apply-failed messages are deliberately left unacknowledged so SQS retries them and eventually moves them to the DLQ. Change policy/RBAC intentionally, redeploy, and only then replay the DLQ.
 
 4. **To replay DLQ messages** (after fixing the root cause), where
    `<DLQ_ARN>` is the dead-letter queue ARN and `<MAIN_QUEUE_ARN>` is the main
@@ -488,14 +488,22 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
 **Diagnosis:**
 
 ```bash
-# 1. Dry-run the manifest to see the exact error
+# 1. Dry-run the manifest to see the exact error.
+#    Note this is a client-side kubectl parse, not an admission preview —
+#    it does not consult the cluster's validation policy.
 gco jobs submit my-job.yaml -n gco-jobs --dry-run
 
-# 2. Inspect the deployed-policy source of truth
-jq '.context.job_validation_policy.resource_quotas' cdk.json
+# 2. Read what the region ACTUALLY enforces, from the deployed cluster.
+#    Prefer this over cdk.json: cdk.json is the input to a deploy, not the
+#    state of one, and CDK adds the project's own ECR registries to
+#    trusted_registries at synth time.
+gco jobs policy --region us-east-1
 
-# 3. Check allowed namespaces in the same deployment policy
-jq '.context.job_validation_policy.allowed_namespaces' cdk.json
+# 3. Narrow to a specific layer (all three must pass: front-door caps,
+#    per-container LimitRange, aggregate ResourceQuota)
+gco jobs policy -r us-east-1 -o json | jq '.policy.manifest_caps'
+gco jobs policy -r us-east-1 -o json | jq '.policy.allowed_namespaces'
+gco jobs policy -r us-east-1 -o json | jq '.cluster_enforcement'
 ```
 
 **Resolution:**

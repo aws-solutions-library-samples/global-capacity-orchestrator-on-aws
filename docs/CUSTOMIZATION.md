@@ -722,6 +722,8 @@ This policy is enforced on **both** submission paths:
 
 CDK wires the same configuration values into both services at deploy time, so a single policy change applies uniformly. An attacker holding `sqs:SendMessage` on the job queue cannot use the SQS path to bypass the checks enforced by the REST path.
 
+> **To read what a region actually enforces, don't read this file — ask the cluster.** `gco jobs policy --region <region>` (or `GET /api/v1/policy`) returns the deployed policy, plus the namespace `LimitRange` and `ResourceQuota` ceilings that form the second and third admission layers. `cdk.json` is the *input* to a deploy: it drifts the moment a stack is deployed from a different checkout, and CDK adds the project's own ECR registries to `trusted_registries` at synth time, so the effective allowlist is always larger than what you see here. See [Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy).
+
 Policy values in `cdk.json` must be literal JSON booleans (`true` or `false`). Nulls, strings, numbers, unknown policy fields, and malformed `require_accelerator_toleration` values are rejected before synthesis rather than being converted by truthiness. At runtime, the generated `BLOCK_*`, `REQUIRE_ACCELERATOR_TOLERATION`, and `VALIDATION_ENABLED` variables accept explicit `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` spellings (case-insensitive); unset or blank variables retain their documented defaults. Any other non-empty value, including a typo or unresolved placeholder, fails service startup instead of disabling a control.
 
 ### Security Policy Toggles

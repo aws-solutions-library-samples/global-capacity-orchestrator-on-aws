@@ -1623,6 +1623,30 @@
         ]
       }
     },
+    "/api/v1/policy": {
+      "get": {
+        "description": "The validation policy this region actually enforces, as deployed.\n\nAnswers \"will this cluster admit the job I am about to pay to run?\"\nbefore submission, so a policy conflict surfaces at plan time instead of\nafter a region has been provisioned and billed.\n\nReads the live ``ManifestProcessor`` instance rather than any config file.\nA local ``cdk.json`` is the *input* to a deploy, not the state of one:\nthe cluster may have been deployed from a different checkout, and CDK\naugments ``trusted_registries`` with the project's own ECR hostnames at\nsynth time, so the effective allowlist is strictly larger than the\nconfigured one.\n\nThree layers govern admission and all three are reported:\n\n1. ``policy`` \u2014 the front-door checks the manifest processor and the SQS\n   queue processor both apply (they read the same env vars, so neither\n   submission path is a bypass).\n2. ``cluster_enforcement.limit_ranges`` \u2014 per-container ceilings.\n3. ``cluster_enforcement.resource_quotas`` \u2014 namespace aggregate ceilings.\n\nA manifest must clear all three. Layers 2 and 3 are read live from the\nKubernetes API and degrade to ``status=\"unavailable\"`` rather than\nfailing the whole response.",
+        "operationId": "get_job_validation_policy_api_v1_policy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Job Validation Policy Api V1 Policy Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Job Validation Policy",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
     "/api/v1/queue/jobs": {
       "get": {
         "description": "List one bounded page of jobs with optional filters.",

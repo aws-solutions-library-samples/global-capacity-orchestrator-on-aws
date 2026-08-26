@@ -1052,6 +1052,30 @@ class GCOAWSClient:
         result: dict[str, Any] = response.json()
         return result
 
+    def get_job_validation_policy(self, region: str) -> dict[str, Any]:
+        """
+        Get the job validation policy a region actually enforces.
+
+        Reads the deployed manifest processor's live configuration, not a
+        local ``cdk.json`` — the two can diverge whenever a stack was deployed
+        from a different checkout, and CDK augments ``trusted_registries``
+        with the project's own ECR hostnames at synth time.
+
+        Args:
+            region: Target region
+
+        Returns:
+            The region's effective policy plus its live namespace
+            ResourceQuota / LimitRange ceilings
+        """
+        response = self.make_authenticated_request(
+            method="GET", path="/api/v1/policy", target_region=region
+        )
+
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
 
 def get_aws_client(config: GCOConfig | None = None) -> GCOAWSClient:
     """Get a configured AWS client instance."""

@@ -183,6 +183,12 @@ AGGREGATOR_REGIONAL_API_ROUTES = (
     ("DELETE", "api/v1/jobs"),
     ("GET", "api/v1/health"),
     ("GET", "api/v1/status"),
+    # Read-only introspection of the region's deployed job validation policy.
+    # Callers need it before submission to know whether a manifest will be
+    # admitted; it exposes the same class of deployment metadata as
+    # api/v1/status (which already reports the caps and namespace allowlist)
+    # and mutates nothing.
+    ("GET", "api/v1/policy"),
 )
 
 

@@ -269,6 +269,7 @@ Manage jobs across GCO clusters.
 | [`gco jobs retry`](#gco-jobs-retry) | Retry a failed job. |
 | [`gco jobs bulk-delete`](#gco-jobs-bulk-delete) | Bulk delete jobs based on filters. |
 | [`gco jobs health`](#gco-jobs-health) | Get health status of GCO clusters. |
+| [`gco jobs policy`](#gco-jobs-policy) | Show the job validation policy a region actually enforces. |
 | [`gco jobs queue-status`](#gco-jobs-queue-status) | View SQS queue status across regions. |
 
 </details>
@@ -650,6 +651,43 @@ gco jobs health [OPTIONS]
 gco jobs health --region us-east-1
 gco jobs health --all-regions
 ```
+
+#### `gco jobs policy`
+
+Show the job validation policy a region actually enforces — the per-manifest
+cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `trusted_registries`,
+the pod-security `block_*` flags, and the namespace's live `LimitRange` /
+`ResourceQuota` ceilings.
+
+Use it before submitting to check whether a manifest will be admitted, rather
+than discovering a policy conflict after a region has been provisioned.
+
+This reads the deployed cluster, not your local `cdk.json`. The two diverge
+whenever the stack was deployed from a different checkout, and CDK adds the
+project's own ECR registries to `trusted_registries` at synth time, so the
+effective allowlist is always larger than the configured one. Note that
+`gco jobs submit --dry-run` is a client-side `kubectl` parse, not an admission
+preview — it never consults this policy.
+
+```bash
+gco jobs policy [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Target region (required) |
+
+**Example:**
+
+```bash
+gco jobs policy --region us-east-1
+gco jobs policy -r us-east-1 -o json | jq '.policy.trusted_registries'
+```
+
+See [Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy)
+for the response shape and the three admission layers.
 
 #### `gco jobs queue-status`
 

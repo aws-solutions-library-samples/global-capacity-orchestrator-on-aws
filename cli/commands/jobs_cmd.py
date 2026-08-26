@@ -936,6 +936,88 @@ def job_health(config: Any, region: Any, all_regions: Any) -> None:
         sys.exit(1)
 
 
+@jobs.command("policy")
+@click.option("--region", "-r", required=True, help="Target region")
+@pass_config
+def job_policy(config: Any, region: Any) -> None:
+    """Show the job validation policy a region actually enforces.
+
+    Reads the deployed manifest processor, not your local cdk.json — those
+    diverge whenever the stack was deployed from a different checkout, and CDK
+    adds the project's own ECR registries to the trusted list at synth time.
+
+    Use this before submitting to know whether a manifest will be admitted.
+    Three layers must all pass: the front-door policy, the namespace
+    LimitRange (per container), and the namespace ResourceQuota (aggregate).
+
+    Examples:
+        gco jobs policy --region us-east-1
+        gco jobs policy -r us-east-1 -o json
+    """
+    formatter = get_output_formatter(config)
+    job_manager = get_job_manager(config)
+
+    try:
+        result = job_manager._aws_client.get_job_validation_policy(region=region)
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        policy = result.get("policy", {})
+        caps = policy.get("manifest_caps", {})
+
+        print(f"\n  Job Validation Policy — {result.get('region', region)}")
+        print(f"  Cluster: {result.get('cluster_id', 'unknown')}")
+        print("  " + "-" * 60)
+        print(f"  Validation enabled:  {policy.get('validation_enabled')}")
+        print("\n  PER-MANIFEST CAPS (front door)")
+        print(f"    max CPU:     {caps.get('max_cpu_millicores')}m")
+        print(f"    max memory:  {caps.get('max_memory_bytes')} bytes")
+        print(f"    max GPU:     {caps.get('max_gpu_count')}")
+        print("\n  ALLOWLISTS")
+        print(f"    namespaces:       {', '.join(policy.get('allowed_namespaces', []))}")
+        print(f"    kinds:            {', '.join(policy.get('allowed_kinds', []))}")
+        print(f"    registries:       {', '.join(policy.get('trusted_registries', []))}")
+        print(f"    dockerhub orgs:   {', '.join(policy.get('trusted_dockerhub_orgs', []))}")
+        print("\n  OTHER CHECKS")
+        print(
+            f"    accelerator toleration required: {policy.get('require_accelerator_toleration')}"
+        )
+        print(f"    YAML max depth:                  {policy.get('yaml_max_depth')}")
+
+        security = policy.get("manifest_security_policy", {})
+        if security:
+            enabled = sorted(name for name, on in security.items() if on)
+            disabled = sorted(name for name, on in security.items() if not on)
+            print(f"    blocked:     {', '.join(enabled) if enabled else 'none'}")
+            print(f"    not blocked: {', '.join(disabled) if disabled else 'none'}")
+
+        enforcement = result.get("cluster_enforcement", {})
+        if enforcement:
+            print("\n  CLUSTER ENFORCEMENT (live from the Kubernetes API)")
+            for namespace, layer in sorted(enforcement.items()):
+                status = layer.get("status", "unknown")
+                if status != "ok":
+                    print(f"    {namespace}: {status} — {layer.get('reason', 'no reason given')}")
+                    continue
+                for name, hard in sorted(layer.get("resource_quotas", {}).items()):
+                    print(f"    {namespace} ResourceQuota/{name}:")
+                    for key, value in sorted(hard.items()):
+                        print(f"      {key}: {value}")
+                for name, limits in sorted(layer.get("limit_ranges", {}).items()):
+                    print(f"    {namespace} LimitRange/{name}:")
+                    for limit in limits:
+                        maximum = limit.get("max", {})
+                        if maximum:
+                            print(f"      {limit.get('type', '?')} max: {maximum}")
+        print()
+
+    except Exception as e:
+        formatter.print_error(f"Failed to get job validation policy: {e}")
+        sys.exit(1)
+
+
 @jobs.command("submit-queue")
 @click.argument("manifest_path", type=click.Path(exists=True))
 @click.option("--region", "-r", required=True, help="Target region for job execution")

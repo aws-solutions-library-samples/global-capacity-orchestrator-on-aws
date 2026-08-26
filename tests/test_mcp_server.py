@@ -172,7 +172,7 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 135 read-only or low-risk
+        # The default registry intentionally contains 136 read-only or low-risk
         # tools (134 before fleet_status; 125 before the cost
         # allocation/k8s/report family added 9). Optional families add 48 more
         # when every flag is enabled: capacity purchase (2), image publish (3),
@@ -180,7 +180,7 @@ class TestToolRegistration:
         # (4), infrastructure destroy (2), local metrics (1), semantic progress
         # (1), local storage sync (1), config management (7), and Mission (10).
         # The all-flags ceiling is therefore 183.
-        base_count = 135
+        base_count = 136
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -235,6 +235,7 @@ class TestToolRegistration:
             "get_job_metrics",
             "cluster_health",
             "queue_status",
+            "get_job_validation_policy",
             # Mutating
             "submit_job_sqs",
             "submit_job_api",

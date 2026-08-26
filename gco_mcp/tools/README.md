@@ -13,13 +13,13 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 135 tools; with every flag enabled the
-ceiling is 189. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 136 tools; with every flag enabled the
+ceiling is 190. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
-| `jobs.py` | 13 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status` |
+| `jobs.py` | 14 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status`, `get_job_validation_policy` |
 | `capacity.py` | 18 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
 | `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
@@ -60,6 +60,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job_logs` | Get logs from a job. |
 | `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
 | `get_job_pods` | Get pod details, placement, and container status for a job. |
+| `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings. Reads the cluster, not a local `cdk.json`. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
 | `queue_status` | View [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue status (pending, in-flight, DLQ counts). |

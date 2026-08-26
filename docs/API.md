@@ -292,6 +292,7 @@ Full detail, including response shapes, is in
 |--------|----------|-------------|-----------------------|-------------|
 | GET | `/api/v1/health` | `health-monitor` | Yes | Cluster health; `200` healthy, `503` unhealthy |
 | GET | `/api/v1/status` | `manifest-processor` | Yes | Service status, resource limits, queue-worker state |
+| GET | `/api/v1/policy` | `manifest-processor` | Yes | The region's effective job validation policy plus live namespace ResourceQuota / LimitRange ceilings |
 | GET | `/healthz` | each service | No | Liveness probe |
 | GET | `/readyz` | each service | No | Readiness probe |
 | GET | `/metrics` | each service | No | Prometheus exposition |
@@ -1640,6 +1641,7 @@ Service directly or scraped by the cluster's Prometheus.
 | `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization, configured thresholds, active job count, threshold violations |
 | `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
 | `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
+| `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings. `503` until the processor is initialized |
 | `GET /healthz` | all three | None | Liveness. Always `200` when the process is up |
 | `GET /readyz` | all three | None | Readiness. `503` until dependencies are initialized; the manifest processor also reports `503` if its central queue worker has stopped |
 | `GET /metrics` | all three | None | Prometheus exposition for the in-cluster scrape |
@@ -1659,6 +1661,56 @@ dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
 > its in-cluster response; through either API Gateway, `/api/v1/status` returns
 > the manifest processor's. The health monitor's `/api/v1/metrics` has its own
 > route and is reachable through the gateway.
+
+### Reading the deployed validation policy
+
+`GET /api/v1/policy` answers one question: **will this cluster admit the job I
+am about to submit?** Ask it before submission and a policy conflict surfaces
+at plan time instead of after a region has been provisioned and billed.
+
+```bash
+gco jobs policy --region us-east-1
+gco jobs policy --region us-east-1 -o json | jq '.policy.trusted_registries'
+```
+
+The response reads the live `ManifestProcessor` instance, so it reflects what
+that region enforces right now. **A local `cdk.json` is not a substitute.** It
+is the input to a deploy, not the state of one, and it diverges from the
+deployed policy for two independent reasons:
+
+- The cluster may have been deployed from a different checkout than the one you
+  are reading.
+- CDK augments `trusted_registries` with the project's own ECR registry
+  hostnames at synth time, so the effective allowlist is always strictly larger
+  than the configured one.
+
+Because both the REST manifest processor and the SQS queue processor read the
+same environment variables, this endpoint describes both submission paths —
+neither is a bypass of the other.
+
+Three layers govern admission, and the response reports all three:
+
+| Layer | Where it comes from | Response key |
+|-------|--------------------|--------------|
+| Front-door policy — per-manifest caps, namespace/kind/registry allowlists, pod-security flags | `cdk.json::job_validation_policy`, baked into the service's container env at deploy | `policy` |
+| Per-container ceilings | the namespace's `LimitRange` | `cluster_enforcement.<ns>.limit_ranges` |
+| Aggregate ceilings | the namespace's `ResourceQuota` | `cluster_enforcement.<ns>.resource_quotas` |
+
+A manifest must clear all three. Reporting only the first would be misleading:
+a job can pass the front-door cap and still be rejected by the `LimitRange`.
+Layers 2 and 3 are read live from the Kubernetes API and degrade to
+`{"status": "unavailable", "reason": "..."}` per namespace rather than failing
+the whole response, so a missing layer is always explicit rather than inferred
+from an absent key.
+
+Caps appear in the units the validator actually compares in
+(`max_cpu_millicores`, `max_memory_bytes`, `max_gpu_count`) alongside the raw
+configured strings under `manifest_caps.configured`, because `"384"` vCPU and
+`384000` millicores are the same cap and a caller doing a local pre-check needs
+to know which one it is holding.
+
+Note that `gco jobs submit --dry-run` is **not** an admission preview — it runs
+`kubectl --dry-run=client`, a client-side parse that never consults this policy.
 
 ## Cluster-Internal Surfaces
 
