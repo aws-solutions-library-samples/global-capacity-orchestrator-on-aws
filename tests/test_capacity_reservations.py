@@ -682,6 +682,29 @@ class TestListReservationsPricing:
         checker = self._make_checker()
         mock_ec2 = MagicMock()
         mock_ec2.get_paginator.return_value = self._paginator_with_one()
+        # GPUs per instance is resolved live now that the offline catalog is
+        # gone; the same mock client answers DescribeInstanceTypes.
+        mock_ec2.describe_instance_types.return_value = {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "p5.48xlarge",
+                    "VCpuInfo": {"DefaultVCpus": 192},
+                    "MemoryInfo": {"SizeInMiB": 2097152},
+                    "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+                    "GpuInfo": {
+                        "Gpus": [
+                            {
+                                "Name": "H100",
+                                "Manufacturer": "NVIDIA",
+                                "Count": 8,
+                                "MemoryInfo": {"SizeInMiB": 81920},
+                            }
+                        ],
+                        "TotalGpuMemoryInMiB": 655360,
+                    },
+                }
+            ]
+        }
         checker._session.client = MagicMock(return_value=mock_ec2)
         checker.get_on_demand_price = MagicMock(return_value=30.0)
 

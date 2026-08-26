@@ -2,8 +2,8 @@
 Tests for cli/capacity/ — the GPU capacity checker and recommender.
 
 Covers the InstanceTypeInfo/SpotPriceInfo/CapacityEstimate dataclasses,
-the GPU_INSTANCE_SPECS catalog, EC2 describe_instance_types lookup with
-fallback to hardcoded specs, spot price history + stability analysis,
+the DescribeInstanceTypes -> InstanceTypeInfo mapping (always resolved live;
+there is no checked-in specification table), spot price history + stability analysis,
 on-demand pricing via the Pricing API (with in-process caching),
 instance availability checks, and the combined spot/on-demand/both
 estimation path. Exercises recommend_capacity_type across low/medium/
@@ -113,36 +113,210 @@ class TestCapacityEstimate:
         assert estimate.details["is_gpu"] is True
 
 
-class TestGPUInstanceSpecs:
-    """Tests for GPU instance specifications."""
+#: A realistic DescribeInstanceTypes record, trimmed to the groups the mapper
+#: reads. Shaped after p5.48xlarge: 8 H100s, EFA, local NVMe, capacity blocks.
+_P5_RECORD = {
+    "InstanceType": "p5.48xlarge",
+    "CurrentGeneration": True,
+    "BareMetal": False,
+    "Hypervisor": "nitro",
+    "BurstablePerformanceSupported": False,
+    "FreeTierEligible": False,
+    "DedicatedHostsSupported": True,
+    "InstanceStorageSupported": True,
+    "HibernationSupported": False,
+    "AutoRecoverySupported": False,
+    "NitroEnclavesSupport": "unsupported",
+    "NitroTpmSupport": "unsupported",
+    "SupportedUsageClasses": ["on-demand", "spot", "capacity-block"],
+    "SupportedRootDeviceTypes": ["ebs"],
+    "SupportedVirtualizationTypes": ["hvm"],
+    "SupportedBootModes": ["uefi"],
+    "VCpuInfo": {"DefaultVCpus": 192, "DefaultCores": 96, "DefaultThreadsPerCore": 2},
+    "MemoryInfo": {"SizeInMiB": 2097152},
+    "ProcessorInfo": {
+        "SupportedArchitectures": ["x86_64"],
+        "SustainedClockSpeedInGhz": 3.2,
+        "Manufacturer": "AMD",
+    },
+    "GpuInfo": {
+        "Gpus": [
+            {
+                "Name": "H100",
+                "Manufacturer": "NVIDIA",
+                "Count": 8,
+                "MemoryInfo": {"SizeInMiB": 81920},
+            }
+        ],
+        "TotalGpuMemoryInMiB": 655360,
+    },
+    "NetworkInfo": {
+        "EfaSupported": True,
+        "EfaInfo": {"MaximumEfaInterfaces": 32},
+        "NetworkPerformance": "3200 Gigabit",
+        "MaximumNetworkInterfaces": 64,
+        "MaximumNetworkCards": 32,
+        "Ipv6Supported": True,
+        "EnaSupport": "required",
+        "EncryptionInTransitSupported": True,
+    },
+    "InstanceStorageInfo": {
+        "TotalSizeInGB": 30720,
+        "Disks": [{"SizeInGB": 3840, "Count": 8, "Type": "ssd"}],
+        "NvmeSupport": "required",
+    },
+    "EbsInfo": {
+        "EbsOptimizedSupport": "default",
+        "EncryptionSupport": "supported",
+        "NvmeSupport": "required",
+        "EbsOptimizedInfo": {
+            "BaselineIops": 80000,
+            "MaximumIops": 80000,
+            "BaselineThroughputInMBps": 1250.0,
+            "MaximumThroughputInMBps": 1250.0,
+        },
+    },
+    "PlacementGroupInfo": {"SupportedStrategies": ["cluster", "partition", "spread"]},
+}
 
-    def test_gpu_instance_specs_contains_common_types(self):
-        """Test that GPU_INSTANCE_SPECS contains common GPU types."""
-        from cli.capacity import GPU_INSTANCE_SPECS
 
-        assert "g4dn.xlarge" in GPU_INSTANCE_SPECS
-        assert "g5.xlarge" in GPU_INSTANCE_SPECS
-        assert "p3.2xlarge" in GPU_INSTANCE_SPECS
-        assert "p4d.24xlarge" in GPU_INSTANCE_SPECS
+class TestInstanceTypeInfoFromEc2:
+    """The pure DescribeInstanceTypes -> InstanceTypeInfo mapping.
 
-    def test_gpu_instance_specs_structure(self):
-        """Test GPU_INSTANCE_SPECS structure."""
-        from cli.capacity import GPU_INSTANCE_SPECS
+    These replace the old GPU_INSTANCE_SPECS assertions. That table was removed
+    because it short-circuited the EC2 API, so a new accelerator family stayed
+    invisible until someone hand-edited it and a stale number fed straight into
+    NodePool sizing and capacity scores. What is worth pinning now is the
+    mapping, not a copy of AWS's catalog.
+    """
 
-        g4dn = GPU_INSTANCE_SPECS["g4dn.xlarge"]
-        assert g4dn.vcpus == 4
-        assert g4dn.memory_gib == 16
-        assert g4dn.gpu_count == 1
-        assert g4dn.gpu_type == "T4"
-        assert g4dn.is_gpu is True
+    def test_maps_core_compute_fields(self):
+        from cli.capacity import instance_type_info_from_ec2
 
-    def test_p4d_instance_specs(self):
-        """Test P4d instance specs."""
-        from cli.capacity import GPU_INSTANCE_SPECS
+        info = instance_type_info_from_ec2(_P5_RECORD, region="us-east-1")
 
-        p4d = GPU_INSTANCE_SPECS["p4d.24xlarge"]
-        assert p4d.gpu_count == 8
-        assert p4d.gpu_type == "A100"
+        assert info.instance_type == "p5.48xlarge"
+        assert info.vcpus == 192
+        assert info.cores == 96
+        assert info.threads_per_core == 2
+        assert info.memory_gib == 2048.0
+        assert info.architectures == ["x86_64"]
+        assert info.architecture == "x86_64"
+        assert info.sustained_clock_speed_ghz == 3.2
+        assert info.region == "us-east-1"
+
+    def test_gpu_memory_is_total_not_per_device(self):
+        """The scalar field is the node's total, taken from TotalGpuMemoryInMiB.
+
+        The on-demand availability heuristics read gpu_memory_gib as a total, and
+        the removed code path populated it from Gpus[0] (per-device) — an 8x
+        undercount on every multi-GPU type.
+        """
+        from cli.capacity import instance_type_info_from_ec2
+
+        info = instance_type_info_from_ec2(_P5_RECORD)
+
+        assert info.gpu_count == 8
+        assert info.gpu_memory_gib == 640.0
+        assert info.gpu_devices[0]["memory_gib"] == 80.0
+
+    def test_sums_counts_across_heterogeneous_accelerator_models(self):
+        """A multi-model Gpus[] list must not be read as Gpus[0]."""
+        from cli.capacity import instance_type_info_from_ec2
+
+        record = dict(_P5_RECORD)
+        record["GpuInfo"] = {
+            "Gpus": [
+                {
+                    "Name": "A",
+                    "Manufacturer": "NVIDIA",
+                    "Count": 2,
+                    "MemoryInfo": {"SizeInMiB": 16384},
+                },
+                {
+                    "Name": "B",
+                    "Manufacturer": "NVIDIA",
+                    "Count": 3,
+                    "MemoryInfo": {"SizeInMiB": 8192},
+                },
+            ],
+            "TotalGpuMemoryInMiB": 57344,
+        }
+
+        info = instance_type_info_from_ec2(record)
+
+        assert info.gpu_count == 5
+        assert info.gpu_type == "A+B"
+        assert len(info.gpu_devices) == 2
+
+    def test_maps_network_storage_and_purchasing(self):
+        from cli.capacity import instance_type_info_from_ec2
+
+        info = instance_type_info_from_ec2(_P5_RECORD)
+
+        assert info.efa_supported is True
+        assert info.efa_max_interfaces == 32
+        assert info.maximum_network_interfaces == 64
+        assert info.instance_storage_total_gb == 30720
+        assert info.instance_storage_disks == [{"size_gb": 3840, "count": 8, "type": "ssd"}]
+        assert info.ebs_maximum_iops == 80000
+        assert info.supported_placement_strategies == ["cluster", "partition", "spread"]
+        assert info.spot_supported is True
+        assert info.capacity_block_supported is True
+
+    def test_absent_field_groups_do_not_raise(self):
+        """EC2 omits whole groups per family; a CPU type must map cleanly."""
+        from cli.capacity import instance_type_info_from_ec2
+
+        info = instance_type_info_from_ec2(
+            {
+                "InstanceType": "m5.xlarge",
+                "VCpuInfo": {"DefaultVCpus": 4},
+                "MemoryInfo": {"SizeInMiB": 16384},
+                "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+            }
+        )
+
+        assert info.vcpus == 4
+        assert info.gpu_count == 0
+        assert info.gpu_type is None
+        assert info.gpu_devices == []
+        assert info.is_gpu is False
+        assert info.is_accelerated is False
+        assert info.efa_supported is None
+
+    def test_maps_neuron_devices(self):
+        """Trainium/Inferentia2 report under NeuronInfo, not GpuInfo."""
+        from cli.capacity import instance_type_info_from_ec2
+
+        info = instance_type_info_from_ec2(
+            {
+                "InstanceType": "trn2.48xlarge",
+                "VCpuInfo": {"DefaultVCpus": 192},
+                "MemoryInfo": {"SizeInMiB": 2097152},
+                "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+                "NeuronInfo": {
+                    "NeuronDevices": [
+                        {
+                            "Name": "Trainium2",
+                            "Count": 16,
+                            "CoreInfo": {"Count": 128, "Version": 3},
+                            "MemoryInfo": {"SizeInMiB": 24576},
+                        }
+                    ],
+                    "TotalNeuronDeviceMemoryInMiB": 1572864,
+                },
+            }
+        )
+
+        assert info.neuron_count == 16
+        assert info.neuron_memory_gib == 1536.0
+        assert info.neuron_devices[0]["core_count"] == 128
+        # A Neuron node carries no NVIDIA GPU, so is_gpu stays False while
+        # is_accelerated is True — the capacity heuristics treat them as
+        # different supply pools.
+        assert info.is_gpu is False
+        assert info.is_accelerated is True
 
 
 class TestCapacityChecker:
@@ -158,17 +332,48 @@ class TestCapacityChecker:
             assert checker.config is not None
 
     def test_get_instance_info_known_type(self):
-        """Test getting info for known GPU instance type."""
+        """A GPU type is described from EC2, including its region.
+
+        Previously this passed without any EC2 call because a checked-in
+        specification table short-circuited the lookup. The table is gone, so
+        the EC2 round-trip is now part of the contract being asserted.
+        """
         from cli.capacity import CapacityChecker
 
         with patch("cli.capacity.checker.get_config") as mock_config:
-            mock_config.return_value = MagicMock()
-            checker = CapacityChecker()
-            info = checker.get_instance_info("g4dn.xlarge")
+            mock_config.return_value = MagicMock(default_region="us-east-1")
+            with patch("cli.capacity.checker.boto3.Session") as mock_session:
+                mock_ec2 = MagicMock()
+                mock_session.return_value.client.return_value = mock_ec2
+                mock_ec2.describe_instance_types.return_value = {
+                    "InstanceTypes": [
+                        {
+                            "InstanceType": "g4dn.xlarge",
+                            "VCpuInfo": {"DefaultVCpus": 4},
+                            "MemoryInfo": {"SizeInMiB": 16384},
+                            "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+                            "GpuInfo": {
+                                "Gpus": [
+                                    {
+                                        "Count": 1,
+                                        "Name": "T4",
+                                        "Manufacturer": "NVIDIA",
+                                        "MemoryInfo": {"SizeInMiB": 16384},
+                                    }
+                                ],
+                                "TotalGpuMemoryInMiB": 16384,
+                            },
+                        }
+                    ]
+                }
+                checker = CapacityChecker()
+                info = checker.get_instance_info("g4dn.xlarge")
 
             assert info is not None
             assert info.instance_type == "g4dn.xlarge"
             assert info.gpu_count == 1
+            assert info.region == "us-east-1"
+            mock_ec2.describe_instance_types.assert_called_once_with(InstanceTypes=["g4dn.xlarge"])
 
     def test_get_instance_info_unknown_type(self):
         """Test getting info for unknown instance type from API."""
@@ -1675,7 +1880,12 @@ class TestCapacityCheckerGetInstanceInfoWithGPUFromAPI:
     """Tests for get_instance_info with GPU instances from API."""
 
     def test_get_instance_info_with_gpu_from_api(self):
-        """Test getting GPU instance info from EC2 API."""
+        """GPU info maps from the API, deriving the total when EC2 omits it.
+
+        This record has no TotalGpuMemoryInMiB, so gpu_memory_gib must fall back
+        to count x per-device rather than reporting 0 GiB for a node that
+        plainly has a GPU.
+        """
         from cli.capacity import CapacityChecker
 
         with patch("cli.capacity.checker.get_config") as mock_config:

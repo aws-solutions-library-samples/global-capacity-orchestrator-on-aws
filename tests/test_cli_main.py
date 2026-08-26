@@ -240,12 +240,15 @@ class TestCapacityCommands:
         runner = CliRunner()
 
         with patch("cli.commands.capacity_cmd.get_capacity_checker") as mock_checker:
+            from cli.capacity import InstanceTypeInfo
+
             mock_cc = MagicMock()
-            mock_cc.get_instance_info.return_value = {
-                "instance_type": "g4dn.xlarge",
-                "vcpus": 4,
-                "memory_gib": 16,
-            }
+            mock_cc.get_instance_info.return_value = InstanceTypeInfo(
+                instance_type="g4dn.xlarge",
+                vcpus=4,
+                memory_gib=16,
+                region="us-east-1",
+            )
             mock_checker.return_value = mock_cc
 
             result = runner.invoke(cli, ["capacity", "instance-info", "g4dn.xlarge"])
@@ -1615,7 +1618,8 @@ class TestCliCapacityCommandsExtended:
             mock_checker.return_value.get_instance_info.return_value = None
             result = runner.invoke(cli, ["capacity", "instance-info", "invalid-type"])
             assert result.exit_code == 1
-            assert "not found" in result.output.lower()
+            assert "invalid-type" in result.output
+            assert "could not describe" in result.output.lower()
 
 
 class TestCliStackCommandsExtended:

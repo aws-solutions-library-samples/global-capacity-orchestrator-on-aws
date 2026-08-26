@@ -268,14 +268,16 @@ class TestCapacityCommands:
     @patch("cli.commands.capacity_cmd.get_output_formatter")
     def test_capacity_instance_info(self, mock_formatter, mock_checker):
         """Test capacity instance-info command."""
+        from cli.capacity import InstanceTypeInfo
         from cli.main import cli
 
         mock_cap_checker = MagicMock()
-        mock_cap_checker.get_instance_info.return_value = {
-            "instance_type": "g4dn.xlarge",
-            "vcpus": 4,
-            "memory_gb": 16,
-        }
+        mock_cap_checker.get_instance_info.return_value = InstanceTypeInfo(
+            instance_type="g4dn.xlarge",
+            vcpus=4,
+            memory_gib=16,
+            region="us-east-1",
+        )
         mock_checker.return_value = mock_cap_checker
 
         mock_output = MagicMock()

@@ -994,7 +994,10 @@ def test_capacity_instance_info_missing_is_a_specific_error(runner: CliRunner) -
         result = _invoke(runner, capacity, ["instance-info", "unknown.large"])
 
     assert result.exit_code == 1
-    assert "Instance type unknown.large not found" in result.output
+    # The message names the type AND the region, because a missing description
+    # usually means "not offered there" rather than "no such type".
+    assert "unknown.large" in result.output
+    assert "not be offered in that region" in result.output
     assert "Failed to get instance info" not in result.output
 
 

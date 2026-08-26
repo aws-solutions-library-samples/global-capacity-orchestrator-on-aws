@@ -143,19 +143,120 @@ def spot_prices(config: Any, instance_type: Any, region: Any, days: Any) -> None
 
 @capacity.command("instance-info")
 @click.argument("instance_type")
+@click.option(
+    "--region",
+    "-r",
+    help="Region to describe the type in (default: the configured default region)",
+)
 @pass_config
-def instance_info(config: Any, instance_type: Any) -> None:
-    """Get information about an instance type."""
+def instance_info(config: Any, instance_type: Any, region: Any) -> None:
+    """Describe an instance type's compute characteristics.
+
+    Resolved live from EC2 DescribeInstanceTypes every time — there is no
+    checked-in specification table, so a newly launched accelerator family is
+    reported the day it ships.
+
+    Reports vCPUs/cores/threads, memory, every accelerator class (NVIDIA GPU,
+    AWS Neuron, Inferentia, media, FPGA) with per-model breakdowns, EFA and
+    network limits, local NVMe and EBS characteristics, placement-group support,
+    purchase options (spot / capacity-block), and platform capabilities.
+
+    DescribeInstanceTypes is region-scoped: a type is only described where it is
+    offered. If it is missing, try another region or `gco capacity
+    recommend-region`.
+
+    Examples:
+        gco capacity instance-info p5.48xlarge
+        gco capacity instance-info trn2.48xlarge -r us-east-1
+        gco -o json capacity instance-info p5.48xlarge
+        gco -o json capacity instance-info g5.2xlarge | jq '.gpu_devices'
+    """
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
     try:
-        info = checker.get_instance_info(instance_type)
-        if info:
-            formatter.print(info)
-        else:
-            formatter.print_error(f"Instance type {instance_type} not found")
+        info = checker.get_instance_info(instance_type, region=region)
+        if not info:
+            target = region or config.default_region
+            formatter.print_error(
+                f"Could not describe instance type '{instance_type}' in {target}. "
+                "It may not exist, or may not be offered in that region — try "
+                "--region, or 'gco capacity recommend-region'."
+            )
             sys.exit(1)
+
+        if config.output_format != "table":
+            formatter.print(info)
+            return
+
+        print(f"\n  {info.instance_type}  ({info.region})")
+        print("  " + "-" * 58)
+        print(f"  vCPUs:         {info.vcpus}", end="")
+        if info.cores is not None:
+            print(f"  ({info.cores} cores x {info.threads_per_core} threads)", end="")
+        print()
+        print(f"  Memory:        {info.memory_gib} GiB")
+        print(f"  Architecture:  {', '.join(info.architectures) or info.architecture}")
+        if info.processor_manufacturer:
+            clock = (
+                f" @ {info.sustained_clock_speed_ghz} GHz" if info.sustained_clock_speed_ghz else ""
+            )
+            print(f"  Processor:     {info.processor_manufacturer}{clock}")
+
+        if info.gpu_devices:
+            print(f"\n  GPUs:          {info.gpu_count} total, {info.gpu_memory_gib} GiB total")
+            for device in info.gpu_devices:
+                print(
+                    f"    {device.get('count')}x {device.get('manufacturer')} "
+                    f"{device.get('name')} @ {device.get('memory_gib')} GiB each"
+                )
+        if info.neuron_devices:
+            print(
+                f"\n  Neuron:        {info.neuron_count} devices, "
+                f"{info.neuron_memory_gib} GiB total"
+            )
+            for device in info.neuron_devices:
+                print(
+                    f"    {device.get('count')}x {device.get('name')} "
+                    f"({device.get('core_count')} cores v{device.get('core_version')})"
+                )
+        if info.inference_accelerators:
+            print(f"\n  Inferentia:    {info.inference_accelerator_count} accelerators")
+
+        print("\n  NETWORK")
+        print(f"    EFA:              {'yes' if info.efa_supported else 'no'}", end="")
+        if info.efa_max_interfaces:
+            print(f" (max {info.efa_max_interfaces} interfaces)", end="")
+        print()
+        print(f"    Performance:      {info.network_performance}")
+        print(f"    Max ENIs:         {info.maximum_network_interfaces}")
+        if info.maximum_network_cards:
+            print(f"    Network cards:    {info.maximum_network_cards}")
+
+        print("\n  STORAGE")
+        if info.instance_storage_total_gb:
+            disks = ", ".join(
+                f"{d.get('count')}x {d.get('size_gb')} GB {d.get('type')}"
+                for d in info.instance_storage_disks
+            )
+            print(f"    Local:            {info.instance_storage_total_gb} GB ({disks})")
+        else:
+            print("    Local:            none (EBS only)")
+        print(f"    EBS optimized:    {info.ebs_optimized_support}")
+        if info.ebs_maximum_iops:
+            print(
+                f"    EBS max:          {info.ebs_maximum_iops} IOPS, "
+                f"{info.ebs_maximum_throughput_mbps} MB/s"
+            )
+
+        print("\n  PURCHASING")
+        print(f"    Usage classes:    {', '.join(info.supported_usage_classes)}")
+        print(f"    Capacity blocks:  {'yes' if info.capacity_block_supported else 'no'}")
+        if info.supported_placement_strategies:
+            print(f"    Placement:        {', '.join(info.supported_placement_strategies)}")
+        print(f"    Current gen:      {'yes' if info.current_generation else 'no'}")
+        print()
+
     except Exception as e:
         formatter.print_error(f"Failed to get instance info: {e}")
         sys.exit(1)

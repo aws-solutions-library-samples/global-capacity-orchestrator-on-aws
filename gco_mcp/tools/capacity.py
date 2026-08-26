@@ -20,13 +20,32 @@ def check_capacity(instance_type: str, region: str) -> str:
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def instance_info(instance_type: str) -> str:
-    """Get hardware and pricing metadata for an EC2 instance type.
+def instance_info(instance_type: str, region: str | None = None) -> str:
+    """Describe an EC2 instance type's compute characteristics.
+
+    Resolved live from ec2:DescribeInstanceTypes on every call — no checked-in
+    specification table — so a newly launched accelerator family is reported as
+    soon as it ships.
+
+    Returns vCPUs/cores/threads, memory, every accelerator class (NVIDIA GPU,
+    AWS Neuron, Inferentia, media, FPGA) with per-model counts and memory, EFA
+    and network limits, local NVMe and EBS characteristics, placement-group
+    support, purchase options (spot / capacity-block), and platform
+    capabilities. GPU memory is reported as a total across devices.
+
+    Carries no pricing. Use check_capacity or spot_prices for cost signals.
+
+    DescribeInstanceTypes is region-scoped, so a type is described only where it
+    is offered; if it is missing, try another region or recommend_region.
 
     Args:
         instance_type: EC2 instance type (for example, g5.2xlarge or p5.48xlarge).
+        region: Region to describe it in. Defaults to the configured region.
     """
-    return cli_runner._run_cli("capacity", "instance-info", instance_type)
+    args = ["capacity", "instance-info", instance_type]
+    if region:
+        args += ["-r", region]
+    return cli_runner._run_cli(*args)
 
 
 @mcp.tool(tags={"safe", "capacity"})

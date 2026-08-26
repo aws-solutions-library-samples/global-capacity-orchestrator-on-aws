@@ -9,7 +9,9 @@ each region in parallel.
 Data Sources:
     - EC2 GetSpotPlacementScores: likelihood of getting spot capacity (1-10 score)
     - EC2 DescribeSpotPriceHistory: current and historical spot prices (7-day window)
-    - EC2 DescribeInstanceTypes: vCPU, memory, GPU count/type/memory, EFA support
+    - EC2 DescribeInstanceTypes: full compute characteristics — vCPU/cores/threads,
+      memory, every accelerator class, EFA and network limits, local NVMe and EBS,
+      placement-group support, purchase options, platform capabilities
     - EC2 DescribeInstanceTypeOfferings: which instance types are available in the region
     - EC2 DescribeCapacityBlockOfferings: purchasable Capacity Blocks for ML workloads
     - EC2 PurchaseCapacityBlock: (optional) purchase a Capacity Block by offering ID
@@ -18,17 +20,20 @@ Key Classes:
     CapacityChecker: Main class. Instantiated with a region and optional GCOConfig.
         - check_capacity(instance_type) → CapacityEstimate
         - get_spot_prices(instance_type) → list[SpotPriceInfo]
-        - get_instance_info(instance_type) → InstanceTypeInfo
+        - get_instance_info(instance_type, region) → InstanceTypeInfo
         - check_capacity_blocks(instance_type, count, duration) → list[dict]
 
 Output Models (defined in models.py):
     - CapacityEstimate: spot score, price, trend, on-demand price, instance specs
     - SpotPriceInfo: AZ, price, timestamp
-    - InstanceTypeInfo: vCPU, memory, GPU count/type/memory, EFA, architecture
+    - InstanceTypeInfo: every compute characteristic EC2 reports for a type
 
-The GPU_INSTANCE_SPECS lookup table in models.py provides offline specs for common
-GPU instances so the checker can return useful information even when the EC2 API
-is unavailable or the instance type isn't offered in the region.
+Instance-type characteristics are always resolved live. A checked-in
+GPU_INSTANCE_SPECS table used to short-circuit DescribeInstanceTypes here; it was
+removed because a hand-maintained catalog hid new accelerator families until
+someone edited it, and a stale number fed straight into NodePool sizing and
+capacity scoring. The trade is one EC2 call per lookup, and that lookups now
+require credentials and a region that offers the type.
 """
 
 from __future__ import annotations
@@ -52,11 +57,11 @@ from cli.config import GCOConfig, get_config
 
 from . import blocks
 from .models import (
-    GPU_INSTANCE_SPECS,
     CapacityCheckError,
     CapacityEstimate,
     InstanceTypeInfo,
     SpotPriceInfo,
+    instance_type_info_from_ec2,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,50 +192,68 @@ class CapacityChecker:
         self._session = boto3.Session()
         self._pricing_cache: dict[str, Any] = {}
         self._offerings_cache: dict[str, set[str]] = {}
+        # Instance descriptions are now always resolved from EC2, and callers
+        # like _enrich_reservation_pricing ask per row. Memoize per
+        # (type, region) so listing 50 reservations of one type stays one call.
+        self._instance_info_cache: dict[tuple[str, str], InstanceTypeInfo | None] = {}
 
-    def get_instance_info(self, instance_type: str) -> InstanceTypeInfo | None:
-        """Get information about an instance type."""
-        if instance_type in GPU_INSTANCE_SPECS:
-            return GPU_INSTANCE_SPECS[instance_type]
+    def get_instance_info(
+        self, instance_type: str, region: str | None = None
+    ) -> InstanceTypeInfo | None:
+        """Describe an instance type's compute characteristics from EC2.
 
-        # Try to get from EC2 API
+        Always resolved live. There is no checked-in specification table behind
+        this any more: the previous 25-entry GPU catalog short-circuited the API,
+        so a new accelerator family stayed invisible until someone hand-edited
+        it, and a wrong number propagated silently into NodePool sizing and
+        capacity scores. Every field now comes from
+        ``ec2:DescribeInstanceTypes`` via :func:`instance_type_info_from_ec2`.
+
+        ``DescribeInstanceTypes`` is region-scoped and returns a type only where
+        it is offered, so ``region`` matters. It defaults to the configured
+        default region rather than a hardcoded one; a type that region does not
+        offer returns ``None`` even though it may exist elsewhere. Use
+        ``check_instance_available_in_region`` or ``recommend-region`` to find
+        where a type is offered.
+
+        Friendly aliases are normalized first (``p6-b200`` ->
+        ``p6-b200.48xlarge``) so this agrees with the rest of the capacity
+        surface.
+
+        Returns ``None`` when the type is unknown, is not offered in the target
+        region, or cannot be described. The distinction is logged; callers
+        needing to tell those cases apart should use
+        :meth:`validate_instance_type`.
+        """
+        canonical, _ = blocks.normalize_instance_type(instance_type)
+        target_region = region or self.config.default_region
+
         try:
-            ec2 = self._session.client("ec2", region_name="us-east-1")
-            response = ec2.describe_instance_types(InstanceTypes=[instance_type])
-
-            if response["InstanceTypes"]:
-                info = response["InstanceTypes"][0]
-                vcpus = info["VCpuInfo"]["DefaultVCpus"]
-                memory = info["MemoryInfo"]["SizeInMiB"] / 1024
-
-                gpu_count = 0
-                gpu_type = None
-                gpu_memory = 0
-
-                if "GpuInfo" in info:
-                    gpus = info["GpuInfo"].get("Gpus", [])
-                    if gpus:
-                        gpu_count = gpus[0].get("Count", 0)
-                        gpu_type = gpus[0].get("Name")
-                        gpu_memory = gpus[0].get("MemoryInfo", {}).get("SizeInMiB", 0) / 1024
-
-                arch = info["ProcessorInfo"]["SupportedArchitectures"][0]
-
-                return InstanceTypeInfo(
-                    instance_type=instance_type,
-                    vcpus=vcpus,
-                    memory_gib=memory,
-                    gpu_count=gpu_count,
-                    gpu_type=gpu_type,
-                    gpu_memory_gib=gpu_memory,
-                    architecture=arch,
-                )
+            ec2 = self._session.client("ec2", region_name=target_region)
+            response = ec2.describe_instance_types(InstanceTypes=[canonical])
         except ClientError as e:
-            logger.debug("Failed to describe instance type %s: %s", instance_type, e)
+            logger.debug(
+                "Failed to describe instance type %s in %s: %s", canonical, target_region, e
+            )
+            return None
         except Exception as e:
-            logger.warning("Unexpected error getting instance info for %s: %s", instance_type, e)
+            logger.warning(
+                "Unexpected error getting instance info for %s in %s: %s",
+                canonical,
+                target_region,
+                e,
+            )
+            return None
 
-        return None
+        records = response.get("InstanceTypes") or []
+        if not records:
+            logger.debug(
+                "Instance type %s is not offered in %s (it may exist in another region)",
+                canonical,
+                target_region,
+            )
+            return None
+        return instance_type_info_from_ec2(records[0], region=target_region)
 
     def validate_instance_type(self, instance_type: str) -> dict[str, Any]:
         """Classify an instance type as valid / invalid, with friendly normalization.
@@ -239,11 +262,10 @@ class CapacityChecker:
         zero offerings" into the same empty result. This method separates them so
         callers can tell a typo from genuine unavailability:
 
-        * A type in ``GPU_INSTANCE_SPECS`` is valid and ``known`` without any AWS
-          call.
-        * Otherwise EC2 ``DescribeInstanceTypes`` is consulted; an
-          ``InvalidInstanceType`` (or empty result) marks it invalid, while a
-          transient API error leaves it valid-but-unverified with a note.
+        * EC2 ``DescribeInstanceTypes`` is consulted for every type; an
+          ``InvalidInstanceType`` marks it invalid, an empty result means the
+          type is not offered in the region consulted, and a transient API error
+          leaves it valid-but-unverified with a note.
         * Friendly aliases are expanded (``p6-b200`` -> ``p6-b200.48xlarge``,
           ``p6-b300`` -> ``p6-b300.48xlarge``) and UltraServer-only families
           (the Grace-Blackwell ``gb200``/``gb300`` superchips, sold only as
@@ -252,6 +274,19 @@ class CapacityChecker:
 
         Returns a dict: ``requested``, ``instance_type`` (canonical), ``valid``,
         ``known``, ``note``, ``gpu_count``.
+
+        ``known`` means "EC2 returned a description for this type in the region
+        consulted". It used to mean "present in our hardcoded GPU catalog"; that
+        catalog is gone, so the flag now reflects live confirmation. It is
+        reported for information (as ``known_instance_type``) and never gates
+        anything.
+
+        Note the three-way outcome, which callers do depend on: a bogus type is
+        ``valid=False``; a real type the consulted region does not offer stays
+        ``valid=True`` with an explanatory ``note`` and ``known=False``; and a
+        confirmed type is ``valid=True, known=True``. Collapsing the middle case
+        into ``valid=False`` would reject a p5 in a region that merely lacks it,
+        which is what the removed catalog used to paper over.
         """
         canonical, note = blocks.normalize_instance_type(instance_type)
         result: dict[str, Any] = {
@@ -269,23 +304,26 @@ class CapacityChecker:
             result["valid"] = False
             return result
 
-        if canonical in GPU_INSTANCE_SPECS:
-            spec = GPU_INSTANCE_SPECS[canonical]
-            result["known"] = True
-            result["gpu_count"] = spec.gpu_count
-            return result
-
-        # Not in the offline table — ask EC2, separating "invalid" from "API error".
+        # Ask EC2, separating "invalid type" from "not offered here" from
+        # "API error". An empty result is the middle case: the type is real but
+        # this region does not offer it, so it must not be reported invalid.
+        region = self.config.default_region
         try:
-            ec2 = self._session.client("ec2", region_name="us-east-1")
+            ec2 = self._session.client("ec2", region_name=region)
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
             types = response.get("InstanceTypes", [])
             if not types:
-                result["valid"] = False
+                result["note"] = note or (
+                    f"Instance type is not offered in {region}; it may exist in another region."
+                )
                 return result
+            result["known"] = True
             gpu_info = types[0].get("GpuInfo") or {}
-            gpus = gpu_info.get("Gpus", [])
-            result["gpu_count"] = gpus[0].get("Count", 0) if gpus else 0
+            # Sum across models rather than reading Gpus[0] so a heterogeneous
+            # accelerator list is not undercounted.
+            result["gpu_count"] = sum(
+                int(gpu.get("Count") or 0) for gpu in (gpu_info.get("Gpus") or [])
+            )
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code in ("InvalidInstanceType", "InvalidParameterValue"):
@@ -1187,6 +1225,20 @@ class CapacityChecker:
 
         return reservations
 
+    def _gpus_per_instance(self, instance_type: str, region: str) -> int | None:
+        """GPUs per instance for per-GPU-hour pricing, memoized per type+region.
+
+        Returns ``None`` when the type cannot be described, which callers treat
+        as "omit the per-GPU figure" rather than as zero GPUs — reporting a
+        per-GPU-hour price of infinity, or silently dividing by a wrong count,
+        would be worse than omitting it.
+        """
+        key = (instance_type, region)
+        if key not in self._instance_info_cache:
+            self._instance_info_cache[key] = self.get_instance_info(instance_type, region=region)
+        info = self._instance_info_cache[key]
+        return info.gpu_count if info else None
+
     def _enrich_reservation_pricing(self, reservation: dict[str, Any], region: str) -> None:
         """Add On-Demand pricing keys to a reservation dict, in place.
 
@@ -1205,8 +1257,7 @@ class CapacityChecker:
             logger.debug("On-demand price lookup failed for %s in %s: %s", instance_type, region, e)
             on_demand = None
 
-        spec = GPU_INSTANCE_SPECS.get(instance_type)
-        gpus_per_instance = spec.gpu_count if spec else None
+        gpus_per_instance = self._gpus_per_instance(str(instance_type), region)
 
         pricing = blocks.compute_reservation_pricing(
             on_demand, reservation.get("total_instances"), gpus_per_instance

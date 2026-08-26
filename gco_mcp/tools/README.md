@@ -83,7 +83,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `create_reservation` | Create a new On-Demand Capacity Reservation (ODCR) (gated by `GCO_ENABLE_CAPACITY_PURCHASE`). |
 | `find_capacity_blocks` | Find [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) [Capacity Blocks](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report. |
-| `instance_info` | Get hardware and pricing metadata for an EC2 instance type. |
+| `instance_info` | Describe an EC2 instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` on every call (no checked-in specification table): vCPUs/cores/threads, memory, every accelerator class with per-model counts and memory, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. Carries no pricing. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
 | `recommend_capacity` | Recommend spot or on-demand capacity for a workload. |
 | `recommend_region` | Get optimal region recommendation based on capacity. |

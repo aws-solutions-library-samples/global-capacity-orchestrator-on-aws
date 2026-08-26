@@ -28,11 +28,11 @@ from .history import (
     get_capacity_history_store,
 )
 from .models import (
-    GPU_INSTANCE_SPECS,
     CapacityCheckError,
     CapacityEstimate,
     InstanceTypeInfo,
     SpotPriceInfo,
+    instance_type_info_from_ec2,
 )
 from .multi_region import (
     MultiRegionCapacityChecker,
@@ -49,7 +49,6 @@ from .traffic_dial import (
 )
 
 __all__ = [
-    "GPU_INSTANCE_SPECS",
     "BedrockCapacityAdvisor",
     "BedrockCapacityRecommendation",
     "CapacityCheckError",
@@ -63,6 +62,7 @@ __all__ = [
     "RegionDialStatus",
     "SpotPlacementConfigLimitError",
     "SpotPriceInfo",
+    "instance_type_info_from_ec2",
     "TrafficDialError",
     "TrafficDialManager",
     "compute_price_trend",

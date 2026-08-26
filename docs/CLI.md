@@ -2056,7 +2056,7 @@ Check and manage cluster capacity.
 | [`gco capacity reservation-check`](#gco-capacity-reservation-check) | Check reservation availability and Capacity Block offerings for ML workloads. |
 | [`gco capacity find-blocks`](#gco-capacity-find-blocks) | Find Capacity Blocks across regions, durations, and a start-date window in one consolidated, ranked report. |
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
-| [`gco capacity instance-info`](#gco-capacity-instance-info) | Print AWS-published metadata for an instance type — vCPUs, memory, GPU count, network performance, and supported architectures. |
+| [`gco capacity instance-info`](#gco-capacity-instance-info) | Describe an instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` — vCPUs/cores/threads, memory, every accelerator class, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
 | [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on by default). |
 | [`gco capacity history show`](#gco-capacity-history-show) | Show the recorded capacity time-series for an instance type in a region. |
@@ -2424,19 +2424,54 @@ gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 -y
 
 #### `gco capacity instance-info`
 
-Print AWS-published metadata for an instance type — vCPUs, memory,
-GPU count, network performance, and supported architectures. Read-only
-and does not call the EC2 RunInstances API.
+Describe an instance type's compute characteristics. Read-only — it calls
+`ec2:DescribeInstanceTypes` and never `RunInstances`.
+
+Resolved live on every call. There is deliberately no checked-in specification
+table behind this, so a newly launched accelerator family is reported the day it
+ships. (One used to exist — a 25-entry GPU catalog that short-circuited the API —
+and it was removed because a hand-maintained catalog hides new families until
+someone edits it, and a stale number feeds straight into NodePool sizing and
+capacity scores.)
+
+Reported fields:
+
+| Group | Fields |
+|-------|--------|
+| Processor | vCPUs, cores, threads per core, architectures, sustained clock speed, manufacturer, current-generation and bare-metal flags, hypervisor, burstable |
+| Accelerators | NVIDIA GPUs (per-model name, manufacturer, count, memory) with the node total; AWS Neuron devices with core counts; Inferentia; media accelerators; FPGAs |
+| Network | EFA support and max EFA interfaces, network performance, max ENIs and network cards, IPv6, ENA, encryption in transit |
+| Storage | local NVMe total and per-disk layout, EBS optimized/encryption/NVMe support, baseline and maximum EBS IOPS and throughput |
+| Purchasing | supported usage classes (on-demand / spot / capacity-block), placement-group strategies, dedicated-host support |
+| Platform | root device and virtualization types, boot modes, hibernation, auto-recovery, Nitro Enclaves, Nitro TPM |
+
+GPU memory is reported as the **total** across devices, with the per-device
+figure in `gpu_devices`.
+
+`DescribeInstanceTypes` is region-scoped: a type is described only where it is
+offered. If it is missing, try another region or
+[`gco capacity recommend-region`](#gco-capacity-recommend-region).
 
 ```bash
-gco capacity instance-info INSTANCE_TYPE
+gco capacity instance-info INSTANCE_TYPE [OPTIONS]
 ```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region to describe the type in (default: the configured default region) |
 
 **Example:**
 
 ```bash
 gco capacity instance-info g5.xlarge
 gco capacity instance-info p5.48xlarge
+gco capacity instance-info trn2.48xlarge --region us-east-1
+
+# Machine-readable, for a specific field
+gco -o json capacity instance-info p5.48xlarge | jq '.gpu_devices'
+gco -o json capacity instance-info p5.48xlarge | jq '{efa: .efa_supported, gpus: .gpu_count}'
 ```
 
 #### `gco capacity spot-prices`

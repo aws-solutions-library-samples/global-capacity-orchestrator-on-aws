@@ -131,33 +131,62 @@ class TestCapacityChecker:
     """Tests for capacity checking functionality."""
 
     def test_instance_info_gpu(self):
-        """Test getting GPU instance information."""
+        """GPU instance info comes from the live EC2 description, not a table.
+
+        There is deliberately no checked-in specification catalog behind
+        get_instance_info, so this asserts the EC2 round-trip and the mapping
+        rather than a hardcoded expectation.
+        """
+        from unittest.mock import MagicMock, patch
+
         from cli.capacity import CapacityChecker
 
-        checker = CapacityChecker()
+        record = {
+            "InstanceType": "g4dn.xlarge",
+            "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2, "DefaultThreadsPerCore": 2},
+            "MemoryInfo": {"SizeInMiB": 16384},
+            "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+            "GpuInfo": {
+                "Gpus": [
+                    {
+                        "Name": "T4",
+                        "Manufacturer": "NVIDIA",
+                        "Count": 1,
+                        "MemoryInfo": {"SizeInMiB": 16384},
+                    }
+                ],
+                "TotalGpuMemoryInMiB": 16384,
+            },
+        }
 
-        # Test known GPU instance
-        info = checker.get_instance_info("g4dn.xlarge")
+        with patch("cli.capacity.checker.boto3.Session") as session_cls:
+            ec2 = MagicMock()
+            ec2.describe_instance_types.return_value = {"InstanceTypes": [record]}
+            session_cls.return_value.client.return_value = ec2
+            checker = CapacityChecker()
+            info = checker.get_instance_info("g4dn.xlarge")
+
         assert info is not None
         assert info.instance_type == "g4dn.xlarge"
+        assert info.vcpus == 4
+        assert info.memory_gib == 16
         assert info.gpu_count == 1
         assert info.gpu_type == "T4"
         assert info.is_gpu is True
+        ec2.describe_instance_types.assert_called_once_with(InstanceTypes=["g4dn.xlarge"])
 
-    def test_instance_info_from_specs(self):
-        """Test GPU instance specs dictionary."""
-        from cli.capacity import GPU_INSTANCE_SPECS
+    def test_instance_info_returns_none_when_region_does_not_offer_type(self):
+        """An empty EC2 result is "not offered here", reported as None."""
+        from unittest.mock import MagicMock, patch
 
-        assert "g4dn.xlarge" in GPU_INSTANCE_SPECS
-        assert "g5.xlarge" in GPU_INSTANCE_SPECS
-        assert "p3.2xlarge" in GPU_INSTANCE_SPECS
-        assert "p4d.24xlarge" in GPU_INSTANCE_SPECS
+        from cli.capacity import CapacityChecker
 
-        # Verify spec structure
-        g4dn = GPU_INSTANCE_SPECS["g4dn.xlarge"]
-        assert g4dn.vcpus == 4
-        assert g4dn.memory_gib == 16
-        assert g4dn.gpu_count == 1
+        with patch("cli.capacity.checker.boto3.Session") as session_cls:
+            ec2 = MagicMock()
+            ec2.describe_instance_types.return_value = {"InstanceTypes": []}
+            session_cls.return_value.client.return_value = ec2
+            checker = CapacityChecker()
+            assert checker.get_instance_info("p5.48xlarge") is None
 
     def test_spot_price_info_dataclass(self):
         """Test SpotPriceInfo dataclass."""

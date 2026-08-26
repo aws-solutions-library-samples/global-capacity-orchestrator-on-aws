@@ -29,7 +29,7 @@ BedrockCapacityAdvisor (AI-powered natural language recommendations)
 | `blocks.py` | Pure primitives shared by the reserved-capacity flows: Capacity Block duration math, instance-type alias normalization, per-hour / per-GPU-hour pricing (offerings and ODCRs), and offering/reservation de-dup, sort, and rank helpers. |
 | `multi_region.py` | Cross-region aggregation. Queries all deployed regions in parallel, computes weighted scores (spot score, price trend, queue depth, GPU utilization), and ranks regions. |
 | `advisor.py` | AI-powered recommendations via Amazon Bedrock. Gathers capacity data from all regions and sends it to an LLM for analysis with workload-specific context. |
-| `models.py` | Data models — `CapacityEstimate`, `SpotPriceInfo`, `InstanceTypeInfo`, `GPU_INSTANCE_SPECS` lookup table. |
+| `models.py` | Data models — `CapacityEstimate`, `SpotPriceInfo`, `InstanceTypeInfo`, and `instance_type_info_from_ec2()` which maps a `DescribeInstanceTypes` record onto it. No checked-in instance specification table: characteristics are always resolved live. |
 | `__init__.py` | Package exports and `compute_weighted_score()` utility. |
 
 ## How Region Recommendation Works
