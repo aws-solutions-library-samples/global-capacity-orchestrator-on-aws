@@ -313,6 +313,18 @@ strict_equality = true
 extra_checks = true
 warn_redundant_casts = true
 warn_unused_ignores = true
+# gco_mcp ships as a PEP 420 namespace package whose modules import each other
+# bare off sys.path (`from server import mcp`, `from mission.state import ...`),
+# so `mission`, `server`, and `cli_runner` are top-level modules that only
+# resolve when gco_mcp/ is on the search path. Without this, the result of a
+# mypy run depends on which paths you pass it: CI's
+# `mypy gco/ cli/ gco_mcp/ scripts/` resolves them to real types and is clean,
+# while a narrower `mypy cli/` leaves them Any and reports four *spurious*
+# unused-ignore/no-any-return errors in cli/commands/swarm_cmd.py — whose
+# `type: ignore[arg-type]` comments are in fact required. Pinning the path here
+# makes every invocation agree with CI, so nobody "fixes" a real suppression
+# and breaks the build.
+mypy_path = "gco_mcp"
 # Ignore missing imports from untyped third-party libraries (boto3, kubernetes,
 # aws_cdk, etc. don't ship type stubs we can rely on). This is NOT a license
 # to skip annotating our own code — it only suppresses errors from imports.
@@ -340,14 +352,14 @@ module = "gco.stacks.*"
 disallow_subclassing_any = false
 warn_unused_ignores = false
 
-# Tests can use looser rules — the test runner resolves fixtures at runtime so
-# `disallow_untyped_defs` creates too much noise for little real-world benefit.
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-disallow_untyped_decorators = false
-check_untyped_defs = true
+# NOTE: there is deliberately no `tests.*` override here. One existed, relaxing
+# disallow_untyped_defs and friends, but nothing ever applied it: no mypy job
+# typechecks tests/ (lint:mypy:strict runs `mypy gco/ cli/ gco_mcp/ scripts/`),
+# so `warn_unused_configs` reported it as an unused section on every run. It was
+# removed rather than made real: `mypy tests/` currently reports ~3.3k errors
+# across 229 modules, so adding the suite to CI is its own project, not a
+# config tweak. Reinstate the override in the same change that adds tests/ to a
+# mypy job — not before, or the note comes back.
 
 [tool.pytest.ini_options]
 # Single source of truth for pytest configuration. This block previously
