@@ -247,6 +247,7 @@ from tools.storage import (  # noqa: E402, F401
     list_file_systems,
     list_storage_buckets,
     list_storage_contents,
+    s3_inventory,
 )
 from tools.tasks import task_status, task_tail  # noqa: E402, F401
 from tools.templates import (  # noqa: E402, F401
@@ -761,6 +762,7 @@ _PUBLIC_EXPORTS = [
     "reserve_capacity",
     "retry_job",
     "rollback_canary",
+    "s3_inventory",
     "scale_inference",
     "set_capacity_advisor_default_model",
     "set_claude_code_default_model",

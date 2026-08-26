@@ -83,6 +83,75 @@ def storage_list(config: Any, region: str | None) -> None:
         sys.exit(1)
 
 
+@storage.command("s3-inventory")
+@click.option(
+    "--region",
+    "-r",
+    help="Limit regional entries to this region (global entries are always included)",
+)
+@pass_config
+def storage_s3_inventory(config: Any, region: str | None) -> None:
+    """Describe every S3 bucket this deployment creates, as JSON.
+
+    Complements `storage list`, which reports only the four user-facing buckets
+    addressable by `storage sync`. This is the full set — the always-on central
+    and per-region shared buckets, the model-weights bucket, the cost-report
+    bucket, the optional analytics Studio bucket, and every server-access-log
+    sink — each with the deployment-contract facts:
+
+      \b
+      - which stack owns it, and in which region
+      - what it is for, and which object-key prefixes are already reserved
+      - whether job pods can read/write it, and how they discover its name
+      - what teardown does to it (removal policy)
+      - whether it is currently deployed
+
+    A bucket whose stack is not deployed is listed with status "not-deployed"
+    rather than omitted, so the inventory is complete before a region is rolled
+    out.
+
+    This inventories buckets and their deployment contract. It is unrelated to
+    the AWS "S3 Inventory" feature, which reports the objects inside a bucket.
+
+    Examples:
+        gco -o json storage s3-inventory
+        gco -o json storage s3-inventory --region us-east-1
+        gco -o json storage s3-inventory | jq '.summary.pod_writable'
+        gco -o json storage s3-inventory | jq '.buckets[] | select(.pod_access=="read-write")'
+    """
+    from ..storage import get_storage_manager
+
+    formatter = get_output_formatter(config)
+    try:
+        result = get_storage_manager(config).s3_inventory(region=region)
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        summary = result["summary"]
+        print(f"\n  S3 inventory — project {result['project_name']}, account {result['account']}")
+        print(
+            f"  {summary['deployed']}/{summary['total']} deployed"
+            f"  ({summary['not_deployed']} not deployed)"
+        )
+        # Nested values render as "<dict>" in table mode, so flatten to the
+        # columns that matter and leave the full shape to -o json.
+        formatter.print(
+            result["buckets"],
+            columns=["id", "role", "region", "bucket", "pod_access", "status"],
+        )
+        if summary["pod_writable"]:
+            print("\n  Pod-writable buckets:")
+            for name in summary["pod_writable"]:
+                print(f"    {name}")
+        print()
+
+    except Exception as exc:
+        formatter.print_error(f"Failed to build the GCO S3 inventory: {exc}")
+        sys.exit(1)
+
+
 @storage.command("sync")
 @click.argument("bucket_alias")
 @click.argument("local_dir", metavar="LOCAL_PATH")

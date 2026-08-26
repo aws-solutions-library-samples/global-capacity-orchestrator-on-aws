@@ -60,6 +60,40 @@ async def list_storage_buckets(region: str | None = None) -> str:
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
+@mcp.tool(tags={"safe", "storage"})
+@audit_logged
+async def s3_inventory(region: str | None = None) -> str:
+    """Describe every S3 bucket the deployment creates, with its contract.
+
+    Broader than list_storage_buckets, which returns only the four buckets
+    addressable by ``storage sync``. This covers the always-on central
+    (``Cluster_Shared_Bucket``) and per-region (``Regional_Shared_Bucket``)
+    buckets, model weights, cost reports, the optional analytics Studio bucket,
+    and every server-access-log sink.
+
+    Each entry carries the owning stack and region, the bucket's purpose,
+    reserved object-key prefixes, whether job pods have read-write / read-only /
+    no access and how they discover the name (ConfigMap key or SSM path), the
+    teardown removal policy, and whether it is currently deployed. Buckets whose
+    stack is not deployed are included with ``status="not-deployed"`` so the
+    inventory is complete rather than silently partial.
+
+    Use this to answer "where can a job write?" — ``summary.pod_writable`` lists
+    exactly the buckets the job-pod role can write to.
+
+    Inventories buckets and their deployment contract; unrelated to the AWS
+    "S3 Inventory" feature, which reports the objects inside a bucket.
+
+    Args:
+        region: Limit regional entries to one AWS region. Global, monitoring,
+            and analytics entries are always included.
+    """
+    args = ["storage", "s3-inventory"]
+    if region:
+        args += ["--region", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
 # =============================================================================
 # Read-only inspection tools (async)
 # =============================================================================

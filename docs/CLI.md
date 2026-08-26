@@ -3284,11 +3284,12 @@ Bucket names are resolved from the SSM parameters and CloudFormation metadata
 published by the deployed stacks; GCO does not guess or reconstruct them.
 
 <details>
-<summary>All <code>gco storage</code> commands (2) — click to expand</summary>
+<summary>All <code>gco storage</code> commands (3) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
 | [`gco storage list`](#gco-storage-list) | List deployed user-facing buckets and their stable aliases. |
+| [`gco storage s3-inventory`](#gco-storage-s3-inventory) | Describe every S3 bucket the deployment creates, with owning stack, purpose, pod access, and removal policy. |
 | [`gco storage sync`](#gco-storage-sync) | Incrementally download from or upload to a bucket or prefix. |
 
 </details>
@@ -3326,6 +3327,58 @@ gco storage list [OPTIONS]
 gco storage list
 gco storage list --region us-east-1
 gco --output json storage list
+```
+
+#### `gco storage s3-inventory`
+
+Describe **every** S3 bucket the deployment creates, as a JSON document. Broader
+than [`gco storage list`](#gco-storage-list), which reports only the four
+user-facing buckets addressable by [`gco storage sync`](#gco-storage-sync).
+
+Covers the always-on central [`Cluster_Shared_Bucket`](CLUSTER_SHARED_BUCKET.md)
+and per-region [`Regional_Shared_Bucket`](REGIONAL_SHARED_BUCKET.md), the model
+weights bucket, the cost report bucket, the optional analytics Studio bucket, and
+every server-access-log sink.
+
+Each entry carries the deployment-contract facts, not just the name:
+
+| Field | Meaning |
+|-------|---------|
+| `id`, `role`, `scope` | Stable identifier; `primary` vs `access-logs`; `global` / `regional` / `monitoring` / `analytics` |
+| `owning_stack`, `region` | Which stack creates it, and where |
+| `bucket`, `arn`, `s3_uri` | Physical identity, resolved from SSM or CloudFormation — never reconstructed |
+| `status`, `detail` | `deployed` or `not-deployed`, with the reason |
+| `purpose`, `reserved_prefixes` | What it is for, and which object-key prefixes the platform already owns |
+| `pod_access`, `discovery` | `read-write` / `read-only` / `none` for the job-pod role, and the ConfigMap key or SSM path a pod resolves it through |
+| `removal_policy` | What teardown does to it |
+| `sync_alias`, `opt_in` | The alias `storage sync` accepts, and the `cdk.json` toggle if it is optional |
+
+`summary.pod_writable` is the short answer to "where can a job write?".
+
+Buckets whose stack is not deployed are **included** with
+`status: "not-deployed"` rather than omitted, so the inventory is complete even
+before a region is rolled out.
+
+```bash
+gco storage s3-inventory [OPTIONS]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Limit regional entries to one region; global, monitoring, and analytics entries are always included |
+
+```bash
+gco -o json storage s3-inventory
+gco -o json storage s3-inventory --region us-east-1
+
+# Where can a job write?
+gco -o json storage s3-inventory | jq '.summary.pod_writable'
+
+# Full records for the pod-writable buckets
+gco -o json storage s3-inventory | jq '.buckets[] | select(.pod_access=="read-write")'
+
+# What is not deployed yet, and why
+gco -o json storage s3-inventory | jq '.buckets[] | select(.status=="not-deployed") | {id, detail}'
 ```
 
 #### `gco storage sync`

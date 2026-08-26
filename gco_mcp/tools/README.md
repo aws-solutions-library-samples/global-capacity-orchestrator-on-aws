@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 136 tools; with every flag enabled the
-ceiling is 190. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 137 tools; with every flag enabled the
+ceiling is 191. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -25,7 +25,7 @@ flag-to-tool mapping.
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
 | `stacks.py` | 29 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated) |
 | `status.py` | 1 | `fleet_status` |
-| `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
+| `storage.py` | 8 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `s3_inventory`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `analytics.py` | 8 | `analytics_doctor`, `analytics_status`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
@@ -183,6 +183,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
 | `list_storage_buckets` | List deployed GCO [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and their human-friendly aliases. |
+| `s3_inventory` | Describe every S3 bucket the deployment creates — central and per-region shared buckets, model weights, cost reports, the optional analytics bucket, and every access-log sink — with owning stack, purpose, reserved prefixes, pod read/write access and how pods discover it, removal policy, and deployed status. `summary.pod_writable` answers "where can a job write?". |
 | `list_storage_contents` | List contents of shared EFS storage. |
 | `sync_storage_bucket` | Sync between a GCO S3 bucket and a confined local path using explicit `download` (default) or `upload` direction; neither direction deletes destination-only data (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC` and confined to `GCO_STORAGE_LOCAL_ROOT`). |
 | `upload_to_regional_bucket` | `gco models upload-regional` — upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` to a regional bucket (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |

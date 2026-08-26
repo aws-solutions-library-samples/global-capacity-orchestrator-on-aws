@@ -394,6 +394,9 @@ class StorageManager:
 
     def __init__(self, config: GCOConfig | None = None):
         self.config = config or get_config()
+        # One CloudFormation sweep per (stack, region) serves every access-logs
+        # entry in that stack, so a full inventory stays at one call per stack.
+        self._stack_resource_cache: dict[tuple[str, str], dict[str, str]] = {}
 
     def list_buckets(self, region: str | None = None) -> list[dict[str, str]]:
         """Return deployed user-facing buckets under their stable aliases.
@@ -419,6 +422,284 @@ class StorageManager:
             buckets.append(self.resolve_bucket("analytics-studio"))
 
         return buckets
+
+    def s3_inventory(self, region: str | None = None) -> dict[str, Any]:
+        """Describe every S3 bucket this deployment creates, deployed or not.
+
+        Complements :meth:`list_buckets`, which deliberately reports only the
+        four user-facing buckets addressable by ``storage sync``. This reports
+        the full set — including the server-access-log sinks and the cost-report
+        bucket — with the deployment-contract facts a caller actually needs:
+        which stack owns each bucket, what it is for, whether job pods can reach
+        it and how they discover it, what happens to it on teardown, and which
+        object-key prefixes the platform has already reserved.
+
+        A bucket whose stack is not deployed is reported with
+        ``status="not-deployed"`` rather than omitted, so the answer to "what
+        buckets does this deployment have?" is complete even before a region is
+        rolled out. Static facts come from :data:`BUCKET_DESCRIPTORS` and need no
+        AWS call; only the physical name, ARN, and status are resolved live.
+
+        ``region`` limits the regional entries to one region. Global,
+        monitoring, and analytics entries are always included because they exist
+        once per deployment, not once per region.
+
+        Note this inventories *buckets and their deployment contract*. It is
+        unrelated to the AWS "S3 Inventory" feature, which produces scheduled
+        reports of the objects inside a single bucket.
+        """
+        project = self.config.project_name
+        regional_regions = [region] if region else self._configured_regional_regions()
+        account = self._account_id()
+
+        # One CloudFormation sweep per stack, shared by every access-logs entry
+        # in that stack — those buckets are CDK-auto-named, so their physical
+        # names exist only as stack resources.
+        log_buckets: dict[tuple[str, str], str | None] = {}
+        stacks_to_sweep: list[tuple[str, str, str]] = [
+            ("global", self.config.global_stack_name, self.config.global_region),
+            ("monitoring", f"{project}-monitoring", self.config.monitoring_region),
+            ("analytics", f"{project}-analytics", self.config.api_gateway_region),
+        ]
+        stacks_to_sweep.extend(
+            (f"regional:{item}", f"{self.config.regional_stack_prefix}-{item}", item)
+            for item in regional_regions
+        )
+        for scope_key, stack_name, stack_region in stacks_to_sweep:
+            for logical_id, physical in self._stack_bucket_resources(
+                stack_name, stack_region
+            ).items():
+                log_buckets[(scope_key, logical_id)] = physical
+
+        records: list[dict[str, Any]] = []
+        for descriptor in BUCKET_DESCRIPTORS:
+            if descriptor.scope == "regional":
+                for regional_region in regional_regions:
+                    records.append(
+                        self._s3_inventory_record(
+                            descriptor,
+                            region=regional_region,
+                            stack_name=f"{self.config.regional_stack_prefix}-{regional_region}",
+                            account=account,
+                            log_buckets=log_buckets,
+                            scope_key=f"regional:{regional_region}",
+                        )
+                    )
+                continue
+
+            scope_region, stack_name = {
+                "global": (self.config.global_region, self.config.global_stack_name),
+                "monitoring": (self.config.monitoring_region, f"{project}-monitoring"),
+                "analytics": (self.config.api_gateway_region, f"{project}-analytics"),
+            }[descriptor.scope]
+            records.append(
+                self._s3_inventory_record(
+                    descriptor,
+                    region=scope_region,
+                    stack_name=stack_name,
+                    account=account,
+                    log_buckets=log_buckets,
+                    scope_key=descriptor.scope,
+                )
+            )
+
+        deployed = sum(1 for item in records if item["status"] == "deployed")
+        return {
+            "project_name": project,
+            "account": account,
+            "regions": {
+                "global": self.config.global_region,
+                "monitoring": self.config.monitoring_region,
+                "analytics": self.config.api_gateway_region,
+                "regional": regional_regions,
+            },
+            "buckets": records,
+            "summary": {
+                "total": len(records),
+                "deployed": deployed,
+                "not_deployed": len(records) - deployed,
+                "pod_writable": sorted(
+                    item["bucket"]
+                    for item in records
+                    if item["pod_access"] == "read-write" and item["bucket"]
+                ),
+            },
+        }
+
+    def _s3_inventory_record(
+        self,
+        descriptor: BucketDescriptor,
+        *,
+        region: str,
+        stack_name: str,
+        account: str | None,
+        log_buckets: dict[tuple[str, str], str | None],
+        scope_key: str,
+    ) -> dict[str, Any]:
+        """Merge one descriptor's static facts with its live name and status."""
+        name: str | None = None
+        arn: str | None = None
+        detail = ""
+
+        try:
+            if descriptor.role == "access-logs":
+                name = log_buckets.get((scope_key, descriptor.logical_id_prefix))
+            else:
+                name, arn = self._resolve_primary_bucket(descriptor, region, account)
+        except Exception as exc:  # noqa: BLE001 - an unresolvable entry is reported, not fatal
+            detail = f"could not resolve: {exc}"
+
+        if name and not arn:
+            arn = f"arn:{self._partition_for(region)}:s3:::{name}"
+        if not name and not detail:
+            detail = (
+                f"{stack_name} is not deployed"
+                if descriptor.opt_in is None
+                else f"{stack_name} is not deployed (opt-in: {descriptor.opt_in})"
+            )
+
+        return {
+            "id": descriptor.id if descriptor.scope != "regional" else f"{descriptor.id}:{region}",
+            "role": descriptor.role,
+            "scope": descriptor.scope,
+            "region": region,
+            "owning_stack": stack_name,
+            "bucket": name,
+            "arn": arn,
+            "s3_uri": f"s3://{name}/" if name else None,
+            "status": "deployed" if name else "not-deployed",
+            "detail": detail,
+            "purpose": descriptor.purpose,
+            "pod_access": descriptor.pod_access,
+            "discovery": descriptor.discovery,
+            "removal_policy": descriptor.removal_policy,
+            "reserved_prefixes": list(descriptor.reserved_prefixes),
+            "sync_alias": (
+                f"{descriptor.sync_alias}:{region}"
+                if descriptor.sync_alias and descriptor.scope == "regional"
+                else descriptor.sync_alias
+            ),
+            "opt_in": descriptor.opt_in,
+        }
+
+    def _resolve_primary_bucket(
+        self, descriptor: BucketDescriptor, region: str, account: str | None
+    ) -> tuple[str | None, str | None]:
+        """Resolve a primary bucket's physical name and ARN, or ``(None, None)``.
+
+        Each family publishes its identity differently, so this routes to the
+        contract that family actually uses rather than reconstructing names:
+        the two shared buckets publish name+ARN to SSM, the model bucket
+        publishes its name, the cost bucket's name is deterministic by design
+        (so regional stacks can grant on it before it exists), and the Studio
+        bucket is CDK-auto-named and only knowable from its stack.
+        """
+        from gco.services.aws_ssm import get_ssm_parameter_optional
+        from gco.stacks.constants import (
+            cluster_shared_ssm_parameter_prefix,
+            cost_report_bucket_name,
+            regional_shared_ssm_parameter_prefix,
+        )
+
+        project = self.config.project_name
+
+        if descriptor.id == "cluster-shared":
+            prefix = cluster_shared_ssm_parameter_prefix(project)
+            return (
+                get_ssm_parameter_optional(f"{prefix}/name", region=region),
+                get_ssm_parameter_optional(f"{prefix}/arn", region=region),
+            )
+        if descriptor.id == "regional-shared":
+            prefix = regional_shared_ssm_parameter_prefix(project)
+            return (
+                get_ssm_parameter_optional(f"{prefix}/name", region=region),
+                get_ssm_parameter_optional(f"{prefix}/arn", region=region),
+            )
+        if descriptor.id == "model-weights":
+            return get_ssm_parameter_optional(f"/{project}/model-bucket-name", region=region), None
+        if descriptor.id == "cost-reports":
+            if not account:
+                return None, None
+            # Deterministic by design so regional stacks can grant on it before
+            # the monitoring stack exists. Confirm it is really there rather
+            # than reporting a name that may never have been created.
+            expected = cost_report_bucket_name(project, account, region)
+            resources = self._stack_bucket_resources(f"{project}-monitoring", region)
+            return (expected, None) if expected in resources.values() else (None, None)
+        if descriptor.id == "analytics-studio":
+            resources = self._stack_bucket_resources(f"{project}-analytics", region)
+            return resources.get(descriptor.logical_id_prefix), None
+        return None, None
+
+    def _stack_bucket_resources(self, stack_name: str, region: str) -> dict[str, str]:
+        """Map ``logical-id-prefix -> physical bucket name`` for one stack.
+
+        CDK appends a hash to logical IDs, so entries are keyed by the stable
+        construct-id prefix the descriptors declare. Returns ``{}`` when the
+        stack is absent — an undeployed stack is an expected state here, not an
+        error — while permission and transport failures propagate so they are
+        never silently reported as "not deployed".
+        """
+        cache_key = (stack_name, region)
+        if cache_key in self._stack_resource_cache:
+            return self._stack_resource_cache[cache_key]
+
+        prefixes = {item.logical_id_prefix for item in BUCKET_DESCRIPTORS}
+        found: dict[str, str] = {}
+        cfn = boto3.client("cloudformation", region_name=region)
+        token: str | None = None
+        try:
+            while True:
+                kwargs: dict[str, str] = {"StackName": stack_name}
+                if token:
+                    kwargs["NextToken"] = token
+                response = cfn.list_stack_resources(**kwargs)
+                for resource in response.get("StackResourceSummaries", []):
+                    if resource.get("ResourceType") != "AWS::S3::Bucket":
+                        continue
+                    logical_id = str(resource.get("LogicalResourceId", ""))
+                    physical = resource.get("PhysicalResourceId")
+                    if not isinstance(physical, str) or not physical:
+                        continue
+                    for prefix in prefixes:
+                        if logical_id.startswith(prefix):
+                            found[prefix] = physical
+                            break
+                token_value = response.get("NextToken")
+                token = token_value if isinstance(token_value, str) else None
+                if not token:
+                    break
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            if error.get("Code") == "ValidationError" and "does not exist" in str(
+                error.get("Message", "")
+            ):
+                found = {}
+            else:
+                raise
+
+        self._stack_resource_cache[cache_key] = found
+        return found
+
+    def _account_id(self) -> str | None:
+        """The caller's account id, or ``None`` when it cannot be determined.
+
+        ``sts:GetCallerIdentity`` needs no IAM permission, so this normally
+        succeeds wherever credentials exist at all.
+        """
+        try:
+            identity = boto3.client("sts").get_caller_identity()
+            value = identity.get("Account")
+            return str(value) if value else None
+        except Exception:  # noqa: BLE001 - the inventory degrades without it
+            return None
+
+    def _partition_for(self, region: str) -> str:
+        """ARN partition for a region (aws, aws-cn, aws-us-gov)."""
+        try:
+            return str(boto3.Session().get_partition_for_region(region))
+        except Exception:  # noqa: BLE001 - commercial is the right default
+            return "aws"
 
     def resolve_bucket(self, alias: str, region: str | None = None) -> dict[str, str]:
         """Resolve a stable alias to a physical bucket and home region.
@@ -1407,6 +1688,151 @@ class StorageManager:
             return False
         path_stat = path.stat()
         return path_stat.st_size == size and int(path_stat.st_mtime) >= int(modified.timestamp())
+
+
+@dataclass(frozen=True)
+class BucketDescriptor:
+    """The deployment-contract facts about one bucket the stacks create.
+
+    Everything here is a property of the *design* — which stack owns the
+    bucket, what it is for, whether job pods can reach it, and what happens to
+    it on teardown — so it is knowable without an AWS call. The physical name,
+    ARN, and deployed/absent status are resolved separately at inventory time.
+
+    Keeping the two apart is deliberate: an operator asking "what buckets does
+    this deployment have and which can my pods write to?" gets a complete
+    answer even for a region that has not been deployed yet, with each entry
+    marked ``not-deployed`` rather than silently missing.
+    """
+
+    id: str
+    role: str
+    scope: str
+    purpose: str
+    pod_access: str
+    discovery: str
+    removal_policy: str
+    logical_id_prefix: str
+    sync_alias: str | None = None
+    reserved_prefixes: tuple[str, ...] = ()
+    opt_in: str | None = None
+
+
+#: Every bucket the GCO stacks create, in reporting order. ``scope`` decides
+#: which stack and region an entry resolves against; ``role`` separates the
+#: buckets workloads use from the server-access-log sinks that exist only to
+#: satisfy the "every bucket must log" control.
+BUCKET_DESCRIPTORS: tuple[BucketDescriptor, ...] = (
+    BucketDescriptor(
+        id="cluster-shared",
+        role="primary",
+        scope="global",
+        purpose="Always-on central bucket every regional cluster can read and write",
+        pod_access="read-write",
+        discovery="gco-cluster-shared-bucket ConfigMap (sharedBucketName) in gco-jobs/gco-system/gco-inference",
+        removal_policy="destroy",
+        logical_id_prefix="ClusterSharedBucket",
+        sync_alias="cluster-shared",
+        reserved_prefixes=("mlflow-artifacts/", "analytics-data/", "vector-corpus/"),
+    ),
+    BucketDescriptor(
+        id="cluster-shared-access-logs",
+        role="access-logs",
+        scope="global",
+        purpose="Server access logs for the cluster-shared bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the global stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="ClusterSharedAccessLogsBucket",
+    ),
+    BucketDescriptor(
+        id="model-weights",
+        role="primary",
+        scope="global",
+        purpose="Central model weights pulled by inference init containers",
+        pod_access="read-only",
+        discovery="SSM /<project>/model-bucket-name in the global region",
+        removal_policy="destroy",
+        logical_id_prefix="ModelWeightsBucket",
+        sync_alias="model-weights",
+    ),
+    BucketDescriptor(
+        id="model-weights-access-logs",
+        role="access-logs",
+        scope="global",
+        purpose="Server access logs for the model weights bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the global stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="ModelWeightsAccessLogsBucket",
+    ),
+    BucketDescriptor(
+        id="regional-shared",
+        role="primary",
+        scope="regional",
+        purpose="Always-on general-purpose in-region bucket; no cross-region egress",
+        pod_access="read-write",
+        discovery="gco-regional-shared-bucket ConfigMap (regionalBucketName) in gco-jobs/gco-system/gco-inference",
+        removal_policy="destroy",
+        logical_id_prefix="RegionalSharedBucket",
+        sync_alias="regional-shared",
+        reserved_prefixes=("mooncake-kv/",),
+    ),
+    BucketDescriptor(
+        id="regional-shared-access-logs",
+        role="access-logs",
+        scope="regional",
+        purpose="Server access logs for that region's regional-shared bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the regional stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="RegionalSharedAccessLogsBucket",
+    ),
+    BucketDescriptor(
+        id="cost-reports",
+        role="primary",
+        scope="monitoring",
+        purpose="Hive-partitioned Parquet cost reports queried through Athena",
+        pod_access="none",
+        discovery="Deterministic name <project>-cost-reports-<account>-<monitoring-region>",
+        removal_policy="destroy",
+        logical_id_prefix="CostReportBucket",
+        reserved_prefixes=("reports/", "adhoc/", "athena-results/"),
+    ),
+    BucketDescriptor(
+        id="cost-reports-access-logs",
+        role="access-logs",
+        scope="monitoring",
+        purpose="Server access logs for the cost report bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the monitoring stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="CostReportAccessLogsBucket",
+    ),
+    BucketDescriptor(
+        id="analytics-studio",
+        role="primary",
+        scope="analytics",
+        purpose="SageMaker Studio private scratch data and notebook outputs",
+        pod_access="none",
+        discovery="CloudFormation resource of the analytics stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="StudioOnlyBucket",
+        sync_alias="analytics-studio",
+        opt_in="analytics_environment.enabled",
+    ),
+    BucketDescriptor(
+        id="analytics-studio-access-logs",
+        role="access-logs",
+        scope="analytics",
+        purpose="Server access logs for the analytics Studio bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the analytics stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="AnalyticsAccessLogsBucket",
+        opt_in="analytics_environment.enabled",
+    ),
+)
 
 
 def get_storage_manager(config: GCOConfig | None = None) -> StorageManager:

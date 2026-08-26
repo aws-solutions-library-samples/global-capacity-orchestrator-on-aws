@@ -123,12 +123,12 @@ def test_live_counts_are_current_values() -> None:
     """Pin today's known-good numbers so an accidental registry change is loud.
 
     Not a substitute for the drift guard above — this simply documents the
-    expected 136/190 and turns an unexpected count change into an obvious
+    expected 137/191 and turns an unexpected count change into an obvious
     failure with context, alongside the exact-inventory guard in
     test_mcp_server.py.
     """
     default, ceiling = _live_counts()
-    assert (default, ceiling) == (136, 190), (
+    assert (default, ceiling) == (137, 191), (
         f"Registered MCP tool counts changed to {default}/{ceiling}. If intentional, "
         "update the docs, test_mcp_server.py, and this expectation together."
     )
