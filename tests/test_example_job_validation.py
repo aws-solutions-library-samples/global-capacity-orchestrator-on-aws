@@ -174,6 +174,12 @@ class TestActionRegistry:
         The previous literal guard omitted ``opencost`` even though it
         depends on topology (and therefore deploy) — deriving from the
         dependency graph closed that gap.
+
+        This literal is the counterweight: it is the assertion that an action
+        added to the live registry has been thought about here too. Every
+        action in it refuses to resume once the checkpoint records teardown,
+        which is why a read-only action like ``policy`` still belongs — there
+        is nothing to read once the cluster is gone.
         """
         from scripts.live_release_validation.registry import (
             build_action_registry as build_live_registry,
@@ -185,6 +191,7 @@ class TestActionRegistry:
             {
                 "deploy",
                 "topology",
+                "policy",
                 "api",
                 "sqs",
                 "central-queue",
