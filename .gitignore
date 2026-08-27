@@ -81,6 +81,7 @@ aws-exports.js
 tmp/
 temp/
 .live-release-validation/
+.example-job-validation/
 
 # Other
 test_plan.md
