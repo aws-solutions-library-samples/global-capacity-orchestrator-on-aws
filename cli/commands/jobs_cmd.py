@@ -44,6 +44,15 @@ def jobs(config: Any) -> None:
 )
 @click.option("--region", "-r", "target_region", help="Target specific region")
 @click.option("--dry-run", is_flag=True, help="Validate without applying")
+@click.option(
+    "--check-policy",
+    is_flag=True,
+    help=(
+        "Before submitting, check the manifests against the policy the target "
+        "region actually enforces and report anything that would be rejected. "
+        "Advisory: findings are printed and submission continues"
+    ),
+)
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
@@ -54,6 +63,7 @@ def submit_job(
     namespace: Any,
     target_region: Any,
     dry_run: Any,
+    check_policy: Any,
     label: Any,
     wait: Any,
     timeout: Any,
@@ -71,6 +81,16 @@ def submit_job(
         if "=" in lbl:
             k, v = lbl.split("=", 1)
             labels[k] = v
+
+    if check_policy:
+        _run_pre_submit_policy_check(
+            config,
+            job_manager,
+            formatter,
+            manifest_path=manifest_path,
+            namespace=namespace,
+            target_region=target_region,
+        )
 
     try:
         result = job_manager.submit_job(
@@ -1015,6 +1035,361 @@ def job_policy(config: Any, region: Any) -> None:
 
     except Exception as e:
         formatter.print_error(f"Failed to get job validation policy: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Policy pre-checks (advisory)
+# ---------------------------------------------------------------------------
+
+
+def _policy_regions(config: Any, requested: tuple[str, ...] | None) -> list[str]:
+    """Regions to read policy from: those asked for, else the configured set."""
+    if requested:
+        seen: dict[str, None] = {}
+        for region in requested:
+            seen.setdefault(region, None)
+        return list(seen)
+
+    from ..status import _workload_regions, resolve_regions
+
+    regions = _workload_regions(resolve_regions(config))
+    return regions or [config.default_region]
+
+
+def _render_verdicts(verdicts: Any, *, indent: str = "  ") -> None:
+    """Print one line per region plus its reasons, for a terminal reader."""
+    from ..job_policy import VERDICT_ADMIT, VERDICT_REJECT, VERDICT_UNKNOWN
+
+    marks = {VERDICT_ADMIT: "admit ", VERDICT_REJECT: "REJECT", VERDICT_UNKNOWN: "  ?   "}
+    for verdict in verdicts:
+        print(f"{indent}[{marks.get(verdict.verdict, '?')}] {verdict.region}")
+        if verdict.verdict == VERDICT_UNKNOWN:
+            print(f"{indent}    policy unreadable: {verdict.reason}")
+            continue
+        for issue in verdict.issues:
+            where = f"{issue.manifest} " if issue.manifest else ""
+            print(f"{indent}    {where}[{issue.check}] {issue.message}")
+        if verdict.enforcement_gaps:
+            print(
+                f"{indent}    note: live quota/LimitRange unreadable for "
+                f"{', '.join(verdict.enforcement_gaps)} — only the front-door "
+                f"caps were checked"
+            )
+
+
+def _run_pre_submit_policy_check(
+    config: Any,
+    job_manager: Any,
+    formatter: Any,
+    *,
+    manifest_path: str,
+    namespace: str | None,
+    target_region: str | None,
+) -> None:
+    """Advisory pre-submit check against the target region's live policy.
+
+    Deliberately non-blocking. The cluster is the authoritative gate and this
+    reads a snapshot of its policy over the network, so a check that refused to
+    submit on its own opinion would block valid jobs whenever it is stale or
+    wrong. It prints what it found and returns.
+
+    A failure to read the policy is also non-fatal for the same reason: not
+    being able to check is not evidence of a problem, and the submission that
+    follows would have happened anyway without the flag.
+    """
+    from ..job_policy import VERDICT_REJECT, fetch_region_policies, region_verdicts
+
+    try:
+        manifests = job_manager.load_manifests(manifest_path)
+        # Match what the server will see: submit_job fills in the namespace for
+        # manifests that do not declare one, and the namespace allowlist check
+        # is against that resolved value.
+        effective_namespace = namespace or config.default_namespace
+        for manifest in manifests:
+            if isinstance(manifest, dict):
+                manifest.setdefault("metadata", {}).setdefault("namespace", effective_namespace)
+
+        regions = [target_region] if target_region else _policy_regions(config, None)
+        policies = fetch_region_policies(job_manager._aws_client, regions)
+        verdicts = region_verdicts(manifests, policies)
+    except Exception as e:
+        formatter.print_warning(f"Policy pre-check could not run ({e}); submitting anyway")
+        return
+
+    rejecting = [v for v in verdicts if v.verdict == VERDICT_REJECT]
+    if rejecting:
+        formatter.print_warning(
+            f"Policy pre-check: {len(rejecting)} of {len(verdicts)} region(s) would "
+            f"reject these manifests. Submitting anyway (advisory)."
+        )
+        _render_verdicts(verdicts)
+    else:
+        readable = [v for v in verdicts if v.verdict != "unknown"]
+        if readable:
+            formatter.print_success(
+                f"Policy pre-check: admissible in {', '.join(v.region for v in readable)}"
+            )
+        else:
+            formatter.print_warning(
+                "Policy pre-check: no region's policy could be read; submitting anyway"
+            )
+            _render_verdicts(verdicts)
+
+
+def _cdk_job_validation_policy() -> tuple[dict[str, Any], str]:
+    """Read ``context.job_validation_policy`` out of the local cdk.json.
+
+    Returns the raw sub-document and the path it came from. Raises when there is
+    no cdk.json to read, because silently checking against shipped defaults
+    would look like a successful check of the user's configuration.
+    """
+    import json
+    from pathlib import Path
+
+    path = Path.cwd() / "cdk.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"no cdk.json at {path}; --offline reads the policy from a checkout"
+        )
+    context = json.loads(path.read_text(encoding="utf-8")).get("context", {}) or {}
+    policy = context.get("job_validation_policy", {}) or {}
+    return policy, str(path)
+
+
+def _check_policy_offline(
+    config: Any,
+    job_manager: Any,
+    formatter: Any,
+    *,
+    manifest_path: str | None,
+    namespace: str | None,
+    fail_on_reject: bool,
+) -> None:
+    """Judge manifests against cdk.json, with no AWS calls.
+
+    Strictly weaker than the online path and says so in its output. Two reasons
+    it cannot be authoritative, both real rather than theoretical: a region may
+    have been deployed from a different checkout of this file, and CDK appends
+    the project's own ECR registry hostnames to ``trusted_registries`` at synth
+    time, so a deployed region trusts registries that appear nowhere here. An
+    image-provenance rejection offline is therefore a maybe, not a no.
+    """
+    import dataclasses
+
+    from gco.job_admission import JobValidationPolicy
+
+    from ..job_policy import evaluate_manifests
+
+    if not manifest_path:
+        formatter.print_error("--offline needs a MANIFEST_PATH to check")
+        sys.exit(1)
+
+    try:
+        configured, source = _cdk_job_validation_policy()
+        policy = JobValidationPolicy.from_cdk_context(configured)
+        manifests = job_manager.load_manifests(manifest_path)
+        effective_namespace = namespace or config.default_namespace
+        for manifest in manifests:
+            if isinstance(manifest, dict):
+                manifest.setdefault("metadata", {}).setdefault("namespace", effective_namespace)
+        issues = evaluate_manifests(manifests, policy)
+    except Exception as e:
+        formatter.print_error(f"Offline policy check failed: {e}")
+        sys.exit(1)
+
+    caveat = (
+        "checked the CONFIGURED policy from cdk.json, not what any region has "
+        "deployed; CDK also adds project ECR registries at synth time, so an "
+        "image rejection here may pass in a real region"
+    )
+
+    if config.output_format != "table":
+        formatter.print(
+            {
+                "source": source,
+                "mode": "offline",
+                "caveat": caveat,
+                "admissible": not issues,
+                "issues": [dataclasses.asdict(issue) for issue in issues],
+            }
+        )
+        if fail_on_reject and issues:
+            sys.exit(1)
+        return
+
+    print(f"\n  Offline policy check — {source}")
+    print("  " + "-" * 60)
+    if issues:
+        for issue in issues:
+            where = f"{issue.manifest} " if issue.manifest else ""
+            print(f"    {where}[{issue.check}] {issue.message}")
+    else:
+        print("    no violations of the configured policy")
+    print(f"\n  Note: {caveat}")
+    print()
+
+    if fail_on_reject and issues:
+        sys.exit(1)
+
+
+@jobs.command("check-policy")
+@click.argument("manifest_path", type=click.Path(exists=True), required=False)
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region to check (repeatable). Defaults to every configured region.",
+)
+@click.option(
+    "--namespace",
+    "-n",
+    help="Namespace to assume for manifests that don't declare their own",
+)
+@click.option(
+    "--offline",
+    is_flag=True,
+    help=(
+        "Check against cdk.json instead of calling AWS. Needs no credentials, "
+        "but reports the CONFIGURED policy, not the deployed one"
+    ),
+)
+@click.option(
+    "--fail-on-reject",
+    is_flag=True,
+    help="Exit 1 when any checked region would reject (after printing)",
+)
+@pass_config
+def check_policy(
+    config: Any,
+    manifest_path: Any,
+    regions: Any,
+    namespace: Any,
+    offline: Any,
+    fail_on_reject: Any,
+) -> None:
+    """Check which regions would admit a manifest, and compare their policies.
+
+    Reads the policy each region actually enforces and evaluates the manifest
+    against it with the same code the manifest processor runs. Two things this
+    answers that submitting cannot:
+
+    A job can be admissible in one region and over-cap in another. Without
+    this you discover that by submitting and being rejected.
+
+    There are no per-region policy overrides, so any field that differs
+    between regions means a region was deployed from a different checkout.
+    That stays invisible until a manifest that worked yesterday is refused.
+
+    Omit MANIFEST_PATH to compare policies without judging anything.
+
+    --offline answers the same question from cdk.json with no AWS calls, for
+    pre-commit hooks and air-gapped checkouts. It is strictly weaker: it reports
+    what the file configures, and a deployed region trusts ECR registries the
+    file never mentions, so an image rejection may be a false positive.
+
+    Advisory only: the cluster is the real gate and this reads a snapshot of
+    its policy, so it exits 0 unless you pass --fail-on-reject.
+
+    Examples:
+        gco jobs check-policy examples/gpu-job.yaml
+        gco jobs check-policy examples/gpu-job.yaml -r us-east-1 -r us-east-2
+        gco jobs check-policy                      # policy comparison only
+        gco -o json jobs check-policy examples/gpu-job.yaml
+        gco jobs check-policy examples/gpu-job.yaml --offline
+    """
+    import dataclasses
+
+    from ..job_policy import (
+        VERDICT_REJECT,
+        detect_policy_drift,
+        ecr_augmentation,
+        fetch_region_policies,
+        region_verdicts,
+        registry_drift,
+    )
+
+    formatter = get_output_formatter(config)
+    job_manager = get_job_manager(config)
+
+    if offline:
+        _check_policy_offline(
+            config,
+            job_manager,
+            formatter,
+            manifest_path=manifest_path,
+            namespace=namespace,
+            fail_on_reject=fail_on_reject,
+        )
+        return
+
+    try:
+        target_regions = _policy_regions(config, regions)
+        policies = fetch_region_policies(job_manager._aws_client, target_regions)
+
+        manifests: list[dict[str, Any]] = []
+        if manifest_path:
+            manifests = job_manager.load_manifests(manifest_path)
+            effective_namespace = namespace or config.default_namespace
+            for manifest in manifests:
+                if isinstance(manifest, dict):
+                    manifest.setdefault("metadata", {}).setdefault("namespace", effective_namespace)
+
+        verdicts = region_verdicts(manifests, policies) if manifests else []
+        drift = detect_policy_drift(policies)
+        registries = registry_drift(policies)
+        if registries is not None:
+            drift = [*drift, registries]
+        augmentation = ecr_augmentation(policies)
+    except Exception as e:
+        formatter.print_error(f"Failed to check policy: {e}")
+        sys.exit(1)
+
+    if config.output_format != "table":
+        formatter.print(
+            {
+                "regions": target_regions,
+                "unreadable": {entry.region: entry.reason for entry in policies if not entry.ok},
+                "verdicts": [dataclasses.asdict(verdict) for verdict in verdicts],
+                "policy_drift": [dataclasses.asdict(item) for item in drift],
+                "ecr_augmentation": augmentation,
+            }
+        )
+        if fail_on_reject and any(v.verdict == VERDICT_REJECT for v in verdicts):
+            sys.exit(1)
+        return
+
+    if verdicts:
+        print(f"\n  Admissibility — {len(verdicts)} region(s)")
+        print("  " + "-" * 60)
+        _render_verdicts(verdicts)
+
+    print(f"\n  Cross-region policy agreement — {len(policies)} region(s) read")
+    print("  " + "-" * 60)
+    readable = [entry for entry in policies if entry.ok]
+    if len(readable) < 2:
+        print("    only one region readable; nothing to compare")
+    elif not drift:
+        print(f"    identical across {', '.join(entry.region for entry in readable)}")
+    else:
+        print("    these fields differ, which means a region is running a")
+        print("    different deployment of cdk.json than the others:")
+        for item in drift:
+            print(f"      {item.field}:")
+            for region, value in sorted(item.values.items()):
+                print(f"        {region}: {value}")
+
+    added = {region: hosts for region, hosts in augmentation.items() if hosts}
+    if added:
+        print("\n  ECR hostnames CDK added at synth time (absent from cdk.json)")
+        print("  " + "-" * 60)
+        for region, hosts in sorted(added.items()):
+            for host in hosts:
+                print(f"    {region}: {host}")
+    print()
+
+    if fail_on_reject and any(v.verdict == VERDICT_REJECT for v in verdicts):
         sys.exit(1)
 
 

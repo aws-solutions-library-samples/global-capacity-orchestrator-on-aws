@@ -28,6 +28,7 @@ multi-region callers exercise the same code the cluster does.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from typing import Any, NamedTuple
 
 from gco.services.structured_logging import sanitize_log_value
@@ -312,9 +313,16 @@ def _untrusted_container_in_pod_spec(
 
 
 def validate_resource_kind(
-    manifest: dict[str, Any], allowed_kinds: set[str] | tuple[str, ...] = DEFAULT_ALLOWED_KINDS
+    manifest: dict[str, Any],
+    allowed_kinds: Collection[str] = DEFAULT_ALLOWED_KINDS,
 ) -> tuple[bool, str | None]:
-    """Validate a manifest kind against the shared submission allowlist."""
+    """Validate a manifest kind against the shared submission allowlist.
+
+    ``allowed_kinds`` is any collection because the allowlist arrives as a tuple
+    of defaults, a set off a live processor, and a frozenset off a
+    :class:`JobValidationPolicy`; only membership and ordering-for-display are
+    used, so narrowing the type would force callers into pointless conversions.
+    """
     kind = manifest.get("kind", "")
     allowed = set(allowed_kinds)
     if kind not in allowed:

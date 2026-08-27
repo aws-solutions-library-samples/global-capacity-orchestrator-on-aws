@@ -70,6 +70,7 @@ SECTION_CAPACITY = "capacity"
 SECTION_INFERENCE = "inference"
 SECTION_COSTS = "costs"
 SECTION_NODEPOOLS = "nodepools"
+SECTION_POLICY = "policy"
 
 SECTION_ORDER: tuple[str, ...] = (
     SECTION_REGIONS,
@@ -80,6 +81,7 @@ SECTION_ORDER: tuple[str, ...] = (
     SECTION_INFERENCE,
     SECTION_COSTS,
     SECTION_NODEPOOLS,
+    SECTION_POLICY,
 )
 
 # Sections that fan out over the resolved workload region list and therefore
@@ -879,6 +881,82 @@ def _gather_nodepools(config: GCOConfig, requested: bool, workload: list[str]) -
 # ---------------------------------------------------------------------------
 
 
+def _gather_policy(config: GCOConfig, requested: bool, workload: list[str]) -> Section:
+    """Compare the job-validation policy each region actually enforces.
+
+    Opt-in because it costs a CloudFormation describe plus an API call per
+    region, and because it needs the regional API bridge deployed.
+
+    Every region is deployed from the same ``cdk.json`` -- there are no
+    per-region policy overrides -- so a field that differs across regions means
+    at least one region is running a different deployment of that file. Nothing
+    else reports this: each region is individually healthy and self-consistent,
+    and the divergence only shows up as a manifest that is admitted in one
+    region and refused in another.
+
+    ``trusted_registries`` is compared with ECR hostnames stripped, because CDK
+    appends the project's own registries at synth time and those encode a region.
+    """
+    if not requested:
+        return Section(
+            name=SECTION_POLICY,
+            status=STATUS_SKIPPED,
+            reason="not requested; pass --with-policy (one API call per region)",
+        )
+    if not workload:
+        return _regions_unavailable_section(SECTION_POLICY)
+
+    from cli.aws_client import get_aws_client
+    from cli.job_policy import (
+        detect_policy_drift,
+        ecr_augmentation,
+        fetch_region_policies,
+        registry_drift,
+    )
+
+    policies = fetch_region_policies(get_aws_client(config), workload)
+    readable = [entry for entry in policies if entry.ok]
+    unreadable = {entry.region: entry.reason or "unknown" for entry in policies if not entry.ok}
+
+    drift = detect_policy_drift(policies)
+    registries = registry_drift(policies)
+    if registries is not None:
+        drift = [*drift, registries]
+
+    data: dict[str, Any] = {
+        "compared": [entry.region for entry in readable],
+        "unreadable": unreadable,
+        "agree": not drift,
+        "drift": [{"field": item.field, "values": item.values} for item in drift],
+        "ecr_augmentation": {r: h for r, h in ecr_augmentation(policies).items() if h},
+        "enforcement_gaps": {
+            entry.region: entry.enforcement_gaps for entry in readable if entry.enforcement_gaps
+        },
+    }
+
+    if not readable:
+        return Section(
+            name=SECTION_POLICY,
+            status=STATUS_UNAVAILABLE,
+            reason="no region's policy could be read",
+            data=data,
+            errors=[f"{region}: {reason}" for region, reason in sorted(unreadable.items())],
+        )
+    if unreadable:
+        return Section(
+            name=SECTION_POLICY,
+            status=STATUS_PARTIAL,
+            reason=f"{len(unreadable)} of {len(policies)} regions unreadable",
+            data=data,
+            errors=[f"{region}: {reason}" for region, reason in sorted(unreadable.items())],
+        )
+    if len(readable) < 2:
+        # One region cannot disagree with itself. Report the policy as read
+        # rather than implying agreement was verified.
+        return Section(name=SECTION_POLICY, status=STATUS_OK, data=data)
+    return Section(name=SECTION_POLICY, status=STATUS_OK, data=data)
+
+
 def derive_findings(sections: dict[str, Section]) -> list[Finding]:
     """Derive the findings list from an already-gathered document.
 
@@ -975,6 +1053,36 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
             )
         )
 
+    policy = sections.get(SECTION_POLICY)
+    if policy is not None and policy.status in {STATUS_OK, STATUS_PARTIAL}:
+        for item in policy.data.get("drift", []):
+            field_name = item.get("field")
+            values = item.get("values", {})
+            spread = "; ".join(f"{region}={value}" for region, value in sorted(values.items()))
+            warns.append(
+                Finding(
+                    severity=SEVERITY_WARN,
+                    section=SECTION_POLICY,
+                    message=(
+                        f"{field_name} differs across regions ({spread}) — there are no "
+                        f"per-region policy overrides, so a region is running a different "
+                        f"deployment of cdk.json"
+                    ),
+                )
+            )
+        for region, namespaces in sorted(policy.data.get("enforcement_gaps", {}).items()):
+            warns.append(
+                Finding(
+                    severity=SEVERITY_WARN,
+                    section=SECTION_POLICY,
+                    message=(
+                        f"{region} cannot read the live ResourceQuota/LimitRange for "
+                        f"{', '.join(namespaces)}, so only its front-door caps are "
+                        f"reportable (check the manifest-processor Role)"
+                    ),
+                )
+            )
+
     return errors + warns
 
 
@@ -1013,6 +1121,7 @@ def gather_fleet_status(
     region: str | None = None,
     with_costs: bool = False,
     with_nodepools: bool = False,
+    with_policy: bool = False,
     costs_cache: Section | None = None,
 ) -> FleetStatus:
     """Gather every section and assemble the fleet status document.
@@ -1057,6 +1166,7 @@ def gather_fleet_status(
     else:
         gatherers[SECTION_COSTS] = lambda: _gather_costs(config, with_costs)
     gatherers[SECTION_NODEPOOLS] = lambda: _gather_nodepools(config, with_nodepools, workload)
+    gatherers[SECTION_POLICY] = lambda: _gather_policy(config, with_policy, workload)
 
     sections: dict[str, Section] = {SECTION_REGIONS: regions_section}
     if not workload:

@@ -188,6 +188,7 @@ from tools.inference import (  # noqa: E402, F401
     update_inference_image,
 )
 from tools.jobs import (  # noqa: E402, F401
+    check_job_policy,
     cluster_health,
     get_job,
     get_job_events,
@@ -627,6 +628,7 @@ _PUBLIC_EXPORTS = [
     "capacity_status",
     "chat_inference",
     "check_capacity",
+    "check_job_policy",
     "cluster_health",
     "cluster_tunnel_command",
     "config_get",

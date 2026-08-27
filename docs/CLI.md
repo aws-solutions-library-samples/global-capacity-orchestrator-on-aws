@@ -176,6 +176,7 @@ gco status --output json
 
 # Include the billed and cluster-bound sections
 gco status --with-costs --with-nodepools
+gco status --with-policy
 
 # Refresh in place while watching a deploy or a queue drain
 gco status --watch 10
@@ -191,6 +192,7 @@ gco status --fail-on-findings
 | `--region`, `-r` | Restrict the gather to a single region |
 | `--with-costs` | Include the `costs` section (Cost Explorer bills per `GetCostAndUsage` request) |
 | `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco cluster tunnel`) |
+| `--with-policy` | Include the `policy` section: compare the job-validation policy each region enforces and report any field that differs (one API call per region) |
 | `--watch SECONDS` | Re-gather and redraw on an interval (minimum 5 seconds; table output only). With `--with-costs`, the costs section is re-fetched at most every 15 minutes and carries an `as_of` timestamp |
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
 
@@ -208,6 +210,7 @@ Kubernetes API, so both are opt-in flags.
 | `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
 | `inference` | 1 | Inference endpoint desired state from the global registry |
 | `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
+| `policy` | 1 per region | Cross-region job-validation policy agreement (`--with-policy`). No per-region overrides exist, so a differing field means a region was deployed from a different `cdk.json` checkout; each one becomes a warn finding |
 | `nodepools` | 3 | Karpenter NodePools per region after an endpoint reachability probe (`--with-nodepools`) |
 
 **Section status vocabulary.** Every section carries a `status`; anything that
@@ -250,7 +253,7 @@ discovering stacks wherever they exist.
 Manage jobs across GCO clusters.
 
 <details>
-<summary>All <code>gco jobs</code> commands (16) — click to expand</summary>
+<summary>All <code>gco jobs</code> commands (17) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -269,6 +272,7 @@ Manage jobs across GCO clusters.
 | [`gco jobs retry`](#gco-jobs-retry) | Retry a failed job. |
 | [`gco jobs bulk-delete`](#gco-jobs-bulk-delete) | Bulk delete jobs based on filters. |
 | [`gco jobs health`](#gco-jobs-health) | Get health status of GCO clusters. |
+| [`gco jobs check-policy`](#gco-jobs-check-policy) | Check which regions would admit a manifest, and whether regions still agree on policy. |
 | [`gco jobs policy`](#gco-jobs-policy) | Show the job validation policy a region actually enforces. |
 | [`gco jobs queue-status`](#gco-jobs-queue-status) | View SQS queue status across regions. |
 
@@ -293,6 +297,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--region` | `-r` | Target specific region |
 | `--dry-run` | | Validate without applying |
+| `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--wait` | `-w` | Wait for job completion |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
@@ -651,6 +656,69 @@ gco jobs health [OPTIONS]
 gco jobs health --region us-east-1
 gco jobs health --all-regions
 ```
+
+#### `gco jobs check-policy`
+
+Check which regions would admit a manifest, and whether the regions still agree
+on policy.
+
+Two questions [`gco jobs policy`](#gco-jobs-policy) leaves to you. It shows one
+region's policy; this evaluates a manifest against every region's policy using
+the same checks the manifest processor runs, and compares the regions to each
+other.
+
+**Which regions would take this job.** A 32-GPU job can be admissible in one
+region and over-cap in another. Without this you find out by submitting and
+being rejected.
+
+**Whether the regions still agree.** There are no per-region policy overrides —
+every region is deployed from the same `cdk.json` — so any field that differs
+means at least one region is running a different deployment of that file. Each
+region looks individually healthy, so this stays invisible until a manifest that
+was admitted yesterday is refused. `trusted_registries` is compared with ECR
+hostnames stripped, because CDK appends the project's own registries at synth
+time and those encode a region; the stripped entries are reported separately as
+synth-time augmentation.
+
+Omit `MANIFEST_PATH` to compare policies without judging anything.
+
+Advisory. The cluster is the authoritative gate and this reads a snapshot of its
+policy over the network, so it exits 0 unless you pass `--fail-on-reject`. A
+check that blocked on its own opinion would refuse valid jobs whenever it was
+stale or wrong.
+
+```bash
+gco jobs check-policy [MANIFEST_PATH] [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region to check (repeatable). Defaults to every configured region. |
+| `--namespace` | `-n` | Namespace to assume for manifests that don't declare their own |
+| `--offline` | | Read `cdk.json` instead of calling AWS (no credentials needed) |
+| `--fail-on-reject` | | Exit 1 when any checked region would reject, after printing |
+
+`--offline` answers the same question with no AWS calls, for pre-commit hooks and
+air-gapped checkouts. It is strictly weaker: it reports what the file
+*configures*, not what any region has *deployed*, and since CDK adds project ECR
+registries at synth time an image-provenance rejection offline may pass in a real
+region. The output says so.
+
+**Example:**
+
+```bash
+gco jobs check-policy examples/gpu-job.yaml
+gco jobs check-policy examples/gpu-job.yaml -r us-east-1 -r us-east-2
+gco jobs check-policy                       # policy comparison only
+gco jobs check-policy examples/gpu-job.yaml --offline --fail-on-reject
+gco -o json jobs check-policy examples/gpu-job.yaml | jq '.policy_drift'
+```
+
+To surface policy drift across the whole fleet instead of per manifest, use
+[`gco status --with-policy`](#status-commands), which reports each differing field as
+a warn-severity finding.
 
 #### `gco jobs policy`
 

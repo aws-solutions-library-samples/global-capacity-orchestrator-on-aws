@@ -239,6 +239,7 @@ def _watch_loop(
     with_nodepools: bool,
     interval: int,
     fail_on_findings: bool,
+    with_policy: bool = False,
 ) -> None:
     """Re-gather and redraw until interrupted.
 
@@ -263,6 +264,7 @@ def _watch_loop(
             region=region,
             with_costs=with_costs,
             with_nodepools=with_nodepools,
+            with_policy=with_policy,
             costs_cache=reuse,
         )
         if with_costs and reuse is None:
@@ -300,6 +302,14 @@ def _watch_loop(
     ),
 )
 @click.option(
+    "--with-policy",
+    is_flag=True,
+    help=(
+        "Compare the job-validation policy each region enforces and report any "
+        "field that differs (one API call per region)"
+    ),
+)
+@click.option(
     "--fail-on-findings",
     is_flag=True,
     help=(
@@ -313,6 +323,7 @@ def status(
     region: str | None,
     with_costs: bool,
     with_nodepools: bool,
+    with_policy: bool,
     watch: int | None,
     fail_on_findings: bool,
 ) -> None:
@@ -329,6 +340,7 @@ def status(
         gco status -r us-east-1
         gco status --output json
         gco status --with-costs --with-nodepools
+        gco status --with-policy
         gco status --watch 10
         gco status --fail-on-findings
     """
@@ -352,6 +364,7 @@ def status(
                 region=region,
                 with_costs=with_costs,
                 with_nodepools=with_nodepools,
+                with_policy=with_policy,
                 interval=watch,
                 fail_on_findings=fail_on_findings,
             )
@@ -360,7 +373,11 @@ def status(
         return
 
     doc = gather_fleet_status(
-        config, region=region, with_costs=with_costs, with_nodepools=with_nodepools
+        config,
+        region=region,
+        with_costs=with_costs,
+        with_nodepools=with_nodepools,
+        with_policy=with_policy,
     )
 
     if config.output_format == "table":
