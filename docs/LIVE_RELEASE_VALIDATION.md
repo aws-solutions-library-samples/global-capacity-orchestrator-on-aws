@@ -63,6 +63,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state |
 | `deploy` | `baseline` | Deploy the checked-in GCO topology |
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB |
+| `policy` | `topology` | `GET /api/v1/policy` reports all three admission layers per Region: the front-door caps, the per-container `LimitRange`, and the namespace `ResourceQuota`. Asserted on the response body, because a Kubernetes read failure degrades to HTTP 200 with a per-namespace `status` and is invisible to a transport-level check. Also requires the project's own ECR hostnames in `trusted_registries`, which CDK appends at synth time. |
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
 | `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle, bind the worker-persisted Kubernetes identity, and verify/delete that exact workload |

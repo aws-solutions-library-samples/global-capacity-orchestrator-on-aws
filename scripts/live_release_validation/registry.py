@@ -26,6 +26,7 @@ from .actions import (
     action_destroy,
     action_final_inventory,
     action_opencost,
+    action_policy,
     action_preflight,
     action_schedulers,
     action_sqs_lifecycle,
@@ -72,6 +73,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Verify stacks, EKS, API endpoints, queues, and DynamoDB",
             ("deploy",),
             action_topology,
+        ),
+        ActionDefinition(
+            "policy",
+            "Require all three admission layers to be readable per Region",
+            ("topology",),
+            action_policy,
         ),
         ActionDefinition(
             "api",
