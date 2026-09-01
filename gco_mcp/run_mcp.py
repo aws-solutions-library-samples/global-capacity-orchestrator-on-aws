@@ -157,6 +157,7 @@ from tools.costs import (  # noqa: E402, F401
     cost_workloads,
 )
 from tools.dag import dag_run, dag_validate  # noqa: E402, F401
+from tools.deps import deps_scan  # noqa: E402, F401
 from tools.docs import find_docs  # noqa: E402, F401
 from tools.examples import find_examples  # noqa: E402, F401
 from tools.images import (  # noqa: E402, F401

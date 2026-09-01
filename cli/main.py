@@ -29,6 +29,7 @@ from .commands import (
     config_cmd,
     costs,
     dag,
+    deps,
     examples,
     files,
     images,
@@ -139,6 +140,7 @@ def cli(
 cli.add_command(autopilot)
 cli.add_command(jobs)
 cli.add_command(dag)
+cli.add_command(deps)
 cli.add_command(queue)
 cli.add_command(release)
 cli.add_command(examples)

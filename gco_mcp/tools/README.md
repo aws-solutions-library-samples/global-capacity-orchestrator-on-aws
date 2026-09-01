@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 138 tools; with every flag enabled the
-ceiling is 194. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 139 tools; with every flag enabled the
+ceiling is 195. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -36,6 +36,7 @@ flag-to-tool mapping.
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
 | `images.py` | 20 | `images_list`, `images_tags`, `images_describe`, `images_uri`, `images_replication_get`, `images_replication_status`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_init`, `images_lifecycle_get`, `images_lifecycle_set`, `images_replication_sync`, `images_build` (gated), `images_push` (gated), `images_mirror` (gated), `images_delete_tag` (gated), `images_delete_repo` (gated), `images_cleanup` (gated), `images_prune` (gated) |
 | `dag.py` | 2 | `dag_validate`, `dag_run` |
+| `deps.py` | 1 | `deps_scan` (dependency update scan + NodePool registry freshness) |
 | `config.py` | 1 | `config_get` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
@@ -300,6 +301,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. |
 | `dag_validate` | `gco dag validate` — statically validate a DAG manifest. |
+
+### `deps.py`
+
+| Tool | Description |
+|------|-------------|
+| `deps_scan` | `gco deps scan` — generate the monthly dependency-update report on demand; `nodepools_only=true` runs just the accelerator-catalog / NodePool freshness check. |
 
 ### `config.py`
 

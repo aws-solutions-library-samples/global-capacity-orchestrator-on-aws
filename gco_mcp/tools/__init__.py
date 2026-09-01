@@ -16,6 +16,7 @@ def register_all_tools() -> None:
         config,
         costs,
         dag,
+        deps,
         docs,
         examples,
         images,

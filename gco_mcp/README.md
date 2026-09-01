@@ -997,6 +997,21 @@ messages, command metadata, individual log records, total log bytes, and tail
 reads are all bounded; symlinks, hard links, special files, traversal IDs, and
 oversized status records fail closed.
 
+### Dependency Maintenance
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | safe | — |
+
+The full scan mirrors the `deps-scan` GitHub Actions workflow: it sweeps
+PyPI, npm, container registries, Helm repos, GitHub, and (when the server's
+AWS credentials resolve) the EKS / Aurora / EMR / Bedrock / EC2-accelerator
+surfaces, returning the same Markdown report the rolling
+"[Automated] Dependency updates available" issue carries. It requires a GCO
+checkout, typically takes several minutes, and its Python surface
+pip-installs the project's extras into the server's active environment —
+exactly how CI runs it.
+
 ### Live State
 
 The synthetic `read_resource` tool (added by FastMCP's Resources As Tools transform) reaches every resource path the server exposes — including the live-state paths below, which materialize current cluster state on demand. Live kubectl-backed reads require an explicit AWS region and use an account-qualified EKS context; legacy regionless URIs return a structured `eks_region_required` error rather than using kubectl's ambient current context. Tool-only clients can call `read_resource(uri="gco://jobs/us-east-1/my-job")` and get the same answer the regional resource handler would return directly.

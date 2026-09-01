@@ -33,6 +33,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [vector](#vector-commands)
   - [release](#release-commands)
   - [examples](#examples-commands)
+  - [deps](#deps-commands)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Examples](#examples)
@@ -5425,6 +5426,62 @@ gco examples validate --examples gpu-job --expected-account 123456789012 \
 | `--report-dir` | Report directory (default: `~/gco-example-job-validation-reports/<run-id>`). |
 | `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
 | `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
+
+---
+
+### Deps Commands
+
+Dependency maintenance: reproduce the monthly `deps-scan` workflow's update
+list on demand.
+
+<details>
+<summary>All <code>gco deps</code> commands (1) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco deps scan`](#gco-deps-scan) | Generate the dependency update list the monthly deps-scan produces. |
+
+</details>
+
+#### `gco deps scan`
+
+Run the repository's dependency scanner (`.github/scripts/dependency-scan.sh`
+— the script behind the rolling "[Automated] Dependency updates available"
+issue) and print its Markdown report. Surfaces that need AWS credentials or
+missing host tools (`skopeo`, `helm`, `aws`, …) are skipped and flagged as
+incomplete rather than failing, exactly as in CI. Requires a GCO checkout.
+
+Heads-up: the full scan's Python surface runs `pip install -e ".[<extras>]"`
+into the active environment (that is how it asks pip for outdated direct
+pins). Run it from the dev container or a dedicated venv if that matters.
+
+```bash
+gco deps scan [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--nodepools-only` | Run only the accelerator-catalog / Karpenter NodePool freshness check (offline policy validation always; live EC2 catalog comparison when AWS credentials resolve). Fast, and the only network it may touch is EC2. |
+| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. |
+
+**Examples:**
+
+```bash
+# Full scan; report to stdout, progress to stderr
+gco deps scan
+
+# Just the accelerator/NodePool registry freshness check
+gco deps scan --nodepools-only
+
+# Machine-readable envelope (has_drift, scan_complete, report_markdown) —
+# the same shape the MCP deps_scan tool returns
+gco -o json deps scan
+
+# Save the report for a PR description
+gco deps scan --report /tmp/dependency-report.md
+```
 
 ## Configuration
 
