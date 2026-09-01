@@ -50,8 +50,9 @@
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, duplicated *_VERSION
-#     workflow environment pins, and every per-Lambda requirements.txt pin
-#     against the version resolved centrally
+#     workflow environment pins, every per-Lambda requirements.txt pin
+#     against the version resolved centrally, and digest-pinned images
+#     carrying two digests under one tag
 #   - Base-image security epochs (APT_SECURITY_EPOCH / DNF_SECURITY_EPOCH)
 #     older than SECURITY_EPOCH_STALE_DAYS
 #   - Suppression expiries: .trivyignore / .pip-audit-ignore /
@@ -1611,6 +1612,8 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 #   - every per-Lambda requirements.txt pin agrees with the version the
 #     repository resolves centrally (pyproject, then the lock for
 #     transitives) — the copies that ship to production.
+#   - no digest-pinned image carries two different digests under one tag,
+#     which means an upstream re-push was only half applied.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking version consistency ==="
@@ -1808,6 +1811,19 @@ if [ -n "$LAMBDA_PIN_PROBLEMS" ]; then
     echo "  - Lambda runtime pin: ${lambda_req}: ${lambda_problem}"
     echo "Lambda runtime pins|${lambda_req}: ${lambda_problem}" >> "$CONSISTENCY_RESULTS"
   done <<< "$LAMBDA_PIN_PROBLEMS"
+fi
+
+# An immutable digest is only immutable where it is written down. When an
+# upstream tag is re-pushed and the pin is refreshed in one file but restated as
+# a literal in another, nothing reconciled the two until whichever test held the
+# stale copy happened to run. Two digests under one tag is unambiguous drift.
+IMAGE_DIGEST_PROBLEMS="$(check_image_digest_consistency .)"
+if [ -n "$IMAGE_DIGEST_PROBLEMS" ]; then
+  while IFS='|' read -r image_repo image_problem; do
+    [ -n "$image_repo" ] || continue
+    echo "  - image digest: ${image_repo}: ${image_problem}"
+    echo "Image digest copies|${image_repo}: ${image_problem}" >> "$CONSISTENCY_RESULTS"
+  done <<< "$IMAGE_DIGEST_PROBLEMS"
 fi
 
 CONSISTENCY_COUNT="$(wc -l < "$CONSISTENCY_RESULTS" 2>/dev/null | tr -d ' ')"

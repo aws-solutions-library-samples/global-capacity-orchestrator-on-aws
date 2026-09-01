@@ -2325,3 +2325,120 @@ for requirements in sorted((root / 'lambda').glob('*/requirements.txt')):
         print(f'{relative}|{name}=={version} must match {label} {want}')
 " "$root" "$pyproject" "$lockfile" 2>/dev/null
 }
+
+# check_image_digest_consistency [root]
+#
+# Emits ``image|problem`` for every ``repo:tag`` this repository pins to two
+# different ``@sha256:`` digests — the tag was re-pushed upstream and only some
+# of the copies were refreshed.
+#
+# This exists because the drift sections answer "is this pin behind upstream?"
+# and the version-consistency checks answer "do the copies of a *named* pin
+# agree?", but neither could see a pin restated as a bare literal elsewhere in
+# the tree. That is the class that keeps escaping: the #317 sweep refreshed the
+# python-slim digest in a smoke manifest while a test kept the previous one, and
+# it surfaced only when the CI shard holding that test happened to run.
+#
+# Deliberately narrow. Two broader variants were written and measured against
+# this tree before being cut, because both were pure noise here:
+#
+#   * "same repo, different tags" reported python at 3.14, 3.14.6-slim and
+#     3.14.7-slim for three legitimate purposes, busybox pinned in examples
+#     versus ``:latest`` in property-test fixtures, and several synthetic
+#     Volcano tags — about fifteen rows, none of them drift.
+#   * "digest-pinned here but named at a bare tag there" reported only fixture
+#     image strings and the quoted registry-timeout error messages in the
+#     ``build-image-with-retry`` docs.
+#
+# A section that is mostly noise trains readers to skip it. Two digests under
+# one tag, by contrast, cannot be anything but a copy someone missed: a fixture
+# does not invent a real 64-hex digest. Images that need tag-level coverage get
+# a dedicated guard instead — see ``tests/test_pinned_floci_version.py``.
+#
+# Excludes generated trees, sibling git worktrees, recorded terminal casts, and
+# the generated flowchart HTML: all of them hold point-in-time copies of source
+# that are not pins.
+#
+# Example output:
+#
+#     docker.io/library/python|tag 3.14.7-slim has 2 digests: 656d12e7… in a.yaml, ce407646… in b.py
+#
+# Prints nothing when every digest-pinned image agrees with itself.
+check_image_digest_consistency() {
+  local root="${1:-.}"
+  python3 -c "
+import re, sys
+from pathlib import Path
+from collections import defaultdict
+
+root = Path(sys.argv[1]).resolve()
+excluded = {
+    '.git', '.kiro', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.worktrees',
+    'build', 'cdk.out', 'dist', 'node_modules', '__pycache__', 'site',
+    '.example-job-validation',
+}
+suffixes = {'.py', '.yaml', '.yml', '.md', '.sh', '.txt', '.toml'}
+
+def owned(path):
+    parts = path.relative_to(root).parts
+    if any(p in excluded or p.startswith('.venv') or p.endswith('-build') for p in parts[:-1]):
+        return False
+    if parts and parts[0] in excluded:
+        return False
+    # Generated flowchart HTML embeds a copy of the source it charts.
+    if parts and parts[0] == 'diagrams' and path.suffix != '.py':
+        return False
+    return path.suffix in suffixes or 'ockerfile' in path.name
+
+# repo:tag[@sha256:digest]. The tag must look like a version so ordinary
+# ''key: value'' text and ''host:port'' pairs are never read as images.
+reference = re.compile(
+    r'(?<![\w./:-])'
+    r'([a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)+)'
+    r':(v?[0-9][A-Za-z0-9._-]*)'
+    r'(?:@sha256:([0-9a-f]{64}))?'
+)
+
+pinned = defaultdict(lambda: defaultdict(set))   # repo -> tag -> {(digest, file)}
+
+for path in sorted(root.rglob('*')):
+    if not path.is_file() or not owned(path):
+        continue
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        continue
+    relative = path.relative_to(root).as_posix()
+    # Rejoin references split across adjacent string literals. The stale copy
+    # that caused the incident was written exactly this way —
+    # ''docker.io/library/python:3.14.7-slim@'' on one line and
+    # ''sha256:656d…'' on the next — so a line-at-a-time matcher saw no pin at
+    # all and reported nothing. Only the seam around the digest is rejoined, so
+    # unrelated adjacent literals cannot be welded into a false reference.
+    text = re.sub(r'@[\"\x27][\s,]*[\"\x27]sha256:', '@sha256:', text)
+    text = re.sub(r'[\"\x27][\s,]*[\"\x27]@sha256:', '@sha256:', text)
+    for line in text.splitlines():
+        for match in reference.finditer(line):
+            repo, tag, digest = match.group(1), match.group(2), match.group(3)
+            prefix = line[: match.start()]
+            # ''https://host/path:1.2'' is a URL, not an image reference.
+            if '://' in prefix[-12:] or prefix.endswith('//'):
+                continue
+            if digest:
+                pinned[repo][tag].add((digest, relative))
+
+def listing(items):
+    return ', '.join(sorted(items))
+
+for repo in sorted(pinned):
+    for tag in sorted(pinned[repo]):
+        seen = pinned[repo][tag]
+        distinct = sorted({digest for digest, _ in seen})
+        if len(distinct) > 1:
+            detail = ', '.join(
+                d[:8] + '… in ' + listing(f for g, f in seen if g == d) for d in distinct
+            )
+            print(f'{repo}|tag {tag} has {len(distinct)} digests: {detail}')
+
+" "$root" 2>/dev/null
+}

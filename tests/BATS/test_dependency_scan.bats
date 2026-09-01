@@ -1276,6 +1276,95 @@ EOF
     rm -rf "$tmpdir"
 }
 
+# ── check_image_digest_consistency ──────────────────────────────────────────
+
+@test "check_image_digest_consistency: the committed tree pins every digest once" {
+    # Policy lock: an upstream tag re-push must be applied to every copy. The
+    # python-slim digest moved in a smoke manifest while a test kept the old
+    # one, and only the CI shard holding that test noticed.
+    run check_image_digest_consistency .
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_image_digest_consistency: two digests under one tag are reported with both files" {
+    tmpdir="$(mktemp -d)"
+    mkdir -p "$tmpdir/manifests" "$tmpdir/tests"
+    printf 'image: docker.io/library/python:3.14.7-slim@sha256:%s\n' "$(printf 'a%.0s' {1..64})" \
+        > "$tmpdir/manifests/job.yaml"
+    printf 'PINNED = "docker.io/library/python:3.14.7-slim@sha256:%s"\n' "$(printf 'b%.0s' {1..64})" \
+        > "$tmpdir/tests/test_pins.py"
+    run check_image_digest_consistency "$tmpdir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"docker.io/library/python|tag 3.14.7-slim has 2 digests"* ]]
+    # Both sides must be named, or the reader cannot tell which to change.
+    [[ "$output" == *"manifests/job.yaml"* ]]
+    [[ "$output" == *"tests/test_pins.py"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "check_image_digest_consistency: a reference split across string literals still counts" {
+    # The stale copy that caused the incident was written as two adjacent Python
+    # literals, so a line-at-a-time matcher saw no pin at all and passed.
+    tmpdir="$(mktemp -d)"
+    mkdir -p "$tmpdir/tests"
+    printf 'image: docker.io/library/python:3.14.7-slim@sha256:%s\n' "$(printf 'a%.0s' {1..64})" \
+        > "$tmpdir/job.yaml"
+    cat > "$tmpdir/tests/test_pins.py" <<EOF
+_PINNED = (
+    "docker.io/library/python:3.14.7-slim@"
+    "sha256:$(printf 'b%.0s' {1..64})",
+)
+EOF
+    run check_image_digest_consistency "$tmpdir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"has 2 digests"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "check_image_digest_consistency: agreeing copies and distinct tags stay silent" {
+    tmpdir="$(mktemp -d)"
+    same="$(printf 'c%.0s' {1..64})"
+    printf 'image: repo/app:1.0.0@sha256:%s\n' "$same" > "$tmpdir/a.yaml"
+    printf 'image: repo/app:1.0.0@sha256:%s\n' "$same" > "$tmpdir/b.yaml"
+    # A different tag legitimately has a different digest.
+    printf 'image: repo/app:2.0.0@sha256:%s\n' "$(printf 'd%.0s' {1..64})" > "$tmpdir/c.yaml"
+    # Bare tags are not compared at all — fixtures and prose use them freely.
+    printf 'image: repo/app:9.9.9\n' > "$tmpdir/d.yaml"
+    run check_image_digest_consistency "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_image_digest_consistency: generated trees and worktrees are excluded" {
+    # Sibling git worktrees and build output hold whole copies of the tree at
+    # older commits; treating those as pins would report every image forever.
+    tmpdir="$(mktemp -d)"
+    mkdir -p "$tmpdir/.worktrees/other" "$tmpdir/cdk.out" "$tmpdir/lambda/thing-build"
+    printf 'image: repo/app:1.0.0@sha256:%s\n' "$(printf 'a%.0s' {1..64})" > "$tmpdir/a.yaml"
+    for stale in .worktrees/other/a.yaml cdk.out/a.yaml lambda/thing-build/a.yaml; do
+        printf 'image: repo/app:1.0.0@sha256:%s\n' "$(printf 'b%.0s' {1..64})" \
+            > "$tmpdir/$stale"
+    done
+    run check_image_digest_consistency "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_image_digest_consistency: URLs and host:port pairs are not images" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/notes.md" <<'EOF'
+Reach the emulator at http://127.0.0.1:4566 and the dashboard at
+https://grafana.example.com/d/abc:1.2 — neither is an image reference.
+EOF
+    run check_image_digest_consistency "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
 # ── extract_constant_value ──────────────────────────────────────────────────
 
 @test "extract_constant_value: reads LAMBDA_PYTHON_RUNTIME from real constants.py" {
