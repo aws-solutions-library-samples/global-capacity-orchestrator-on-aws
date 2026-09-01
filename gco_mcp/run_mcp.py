@@ -673,6 +673,7 @@ _PUBLIC_EXPORTS = [
     "deploy_disaggregated_inference",
     "deploy_inference",
     "deploy_stack",
+    "deps_scan",
     "destroy_all",
     "destroy_stack",
     "disable_analytics",
