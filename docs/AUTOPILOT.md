@@ -207,7 +207,7 @@ when GCO's reviewed npm pin changes, not by mutating the launched installation.
 
 Every launch regenerates `~/.gco/autopilot/codex/config.toml` and sets
 `CODEX_HOME=~/.gco/autopilot/codex`, so personal `~/.codex` state is neither
-read nor modified. Codex 0.150.1 normally layers a trusted workspace's
+read nor modified. Codex 0.152.0 normally layers a trusted workspace's
 `.codex/config.toml` above that user file, so Autopilot also:
 
 - identifies Codex's Git project root (including linked worktrees);
@@ -225,7 +225,7 @@ The generated TOML still contains:
 - the same GCO and companion MCP server registry as Claude.
 
 Organization-managed Codex policy remains authoritative by design. Codex
-0.150.1 has no Claude-equivalent strict replacement switch for system/managed
+0.152.0 has no Claude-equivalent strict replacement switch for system/managed
 MCP layers; Autopilot's guarantee is isolation from personal and project
 configuration, not bypassing administrator policy.
 

@@ -1819,12 +1819,12 @@ def test_codex_resume_and_passthrough_map_to_native_argv(
 def test_install_codex_uses_only_the_exact_npm_pin() -> None:
     from cli.autopilot import codex_install_command, install_codex
 
-    assert CODEX_VERSION == "0.150.1"
+    assert CODEX_VERSION == "0.152.0"
     assert codex_install_command() == [
         "npm",
         "install",
         "-g",
-        "@openai/codex@0.150.1",
+        "@openai/codex@0.152.0",
     ]
     with (
         patch("cli.autopilot.shutil.which", return_value="/usr/bin/npm"),
@@ -1846,5 +1846,5 @@ def test_codex_pin_source_is_an_exact_scanner_friendly_literal() -> None:
 
     pin = re.search(r'^CODEX_VERSION = "([^"]+)"$', source, re.M)
     assert pin is not None
-    assert pin.group(1) == CODEX_VERSION == "0.150.1"
+    assert pin.group(1) == CODEX_VERSION == "0.152.0"
     assert re.fullmatch(r"\d+\.\d+\.\d+", CODEX_VERSION)
