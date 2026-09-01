@@ -330,7 +330,7 @@ GCO can also deploy long-running inference endpoints across regions. Here's a qu
 ```bash
 # Deploy a vLLM inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
   -r us-east-1
@@ -358,7 +358,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 138 tools by default (up to 194 with all flags enabled) spanning the CLI and project-aware resources. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
+GCO includes an MCP server with 139 tools by default (up to 195 with all flags enabled) spanning the CLI and project-aware resources. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 
 ```jsonc
 // MCP client config file (for example, Cursor's ~/.cursor/mcp.json)

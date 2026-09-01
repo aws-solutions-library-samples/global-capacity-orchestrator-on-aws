@@ -5152,7 +5152,7 @@ class TestSmokeManifestSupplyChain:
         "sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616",
         # The Slurm probe needs a Python runtime for its slurmrestd round trip.
         "docker.io/library/python:3.14.7-slim@"
-        "sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+        "sha256:656d12e70054d5fda18a045e2494c96701e9792dd1445f95b3d038df954f57e9",
     )
 
     def test_smoke_images_are_immutable_and_dependency_scanned(self) -> None:

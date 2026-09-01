@@ -555,7 +555,7 @@ def cost_athena_workgroup_name(project_name: str) -> str:
     return f"{project_name}-cost"
 
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.27.1"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.28.0"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP

@@ -26,7 +26,7 @@ def inference(config: Any) -> None:
     "--image",
     "-i",
     default=None,
-    help="Container image (e.g. vllm/vllm-openai:v0.27.1). Optional with "
+    help="Container image (e.g. vllm/vllm-openai:v0.28.0). Optional with "
     "--mooncake-mode: falls back to the default upstream Mooncake-enabled vLLM image.",
 )
 @click.option(
@@ -199,10 +199,10 @@ def inference_deploy(
     in each target region creates the Kubernetes resources automatically.
 
     Examples:
-        gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1
+        gco inference deploy my-llm -i vllm/vllm-openai:v0.28.0
 
         gco inference deploy llama3-70b \\
-            -i vllm/vllm-openai:v0.27.1 \\
+            -i vllm/vllm-openai:v0.28.0 \\
             -r us-east-1 -r eu-west-1 \\
             --replicas 2 --gpu-count 4 \\
             --model-path /mnt/gco/models/llama3-70b \\
@@ -709,7 +709,7 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     Triggers a rolling update across all target regions.
 
     Examples:
-        gco inference update-image my-llm -i vllm/vllm-openai:v0.27.1
+        gco inference update-image my-llm -i vllm/vllm-openai:v0.28.0
     """
     from ..inference import get_inference_manager
 
@@ -998,7 +998,7 @@ def inference_canary(
     the new primary, or 'rollback' to remove it.
 
     Examples:
-        gco inference canary my-llm -i vllm/vllm-openai:v0.27.1 --weight 10
+        gco inference canary my-llm -i vllm/vllm-openai:v0.28.0 --weight 10
         gco inference canary my-llm -i new-image:latest -w 25 -r 2
     """
     from ..inference import get_inference_manager

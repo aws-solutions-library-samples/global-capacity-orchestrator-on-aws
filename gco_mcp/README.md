@@ -70,7 +70,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 138 tools by default (up to 194 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 139 tools by default (up to 195 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments

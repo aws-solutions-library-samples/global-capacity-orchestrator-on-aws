@@ -152,7 +152,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 138 tools by default (up to 194 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 139 tools by default (up to 195 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -259,7 +259,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an Inference Endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.28.0 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```
@@ -623,7 +623,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── gco_mcp/                             # MCP server for LLM interaction (138 tools default, up to 194 with feature flags)
+├── gco_mcp/                             # MCP server for LLM interaction (139 tools default, up to 195 with feature flags)
 ├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 ├── tests/                               # PyTest + BATS test suites (counts tracked via badges)
