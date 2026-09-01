@@ -32,9 +32,9 @@
       "source_commit": "014029fc23b3763b4a03447e9e95b4a3fafcc3f3"
     },
     "cli/inference.py": {
-      "digest": "6f8fb7c52c3b8051d533bfcf56649fca0a8fe0f20829562718c3083ea30117f5",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "a9fb5d06a717ac2e7e55750fbbf7b13b01e729e6b9d0981a5102b63fd074d26b",
+      "generated_at": "2026-09-01T20:21:43Z",
+      "source_commit": "839304b75eee1f16d041474ff2a68d2cced65f48"
     },
     "cli/jobs.py": {
       "digest": "7c846bae00189f7705a638783e508cba58d81a516cfb626ce0a2ef6500875a7a",
