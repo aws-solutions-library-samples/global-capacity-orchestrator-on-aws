@@ -26,8 +26,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T13:22:56Z
-# Generated from Git commit: ed395032d46063f44b638deb85ae2a6dbf98e7f4
+# Generated at (UTC): 2026-09-01T14:42:56Z
+# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
 # Flowchart(s) generated from this file:
 #   * ``SpotPriceGate.evaluate`` -> ``diagrams/code_diagrams/gco/services/spot_price_gate.SpotPriceGate_evaluate.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/spot_price_gate.SpotPriceGate_evaluate.png``)
