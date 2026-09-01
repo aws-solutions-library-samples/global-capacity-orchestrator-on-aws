@@ -2852,9 +2852,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.28.0
 gco inference deploy llama3-70b \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   -r us-east-1 -r eu-west-1 \
   --replicas 2 --gpu-count 4 \
   --model-source s3://bucket/models/llama3-70b \
@@ -2862,7 +2862,7 @@ gco inference deploy llama3-70b \
 
 # Deploy with autoscaling (creates a Kubernetes HPA)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
@@ -2996,7 +2996,7 @@ gco inference update-image ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference update-image my-llm -i vllm/vllm-openai:v0.27.1
+gco inference update-image my-llm -i vllm/vllm-openai:v0.28.0
 ```
 
 #### `gco inference invoke`
@@ -3126,10 +3126,10 @@ gco inference canary ENDPOINT_NAME [OPTIONS]
 
 ```bash
 # 10% traffic to new version
-gco inference canary my-llm -i vllm/vllm-openai:v0.27.1
+gco inference canary my-llm -i vllm/vllm-openai:v0.28.0
 
 # 25% traffic with 2 canary replicas
-gco inference canary my-llm -i vllm/vllm-openai:v0.27.1 -w 25 -r 2
+gco inference canary my-llm -i vllm/vllm-openai:v0.28.0 -w 25 -r 2
 ```
 
 #### `gco inference promote`
@@ -5590,7 +5590,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 2. Deploy inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm \
@@ -5604,13 +5604,13 @@ gco inference scale my-llm --replicas 3
 
 # Or enable autoscaling
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70
 
 # 5. Rolling update
-gco inference update-image my-llm -i vllm/vllm-openai:v0.27.1
+gco inference update-image my-llm -i vllm/vllm-openai:v0.28.0
 
 # 6. Cleanup
 gco inference delete my-llm -y

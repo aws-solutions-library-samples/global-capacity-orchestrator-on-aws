@@ -92,8 +92,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v3.32.1",
-            "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744",
+            "v3.32.2",
+            "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02",
         ),
         (
             ".github/workflows/integration-tests.yml",
@@ -164,8 +164,8 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/integration-tests.yml",
             "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.32.1"',
-            'CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"',
+            'CALICO_VERSION: "v3.32.2"',
+            'CALICO_SHA256: "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02"',
             "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
             'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),

@@ -190,7 +190,7 @@ This happens automatically in every target region, so model weights are always l
 ```bash
 # Deploy vLLM serving a model (downloads from HuggingFace at startup)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct
 ```
@@ -203,7 +203,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # Deploy with model sync from S3
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm
@@ -275,17 +275,17 @@ GCO works with any containerized inference server. These frameworks have example
 
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
-| vLLM | `vllm/vllm-openai:v0.27.1` | 8000 | `/health` | OpenAI-compatible LLM serving |
+| vLLM | `vllm/vllm-openai:v0.28.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
 | TGI | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
-| Triton | `nvcr.io/nvidia/tritonserver:26.07-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
+| Triton | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
 | TorchServe | `pytorch/torchserve:latest-gpu` | 8080 | `/ping` | PyTorch model serving |
-| SGLang | `lmsysorg/sglang:v0.5.17` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
+| SGLang | `lmsysorg/sglang:v0.5.18` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 
 ### vLLM Example
 
 ```bash
 gco inference deploy vllm-llama3 \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
   -e MAX_MODEL_LEN=4096
@@ -309,7 +309,7 @@ gco inference deploy tgi-mistral \
 
 ```bash
 gco inference deploy triton-models \
-  -i nvcr.io/nvidia/tritonserver:26.07-py3 \
+  -i nvcr.io/nvidia/tritonserver:26.08-py3 \
   --port 8000 \
   --health-path /v2/health/ready \
   --gpu-count 1 \
@@ -542,14 +542,14 @@ Inference endpoints support automatic scaling based on resource utilization. Whe
 ```bash
 # Deploy with autoscaling enabled
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
 
 # Scale on GPU utilization (routed through KEDA + CloudWatch)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric gpu:60
@@ -574,7 +574,7 @@ The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10
 
 ```bash
 # Triggers a rolling update in all target regions
-gco inference update-image my-llm -i vllm/vllm-openai:v0.27.1
+gco inference update-image my-llm -i vllm/vllm-openai:v0.28.0
 ```
 
 ### Stop and Start
@@ -606,10 +606,10 @@ Canary deployments let you test a new model version with a percentage of traffic
 
 ```bash
 # Start a canary: 10% traffic to the candidate image; 90% stays on the current primary
-gco inference canary my-llm -i vllm/vllm-openai:v0.27.1 --weight 10
+gco inference canary my-llm -i vllm/vllm-openai:v0.28.0 --weight 10
 
 # Increase canary traffic to 25%
-gco inference canary my-llm -i vllm/vllm-openai:v0.27.1 --weight 25
+gco inference canary my-llm -i vllm/vllm-openai:v0.28.0 --weight 25
 
 # Happy with the canary? Promote it to primary (100% traffic)
 gco inference promote my-llm -y
@@ -635,10 +635,10 @@ Use spot instances to reduce inference serving costs. Spot GPU instances can be 
 
 ```bash
 # Deploy on spot instances
-gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1 --capacity-type spot
+gco inference deploy my-llm -i vllm/vllm-openai:v0.28.0 --gpu-count 1 --capacity-type spot
 
 # Deploy on on-demand (default, guaranteed availability)
-gco inference deploy my-llm -i vllm/vllm-openai:v0.27.1 --gpu-count 1 --capacity-type on-demand
+gco inference deploy my-llm -i vllm/vllm-openai:v0.28.0 --gpu-count 1 --capacity-type on-demand
 ```
 
 When `--capacity-type spot` is set, the inference_monitor adds a `karpenter.sh/capacity-type: spot` node selector to the deployment. Karpenter then provisions spot GPU instances for those pods.
@@ -862,11 +862,11 @@ By default, `gco inference deploy` targets all deployed Regions. This keeps endp
 ```bash
 # Deploy to all Regions (recommended — ensures consistent availability)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1
+  -i vllm/vllm-openai:v0.28.0
 
 # Deploy to specific regions (use with caution — see note below)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   -r us-east-1 -r eu-west-1
 ```
 
@@ -901,7 +901,7 @@ gco inference status my-llm
   Endpoint: my-llm
   ------------------------------------------------------------
   State:     running
-  Image:     vllm/vllm-openai:v0.27.1
+  Image:     vllm/vllm-openai:v0.28.0
   Replicas:  2
   GPUs:      1
   Port:      8000
@@ -963,7 +963,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 3. Deploy the endpoint
 gco inference deploy vllm-llama3 \
-  -i vllm/vllm-openai:v0.27.1 \
+  -i vllm/vllm-openai:v0.28.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/vllm-llama3 \
@@ -980,7 +980,7 @@ gco inference invoke vllm-llama3 \
 gco inference scale vllm-llama3 --replicas 3
 
 # 7. Update to a new version
-gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.27.1
+gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.28.0
 
 # 8. Clean up
 gco inference delete vllm-llama3 -y

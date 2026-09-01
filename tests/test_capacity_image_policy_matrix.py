@@ -451,7 +451,7 @@ class TestImageCatalogAndReplication:
             assert known["uri"] == "registry/gco/a-service:v2"
             with pytest.raises(ValueError, match="Known images: a-service, z-service"):
                 manager.get_maintained_image("missing")
-        assert manager.default_disaggregated_image_uri().endswith(":v0.27.1")
+        assert manager.default_disaggregated_image_uri().endswith(":v0.28.0")
         assert manager.default_disaggregated_image_uri("custom") == ("vllm/vllm-openai:custom")
 
     @pytest.mark.parametrize(
