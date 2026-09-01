@@ -154,7 +154,6 @@ if is_enabled(FLAG_MISSION):
         stagnation_threshold: int = 3,
         use_sampling: bool | None = None,
         allow_scripted_strategies: bool = False,
-        sampling_model_preferences: dict[str, Any] | None = None,
         allow_all_tools: bool = False,
     ) -> str:
         """[gated by GCO_ENABLE_MISSION] Start a new Mission session.
@@ -174,10 +173,10 @@ if is_enabled(FLAG_MISSION):
                 terminating (default 3).
             use_sampling: Three-state opt-in. ``None`` auto-detects,
                 ``True`` opts in explicitly, ``False`` opts out.
+                Sampling always runs server-side through Bedrock — MCP
+                client sampling left the protocol with FastMCP 4.
             allow_scripted_strategies: When True, the session permits
                 scripted strategies (validated via the sandbox AST).
-            sampling_model_preferences: Optional FastMCP
-                ``ModelPreferences`` payload forwarded to MCP sampling.
             allow_all_tools: When True (default ``False``), resolve the
                 session's allowlist to every currently-registered tool
                 minus the ``mission_*`` control tools, instead of an
@@ -210,9 +209,8 @@ if is_enabled(FLAG_MISSION):
         except MissionValidationError as err:
             return json.dumps({"code": err.code, "details": err.details})
 
-        ctx = _try_get_context()
         use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
-            ctx, use_sampling
+            use_sampling
         )
 
         session_id = f"mission-{secrets.token_hex(8)}"
@@ -233,8 +231,6 @@ if is_enabled(FLAG_MISSION):
             "iterations": [],
             "no_progress_counter": 0,
         }
-        if sampling_model_preferences is not None:
-            session["sampling_model_preferences"] = sampling_model_preferences
 
         backend = mission_state.get_backend()
         # Strip the validator's cached ``_parsed_ast`` AST nodes from

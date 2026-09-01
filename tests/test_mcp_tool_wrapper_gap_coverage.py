@@ -133,9 +133,9 @@ def _isolated_tool_module(
     fastmcp_package.__path__ = []  # type: ignore[attr-defined]
     fastmcp_server = _stub_module("fastmcp.server")
     fastmcp_server.__path__ = []  # type: ignore[attr-defined]
-    fastmcp_tasks = _stub_module("fastmcp.server.tasks")
-    fastmcp_tasks.__path__ = []  # type: ignore[attr-defined]
-    task_config = _stub_module("fastmcp.server.tasks.config", TaskConfig=_TaskConfig)
+    fastmcp_utilities = _stub_module("fastmcp.utilities")
+    fastmcp_utilities.__path__ = []  # type: ignore[attr-defined]
+    task_config = _stub_module("fastmcp.utilities.tasks", TaskConfig=_TaskConfig)
 
     cli_package = _stub_module("cli")
     cli_package.__path__ = []  # type: ignore[attr-defined]
@@ -149,8 +149,8 @@ def _isolated_tool_module(
         "fastmcp": fastmcp_package,
         "fastmcp.server": fastmcp_server,
         "fastmcp.server.dependencies": dependencies,
-        "fastmcp.server.tasks": fastmcp_tasks,
-        "fastmcp.server.tasks.config": task_config,
+        "fastmcp.utilities": fastmcp_utilities,
+        "fastmcp.utilities.tasks": task_config,
         "feature_flags": feature_flags,
         "local_data": local_data,
         "server": server,

@@ -237,8 +237,7 @@ if is_enabled(FLAG_SWARM):
         except MissionValidationError as err:
             return _error(err)
 
-        ctx = _try_get_context()
-        use_resolved, backend_resolved = mission_sampling.resolve_sampling_state(ctx, use_sampling)
+        use_resolved, backend_resolved = mission_sampling.resolve_sampling_state(use_sampling)
         session_id = f"mission-{secrets.token_hex(8)}"
         session = swarm_rules.build_orchestrator_session(
             session_id=session_id,
@@ -427,12 +426,11 @@ if is_enabled(FLAG_SWARM):
         registered_tools = await _registered_tools_dict()
         registered_tags = await _registered_tool_tags()
         docstrings = await _tool_docstrings_dict()
-        ctx = _try_get_context()
-        use_resolved, backend_name = mission_sampling.resolve_sampling_state(ctx, use_sampling)
+        use_resolved, backend_name = mission_sampling.resolve_sampling_state(use_sampling)
         plan: list[dict[str, Any]] | None = None
         fallback_reason: str | None = None
         if use_resolved:
-            backend_obj = mission_sampling.select_sampling_backend(ctx, None, None)
+            backend_obj = mission_sampling.select_sampling_backend(None)
             if backend_obj is not None:
                 try:
                     plan = await swarm_scaffold.generate_sampled_plan(

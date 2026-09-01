@@ -141,12 +141,12 @@ def _install_default_sampling(
     monkeypatch.setattr(
         mission_sampling,
         "resolve_sampling_state",
-        lambda _ctx, _explicit: (True, "bedrock"),
+        lambda _explicit: (True, "bedrock"),
     )
 
-    def _select(_ctx: Any, model_id: str | None = None, prefs: Any = None) -> Any:
+    def _select(model_id: str | None = None) -> Any:
         backend = _DefaultReplayBackend(capture)
-        selections.append((model_id, prefs, backend.model_id))
+        selections.append((model_id, None, backend.model_id))
         return backend
 
     monkeypatch.setattr(mission_sampling, "select_sampling_backend", _select)
@@ -1200,12 +1200,12 @@ class TestMissionScaffoldCriteriaCli:
         monkeypatch.setattr(
             mission_sampling,
             "resolve_sampling_state",
-            lambda _ctx, _explicit: (True, "bedrock"),
+            lambda _explicit: (True, "bedrock"),
         )
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda _ctx, model_id=None, prefs=None: _BrokenBackend(),
+            lambda model_id=None: _BrokenBackend(),
         )
 
         runner = CliRunner()

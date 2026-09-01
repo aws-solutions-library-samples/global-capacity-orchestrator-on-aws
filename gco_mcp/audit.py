@@ -195,17 +195,18 @@ def _try_get_fastmcp_context() -> Any | None:
 
 
 def _try_get_task_id(ctx: Any | None) -> str | None:
-    """Extract the active FastMCP task ID through supported APIs first.
+    """Extract the active MCP task ID through supported APIs first.
 
-    Docket-backed FastMCP workers expose the protocol task through
-    ``get_task_context()`` rather than request metadata. ``Context.task_id`` is
-    the next supported surface; the metadata walk remains as a compatibility
-    fallback for older FastMCP releases and focused callers. Any identifier is
-    byte-bounded before it can enter an audit record or task-status decision.
+    Task-extension workers (SEP-2663, the ``fastmcp_tasks`` package in
+    FastMCP 4) expose the protocol task through ``get_task_context()`` rather
+    than request metadata. ``Context.task_id`` is the next supported surface;
+    the metadata walk remains as a compatibility fallback for focused callers.
+    Any identifier is byte-bounded before it can enter an audit record or
+    task-status decision.
     """
     candidates: list[object] = []
     try:
-        from fastmcp.server.dependencies import get_task_context
+        from fastmcp_tasks.context import get_task_context
 
         candidates.append(getattr(get_task_context(), "task_id", None))
     except Exception:

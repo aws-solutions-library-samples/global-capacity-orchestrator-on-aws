@@ -229,7 +229,7 @@ def _persist_orchestrator(
         _emit_error(exc.code, exc.details)
         raise SystemExit(1) from exc
 
-    use_resolved, backend_resolved = mission_sampling.resolve_sampling_state(None, use_sampling)
+    use_resolved, backend_resolved = mission_sampling.resolve_sampling_state(use_sampling)
     session = swarm_rules.build_orchestrator_session(
         session_id=f"mission-{secrets.token_hex(8)}",
         directive=directive_clean,
@@ -276,11 +276,11 @@ def _scaffold_plan(
         _emit_error(exc.code, exc.details)
         raise SystemExit(1) from exc
     registered, tags = _resolve_registered_tools_for_cli()
-    use_resolved, backend_name = mission_sampling.resolve_sampling_state(None, use_sampling)
+    use_resolved, backend_name = mission_sampling.resolve_sampling_state(use_sampling)
     plan: list[dict[str, Any]] | None = None
     fallback_reason: str | None = None
     if use_resolved:
-        backend_obj = mission_sampling.select_sampling_backend(None, None, None)
+        backend_obj = mission_sampling.select_sampling_backend(None)
         if backend_obj is not None:
             try:
                 plan = asyncio.run(

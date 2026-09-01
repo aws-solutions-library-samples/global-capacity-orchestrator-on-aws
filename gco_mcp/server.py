@@ -24,6 +24,14 @@ from fastmcp.experimental.transforms.code_mode import (
 from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
 
+# Background tasks are the io.modelcontextprotocol/tasks protocol extension
+# (SEP-2663) in FastMCP 4, shipped as the separate ``fastmcp-tasks`` package
+# pulled in by the ``fastmcp[tasks]`` extra. A server with
+# ``task=TaskConfig(...)`` tools (tools/stacks.py, tools/images.py) refuses
+# to start unless the extension is registered below.
+from fastmcp_tasks import TasksExtension
+from version import get_project_version
+
 # ``run_mcp`` supports both legacy top-level imports (``import server`` after
 # adding gco_mcp/ to sys.path) and package imports. Bind both names to the first
 # loaded module before constructing the FastMCP object so the two routes can
@@ -36,6 +44,7 @@ elif __name__ == "gco_mcp.server":
 
 mcp = FastMCP(
     "GCO",
+    version=get_project_version(),
     instructions=(
         "Multi-region EKS Auto Mode platform for AI/ML workload orchestration. "
         "Submit jobs, manage inference endpoints, check capacity, track costs, "
@@ -59,18 +68,25 @@ mcp = FastMCP(
         "- mcp:// — Live tool/resource indexes and feature-flag mappings\n\n"
         "Start with docs://gco/index or mcp://gco/resources/index to explore."
     ),
-    # NOTE on background-task support: ``tasks=True`` is intentionally NOT set
-    # here. FastMCP's ``tasks=True`` at the server level applies a default
+    # NOTE on background-task support: the server-wide ``tasks=True`` kwarg is
+    # intentionally NOT set here. It applies a default
     # ``TaskConfig(mode="optional")`` to every tool, which requires every tool
     # function to be async (FastMCP raises ValueError at registration time
     # otherwise). The async migration of existing sync tools lands in a
     # later phase; until then, the long-running tools that genuinely need
     # background-task support set ``task=TaskConfig(mode=...)`` on their
-    # individual ``@mcp.tool(...)`` decorators rather than relying on the
-    # server-wide default. The ``fastmcp[tasks]`` extra is still pulled in
-    # via ``pyproject.toml`` so pydocket is available when those per-tool
-    # decorators run.
+    # individual ``@mcp.tool(...)`` decorators. Task execution itself is
+    # provided by the SEP-2663 tasks extension registered right below.
 )
+
+# FastMCP 4 moved background tasks out of the core protocol and into the
+# io.modelcontextprotocol/tasks extension (SEP-2663). Registering the
+# extension is mandatory: a server with ``task=TaskConfig(...)`` tools
+# refuses to start without it. The default backend is the in-memory,
+# single-process docket, which matches the stdio deployment model of this
+# server; ``FASTMCP_DOCKET_URL`` (e.g. ``redis://...``) selects a durable
+# backend that survives restarts and spans workers.
+mcp.add_extension(TasksExtension())
 
 # Always-on: tool-only clients (Cursor) get list_resources/read_resource synthetic tools.
 # Registered AFTER the catalog-replacement transform below so the synthetic

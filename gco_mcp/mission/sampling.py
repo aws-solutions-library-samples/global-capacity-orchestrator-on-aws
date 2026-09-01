@@ -44,7 +44,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from gco.bedrock import (
     BEDROCK_READ_TIMEOUT_SECONDS,
@@ -69,13 +69,6 @@ from .validation import MissionValidationError
 # <pyflowchart-code-diagram> END
 
 
-if TYPE_CHECKING:  # pragma: no cover - import-time only
-    # ``fastmcp.Context`` is the concrete type expected by
-    # :class:`MCPSamplingBackend`. Kept behind ``TYPE_CHECKING`` so the
-    # runtime import surface stays pure-stdlib; the backend itself
-    # accepts any object that exposes a compatible ``sample`` method.
-    from fastmcp import Context as _FastMCPContext  # noqa: F401
-
 __all__ = [
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
@@ -85,7 +78,6 @@ __all__ = [
     "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "FINAL_LESSONS_SCHEMA",
     "BedrockSamplingBackend",
-    "MCPSamplingBackend",
     "MissionValidationError",
     "OBSERVATION_FIELD_BYTE_CAP",
     "OBSERVATION_FIELD_TRUNCATE_TO",
@@ -850,14 +842,17 @@ class SamplingBackend(Protocol):
 
     Attributes:
         backend_name: Stable identifier the audit pipeline emits in the
-            ``sampling_backend`` field. Constrained to the two
-            transports the system supports today.
+            ``sampling_backend`` field. Bedrock is the only transport
+            the system supports: MCP client sampling (``ctx.sample``)
+            left the protocol with FastMCP 4's sessionless era, so
+            missions sample server-side regardless of how they were
+            started.
         model_id: The concrete model identifier the backend will route
             the prompt to. Echoed in audit events so replay can
             reproduce the exact request.
     """
 
-    backend_name: Literal["mcp", "bedrock"]
+    backend_name: Literal["bedrock"]
     model_id: str
 
     async def sample(self, prompt: SamplingPrompt) -> str:
@@ -883,8 +878,6 @@ class SamplingTransportError(Exception):
 
     * ``"bedrock_AccessDeniedException"`` — IAM denied
       ``bedrock:InvokeModel`` for the resolved model.
-    * ``"mcp_unavailable"`` — the MCP transport reported no sampling
-      capability or the in-flight call was cancelled.
     * ``"bedrock_malformed_response"`` — Converse returned a payload
       that did not have the expected ``output.message.content[0].text``
       shape.
@@ -917,105 +910,6 @@ class SamplingTransportError(Exception):
         if self.message is None:
             return self.code
         return f"{self.code}: {self.message}"
-
-
-# ---------------------------------------------------------------------------
-# MCPSamplingBackend — routes the prompt through a FastMCP Context
-# ---------------------------------------------------------------------------
-
-
-class MCPSamplingBackend:
-    """Sampling backend that calls ``ctx.sample`` on a FastMCP-style Context.
-
-    The constructor accepts any object exposing an awaitable ``sample``
-    method — typically ``fastmcp.Context``. The type is intentionally
-    duck-typed so ``fastmcp`` is not a runtime import requirement of
-    this module.
-
-    Two FastMCP API quirks are absorbed here:
-
-    1. ``ctx.sample`` returns either a bare string or an object with a
-       ``.text`` attribute, depending on the FastMCP version. Both
-       shapes are accepted; anything else surfaces as
-       :class:`SamplingTransportError` with code
-       ``"mcp_unexpected_response_type"``.
-    2. The keyword carrying ``ModelPreferences`` has been spelled both
-       ``modelPreferences`` (camelCase, MCP wire format) and
-       ``model_preferences`` (snake_case, older Python binding). The
-       backend tries the camelCase form first and falls back to the
-       snake_case form on a ``TypeError`` so it works against either
-       FastMCP release without pinning a version.
-
-    Any other exception from the transport is re-raised as
-    :class:`SamplingTransportError` with code
-    ``"mcp_<ExceptionClassName>"`` and the original exception preserved
-    via ``__cause__``.
-    """
-
-    backend_name: Literal["mcp", "bedrock"] = "mcp"
-
-    def __init__(
-        self,
-        ctx: Any,
-        model_id: str | None = None,
-        prefs: dict[str, Any] | None = None,
-    ) -> None:
-        """Bind the Context, the optional model id, and the preferences dict.
-
-        Args:
-            ctx: A FastMCP ``Context`` (or any duck-compatible object
-                exposing an awaitable ``sample(text, **kwargs)``
-                method). Stored verbatim.
-            model_id: Optional concrete model identifier. Echoed in
-                audit events. Defaults to the empty string when not
-                provided so the attribute is always present.
-            prefs: Optional FastMCP ``ModelPreferences`` payload. Passed
-                straight through to ``ctx.sample`` when not ``None``;
-                omitted from the call entirely when ``None``. The
-                payload is not validated here — that is the transport's
-                job.
-        """
-        self._ctx = ctx
-        self.model_id: str = model_id if model_id is not None else ""
-        self._prefs = prefs
-
-    async def sample(self, prompt: SamplingPrompt) -> str:
-        """Render ``prompt`` through ``ctx.sample`` and return the raw text.
-
-        Raises:
-            SamplingTransportError: On any transport-level failure or
-                when the transport returns an unexpected response shape.
-                The original exception is chained via ``__cause__``.
-        """
-        text = prompt.assemble()
-        try:
-            if self._prefs is None:
-                result = await self._ctx.sample(text)
-            else:
-                # Compatibility shim: try MCP-spec camelCase first; on a
-                # signature mismatch, fall back to the snake_case form.
-                # The ``TypeError`` here is a binding-version concern,
-                # not a transport failure, so it is NOT translated to a
-                # SamplingTransportError.
-                try:
-                    result = await self._ctx.sample(text, modelPreferences=self._prefs)
-                except TypeError:
-                    result = await self._ctx.sample(text, model_preferences=self._prefs)
-
-            if hasattr(result, "text"):
-                return str(result.text)
-            if isinstance(result, str):
-                return result
-            raise SamplingTransportError(
-                "mcp_unexpected_response_type",
-                message=f"got {type(result).__name__}",
-            )
-        except SamplingTransportError:
-            # Already tagged by us — let it propagate untouched so the
-            # ``code`` attribute is preserved.
-            raise
-        except Exception as err:  # noqa: BLE001 - intentional broad catch
-            raise SamplingTransportError(f"mcp_{type(err).__name__}") from err
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +958,7 @@ class BedrockSamplingBackend:
       ``"bedrock_truncated_response"``.
     """
 
-    backend_name: Literal["mcp", "bedrock"] = "bedrock"
+    backend_name: Literal["bedrock"] = "bedrock"
 
     def __init__(
         self,
@@ -1228,67 +1122,28 @@ class BedrockSamplingBackend:
 # ---------------------------------------------------------------------------
 
 
-def _ctx_has_sampling_capability(ctx: Any) -> bool:
-    """Return ``True`` when the MCP context advertises sampling support.
+def select_sampling_backend(model_id: str | None) -> SamplingBackend:
+    """Construct the sampling backend for a session that opted into sampling.
 
-    FastMCP exposes the negotiated client capabilities under a couple
-    of attribute paths depending on its release: the modern
-    ``ctx.session_capabilities.sampling`` and the older
-    ``ctx.fastmcp.client_capabilities.sampling``. Either path may be
-    missing or set to ``None`` on a context that has not finished
-    capability negotiation. The probe walks both paths defensively
-    using ``getattr`` so a missing attribute never raises.
-    """
-    caps = getattr(ctx, "session_capabilities", None)
-    if caps is None:
-        # Older FastMCP versions surface capabilities via fastmcp.client_capabilities.
-        fastmcp_attr = getattr(ctx, "fastmcp", None)
-        caps = (
-            getattr(fastmcp_attr, "client_capabilities", None) if fastmcp_attr is not None else None
-        )
-    if caps is None:
-        return False
-    sampling = getattr(caps, "sampling", None)
-    return bool(sampling)
-
-
-def select_sampling_backend(
-    ctx: Any | None,
-    model_id: str | None,
-    prefs: dict[str, Any] | None,
-) -> SamplingBackend | None:
-    """Resolve which sampling backend to use for the given call site.
-
-    The resolver picks one of three outcomes:
-
-    * MCP path — ``ctx`` is non-``None`` and the context advertises
-      sampling capability. Returns an :class:`MCPSamplingBackend`
-      bound to ``ctx`` with ``model_id`` and ``prefs`` forwarded.
-    * CLI path — ``ctx`` is ``None``. Returns a
-      :class:`BedrockSamplingBackend` constructed with ``model_id``;
-      credential resolution is deferred to the first ``sample`` call.
-    * Deterministic-fallback only — ``ctx`` is non-``None`` but the
-      context does not advertise sampling capability. Returns ``None``.
+    Bedrock is the only sampling transport. MCP client sampling
+    (``ctx.sample``) left the protocol with FastMCP 4's sessionless era —
+    per the v4 migration guidance, generation belongs server-side — so
+    missions sample through ``bedrock-runtime:Converse`` with the server's
+    own credentials regardless of whether they were started from the CLI
+    or over MCP. Credential resolution is deferred to the first ``sample``
+    call; a missing-credentials failure surfaces as
+    :class:`SamplingTransportError` and the engine's deterministic
+    fallback absorbs it.
 
     Args:
-        ctx: A FastMCP-style ``Context`` for the MCP path, or ``None``
-            for the CLI path. Anything else passes through the same
-            duck-typed capability probe used by the MCP backend.
-        model_id: Optional concrete model identifier. Forwarded to
-            either backend constructor verbatim.
-        prefs: Optional FastMCP ``ModelPreferences`` payload. Forwarded
-            only to :class:`MCPSamplingBackend`; the Bedrock backend
-            uses its own pinned inference config.
+        model_id: Optional concrete model identifier. Forwarded to the
+            backend constructor verbatim; ``None`` resolves through the
+            environment and ``cdk.json`` Mission default.
 
     Returns:
-        A :class:`SamplingBackend` instance, or ``None`` when the only
-        available path is the deterministic fallback.
+        A :class:`BedrockSamplingBackend` bound to ``model_id``.
     """
-    if ctx is None:
-        return BedrockSamplingBackend(model_id)
-    if _ctx_has_sampling_capability(ctx):
-        return MCPSamplingBackend(ctx, model_id, prefs)
-    return None
+    return BedrockSamplingBackend(model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1512,7 +1367,7 @@ class SamplingUsed:
     parsed: dict[str, Any]
     """Parsed JSON payload that has cleared the schema and catalog checks."""
 
-    backend_name: Literal["mcp", "bedrock"]
+    backend_name: Literal["bedrock"]
     """Stable backend identifier — echoes the bound backend's tag."""
 
     model_id: str
@@ -1543,7 +1398,7 @@ class SamplingFallback:
     ``"over_budget"``, ``"script_rejected"``,
     ``"no_backend_resolved"``, ``"disabled"``."""
 
-    backend_name: Literal["mcp", "bedrock", "none"]
+    backend_name: Literal["bedrock", "none"]
     """The bound backend's tag, or ``"none"`` when no backend was
     resolved at the call site."""
 
@@ -2017,35 +1872,27 @@ def _bedrock_credentials_available() -> bool:
 
 
 def resolve_sampling_state(
-    ctx: Any | None,
     use_sampling_param: bool | None,
-) -> tuple[bool, Literal["mcp", "bedrock", "none"]]:
+) -> tuple[bool, Literal["bedrock", "none"]]:
     """Decide whether sampling is enabled for a session and which backend resolves.
+
+    Bedrock is the only sampling transport (MCP client sampling left the
+    protocol with FastMCP 4), so resolution no longer depends on how the
+    session was started — CLI and MCP callers probe the same server-side
+    credentials.
 
     Resolution precedence (first match wins):
 
     1. ``use_sampling_param is False`` — caller explicitly disabled
        sampling, so the result is ``(False, "none")`` regardless of
        any capability the environment advertises.
-    2. ``ctx`` is non-``None`` and advertises MCP sampling capability —
-       the caller is on the MCP path and the host can perform sampling,
-       so the result is ``(True, "mcp")``.
-    3. ``ctx is None`` (CLI path) — probe local AWS credentials. When
-       they resolve, return ``(True, "bedrock")``. When they do not,
-       return ``(True, "none")`` if the caller opted in explicitly with
-       ``use_sampling_param is True`` (so the caller can decide whether
-       to error or proceed deterministic-only), and ``(False, "none")``
-       otherwise.
-    4. ``ctx`` is non-``None`` but advertises no sampling capability —
-       same explicit-opt-in handling as the no-credentials CLI branch:
-       ``(True, "none")`` when the caller opted in explicitly,
+    2. Local AWS credentials resolve — ``(True, "bedrock")``.
+    3. No credentials — ``(True, "none")`` if the caller opted in
+       explicitly with ``use_sampling_param is True`` (so the caller can
+       decide whether to error or proceed deterministic-only), and
        ``(False, "none")`` otherwise.
 
     Args:
-        ctx: A FastMCP-style Context for the MCP path, or ``None`` for
-            the CLI path. The capability probe is duck-typed so any
-            object exposing the same attributes that
-            :func:`_ctx_has_sampling_capability` checks works here.
         use_sampling_param: Three-state opt-in flag. ``None`` means the
             caller did not specify and the helper should auto-detect.
             ``False`` short-circuits to a disabled state. ``True`` means
@@ -2061,19 +1908,11 @@ def resolve_sampling_state(
     if use_sampling_param is False:
         return (False, "none")
 
-    # 2. MCP path with capability advertised.
-    if ctx is not None and _ctx_has_sampling_capability(ctx):
-        return (True, "mcp")
+    # 2. Probe server-side AWS credentials.
+    if _bedrock_credentials_available():
+        return (True, "bedrock")
 
-    # 3. CLI path — probe local AWS credentials.
-    if ctx is None:
-        if _bedrock_credentials_available():
-            return (True, "bedrock")
-        if use_sampling_param is True:
-            return (True, "none")
-        return (False, "none")
-
-    # 4. ctx present but no MCP capability — only honour an explicit True.
+    # 3. No credentials — only honour an explicit True.
     if use_sampling_param is True:
         return (True, "none")
     return (False, "none")

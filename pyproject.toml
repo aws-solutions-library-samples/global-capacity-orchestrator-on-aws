@@ -57,13 +57,14 @@ dependencies = [
     "httpx==0.28.1",
     "urllib3==2.7.0",
     # FastMCP powers the in-tree MCP server (gco_mcp/run_mcp.py). The ``tasks``
-    # extra pulls in the protocol-native background task support
-    # (SEP-1686) used by the long-running stack lifecycle and image
-    # build/push tools. The ``code-mode`` extra pulls in the
+    # extra pulls in ``fastmcp-tasks``, the io.modelcontextprotocol/tasks
+    # extension (SEP-2663) used by the long-running stack lifecycle and image
+    # build/push tools (registered via ``mcp.add_extension(TasksExtension())``
+    # in gco_mcp/server.py). The ``code-mode`` extra pulls in the
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==3.4.7",
+    "fastmcp[tasks,code-mode]==4.0.0",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -176,7 +177,7 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==3.4.7",
+    "fastmcp[tasks,code-mode]==4.0.0",
 ]
 lint = [
     "ruff==0.16.3",

@@ -394,10 +394,9 @@ class SessionState(TypedDict):
     checkpoint_cadence: Cadence
     stagnation_threshold: int
     use_sampling: bool
-    sampling_backend_resolved: NotRequired[Literal["mcp", "bedrock", "none"]]
+    sampling_backend_resolved: NotRequired[Literal["bedrock", "none"]]
     bedrock_model_id: NotRequired[str]
     allow_scripted_strategies: bool
-    sampling_model_preferences: NotRequired[dict[str, Any]]
     status: StatusLabel
     created_at: str
     started_at: NotRequired[str]

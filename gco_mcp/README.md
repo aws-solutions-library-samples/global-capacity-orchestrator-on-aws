@@ -1202,7 +1202,8 @@ The MCP server is organized as a modular package under `gco_mcp/`:
 ```text
 gco_mcp/
 ├── run_mcp.py             — Thin entrypoint (python gco_mcp/run_mcp.py)
-├── server.py              — FastMCP instance, transforms, middleware
+├── server.py              — FastMCP instance, transforms, middleware, tasks extension
+├── completions.py         — argument completion for registry-backed resource templates
 ├── feature_flags.py       — Feature-flag evaluation (FLAG_* constants, is_enabled)
 ├── audit.py               — Audit logging, sanitization, decorator
 ├── audit_middleware.py    — Context-spy middleware that captures client_messages and elicitations
@@ -1245,7 +1246,7 @@ gco_mcp/
 │   ├── engine.py            — Five-phase iteration loop driver (MissionEngine)
 │   ├── final_report.py      — Final_Report builder (deterministic + sampled overlay)
 │   ├── predicate.py         — Restricted AST evaluator for predicate criteria
-│   ├── sampling.py          — Bedrock/MCP sampling backends + Strategy_Revision prompt
+│   ├── sampling.py          — Bedrock sampling backend + Strategy_Revision prompt
 │   ├── sandbox.py           — Script sandbox (MontySandboxProvider + AST validator)
 │   ├── state.py             — Persistence backends (filesystem, DynamoDB)
 │   ├── types.py             — TypedDict definitions (SessionState, Strategy, etc.)
@@ -1273,7 +1274,7 @@ gco_mcp/
     └── tasks.py           — tasks://gco/{task_id} (FastMCP background task status)
 ```
 
-Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use FastMCP Tasks — protocol-native background-task support — rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops).
+Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use the MCP tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663 — FastMCP's `fastmcp-tasks` package, registered in `server.py`) rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops).
 
 Most operational tools shell out to the `gco` CLI, while discovery, introspection, task-observability, and Mission tools use their dedicated in-process backends. The CLI-backed approach:
 

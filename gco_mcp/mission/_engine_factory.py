@@ -362,12 +362,8 @@ def _build_sampling_callable(
         return None
 
     backend_obj = mission_sampling.select_sampling_backend(
-        ctx,
         model_id=session.get("bedrock_model_id"),
-        prefs=session.get("sampling_model_preferences"),
     )
-    if backend_obj is None:
-        return None
 
     # Slow-moving live signals (per-region queue depth, GPU utilisation,
     # deployed-region list, reservation counts). Cached on the closure
@@ -464,12 +460,8 @@ def _build_final_lessons_callable(
         return None
 
     backend_obj = mission_sampling.select_sampling_backend(
-        ctx,
         model_id=session.get("bedrock_model_id"),
-        prefs=session.get("sampling_model_preferences"),
     )
-    if backend_obj is None:
-        return None
 
     async def _final_lessons(*, session: dict[str, Any], ctx: Any | None) -> Any:
         return await mission_sampling.maybe_sample_final_lessons(

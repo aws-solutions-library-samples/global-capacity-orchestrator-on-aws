@@ -3375,26 +3375,6 @@ class TestEngineFactory:
         )
         assert result is None
 
-    def test_build_sampling_callable_returns_none_when_backend_select_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A backend selector that returns ``None`` skips sampler wiring."""
-        from mission import _engine_factory
-        from mission import sampling as mission_sampling
-
-        monkeypatch.setattr(
-            mission_sampling,
-            "select_sampling_backend",
-            lambda ctx, model_id, prefs: None,
-        )
-        result = _engine_factory._build_sampling_callable(
-            {"use_sampling": True, "sampling_backend_resolved": "bedrock"},
-            ctx=None,
-            registered_tools={},
-            tool_docstrings={},
-        )
-        assert result is None
-
     def test_build_sandbox_runner_returns_none_when_flag_off(self) -> None:
         """Sandbox runner stays ``None`` when ``allow_scripted_strategies`` is off."""
         from mission._engine_factory import _build_sandbox_runner
@@ -3721,7 +3701,7 @@ class TestEngineFactorySamplerClosure:
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda ctx, model_id, prefs: object(),
+            lambda model_id: object(),
         )
 
         called: list[Any] = []
@@ -3757,7 +3737,7 @@ class TestEngineFactorySamplerClosure:
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda ctx, model_id, prefs: "fake-backend",
+            lambda model_id: "fake-backend",
         )
 
         # Patch the env-block gatherer to a known value so we can
@@ -3814,7 +3794,7 @@ class TestEngineFactorySamplerClosure:
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda ctx, model_id, prefs: "fake",
+            lambda model_id: "fake",
         )
 
         from mission import _environment as env_module
@@ -3860,7 +3840,7 @@ class TestEngineFactorySamplerClosure:
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda ctx, model_id, prefs: "fake",
+            lambda model_id: "fake",
         )
 
         from mission import _environment as env_module
@@ -3911,7 +3891,7 @@ class TestEngineFactorySamplerClosure:
         monkeypatch.setattr(
             mission_sampling,
             "select_sampling_backend",
-            lambda ctx, model_id, prefs: "fake",
+            lambda model_id: "fake",
         )
 
         from mission import _environment as env_module

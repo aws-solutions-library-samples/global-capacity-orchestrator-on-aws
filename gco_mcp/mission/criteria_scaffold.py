@@ -824,9 +824,9 @@ async def _call_backend(backend: SamplingBackend, prompt_str: str) -> str:
     # uses a thin adapter that overrides ``assemble`` so the existing
     # backend implementations call ``assemble()`` and get the prompt.
     prompt_obj = _PromptAdapter(prompt_str)
-    # Backends accept any object with an ``assemble`` method. Both
-    # MCPSamplingBackend and BedrockSamplingBackend call
-    # ``prompt.assemble()`` to get the rendered string.
+    # Backends accept any object with an ``assemble`` method —
+    # BedrockSamplingBackend calls ``prompt.assemble()`` to get the
+    # rendered string.
     del SamplingPrompt  # imported only for documentation linkage
     return await backend.sample(prompt_obj)  # type: ignore[arg-type]
 

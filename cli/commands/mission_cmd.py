@@ -395,12 +395,9 @@ def mission_start(
         )
         sys.exit(1)
 
-    # Resolve sampling state. ``ctx=None`` because this is the CLI path;
-    # the helper's third precedence branch then probes local AWS
-    # credentials and returns ``("bedrock", True)`` when they resolve.
-    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
-        None, use_sampling
-    )
+    # Resolve sampling state. The helper probes local AWS credentials and
+    # returns ``(True, "bedrock")`` when they resolve.
+    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(use_sampling)
 
     session_id = f"mission-{secrets.token_hex(8)}"
     now_iso = datetime.now(UTC).isoformat()
@@ -1158,18 +1155,12 @@ def mission_scaffold_criteria_cmd(
         )
         sys.exit(1)
 
-    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
-        None, use_sampling
-    )
+    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(use_sampling)
 
     criteria: list[dict[str, Any]] | None = None
     sampling_path_taken = False
     if use_sampling_resolved and backend_resolved != "none":
-        backend_obj = mission_sampling.select_sampling_backend(
-            None,
-            model_id=bedrock_model_id,
-            prefs=None,
-        )
+        backend_obj = mission_sampling.select_sampling_backend(model_id=bedrock_model_id)
         if backend_obj is not None:
             try:
                 criteria = asyncio.run(
@@ -1416,18 +1407,12 @@ def mission_run_cmd(
     # Resolve the sampling state once; reuse it for both the scaffold
     # call and the persisted session's ``use_sampling`` field so the
     # operator's --use-sampling/--no-sampling intent applies end-to-end.
-    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
-        None, use_sampling
-    )
+    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(use_sampling)
 
     criteria: list[dict[str, Any]] | None = None
     sampling_path_taken = False
     if use_sampling_resolved and backend_resolved != "none":
-        backend_obj = mission_sampling.select_sampling_backend(
-            None,
-            model_id=bedrock_model_id,
-            prefs=None,
-        )
+        backend_obj = mission_sampling.select_sampling_backend(model_id=bedrock_model_id)
         if backend_obj is not None:
             try:
                 criteria = asyncio.run(

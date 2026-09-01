@@ -670,7 +670,7 @@ Useful options:
 | `--max-iterations N` | `5` | Hard cap on the iteration count. Pass `-1` to opt out. |
 | `--max-wall-clock SECONDS` | `300` | Hard cap on wall-clock seconds. Pass `-1` to opt out. |
 | `--use-sampling` / `--no-sampling` | auto-detect | Force the sampling path on/off for both the scaffolder and the loop's Strategy_Revision sampler. Default precedence: MCP host capability → Bedrock cred probe → off. |
-| `--bedrock-model-id MODEL_ID` | from env / `claude-sonnet-4-5` | Override the Bedrock model id (CLI sampling backend only; MCP sampling uses whichever model the host advertises). |
+| `--bedrock-model-id MODEL_ID` | from env / `claude-sonnet-4-5` | Override the Bedrock model id used by the sampling backend. |
 | `--save-criteria PATH` | unset | Also write the scaffolded criteria JSON to `PATH` for inspection or reuse. |
 | `--max-criteria N` | `5` | Cap on the number of criterion entries the scaffolder emits. |
 | `--retries N` | `3` | Sampling-path retry budget when the validator rejects the model's response. After exhaustion, falls back to deterministic templates. |
@@ -793,19 +793,22 @@ The **only** names excluded from the expansion are the nine `mission_*` control 
 
 Sampling is **advisory only**. The deterministic verdict cascade decides every Verdict; the sampler shapes only the next Strategy and the closing notes on the Final_Report.
 
-Two backends:
+One backend:
 
 | Backend | Used By | Transport |
 |---------|---------|-----------|
-| MCP | The `mission_*` MCP tools when the host advertises sampling capability | `ctx.sample(...)` (FastMCP `Context`) |
-| Bedrock | The `gco mission` CLI | `bedrock-runtime:Converse` |
+| Bedrock | The `gco mission` CLI and the `mission_*` MCP tools alike | `bedrock-runtime:Converse` |
+
+Sampling always runs server-side through Bedrock. (Client-side MCP sampling
+was removed along with FastMCP 4: `ctx.sample` left the protocol with the
+sessionless era, and per the v4 migration guidance generation belongs in the
+server, which behaves the same for every client.)
 
 Resolution precedence at session start:
 
 1. Explicit `--no-sampling` / `--use-sampling` flag (or the `use_sampling` field on the MCP `mission_start` payload).
-2. MCP capability detection — when running inside an MCP host that advertises `sampling`, the MCP backend is selected.
-3. CLI Bedrock credential probe — when `boto3` resolves credentials, the Bedrock backend is selected.
-4. Otherwise sampling is off and the loop runs in deterministic-fallback mode.
+2. Bedrock credential probe — when `boto3` resolves credentials, the Bedrock backend is selected.
+3. Otherwise sampling is off and the loop runs in deterministic-fallback mode.
 
 Defaults:
 

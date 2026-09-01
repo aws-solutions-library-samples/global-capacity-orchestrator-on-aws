@@ -14,6 +14,16 @@ import json
 from typing import Any
 
 from audit import audit_logged
+
+# FastMCP's Progress / Context dependencies inject real instances per
+# call inside an MCP request; unit tests supply caller-provided fakes.
+from fastmcp.server.dependencies import CurrentContext, Progress
+
+# TaskConfig opts the gated build/push tools into the MCP tasks extension
+# (SEP-2663, registered in gco_mcp/server.py) so clients that speak the
+# task protocol can run them as background tasks; everyone else runs them
+# inline with streamed progress.
+from fastmcp.utilities.tasks import TaskConfig
 from feature_flags import (
     FLAG_DESTRUCTIVE_OPERATIONS,
     FLAG_IMAGE_PUBLISH,
@@ -23,25 +33,7 @@ from server import mcp
 
 from tools._long_task import _run_long_task
 
-# FastMCP's Progress / Context dependencies are optional from this
-# module's perspective — when ``fastmcp[tasks]`` is reachable they
-# inject real instances per call; otherwise the gated build/push tools
-# still register but rely on caller-provided fakes (the test path).
-try:
-    from fastmcp.server.dependencies import CurrentContext, Progress
-except ImportError:  # pragma: no cover - degraded fastmcp install
-    CurrentContext = None  # type: ignore[assignment]
-    Progress = None  # type: ignore[misc,assignment]
-
-# TaskConfig is best-effort wired so MCP clients that opt into the task
-# protocol can run build/push as background tasks. If the import path
-# moves between fastmcp versions, the tools register without it.
-try:
-    from fastmcp.server.tasks.config import TaskConfig
-
-    _TASK_CONFIG_OPTIONAL: Any = TaskConfig(mode="optional")
-except ImportError:  # pragma: no cover - degraded fastmcp install
-    _TASK_CONFIG_OPTIONAL = None
+_TASK_CONFIG_OPTIONAL = TaskConfig(mode="optional")
 
 
 def _get_manager() -> Any:
@@ -301,83 +293,75 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
 
         return await asyncio.to_thread(_run)
 
-    # Build the decorator kwargs dict so we only pass ``task=...`` when
-    # TaskConfig was importable on this fastmcp version.
-    _publish_decorator_kwargs: dict[str, Any] = {"tags": {"image", "images"}}
-    if _TASK_CONFIG_OPTIONAL is not None:
-        _publish_decorator_kwargs["task"] = _TASK_CONFIG_OPTIONAL
+    @mcp.tool(tags={"image", "images"}, task=_TASK_CONFIG_OPTIONAL)
+    @audit_logged
+    async def images_build(
+        context: str,
+        name: str,
+        tag: str | None = None,
+        dockerfile: str = "Dockerfile",
+        platform: str = "linux/amd64",
+        retain: bool = False,
+        *,
+        ctx: Any = CurrentContext(),
+        progress: Any = Progress(),
+    ) -> str:
+        """[gated by GCO_ENABLE_IMAGE_PUBLISH] long-running, data-upload.
 
-    if Progress is not None and CurrentContext is not None:
+        `gco images build` — build a container image and push to ECR.
 
-        @mcp.tool(**_publish_decorator_kwargs)  # type: ignore[untyped-decorator]
-        @audit_logged
-        async def images_build(
-            context: str,
-            name: str,
-            tag: str | None = None,
-            dockerfile: str = "Dockerfile",
-            platform: str = "linux/amd64",
-            retain: bool = False,
-            *,
-            ctx: Any = CurrentContext(),
-            progress: Any = Progress(),
-        ) -> str:
-            """[gated by GCO_ENABLE_IMAGE_PUBLISH] long-running, data-upload.
+        Args:
+            context: Build context directory.
+            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            tag: Image tag (defaults to git short SHA, else ``latest``).
+            dockerfile: Path to the Dockerfile, relative to ``context``.
+            platform: ``--platform`` argument for the build.
+            retain: When True, mark the repository with ``gco:retain=true``
+                so it survives stack destroys.
+        """
+        argv = ["gco", "images", "build", context, "--name", name]
+        if tag:
+            argv += ["--tag", tag]
+        argv += ["--dockerfile", dockerfile, "--platform", platform]
+        if retain:
+            argv.append("--retain")
+        return await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
 
-            `gco images build` — build a container image and push to ECR.
+    @mcp.tool(tags={"image", "images"}, task=_TASK_CONFIG_OPTIONAL)
+    @audit_logged
+    async def images_push(
+        name: str,
+        tag: str,
+        local_image: str,
+        retain: bool = False,
+        *,
+        ctx: Any = CurrentContext(),
+        progress: Any = Progress(),
+    ) -> str:
+        """[gated by GCO_ENABLE_IMAGE_PUBLISH] long-running, data-upload.
 
-            Args:
-                context: Build context directory.
-                name: Image name (lowercase letters, digits, dashes; max 63 chars).
-                tag: Image tag (defaults to git short SHA, else ``latest``).
-                dockerfile: Path to the Dockerfile, relative to ``context``.
-                platform: ``--platform`` argument for the build.
-                retain: When True, mark the repository with ``gco:retain=true``
-                    so it survives stack destroys.
-            """
-            argv = ["gco", "images", "build", context, "--name", name]
-            if tag:
-                argv += ["--tag", tag]
-            argv += ["--dockerfile", dockerfile, "--platform", platform]
-            if retain:
-                argv.append("--retain")
-            return await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
+        `gco images push` — push an already-built local image to the project ECR repo.
 
-        @mcp.tool(**_publish_decorator_kwargs)  # type: ignore[untyped-decorator]
-        @audit_logged
-        async def images_push(
-            name: str,
-            tag: str,
-            local_image: str,
-            retain: bool = False,
-            *,
-            ctx: Any = CurrentContext(),
-            progress: Any = Progress(),
-        ) -> str:
-            """[gated by GCO_ENABLE_IMAGE_PUBLISH] long-running, data-upload.
-
-            `gco images push` — push an already-built local image to the project ECR repo.
-
-            Args:
-                name: Image name (lowercase letters, digits, dashes; max 63 chars).
-                tag: Image tag.
-                local_image: Source image reference on the local container runtime.
-                retain: When True, mark the repository with ``gco:retain=true``
-                    so it survives stack destroys.
-            """
-            argv = [
-                "gco",
-                "images",
-                "push",
-                name,
-                "--tag",
-                tag,
-                "--local-image",
-                local_image,
-            ]
-            if retain:
-                argv.append("--retain")
-            return await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
+        Args:
+            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            tag: Image tag.
+            local_image: Source image reference on the local container runtime.
+            retain: When True, mark the repository with ``gco:retain=true``
+                so it survives stack destroys.
+        """
+        argv = [
+            "gco",
+            "images",
+            "push",
+            name,
+            "--tag",
+            tag,
+            "--local-image",
+            local_image,
+        ]
+        if retain:
+            argv.append("--retain")
+        return await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
 
 
 # =============================================================================

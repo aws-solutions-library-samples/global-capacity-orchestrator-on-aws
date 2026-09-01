@@ -740,8 +740,13 @@ class TestAuditContextCapture:
         async def handler(message, response_type, params, context):
             return ElicitResult(action="accept", content="yes")
 
+        # ``ctx.elicit()`` is era-gated in FastMCP 4: it works on
+        # handshake-era connections and raises on the sessionless
+        # 2026-07-28 protocol (which mode="auto" clients negotiate).
+        # Pin the client to the legacy era so the middleware's elicit
+        # capture path stays exercisable.
         with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
-            async with Client(test_mcp, elicitation_handler=handler) as client:
+            async with Client(test_mcp, elicitation_handler=handler, mode="legacy") as client:
                 await client.call_tool("elicitor", {})
 
         entry = _last_invocation_entry(caplog)
@@ -754,7 +759,7 @@ class TestAuditContextCapture:
         assert elics[0].get("message") == "Please confirm"
 
     def test_audit_includes_supported_task_context_id(self, caplog, monkeypatch):
-        """The public FastMCP task context is the primary task-ID source."""
+        """The tasks-extension task context is the primary task-ID source."""
 
         fake_ctx = MagicMock()
         fake_ctx.request_context = MagicMock()
@@ -773,7 +778,7 @@ class TestAuditContextCapture:
 
         with (
             patch(
-                "fastmcp.server.dependencies.get_task_context",
+                "fastmcp_tasks.context.get_task_context",
                 return_value=task_context,
             ),
             caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
@@ -790,7 +795,7 @@ class TestAuditContextCapture:
         fake_ctx.task_id = "x" * 2_000
         fake_ctx.request_context = None
         with patch(
-            "fastmcp.server.dependencies.get_task_context",
+            "fastmcp_tasks.context.get_task_context",
             side_effect=RuntimeError("no task context"),
         ):
             task_id = audit._try_get_task_id(fake_ctx)

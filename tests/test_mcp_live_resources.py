@@ -19,11 +19,10 @@ pattern used by ``tests/test_mcp_image_resources.py``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -356,30 +355,30 @@ class TestCostsSummaryResource:
 
 
 class TestTaskStatusResource:
-    def test_tasks_resource_returns_state_when_accessor_available(self):
-        # Patch the runtime FastMCP instance to expose a ``get_task`` accessor
-        # the resource handler can call. ``object.__setattr__`` bypasses
-        # FastMCP's frozen-attribute guard for the duration of this test.
-        record = {"status": "running", "progress": {"completed": 1, "total": 5}}
-        try:
-            object.__setattr__(run_mcp.mcp, "get_task", lambda tid: record)
+    def test_tasks_resource_returns_state_when_extension_answers(self):
+        # Patch the tasks extension's ``tasks/get`` handler — the single
+        # seam the resource reads through — to return a canned record.
+        record = MagicMock()
+        record.model_dump.return_value = {
+            "status": "working",
+            "progress": {"completed": 1, "total": 5},
+        }
+        with patch(
+            "fastmcp_tasks.handlers.tasks_get",
+            new=AsyncMock(return_value=record),
+        ):
             content = _read_resource("tasks://gco/abc123")
-        finally:
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(run_mcp.mcp, "get_task")
         parsed = json.loads(content)
         assert parsed["task_id"] == "abc123"
-        assert parsed["state"]["status"] == "running"
+        assert parsed["state"]["status"] == "working"
 
-    def test_tasks_resource_returns_graceful_error_when_unavailable(self):
-        # No accessor on the live mcp instance — the handler returns the
-        # documented graceful error JSON rather than crashing.
-        if hasattr(run_mcp.mcp, "get_task"):
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(run_mcp.mcp, "get_task")
+    def test_tasks_resource_returns_not_found_for_unknown_id(self):
+        # No patching: the real extension handler reports an id the docket
+        # has never seen as not-found, and the resource maps that to the
+        # documented error JSON rather than crashing.
         content = _read_resource("tasks://gco/no-such-task")
         parsed = json.loads(content)
-        assert parsed["error"] == "task protocol not available"
+        assert parsed["error"] == "task not found"
         assert parsed["task_id"] == "no-such-task"
 
     def test_tasks_resource_rejects_invalid_task_id(self):

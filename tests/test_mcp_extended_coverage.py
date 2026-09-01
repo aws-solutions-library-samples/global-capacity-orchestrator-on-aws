@@ -33,7 +33,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -175,88 +175,62 @@ class TestIam:
 
 
 class TestTaskResource:
+    """tasks://gco/{task_id} reads through the SEP-2663 tasks extension.
+
+    The resource delegates to ``fastmcp_tasks.handlers.tasks_get`` — the
+    same handler that answers protocol ``tasks/get`` requests — so these
+    tests patch that single seam (or let the real handler run against the
+    not-yet-started docket for the not-found path).
+    """
+
     def test_invalid_task_id(self) -> None:
         body = _read_resource("tasks://gco/!@#$%")
         payload = json.loads(body)
         assert payload["error"] == "invalid task_id"
 
-    def test_get_task_returns_dict(self) -> None:
-        import contextlib
-
-        try:
-            object.__setattr__(mcp, "get_task", lambda _tid: {"state": "running"})
+    def test_tasks_get_result_rendered_as_state(self) -> None:
+        record = MagicMock()
+        record.model_dump.return_value = {"status": "working", "task_id": "task-123"}
+        with patch("fastmcp_tasks.handlers.tasks_get", new=AsyncMock(return_value=record)):
             body = _read_resource("tasks://gco/task-123")
-        finally:
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(mcp, "get_task")
         payload = json.loads(body)
         assert payload["task_id"] == "task-123"
-        assert payload["state"] == {"state": "running"}
+        assert payload["state"]["status"] == "working"
 
-    def test_get_task_returns_object_with_model_dump(self) -> None:
-        import contextlib
-
+    def test_tasks_get_receives_server_and_task_id(self) -> None:
         record = MagicMock()
-        record.model_dump.return_value = {"state": "completed", "result": "ok"}
-        try:
-            object.__setattr__(mcp, "get_task", lambda _tid: record)
+        record.model_dump.return_value = {"status": "completed"}
+        tasks_get = AsyncMock(return_value=record)
+        with patch("fastmcp_tasks.handlers.tasks_get", new=tasks_get):
+            _read_resource("tasks://gco/abc")
+        tasks_get.assert_awaited_once_with(mcp, "abc")
+
+    def test_tasks_get_raising_maps_to_task_not_found(self) -> None:
+        with patch(
+            "fastmcp_tasks.handlers.tasks_get",
+            new=AsyncMock(side_effect=RuntimeError("Task not found: abc")),
+        ):
             body = _read_resource("tasks://gco/abc")
-        finally:
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(mcp, "get_task")
         payload = json.loads(body)
-        assert payload["state"]["state"] == "completed"
+        assert payload["error"] == "task not found"
+        assert payload["task_id"] == "abc"
 
-    def test_get_task_returns_object_with_dict_attr(self) -> None:
-        import contextlib
-
-        class _Record:
-            def __init__(self) -> None:
-                self.state = "running"
-                self.progress = 42
-                self._private = "hidden"
-
-        try:
-            object.__setattr__(mcp, "get_task", lambda _tid: _Record())
-            body = _read_resource("tasks://gco/abc")
-        finally:
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(mcp, "get_task")
-        payload = json.loads(body)
-        assert payload["state"]["state"] == "running"
-        assert payload["state"]["progress"] == 42
-        assert "_private" not in payload["state"]
-
-    def test_get_task_raises_falls_through(self) -> None:
-        # When the new accessor raises, the helper falls back to the
-        # docket. With no docket installed the resource returns the
-        # graceful error stub.
-        import contextlib
-
-        def boom(_id: str) -> Any:
-            raise RuntimeError("boom")
-
-        try:
-            object.__setattr__(mcp, "get_task", boom)
-            body = _read_resource("tasks://gco/abc")
-        finally:
-            with contextlib.suppress(AttributeError):
-                object.__delattr__(mcp, "get_task")
-        payload = json.loads(body)
-        assert payload["error"] == "task protocol not available"
-
-    def test_no_accessors_returns_error_stub(self) -> None:
-        # Both accessors absent: the existing live-resources test file
-        # exercises this; here we just sanity-check the same path so
-        # the line stays warm.
-        import contextlib
-
-        with contextlib.suppress(AttributeError):
-            object.__delattr__(mcp, "get_task")
+    def test_unknown_id_against_real_handler_is_not_found(self) -> None:
+        # No patching: the real extension handler runs against a docket
+        # that has not started (no server lifespan in this test), which
+        # reports the id as unknown — the same wire answer a protocol
+        # ``tasks/get`` for a bogus id would produce.
         body = _read_resource("tasks://gco/missing")
         payload = json.loads(body)
-        assert payload["error"] == "task protocol not available"
+        assert payload["error"] == "task not found"
         assert payload["task_id"] == "missing"
+
+    def test_missing_extension_returns_protocol_unavailable_stub(self) -> None:
+        with patch.dict(sys.modules, {"fastmcp_tasks.handlers": None}):
+            body = _read_resource("tasks://gco/abc")
+        payload = json.loads(body)
+        assert payload["error"] == "task protocol not available"
+        assert payload["task_id"] == "abc"
 
 
 # ---------------------------------------------------------------------------
@@ -862,63 +836,40 @@ class TestImagesCtxWarning:
 
 
 # ---------------------------------------------------------------------------
-# gco_mcp/resources/tasks.py — fallback chain branches
+# gco_mcp/resources/tasks.py — direct-call branches
 # ---------------------------------------------------------------------------
 #
-# The earlier ``TestTasksResource`` class covers the happy ``get_task``
-# path, the ``invalid task_id`` regex branch, and the no-accessor stub.
-# These extra cases cover the older-build fallbacks: the ``_docket``
-# attribute name, the ``fetch_task`` accessor, the ``model_dump``
-# coercion, and the unconvertible-record ``str(record)`` last-resort.
+# The earlier ``TestTaskResource`` class covers the registry-routed paths
+# (happy path, not-found mapping, invalid task_id, missing-extension stub).
+# These extra cases call ``_task_resource`` directly to pin the module-seam
+# behaviors: the ``server``-import failure stub and the ``_coerce_to_dict``
+# conversion ladder including the ``str(record)`` last-resort.
 
 
 class TestTasksResourceFallbacks:
-    def test_docket_underscore_attribute_used_when_get_task_absent(self) -> None:
-        """Older FastMCP builds expose state via ``_docket``."""
+    def test_server_import_failure_returns_protocol_unavailable_stub(self) -> None:
+        """An unimportable ``server`` module degrades to the graceful stub."""
         from resources import tasks as tasks_mod
 
-        fake_docket = MagicMock(spec=["get"])
-        fake_docket.get.return_value = {"status": "running"}
-
-        fake_mcp = MagicMock(spec=["_docket"])
-        fake_mcp._docket = fake_docket
-
-        with patch.dict(sys.modules, {"server": MagicMock(mcp=fake_mcp)}):
-            body = tasks_mod._task_resource("task-123")
+        with patch.dict(sys.modules, {"server": None}):
+            body = asyncio.run(tasks_mod._task_resource("task-123"))
         payload = json.loads(body)
+        assert payload["error"] == "task protocol not available"
         assert payload["task_id"] == "task-123"
-        assert payload["state"]["status"] == "running"
 
-    def test_fetch_task_accessor_used_when_get_and_get_task_absent(self) -> None:
-        """Some builds expose the lookup as ``fetch_task``."""
+    def test_lookup_delegates_to_tasks_get_with_server_singleton(self) -> None:
+        """The direct-call path hands the shared server and id to ``tasks_get``."""
         from resources import tasks as tasks_mod
+        from server import mcp as real_mcp
 
-        fake_docket = MagicMock(spec=["fetch_task"])
-        fake_docket.fetch_task.return_value = {"status": "complete"}
-
-        fake_mcp = MagicMock(spec=["docket"])
-        fake_mcp.docket = fake_docket
-
-        with patch.dict(sys.modules, {"server": MagicMock(mcp=fake_mcp)}):
-            body = tasks_mod._task_resource("task-abc")
+        record = MagicMock()
+        record.model_dump.return_value = {"status": "working"}
+        tasks_get = AsyncMock(return_value=record)
+        with patch("fastmcp_tasks.handlers.tasks_get", new=tasks_get):
+            body = asyncio.run(tasks_mod._task_resource("task-xyz"))
+        tasks_get.assert_awaited_once_with(real_mcp, "task-xyz")
         payload = json.loads(body)
-        assert payload["state"]["status"] == "complete"
-
-    def test_docket_accessor_swallows_exceptions(self) -> None:
-        """A misbehaving accessor must skip to the next without surfacing."""
-        from resources import tasks as tasks_mod
-
-        fake_docket = MagicMock(spec=["get_task", "get"])
-        fake_docket.get_task.side_effect = RuntimeError("boom")
-        fake_docket.get.return_value = {"status": "fallback"}
-
-        fake_mcp = MagicMock(spec=["_docket"])
-        fake_mcp._docket = fake_docket
-
-        with patch.dict(sys.modules, {"server": MagicMock(mcp=fake_mcp)}):
-            body = tasks_mod._task_resource("task-xyz")
-        payload = json.loads(body)
-        assert payload["state"]["status"] == "fallback"
+        assert payload["state"]["status"] == "working"
 
     def test_coerce_to_dict_uses_model_dump(self) -> None:
         from resources.tasks import _coerce_to_dict
@@ -977,28 +928,6 @@ class TestTasksResourceFallbacks:
 
         out = _coerce_to_dict(Slotted())
         assert out == {"value": "Slotted()"}
-
-    def test_server_import_failure_returns_protocol_unavailable_stub(self) -> None:
-        """If the ``server`` module itself fails to import, the lookup
-        returns ``None`` and the resource emits the protocol-unavailable
-        stub."""
-        from resources import tasks as tasks_mod
-
-        original_import = (
-            __builtins__["__import__"]
-            if isinstance(__builtins__, dict)
-            else __builtins__.__import__
-        )  # type: ignore[index]
-
-        def _raising_import(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "server":
-                raise ImportError("server vanished")
-            return original_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=_raising_import):
-            body = tasks_mod._task_resource("task-1")
-        payload = json.loads(body)
-        assert payload["error"] == "task protocol not available"
 
 
 # ---------------------------------------------------------------------------

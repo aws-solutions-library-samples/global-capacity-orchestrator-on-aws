@@ -1,10 +1,12 @@
 """Task status resources (tasks://gco/...) for the GCO MCP server.
 
-Reads through FastMCP's task protocol surface to surface the status of
-a long-running tool invocation as JSON. Returns a graceful error stub
-when the FastMCP build in use doesn't expose a task-status query — the
-protocol surface lives under ``fastmcp.server.tasks`` and its public
-shape can shift between minor versions.
+Reads through the MCP tasks extension (SEP-2663, the ``fastmcp_tasks``
+package in FastMCP 4) to surface the status of a long-running tool
+invocation as JSON. The extension's own ``tasks/get`` handler is reused so
+this resource reports exactly what a protocol-native ``tasks/get`` request
+would return — status, timestamps, poll interval, and the inlined result or
+error for finished tasks. Returns a graceful error stub when the FastMCP
+build in use doesn't ship the tasks extension.
 """
 
 from __future__ import annotations
@@ -20,43 +22,29 @@ from typing import Any
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
-def _lookup_task_state(task_id: str) -> dict[str, Any] | None:
-    """Best-effort lookup of a task's current state through FastMCP's API.
+async def _lookup_task_state(task_id: str) -> dict[str, Any] | None:
+    """Look up a task's current state through the tasks extension.
 
-    FastMCP exposes task introspection via the docket store registered
-    on the server instance. The exact accessor moves between minor
-    versions, so this helper tries the documented paths in order and
-    returns ``None`` if none of them work — the caller turns that into
-    a graceful error JSON.
+    Delegates to ``fastmcp_tasks.handlers.tasks_get`` — the same handler
+    that serves protocol ``tasks/get`` requests — so the resource view and
+    the wire view can never disagree. Returns ``None`` when the extension
+    is unavailable on this build (the caller turns that into a graceful
+    "not available" JSON) and raises ``LookupError`` when the extension is
+    present but knows nothing about ``task_id``.
     """
     try:
+        from fastmcp_tasks.handlers import tasks_get
         from server import mcp as _mcp
     except ImportError:
         return None
 
-    # Newer FastMCP exposes a direct ``get_task`` accessor.
-    getter = getattr(_mcp, "get_task", None)
-    if callable(getter):
-        try:
-            record = getter(task_id)
-        except Exception:  # noqa: BLE001
-            record = None
-        if record is not None:
-            return _coerce_to_dict(record)
-
-    # Older builds keep state on the docket adapter.
-    docket = getattr(_mcp, "_docket", None) or getattr(_mcp, "docket", None)
-    for attr in ("get_task", "get", "fetch_task"):
-        accessor = getattr(docket, attr, None)
-        if callable(accessor):
-            try:
-                record = accessor(task_id)
-            except Exception:  # noqa: BLE001
-                continue
-            if record is not None:
-                return _coerce_to_dict(record)
-
-    return None
+    try:
+        record = await tasks_get(_mcp, task_id)
+    except Exception as exc:
+        # The handler raises the protocol not-found error for unknown or
+        # expired task ids (and for a docket that has not started yet).
+        raise LookupError(str(exc)) from exc
+    return _coerce_to_dict(record)
 
 
 def _coerce_to_dict(record: object) -> dict[str, Any]:
@@ -77,18 +65,27 @@ def _coerce_to_dict(record: object) -> dict[str, Any]:
     return {"value": str(record)}
 
 
-def _task_resource(task_id: str) -> str:
+async def _task_resource(task_id: str) -> str:
     """Return the current status of ``task_id`` as JSON."""
     if not _TASK_ID_RE.match(task_id):
         return json.dumps({"error": "invalid task_id", "value": task_id})
-    state = _lookup_task_state(task_id)
+    try:
+        state = await _lookup_task_state(task_id)
+    except LookupError as exc:
+        return json.dumps(
+            {
+                "error": "task not found",
+                "detail": str(exc)[:200],
+                "task_id": task_id,
+            }
+        )
     if state is None:
         return json.dumps(
             {
                 "error": "task protocol not available",
                 "detail": (
-                    "this build of FastMCP does not expose a task-status accessor "
-                    "this resource handler can call"
+                    "this build of FastMCP does not ship the tasks extension "
+                    "(fastmcp_tasks) this resource handler reads through"
                 ),
                 "task_id": task_id,
             }

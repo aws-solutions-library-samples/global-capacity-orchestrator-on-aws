@@ -47,24 +47,6 @@ from mission_judge.shape import (  # noqa: E402
     validate_output_name,
 )
 
-
-def _try_get_context() -> Any | None:
-    """Return the active FastMCP Context if inside a request, else ``None``.
-
-    Mirrors :func:`mcp.tools.mission._try_get_context`: wraps the optional
-    ``fastmcp.server.dependencies.get_context`` import so the helper works on
-    the CLI path and in unit tests that don't go through an MCP request —
-    those raise ``RuntimeError`` from ``get_context()``, which we swallow so
-    ``select_sampling_backend`` falls back to the Bedrock path.
-    """
-    try:
-        from fastmcp.server.dependencies import get_context
-
-        return get_context()
-    except Exception:
-        return None
-
-
 # Registration is entirely gated by the feature flag. When the flag is unset,
 # the decorator below never fires and FastMCP never sees the tool, so it does
 # not appear in ``mcp.list_tools()``. The gate is evaluated only through
@@ -117,9 +99,11 @@ if is_enabled(FLAG_SEMANTIC_PROGRESS):
                 directive, recent_context, judge_rubric.RUBRIC_VERSION
             )
 
-            ctx = _try_get_context()  # active FastMCP Context or None (CLI path)
-            backend = select_sampling_backend(ctx, model_id, None)
-            if backend is None:
+            # Bedrock is the only sampling transport (MCP client sampling
+            # left the protocol with FastMCP 4), so the judge samples
+            # server-side for CLI and MCP callers alike.
+            backend = select_sampling_backend(model_id)
+            if backend is None:  # defensive: seam stubs may return None
                 raise JudgeError(ErrorCode.NO_SAMPLING_BACKEND)
 
             try:

@@ -132,7 +132,7 @@ class TestSwarmStartAndHelpers:
         monkeypatch.setattr(
             tools_module.mission_sampling,
             "resolve_sampling_state",
-            lambda _ctx, _requested: (False, "none"),
+            lambda _requested: (False, "none"),
         )
 
         payload = await _start(tools_module)

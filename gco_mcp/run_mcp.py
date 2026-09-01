@@ -95,6 +95,14 @@ if _IS_RELOAD:
 else:
     register_all_resources()
 
+# Argument completion (FastMCP 4): answers ``completion/complete`` for the
+# static registry-backed resource templates. Registered after the resource
+# modules so the handler's providers read fully-populated registries;
+# re-registration on reload just replaces the handler.
+from completions import register_completions  # noqa: E402
+
+register_completions(mcp)
+
 # --- Re-export tool functions for backward compat with existing tests ---
 # Tests call e.g. run_mcp.list_jobs(), so we import them into this namespace.
 

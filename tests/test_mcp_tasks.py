@@ -538,7 +538,7 @@ async def test_run_long_task_reuses_safe_protocol_task_id(tmp_path, monkeypatch)
     task_context.task_id = "protocol-task-123"
 
     with patch(
-        "fastmcp.server.dependencies.get_task_context",
+        "fastmcp_tasks.context.get_task_context",
         return_value=task_context,
     ):
         result = await _run_long_task(

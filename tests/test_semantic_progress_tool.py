@@ -132,10 +132,10 @@ def make_stub_backend(
 ) -> StubBackend:
     """Build a :class:`StubBackend` with sensible defaults for the success path.
 
-    Defaults model the CLI (Bedrock) path with a colon-bearing model id, which
+    Defaults model the Bedrock path with a colon-bearing model id, which
     is the most demanding success case for the source-identifier join. Callers
-    override ``backend_name`` / ``model_id`` to exercise the MCP path or a
-    different model, and pass ``sample_error`` to drive a transport failure.
+    override ``backend_name`` / ``model_id`` to exercise a different backend
+    label or model, and pass ``sample_error`` to drive a transport failure.
     """
     return StubBackend(
         backend_name=backend_name,
@@ -324,23 +324,25 @@ def test_success_source_identifier_preserves_colon_in_model_id(judge_module: Any
     assert result["model_id"] == _MODEL_ID_WITH_COLON
 
 
-def test_success_mcp_backend_reports_mcp_provenance(judge_module: Any) -> None:
-    """An MCP-path backend surfaces ``backend_name == "mcp"`` in provenance.
+def test_success_backend_label_echoed_in_provenance(judge_module: Any) -> None:
+    """The tool echoes whatever backend the seam resolves in provenance.
 
-    When the seam resolves the MCP path, the tool must echo that backend name
-    and form the source identifier from it, leaving the metric value untouched.
+    The seam contract is label-agnostic: the tool must echo the resolved
+    backend's name and form the source identifier from it, leaving the
+    metric value untouched. (A replay label stands in for any future
+    non-Bedrock transport.)
     """
     stub = make_stub_backend(
-        backend_name="mcp",
-        model_id="client-routed-model",
+        backend_name="replay",
+        model_id="canned-model",
         sample_result=canned_response(0.4),
     )
     with patch.object(judge_module, "select_sampling_backend", return_value=stub):
         result = call_judge(judge_module, directive="answer the user's question")
 
-    assert result["backend_name"] == "mcp"
-    assert result["model_id"] == "client-routed-model"
-    assert result["source"] == "mcp:client-routed-model"
+    assert result["backend_name"] == "replay"
+    assert result["model_id"] == "canned-model"
+    assert result["source"] == "replay:canned-model"
     assert_canonical_progress_shape(result, expected_key="progress_score", expected_value=0.4)
 
 

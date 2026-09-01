@@ -474,7 +474,7 @@ def test_sampling_backend_protocol_runtime_checkable() -> None:
     SamplingBackend); a class missing any of them does not."""
 
     class _GoodBackend:
-        backend_name = "mcp"
+        backend_name = "bedrock"
         model_id = "stub-model"
 
         async def sample(self, prompt: SamplingPrompt) -> str:
@@ -513,174 +513,18 @@ def test_sampling_transport_error_with_message() -> None:
 
 
 # ---------------------------------------------------------------------------
-# MCPSamplingBackend
+# Async test helper
 # ---------------------------------------------------------------------------
-
+# MCPSamplingBackend and its unit tests were removed with FastMCP 4:
+# ``ctx.sample`` left the protocol on every era, so Bedrock is the only
+# sampling transport (see mission/sampling.py).
 
 import asyncio  # noqa: E402
-
-from mission.sampling import MCPSamplingBackend  # noqa: E402
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
     """Run an async coroutine synchronously inside a sync test."""
     return asyncio.run(coro)
-
-
-class _FakeCtxReturningString:
-    """Fake Context whose ``sample`` returns a plain string."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def sample(self, text: str, **kwargs: Any) -> str:
-        self.calls.append({"text": text, "kwargs": kwargs})
-        return '{"revision_rationale": "ok", "next_strategy": {}, "confidence": 0.5}'
-
-
-class _TextResult:
-    """Stand-in for FastMCP's response objects with a ``.text`` attribute."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _FakeCtxReturningTextObj:
-    """Fake Context whose ``sample`` returns an object with ``.text``."""
-
-    async def sample(self, text: str, **kwargs: Any) -> Any:  # noqa: ARG002
-        return _TextResult("response-from-text-attr")
-
-
-class _FakeCtxReturningInt:
-    """Fake Context whose ``sample`` returns a non-string, non-text-attr value."""
-
-    async def sample(self, text: str, **kwargs: Any) -> Any:  # noqa: ARG002
-        return 42
-
-
-class _FakeCtxRaising:
-    """Fake Context whose ``sample`` raises a runtime error."""
-
-    async def sample(self, text: str, **kwargs: Any) -> str:  # noqa: ARG002
-        raise RuntimeError("boom")
-
-
-class _FakeCtxOnlySnakeCase:
-    """Fake Context that only accepts ``model_preferences`` (snake_case).
-
-    The first call attempt with ``modelPreferences=`` raises ``TypeError``
-    so the backend's compatibility shim retries with the snake_case
-    spelling. The second call records which kwarg was used.
-    """
-
-    def __init__(self) -> None:
-        self.last_kwarg_name: str | None = None
-
-    async def sample(
-        self,
-        text: str,
-        *,
-        model_preferences: Any = None,
-        **kwargs: Any,
-    ) -> str:
-        if "modelPreferences" in kwargs:
-            # FastMCP versions that don't recognise the camelCase form
-            # raise ``TypeError`` for the unknown keyword. Mirror that.
-            raise TypeError("sample() got an unexpected keyword argument 'modelPreferences'")
-        self.last_kwarg_name = "model_preferences"
-        return "snake-case-ok"
-
-
-class _FakeCtxRecordingKwargs:
-    """Fake Context that just records the kwargs it was called with."""
-
-    def __init__(self) -> None:
-        self.captured_kwargs: dict[str, Any] | None = None
-
-    async def sample(self, text: str, **kwargs: Any) -> str:  # noqa: ARG002
-        self.captured_kwargs = dict(kwargs)
-        return "no-prefs-ok"
-
-
-def test_mcp_backend_used_path() -> None:
-    """A bare ctx returning a string flows straight through the backend."""
-    ctx = _FakeCtxReturningString()
-    backend = MCPSamplingBackend(ctx, model_id="test-model")
-    prompt = _make_prompt()
-    out = _run(backend.sample(prompt))
-    assert isinstance(out, str)
-    assert "revision_rationale" in out
-    assert backend.backend_name == "mcp"
-    assert backend.model_id == "test-model"
-    # The ctx received the assembled prompt verbatim.
-    assert len(ctx.calls) == 1
-    assert ctx.calls[0]["text"] == prompt.assemble()
-
-
-def test_mcp_backend_returns_object_with_text_attr() -> None:
-    """An object exposing ``.text`` is unwrapped into the string."""
-    ctx = _FakeCtxReturningTextObj()
-    backend = MCPSamplingBackend(ctx)
-    out = _run(backend.sample(_make_prompt()))
-    assert out == "response-from-text-attr"
-
-
-def test_mcp_backend_returns_unexpected_type_raises_transport_error() -> None:
-    """A non-string, non-text-attr return value yields a transport error."""
-    ctx = _FakeCtxReturningInt()
-    backend = MCPSamplingBackend(ctx)
-    try:
-        _run(backend.sample(_make_prompt()))
-    except SamplingTransportError as err:
-        assert err.code == "mcp_unexpected_response_type"
-        assert err.message is not None
-        assert "int" in err.message
-    else:
-        raise AssertionError("expected SamplingTransportError")
-
-
-def test_mcp_backend_transport_error_wraps_underlying_exception() -> None:
-    """Transport-level exceptions are re-raised with code ``mcp_<ClassName>``."""
-    ctx = _FakeCtxRaising()
-    backend = MCPSamplingBackend(ctx)
-    try:
-        _run(backend.sample(_make_prompt()))
-    except SamplingTransportError as err:
-        assert err.code == "mcp_RuntimeError"
-        # The original RuntimeError is preserved on the cause chain.
-        assert isinstance(err.__cause__, RuntimeError)
-        assert str(err.__cause__) == "boom"
-    else:
-        raise AssertionError("expected SamplingTransportError")
-
-
-def test_mcp_backend_falls_back_to_snake_case_pref_kwarg() -> None:
-    """When ctx rejects ``modelPreferences``, the backend retries with
-    ``model_preferences``."""
-    ctx = _FakeCtxOnlySnakeCase()
-    backend = MCPSamplingBackend(ctx, prefs={"hints": ["claude"]})
-    out = _run(backend.sample(_make_prompt()))
-    assert out == "snake-case-ok"
-    assert ctx.last_kwarg_name == "model_preferences"
-
-
-def test_mcp_backend_omits_prefs_when_none() -> None:
-    """A ``prefs=None`` backend never passes a preferences kwarg to ctx."""
-    ctx = _FakeCtxRecordingKwargs()
-    backend = MCPSamplingBackend(ctx, prefs=None)
-    out = _run(backend.sample(_make_prompt()))
-    assert out == "no-prefs-ok"
-    assert ctx.captured_kwargs == {}
-    assert "modelPreferences" not in (ctx.captured_kwargs or {})
-    assert "model_preferences" not in (ctx.captured_kwargs or {})
-
-
-def test_mcp_backend_satisfies_protocol() -> None:
-    """An :class:`MCPSamplingBackend` instance is a SamplingBackend."""
-    ctx = _FakeCtxReturningString()
-    backend = MCPSamplingBackend(ctx, model_id="m")
-    assert isinstance(backend, SamplingBackend) is True
 
 
 # ---------------------------------------------------------------------------
@@ -1011,90 +855,23 @@ def test_bedrock_backend_applies_default_high_reasoning_without_sampling_control
 from mission.sampling import select_sampling_backend  # noqa: E402
 
 
-def test_select_returns_mcp_when_ctx_has_sampling_capability() -> None:
-    """A ctx that advertises sampling capability resolves to MCPSamplingBackend
-    with model_id forwarded."""
-
-    class _Caps:
-        sampling = True
-
-    class _Ctx:
-        session_capabilities = _Caps()
-
-    backend = select_sampling_backend(_Ctx(), model_id="m", prefs={"hints": []})
-    assert isinstance(backend, MCPSamplingBackend)
-    assert backend.model_id == "m"
+def test_select_returns_bedrock_with_model_id_forwarded() -> None:
+    """Bedrock is the only sampling transport; model_id is forwarded verbatim."""
+    backend = select_sampling_backend("test-model")
+    assert isinstance(backend, BedrockSamplingBackend)
+    assert backend.model_id == "test-model"
 
 
-def test_select_returns_none_when_ctx_lacks_sampling_capability() -> None:
-    """A ctx with session_capabilities.sampling falsy resolves to None."""
-
-    class _Caps:
-        sampling = False
-
-    class _Ctx:
-        session_capabilities = _Caps()
-
-    assert select_sampling_backend(_Ctx(), None, None) is None
-
-
-def test_select_returns_none_when_session_capabilities_is_none() -> None:
-    """A ctx with session_capabilities set to None resolves to None."""
-
-    class _Ctx:
-        session_capabilities = None
-
-    assert select_sampling_backend(_Ctx(), None, None) is None
-
-
-def test_select_returns_none_when_session_capabilities_attr_missing() -> None:
-    """A ctx that exposes no session_capabilities attr at all (and no
-    fastmcp.client_capabilities fallback) resolves to None."""
-
-    class _Ctx:
-        pass
-
-    assert select_sampling_backend(_Ctx(), None, None) is None
-
-
-def test_select_returns_bedrock_when_ctx_is_none() -> None:
-    """The CLI path (ctx=None) resolves to BedrockSamplingBackend pinned to
-    the module default model id."""
-    backend = select_sampling_backend(None, model_id=None, prefs=None)
+def test_select_resolves_default_model_when_model_id_is_none() -> None:
+    """``model_id=None`` resolves through the cdk.json Mission default."""
+    backend = select_sampling_backend(None)
     assert isinstance(backend, BedrockSamplingBackend)
     assert backend.model_id == get_default_mission_model_id()
 
 
-def test_select_falls_back_to_fastmcp_client_capabilities() -> None:
-    """When session_capabilities is missing, the resolver consults the older
-    fastmcp.client_capabilities path."""
-
-    class _ClientCaps:
-        sampling = True
-
-    class _FastMCP:
-        client_capabilities = _ClientCaps()
-
-    class _Ctx:
-        fastmcp = _FastMCP()  # no session_capabilities
-
-    backend = select_sampling_backend(_Ctx(), None, None)
-    assert isinstance(backend, MCPSamplingBackend)
-
-
-def test_select_passes_model_id_and_prefs_to_mcp_backend() -> None:
-    """model_id and prefs are forwarded to MCPSamplingBackend verbatim."""
-
-    class _Caps:
-        sampling = True
-
-    class _Ctx:
-        session_capabilities = _Caps()
-
-    backend = select_sampling_backend(_Ctx(), "test-model", {"hints": ["claude"]})
-    assert isinstance(backend, MCPSamplingBackend)
-    assert backend.model_id == "test-model"
-    assert backend._prefs == {"hints": ["claude"]}
+def test_select_satisfies_sampling_backend_protocol() -> None:
+    """The returned backend satisfies the runtime-checkable protocol."""
+    assert isinstance(select_sampling_backend(None), SamplingBackend)
 
 
 # ---------------------------------------------------------------------------
@@ -1362,7 +1139,7 @@ class _FakeBackend:
     def __init__(
         self,
         *,
-        backend_name: str = "mcp",
+        backend_name: str = "bedrock",
         model_id: str = "fake-model-v1",
         returns: str | None = None,
         raises: BaseException | None = None,
@@ -1511,7 +1288,9 @@ def test_maybe_sample_strategy_revision_used_path() -> None:
         },
         "confidence": 0.7,
     }
-    backend = _FakeBackend(backend_name="mcp", model_id="fake-mcp", returns=json.dumps(payload))
+    backend = _FakeBackend(
+        backend_name="bedrock", model_id="fake-model", returns=json.dumps(payload)
+    )
 
     with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
         result = _run(
@@ -1530,14 +1309,14 @@ def test_maybe_sample_strategy_revision_used_path() -> None:
 
     assert isinstance(result, SamplingUsed)
     assert result.parsed == payload
-    assert result.backend_name == "mcp"
-    assert result.model_id == "fake-mcp"
+    assert result.backend_name == "bedrock"
+    assert result.model_id == "fake-model"
     assert emit.call_count == 1
     kwargs = emit.call_args.kwargs
     assert kwargs["sampling_purpose"] == "strategy_revision"
     assert kwargs["sampling_status"] == "used"
-    assert kwargs["sampling_backend"] == "mcp"
-    assert kwargs["sampling_model_id"] == "fake-mcp"
+    assert kwargs["sampling_backend"] == "bedrock"
+    assert kwargs["sampling_model_id"] == "fake-model"
     assert kwargs["model_output_bytes"] > 0
 
 
@@ -1547,8 +1326,8 @@ def test_maybe_sample_strategy_revision_transport_error() -> None:
     session = _make_session()
     iteration = _make_iteration_for_orch()
     backend = _FakeBackend(
-        backend_name="mcp",
-        model_id="fake-mcp",
+        backend_name="bedrock",
+        model_id="fake-model",
         raises=SamplingTransportError("mcp_unavailable"),
     )
 
@@ -1569,8 +1348,8 @@ def test_maybe_sample_strategy_revision_transport_error() -> None:
 
     assert isinstance(result, SamplingFallback)
     assert result.reason == "transport_error"
-    assert result.backend_name == "mcp"
-    assert result.model_id == "fake-mcp"
+    assert result.backend_name == "bedrock"
+    assert result.model_id == "fake-model"
     assert result.rationale  # deterministic template
     assert emit.call_count == 1
     kwargs = emit.call_args.kwargs
@@ -1783,83 +1562,34 @@ def test_maybe_sample_final_lessons_no_backend() -> None:
 from mission.sampling import resolve_sampling_state  # noqa: E402
 
 
-class _CapsSamplingTrue:
-    sampling = True
+def test_resolve_explicit_false_short_circuits() -> None:
+    """Explicit ``use_sampling_param=False`` overrides any credential probe.
 
-
-class _CapsSamplingFalse:
-    sampling = False
-
-
-class _CtxWithSampling:
-    session_capabilities = _CapsSamplingTrue()
-
-
-class _CtxWithoutSampling:
-    session_capabilities = _CapsSamplingFalse()
-
-
-def test_resolve_explicit_false_short_circuits_with_mcp_ctx() -> None:
-    """Explicit ``use_sampling_param=False`` overrides MCP capability detection."""
-    result = resolve_sampling_state(_CtxWithSampling(), use_sampling_param=False)
-    assert result == (False, "none")
-
-
-def test_resolve_explicit_false_short_circuits_without_ctx() -> None:
-    """Explicit ``use_sampling_param=False`` overrides any CLI credential probe."""
-    # No ctx and no boto3 patch needed — explicit False short-circuits before
-    # the credential probe ever runs.
-    result = resolve_sampling_state(None, use_sampling_param=False)
-    assert result == (False, "none")
-
-
-def test_resolve_mcp_capability_detected() -> None:
-    """A ctx that advertises sampling resolves to ``(True, "mcp")`` when the
-    caller did not specify a preference."""
-    result = resolve_sampling_state(_CtxWithSampling(), use_sampling_param=None)
-    assert result == (True, "mcp")
-
-
-def test_resolve_mcp_capability_when_explicit_true() -> None:
-    """Explicit ``use_sampling_param=True`` plus MCP capability still resolves
-    to the MCP backend."""
-    result = resolve_sampling_state(_CtxWithSampling(), use_sampling_param=True)
-    assert result == (True, "mcp")
-
-
-def test_resolve_no_mcp_capability_explicit_true() -> None:
-    """A ctx without sampling capability + explicit opt-in returns
-    ``(True, "none")`` so the caller can decide whether to error or proceed
-    deterministic-only."""
-    result = resolve_sampling_state(_CtxWithoutSampling(), use_sampling_param=True)
-    assert result == (True, "none")
-
-
-def test_resolve_no_mcp_capability_implicit() -> None:
-    """A ctx without sampling capability + no explicit opt-in returns
-    ``(False, "none")``."""
-    result = resolve_sampling_state(_CtxWithoutSampling(), use_sampling_param=None)
+    No boto3 patch needed — explicit False short-circuits before the
+    credential probe ever runs.
+    """
+    result = resolve_sampling_state(use_sampling_param=False)
     assert result == (False, "none")
 
 
 def test_resolve_cli_with_credentials() -> None:
-    """``ctx=None`` + AWS credentials available → ``(True, "bedrock")``."""
+    """AWS credentials available → ``(True, "bedrock")``."""
     with mock.patch.object(sampling, "_bedrock_credentials_available", return_value=True):
-        result = resolve_sampling_state(None, use_sampling_param=None)
+        result = resolve_sampling_state(use_sampling_param=None)
     assert result == (True, "bedrock")
 
 
 def test_resolve_cli_without_credentials_implicit() -> None:
-    """``ctx=None`` + no credentials + no explicit opt-in → ``(False, "none")``."""
+    """No credentials + no explicit opt-in → ``(False, "none")``."""
     with mock.patch.object(sampling, "_bedrock_credentials_available", return_value=False):
-        result = resolve_sampling_state(None, use_sampling_param=None)
+        result = resolve_sampling_state(use_sampling_param=None)
     assert result == (False, "none")
 
 
 def test_resolve_cli_without_credentials_explicit_true() -> None:
-    """``ctx=None`` + no credentials + explicit opt-in → ``(True, "none")``."""
+    """No credentials + explicit opt-in → ``(True, "none")``."""
     with mock.patch.object(sampling, "_bedrock_credentials_available", return_value=False):
-        result = resolve_sampling_state(None, use_sampling_param=True)
+        result = resolve_sampling_state(use_sampling_param=True)
     assert result == (True, "none")
 
 
@@ -1876,62 +1606,28 @@ def test_resolve_handles_missing_boto3_gracefully() -> None:
         # The probe must absorb the ImportError and report no creds.
         assert sampling._bedrock_credentials_available() is False
         # The resolver must in turn route to the no-creds branch.
-        result = resolve_sampling_state(None, use_sampling_param=None)
+        result = resolve_sampling_state(use_sampling_param=None)
     assert result == (False, "none")
 
 
 # ---------------------------------------------------------------------------
-# TestMCPSampling — end-to-end through MCPSamplingBackend
+# TestCannedBackendSampling — end-to-end through a canned protocol backend
 # ---------------------------------------------------------------------------
 #
-# These tests wire the real :class:`MCPSamplingBackend` through
-# :func:`maybe_sample_strategy_revision` so the full pipeline is
-# exercised: assemble prompt → ctx.sample → JSON extract → schema
-# validate → catalog validate → audit emit. The fixtures stub
-# ``Context.sample`` to return canned text (or raise) so the harness
-# stays free of any real MCP transport.
+# These tests wire a canned :class:`_FakeBackend` through
+# :func:`maybe_sample_strategy_revision` so the full transport-agnostic
+# pipeline is exercised: assemble prompt → backend.sample → JSON extract →
+# schema validate → catalog validate → audit emit. (The MCP transport
+# variant of this harness was removed with FastMCP 4 — ``ctx.sample`` left
+# the protocol — so the canned backend carries the Bedrock label the
+# selector now always resolves.)
 # ---------------------------------------------------------------------------
 
 
-class _CapsSampling:
-    """Capabilities object that advertises sampling support."""
+class TestCannedBackendSampling:
+    """End-to-end sampling tests through a canned protocol backend.
 
-    sampling = True
-
-
-class _CannedCtx:
-    """Minimal Context stand-in for end-to-end MCP sampling tests.
-
-    The ``sample`` coroutine returns the value supplied at construction
-    time (typically a canned JSON string) or raises ``raises`` if set.
-    The :attr:`session_capabilities` attribute is wired so
-    :func:`select_sampling_backend` resolves to MCP.
-    """
-
-    session_capabilities = _CapsSampling()
-
-    def __init__(
-        self,
-        *,
-        returns: str | None = None,
-        raises: BaseException | None = None,
-    ) -> None:
-        self._returns = returns
-        self._raises = raises
-        self.calls: list[dict[str, Any]] = []
-
-    async def sample(self, text: str, **kwargs: Any) -> str:
-        self.calls.append({"text": text, "kwargs": dict(kwargs)})
-        if self._raises is not None:
-            raise self._raises
-        return self._returns if self._returns is not None else ""
-
-
-class TestMCPSampling:
-    """End-to-end sampling tests with :class:`MCPSamplingBackend` wiring.
-
-    Each test instantiates the real backend (via
-    :func:`select_sampling_backend` to mirror engine wiring), calls
+    Each test builds a :class:`_FakeBackend`, calls
     :func:`maybe_sample_strategy_revision`, and asserts on both the
     returned envelope (:class:`SamplingUsed` / :class:`SamplingFallback`)
     and the audit event payload captured via ``mock.patch.object`` on
@@ -1949,18 +1645,17 @@ class TestMCPSampling:
         return _make_iteration_for_orch()
 
     @staticmethod
-    def _bind_backend(ctx: _CannedCtx) -> MCPSamplingBackend:
-        """Resolve the backend through the public selector to mirror engine wiring."""
-        backend = select_sampling_backend(ctx, model_id="m", prefs=None)
-        # The selector returns ``MCPSamplingBackend`` when the context
-        # advertises sampling capability; assert the shape so a future
-        # change to the resolver doesn't silently re-route these tests.
-        assert isinstance(backend, MCPSamplingBackend)
-        return backend
+    def _bind_backend(
+        *,
+        returns: str | None = None,
+        raises: BaseException | None = None,
+    ) -> _FakeBackend:
+        """Build the canned backend the way the engine's selector labels one."""
+        return _FakeBackend(backend_name="bedrock", model_id="m", returns=returns, raises=raises)
 
     def test_used_path(self) -> None:
         """Well-formed JSON with allowlisted tool calls → :class:`SamplingUsed`,
-        audit event has ``sampling_status="used"`` and ``sampling_backend="mcp"``."""
+        audit event has ``sampling_status="used"`` and ``sampling_backend="bedrock"``."""
         payload = {
             "revision_rationale": "swap to a fresh manifest",
             "next_strategy": {
@@ -1976,8 +1671,7 @@ class TestMCPSampling:
             },
             "confidence": 0.7,
         }
-        ctx = _CannedCtx(returns=json.dumps(payload))
-        backend = self._bind_backend(ctx)
+        backend = self._bind_backend(returns=json.dumps(payload))
 
         with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
             result = _run(
@@ -1996,25 +1690,24 @@ class TestMCPSampling:
 
         assert isinstance(result, SamplingUsed)
         assert result.parsed == payload
-        assert result.backend_name == "mcp"
+        assert result.backend_name == "bedrock"
         assert result.model_id == "m"
-        # The ctx received the assembled prompt verbatim — confirms
-        # the backend went all the way through to ``ctx.sample``.
-        assert len(ctx.calls) == 1
+        # The backend received the assembled prompt — confirms the
+        # helper went all the way through to ``backend.sample``.
+        assert len(backend.calls) == 1
 
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_purpose"] == "strategy_revision"
         assert kwargs["sampling_status"] == "used"
-        assert kwargs["sampling_backend"] == "mcp"
+        assert kwargs["sampling_backend"] == "bedrock"
         assert kwargs["sampling_model_id"] == "m"
         assert kwargs["model_output_bytes"] > 0
 
     def test_rejected_bad_json(self) -> None:
         """Sampler returns non-JSON → fallback, audit ``sampling_status="rejected"``,
         ``validation_error="json_parse"``."""
-        ctx = _CannedCtx(returns="this is definitely not JSON at all")
-        backend = self._bind_backend(ctx)
+        backend = self._bind_backend(returns="this is definitely not JSON at all")
 
         with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
             result = _run(
@@ -2033,13 +1726,13 @@ class TestMCPSampling:
 
         assert isinstance(result, SamplingFallback)
         assert result.reason == "json_parse"
-        assert result.backend_name == "mcp"
+        assert result.backend_name == "bedrock"
         assert result.rationale  # deterministic template populated
 
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_status"] == "rejected"
-        assert kwargs["sampling_backend"] == "mcp"
+        assert kwargs["sampling_backend"] == "bedrock"
         assert kwargs["validation_error"] == "json_parse"
 
     def test_rejected_non_allowlisted_tool(self) -> None:
@@ -2054,8 +1747,7 @@ class TestMCPSampling:
             },
             "confidence": 0.4,
         }
-        ctx = _CannedCtx(returns=json.dumps(payload))
-        backend = self._bind_backend(ctx)
+        backend = self._bind_backend(returns=json.dumps(payload))
 
         with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
             result = _run(
@@ -2074,12 +1766,12 @@ class TestMCPSampling:
 
         assert isinstance(result, SamplingFallback)
         assert result.reason == "tool_not_allowlisted"
-        assert result.backend_name == "mcp"
+        assert result.backend_name == "bedrock"
 
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_status"] == "rejected"
-        assert kwargs["sampling_backend"] == "mcp"
+        assert kwargs["sampling_backend"] == "bedrock"
         assert kwargs["validation_error"] == "tool_not_allowlisted"
 
     def test_rejected_script_ast_failure(self) -> None:
@@ -2097,8 +1789,7 @@ class TestMCPSampling:
             },
             "confidence": 0.5,
         }
-        ctx = _CannedCtx(returns=json.dumps(payload))
-        backend = self._bind_backend(ctx)
+        backend = self._bind_backend(returns=json.dumps(payload))
 
         with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
             result = _run(
@@ -2118,7 +1809,7 @@ class TestMCPSampling:
             )
 
         assert isinstance(result, SamplingFallback)
-        assert result.backend_name == "mcp"
+        assert result.backend_name == "bedrock"
         # The reason carries the script-level rejection token. The
         # exact token depends on which validator clause fires first;
         # accept any of the stable tokens documented for ``__import__``.
@@ -2137,7 +1828,7 @@ class TestMCPSampling:
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_status"] == "rejected"
-        assert kwargs["sampling_backend"] == "mcp"
+        assert kwargs["sampling_backend"] == "bedrock"
         # Mirror the same allow-list of stable tokens for the audit
         # field. ``validation_error`` is the same string the
         # orchestration helper records under ``details.reason``.
@@ -2154,10 +1845,11 @@ class TestMCPSampling:
         ), f"unexpected validation_error: {kwargs['validation_error']!r}"
 
     def test_unavailable(self) -> None:
-        """``Context.sample`` raises → fallback, ``sampling_status="rejected"``,
-        ``validation_error`` starts with ``"mcp_"`` and tags the exception class."""
-        ctx = _CannedCtx(raises=RuntimeError("transport blew up"))
-        backend = self._bind_backend(ctx)
+        """``backend.sample`` raises a tagged transport error → fallback,
+        ``sampling_status="rejected"``, ``validation_error`` carries the code."""
+        backend = self._bind_backend(
+            raises=SamplingTransportError("bedrock_ServiceUnavailableException")
+        )
 
         with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
             result = _run(
@@ -2176,19 +1868,16 @@ class TestMCPSampling:
 
         assert isinstance(result, SamplingFallback)
         assert result.reason == "transport_error"
-        assert result.backend_name == "mcp"
+        assert result.backend_name == "bedrock"
         assert result.rationale  # deterministic template populated
 
         assert emit.call_count == 1
         kwargs = emit.call_args.kwargs
         assert kwargs["sampling_status"] == "rejected"
-        assert kwargs["sampling_backend"] == "mcp"
-        # The MCP backend wraps any non-SamplingTransportError exception
-        # as ``mcp_<ExceptionClassName>`` — assert the prefix and the
-        # specific exception class so future transport changes still
-        # trip the test if they break the contract.
-        assert kwargs["validation_error"].startswith("mcp_")
-        assert kwargs["validation_error"] == "mcp_RuntimeError"
+        assert kwargs["sampling_backend"] == "bedrock"
+        # The transport error's tagged code flows into the audit event
+        # verbatim so operators can branch on a stable string.
+        assert kwargs["validation_error"] == "bedrock_ServiceUnavailableException"
 
 
 # ---------------------------------------------------------------------------
@@ -2437,8 +2126,8 @@ class TestBedrockSampling:
         # call records the no-credentials state once, here, rather
         # than re-probing on every iteration.
         with mock.patch.object(sampling, "_bedrock_credentials_available", return_value=False):
-            assert resolve_sampling_state(None, use_sampling_param=True) == (True, "none")
-            assert resolve_sampling_state(None, use_sampling_param=None) == (False, "none")
+            assert resolve_sampling_state(use_sampling_param=True) == (True, "none")
+            assert resolve_sampling_state(use_sampling_param=None) == (False, "none")
 
         # ---- Step 2: even when the CLI selector is asked for a
         # backend (the call site that doesn't pre-check credentials),
@@ -2453,7 +2142,7 @@ class TestBedrockSampling:
         fake_boto3.Session.return_value = fake_session
 
         with mock.patch.dict("sys.modules", {"boto3": fake_boto3}):
-            backend = select_sampling_backend(None, model_id=None, prefs=None)
+            backend = select_sampling_backend(None)
             assert isinstance(backend, BedrockSamplingBackend)
 
             # Direct ``sample`` call surfaces the tagged transport error.
