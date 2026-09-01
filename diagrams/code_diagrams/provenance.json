@@ -27,9 +27,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "cli/images.py": {
-      "digest": "bd8d7d6d5a9e580515f34c2a980e90a85e7121fb977f0a8cc60fa127e11a9013",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "d95bc2ac7b13403bfed36933623ff7f0515f00dce5f86713e6a0eb30d71ba1da",
+      "generated_at": "2026-09-01T17:12:46Z",
+      "source_commit": "014029fc23b3763b4a03447e9e95b4a3fafcc3f3"
     },
     "cli/inference.py": {
       "digest": "6f8fb7c52c3b8051d533bfcf56649fca0a8fe0f20829562718c3083ea30117f5",
@@ -67,9 +67,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "46d67e5d3ee97b0bade50f587b3c29518f6260ec55cd274aab497a57dc6d01db",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "8e013c7682a800abeded9f2279efe63fa618eb1e1b0e88509319715ed7b1f039",
+      "generated_at": "2026-09-01T17:12:46Z",
+      "source_commit": "014029fc23b3763b4a03447e9e95b4a3fafcc3f3"
     },
     "gco/services/manifest_api.py": {
       "digest": "d7a5cfaa0fa59899baf5a2c2cb0c9ae059d8feea055b4d75aa0675ae320ac05f",

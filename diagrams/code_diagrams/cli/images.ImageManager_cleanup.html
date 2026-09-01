@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="3bf7a26a4725e23e">
+        <meta name="gco-generated-at" content="2026-09-01T17:12:46Z">
+        <meta name="gco-source-commit" content="014029fc23b3763b4a03447e9e95b4a3fafcc3f3">
+        <meta name="gco-flow-digest" content="f044278d55198010">
         <title>gco images cleanup — bulk tag delete with filter branches</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,20 +208,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5012=>operation: 'Delete every untagged image across one or all project repos.'
-cond5015=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
-op5025=>operation: repos: list[str]
-cond5028=>condition: if name
-op5032=>operation: validated = self._validate_name(name)
-op5034=>operation: repos = [f'{self._repo_prefix}/{validated}']
-op5041=>operation: ecr = self._ecr_client()
-op5043=>operation: repos_touched = 0
-op5045=>operation: tags_deleted = 0
-op5047=>operation: bytes_freed = 0
-cond5050=>condition: for repo_name in repos
-op5054=>operation: untagged_ids: list[dict[str, str]] = []
-op5056=>operation: untagged_size = 0
-op5059=>operation: paginator = ecr.get_paginator('describe_images')
+        <div><textarea id="code" style="width: 100%;" rows="11">op359=>operation: 'Delete every untagged image across one or all project repos.'
+cond362=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
+op372=>operation: repos: list[str]
+cond375=>condition: if name
+op379=>operation: validated = self._validate_name(name)
+op381=>operation: repos = [f'{self._repo_prefix}/{validated}']
+op388=>operation: ecr = self._ecr_client()
+op390=>operation: repos_touched = 0
+op392=>operation: tags_deleted = 0
+op394=>operation: bytes_freed = 0
+cond397=>condition: for repo_name in repos
+op401=>operation: untagged_ids: list[dict[str, str]] = []
+op403=>operation: untagged_size = 0
+op406=>operation: paginator = ecr.get_paginator('describe_images')
 for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'UNTAGGED'}):
     for detail in page.get('imageDetails', []):
         digest = detail.get('imageDigest')
@@ -231,52 +231,52 @@ for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'U
         size = detail.get('imageSizeInBytes') or 0
         if isinstance(size, int):
             untagged_size += size
-cond5058=>condition: exception raised?
-cond5061=>condition: except ClientError as e
-sub5065=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
-sub5067=>subroutine: continue
-cond5073=>operation: continue if  not untagged_ids
-op5083=>operation: repos_touched += 1
-cond5086=>condition: for chunk_start in range(0, len(untagged_ids), 100)
-op5090=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
-op5092=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
-op5094=>operation: tags_deleted += len(resp.get('imageIds', []))
-op5098=>operation: bytes_freed += untagged_size
-io5105=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
-e5103=>end: end function return
-op5038=>operation: repos = [r['name'] for r in self.list_repos()]
+cond405=>condition: exception raised?
+cond408=>condition: except ClientError as e
+sub412=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
+sub414=>subroutine: continue
+cond420=>operation: continue if  not untagged_ids
+op430=>operation: repos_touched += 1
+cond433=>condition: for chunk_start in range(0, len(untagged_ids), 100)
+op437=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
+op439=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
+op441=>operation: tags_deleted += len(resp.get('imageIds', []))
+op445=>operation: bytes_freed += untagged_size
+io452=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
+e450=>end: end function return
+op385=>operation: repos = [r['name'] for r in self.list_repos()]
 
-op5012->cond5015
-cond5015->op5025
-op5025->cond5028
-cond5028(yes)->op5032
-op5032->op5034
-op5034->op5041
-op5041->op5043
-op5043->op5045
-op5045->op5047
-op5047->cond5050
-cond5050(yes)->op5054
-op5054->op5056
-op5056->op5059
-op5059->cond5058
-cond5058(yes)->cond5061
-cond5061(yes)->sub5065
-sub5065->sub5067
-cond5061(no)->cond5073
-cond5073->op5083
-op5083->cond5086
-cond5086(yes)->op5090
-op5090->op5092
-op5092->op5094
-op5094(left)->cond5086
-cond5086(no)->op5098
-op5098(left)->cond5050
-cond5058(no)->cond5073
-cond5050(no)->io5105
-io5105->e5103
-cond5028(no)->op5038
-op5038->op5041
+op359->cond362
+cond362->op372
+op372->cond375
+cond375(yes)->op379
+op379->op381
+op381->op388
+op388->op390
+op390->op392
+op392->op394
+op394->cond397
+cond397(yes)->op401
+op401->op403
+op403->op406
+op406->cond405
+cond405(yes)->cond408
+cond408(yes)->sub412
+sub412->sub414
+cond408(no)->cond420
+cond420->op430
+op430->cond433
+cond433(yes)->op437
+op437->op439
+op439->op441
+op441(left)->cond433
+cond433(no)->op445
+op445(left)->cond397
+cond405(no)->cond420
+cond397(no)->io452
+io452->e450
+cond375(no)->op385
+op385->op388
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -286,17 +286,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-01T17:12:46Z -->
+        <!-- Generated from Git commit: 014029fc23b3763b4a03447e9e95b4a3fafcc3f3 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-01T17:12:46Z">2026-09-01T17:12:46Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>014029fc23b3763b4a03447e9e95b4a3fafcc3f3</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>3bf7a26a4725e23e</code>
+            Flow content SHA-256: <code>f044278d55198010</code>
           </p>
           <div id="canvas"></div>
         </div>

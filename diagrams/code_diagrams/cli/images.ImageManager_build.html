@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="479aee9cdb910d02">
+        <meta name="gco-generated-at" content="2026-09-01T17:12:46Z">
+        <meta name="gco-source-commit" content="014029fc23b3763b4a03447e9e95b4a3fafcc3f3">
+        <meta name="gco-flow-digest" content="946f90db2484e408">
         <title>gco images build — context validation, login, build, push</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,56 +208,56 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4847=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n            quiet: Capture container build output instead of writing it to the\n                command\'s output stream. Used for machine-readable CLI output.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
-op4849=>operation: ctx = self._validate_context(context)
-op4851=>operation: validated_name = self._validate_name(name)
-op4853=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
-op4855=>operation: df_path = (ctx / dockerfile).resolve()
-cond4858=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
-cond4869=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not df_path.is_relative_to(ctx)
-op4879=>operation: runtime = self._runtime_or_error()
-sub4881=>subroutine: self.init(name, retain=retain)
-sub4883=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub4885=>subroutine: self._ecr_login(runtime)
-op4887=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
-op4889=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
-cond4892=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
-sub4901=>subroutine: build_cmd.append(str(ctx))
-sub4903=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
-op4905=>operation: build_run_kwargs: dict[str, Any] = {'check': True, 'cwd': str(ctx)}
-cond4908=>operation: build_run_kwargs.update(capture_output=True, text=True) if  quiet
-sub4918=>subroutine: subprocess.run(build_cmd, **build_run_kwargs)
-op4920=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
-op4922=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond4925=>operation: self._apply_retain_tag(validated_name) if  retain
-op4935=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io4940=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e4938=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op194=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n            quiet: Capture container build output instead of writing it to the\n                command\'s output stream. Used for machine-readable CLI output.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
+op196=>operation: ctx = self._validate_context(context)
+op198=>operation: validated_name = self._validate_name(name)
+op200=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
+op202=>operation: df_path = (ctx / dockerfile).resolve()
+cond205=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
+cond216=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not df_path.is_relative_to(ctx)
+op226=>operation: runtime = self._runtime_or_error()
+sub228=>subroutine: self.init(name, retain=retain)
+sub230=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub232=>subroutine: self._ecr_login(runtime)
+op234=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op236=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
+cond239=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
+sub248=>subroutine: build_cmd.append(str(ctx))
+sub250=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
+op252=>operation: build_run_kwargs: dict[str, Any] = {'check': True, 'cwd': str(ctx)}
+cond255=>operation: build_run_kwargs.update(capture_output=True, text=True) if  quiet
+sub265=>subroutine: subprocess.run(build_cmd, **build_run_kwargs)
+op267=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
+op269=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond272=>operation: self._apply_retain_tag(validated_name) if  retain
+op282=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io287=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e285=>end: end function return
 
-op4847->op4849
-op4849->op4851
-op4851->op4853
-op4853->op4855
-op4855->cond4858
-cond4858->cond4869
-cond4869->op4879
-op4879->sub4881
-sub4881->sub4883
-sub4883->sub4885
-sub4885->op4887
-op4887->op4889
-op4889->cond4892
-cond4892->sub4901
-sub4901->sub4903
-sub4903->op4905
-op4905->cond4908
-cond4908->sub4918
-sub4918->op4920
-op4920->op4922
-op4922->cond4925
-cond4925->op4935
-op4935->io4940
-io4940->e4938
+op194->op196
+op196->op198
+op198->op200
+op200->op202
+op202->cond205
+cond205->cond216
+cond216->op226
+op226->sub228
+sub228->sub230
+sub230->sub232
+sub232->op234
+op234->op236
+op236->cond239
+cond239->sub248
+sub248->sub250
+sub250->op252
+op252->cond255
+cond255->sub265
+sub265->op267
+op267->op269
+op269->cond272
+cond272->op282
+op282->io287
+io287->e285
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -267,17 +267,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-01T17:12:46Z -->
+        <!-- Generated from Git commit: 014029fc23b3763b4a03447e9e95b4a3fafcc3f3 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-01T17:12:46Z">2026-09-01T17:12:46Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>014029fc23b3763b4a03447e9e95b4a3fafcc3f3</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>479aee9cdb910d02</code>
+            Flow content SHA-256: <code>946f90db2484e408</code>
           </p>
           <div id="canvas"></div>
         </div>
