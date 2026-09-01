@@ -64,7 +64,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install pinned PyYAML
-        run: python3 -m pip install --user "pyyaml==6.0.3"
+        # Derived from pyproject.toml so a bump edits one file. Empty
+        # extraction is fatal rather than falling back to an unpinned install.
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          pyyaml_version="$(extract_python_pin pyyaml pyproject.toml)"
+          if [ -z "${pyyaml_version}" ]; then
+            echo "::error::could not derive the pyyaml pin from pyproject.toml"
+            exit 1
+          fi
+          echo "Derived pyyaml pin: ${pyyaml_version}"
+          python3 -m pip install --user "pyyaml==${pyyaml_version}"
 
       - name: Extract dashboards from the applier manifests
         run: |

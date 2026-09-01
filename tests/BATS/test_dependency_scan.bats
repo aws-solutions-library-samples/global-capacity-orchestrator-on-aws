@@ -1262,6 +1262,96 @@ EOF
     rm -rf "$tmpdir"
 }
 
+@test "extract_python_pin: reads the real repository pins CI derives" {
+    # The moto server step and the Grafana dashboard job install these at
+    # runtime from pyproject rather than restating the version, so a bump
+    # edits one file. Assert the shape, not the value, so a legitimate bump
+    # does not break the test.
+    run extract_python_pin moto pyproject.toml
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+    run extract_python_pin pyyaml pyproject.toml
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_python_pin: agrees with the lock so a constrained install resolves" {
+    # The moto step installs with requirements-lock.txt as a constraint, so a
+    # pyproject pin that disagrees with the lock makes pip fail outright.
+    pinned="$(extract_python_pin moto pyproject.toml)"
+    locked="$(grep -E '^moto==' requirements-lock.txt | cut -d= -f3)"
+    [ -n "$pinned" ]
+    [ "$pinned" = "$locked" ]
+}
+
+@test "extract_python_pin: finds base, optional-group, and extras-bearing pins" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+[project]
+dependencies = ["boto3==1.2.3", "fastmcp[tasks,code_mode]==4.0.0"]
+
+[project.optional-dependencies]
+dev = ["moto==9.9.9", "Some_Pkg==1.2"]
+EOF
+    run extract_python_pin boto3 "$tmpfile"
+    [ "$output" = "1.2.3" ]
+    # A group-only pin is still the project's declared version.
+    run extract_python_pin moto "$tmpfile"
+    [ "$output" = "9.9.9" ]
+    # Extras on the declaration are the project's business, not the version's.
+    run extract_python_pin fastmcp "$tmpfile"
+    [ "$output" = "4.0.0" ]
+    # PEP 503: the caller may spell the name any equivalent way.
+    run extract_python_pin some-pkg "$tmpfile"
+    [ "$output" = "1.2" ]
+    run extract_python_pin SOME_PKG "$tmpfile"
+    [ "$output" = "1.2" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_pin: every ambiguous case yields empty so callers fail loudly" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+[project]
+dependencies = ["ranged>=1.0", "bare"]
+
+[project.optional-dependencies]
+a = ["split==1.0.0"]
+b = ["split==2.0.0"]
+EOF
+    # Absent, non-exact, and bare specifiers give no version to install.
+    run extract_python_pin absent "$tmpfile"
+    [ -z "$output" ]
+    run extract_python_pin ranged "$tmpfile"
+    [ -z "$output" ]
+    run extract_python_pin bare "$tmpfile"
+    [ -z "$output" ]
+    # Two groups disagreeing must not silently resolve to one of them.
+    run extract_python_pin split "$tmpfile"
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+
+    run extract_python_pin moto /nonexistent/pyproject.toml
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    tmpfile="$(mktemp)"
+    echo "[[[not toml" > "$tmpfile"
+    run extract_python_pin moto "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_pin: an environment marker does not leak into the version" {
+    tmpfile="$(mktemp)"
+    printf '[project]\ndependencies = ["marked==3.2.1 ; python_version < \x275.0\x27"]\n' > "$tmpfile"
+    run extract_python_pin marked "$tmpfile"
+    [ "$output" = "3.2.1" ]
+    rm -f "$tmpfile"
+}
+
 @test "check_lambda_requirements_pins: normalises names and ignores inline comments" {
     # ``PyYAML`` and ``pyyaml`` are the same distribution under PEP 503, and a
     # trailing comment must not become part of the version.

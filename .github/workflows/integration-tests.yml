@@ -776,14 +776,27 @@ jobs:
                 token: ci-stub-token
           EOF
       - name: Start moto SQS and create the job queue
-        # moto (the same 5.2.2 the test suite pins in requirements-lock.txt,
-        # installed with the lock as a constraint) provides a real SQS wire
-        # API on the runner. botocore honors AWS_ENDPOINT_URL_SQS, so the
-        # container talks to it with zero code changes — the KEDA ScaledJob
-        # consume path runs for real: receive, validate, delete/retain.
+        # moto provides a real SQS wire API on the runner. botocore honors
+        # AWS_ENDPOINT_URL_SQS, so the container talks to it with zero code
+        # changes — the KEDA ScaledJob consume path runs for real: receive,
+        # validate, delete/retain.
+        #
+        # The version is derived from pyproject.toml rather than written here,
+        # so it is always the one the test suite resolves and a bump edits one
+        # file. A literal copy drifted to 5.2.2 while pyproject moved to 5.2.3
+        # and, because the install also constrains against the lock, pip
+        # refused to resolve at all. Empty extraction is fatal: installing an
+        # unpinned moto would quietly diverge from the suite.
         run: |
           set -euo pipefail
-          pip install --constraint requirements-lock.txt "moto[server]==5.2.2"
+          source .github/scripts/lib_dependency_scan.sh
+          moto_version="$(extract_python_pin moto pyproject.toml)"
+          if [ -z "${moto_version}" ]; then
+            echo "::error::could not derive the moto pin from pyproject.toml"
+            exit 1
+          fi
+          echo "Derived moto pin: ${moto_version}"
+          pip install --constraint requirements-lock.txt "moto[server]==${moto_version}"
           nohup moto_server -H 127.0.0.1 -p 5000 > "${RUNNER_TEMP}/moto.log" 2>&1 &
           code=""
           for _ in $(seq 1 30); do

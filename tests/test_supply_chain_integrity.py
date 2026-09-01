@@ -3,6 +3,7 @@
 import ast
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -246,6 +247,54 @@ def test_helm_and_kubectl_pins_live_only_in_the_installer_dockerfile() -> None:
         assert "extract_helm_installer_pins" in _read(workflow), (
             f"{workflow} no longer derives its Helm/kubectl pins from the installer Dockerfile"
         )
+
+
+def test_workflow_pip_installs_derive_versions_pinned_in_pyproject() -> None:
+    """A workflow must not restate a version pyproject.toml already pins.
+
+    A CI step that pip-installs a package the project also declares had two
+    copies of the version with nothing reconciling them. That drifted: the moto
+    server step pinned 5.2.2 while pyproject moved to 5.2.3, and because the
+    step also constrains against requirements-lock.txt pip refused to resolve
+    at all. Such steps now derive the version through
+    ``extract_python_pin`` instead.
+
+    Packages pyproject does *not* pin are unaffected — ``pip==25.0.1`` is the
+    installer itself, deliberately pinned in the workflow that bootstraps it.
+    """
+    pyproject = tomllib.loads(_read("pyproject.toml"))
+    project = pyproject.get("project", {})
+    specs = list(project.get("dependencies", []) or [])
+    for group in (project.get("optional-dependencies", {}) or {}).values():
+        specs.extend(group or [])
+
+    def normalize(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    pinned = {
+        normalize(re.split(r"[\[=!<>;~ ]", spec, maxsplit=1)[0]) for spec in specs if "==" in spec
+    }
+    pinned.discard("gco-cli")
+
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        hits = [
+            match.group(0).strip()
+            for match in re.finditer(
+                r"""pip install[^\n]*?["']?([A-Za-z0-9][A-Za-z0-9._-]*)"""
+                r"""(?:\[[A-Za-z0-9,._-]+\])?==[0-9][^\s"']*["']?""",
+                path.read_text(encoding="utf-8"),
+            )
+            if normalize(match.group(1)) in pinned
+        ]
+        if hits:
+            offenders[path.name] = hits
+
+    assert not offenders, (
+        "workflow steps restate a version pyproject.toml already pins; derive it with "
+        "``extract_python_pin <package> pyproject.toml`` from lib_dependency_scan.sh "
+        f"instead: {offenders}"
+    )
 
 
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
