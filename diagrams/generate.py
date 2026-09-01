@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT))
 from diagrams.code_diagrams._renderer import _output_stem_for  # noqa: E402
 from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
-from diagrams.code_diagrams.generate import _verify_targets_match_source_commit  # noqa: E402
+from diagrams.code_diagrams.generate import (  # noqa: E402
+    verify_targets_match_provenance_manifest,
+)
 from diagrams.infra_diagrams._catalog import INFRA_DIAGRAM_NAMES  # noqa: E402
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS  # noqa: E402
 
@@ -217,8 +219,11 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
     if len(source_commits) != 1:
         issues.append(f"code diagram source commits disagree: {sorted(source_commits)}")
     else:
+        # Verify freshness against the committed digest manifest, not Git
+        # history: squash-merges delete branch commits, so the recorded SHA
+        # is provenance metadata rather than a resolvable object.
         try:
-            _verify_targets_match_source_commit(
+            verify_targets_match_provenance_manifest(
                 project_root=project_root,
                 targets=TARGETS,
                 source_commit=next(iter(source_commits)),

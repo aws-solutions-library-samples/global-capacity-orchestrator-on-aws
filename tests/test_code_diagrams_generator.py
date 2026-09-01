@@ -782,6 +782,107 @@ class TestSourceCommitVerification:
             )
 
 
+class TestProvenanceManifestVerification:
+    """The repository-side freshness contract is self-contained.
+
+    ``verify_targets_match_provenance_manifest`` compares working-tree bytes
+    against the digests recorded at generation time and must never resolve
+    the recorded commit from Git history — a squash-merged PR deletes its
+    branch commits, which is exactly how the recorded SHA became unreachable
+    on ``main`` and broke every fresh clone's contract check.
+    """
+
+    @staticmethod
+    def _write_source_and_manifest(
+        tmp_path: Path, body: bytes, *, commit: str = "a" * 40
+    ) -> Target:
+        source = tmp_path / "example.py"
+        source.write_bytes(body)
+        target = Target(source="example.py", function="f")
+        output_dir = tmp_path / "diagrams" / "code_diagrams"
+        output_dir.mkdir(parents=True)
+        generate_mod.write_provenance_manifest(
+            project_root=tmp_path,
+            output_dir=output_dir,
+            targets=[target],
+            generated_at="2026-09-01T12:00:00Z",
+            source_commit=commit,
+        )
+        return target
+
+    def test_write_then_verify_round_trips(self, tmp_path: Path) -> None:
+        target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
+        generate_mod.verify_targets_match_provenance_manifest(
+            project_root=tmp_path, targets=[target], source_commit="a" * 40
+        )
+
+    def test_verifier_never_consults_git(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreachable recorded commit must not matter to the contract.
+
+        Squash merges legitimately orphan the recorded SHA; the check would
+        only stay green in every clone if it never asks Git about it.
+        """
+
+        def _no_git(*_args, **_kwargs):
+            raise AssertionError("the provenance contract must not invoke subprocesses")
+
+        monkeypatch.setattr(generate_mod.subprocess, "run", _no_git)
+        target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
+        generate_mod.verify_targets_match_provenance_manifest(
+            project_root=tmp_path, targets=[target], source_commit="a" * 40
+        )
+
+    def test_missing_manifest_is_actionable(self, tmp_path: Path) -> None:
+        (tmp_path / "example.py").write_bytes(b"def f():\n    return True\n")
+        with pytest.raises(RuntimeError, match="missing provenance.json"):
+            generate_mod.verify_targets_match_provenance_manifest(
+                project_root=tmp_path,
+                targets=[Target(source="example.py", function="f")],
+                source_commit="a" * 40,
+            )
+
+    def test_manifest_commit_disagreement_is_rejected(self, tmp_path: Path) -> None:
+        target = self._write_source_and_manifest(
+            tmp_path, b"def f():\n    return True\n", commit="a" * 40
+        )
+        with pytest.raises(RuntimeError, match="disagrees with the catalogue"):
+            generate_mod.verify_targets_match_provenance_manifest(
+                project_root=tmp_path, targets=[target], source_commit="b" * 40
+            )
+
+    def test_out_of_sync_target_set_is_rejected(self, tmp_path: Path) -> None:
+        self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
+        (tmp_path / "other.py").write_bytes(b"def g():\n    return True\n")
+        with pytest.raises(RuntimeError, match="out of sync with the target catalogue"):
+            generate_mod.verify_targets_match_provenance_manifest(
+                project_root=tmp_path,
+                targets=[Target(source="other.py", function="g")],
+                source_commit="a" * 40,
+            )
+
+    def test_any_substantive_source_change_is_rejected(self, tmp_path: Path) -> None:
+        target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
+        (tmp_path / "example.py").write_bytes(b"def f():\n    return False\n")
+        with pytest.raises(RuntimeError, match="Commit substantive source changes first"):
+            generate_mod.verify_targets_match_provenance_manifest(
+                project_root=tmp_path, targets=[target], source_commit="a" * 40
+            )
+
+    def test_marker_restamp_does_not_change_source_identity(self, tmp_path: Path) -> None:
+        body = b"def f():\n    return True\n"
+        target = self._write_source_and_manifest(tmp_path, body)
+        (tmp_path / "example.py").write_bytes(
+            b"# <pyflowchart-code-diagram> BEGIN - generated\n"
+            b"# restamped metadata\n"
+            b"# <pyflowchart-code-diagram> END\n\n" + body
+        )
+        generate_mod.verify_targets_match_provenance_manifest(
+            project_root=tmp_path, targets=[target], source_commit="a" * 40
+        )
+
+
 class TestSyncSharedLambdaCopies:
     """The generator propagates canonical shared sources to their copies.
 

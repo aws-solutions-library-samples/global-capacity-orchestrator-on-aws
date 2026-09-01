@@ -34,6 +34,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -66,10 +68,52 @@ _MARKER_BYTES_RE = re.compile(
     re.DOTALL,
 )
 
+#: Committed next to the catalogue README. Records, for every charted source,
+#: the SHA-256 of its marker-stripped bytes at generation time. The repository
+#: contract check verifies working-tree sources against these digests instead
+#: of resolving ``source_commit`` from Git history: a squash-merged PR deletes
+#: its branch commits, so a recorded SHA is only a human-readable provenance
+#: label — never a lookup key that must resolve in every future clone.
+PROVENANCE_MANIFEST_NAME = "provenance.json"
+
 
 def _without_generated_marker(source: bytes) -> bytes:
     """Remove only the generated marker bytes; preserve every other byte."""
     return _MARKER_BYTES_RE.sub(b"", source)
+
+
+def source_content_digest(source: bytes) -> str:
+    """SHA-256 hex digest of a charted source with generated markers removed.
+
+    Marker blocks are excluded so that restamping timestamps/commits during
+    regeneration never changes a source's recorded digest — only substantive
+    code changes do.
+    """
+    return hashlib.sha256(_without_generated_marker(source)).hexdigest()
+
+
+def write_provenance_manifest(
+    *,
+    project_root: Path,
+    output_dir: Path,
+    targets: list[Target],
+    generated_at: str,
+    source_commit: str,
+) -> Path:
+    """Write the digest manifest the repository contract checks against."""
+    digests = {
+        source: source_content_digest((project_root / source).read_bytes())
+        for source in sorted({target.source for target in targets})
+    }
+    manifest = {
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "source_commit": source_commit,
+        "source_digests": digests,
+    }
+    path = output_dir / PROVENANCE_MANIFEST_NAME
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _verify_targets_match_source_commit(
@@ -112,6 +156,63 @@ def _verify_targets_match_source_commit(
             "charted source bytes differ from GCO_DIAGRAM_SOURCE_COMMIT after "
             f"removing only generated markers: {mismatches}. Commit substantive "
             "source changes first, then regenerate from that commit."
+        )
+
+
+def verify_targets_match_provenance_manifest(
+    *, project_root: Path, targets: list[Target], source_commit: str
+) -> None:
+    """Require charted source bytes to match the committed digest manifest.
+
+    This is the repository-side freshness contract. It is deliberately
+    self-contained: it compares working-tree bytes (markers stripped) against
+    the SHA-256 digests recorded at generation time, and never resolves the
+    recorded commit from Git history. The generation-time check
+    (:func:`_verify_targets_match_source_commit`) still anchors generation to
+    a real committed state on the machine that runs the generator — but once
+    committed, the catalogue must stay verifiable in any clone: a
+    squash-merge deletes branch commits, so a recorded SHA can legitimately
+    be unreachable while the catalogue remains exactly current.
+    """
+    manifest_path = project_root / "diagrams" / "code_diagrams" / PROVENANCE_MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"missing {PROVENANCE_MANIFEST_NAME}: regenerate the code diagram catalogue"
+        ) from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"unreadable {PROVENANCE_MANIFEST_NAME}: {exc}") from exc
+
+    recorded_commit = manifest.get("source_commit")
+    if recorded_commit != source_commit:
+        raise RuntimeError(
+            f"{PROVENANCE_MANIFEST_NAME} source commit {recorded_commit!r} disagrees "
+            f"with the catalogue's {source_commit!r}"
+        )
+    digests = manifest.get("source_digests")
+    if not isinstance(digests, dict):
+        raise RuntimeError(f"{PROVENANCE_MANIFEST_NAME} has no source_digests mapping")
+
+    charted = sorted({target.source for target in targets})
+    missing = sorted(set(charted) - set(digests))
+    retired = sorted(set(digests) - set(charted))
+    if missing or retired:
+        raise RuntimeError(
+            f"{PROVENANCE_MANIFEST_NAME} is out of sync with the target catalogue "
+            f"(missing: {missing}, retired: {retired}); regenerate the catalogue"
+        )
+
+    mismatches = [
+        source
+        for source in charted
+        if source_content_digest((project_root / source).read_bytes()) != digests[source]
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "charted source bytes differ from the recorded provenance digests after "
+            f"removing only generated markers: {mismatches}. Commit substantive "
+            "source changes first, then regenerate the catalogue from that commit."
         )
 
 
@@ -228,6 +329,14 @@ def main() -> None:
     if full_catalog:
         prune_orphaned_artifacts(targets=TARGETS, output_dir=output_dir)
         write_readme(results, output_dir=output_dir)
+        manifest_path = write_provenance_manifest(
+            project_root=project_root,
+            output_dir=output_dir,
+            targets=TARGETS,
+            generated_at=generated_at,
+            source_commit=source_commit,
+        )
+        print(f"📝 Wrote {manifest_path}")
     else:
         print("\n📝 Keeping the full-catalog README unchanged for a partial run.")
 
