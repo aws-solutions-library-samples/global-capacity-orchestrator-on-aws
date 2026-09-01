@@ -38,7 +38,10 @@ from repository files.
 ## Quick reference
 
 ```bash
-# Canonical full regeneration from a clean, committed source revision
+# Canonical regeneration from a clean, committed source revision.
+# The code catalogue is INCREMENTAL: only charted sources whose bytes
+# changed are re-rendered and restamped, so the diff stays proportional
+# to the code you touched. A run with nothing stale is a no-op.
 SOURCE_DATE_EPOCH=1788091200 \
 GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> \
 python diagrams/generate.py
@@ -52,11 +55,28 @@ GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> \
 python diagrams/generate.py --code-only
 python diagrams/generate.py --infra-only
 
+# Force a full restamp of every code target (rarely needed — reach for
+# this only after changing the generator's own rendering or marker
+# format, which invalidates every artifact rather than one source).
+SOURCE_DATE_EPOCH=1788091200 \
+GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> \
+python diagrams/code_diagrams/generate.py --all
+
 # Direct code-generator maintenance operations
 GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> \
 python diagrams/code_diagrams/generate.py --skip-png
 python diagrams/code_diagrams/generate.py --strip-markers
 ```
+
+Freshness is verified against `code_diagrams/provenance.json`, which records
+each charted source's marker-stripped SHA-256 digest alongside the timestamp
+and commit that produced its artifacts. Two consequences worth knowing:
+
+- The contract never resolves a recorded commit through Git, so a
+  squash-merged (and deleted) branch commit stays a valid provenance label.
+- The catalogue is legitimately a mix of vintages. Each source's marker and
+  artifacts must match *that source's* recorded stamp; the index header
+  reports the most recent generation.
 
 ## Prerequisites
 

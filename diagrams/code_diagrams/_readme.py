@@ -120,14 +120,14 @@ def render_readme(
 ) -> str:
     """Render the full README markdown body as a string."""
     sections = _group_by_toplevel(results)
-    generated_at_values = {result.generated_at for result in results}
-    if len(generated_at_values) > 1:
-        raise ValueError("README results must share one generation timestamp")
-    generated_at = next(iter(generated_at_values), "unknown")
-    source_commits = {result.source_commit for result in results}
-    if len(source_commits) > 1:
-        raise ValueError("README results must share one Git source commit")
-    source_commit = next(iter(source_commits), "unknown")
+    # Provenance is per source (see ``provenance.json``), so the catalogue is
+    # legitimately a mix of vintages: incremental regeneration restamps only
+    # the sources that changed. The index header therefore reports the most
+    # recent generation; each source's own stamp lives in its marker block and
+    # in the manifest.
+    newest = max(results, key=lambda result: result.generated_at, default=None)
+    generated_at = newest.generated_at if newest is not None else "unknown"
+    source_commit = newest.source_commit if newest is not None else "unknown"
     header = _HEADER.replace("__GENERATED_AT__", generated_at).replace(
         "__SOURCE_COMMIT__", source_commit
     )

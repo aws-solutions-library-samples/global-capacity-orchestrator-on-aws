@@ -17,6 +17,7 @@ from diagrams.code_diagrams._renderer import _output_stem_for  # noqa: E402
 from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
 from diagrams.code_diagrams.generate import (  # noqa: E402
+    newest_provenance_stamp,
     verify_targets_match_provenance_manifest,
 )
 from diagrams.infra_diagrams._catalog import INFRA_DIAGRAM_NAMES  # noqa: E402
@@ -127,21 +128,46 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
         ),
     ]
 
+    # Freshness is verified against the committed digest manifest, not Git
+    # history: squash merges delete branch commits, so a recorded SHA is
+    # provenance metadata rather than a resolvable object. The manifest also
+    # carries each source's own stamp, which is what lets one PR restamp only
+    # the sources it changed.
+    manifest: dict[str, dict[str, str]] = {}
+    try:
+        manifest = verify_targets_match_provenance_manifest(
+            project_root=project_root,
+            targets=TARGETS,
+        )
+    except RuntimeError as exc:
+        issues.append(str(exc))
+
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
     readme_timestamps = set(_TIMESTAMP_RE.findall(readme))
-    timestamps = set(readme_timestamps)
     readme_source_commits = set(_SOURCE_COMMIT_RE.findall(readme))
-    source_commits = set(readme_source_commits)
     if len(readme_timestamps) != 1:
         issues.append(f"code index timestamp invalid: {sorted(readme_timestamps)}")
     if len(readme_source_commits) != 1:
         issues.append(f"code index source commit invalid: {sorted(readme_source_commits)}")
+    if manifest and len(readme_timestamps) == 1 and len(readme_source_commits) == 1:
+        newest_at, newest_commit = newest_provenance_stamp(manifest)
+        if (next(iter(readme_timestamps)), next(iter(readme_source_commits))) != (
+            newest_at,
+            newest_commit,
+        ):
+            issues.append(
+                "code index stamp does not match the newest provenance entry "
+                f"({newest_at} / {newest_commit})"
+            )
     expected_index_links: set[str] = set()
     checked_sources: set[str] = set()
+    html_source: dict[Path, str] = {}
     for target in TARGETS:
         stem = _output_stem_for(target, output_dir=output_dir)
         for suffix in ("html", "png"):
             path = stem.parent / f"{stem.name}.{suffix}"
+            if suffix == "html":
+                html_source[path] = target.source
             relative = path.relative_to(output_dir).as_posix()
             expected_index_links.add(relative)
             if f"./{relative}" not in readme:
@@ -175,8 +201,20 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
                     f"source marker commit invalid: {target.source}: "
                     f"{sorted(marker_source_commits)}"
                 )
-            timestamps.update(source_timestamps)
-            source_commits.update(marker_source_commits)
+            # Each source's marker must agree with that source's own recorded
+            # provenance — not with the rest of the catalogue.
+            if (
+                manifest
+                and len(source_timestamps) == 1
+                and len(marker_source_commits) == 1
+                and target.source in manifest
+            ):
+                entry = manifest[target.source]
+                if (next(iter(source_timestamps)), next(iter(marker_source_commits))) != (
+                    entry["generated_at"],
+                    entry["source_commit"],
+                ):
+                    issues.append(f"source marker stamp disagrees with provenance: {target.source}")
         if f"``{target.function}``" not in source:
             issues.append(f"source marker omitted: {target.source}:{target.function}")
 
@@ -202,7 +240,24 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
             issues.append(
                 f"code artifact visible source commit omitted: {html.relative_to(project_root)}"
             )
-        source_commits.update(html_source_commits)
+        # An artifact must carry its own source's stamp; sibling artifacts
+        # derived from other sources are free to be a different vintage.
+        owner = html_source.get(html)
+        if (
+            manifest
+            and owner in manifest
+            and len(html_timestamps) == 1
+            and len(html_source_commits) == 1
+        ):
+            entry = manifest[owner]
+            if (next(iter(html_timestamps)), next(iter(html_source_commits))) != (
+                entry["generated_at"],
+                entry["source_commit"],
+            ):
+                issues.append(
+                    "code artifact stamp disagrees with provenance: "
+                    f"{html.relative_to(project_root)}"
+                )
         flow_digests = set(_FLOW_DIGEST_RE.findall(html_text))
         if len(flow_digests) != 1:
             issues.append(
@@ -213,23 +268,6 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
             issues.append(
                 f"code artifact visible flow digest omitted: {html.relative_to(project_root)}"
             )
-        timestamps.update(html_timestamps)
-    if len(timestamps) != 1:
-        issues.append(f"code diagram timestamps disagree: {sorted(timestamps)}")
-    if len(source_commits) != 1:
-        issues.append(f"code diagram source commits disagree: {sorted(source_commits)}")
-    else:
-        # Verify freshness against the committed digest manifest, not Git
-        # history: squash-merges delete branch commits, so the recorded SHA
-        # is provenance metadata rather than a resolvable object.
-        try:
-            verify_targets_match_provenance_manifest(
-                project_root=project_root,
-                targets=TARGETS,
-                source_commit=next(iter(source_commits)),
-            )
-        except RuntimeError as exc:
-            issues.append(str(exc))
 
     allowed_marker_sources = {target.source for target in TARGETS}
     issues.extend(_shared_source_copy_issues(project_root, allowed_marker_sources))

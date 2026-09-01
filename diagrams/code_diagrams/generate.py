@@ -46,6 +46,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from diagrams.code_diagrams._renderer import (  # noqa: E402
+    RenderedTarget,
+    _output_stem_for,
     prune_orphaned_artifacts,
     render_all,
     write_readme,
@@ -53,6 +55,7 @@ from diagrams.code_diagrams._renderer import (  # noqa: E402
 from diagrams.code_diagrams._source_marker import (  # noqa: E402
     SENTINEL,
     strip_all_markers,
+    strip_markers_from,
     upsert_markers,
 )
 from diagrams.code_diagrams._targets import TARGETS, Target  # noqa: E402
@@ -68,13 +71,24 @@ _MARKER_BYTES_RE = re.compile(
     re.DOTALL,
 )
 
-#: Committed next to the catalogue README. Records, for every charted source,
-#: the SHA-256 of its marker-stripped bytes at generation time. The repository
-#: contract check verifies working-tree sources against these digests instead
-#: of resolving ``source_commit`` from Git history: a squash-merged PR deletes
-#: its branch commits, so a recorded SHA is only a human-readable provenance
-#: label — never a lookup key that must resolve in every future clone.
+#: Committed next to the catalogue README. Records, per charted source, the
+#: SHA-256 of its marker-stripped bytes plus the timestamp and commit that
+#: produced its artifacts. Two properties follow from keeping provenance
+#: *per source* rather than catalogue-wide:
+#:
+#: 1. The contract check verifies working-tree sources against these digests
+#:    instead of resolving ``source_commit`` from Git history — a squash-merged
+#:    PR deletes its branch commits, so a recorded SHA is a human-readable
+#:    label, never a lookup key that must resolve in every future clone.
+#: 2. Regeneration is incremental. Changing one charted file restamps only
+#:    that file's artifacts, so a PR's diagram diff stays proportional to the
+#:    code it actually touched instead of restamping all ~200 artifacts.
 PROVENANCE_MANIFEST_NAME = "provenance.json"
+
+#: Bumped when the manifest layout changes. v1 recorded one catalogue-wide
+#: ``generated_at`` / ``source_commit`` plus a flat ``source_digests`` map;
+#: v2 records a per-source ``sources`` mapping.
+PROVENANCE_SCHEMA_VERSION = 2
 
 
 def _without_generated_marker(source: bytes) -> bytes:
@@ -92,28 +106,132 @@ def source_content_digest(source: bytes) -> str:
     return hashlib.sha256(_without_generated_marker(source)).hexdigest()
 
 
+def provenance_manifest_path(project_root: Path) -> Path:
+    """Absolute path of the committed provenance manifest."""
+    return project_root / "diagrams" / "code_diagrams" / PROVENANCE_MANIFEST_NAME
+
+
+def load_provenance_manifest(project_root: Path) -> dict[str, dict[str, str]]:
+    """Return ``{source: {digest, generated_at, source_commit}}``.
+
+    Raises :class:`RuntimeError` with an actionable message when the manifest
+    is absent or unreadable — the catalogue cannot be verified without it.
+    """
+    path = provenance_manifest_path(project_root)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"missing {PROVENANCE_MANIFEST_NAME}: regenerate the code diagram catalogue"
+        ) from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"unreadable {PROVENANCE_MANIFEST_NAME}: {exc}") from exc
+
+    sources = raw.get("sources")
+    if not isinstance(sources, dict) or not sources:
+        raise RuntimeError(f"{PROVENANCE_MANIFEST_NAME} has no sources mapping")
+    entries: dict[str, dict[str, str]] = {}
+    for source, entry in sources.items():
+        if not isinstance(entry, dict) or not {
+            "digest",
+            "generated_at",
+            "source_commit",
+        } <= set(entry):
+            raise RuntimeError(
+                f"{PROVENANCE_MANIFEST_NAME} entry for {source} must record "
+                "digest, generated_at, and source_commit"
+            )
+        entries[source] = {
+            key: str(entry[key]) for key in ("digest", "generated_at", "source_commit")
+        }
+    return entries
+
+
+def newest_provenance_stamp(manifest: dict[str, dict[str, str]]) -> tuple[str, str]:
+    """Return the ``(generated_at, source_commit)`` of the newest entry.
+
+    The catalogue README carries one stamp describing the most recent
+    regeneration; per-source stamps live in the manifest and the markers.
+    """
+    newest = max(manifest.values(), key=lambda entry: entry["generated_at"])
+    return newest["generated_at"], newest["source_commit"]
+
+
 def write_provenance_manifest(
     *,
     project_root: Path,
     output_dir: Path,
-    targets: list[Target],
+    regenerated_targets: list[Target],
     generated_at: str,
     source_commit: str,
+    catalog: list[Target],
 ) -> Path:
-    """Write the digest manifest the repository contract checks against."""
-    digests = {
-        source: source_content_digest((project_root / source).read_bytes())
-        for source in sorted({target.source for target in targets})
-    }
-    manifest = {
-        "schema_version": 1,
-        "generated_at": generated_at,
-        "source_commit": source_commit,
-        "source_digests": digests,
-    }
+    """Merge this run's regenerated sources into the manifest and write it.
+
+    Entries for sources this run did not regenerate are preserved verbatim,
+    which is what keeps an incremental run's diff small. Sources no longer in
+    ``catalog`` are dropped.
+    """
+    try:
+        existing = load_provenance_manifest(project_root)
+    except RuntimeError:
+        existing = {}
+
+    charted = {target.source for target in catalog}
+    merged = {source: entry for source, entry in existing.items() if source in charted}
+    for source in sorted({target.source for target in regenerated_targets}):
+        merged[source] = {
+            "digest": source_content_digest((project_root / source).read_bytes()),
+            "generated_at": generated_at,
+            "source_commit": source_commit,
+        }
+
+    manifest = {"schema_version": PROVENANCE_SCHEMA_VERSION, "sources": merged}
     path = output_dir / PROVENANCE_MANIFEST_NAME
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def select_stale_targets(
+    *,
+    project_root: Path,
+    targets: list[Target],
+    output_dir: Path,
+) -> list[Target]:
+    """Return the targets an incremental run must re-render.
+
+    A target is stale when its source's marker-stripped bytes no longer match
+    the recorded digest (a substantive code change), when the source has no
+    recorded provenance at all (newly charted), or when either committed
+    artifact is missing. Everything else is already current and is left byte-
+    for-byte alone.
+    """
+    try:
+        manifest = load_provenance_manifest(project_root)
+    except RuntimeError:
+        return list(targets)
+
+    digest_cache: dict[str, str] = {}
+    stale: list[Target] = []
+    for target in targets:
+        entry = manifest.get(target.source)
+        if entry is None:
+            stale.append(target)
+            continue
+        if target.source not in digest_cache:
+            digest_cache[target.source] = source_content_digest(
+                (project_root / target.source).read_bytes()
+            )
+        if digest_cache[target.source] != entry["digest"]:
+            stale.append(target)
+            continue
+        stem = _output_stem_for(target, output_dir=output_dir)
+        if (
+            not stem.with_name(f"{stem.name}.html").is_file()
+            or not stem.with_name(f"{stem.name}.png").is_file()
+        ):
+            stale.append(target)
+    return stale
 
 
 def _verify_targets_match_source_commit(
@@ -160,43 +278,28 @@ def _verify_targets_match_source_commit(
 
 
 def verify_targets_match_provenance_manifest(
-    *, project_root: Path, targets: list[Target], source_commit: str
-) -> None:
+    *, project_root: Path, targets: list[Target]
+) -> dict[str, dict[str, str]]:
     """Require charted source bytes to match the committed digest manifest.
 
-    This is the repository-side freshness contract. It is deliberately
+    This is the repository-side freshness contract, and it is deliberately
     self-contained: it compares working-tree bytes (markers stripped) against
-    the SHA-256 digests recorded at generation time, and never resolves the
+    the SHA-256 digests recorded at generation time and never resolves a
     recorded commit from Git history. The generation-time check
-    (:func:`_verify_targets_match_source_commit`) still anchors generation to
-    a real committed state on the machine that runs the generator — but once
-    committed, the catalogue must stay verifiable in any clone: a
-    squash-merge deletes branch commits, so a recorded SHA can legitimately
-    be unreachable while the catalogue remains exactly current.
-    """
-    manifest_path = project_root / "diagrams" / "code_diagrams" / PROVENANCE_MANIFEST_NAME
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"missing {PROVENANCE_MANIFEST_NAME}: regenerate the code diagram catalogue"
-        ) from None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"unreadable {PROVENANCE_MANIFEST_NAME}: {exc}") from exc
+    (:func:`_verify_targets_match_source_commit`) still anchors generation to a
+    real committed state on the machine running the generator — but once
+    committed, the catalogue must stay verifiable in any clone: a squash merge
+    deletes branch commits, so a recorded SHA can legitimately be unreachable
+    while the catalogue remains exactly current.
 
-    recorded_commit = manifest.get("source_commit")
-    if recorded_commit != source_commit:
-        raise RuntimeError(
-            f"{PROVENANCE_MANIFEST_NAME} source commit {recorded_commit!r} disagrees "
-            f"with the catalogue's {source_commit!r}"
-        )
-    digests = manifest.get("source_digests")
-    if not isinstance(digests, dict):
-        raise RuntimeError(f"{PROVENANCE_MANIFEST_NAME} has no source_digests mapping")
+    Returns the loaded manifest so the caller can cross-check per-source
+    marker and artifact stamps against it.
+    """
+    manifest = load_provenance_manifest(project_root)
 
     charted = sorted({target.source for target in targets})
-    missing = sorted(set(charted) - set(digests))
-    retired = sorted(set(digests) - set(charted))
+    missing = sorted(set(charted) - set(manifest))
+    retired = sorted(set(manifest) - set(charted))
     if missing or retired:
         raise RuntimeError(
             f"{PROVENANCE_MANIFEST_NAME} is out of sync with the target catalogue "
@@ -206,14 +309,16 @@ def verify_targets_match_provenance_manifest(
     mismatches = [
         source
         for source in charted
-        if source_content_digest((project_root / source).read_bytes()) != digests[source]
+        if source_content_digest((project_root / source).read_bytes()) != manifest[source]["digest"]
     ]
     if mismatches:
         raise RuntimeError(
             "charted source bytes differ from the recorded provenance digests after "
             f"removing only generated markers: {mismatches}. Commit substantive "
-            "source changes first, then regenerate the catalogue from that commit."
+            "source changes first, then regenerate (``python diagrams/generate.py "
+            "--code-only`` re-renders only the sources that changed)."
         )
+    return manifest
 
 
 def main() -> None:
@@ -230,6 +335,16 @@ def main() -> None:
             "Only generate the named target(s). Repeatable. "
             "Format: ``path/to/file.py:function_name``. "
             "Default: all targets."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        dest="force_all",
+        action="store_true",
+        help=(
+            "Re-render every target instead of only the sources whose bytes "
+            "changed. Restamps the whole catalogue, so prefer the default "
+            "incremental run unless you changed the generator itself."
         ),
     )
     parser.add_argument(
@@ -278,23 +393,47 @@ def main() -> None:
         print(f"✅ Stripped markers from {modified} file(s).")
         return
 
-    targets = _filter_targets(TARGETS, args.target)
+    selected = _filter_targets(TARGETS, args.target)
     full_catalog = args.target is None
     generated_at = generation_timestamp_utc()
     source_commit = generation_source_commit()
-    _verify_targets_match_source_commit(
-        project_root=project_root,
-        targets=targets,
-        source_commit=source_commit,
+
+    # Incremental by default: re-render only the sources whose marker-stripped
+    # bytes differ from the recorded provenance (plus newly charted targets and
+    # any missing artifact). This is what keeps a PR's diagram diff
+    # proportional to the code it changed. ``--all`` and an explicit
+    # ``--target`` both bypass the staleness filter.
+    incremental = full_catalog and not args.force_all
+    targets = (
+        select_stale_targets(
+            project_root=project_root,
+            targets=selected,
+            output_dir=output_dir,
+        )
+        if incremental
+        else selected
     )
 
     print("🧭 GCO Code Flowchart Generator")
     print("=" * 50)
     print(f"   Project root : {project_root}")
     print(f"   Output dir   : {output_dir}")
-    print(f"   Targets      : {len(targets)}")
+    print(f"   Mode         : {'incremental' if incremental else 'full'}")
+    print(f"   Targets      : {len(targets)} of {len(selected)} selected")
     print(f"   Generated at : {generated_at}")
     print(f"   Source commit: {source_commit}")
+
+    if not targets:
+        # Nothing changed. Leave every committed artifact, marker, README, and
+        # manifest byte untouched so a no-op regeneration is a no-op diff.
+        print("\n✅ Every charted source is already current; nothing to re-render.")
+        return
+
+    _verify_targets_match_source_commit(
+        project_root=project_root,
+        targets=targets,
+        source_commit=source_commit,
+    )
 
     results = render_all(
         targets=targets,
@@ -314,35 +453,107 @@ def main() -> None:
             sys.exit(f"Canonical generation requires every PNG; missing: {missing_pngs}")
 
     if not args.skip_marker:
-        if full_catalog:
-            # Reconcile the whole owned marker set: stripping first removes
-            # markers from retired targets before current targets are reinserted.
-            strip_all_markers(project_root)
-            upsert_markers(results, project_root=project_root)
-            _sync_shared_lambda_copies(project_root)
-        else:
-            print(
-                "\n🖋  Skipping source-marker refresh for a partial run; "
-                "a full run preserves every marker entry."
-            )
+        # Refresh markers only in the sources we just re-rendered, so an
+        # incremental run leaves every other charted file byte-identical.
+        # Retired sources still get their stale markers pruned — the checked-in
+        # copies of charted shared Lambda sources are legitimate marker
+        # carriers and must stay in the allowed set.
+        allowed_markers = {target.source for target in TARGETS}
+        for canonical, copies in LAMBDA_SHARED_SOURCE_TARGETS.items():
+            if canonical in allowed_markers:
+                allowed_markers.update(copies)
+        prune_retired_markers(project_root, charted=allowed_markers)
+        upsert_markers(results, project_root=project_root)
+        _sync_shared_lambda_copies(project_root)
 
     if full_catalog:
         prune_orphaned_artifacts(targets=TARGETS, output_dir=output_dir)
-        write_readme(results, output_dir=output_dir)
         manifest_path = write_provenance_manifest(
             project_root=project_root,
             output_dir=output_dir,
-            targets=TARGETS,
+            regenerated_targets=targets,
             generated_at=generated_at,
             source_commit=source_commit,
+            catalog=TARGETS,
         )
         print(f"📝 Wrote {manifest_path}")
+        # The README indexes the whole catalogue, so entries for sources this
+        # run did not touch are reconstructed from their recorded provenance.
+        write_readme(
+            _catalog_readme_entries(
+                project_root=project_root,
+                output_dir=output_dir,
+                results=results,
+            ),
+            output_dir=output_dir,
+        )
     else:
-        print("\n📝 Keeping the full-catalog README unchanged for a partial run.")
+        print("\n📝 Keeping the full-catalog README and manifest unchanged for a partial run.")
 
     print("\n" + "=" * 50)
     print("✅ Code flowchart generation complete!")
     print(f"   Output directory: {output_dir.absolute()}")
+
+
+def prune_retired_markers(project_root: Path, *, charted: set[str]) -> int:
+    """Strip markers from files that are no longer charted targets.
+
+    A full ``strip_all_markers`` + reinsert pass would rewrite every charted
+    source on every run, which is exactly the catalogue-wide churn incremental
+    generation exists to avoid. Only genuinely retired sources are touched.
+    """
+    modified = 0
+    for source_path in sorted(project_root.rglob("*.py")):
+        relative = source_path.relative_to(project_root).as_posix()
+        if relative in charted or "-build" in relative:
+            continue
+        if not relative.startswith(("app.py", "cli/", "gco/", "gco_mcp/", "lambda/")):
+            continue
+        original = source_path.read_text(encoding="utf-8")
+        if SENTINEL not in original:
+            continue
+        stripped = strip_markers_from(original)
+        if stripped != original:
+            source_path.write_text(stripped, encoding="utf-8")
+            print(f"   🧹 stripped retired marker from {relative}")
+            modified += 1
+    return modified
+
+
+def _catalog_readme_entries(
+    *,
+    project_root: Path,
+    output_dir: Path,
+    results: list[RenderedTarget],
+) -> list[RenderedTarget]:
+    """Return one entry per catalogue target for the README index.
+
+    Freshly rendered targets contribute their real results; every other target
+    is reconstructed from its recorded provenance stamp and committed artifact
+    paths, so an incremental run still writes a complete index without
+    re-rendering (or restamping) the untouched majority.
+    """
+    rendered = {(result.target.source, result.target.function): result for result in results}
+    manifest = load_provenance_manifest(project_root)
+    entries: list[RenderedTarget] = []
+    for target in TARGETS:
+        existing = rendered.get((target.source, target.function))
+        if existing is not None:
+            entries.append(existing)
+            continue
+        entry = manifest[target.source]
+        stem = _output_stem_for(target, output_dir=output_dir)
+        png_path = stem.with_name(f"{stem.name}.png")
+        entries.append(
+            RenderedTarget(
+                target=target,
+                html_path=stem.with_name(f"{stem.name}.html"),
+                png_path=png_path if png_path.is_file() else None,
+                generated_at=entry["generated_at"],
+                source_commit=entry["source_commit"],
+            )
+        )
+    return entries
 
 
 def _sync_shared_lambda_copies(project_root: Path) -> None:

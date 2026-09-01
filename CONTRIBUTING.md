@@ -697,9 +697,13 @@ process.
     Playwright. Use the [canonical two-commit workflow](diagrams/README.md#quick-reference):
     commit charted source first, regenerate with a fixed `SOURCE_DATE_EPOCH`
     and exact `GCO_DIAGRAM_SOURCE_COMMIT`, then commit derived artifacts.
-    Generated marker blocks, HTML/PNG, and the index carry both values plus a
-    flow-content digest. Add new targets by editing
-    `diagrams/code_diagrams/_targets.py`.
+    Regeneration is incremental — only the charted sources you actually
+    changed are re-rendered and restamped, so expect a handful of touched
+    files rather than the whole catalogue. Generated marker blocks, HTML/PNG,
+    and the index carry the stamp plus a flow-content digest, and
+    `code_diagrams/provenance.json` records each source's digest so the
+    freshness contract holds without resolving commits through Git. Add new
+    targets by editing `diagrams/code_diagrams/_targets.py`.
 - Keep it up-to-date with code changes
 
 ## Code Review Guidelines

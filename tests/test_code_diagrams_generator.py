@@ -783,46 +783,56 @@ class TestSourceCommitVerification:
 
 
 class TestProvenanceManifestVerification:
-    """The repository-side freshness contract is self-contained.
+    """The repository-side freshness contract is self-contained and per source.
 
     ``verify_targets_match_provenance_manifest`` compares working-tree bytes
-    against the digests recorded at generation time and must never resolve
-    the recorded commit from Git history — a squash-merged PR deletes its
-    branch commits, which is exactly how the recorded SHA became unreachable
-    on ``main`` and broke every fresh clone's contract check.
+    against the digests recorded at generation time and must never resolve the
+    recorded commit from Git history — a squash-merged PR deletes its branch
+    commits, which is exactly how the recorded SHA became unreachable on
+    ``main`` and broke every fresh clone's contract check. Provenance is
+    recorded per source so one changed file restamps only its own artifacts.
     """
 
     @staticmethod
     def _write_source_and_manifest(
-        tmp_path: Path, body: bytes, *, commit: str = "a" * 40
+        tmp_path: Path,
+        body: bytes,
+        *,
+        commit: str = "a" * 40,
+        generated_at: str = "2026-09-01T12:00:00Z",
+        name: str = "example.py",
+        function: str = "f",
     ) -> Target:
-        source = tmp_path / "example.py"
+        source = tmp_path / name
         source.write_bytes(body)
-        target = Target(source="example.py", function="f")
+        target = Target(source=name, function=function)
         output_dir = tmp_path / "diagrams" / "code_diagrams"
-        output_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         generate_mod.write_provenance_manifest(
             project_root=tmp_path,
             output_dir=output_dir,
-            targets=[target],
-            generated_at="2026-09-01T12:00:00Z",
+            regenerated_targets=[target],
+            generated_at=generated_at,
             source_commit=commit,
+            catalog=[target],
         )
         return target
 
     def test_write_then_verify_round_trips(self, tmp_path: Path) -> None:
         target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
-        generate_mod.verify_targets_match_provenance_manifest(
-            project_root=tmp_path, targets=[target], source_commit="a" * 40
+        manifest = generate_mod.verify_targets_match_provenance_manifest(
+            project_root=tmp_path, targets=[target]
         )
+        assert manifest["example.py"]["source_commit"] == "a" * 40
+        assert manifest["example.py"]["generated_at"] == "2026-09-01T12:00:00Z"
 
     def test_verifier_never_consults_git(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unreachable recorded commit must not matter to the contract.
 
-        Squash merges legitimately orphan the recorded SHA; the check would
-        only stay green in every clone if it never asks Git about it.
+        Squash merges legitimately orphan the recorded SHA; the check only
+        stays green in every clone because it never asks Git about it.
         """
 
         def _no_git(*_args, **_kwargs):
@@ -831,7 +841,7 @@ class TestProvenanceManifestVerification:
         monkeypatch.setattr(generate_mod.subprocess, "run", _no_git)
         target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
         generate_mod.verify_targets_match_provenance_manifest(
-            project_root=tmp_path, targets=[target], source_commit="a" * 40
+            project_root=tmp_path, targets=[target]
         )
 
     def test_missing_manifest_is_actionable(self, tmp_path: Path) -> None:
@@ -840,16 +850,6 @@ class TestProvenanceManifestVerification:
             generate_mod.verify_targets_match_provenance_manifest(
                 project_root=tmp_path,
                 targets=[Target(source="example.py", function="f")],
-                source_commit="a" * 40,
-            )
-
-    def test_manifest_commit_disagreement_is_rejected(self, tmp_path: Path) -> None:
-        target = self._write_source_and_manifest(
-            tmp_path, b"def f():\n    return True\n", commit="a" * 40
-        )
-        with pytest.raises(RuntimeError, match="disagrees with the catalogue"):
-            generate_mod.verify_targets_match_provenance_manifest(
-                project_root=tmp_path, targets=[target], source_commit="b" * 40
             )
 
     def test_out_of_sync_target_set_is_rejected(self, tmp_path: Path) -> None:
@@ -859,7 +859,6 @@ class TestProvenanceManifestVerification:
             generate_mod.verify_targets_match_provenance_manifest(
                 project_root=tmp_path,
                 targets=[Target(source="other.py", function="g")],
-                source_commit="a" * 40,
             )
 
     def test_any_substantive_source_change_is_rejected(self, tmp_path: Path) -> None:
@@ -867,7 +866,7 @@ class TestProvenanceManifestVerification:
         (tmp_path / "example.py").write_bytes(b"def f():\n    return False\n")
         with pytest.raises(RuntimeError, match="Commit substantive source changes first"):
             generate_mod.verify_targets_match_provenance_manifest(
-                project_root=tmp_path, targets=[target], source_commit="a" * 40
+                project_root=tmp_path, targets=[target]
             )
 
     def test_marker_restamp_does_not_change_source_identity(self, tmp_path: Path) -> None:
@@ -879,8 +878,147 @@ class TestProvenanceManifestVerification:
             b"# <pyflowchart-code-diagram> END\n\n" + body
         )
         generate_mod.verify_targets_match_provenance_manifest(
-            project_root=tmp_path, targets=[target], source_commit="a" * 40
+            project_root=tmp_path, targets=[target]
         )
+
+    def test_regenerating_one_source_preserves_other_entries(self, tmp_path: Path) -> None:
+        """A partial rewrite must not restamp sources it did not re-render.
+
+        This is the property that keeps a PR's diagram diff proportional to
+        the code it touched instead of restamping the whole catalogue.
+        """
+        first = self._write_source_and_manifest(
+            tmp_path,
+            b"def f():\n    return True\n",
+            commit="a" * 40,
+            generated_at="2026-09-01T12:00:00Z",
+        )
+        second = Target(source="other.py", function="g")
+        (tmp_path / "other.py").write_bytes(b"def g():\n    return True\n")
+        output_dir = tmp_path / "diagrams" / "code_diagrams"
+
+        # Add the second source, then re-render only that one.
+        generate_mod.write_provenance_manifest(
+            project_root=tmp_path,
+            output_dir=output_dir,
+            regenerated_targets=[second],
+            generated_at="2026-09-02T12:00:00Z",
+            source_commit="b" * 40,
+            catalog=[first, second],
+        )
+
+        manifest = generate_mod.load_provenance_manifest(tmp_path)
+        assert manifest["example.py"]["generated_at"] == "2026-09-01T12:00:00Z"
+        assert manifest["example.py"]["source_commit"] == "a" * 40
+        assert manifest["other.py"]["generated_at"] == "2026-09-02T12:00:00Z"
+        assert manifest["other.py"]["source_commit"] == "b" * 40
+        # A mixed-vintage catalogue is valid, and the newest stamp is what the
+        # README header records.
+        assert generate_mod.newest_provenance_stamp(manifest) == (
+            "2026-09-02T12:00:00Z",
+            "b" * 40,
+        )
+        generate_mod.verify_targets_match_provenance_manifest(
+            project_root=tmp_path, targets=[first, second]
+        )
+
+    def test_retired_sources_drop_out_of_the_manifest(self, tmp_path: Path) -> None:
+        first = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
+        second = Target(source="other.py", function="g")
+        (tmp_path / "other.py").write_bytes(b"def g():\n    return True\n")
+        generate_mod.write_provenance_manifest(
+            project_root=tmp_path,
+            output_dir=tmp_path / "diagrams" / "code_diagrams",
+            regenerated_targets=[second],
+            generated_at="2026-09-02T12:00:00Z",
+            source_commit="b" * 40,
+            catalog=[second],
+        )
+        manifest = generate_mod.load_provenance_manifest(tmp_path)
+        assert set(manifest) == {"other.py"}
+        assert first.source not in manifest
+
+
+class TestIncrementalTargetSelection:
+    """Only sources whose bytes changed (or whose artifacts vanished) re-render."""
+
+    @staticmethod
+    def _seed(tmp_path: Path) -> tuple[Target, Target, Path]:
+        output_dir = tmp_path / "diagrams" / "code_diagrams"
+        output_dir.mkdir(parents=True)
+        targets = []
+        for name, function in (("example.py", "f"), ("other.py", "g")):
+            (tmp_path / name).write_bytes(f"def {function}():\n    return True\n".encode())
+            target = Target(source=name, function=function)
+            targets.append(target)
+            stem = renderer_mod._output_stem_for(target, output_dir=output_dir)
+            stem.parent.mkdir(parents=True, exist_ok=True)
+            stem.with_name(f"{stem.name}.html").write_text("<html></html>", encoding="utf-8")
+            stem.with_name(f"{stem.name}.png").write_bytes(b"\x89PNG")
+        generate_mod.write_provenance_manifest(
+            project_root=tmp_path,
+            output_dir=output_dir,
+            regenerated_targets=targets,
+            generated_at="2026-09-01T12:00:00Z",
+            source_commit="a" * 40,
+            catalog=targets,
+        )
+        return targets[0], targets[1], output_dir
+
+    def test_unchanged_catalogue_selects_nothing(self, tmp_path: Path) -> None:
+        first, second, output_dir = self._seed(tmp_path)
+        assert (
+            generate_mod.select_stale_targets(
+                project_root=tmp_path, targets=[first, second], output_dir=output_dir
+            )
+            == []
+        )
+
+    def test_only_the_changed_source_is_selected(self, tmp_path: Path) -> None:
+        first, second, output_dir = self._seed(tmp_path)
+        (tmp_path / second.source).write_bytes(b"def g():\n    return False\n")
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path, targets=[first, second], output_dir=output_dir
+        ) == [second]
+
+    def test_marker_only_edit_selects_nothing(self, tmp_path: Path) -> None:
+        """Restamping a marker is not a substantive change."""
+        first, second, output_dir = self._seed(tmp_path)
+        body = (tmp_path / second.source).read_bytes()
+        (tmp_path / second.source).write_bytes(
+            b"# <pyflowchart-code-diagram> BEGIN - generated\n"
+            b"# new stamp\n"
+            b"# <pyflowchart-code-diagram> END\n\n" + body
+        )
+        assert (
+            generate_mod.select_stale_targets(
+                project_root=tmp_path, targets=[first, second], output_dir=output_dir
+            )
+            == []
+        )
+
+    def test_missing_artifact_selects_its_target(self, tmp_path: Path) -> None:
+        first, second, output_dir = self._seed(tmp_path)
+        stem = renderer_mod._output_stem_for(first, output_dir=output_dir)
+        stem.with_name(f"{stem.name}.png").unlink()
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path, targets=[first, second], output_dir=output_dir
+        ) == [first]
+
+    def test_newly_charted_source_is_selected(self, tmp_path: Path) -> None:
+        first, second, output_dir = self._seed(tmp_path)
+        fresh = Target(source="fresh.py", function="h")
+        (tmp_path / "fresh.py").write_bytes(b"def h():\n    return True\n")
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path, targets=[first, second, fresh], output_dir=output_dir
+        ) == [fresh]
+
+    def test_absent_manifest_selects_everything(self, tmp_path: Path) -> None:
+        first, second, output_dir = self._seed(tmp_path)
+        generate_mod.provenance_manifest_path(tmp_path).unlink()
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path, targets=[first, second], output_dir=output_dir
+        ) == [first, second]
 
 
 class TestSyncSharedLambdaCopies:
