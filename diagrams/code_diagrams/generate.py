@@ -486,14 +486,9 @@ def main() -> None:
     if not args.skip_marker:
         # Refresh markers only in the sources we just re-rendered, so an
         # incremental run leaves every other charted file byte-identical.
-        # Retired sources still get their stale markers pruned — the checked-in
-        # copies of charted shared Lambda sources are legitimate marker
-        # carriers and must stay in the allowed set.
-        allowed_markers = {target.source for target in TARGETS}
-        for canonical, copies in LAMBDA_SHARED_SOURCE_TARGETS.items():
-            if canonical in allowed_markers:
-                allowed_markers.update(copies)
-        prune_retired_markers(project_root, charted=allowed_markers)
+        # Retired sources still get their stale markers pruned; the shared
+        # Lambda copies stay in the allowed set (see marker_allowed_sources).
+        prune_retired_markers(project_root, charted=marker_allowed_sources(TARGETS))
         upsert_markers(results, project_root=project_root)
         _sync_shared_lambda_copies(project_root)
 
@@ -527,6 +522,23 @@ def main() -> None:
     print("\n" + "=" * 50)
     print("✅ Code flowchart generation complete!")
     print(f"   Output directory: {output_dir.absolute()}")
+
+
+def marker_allowed_sources(targets: list[Target]) -> set[str]:
+    """Return every source permitted to carry a generated marker block.
+
+    That is the charted sources plus the checked-in copies of charted shared
+    Lambda sources — the copies are byte-identical to their canonical source
+    (a separate contract), so they carry its marker too. Omitting them makes
+    marker pruning strip the copies and desynchronise them, so this
+    computation is shared by the generator and the contract checker rather
+    than duplicated in both.
+    """
+    allowed = {target.source for target in targets}
+    for canonical, copies in LAMBDA_SHARED_SOURCE_TARGETS.items():
+        if canonical in allowed:
+            allowed.update(copies)
+    return allowed
 
 
 def prune_retired_markers(project_root: Path, *, charted: set[str]) -> int:

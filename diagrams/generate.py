@@ -18,6 +18,7 @@ from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
 from diagrams.code_diagrams.generate import (  # noqa: E402
     REGENERATION_HINT,
+    marker_allowed_sources,
     newest_provenance_stamp,
     verify_targets_match_provenance_manifest,
 )
@@ -276,11 +277,10 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
                 f"code artifact visible flow digest omitted: {html.relative_to(project_root)}"
             )
 
-    allowed_marker_sources = {target.source for target in TARGETS}
-    issues.extend(_shared_source_copy_issues(project_root, allowed_marker_sources))
-    for source, copies in LAMBDA_SHARED_SOURCE_TARGETS.items():
-        if source in allowed_marker_sources:
-            allowed_marker_sources.update(copies)
+    issues.extend(_shared_source_copy_issues(project_root, {target.source for target in TARGETS}))
+    # Shared with the generator's marker pruning so the two can never disagree
+    # about which files may legitimately carry a marker.
+    allowed_marker_sources = marker_allowed_sources(TARGETS)
     marker_roots = [
         project_root / "app.py",
         project_root / "cli",

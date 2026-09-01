@@ -31,11 +31,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 
 # Skip the whole module if pyflowchart isn't installed — the renderer's
 # control-flow module imports it eagerly at module scope via
@@ -1077,3 +1080,203 @@ class TestSyncSharedLambdaCopies:
         # An empty tree exercises both guards: absent canonical sources and
         # absent consumer directories must be non-fatal no-ops.
         _sync_shared_lambda_copies(tmp_path)
+
+
+class TestPruneRetiredMarkers:
+    """Only genuinely retired sources lose their marker blocks.
+
+    A full strip-then-reinsert pass was the original source of
+    whole-catalogue churn, so incremental runs prune surgically instead. The
+    shared-Lambda copy case is a regression test: the first cut of this helper
+    stripped those copies, which the contract separately requires to stay
+    byte-identical to their canonical source.
+    """
+
+    _MARKED = (
+        '"""Example."""\n\n'
+        f"# <{source_marker_mod.SENTINEL}> BEGIN - auto-inserted, do not edit\n"
+        "# Generated at (UTC): 2026-09-01T12:00:00Z\n"
+        "# Generated from Git commit: " + "a" * 40 + "\n"
+        "# Flowchart(s) generated from this file:\n"
+        "#   * ``f`` -> ``diagrams/code_diagrams/x.f.html``\n"
+        "#     (PNG: ``diagrams/code_diagrams/x.f.png``)\n"
+        "# Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> "
+        "GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> "
+        "python diagrams/generate.py --code-only``.\n"
+        f"# <{source_marker_mod.SENTINEL}> END\n"
+        "\n"
+        "def f():\n    return True\n"
+    )
+
+    @staticmethod
+    def _write(root: Path, relative: str, body: str) -> Path:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_retired_source_is_stripped(self, tmp_path: Path) -> None:
+        retired = self._write(tmp_path, "cli/retired.py", self._MARKED)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
+
+    def test_charted_source_is_left_untouched(self, tmp_path: Path) -> None:
+        charted = self._write(tmp_path, "cli/charted.py", self._MARKED)
+        before = charted.read_bytes()
+        assert generate_mod.prune_retired_markers(tmp_path, charted={"cli/charted.py"}) == 0
+        assert charted.read_bytes() == before
+
+    def test_shared_lambda_copies_survive(self, tmp_path: Path) -> None:
+        """The copies are legitimate marker carriers, not retired sources.
+
+        Stripping them desynchronises them from their canonical source, which
+        the shared-copy contract then reports as drift — the exact bug this
+        pins down.
+        """
+        canonical = "lambda/proxy-shared/proxy_utils.py"
+        copies = LAMBDA_SHARED_SOURCE_TARGETS[canonical]
+        self._write(tmp_path, canonical, self._MARKED)
+        copy_paths = [self._write(tmp_path, copy, self._MARKED) for copy in copies]
+
+        allowed = generate_mod.marker_allowed_sources([Target(source=canonical, function="f")])
+        assert generate_mod.prune_retired_markers(tmp_path, charted=allowed) == 0
+        for path in copy_paths:
+            assert source_marker_mod.SENTINEL in path.read_text(encoding="utf-8")
+
+    def test_packaged_build_trees_are_skipped(self, tmp_path: Path) -> None:
+        vendored = self._write(
+            tmp_path, "lambda/kubectl-applier-simple-build/vendored.py", self._MARKED
+        )
+        before = vendored.read_bytes()
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
+        assert vendored.read_bytes() == before
+
+    def test_files_outside_the_source_roots_are_ignored(self, tmp_path: Path) -> None:
+        outside = self._write(tmp_path, "scripts/helper.py", self._MARKED)
+        before = outside.read_bytes()
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
+        assert outside.read_bytes() == before
+
+    def test_unmarked_sources_are_never_rewritten(self, tmp_path: Path) -> None:
+        plain = self._write(tmp_path, "cli/plain.py", "def f():\n    return True\n")
+        before = plain.read_bytes()
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
+        assert plain.read_bytes() == before
+
+
+class TestMarkerAllowedSources:
+    """The generator and the contract checker must agree on marker carriers.
+
+    Computing this set without the shared-Lambda copies is what made an early
+    cut of incremental pruning strip those copies, so the computation is
+    asserted directly rather than only through its callers.
+    """
+
+    def test_charted_canonical_pulls_in_its_copies(self) -> None:
+        canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
+        allowed = generate_mod.marker_allowed_sources([Target(source=canonical, function="f")])
+        assert canonical in allowed
+        assert set(copies) <= allowed
+
+    def test_uncharted_canonical_contributes_nothing(self) -> None:
+        canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
+        allowed = generate_mod.marker_allowed_sources(
+            [Target(source="cli/unrelated.py", function="f")]
+        )
+        assert allowed == {"cli/unrelated.py"}
+        assert not set(copies) & allowed
+
+    def test_real_catalogue_allows_every_shared_copy_it_charts(self) -> None:
+        allowed = generate_mod.marker_allowed_sources(list(TARGETS))
+        for canonical, copies in LAMBDA_SHARED_SOURCE_TARGETS.items():
+            if canonical in allowed:
+                assert set(copies) <= allowed, canonical
+
+
+class TestReadmeMixedVintage:
+    """The index header reports the newest generation, not a single vintage.
+
+    Rendering used to raise when results disagreed on a timestamp or commit,
+    which is incompatible with incremental regeneration — this pins the
+    replacement behaviour so the guard cannot be reinstated by accident.
+    """
+
+    @staticmethod
+    def _result(name: str, generated_at: str, commit: str) -> RenderedTarget:
+        stem = Path("/tmp/out") / f"{name}.f"
+        return RenderedTarget(
+            target=Target(source=f"cli/{name}.py", function="f"),
+            html_path=stem.with_suffix(".html"),
+            png_path=stem.with_suffix(".png"),
+            generated_at=generated_at,
+            source_commit=commit,
+        )
+
+    def test_newest_stamp_wins(self) -> None:
+        older = self._result("alpha", "2026-09-01T12:00:00Z", "a" * 40)
+        newer = self._result("beta", "2026-09-02T12:00:00Z", "b" * 40)
+        rendered = render_readme([older, newer], output_dir=Path("/tmp/out"))
+        assert "2026-09-02T12:00:00Z" in rendered
+        assert "b" * 40 in rendered
+        assert "2026-09-01T12:00:00Z" not in rendered
+
+    def test_newest_stamp_is_independent_of_input_order(self) -> None:
+        """Row order follows the target catalogue; the header follows recency.
+
+        Only the header is asserted here — ``_group_by_toplevel`` deliberately
+        preserves each directory's ``TARGETS`` order, so the body legitimately
+        changes when the caller's list order changes.
+        """
+        older = self._result("alpha", "2026-09-01T12:00:00Z", "a" * 40)
+        newer = self._result("beta", "2026-09-02T12:00:00Z", "b" * 40)
+        for ordering in ([older, newer], [newer, older]):
+            header = render_readme(ordering, output_dir=Path("/tmp/out")).split("###")[0]
+            assert "2026-09-02T12:00:00Z" in header
+            assert "b" * 40 in header
+            assert "2026-09-01T12:00:00Z" not in header
+
+
+class TestProvenanceSchemaVersions:
+    """A pre-v2 manifest fails loudly, then self-heals via a full regeneration."""
+
+    @staticmethod
+    def _write_v1(root: Path) -> None:
+        output_dir = root / "diagrams" / "code_diagrams"
+        output_dir.mkdir(parents=True)
+        (output_dir / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-09-01T12:00:00Z",
+                    "source_commit": "a" * 40,
+                    "source_digests": {"example.py": "deadbeef"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_v1_layout_is_rejected(self, tmp_path: Path) -> None:
+        self._write_v1(tmp_path)
+        with pytest.raises(RuntimeError, match="no sources mapping"):
+            generate_mod.load_provenance_manifest(tmp_path)
+
+    def test_v1_layout_makes_every_target_stale(self, tmp_path: Path) -> None:
+        """An unreadable manifest must not be mistaken for 'nothing to do'."""
+        self._write_v1(tmp_path)
+        (tmp_path / "example.py").write_bytes(b"def f():\n    return True\n")
+        target = Target(source="example.py", function="f")
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path,
+            targets=[target],
+            output_dir=tmp_path / "diagrams" / "code_diagrams",
+        ) == [target]
+
+    def test_entry_missing_a_required_field_is_rejected(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "diagrams" / "code_diagrams"
+        output_dir.mkdir(parents=True)
+        (output_dir / "provenance.json").write_text(
+            json.dumps({"schema_version": 2, "sources": {"example.py": {"digest": "deadbeef"}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(RuntimeError, match="must record"):
+            generate_mod.load_provenance_manifest(tmp_path)
