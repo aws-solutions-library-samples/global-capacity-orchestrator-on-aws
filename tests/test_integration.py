@@ -1348,7 +1348,13 @@ class TestDependencyVersionConsistency:
     def test_lambda_requirements_match_pyproject(self):
         """Lambda requirements.txt versions should match pyproject.toml pinned versions."""
         pyproject_deps = self._get_pyproject_deps()
-        lambda_dirs = list((PROJECT_ROOT / "lambda").iterdir())
+        # The generated ``*-build`` staging bundles copy requirements.txt from
+        # their source directory, so including them would report every finding
+        # twice on a machine that has built them and drop that coverage
+        # entirely in CI, where the gitignored bundles do not exist.
+        lambda_dirs = [
+            path for path in (PROJECT_ROOT / "lambda").iterdir() if not path.name.endswith("-build")
+        ]
 
         mismatches = []
         for lambda_dir in lambda_dirs:

@@ -2190,3 +2190,138 @@ else:
 " "$registry" "$body" 2>/dev/null
   rm -f "$body"
 }
+
+# check_lambda_requirements_pins [root] [pyproject] [lockfile]
+#
+# Emits ``requirements-path|problem`` for every pin in a per-Lambda
+# ``requirements.txt`` that disagrees with the version this repository
+# actually resolves for that package.
+#
+# Each Lambda carries its own ``requirements.txt`` because it is packaged and
+# deployed independently, so the same library is pinned in up to seven places:
+# ``pyproject.toml`` (what the test suite and the CLI resolve),
+# ``requirements-lock.txt`` (what pip-compile pins the whole graph to), and one
+# copy per Lambda that declares it. Nothing watched the Lambda copies. A bump
+# applied centrally therefore left them behind silently, and the handlers
+# shipped a different boto3 than anything CI ever exercised — the exact drift
+# class the rest of this library exists to catch, on the one surface that
+# reaches production directly.
+#
+# Resolution order for the authoritative version, most specific first:
+#   1. ``[project].dependencies``          — the packages we pin deliberately
+#   2. ``[project.optional-dependencies]`` — group-only pins
+#   3. ``requirements-lock.txt``           — transitives (cryptography, …) that
+#      no pyproject entry names but the repository still resolves exactly
+# A package found in none of the three is a Lambda-only dependency with no
+# central copy to disagree with, so it is skipped rather than reported.
+#
+# Only ``lambda/<name>/requirements.txt`` is read. The generated ``*-build``
+# staging bundles copy their requirements from the source directory, so
+# including them would double-report every finding when they happen to exist
+# locally and report nothing in CI, where they do not.
+#
+# A requirements file that pins nothing (three of them only document that the
+# Lambda runtime supplies boto3) is a skip, not a finding. A missing or
+# unparseable ``pyproject.toml`` is reported, because it always exists here and
+# a parse break must not silently downgrade this to a pass.
+#
+# Example output:
+#
+#     lambda/secret-rotation/requirements.txt|boto3==1.43.74 must match pyproject.toml 1.43.85
+#
+# The PR-time half of this contract lives in
+# tests/test_integration.py::TestDependencyVersionConsistency::test_lambda_requirements_match_pyproject.
+check_lambda_requirements_pins() {
+  local root="${1:-.}"
+  local pyproject="${2:-pyproject.toml}"
+  local lockfile="${3:-requirements-lock.txt}"
+  python3 -c "
+import re, sys, tomllib
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+
+def resolve(path):
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else root / candidate
+
+def normalize(name):
+    # PEP 503 normalisation: lowercase, ``_`` + ``.`` -> ``-``.
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+pin = re.compile(r'([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;]+)')
+
+try:
+    with open(resolve(sys.argv[2]), 'rb') as handle:
+        data = tomllib.load(handle)
+except Exception:
+    print('pyproject.toml|missing or unparseable, cannot verify Lambda pins')
+    sys.exit(0)
+
+project = data.get('project', {}) or {}
+
+def collect(specs):
+    found = {}
+    for spec in specs or []:
+        if not isinstance(spec, str):
+            continue
+        match = pin.fullmatch(spec.strip())
+        if match:
+            found.setdefault(normalize(match.group(1)), set()).add(match.group(2))
+    return found
+
+direct = collect(project.get('dependencies'))
+optional = {}
+for group in (project.get('optional-dependencies', {}) or {}).values():
+    for name, versions in collect(group).items():
+        optional.setdefault(name, set()).update(versions)
+
+locked = {}
+try:
+    for line in resolve(sys.argv[3]).read_text(encoding='utf-8').splitlines():
+        # Lock annotations are indented (''    # via boto3''); pins are not.
+        if not line or line[:1].isspace() or line.lstrip().startswith('#'):
+            continue
+        match = pin.match(line.split('#', 1)[0].strip())
+        if match:
+            locked.setdefault(normalize(match.group(1)), set()).add(match.group(2))
+except OSError:
+    pass
+
+def authority(name):
+    for label, table in (
+        ('pyproject.toml', direct),
+        ('pyproject.toml optional groups', optional),
+        ('requirements-lock.txt', locked),
+    ):
+        if name in table:
+            return label, table[name]
+    return None, None
+
+def owned(path):
+    return not any(part.endswith('-build') for part in path.relative_to(root).parts[:-1])
+
+for requirements in sorted((root / 'lambda').glob('*/requirements.txt')):
+    if not owned(requirements):
+        continue
+    relative = requirements.relative_to(root).as_posix()
+    try:
+        lines = requirements.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        print(relative + '|unreadable, cannot verify Lambda pins')
+        continue
+    for line in lines:
+        entry = line.split('#', 1)[0].strip()
+        if not entry:
+            continue
+        match = pin.fullmatch(entry)
+        if not match:
+            continue
+        name, version = normalize(match.group(1)), match.group(2)
+        label, expected = authority(name)
+        if not expected or version in expected:
+            continue
+        want = ','.join(sorted(expected))
+        print(f'{relative}|{name}=={version} must match {label} {want}')
+" "$root" "$pyproject" "$lockfile" 2>/dev/null
+}

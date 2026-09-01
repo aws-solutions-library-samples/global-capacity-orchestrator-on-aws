@@ -1141,6 +1141,141 @@ EOF
     rm -f "$tmpfile"
 }
 
+# ── check_lambda_requirements_pins ──────────────────────────────────────────
+
+# Builds a synthetic repository whose central pins are boto3 1.43.85 /
+# urllib3 2.7.0 (base), kubernetes 36.0.3 (optional group), and cryptography
+# 50.0.0 (lock-only transitive), so each resolution tier can be exercised.
+_write_pin_fixture() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/pyproject.toml" <<'EOF'
+[project]
+name = "fixture"
+dependencies = ["boto3==1.43.85", "urllib3==2.7.0"]
+
+[project.optional-dependencies]
+runtime = ["kubernetes==36.0.3"]
+EOF
+    printf 'boto3==1.43.85\ncryptography==50.0.0\n    # via a-transitive\n' \
+        > "$dir/requirements-lock.txt"
+}
+
+@test "check_lambda_requirements_pins: the committed repository is in lockstep" {
+    # Policy lock: every Lambda copy of a centrally pinned package must equal
+    # the central version. This is the check whose absence let a boto3 bump
+    # land in pyproject and the lock while six Lambda copies stayed behind.
+    run check_lambda_requirements_pins . pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_lambda_requirements_pins: reports a stale pin against pyproject" {
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    mkdir -p "$tmpdir/lambda/secret-rotation"
+    printf 'boto3==1.43.74\n' > "$tmpdir/lambda/secret-rotation/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "lambda/secret-rotation/requirements.txt|boto3==1.43.74 must match pyproject.toml 1.43.85" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: resolves optional groups and lock-only transitives" {
+    # A Lambda may pin a package that pyproject only names inside an optional
+    # group, or one that no pyproject entry names at all but the lock resolves
+    # exactly (cryptography). Both must still be held to the central version.
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    mkdir -p "$tmpdir/lambda/tls-certificate-manager"
+    printf 'kubernetes==35.0.0\ncryptography==49.0.0\n' \
+        > "$tmpdir/lambda/tls-certificate-manager/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kubernetes==35.0.0 must match pyproject.toml optional groups 36.0.3"* ]]
+    [[ "$output" == *"cryptography==49.0.0 must match requirements-lock.txt 50.0.0"* ]]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: agreeing, undeclared, and comment-only files are silent" {
+    # Three tracked requirements files only document that the Lambda runtime
+    # supplies boto3, and some Lambdas pin their own dependencies that have no
+    # central copy — neither may become a permanent finding.
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    mkdir -p "$tmpdir/lambda/agrees" "$tmpdir/lambda/runtime-only" "$tmpdir/lambda/own-dep"
+    printf 'boto3==1.43.85\nurllib3==2.7.0\n' > "$tmpdir/lambda/agrees/requirements.txt"
+    printf '# boto3 and botocore are provided by the Lambda runtime.\n' \
+        > "$tmpdir/lambda/runtime-only/requirements.txt"
+    printf 'some-lambda-only-package==9.9.9\n' > "$tmpdir/lambda/own-dep/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: skips the generated -build staging bundles" {
+    # The packaged bundles copy requirements.txt from the source directory, so
+    # including them would double-report every finding when they happen to
+    # exist locally and report nothing in CI, where they do not.
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    mkdir -p "$tmpdir/lambda/helm-installer-build"
+    printf 'boto3==1.43.74\n' > "$tmpdir/lambda/helm-installer-build/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: an unreadable pyproject is a finding, not a pass" {
+    # pyproject.toml always exists here, so nothing coming back must surface
+    # rather than silently downgrading the check to a pass.
+    tmpdir="$(mktemp -d)"
+    mkdir -p "$tmpdir/lambda/secret-rotation"
+    printf 'boto3==1.43.74\n' > "$tmpdir/lambda/secret-rotation/requirements.txt"
+    printf '[[[not toml\n' > "$tmpdir/pyproject.toml"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "pyproject.toml|missing or unparseable, cannot verify Lambda pins" ]
+
+    rm -f "$tmpdir/pyproject.toml"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "pyproject.toml|missing or unparseable, cannot verify Lambda pins" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: a missing lockfile still checks pyproject pins" {
+    # The lock is the last resolution tier; losing it must narrow coverage to
+    # the pyproject tiers rather than abandoning the check.
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    rm -f "$tmpdir/requirements-lock.txt"
+    mkdir -p "$tmpdir/lambda/secret-rotation"
+    printf 'boto3==1.43.74\ncryptography==49.0.0\n' \
+        > "$tmpdir/lambda/secret-rotation/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "lambda/secret-rotation/requirements.txt|boto3==1.43.74 must match pyproject.toml 1.43.85" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lambda_requirements_pins: normalises names and ignores inline comments" {
+    # ``PyYAML`` and ``pyyaml`` are the same distribution under PEP 503, and a
+    # trailing comment must not become part of the version.
+    tmpdir="$(mktemp -d)"
+    _write_pin_fixture "$tmpdir"
+    mkdir -p "$tmpdir/lambda/kubectl-applier-simple"
+    printf 'Kubernetes==35.0.0  # pinned for the applier\n' \
+        > "$tmpdir/lambda/kubectl-applier-simple/requirements.txt"
+    run check_lambda_requirements_pins "$tmpdir" pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "lambda/kubectl-applier-simple/requirements.txt|kubernetes==35.0.0 must match pyproject.toml optional groups 36.0.3" ]
+    rm -rf "$tmpdir"
+}
+
 # ── extract_constant_value ──────────────────────────────────────────────────
 
 @test "extract_constant_value: reads LAMBDA_PYTHON_RUNTIME from real constants.py" {
