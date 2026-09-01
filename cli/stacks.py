@@ -3584,10 +3584,10 @@ class StackManager:
             and (allow_noop or prepared_record is not None)
             and expected_stack_id
         ):
-            if stack_id != expected_stack_id:
-                raise RuntimeError(
-                    f"Empty strict change set targets {stack_id}; expected {expected_stack_id}"
-                )
+            # stack_id == expected_stack_id is already guaranteed here: the
+            # identity check above raises for any mismatch whenever
+            # expected_stack_id is not None, and this branch requires a
+            # truthy expected_stack_id.
             target = self._describe_stack_target(
                 stack_name,
                 expected_stack_id=expected_stack_id,
