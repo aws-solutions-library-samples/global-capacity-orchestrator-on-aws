@@ -249,18 +249,22 @@ def test_helm_and_kubectl_pins_live_only_in_the_installer_dockerfile() -> None:
         )
 
 
-def test_workflow_pip_installs_derive_versions_pinned_in_pyproject() -> None:
-    """A workflow must not restate a version pyproject.toml already pins.
+def test_workflows_never_pip_install_a_package_pyproject_declares() -> None:
+    """CI installs the project, never a distribution pyproject already declares.
 
-    A CI step that pip-installs a package the project also declares had two
-    copies of the version with nothing reconciling them. That drifted: the moto
-    server step pinned 5.2.2 while pyproject moved to 5.2.3, and because the
-    step also constrains against requirements-lock.txt pip refused to resolve
-    at all. Such steps now derive the version through
-    ``extract_python_pin`` instead.
+    Naming a declared package in a workflow creates a second copy of its
+    version with nothing reconciling the two. That drifted for real: the moto
+    server step pinned 5.2.2 while pyproject moved to 5.2.3 and, because the
+    step also constrained against requirements-lock.txt, pip refused to resolve
+    at all. Deriving the version would have fixed the symptom and left the
+    second copy in place, so the packages are not named at all any more — jobs
+    install ``.``/``.[extra]`` or the lock, and the queue-processor job gets its
+    SQS wire API from the same digest-pinned emulator floci-tests.yml uses.
 
-    Packages pyproject does *not* pin are unaffected — ``pip==25.0.1`` is the
-    installer itself, deliberately pinned in the workflow that bootstraps it.
+    Targets that are not a declared distribution stay legal: ``pip==25.0.1``
+    (the installer bootstrapping a throwaway resolver env), ``uv``, and
+    lock-derived ``"$pin"`` installs. ``deps-scan.yml`` is exempt outright —
+    resolving packages against *latest* is that workflow's entire purpose.
     """
     pyproject = tomllib.loads(_read("pyproject.toml"))
     project = pyproject.get("project", {})
@@ -271,29 +275,48 @@ def test_workflow_pip_installs_derive_versions_pinned_in_pyproject() -> None:
     def normalize(name: str) -> str:
         return re.sub(r"[-_.]+", "-", name).lower()
 
-    pinned = {
-        normalize(re.split(r"[\[=!<>;~ ]", spec, maxsplit=1)[0]) for spec in specs if "==" in spec
-    }
-    pinned.discard("gco-cli")
+    declared = {normalize(re.split(r"[\[=!<>;~ ]", spec, maxsplit=1)[0]) for spec in specs}
+    declared.discard("gco-cli")
+
+    def named_packages(command: str) -> list[str]:
+        """Distribution names a ``pip install`` command installs by name."""
+        found = []
+        for invocation in re.findall(r"pip install([^\n|;&]*)", command):
+            for raw in invocation.split():
+                token = raw.strip("\"'")
+                if not token:
+                    continue
+                # Flags, requirement/constraint files, the project itself, and
+                # wholly shell-interpolated targets (``"$pin"`` read out of the
+                # lock) are all legitimate. A token that merely *contains* a
+                # variable is not exempt: ``pyyaml==${v}`` still names the
+                # package, which is the copy this guard exists to prevent.
+                if (
+                    token.startswith("-")
+                    or token.startswith(".")
+                    or token.startswith("$")
+                    or "/" in token
+                    or token.endswith(".txt")
+                ):
+                    continue
+                name = normalize(re.split(r"[\[=!<>;~]", token, maxsplit=1)[0])
+                if name in declared:
+                    found.append(token)
+        return found
 
     offenders: dict[str, list[str]] = {}
     for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-        hits = [
-            match.group(0).strip()
-            for match in re.finditer(
-                r"""pip install[^\n]*?["']?([A-Za-z0-9][A-Za-z0-9._-]*)"""
-                r"""(?:\[[A-Za-z0-9,._-]+\])?==[0-9][^\s"']*["']?""",
-                path.read_text(encoding="utf-8"),
-            )
-            if normalize(match.group(1)) in pinned
-        ]
+        if path.name == "deps-scan.yml":
+            continue
+        hits = named_packages(path.read_text(encoding="utf-8"))
         if hits:
             offenders[path.name] = hits
 
     assert not offenders, (
-        "workflow steps restate a version pyproject.toml already pins; derive it with "
-        "``extract_python_pin <package> pyproject.toml`` from lib_dependency_scan.sh "
-        f"instead: {offenders}"
+        "workflow steps pip-install a distribution pyproject.toml already declares, "
+        "creating a second copy of its version; install the project "
+        '(``pip install -e .`` / ``-e ".[extra]"``) or requirements-lock.txt instead: '
+        f"{offenders}"
     )
 
 

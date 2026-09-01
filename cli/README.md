@@ -42,6 +42,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `config_cmd.py` | `gco config-cmd init`, `show`, `get` |
 | `costs_cmd.py` | `gco costs ...` |
 | `dag_cmd.py` | `gco dag ...` |
+| `deps_cmd.py` | `gco deps scan` |
 | `examples_cmd.py` | `gco examples ...` |
 | `files_cmd.py` | `gco files ...` |
 | `images_cmd.py` | `gco images ...` |

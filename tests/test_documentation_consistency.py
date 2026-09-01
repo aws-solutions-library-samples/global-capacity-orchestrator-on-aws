@@ -62,7 +62,7 @@ def test_cli_toc_and_module_readme_match_command_modules() -> None:
     modules = sorted((ROOT / "cli" / "commands").glob("*_cmd.py"))
     expected_groups = set(cli.commands)
     expected_files = {path.name for path in modules}
-    assert len(expected_groups) == len(expected_files) == 26
+    assert len(expected_groups) == len(expected_files) == 27
 
     cli_doc = (ROOT / "docs" / "CLI.md").read_text(encoding="utf-8")
     toc = _section(cli_doc, "## Table of Contents", "## Installation")

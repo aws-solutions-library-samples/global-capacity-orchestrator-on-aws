@@ -730,6 +730,27 @@ jobs:
     name: "integration:docker:queue-processor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # A real SQS wire API for the container under test. This is the same
+      # digest-pinned emulator floci-tests.yml runs, reused rather than
+      # pip-installing a second one: this job installs no Python packages at
+      # all, so there is no dependency copy here to drift from pyproject (a
+      # moto[server] pin here did exactly that, and its server extra would drag
+      # moto[all] — cfn-lint, sympy, networkx — into the lock for everyone).
+      # Bump the tag+digest in lockstep with floci-tests.yml; the deps-scan
+      # Docker-image section tracks both.
+      floci:
+        image: floci/floci:2.0.0@sha256:a6e5fc9f8f36448a453fc6a1babd7de23d601e7bf52044f3d710e7066bd5481b
+        ports:
+          - 4566:4566
+        env:
+          # In-memory state: the job starts from a blank emulator every run.
+          FLOCI_STORAGE_MODE: memory
+    env:
+      AWS_ENDPOINT_URL_SQS: "http://127.0.0.1:4566"
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -775,52 +796,37 @@ jobs:
               user:
                 token: ci-stub-token
           EOF
-      - name: Start moto SQS and create the job queue
-        # moto provides a real SQS wire API on the runner. botocore honors
-        # AWS_ENDPOINT_URL_SQS, so the container talks to it with zero code
-        # changes — the KEDA ScaledJob consume path runs for real: receive,
-        # validate, delete/retain.
+      - name: Create the job queue on the emulator
+        # botocore honors AWS_ENDPOINT_URL_SQS, so the container talks to the
+        # emulator with zero code changes — the KEDA ScaledJob consume path
+        # runs for real: receive, validate, delete/retain.
         #
-        # The version is derived from pyproject.toml rather than written here,
-        # so it is always the one the test suite resolves and a bump edits one
-        # file. A literal copy drifted to 5.2.2 while pyproject moved to 5.2.3
-        # and, because the install also constrains against the lock, pip
-        # refused to resolve at all. Empty extraction is fatal: installing an
-        # unpinned moto would quietly diverge from the suite.
+        # The queue URL is whatever the emulator returns (its account id is its
+        # own business) and is published to GITHUB_ENV for the steps below
+        # rather than reconstructed by hand.
         run: |
           set -euo pipefail
-          source .github/scripts/lib_dependency_scan.sh
-          moto_version="$(extract_python_pin moto pyproject.toml)"
-          if [ -z "${moto_version}" ]; then
-            echo "::error::could not derive the moto pin from pyproject.toml"
-            exit 1
-          fi
-          echo "Derived moto pin: ${moto_version}"
-          pip install --constraint requirements-lock.txt "moto[server]==${moto_version}"
-          nohup moto_server -H 127.0.0.1 -p 5000 > "${RUNNER_TEMP}/moto.log" 2>&1 &
-          code=""
           for _ in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/moto-api/data.json || true)
-            [ "${code}" = "200" ] && break
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${AWS_ENDPOINT_URL_SQS}" || true)
+            if [ "${code}" = "200" ] || [ "${code}" = "404" ]; then
+              echo "Emulator is answering HTTP (${code})."
+              break
+            fi
             sleep 1
           done
-          if [ "${code}" != "200" ]; then
-            echo "::error::moto server never became ready"
-            cat "${RUNNER_TEMP}/moto.log"
+          queue_url="$(aws sqs create-queue \
+            --queue-name gco-ci-jobs \
+            --query QueueUrl --output text)"
+          if [ -z "${queue_url}" ] || [ "${queue_url}" = "None" ]; then
+            echo "::error::emulator did not return a queue URL"
             exit 1
           fi
-          aws sqs create-queue \
-            --queue-name gco-ci-jobs \
-            --endpoint-url http://127.0.0.1:5000 \
-            --query QueueUrl --output text
-        env:
-          AWS_ACCESS_KEY_ID: testing
-          AWS_SECRET_ACCESS_KEY: testing
-          AWS_REGION: us-east-1
+          echo "Job queue: ${queue_url}"
+          echo "JOB_QUEUE_URL=${queue_url}" >> "$GITHUB_ENV"
       - name: Consume from an empty queue (exit 0)
         # One pod per SQS message is the ScaledJob contract; an empty poll
         # must exit 0 so KEDA scale-downs don't register as job failures.
-        # --network host lets the container reach moto on the runner's
+        # --network host lets the container reach the emulator on the runner's
         # loopback; the pod-equivalent hardening flags stay on.
         run: |
           set -euo pipefail
@@ -830,8 +836,8 @@ jobs:
             --security-opt no-new-privileges \
             -v "${RUNNER_TEMP}/kubeconfig:/kubeconfig:ro" \
             -e KUBECONFIG=/kubeconfig \
-            -e JOB_QUEUE_URL="http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
-            -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:5000 \
+            -e JOB_QUEUE_URL="${JOB_QUEUE_URL}" \
+            -e AWS_ENDPOINT_URL_SQS="${AWS_ENDPOINT_URL_SQS}" \
             -e AWS_ACCESS_KEY_ID=testing \
             -e AWS_SECRET_ACCESS_KEY=testing \
             -e AWS_REGION=us-east-1 \
@@ -871,8 +877,7 @@ jobs:
           }
           EOF
           aws sqs send-message \
-            --endpoint-url http://127.0.0.1:5000 \
-            --queue-url "http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            --queue-url "${JOB_QUEUE_URL}" \
             --message-body "file://${RUNNER_TEMP}/privileged-job.json" \
             --query MessageId --output text
           set +e
@@ -881,8 +886,8 @@ jobs:
             --security-opt no-new-privileges \
             -v "${RUNNER_TEMP}/kubeconfig:/kubeconfig:ro" \
             -e KUBECONFIG=/kubeconfig \
-            -e JOB_QUEUE_URL="http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
-            -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:5000 \
+            -e JOB_QUEUE_URL="${JOB_QUEUE_URL}" \
+            -e AWS_ENDPOINT_URL_SQS="${AWS_ENDPOINT_URL_SQS}" \
             -e AWS_ACCESS_KEY_ID=testing \
             -e AWS_SECRET_ACCESS_KEY=testing \
             -e AWS_REGION=us-east-1 \
@@ -899,8 +904,7 @@ jobs:
           # The unacknowledged message must still exist (in flight until the
           # visibility timeout, then retried and eventually DLQ'd).
           attrs=$(aws sqs get-queue-attributes \
-            --endpoint-url http://127.0.0.1:5000 \
-            --queue-url "http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            --queue-url "${JOB_QUEUE_URL}" \
             --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
             --query 'Attributes' --output json)
           printf '%s\n' "${attrs}"
@@ -915,10 +919,6 @@ jobs:
             echo "::error::rejected message was not retained in the queue (total=${total})"
             exit 1
           fi
-        env:
-          AWS_ACCESS_KEY_ID: testing
-          AWS_SECRET_ACCESS_KEY: testing
-          AWS_REGION: us-east-1
       - name: Fail fast without JOB_QUEUE_URL (exit 1)
         # Misconfiguration must be loud: no queue URL means exit 1 with an
         # explicit log line, never a silent success.

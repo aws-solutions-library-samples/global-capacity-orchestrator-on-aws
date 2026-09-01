@@ -63,19 +63,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install pinned PyYAML
-        # Derived from pyproject.toml so a bump edits one file. Empty
-        # extraction is fatal rather than falling back to an unpinned install.
-        run: |
-          set -euo pipefail
-          source .github/scripts/lib_dependency_scan.sh
-          pyyaml_version="$(extract_python_pin pyyaml pyproject.toml)"
-          if [ -z "${pyyaml_version}" ]; then
-            echo "::error::could not derive the pyyaml pin from pyproject.toml"
-            exit 1
-          fi
-          echo "Derived pyyaml pin: ${pyyaml_version}"
-          python3 -m pip install --user "pyyaml==${pyyaml_version}"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+
+      - name: Install project (provides PyYAML for the validator)
+        # validate_grafana_dashboards.py imports yaml and nothing else outside
+        # the stdlib, and pyyaml is a base project dependency — so installing
+        # the project covers it without naming a third-party package here.
+        run: pip install -e .
 
       - name: Extract dashboards from the applier manifests
         run: |

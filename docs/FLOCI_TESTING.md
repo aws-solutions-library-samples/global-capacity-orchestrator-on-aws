@@ -47,7 +47,7 @@ The globs are complements, so their union is always the whole layer.
 
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
-  floci/floci:1.7.0    # finch/podman work identically
+  floci/floci:2.0.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
 
