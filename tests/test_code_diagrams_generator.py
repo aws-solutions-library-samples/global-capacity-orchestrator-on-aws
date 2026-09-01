@@ -846,7 +846,7 @@ class TestProvenanceManifestVerification:
 
     def test_missing_manifest_is_actionable(self, tmp_path: Path) -> None:
         (tmp_path / "example.py").write_bytes(b"def f():\n    return True\n")
-        with pytest.raises(RuntimeError, match="missing provenance.json"):
+        with pytest.raises(RuntimeError, match=r"missing diagrams/code_diagrams/provenance\.json"):
             generate_mod.verify_targets_match_provenance_manifest(
                 project_root=tmp_path,
                 targets=[Target(source="example.py", function="f")],
@@ -864,7 +864,7 @@ class TestProvenanceManifestVerification:
     def test_any_substantive_source_change_is_rejected(self, tmp_path: Path) -> None:
         target = self._write_source_and_manifest(tmp_path, b"def f():\n    return True\n")
         (tmp_path / "example.py").write_bytes(b"def f():\n    return False\n")
-        with pytest.raises(RuntimeError, match="Commit substantive source changes first"):
+        with pytest.raises(RuntimeError, match="no longer describe them"):
             generate_mod.verify_targets_match_provenance_manifest(
                 project_root=tmp_path, targets=[target]
             )

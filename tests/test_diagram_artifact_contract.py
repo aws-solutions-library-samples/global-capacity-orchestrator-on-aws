@@ -39,8 +39,13 @@ _REQUIRED_HIGH_VALUE_TARGETS = {
 
 
 def test_committed_diagram_catalogues_are_structurally_current() -> None:
-    """Targets, artifacts, indexes, timestamps, and markers move together."""
-    assert check_diagram_contract(ROOT) == []
+    """Targets, artifacts, indexes, per-source stamps, and markers agree.
+
+    Every issue string names the offending file and how to fix it, so a CI
+    reader never has to open the generator to know what to regenerate.
+    """
+    issues = check_diagram_contract(ROOT)
+    assert not issues, "committed diagram catalogue is stale:\n  - " + "\n  - ".join(issues)
 
 
 def test_code_only_check_has_no_cdk_or_site_package_dependency() -> None:

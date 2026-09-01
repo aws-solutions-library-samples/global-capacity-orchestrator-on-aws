@@ -90,6 +90,30 @@ PROVENANCE_MANIFEST_NAME = "provenance.json"
 #: v2 records a per-source ``sources`` mapping.
 PROVENANCE_SCHEMA_VERSION = 2
 
+#: Appended to every provenance failure so the fix never requires reading the
+#: generator. Regeneration is incremental, so the command below re-renders
+#: only the stale sources named in the message.
+REGENERATION_HINT = (
+    "To fix: commit the source change first, then regenerate — "
+    "``SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) "
+    "GCO_DIAGRAM_SOURCE_COMMIT=$(git rev-parse HEAD) "
+    "python diagrams/generate.py --code-only`` — and commit the result. "
+    "The run is incremental: only the sources named above are re-rendered "
+    "and restamped."
+)
+
+
+def _target_hint(sources: list[str]) -> str:
+    """Suggest the narrowest regeneration command for ``sources``."""
+    if not sources or len(sources) > 4:
+        return ""
+    targets = " ".join(f"--target {source}:<function>" for source in sources)
+    return (
+        " To re-render just these files, add "
+        f"``{targets}`` (see the source's own marker block for its charted "
+        "function names)."
+    )
+
 
 def _without_generated_marker(source: bytes) -> bytes:
     """Remove only the generated marker bytes; preserve every other byte."""
@@ -122,10 +146,13 @@ def load_provenance_manifest(project_root: Path) -> dict[str, dict[str, str]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise RuntimeError(
-            f"missing {PROVENANCE_MANIFEST_NAME}: regenerate the code diagram catalogue"
+            f"missing diagrams/code_diagrams/{PROVENANCE_MANIFEST_NAME}. {REGENERATION_HINT}"
         ) from None
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"unreadable {PROVENANCE_MANIFEST_NAME}: {exc}") from exc
+        raise RuntimeError(
+            f"unreadable diagrams/code_diagrams/{PROVENANCE_MANIFEST_NAME}: {exc}. "
+            f"{REGENERATION_HINT}"
+        ) from exc
 
     sources = raw.get("sources")
     if not isinstance(sources, dict) or not sources:
@@ -301,9 +328,14 @@ def verify_targets_match_provenance_manifest(
     missing = sorted(set(charted) - set(manifest))
     retired = sorted(set(manifest) - set(charted))
     if missing or retired:
+        detail = []
+        if missing:
+            detail.append(f"newly charted sources with no recorded provenance: {missing}")
+        if retired:
+            detail.append(f"recorded sources no longer in _targets.py: {retired}")
         raise RuntimeError(
             f"{PROVENANCE_MANIFEST_NAME} is out of sync with the target catalogue "
-            f"(missing: {missing}, retired: {retired}); regenerate the catalogue"
+            f"({'; '.join(detail)}). {REGENERATION_HINT}"
         )
 
     mismatches = [
@@ -313,10 +345,9 @@ def verify_targets_match_provenance_manifest(
     ]
     if mismatches:
         raise RuntimeError(
-            "charted source bytes differ from the recorded provenance digests after "
-            f"removing only generated markers: {mismatches}. Commit substantive "
-            "source changes first, then regenerate (``python diagrams/generate.py "
-            "--code-only`` re-renders only the sources that changed)."
+            "these charted sources changed since their flowcharts were generated, so "
+            f"the committed diagrams no longer describe them: {mismatches}. "
+            f"{REGENERATION_HINT}{_target_hint(mismatches)}"
         )
     return manifest
 
@@ -468,27 +499,30 @@ def main() -> None:
 
     if full_catalog:
         prune_orphaned_artifacts(targets=TARGETS, output_dir=output_dir)
-        manifest_path = write_provenance_manifest(
+
+    # Provenance and the index are refreshed on every run, including an
+    # explicit ``--target`` selection: a run that restamps a source's marker
+    # and artifacts without recording the new stamp would leave the repository
+    # contract failing. Entries for sources this run did not touch are
+    # preserved verbatim (manifest) or reconstructed from their recorded
+    # provenance (index), so a partial run stays a partial diff.
+    manifest_path = write_provenance_manifest(
+        project_root=project_root,
+        output_dir=output_dir,
+        regenerated_targets=targets,
+        generated_at=generated_at,
+        source_commit=source_commit,
+        catalog=TARGETS,
+    )
+    print(f"📝 Wrote {manifest_path}")
+    write_readme(
+        _catalog_readme_entries(
             project_root=project_root,
             output_dir=output_dir,
-            regenerated_targets=targets,
-            generated_at=generated_at,
-            source_commit=source_commit,
-            catalog=TARGETS,
-        )
-        print(f"📝 Wrote {manifest_path}")
-        # The README indexes the whole catalogue, so entries for sources this
-        # run did not touch are reconstructed from their recorded provenance.
-        write_readme(
-            _catalog_readme_entries(
-                project_root=project_root,
-                output_dir=output_dir,
-                results=results,
-            ),
-            output_dir=output_dir,
-        )
-    else:
-        print("\n📝 Keeping the full-catalog README and manifest unchanged for a partial run.")
+            results=results,
+        ),
+        output_dir=output_dir,
+    )
 
     print("\n" + "=" * 50)
     print("✅ Code flowchart generation complete!")

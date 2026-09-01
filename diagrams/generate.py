@@ -17,6 +17,7 @@ from diagrams.code_diagrams._renderer import _output_stem_for  # noqa: E402
 from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
 from diagrams.code_diagrams.generate import (  # noqa: E402
+    REGENERATION_HINT,
     newest_provenance_stamp,
     verify_targets_match_provenance_manifest,
 )
@@ -156,8 +157,9 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
             newest_commit,
         ):
             issues.append(
-                "code index stamp does not match the newest provenance entry "
-                f"({newest_at} / {newest_commit})"
+                "diagrams/code_diagrams/README.md: its header stamp must match the "
+                f"newest provenance entry ({newest_at} / {newest_commit}) — rerun the "
+                f"generator to rewrite the index ({REGENERATION_HINT})"
             )
     expected_index_links: set[str] = set()
     checked_sources: set[str] = set()
@@ -214,7 +216,11 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
                     entry["generated_at"],
                     entry["source_commit"],
                 ):
-                    issues.append(f"source marker stamp disagrees with provenance: {target.source}")
+                    issues.append(
+                        f"{target.source}: its marker block's stamp disagrees with the "
+                        "provenance recorded for it — regenerate this source's diagrams "
+                        f"({REGENERATION_HINT})"
+                    )
         if f"``{target.function}``" not in source:
             issues.append(f"source marker omitted: {target.source}:{target.function}")
 
@@ -255,8 +261,9 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
                 entry["source_commit"],
             ):
                 issues.append(
-                    "code artifact stamp disagrees with provenance: "
-                    f"{html.relative_to(project_root)}"
+                    f"{html.relative_to(project_root)}: this artifact's stamp disagrees "
+                    f"with the provenance recorded for {owner} — regenerate that "
+                    f"source's diagrams ({REGENERATION_HINT})"
                 )
         flow_digests = set(_FLOW_DIGEST_RE.findall(html_text))
         if len(flow_digests) != 1:
