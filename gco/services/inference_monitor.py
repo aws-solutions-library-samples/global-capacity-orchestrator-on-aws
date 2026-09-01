@@ -105,8 +105,8 @@ class AdminApiKeySecretError(Exception):
 # and immutable manifest-list digest together: both amd64 and arm64 inference
 # nodes resolve through this single verified index.
 AWS_CLI_IMAGE = (
-    "public.ecr.aws/aws-cli/aws-cli:2.36.26@"
-    "sha256:eaa5d4d024c9b83fe4af2aae3068b052f096beed1a41f202d480c5c521aa3378"
+    "public.ecr.aws/aws-cli/aws-cli:2.36.36@"
+    "sha256:7047de9ebb37c39d07f652ff2ff3f6c42308a4e189788aeeae70563b0c82b57d"
 )
 
 # Valid TCP port boundaries for KV-transfer bootstrap ports.

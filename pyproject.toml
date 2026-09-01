@@ -44,15 +44,15 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.74",
-    "click==8.4.2",
+    "boto3==1.43.85",
+    "click==8.5.0",
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.8.1",
     "kubernetes==36.0.3",
     "fastapi==0.141.1",
     "uvicorn==0.52.4",
-    "pydantic==2.13.4",
+    "pydantic==2.13.5",
     "prometheus-client==0.26.0",
     "httpx==0.28.1",
     "urllib3==2.7.0",
@@ -72,7 +72,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cdk = [
-    "aws-cdk-lib==2.265.0",
+    "aws-cdk-lib==2.267.0",
     "cdk-nag==3.0.2",
     "constructs==10.8.1",
 ]
@@ -91,14 +91,14 @@ diagrams = [
     # the CI lint gate).
     "pyflowchart==0.6.0",
     "playwright==1.62.0",
-    "ruff==0.16.3",
+    "ruff==0.16.5",
 ]
 # Direct runtime roots for the six production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
 # only as the shared transitive constraint; they never install the project extra.
 image-health-monitor = [
-    "boto3==1.43.74",
-    "botocore==1.43.74",
+    "boto3==1.43.85",
+    "botocore==1.43.85",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
@@ -107,21 +107,21 @@ image-health-monitor = [
     "uvicorn==0.52.4",
 ]
 image-manifest-processor = [
-    "boto3==1.43.74",
-    "botocore==1.43.74",
+    "boto3==1.43.85",
+    "botocore==1.43.85",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
-    "pydantic==2.13.4",
+    "pydantic==2.13.5",
     "pyyaml==6.0.3",
     "requests==2.34.2",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
 ]
 image-inference-proxy = [
-    "boto3==1.43.74",
-    "botocore==1.43.74",
+    "boto3==1.43.85",
+    "botocore==1.43.85",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
@@ -129,25 +129,25 @@ image-inference-proxy = [
     "uvicorn==0.52.4",
 ]
 image-inference-monitor = [
-    "boto3==1.43.74",
-    "botocore==1.43.74",
+    "boto3==1.43.85",
+    "botocore==1.43.85",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
-    "boto3==1.43.74",
+    "boto3==1.43.85",
     "kubernetes==36.0.3",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
-    "boto3==1.43.74",
-    "botocore==1.43.74",
+    "boto3==1.43.85",
+    "botocore==1.43.85",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
     "pyarrow==25.0.1",
-    "pydantic==2.13.4",
+    "pydantic==2.13.5",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
 ]
@@ -180,7 +180,7 @@ mcp = [
     "fastmcp[tasks,code-mode]==4.0.0",
 ]
 lint = [
-    "ruff==0.16.3",
+    "ruff==0.16.5",
     "yamllint==1.38.0",
 ]
 typecheck = [
@@ -198,7 +198,7 @@ test = [
     "pytest-mock==3.15.1",
     "pytest-asyncio==1.4.0",
     "pytest-xdist[psutil]==3.8.0",
-    "moto==5.2.2",
+    "moto==5.2.3",
     # moto==5.1.22 lazy-imports its API Gateway backend whenever
     # ``cloudformation.create_stack`` is called (even if the stack template
     # contains no API Gateway resources), and that backend requires
@@ -209,7 +209,7 @@ test = [
     # test seeds a CloudFormation stack for output discovery. Pinning it
     # explicitly keeps test environments reproducible.
     "openapi-spec-validator==0.9.0",
-    "hypothesis==6.165.10",
+    "hypothesis==6.167.1",
     # The cost-monitor service writes Parquet reports via pyarrow (pinned to
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.

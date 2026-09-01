@@ -9,7 +9,7 @@
 #
 # Usage (recommended, multi-region aware):
 #   gco inference deploy triton-models \
-#     -i nvcr.io/nvidia/tritonserver:26.07-py3 \
+#     -i nvcr.io/nvidia/tritonserver:26.08-py3 \
 #     --gpu-count 1 --replicas 2 \
 #     --model-path /mnt/gco/models/triton-repo \
 #     --health-path /v2/health/ready
@@ -50,7 +50,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: triton
-        image: nvcr.io/nvidia/tritonserver:26.07-py3
+        image: nvcr.io/nvidia/tritonserver:26.08-py3
         securityContext:
           allowPrivilegeEscalation: false
         ports:

@@ -198,7 +198,7 @@ charts:
     repo_name: volcano-sh
     repo_url: https://volcano-sh.github.io/helm-charts
     chart: volcano
-    version: "1.15.1"
+    version: "1.15.2"
     namespace: volcano-system
     create_namespace: true
     # Per-chart readiness gate (honored by handler.install_chart):
@@ -226,7 +226,7 @@ charts:
         # `gco images mirror` mirrors into ECR and the tag helm
         # requests, so the two can never drift. Bump in lockstep with the chart
         # `version` above, then re-run the mirror (or just redeploy).
-        image_tag_version: "v1.15.1"
+        image_tag_version: "v1.15.2"
         controller_podAnnotations:
           karpenter.sh/do-not-disrupt: "true"
         scheduler_podAnnotations:
@@ -257,14 +257,14 @@ charts:
     repo_name: kuberay
     repo_url: https://ray-project.github.io/kuberay-helm
     chart: kuberay-operator
-    version: "1.6.2"
+    version: "1.7.0"
     namespace: ray-system
     create_namespace: true
     values:
       # Use Quay.io images (official KubeRay images)
       image:
         repository: quay.io/kuberay/operator
-        tag: v1.6.2
+        tag: v1.7.0
       # Resource configuration
       resources:
         requests:
@@ -567,7 +567,7 @@ charts:
     repo_name: prometheus-community
     repo_url: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    version: "88.5.0"
+    version: "88.6.2"
     namespace: monitoring
     create_namespace: true
     wait: false
@@ -709,7 +709,7 @@ charts:
     repo_name: opencost
     repo_url: https://opencost.github.io/opencost-helm-chart
     chart: opencost
-    version: "2.5.29"
+    version: "2.5.30"
     namespace: monitoring
     create_namespace: false
     wait: false
@@ -1064,7 +1064,7 @@ charts:
     repo_name: kueue-oci
     repo_url: oci://registry.k8s.io/kueue/charts
     chart: kueue
-    version: "0.19.1"
+    version: "0.19.2"
     namespace: kueue-system
     create_namespace: true
     use_oci: true

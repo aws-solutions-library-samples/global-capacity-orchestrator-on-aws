@@ -44,14 +44,14 @@ from . import __version__
 #: Exact Claude Code release installed by ``gco autopilot`` when the
 #: ``claude`` binary is absent. Pinned (never ``latest``) so installs are
 #: reproducible; the monthly deps-scan reports drift against npm.
-CLAUDE_CODE_VERSION = "2.1.235"
+CLAUDE_CODE_VERSION = "2.1.252"
 
 #: npm package that ships the ``claude`` binary.
 CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code"
 
 #: Exact Codex CLI release installed by the Codex engine.
 #: Keep this literal assignment scanner-friendly like CLAUDE_CODE_VERSION.
-CODEX_VERSION = "0.150.1"
+CODEX_VERSION = "0.152.0"
 
 #: npm package that ships the ``codex`` binary.
 CODEX_PACKAGE = "@openai/codex"

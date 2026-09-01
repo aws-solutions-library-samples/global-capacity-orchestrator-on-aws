@@ -55,10 +55,10 @@ permissions:
 # dependency-scan.sh; single-job pins (METRICS_SERVER_*, KUBECONFORM_*) stay
 # scoped to their one job on purpose.
 env:
-  KIND_VERSION: "v0.32.0"
-  KIND_NODE_IMAGE: "kindest/node:v1.36.1"
-  CALICO_VERSION: "v3.32.1"
-  CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
+  KIND_VERSION: "v0.33.0"
+  KIND_NODE_IMAGE: "kindest/node:v1.36.4"
+  CALICO_VERSION: "v3.32.2"
+  CALICO_SHA256: "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02"
 
 jobs:
   integration-helm-charts-valid:

@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 25
     services:
       floci:
-        image: floci/floci:1.7.0@sha256:bec9b9f749322444a57fb0f00d3e007ffd49015162361aab84ccecd9b4f5f8ed
+        image: floci/floci:2.0.0@sha256:a6e5fc9f8f36448a453fc6a1babd7de23d601e7bf52044f3d710e7066bd5481b
         ports:
           - 4566:4566
         env:
@@ -152,7 +152,7 @@ jobs:
     timeout-minutes: 45
     services:
       floci:
-        image: floci/floci:1.7.0@sha256:bec9b9f749322444a57fb0f00d3e007ffd49015162361aab84ccecd9b4f5f8ed
+        image: floci/floci:2.0.0@sha256:a6e5fc9f8f36448a453fc6a1babd7de23d601e7bf52044f3d710e7066bd5481b
         ports:
           - 4566:4566
         env:

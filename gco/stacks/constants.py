@@ -298,13 +298,13 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.1"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.5"
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.7"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
 
-EKS_ADDON_EFS_CSI_DRIVER = "v3.4.1-eksbuild.1"
+EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.5.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.6.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
 EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.1"
@@ -362,7 +362,7 @@ library's enum catalog.
 # analytics stack, the regional stack, the global stack, and the tests import
 # from a single source of truth.
 
-EMR_SERVERLESS_RELEASE_LABEL = "emr-7.13.0"
+EMR_SERVERLESS_RELEASE_LABEL = "emr-7.14.0"
 """EMR Serverless Spark release label used for ``emrserverless.CfnApplication``.
 
 Pinned to a stable Spark release so analytics workloads get a reproducible
