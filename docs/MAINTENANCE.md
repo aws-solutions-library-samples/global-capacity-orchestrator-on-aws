@@ -10,9 +10,11 @@ gets oriented.
 
 This guide is the *how*. The monthly [`deps-scan` workflow](../.github/CI.md#dependency-scan-script)
 is the *when* — it opens or refreshes one issue when a pinned version or the EC2
-accelerator catalog drifts. Accelerator discovery is automated, but lifecycle,
-architecture, replacement, and NodePool scheduling policy remain explicit human
-review decisions.
+accelerator catalog drifts. You do not have to wait for the monthly run:
+[`gco deps scan`](CLI.md#gco-deps-scan) produces the same report on demand from
+a checkout. Accelerator discovery is automated, but lifecycle, architecture,
+replacement, and NodePool scheduling policy remain explicit human review
+decisions.
 
 ## Table of contents
 
@@ -308,7 +310,17 @@ Helm charts, EKS add-ons, accelerator catalog/NodePool policy, CI tooling, and
 more), grouped with an urgency hint and per-row links to the upstream source.
 The workflow keeps one rolling issue open while drift exists, then posts a
 dated resolution comment and closes it automatically only after a complete
-clean scan with no explicitly skipped checks. To act on it:
+clean scan with no explicitly skipped checks.
+
+To generate that same list yourself — before the monthly run, or to confirm a
+bump landed — run [`gco deps scan`](CLI.md#gco-deps-scan) from a checkout
+(`--nodepools-only` for just the accelerator-catalog and NodePool freshness
+check, `--report <path>` to keep the markdown). It runs the same scanner the
+workflow does, so it needs the same tooling on `PATH` and AWS credentials for
+the sections that query AWS; anything unavailable is reported as skipped rather
+than silently passed. The equivalent MCP tool is `deps_scan`.
+
+To act on the report:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
 2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
