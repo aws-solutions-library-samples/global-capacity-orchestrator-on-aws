@@ -22,6 +22,7 @@ from gco.services.api_shared import (
     _parse_job_to_dict,
     _parse_pod_to_dict,
 )
+from gco.services.structured_logging import sanitize_log_value
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
@@ -165,7 +166,14 @@ def _job_scheduling(processor: Any, namespace: str, name: str) -> dict[str, Any]
         )
         return _collect_pod_scheduling(processor.core_v1, pods.items)
     except Exception as exc:
-        logger.warning("Could not resolve node placement for %s/%s: %s", namespace, name, exc)
+        # namespace/name arrive from the request path and the Kubernetes error
+        # echoes them back, so all three are sanitized before logging (CWE-117).
+        logger.warning(
+            "Could not resolve node placement for %s/%s: %s",
+            sanitize_log_value(namespace),
+            sanitize_log_value(name),
+            sanitize_log_value(exc),
+        )
         info = _empty_scheduling_info()
         info["node_lookup_error"] = str(exc)
         return info
@@ -391,7 +399,12 @@ async def get_job_pods(namespace: str, name: str) -> Response:
         try:
             scheduling = _collect_pod_scheduling(processor.core_v1, pods.items)
         except Exception as exc:  # pragma: no cover - collector swallows its own
-            logger.warning("Could not resolve node placement for %s/%s: %s", namespace, name, exc)
+            logger.warning(
+                "Could not resolve node placement for %s/%s: %s",
+                sanitize_log_value(namespace),
+                sanitize_log_value(name),
+                sanitize_log_value(exc),
+            )
             scheduling = _empty_scheduling_info()
             scheduling["node_lookup_error"] = str(exc)
 

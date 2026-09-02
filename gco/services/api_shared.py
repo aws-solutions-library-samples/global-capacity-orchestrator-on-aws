@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from gco.services.manifest_processor import ManifestProcessor
 from gco.services.metrics_publisher import ManifestProcessorMetrics
+from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import (
     JobStore,
     TemplateStore,
@@ -531,7 +532,14 @@ def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
                     core_v1.read_node(name=node_name), node_name
                 )
             except Exception as exc:
-                logger.warning("Could not read node %s: %s", node_name, exc)
+                # The node name originates outside this process and the
+                # Kubernetes error echoes it back; sanitize before logging so
+                # neither can forge log entries (CWE-117).
+                logger.warning(
+                    "Could not read node %s: %s",
+                    sanitize_log_value(node_name),
+                    sanitize_log_value(exc),
+                )
                 errors.append(f"{node_name}: {exc}")
                 node_cache[node_name] = {
                     "name": node_name,

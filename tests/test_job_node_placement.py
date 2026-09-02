@@ -31,6 +31,8 @@ import pytest
 import requests
 
 from cli.jobs import JobInfo, JobManager, _extract_scheduling
+from gco.services import api_shared
+from gco.services.api_routes import jobs as jobs_routes
 from gco.services.api_shared import (
     NODE_CAPACITY_TYPE_LABEL,
     NODE_INSTANCE_TYPE_LABEL,
@@ -86,6 +88,21 @@ def _core_v1(nodes: dict[str, Any]) -> MagicMock:
 
     core_v1.read_node.side_effect = _read_node
     return core_v1
+
+
+def _assert_no_raw_newlines(warning: MagicMock) -> None:
+    """Every value handed to the logger must be free of line breaks (CWE-117).
+
+    Asserts on the arguments rather than a captured log stream because the
+    service installs its own non-propagating structured handler.
+    """
+    assert warning.called, "expected the placement failure to be logged"
+    for call in warning.call_args_list:
+        for value in (*call.args, *call.kwargs.values()):
+            rendered = str(value)
+            assert "\n" not in rendered and "\r" not in rendered, (
+                f"unsanitized value reached the logger: {rendered!r}"
+            )
 
 
 def _gpu_node_labels(instance_type: str, capacity_type: str = "on-demand") -> dict[str, str]:
@@ -320,6 +337,19 @@ class TestCollectPodScheduling:
 
         assert info["node_instance_type"] == CHEAPEST_MEMBER
 
+    def test_a_node_read_failure_cannot_forge_log_entries(self) -> None:
+        """CWE-117: the node name and the Kubernetes error both reach a log call."""
+        forged = 'not found\nERROR:root:node "n1" is g5.48xlarge'
+        core_v1 = _core_v1({"evil\nnode": RuntimeError(forged)})
+
+        with patch.object(api_shared.logger, "warning") as warning:
+            info = _collect_pod_scheduling(core_v1, [_pod("p1", "evil\nnode")])
+
+        _assert_no_raw_newlines(warning)
+        # The unsanitized text still reaches the response body, where a JSON
+        # string cannot forge anything and the caller needs the real reason.
+        assert forged in info["node_lookup_error"]
+
 
 class TestParseNodeToDict:
     def test_the_name_comes_from_the_pod_not_the_node_object(self) -> None:
@@ -454,6 +484,24 @@ class TestGetJobRouteReportsPlacement:
         assert data["metadata"]["name"] == "trainer"
         assert data["scheduling"]["node_name"] is None
         assert "pods unavailable" in data["scheduling"]["node_lookup_error"]
+
+    def test_the_placement_failure_log_cannot_be_forged_from_the_request(
+        self, processor: MagicMock
+    ) -> None:
+        """CWE-117: namespace and job name come straight off the request path.
+
+        The Kubernetes error echoes them back, so all three are sanitized.
+        """
+        processor.batch_v1.read_namespaced_job.return_value = _batch_job()
+        processor.core_v1.list_namespaced_pod.side_effect = RuntimeError(
+            "boom\nERROR:root:forged entry"
+        )
+
+        with patch.object(jobs_routes.logger, "warning") as warning:
+            data = self._get(processor, "/api/v1/jobs/gco-jobs/trainer")
+
+        _assert_no_raw_newlines(warning)
+        assert "forged entry" in data["scheduling"]["node_lookup_error"]
 
     def test_a_completed_job_whose_pods_were_collected_reports_no_placement(
         self, processor: MagicMock
