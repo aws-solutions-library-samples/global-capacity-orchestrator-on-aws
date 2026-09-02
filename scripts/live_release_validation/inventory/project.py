@@ -83,6 +83,49 @@ def capture_baseline(
     }
 
 
+def _tagged_ecr_surface(repositories: Any) -> Any:
+    """Return ECR repositories with untagged images dropped.
+
+    Copying a multi-arch image into a mirror repository leaves the per-platform
+    child manifests untagged: only the manifest list carries the tag. Those
+    children are not an addressable surface — nothing can reference them by tag,
+    and the retained-image acceptance mechanism keys on tags
+    (``retained_ecr_image_deltas`` -> ``_image_with_tag``), so an untagged child
+    can never be declared and can never be accepted.
+
+    Comparing them therefore made the check unsatisfiable: a run that mirrors a
+    multi-arch image into a repository that already existed in the baseline
+    always reported drift no matter how correct it was. Observed live on a run
+    whose Volcano mirror repositories held identical tags before and after while
+    their untagged child count grew from 8 to 12.
+
+    Dropping untagged images keeps every guarantee that is actually enforceable:
+    a repository appearing or disappearing is still a difference, and so is any
+    tag that is added, removed, or repointed to a different digest.
+    """
+    if not isinstance(repositories, list):
+        return repositories
+    comparable = []
+    for repository in repositories:
+        if not isinstance(repository, dict):
+            comparable.append(repository)
+            continue
+        images = repository.get("images")
+        if not isinstance(images, list):
+            comparable.append(repository)
+            continue
+        comparable.append({**repository, "images": [i for i in images if _image_tags(i)]})
+    return comparable
+
+
+def _image_tags(image: Any) -> list[Any]:
+    """Tags carried by one ECR image record, tolerating malformed entries."""
+    if not isinstance(image, dict):
+        return []
+    tags = image.get("tags")
+    return list(tags) if isinstance(tags, list) else []
+
+
 def compare_baseline(expected: dict[str, Any], actual: dict[str, Any]) -> list[dict[str, Any]]:
     """Return exact protected-stack/ECR differences."""
     differences: list[dict[str, Any]] = []
@@ -92,6 +135,9 @@ def compare_baseline(expected: dict[str, Any], actual: dict[str, Any]) -> list[d
         for region in sorted(set(before_by_region) | set(after_by_region)):
             before = before_by_region.get(region, [])
             after = after_by_region.get(region, [])
+            if category == "ecr_repositories":
+                before = _tagged_ecr_surface(before)
+                after = _tagged_ecr_surface(after)
             if before != after:
                 differences.append(
                     {

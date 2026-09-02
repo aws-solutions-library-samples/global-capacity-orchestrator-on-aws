@@ -3241,6 +3241,91 @@ class TestProtectedBaselineIdentity:
         assert differences[0]["category"] == "protected_stacks"
         assert differences[0]["region"] == self._REGION
 
+    def test_untagged_multi_arch_children_are_not_baseline_drift(self) -> None:
+        """Mirroring a multi-arch image must not make the comparison unsatisfiable.
+
+        Copying a manifest list into a mirror repository tags only the list; the
+        per-platform children land untagged. Nothing can reference those by tag,
+        and the retained-image acceptance mechanism keys on tags, so an untagged
+        child can never be declared and never accepted. Comparing them meant any
+        run that mirrored a multi-arch image into a repository already present in
+        the baseline reported drift no matter how correct it was — observed live
+        with Volcano mirror repositories whose tags were identical before and
+        after while their untagged child count grew from 8 to 12.
+        """
+        before = {
+            "ecr_repositories": {
+                self._REGION: [
+                    {
+                        "name": "gco/dockerhub/volcanosh/vc-scheduler",
+                        "arn": self._ECR_ARN,
+                        "images": [
+                            {"digest": "sha256:list", "tags": ["v1.15.2"]},
+                            {"digest": "sha256:child-a", "tags": []},
+                        ],
+                    }
+                ]
+            }
+        }
+        after = json.loads(json.dumps(before))
+        after["ecr_repositories"][self._REGION][0]["images"].extend(
+            [
+                {"digest": "sha256:child-b", "tags": []},
+                {"digest": "sha256:child-c", "tags": []},
+            ]
+        )
+
+        assert inventory.compare_baseline(before, after) == []
+
+    def test_tag_changes_in_mirror_repositories_are_still_drift(self) -> None:
+        """Dropping untagged children must not weaken the tagged guarantee."""
+        base = {
+            "ecr_repositories": {
+                self._REGION: [
+                    {
+                        "name": "gco/dockerhub/volcanosh/vc-scheduler",
+                        "arn": self._ECR_ARN,
+                        "images": [{"digest": "sha256:list", "tags": ["v1.15.2"]}],
+                    }
+                ]
+            }
+        }
+
+        repointed = json.loads(json.dumps(base))
+        repointed["ecr_repositories"][self._REGION][0]["images"][0]["digest"] = "sha256:other"
+        assert len(inventory.compare_baseline(base, repointed)) == 1
+
+        added_tag = json.loads(json.dumps(base))
+        added_tag["ecr_repositories"][self._REGION][0]["images"].append(
+            {"digest": "sha256:new", "tags": ["v9.9.9"]}
+        )
+        assert len(inventory.compare_baseline(base, added_tag)) == 1
+
+        removed_tag = json.loads(json.dumps(base))
+        removed_tag["ecr_repositories"][self._REGION][0]["images"] = []
+        assert len(inventory.compare_baseline(base, removed_tag)) == 1
+
+        vanished_repository = {"ecr_repositories": {self._REGION: []}}
+        assert len(inventory.compare_baseline(base, vanished_repository)) == 1
+
+        new_repository = json.loads(json.dumps(base))
+        new_repository["ecr_repositories"][self._REGION].append(
+            {"name": "gco/unexpected", "arn": f"{self._ECR_ARN}-2", "images": []}
+        )
+        assert len(inventory.compare_baseline(base, new_repository)) == 1
+
+    def test_untagged_filter_tolerates_malformed_ecr_records(self) -> None:
+        """A malformed record must not crash the comparison or be silently equal."""
+        before = {"ecr_repositories": {self._REGION: [{"name": "a"}, "not-a-dict"]}}
+        assert inventory.compare_baseline(before, json.loads(json.dumps(before))) == []
+
+        changed = {"ecr_repositories": {self._REGION: [{"name": "b"}, "not-a-dict"]}}
+        assert len(inventory.compare_baseline(before, changed)) == 1
+
+        # ``images`` present but not a list is passed through untouched.
+        odd = {"ecr_repositories": {self._REGION: [{"name": "a", "images": "unexpected"}]}}
+        assert len(inventory.compare_baseline(before, odd)) == 1
+
     def test_filter_removes_only_exact_stack_role_and_ecr_identities(self) -> None:
         replacement_stack_id = self._STACK_ID.replace("protected-uuid", "replacement-uuid")
         exact_role_arn = f"arn:aws:iam::123456789012:role/path/{self._ROLE_NAME}"
