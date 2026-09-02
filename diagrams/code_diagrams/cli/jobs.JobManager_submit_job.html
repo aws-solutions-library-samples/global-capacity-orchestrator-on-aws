@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="33d34a18b1d983ba">
+        <meta name="gco-generated-at" content="2026-09-02T15:43:36Z">
+        <meta name="gco-source-commit" content="61928c2ff509188fc812466fbd21fd76868efeae">
+        <meta name="gco-flow-digest" content="a4a49e21ca362e3e">
         <title>gco jobs submit — direct kubectl apply path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,35 +208,35 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op826=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
-op828=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-op830=>operation: effective_namespace = namespace or self.config.default_namespace
-cond833=>condition: for manifest in manifest_list
-cond838=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub848=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
-cond853=>condition: if labels
-cond858=>condition: for manifest in manifest_list
-cond863=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond874=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub884=>subroutine: manifest['metadata']['labels'].update(labels)
-io894=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
-e892=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
+op4=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+op6=>operation: effective_namespace = namespace or self.config.default_namespace
+cond9=>condition: for manifest in manifest_list
+cond14=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub24=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
+cond29=>condition: if labels
+cond34=>condition: for manifest in manifest_list
+cond39=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+cond50=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub60=>subroutine: manifest['metadata']['labels'].update(labels)
+io70=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
+e68=>end: end function return
 
-op826->op828
-op828->op830
-op830->cond833
-cond833(yes)->cond838
-cond838->sub848
-sub848(left)->cond833
-cond833(no)->cond853
-cond853(yes)->cond858
-cond858(yes)->cond863
-cond863->cond874
-cond874->sub884
-sub884(left)->cond858
-cond858(no)->io894
-io894->e892
-cond853(no)->io894
+op2->op4
+op4->op6
+op6->cond9
+cond9(yes)->cond14
+cond14->sub24
+sub24(left)->cond9
+cond9(no)->cond29
+cond29(yes)->cond34
+cond34(yes)->cond39
+cond39->cond50
+cond50->sub60
+sub60(left)->cond34
+cond34(no)->io70
+io70->e68
+cond29(no)->io70
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,17 +246,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-02T15:43:36Z -->
+        <!-- Generated from Git commit: 61928c2ff509188fc812466fbd21fd76868efeae -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-02T15:43:36Z">2026-09-02T15:43:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>61928c2ff509188fc812466fbd21fd76868efeae</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>33d34a18b1d983ba</code>
+            Flow content SHA-256: <code>a4a49e21ca362e3e</code>
           </p>
           <div id="canvas"></div>
         </div>
