@@ -452,6 +452,31 @@ gco jobs get my-job --region us-east-1
 gco jobs get training-job -r us-west-2 -n ml-jobs
 ```
 
+**Node placement:** the output reports which node the job's pods landed on and
+that node's instance type and spot/on-demand capacity type. A job constrained
+to a *set* of interchangeable instance types is placed by
+[Karpenter](https://karpenter.sh/) within that set, so the manifest records
+only what the job was authorized to use — this reports what it used.
+
+```text
+  Placement
+  ------------------------------------------------------------------------------
+  NODE                                      INSTANCE TYPE     CAPACITY   PODS
+  ------------------------------------------------------------------------------
+  ip-10-0-1-100.ec2.internal                g5.2xlarge        spot       1
+    karpenter.sh/capacity-type: spot
+    karpenter.sh/nodepool: gco-gpu
+    kubernetes.io/arch: amd64
+    node.kubernetes.io/instance-type: g5.2xlarge
+    topology.kubernetes.io/zone: us-east-1a
+```
+
+`--output json` exposes the same facts as top-level `node_name`,
+`node_instance_type`, `node_capacity_type`, `node_labels` and `nodes` fields.
+They are absent rather than guessed when nothing is scheduled yet or the pods
+have already been garbage-collected. See
+[Get Job](API.md#get-job) for the field-by-field reference.
+
 #### `gco jobs logs`
 
 Get logs from a job.
@@ -555,7 +580,8 @@ gco jobs events training-job -r us-west-2 -n ml-jobs
 
 #### `gco jobs pods`
 
-Get pod details for a job.
+Get pod details for a job, including the node and instance type each pod
+landed on.
 
 ```bash
 gco jobs pods JOB_NAME [OPTIONS]
@@ -574,6 +600,18 @@ gco jobs pods JOB_NAME [OPTIONS]
 gco jobs pods my-job --region us-east-1
 gco jobs pods training-job -r us-west-2 -n ml-jobs
 ```
+
+```text
+  Pods for my-job (2 total)
+  ------------------------------------------------------------------------------------------------
+  NAME                                    NODE                    INSTANCE TYPE     STATUS     RESTARTS
+  ------------------------------------------------------------------------------------------------
+  my-job-abc123                           ip-10-0-1-100.ec2.inte  g5.2xlarge        Running    0
+  my-job-def456                           ip-10-0-2-40.ec2.inter  g5.4xlarge        Running    0
+```
+
+`--output json` adds a per-pod `node` block and a job-wide `scheduling` block;
+see [Get Job Pods](API.md#get-job-pods).
 
 #### `gco jobs metrics`
 

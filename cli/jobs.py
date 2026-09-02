@@ -140,6 +140,29 @@ def _extract_image_refs(spec: dict[str, Any]) -> list[str]:
     return sorted(refs)
 
 
+def _extract_scheduling(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pull the node-placement block out of a job or pods API response.
+
+    Absent on responses that predate the field (an older regional bridge) and
+    on the list endpoint, which deliberately does not pay for a Node read per
+    job. Both cases yield empty placement rather than an error: an absent
+    instance type is honest, a guessed one is not.
+    """
+    scheduling = payload.get("scheduling")
+    if not isinstance(scheduling, dict):
+        return {}
+
+    nodes = scheduling.get("nodes")
+    labels = scheduling.get("node_labels")
+    return {
+        "node_name": scheduling.get("node_name"),
+        "node_instance_type": scheduling.get("node_instance_type"),
+        "node_capacity_type": scheduling.get("node_capacity_type"),
+        "node_labels": dict(labels) if isinstance(labels, dict) else {},
+        "nodes": list(nodes) if isinstance(nodes, list) else [],
+    }
+
+
 @dataclass
 class JobInfo:
     """Information about a Kubernetes job."""
@@ -158,6 +181,23 @@ class JobInfo:
     completions: int = 1
     labels: dict[str, str] = field(default_factory=dict)
     image_refs: list[str] = field(default_factory=list)
+
+    # Where the job's pods actually landed. A job constrained to a *set* of
+    # interchangeable instance types is placed by Karpenter within that set,
+    # so the manifest records only what the run was authorized to use. These
+    # record what it used, which is what cost reconciliation and
+    # "did this fail on the smaller box?" both need.
+    #
+    # ``node_*`` describe the earliest-created scheduled pod; ``nodes`` lists
+    # every node involved (a retried job can move between instance types) with
+    # the pods on each. All are unset when nothing is scheduled yet, when the
+    # pods have been garbage-collected, or on the list endpoint, which does not
+    # pay for a Node read per job.
+    node_name: str | None = None
+    node_instance_type: str | None = None
+    node_capacity_type: str | None = None
+    node_labels: dict[str, str] = field(default_factory=dict)
+    nodes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -590,6 +630,7 @@ class JobManager:
             completions=spec.get("completions", 1),
             labels=metadata.get("labels", {}),
             image_refs=_extract_image_refs(spec),
+            **_extract_scheduling(job_data),
         )
 
     def get_job(self, job_name: str, namespace: str, region: str | None = None) -> JobInfo | None:
@@ -656,7 +697,30 @@ class JobManager:
         resource = response.get("resource") or {}
         if not resource.get("exists", False):
             return None
-        return self._parse_trainjob_info(resource, region)
+        info = self._parse_trainjob_info(resource, region)
+        self._attach_trainjob_scheduling(info, job_name, namespace, region)
+        return info
+
+    def _attach_trainjob_scheduling(
+        self, info: JobInfo, job_name: str, namespace: str, region: str
+    ) -> None:
+        """Fill in node placement for a TrainJob from its child Job's pods.
+
+        The manifests endpoint that resolves a TrainJob knows nothing about
+        pods, so placement comes from the child Job ``<name>-node-0`` whose
+        indexed pods are the node ranks (same convention the log fetch uses).
+        Best effort: a TrainJob with no pods yet, or a bridge too old to report
+        placement, simply leaves the fields unset.
+        """
+        try:
+            response = self._aws_client.get_job_pods(f"{job_name}-node-0", namespace, region)
+        except Exception as exc:
+            logger.debug("No node placement available for TrainJob %s: %s", job_name, exc)
+            return
+
+        scheduling = _extract_scheduling(response if isinstance(response, dict) else {})
+        for attr, value in scheduling.items():
+            setattr(info, attr, value)
 
     def _parse_trainjob_info(self, resource: dict[str, Any], region: str) -> JobInfo:
         """Map a TrainJob resource payload onto JobInfo.

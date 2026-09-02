@@ -921,7 +921,7 @@
         ]
       },
       "get": {
-        "description": "Get details of a specific Job.",
+        "description": "Get details of a specific Job, including where its pods were scheduled.",
         "operationId": "get_job_api_v1_jobs__namespace___name__get",
         "parameters": [
           {
@@ -1196,7 +1196,7 @@
     },
     "/api/v1/jobs/{namespace}/{name}/pods": {
       "get": {
-        "description": "Get pods belonging to a Job.",
+        "description": "Get pods belonging to a Job, with the hardware each one landed on.",
         "operationId": "get_job_pods_api_v1_jobs__namespace___name__pods_get",
         "parameters": [
           {

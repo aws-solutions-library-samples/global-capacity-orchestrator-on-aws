@@ -16,6 +16,8 @@ from gco.services.api_shared import (
     BulkDeleteRequest,
     _check_namespace,
     _check_processor,
+    _collect_pod_scheduling,
+    _empty_scheduling_info,
     _parse_event_to_dict,
     _parse_job_to_dict,
     _parse_pod_to_dict,
@@ -150,9 +152,28 @@ async def list_jobs(
         raise HTTPException(status_code=500, detail=f"Internal server error: {e!s}") from e
 
 
+def _job_scheduling(processor: Any, namespace: str, name: str) -> dict[str, Any]:
+    """Report the nodes a Job's pods landed on, and each node's hardware.
+
+    Placement is supplementary to the Job read: a failure here (pods already
+    garbage-collected, Node read refused) must never turn a successful job
+    lookup into an error, so the failure is recorded in the payload instead.
+    """
+    try:
+        pods = processor.core_v1.list_namespaced_pod(
+            namespace=namespace, label_selector=f"job-name={name}"
+        )
+        return _collect_pod_scheduling(processor.core_v1, pods.items)
+    except Exception as exc:
+        logger.warning("Could not resolve node placement for %s/%s: %s", namespace, name, exc)
+        info = _empty_scheduling_info()
+        info["node_lookup_error"] = str(exc)
+        return info
+
+
 @router.get("/{namespace}/{name}")
 async def get_job(namespace: str, name: str) -> Response:
-    """Get details of a specific Job."""
+    """Get details of a specific Job, including where its pods were scheduled."""
     processor = _check_processor()
     _check_namespace(namespace, processor)
 
@@ -165,6 +186,7 @@ async def get_job(namespace: str, name: str) -> Response:
             "region": processor.region,
             "timestamp": datetime.now(UTC).isoformat(),
             **job_info,
+            "scheduling": _job_scheduling(processor, namespace, name),
         }
 
         return JSONResponse(status_code=200, content=response)
@@ -356,7 +378,7 @@ async def get_job_events(namespace: str, name: str) -> Response:
 
 @router.get("/{namespace}/{name}/pods")
 async def get_job_pods(namespace: str, name: str) -> Response:
-    """Get pods belonging to a Job."""
+    """Get pods belonging to a Job, with the hardware each one landed on."""
     processor = _check_processor()
     _check_namespace(namespace, processor)
 
@@ -366,6 +388,29 @@ async def get_job_pods(namespace: str, name: str) -> Response:
         )
         pod_list = [_parse_pod_to_dict(pod) for pod in pods.items]
 
+        try:
+            scheduling = _collect_pod_scheduling(processor.core_v1, pods.items)
+        except Exception as exc:  # pragma: no cover - collector swallows its own
+            logger.warning("Could not resolve node placement for %s/%s: %s", namespace, name, exc)
+            scheduling = _empty_scheduling_info()
+            scheduling["node_lookup_error"] = str(exc)
+
+        # Denormalized onto each pod so a caller iterating pods does not have to
+        # join against the scheduling block to answer "what did this pod run on".
+        node_index = {node["name"]: node for node in scheduling["nodes"]}
+        for pod_entry in pod_list:
+            node = node_index.get(pod_entry.get("spec", {}).get("nodeName"))
+            pod_entry["node"] = (
+                {
+                    "name": node["name"],
+                    "instance_type": node["instance_type"],
+                    "capacity_type": node["capacity_type"],
+                    "labels": node["labels"],
+                }
+                if node
+                else None
+            )
+
         response = {
             "cluster_id": processor.cluster_id,
             "region": processor.region,
@@ -374,6 +419,7 @@ async def get_job_pods(namespace: str, name: str) -> Response:
             "namespace": namespace,
             "count": len(pod_list),
             "pods": pod_list,
+            "scheduling": scheduling,
         }
 
         return JSONResponse(status_code=200, content=response)

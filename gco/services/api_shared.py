@@ -401,6 +401,166 @@ def _parse_pod_to_dict(pod: V1Pod) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Node placement reporting
+# ---------------------------------------------------------------------------
+
+# The instance type a pod actually landed on. A workload constrained to a set
+# of interchangeable instance types (nodeAffinity ``In: [...]``) is placed by
+# Karpenter within that set, so the manifest only records what the run was
+# authorized to use — this label records what it used.
+NODE_INSTANCE_TYPE_LABEL = "node.kubernetes.io/instance-type"
+
+# Spot vs on-demand. Distinguishing the two matters for reconciling observed
+# cost against an estimate, and for explaining an interrupted run.
+NODE_CAPACITY_TYPE_LABEL = "karpenter.sh/capacity-type"
+
+# Reported alongside the two above because they cost nothing extra (they come
+# from the same Node read) and answer the immediate follow-up questions:
+# which AZ, which CPU architecture, which Karpenter NodePool provisioned it.
+_REPORTED_NODE_LABELS: tuple[str, ...] = (
+    NODE_INSTANCE_TYPE_LABEL,
+    NODE_CAPACITY_TYPE_LABEL,
+    "topology.kubernetes.io/zone",
+    "topology.kubernetes.io/region",
+    "kubernetes.io/arch",
+    "karpenter.sh/nodepool",
+)
+
+
+def _empty_scheduling_info() -> dict[str, Any]:
+    """The shape returned when nothing about placement is known yet."""
+    return {
+        "node_name": None,
+        "node_instance_type": None,
+        "node_capacity_type": None,
+        "node_labels": {},
+        "nodes": [],
+        "unscheduled_pods": 0,
+        "node_lookup_error": None,
+    }
+
+
+def _parse_node_to_dict(node: Any, name: str) -> dict[str, Any]:
+    """Reduce a Kubernetes Node to the placement facts callers ask for.
+
+    ``name`` is the node name the pod reported, which is also the key this
+    Node was read by — carrying it through keeps the pod/node join exact
+    regardless of what the Node object echoes back.
+
+    Label values are accepted only when they are genuinely strings, so a
+    malformed or partially-populated Node cannot put a non-serializable value
+    into the response and turn a successful job read into a 500.
+    """
+    metadata = getattr(node, "metadata", None)
+    raw_labels = getattr(metadata, "labels", None) if metadata is not None else None
+    labels: dict[str, str] = (
+        {k: v for k, v in raw_labels.items() if isinstance(k, str) and isinstance(v, str)}
+        if isinstance(raw_labels, dict)
+        else {}
+    )
+    return {
+        "name": name,
+        "instance_type": labels.get(NODE_INSTANCE_TYPE_LABEL),
+        "capacity_type": labels.get(NODE_CAPACITY_TYPE_LABEL),
+        "labels": {key: labels[key] for key in _REPORTED_NODE_LABELS if labels.get(key)},
+    }
+
+
+def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
+    """Report which nodes a workload's pods landed on, and each node's hardware.
+
+    One Node read per *distinct* node, so the common single-pod job costs
+    exactly one extra API call on a path already talking to the cluster.
+
+    ``node_name`` / ``node_instance_type`` / ``node_capacity_type`` describe
+    the earliest-created scheduled pod, which is stable for the life of the
+    workload even as retries add later pods. ``nodes`` carries every node
+    involved, with the pods on each, so a retried job that moved between
+    instance types is still fully described.
+
+    Never raises. A Node read that is refused (no RBAC) or 404s (node already
+    reclaimed) leaves the instance type ``None`` and records why in
+    ``node_lookup_error`` — an absent value that says so is more useful than a
+    guess that looks verified.
+    """
+    info = _empty_scheduling_info()
+
+    def _sort_key(pod: V1Pod) -> tuple[str, str]:
+        """Deterministic (created, name) ordering that cannot raise.
+
+        Both components are coerced to strings so a Node/Pod with a missing or
+        unexpected timestamp still sorts instead of aborting the whole report.
+        """
+        metadata = getattr(pod, "metadata", None)
+        created = getattr(metadata, "creation_timestamp", None) if metadata is not None else None
+        name = getattr(metadata, "name", None) if metadata is not None else None
+        stamp = ""
+        if created is not None:
+            try:
+                candidate = created.isoformat()
+            except Exception:  # pragma: no cover - defensive
+                candidate = None
+            stamp = candidate if isinstance(candidate, str) else ""
+        return (stamp, name if isinstance(name, str) else "")
+
+    ordered = sorted(pods or [], key=_sort_key)
+
+    node_cache: dict[str, dict[str, Any]] = {}
+    node_order: list[str] = []
+    pods_by_node: dict[str, list[dict[str, Any]]] = {}
+    errors: list[str] = []
+
+    for pod in ordered:
+        metadata = getattr(pod, "metadata", None)
+        spec = getattr(pod, "spec", None)
+        status = getattr(pod, "status", None)
+        node_name = getattr(spec, "node_name", None) if spec is not None else None
+        pod_name = getattr(metadata, "name", None) if metadata is not None else None
+        phase = getattr(status, "phase", None) if status is not None else None
+
+        if not isinstance(node_name, str) or not node_name:
+            info["unscheduled_pods"] += 1
+            continue
+
+        if node_name not in node_cache:
+            node_order.append(node_name)
+            pods_by_node[node_name] = []
+            try:
+                node_cache[node_name] = _parse_node_to_dict(
+                    core_v1.read_node(name=node_name), node_name
+                )
+            except Exception as exc:
+                logger.warning("Could not read node %s: %s", node_name, exc)
+                errors.append(f"{node_name}: {exc}")
+                node_cache[node_name] = {
+                    "name": node_name,
+                    "instance_type": None,
+                    "capacity_type": None,
+                    "labels": {},
+                }
+
+        pods_by_node[node_name].append(
+            {
+                "name": pod_name if isinstance(pod_name, str) else None,
+                "phase": phase if isinstance(phase, str) else None,
+            }
+        )
+
+    if not node_order:
+        return info
+
+    info["nodes"] = [{**node_cache[name], "pods": pods_by_node[name]} for name in node_order]
+    primary = info["nodes"][0]
+    info["node_name"] = primary["name"]
+    info["node_instance_type"] = primary["instance_type"]
+    info["node_capacity_type"] = primary["capacity_type"]
+    info["node_labels"] = dict(primary["labels"])
+    if errors:
+        info["node_lookup_error"] = "; ".join(errors)
+    return info
+
+
 def _parse_event_to_dict(event: CoreV1Event) -> dict[str, Any]:
     """Parse a Kubernetes Event object to a dictionary."""
     return {

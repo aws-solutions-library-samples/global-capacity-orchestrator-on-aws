@@ -8,7 +8,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..jobs import get_job_manager, resolve_submission_identity
+from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
 from ..output import format_job_table, get_output_formatter
 
 logger = logging.getLogger(__name__)
@@ -485,6 +485,31 @@ def list_jobs(
         sys.exit(1)
 
 
+def _print_job_placement(job: JobInfo) -> None:
+    """Print where the job's pods landed, and on what hardware.
+
+    The wide generic table renders ``node_labels``/``nodes`` as placeholders,
+    so the hardware — the reason those fields exist — gets its own block.
+    """
+    if not job.nodes and not job.node_name:
+        return
+
+    print("\n  Placement")
+    print("  " + "-" * 78)
+    print("  NODE                                      INSTANCE TYPE     CAPACITY   PODS")
+    print("  " + "-" * 78)
+    for node in job.nodes or [{"name": job.node_name, "pods": []}]:
+        name = str(node.get("name") or "-")[:40]
+        instance_type = str(node.get("instance_type") or "-")[:17]
+        capacity_type = str(node.get("capacity_type") or "-")[:10]
+        pod_count = len(node.get("pods") or [])
+        print(f"  {name:<41} {instance_type:<17} {capacity_type:<10} {pod_count}")
+
+    if job.node_labels:
+        for key in sorted(job.node_labels):
+            print(f"    {key}: {job.node_labels[key]}")
+
+
 @jobs.command("get")
 @click.argument("job_name")
 @click.option("--namespace", "-n", default="gco-jobs", help="Job namespace")
@@ -492,6 +517,10 @@ def list_jobs(
 @pass_config
 def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
     """Get details of a specific job.
+
+    Reports the node each pod landed on along with that node's instance type
+    and spot/on-demand capacity type, so a job authorized to run on a set of
+    interchangeable instance types shows which one it actually used.
 
     Examples:
         gco jobs get my-job --region us-east-1
@@ -504,6 +533,8 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
         job = job_manager.get_job(job_name, namespace, region)
         if job:
             formatter.print(job)
+            if config.output_format == "table" and isinstance(job, JobInfo):
+                _print_job_placement(job)
         else:
             formatter.print_error(f"Job {job_name} not found")
             sys.exit(1)
@@ -647,7 +678,7 @@ def get_job_pods(config: Any, job_name: Any, namespace: Any, region: Any) -> Non
     """Get pod details for a job.
 
     Shows all pods created by the job with their status, node placement,
-    and container information.
+    the instance type each node is, and container information.
 
     Examples:
         gco jobs pods my-job -r us-east-1
@@ -666,20 +697,23 @@ def get_job_pods(config: Any, job_name: Any, namespace: Any, region: Any) -> Non
                 return
 
             print(f"\n  Pods for {job_name} ({result.get('count', 0)} total)")
-            print("  " + "-" * 80)
+            print("  " + "-" * 96)
             print(
-                "  NAME                                    NODE                    STATUS     RESTARTS"
+                "  NAME                                    NODE                    "
+                "INSTANCE TYPE     STATUS     RESTARTS"
             )
-            print("  " + "-" * 80)
+            print("  " + "-" * 96)
             for pod in pods:
                 name = (pod.get("metadata", {}).get("name") or "")[:40]
                 node = (pod.get("spec", {}).get("nodeName") or "")[:22]
+                node_info = pod.get("node") or {}
+                instance_type = str(node_info.get("instance_type") or "-")[:17]
                 phase = (pod.get("status", {}).get("phase") or "Unknown")[:10]
                 restarts = sum(
                     c.get("restartCount", 0)
                     for c in (pod.get("status", {}).get("containerStatuses") or [])
                 )
-                print(f"  {name:<40} {node:<23} {phase:<10} {restarts}")
+                print(f"  {name:<40} {node:<23} {instance_type:<17} {phase:<10} {restarts}")
         else:
             formatter.print(result)
 

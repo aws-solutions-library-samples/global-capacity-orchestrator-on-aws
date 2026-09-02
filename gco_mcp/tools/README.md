@@ -56,11 +56,11 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `cluster_health` | Get health status of GCO clusters. |
 | `delete_job` | Delete a job. |
-| `get_job` | Get details of a specific job. |
+| `get_job` | Get details of a specific job, including the node its pods landed on and that node's instance type and spot/on-demand capacity type. |
 | `get_job_events` | Get Kubernetes events for a job (useful for debugging). |
 | `get_job_logs` | Get logs from a job. |
 | `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
-| `get_job_pods` | Get pod details, placement, and container status for a job. |
+| `get_job_pods` | Get pod details, placement, and container status for a job. Each pod carries the instance type and capacity type of the node it landed on. |
 | `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings. Reads the cluster, not a local `cdk.json`. |
 | `check_job_policy` | Check which regions would admit a manifest and whether the regions still agree on policy. Evaluates the manifest against each region's deployed policy using the manifest processor's own checks; any field differing across regions means a region was deployed from a different `cdk.json` checkout. `offline=True` reads `cdk.json` with no AWS calls, reporting the configured rather than deployed policy. Advisory. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |

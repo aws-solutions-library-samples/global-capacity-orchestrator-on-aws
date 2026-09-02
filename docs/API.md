@@ -342,7 +342,7 @@ a required bridge is unavailable.
 | Method | Endpoint | Description | CLI Command |
 |--------|----------|-------------|-------------|
 | GET | `/api/v1/jobs` | List jobs with pagination | `gco jobs list -r REGION` |
-| GET | `/api/v1/jobs/{ns}/{name}` | Get job details | `gco jobs get NAME -r REGION` |
+| GET | `/api/v1/jobs/{ns}/{name}` | Get job details, including node placement | `gco jobs get NAME -r REGION` |
 | GET | `/api/v1/jobs/{ns}/{name}/logs` | Get job logs | `gco jobs logs NAME -r REGION` |
 | GET | `/api/v1/jobs/{ns}/{name}/events` | Get job events | `gco jobs events NAME -r REGION` |
 | GET | `/api/v1/jobs/{ns}/{name}/pods` | Get job pods | `gco jobs pods NAME -r REGION` |
@@ -609,6 +609,109 @@ gco jobs list -r us-east-1 --limit 10
 }
 ```
 
+The list endpoint deliberately omits the `scheduling` block described under
+[Get Job](#get-job): resolving it costs a Node read per job per region.
+
+### Get Job
+
+```http
+GET /api/v1/jobs/{namespace}/{name}
+```
+
+Get details of a single Job, plus a `scheduling` block reporting which node
+each of its pods landed on and what hardware that node is.
+
+**CLI:**
+
+```bash
+gco jobs get my-job --region us-east-1
+gco jobs get training-job -r us-west-2 -n ml-jobs
+```
+
+**Response:**
+
+```json
+{
+  "cluster_id": "gco-cluster",
+  "region": "us-east-1",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "metadata": {
+    "name": "training-job-001",
+    "namespace": "gco-jobs",
+    "creationTimestamp": "2024-01-15T10:00:00Z",
+    "labels": {"app": "ml-training"},
+    "annotations": {},
+    "uid": "abc123"
+  },
+  "spec": {
+    "parallelism": 1,
+    "completions": 1,
+    "backoffLimit": 6,
+    "template": {"spec": {"containers": [{"name": "main", "image": "pytorch:latest"}], "initContainers": []}}
+  },
+  "status": {
+    "active": 1,
+    "succeeded": 0,
+    "failed": 0,
+    "startTime": "2024-01-15T10:00:05Z",
+    "completionTime": null,
+    "conditions": []
+  },
+  "computed_status": "running",
+  "scheduling": {
+    "node_name": "ip-10-0-1-100.ec2.internal",
+    "node_instance_type": "g5.2xlarge",
+    "node_capacity_type": "spot",
+    "node_labels": {
+      "node.kubernetes.io/instance-type": "g5.2xlarge",
+      "karpenter.sh/capacity-type": "spot",
+      "topology.kubernetes.io/zone": "us-east-1a",
+      "topology.kubernetes.io/region": "us-east-1",
+      "kubernetes.io/arch": "amd64",
+      "karpenter.sh/nodepool": "gco-gpu"
+    },
+    "nodes": [
+      {
+        "name": "ip-10-0-1-100.ec2.internal",
+        "instance_type": "g5.2xlarge",
+        "capacity_type": "spot",
+        "labels": {"node.kubernetes.io/instance-type": "g5.2xlarge", "karpenter.sh/capacity-type": "spot"},
+        "pods": [{"name": "training-job-001-abc123", "phase": "Running"}]
+      }
+    ],
+    "unscheduled_pods": 0,
+    "node_lookup_error": null
+  }
+}
+```
+
+**The `scheduling` block:**
+
+| Field | Description |
+|-------|-------------|
+| `node_name` | Node the earliest-created scheduled pod landed on, from the pod's `spec.nodeName` |
+| `node_instance_type` | That node's `node.kubernetes.io/instance-type` label |
+| `node_capacity_type` | That node's `karpenter.sh/capacity-type` label — `spot` or `on-demand` |
+| `node_labels` | That node's placement labels: instance type, capacity type, zone, region, arch, NodePool |
+| `nodes` | Every node the job's pods landed on, with the pods on each. A job that was retried onto a different instance type shows both |
+| `unscheduled_pods` | Pods that exist but have no `nodeName` yet |
+| `node_lookup_error` | Why a node's labels are missing, when they are — RBAC refusal, or a node already reclaimed |
+
+A job constrained to a *set* of interchangeable instance types (a
+`nodeAffinity` `In: [...]` requirement) is placed by [Karpenter](https://karpenter.sh/)
+within that set, so the submitted manifest records only what the job was
+*authorized* to run on. `node_instance_type` records what it actually ran on,
+which is what reconciling observed cost against an estimate needs.
+
+Placement fields are `null` — never inferred from the manifest — when nothing
+is scheduled yet, when the pods have been garbage-collected
+(`ttlSecondsAfterFinished`), or when the Node read fails. In the last case
+`node_lookup_error` says why. Resolving placement never fails the job read.
+
+Reading node labels requires the `nodes` `get` permission on the
+`gco-manifest-processor-cluster-read` ClusterRole; without it the node name is
+still reported and the labels come back `null`.
+
 ### Get Job Logs
 
 ```http
@@ -712,7 +815,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
 GET /api/v1/jobs/{namespace}/{name}/pods
 ```
 
-Get detailed information about all pods created by a Job.
+Get detailed information about all pods created by a Job, including the
+hardware each pod landed on.
 
 **CLI:**
 
@@ -761,11 +865,42 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
           }
         ],
         "initContainerStatuses": []
+      },
+      "node": {
+        "name": "ip-10-0-1-100.ec2.internal",
+        "instance_type": "g5.2xlarge",
+        "capacity_type": "spot",
+        "labels": {
+          "node.kubernetes.io/instance-type": "g5.2xlarge",
+          "karpenter.sh/capacity-type": "spot"
+        }
       }
     }
-  ]
+  ],
+  "scheduling": {
+    "node_name": "ip-10-0-1-100.ec2.internal",
+    "node_instance_type": "g5.2xlarge",
+    "node_capacity_type": "spot",
+    "node_labels": {"node.kubernetes.io/instance-type": "g5.2xlarge"},
+    "nodes": [
+      {
+        "name": "ip-10-0-1-100.ec2.internal",
+        "instance_type": "g5.2xlarge",
+        "capacity_type": "spot",
+        "labels": {"node.kubernetes.io/instance-type": "g5.2xlarge"},
+        "pods": [{"name": "training-job-001-abc123", "phase": "Running"}]
+      }
+    ],
+    "unscheduled_pods": 0,
+    "node_lookup_error": null
+  }
 }
 ```
+
+Each pod's `node` block is the same node record the `scheduling` block carries,
+denormalized so a caller iterating pods does not have to join. It is `null` for
+a pod that has not been scheduled. `scheduling` has the same shape and meaning
+as on [Get Job](#get-job).
 
 ### Get Job Metrics
 

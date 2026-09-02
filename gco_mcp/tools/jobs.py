@@ -89,7 +89,14 @@ def submit_job_api(manifest_path: str, namespace: str | None = None) -> str:
 @mcp.tool(tags={"safe", "jobs"})
 @audit_logged
 def get_job(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
-    """Get details of a specific job.
+    """Get details of a specific job, including where its pods were scheduled.
+
+    Reports ``node_name``, ``node_instance_type`` and ``node_capacity_type``
+    (spot vs on-demand) for the node the job's pod landed on, plus a ``nodes``
+    list covering every node involved. A job authorized to run on a set of
+    interchangeable instance types therefore reports the one it actually used,
+    not just what the manifest permitted. The fields are unset — never guessed
+    — when nothing is scheduled yet or the pods have been garbage-collected.
 
     Args:
         job_name: Name of the job.
@@ -155,6 +162,9 @@ def get_job_events(job_name: str, region: str, namespace: str = "gco-jobs") -> s
 @audit_logged
 def get_job_pods(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
     """Get pod details, placement, and container status for a job.
+
+    Each pod carries a ``node`` block with the instance type and spot/on-demand
+    capacity type of the node it landed on.
 
     Args:
         job_name: Name of the owning Kubernetes Job.

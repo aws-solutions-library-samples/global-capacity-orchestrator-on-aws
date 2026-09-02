@@ -330,6 +330,27 @@ class TestManifestProcessorRole:
             "cluster-read role must allow metrics.k8s.io for /metrics endpoint"
         )
 
+    def test_manifest_processor_cluster_read_includes_core_nodes(self, rbac_docs):
+        """Core nodes must be readable so the job read surface reports hardware.
+
+        GET /api/v1/jobs/.../{name} and .../pods call core_v1.read_node() to
+        resolve the node.kubernetes.io/instance-type and
+        karpenter.sh/capacity-type labels of the node a pod landed on. Without
+        this rule the read is refused and the instance type comes back None —
+        which is the deliberate degraded behavior, but it makes the feature
+        permanently inert. Nodes are cluster-scoped, so the rule cannot live in
+        the namespaced gco-manifest-processor Role.
+        """
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        core_node_verbs: set[str] = set()
+        for rule in role.get("rules", []):
+            if "" in rule.get("apiGroups", []) and "nodes" in rule.get("resources", []):
+                core_node_verbs.update(rule.get("verbs", []))
+        assert "get" in core_node_verbs, (
+            "cluster-read role must grant core nodes 'get' so the job read "
+            "surface can report the instance type a pod landed on"
+        )
+
 
 # ─── Submittable kinds ↔ RBAC lockstep ──────────────────────────────
 

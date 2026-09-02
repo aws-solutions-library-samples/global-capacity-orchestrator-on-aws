@@ -261,6 +261,13 @@ rules:
     resources: ["namespaces"]
     verbs: ["get", "list"]
 
+  # Node read — GET /api/v1/jobs/.../{name} and .../pods report which node a
+  # pod landed on and that node's instance-type / capacity-type labels. Nodes
+  # are cluster-scoped, so this cannot live in the namespaced Role.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+
   # Metrics — required for GET /api/v1/jobs/.../metrics endpoint
   # (uses metrics.k8s.io/v1beta1 via custom_objects API)
   - apiGroups: ["metrics.k8s.io"]
