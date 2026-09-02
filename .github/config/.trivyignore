@@ -315,3 +315,39 @@ CVE-2026-46600 exp:2026-11-14
 #             https://avd.aquasec.com/nvd/cve-2026-56865
 CVE-2026-56864 exp:2026-11-14
 CVE-2026-56865 exp:2026-11-14
+
+# CVE-2026-84304 — google.golang.org/grpc heap memory exhaustion. Prior to
+# 1.83.1, internal/transport/transport.go stores every fragmented HTTP/2 DATA
+# frame as a separate recvMsg in recvBuffer, so millions of one-byte frames
+# consume disproportionate heap even while staying inside the connection and
+# stream flow-control windows. An unauthenticated remote peer can drive a
+# gRPC *server* to a panic or OOM through concurrent multiplexed streams.
+# Statically linked into the docker-buildx CLI plugin Dockerfile.dev installs
+# (ARG BUILDX_VERSION), so only security:trivy:container-scan on the dev image
+# surfaces it — the same binary already carrying CVE-2026-56854 and the x/mod
+# pair below.
+#
+# Not introduced by any change of ours: the entry reached the Trivy DB between
+# the green pull-request run of #322 and the push run of the identical commit
+# on main, so it appeared on a dev image whose Buildx pin did not move.
+#
+# Not clearable by a stable pin bump — upstream checked 2026-09-02: the latest
+# stable Buildx v0.36.1 requires grpc v1.82.1. v0.37.0-rc2 already carries
+# v1.83.2, but this release deliberately consumes stable tooling only, and an
+# availability-only defect in contributor tooling does not justify shipping a
+# release candidate as every contributor's and CI job's build toolchain.
+#
+# Low runtime risk, and availability-only: CVSS 4.0 records VC:N/VI:N/VA:H
+# with no confidentiality or integrity impact. Reaching it requires being a
+# gRPC server that accepts connections from a hostile peer. buildx is a
+# client: it dials a BuildKit instance the developer already controls over a
+# local socket, and exposes no gRPC listener to untrusted input. The dev image
+# is contributor/CI tooling and is never deployed.
+#
+# Clears when a stable Buildx release requires grpc >= 1.83.1: bump
+# ARG BUILDX_VERSION in Dockerfile.dev with its reviewed per-architecture
+# checksums (the monthly deps-scan tracks the pin) and drop this entry. Dated
+# to 2026-10-01 to land in the same review as CVE-2026-56854, the other
+# suppression waiting on exactly that stable Buildx release.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-84304
+CVE-2026-84304 exp:2026-10-01
