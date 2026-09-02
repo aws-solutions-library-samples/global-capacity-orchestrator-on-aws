@@ -28,6 +28,8 @@ This project would not have been possible without the support of some incredible
 
 **Ernst Schmid** — For early support, feedback, and belief in the project.
 
+**Mike Nichols** — For early support, feedback, and belief in the project.
+
 **John Dzialo** — For being an early tester and adopter of the project.
 
 **Mark Vinciguerra** — For being an early tester and adopter of the project.
