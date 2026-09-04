@@ -855,6 +855,20 @@ class TestImplicitLogGroupCleanup:
         with patch.object(manager, "_describe_stack_target", return_value=None):
             assert manager._collect_implicit_log_groups(["gco-us-east-1"]) == {}
 
+    def test_stack_with_no_implicit_log_groups_is_omitted(self):
+        """A live stack made up only of explicitly-modeled resources (a
+        CFN-owned LogGroup, an SQS queue) contributes no entry at all —
+        it is not present with an empty list."""
+        manager = self._manager()
+        target = self._stack_target(
+            [
+                {"ResourceType": "AWS::Logs::LogGroup", "PhysicalResourceId": "/gco/explicit"},
+                {"ResourceType": "AWS::SQS::Queue", "PhysicalResourceId": "gco-jobs"},
+            ]
+        )
+        with patch.object(manager, "_describe_stack_target", return_value=target):
+            assert manager._collect_implicit_log_groups(["gco-us-east-1"]) == {}
+
     def test_collection_is_best_effort_per_stack(self):
         """One stack's describe failure must not block the others."""
         manager = self._manager()

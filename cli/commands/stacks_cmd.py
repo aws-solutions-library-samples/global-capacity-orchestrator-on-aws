@@ -1592,7 +1592,12 @@ def _project_name() -> str:
 
     try:
         with open(Path.cwd() / "cdk.json", encoding="utf-8") as f:
-            ctx = (json.load(f) or {}).get("context", {})
+            document = json.load(f)
+        if not isinstance(document, dict):
+            return "gco"
+        ctx = document.get("context")
+        if not isinstance(ctx, dict):
+            return "gco"
         return str(ctx.get("project_name") or "gco")
     except OSError, ValueError:
         return "gco"
@@ -1676,7 +1681,11 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             data = json.loads(p["Value"])
         except ValueError:
             data = {"status": "unknown", "message": p.get("Value", "")}
-        rows.append((name, data.get("status", "unknown"), data.get("message", "")[:80]))
+        if not isinstance(data, dict):
+            data = {"status": "unknown", "message": p.get("Value", "")}
+        status = str(data.get("status", "unknown"))
+        message = str(data.get("message", ""))
+        rows.append((name, status, message[:80]))
 
     if not rows:
         formatter.print_info(

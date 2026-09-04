@@ -837,8 +837,6 @@ class TestFileSystemClientDownloadFromPod:
 
     def test_download_from_pod_kubeconfig_error(self):
         """Test download fails when kubeconfig update fails."""
-        import subprocess
-
         from cli.files import FileSystemClient
 
         with patch("cli.files.get_config") as mock_config:
@@ -851,20 +849,22 @@ class TestFileSystemClientDownloadFromPod:
                 with patch("boto3.Session"):
                     client = FileSystemClient()
 
-                    with patch("subprocess.run") as mock_run:
-                        mock_run.side_effect = subprocess.CalledProcessError(
-                            1, "aws", stderr="Cluster not found"
+                    with (
+                        patch(
+                            "cli.files.update_kubeconfig",
+                            side_effect=RuntimeError("kubeconfig update failed: Cluster not found"),
+                        ),
+                        patch("subprocess.run") as mock_run,
+                        pytest.raises(RuntimeError, match="kubeconfig update failed"),
+                    ):
+                        client.download_from_pod(
+                            region="us-east-1",
+                            pod_name="test-pod",
+                            remote_path="/data",
+                            local_path="./data",
                         )
 
-                        with pytest.raises(RuntimeError) as exc_info:
-                            client.download_from_pod(
-                                region="us-east-1",
-                                pod_name="test-pod",
-                                remote_path="/data",
-                                local_path="./data",
-                            )
-
-                        assert "kubeconfig" in str(exc_info.value).lower()
+                    mock_run.assert_not_called()
 
     def test_download_from_pod_kubectl_error(self):
         """Test download fails when kubectl cp fails."""

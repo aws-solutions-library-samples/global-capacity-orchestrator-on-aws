@@ -32,15 +32,15 @@ from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTra
 from fastmcp_tasks import TasksExtension
 from version import get_project_version
 
-# ``run_mcp`` supports both legacy top-level imports (``import server`` after
-# adding gco_mcp/ to sys.path) and package imports. Bind both names to the first
-# loaded module before constructing the FastMCP object so the two routes can
-# never create independent registries.
+# ``server`` and ``gco_mcp.server`` are the only supported import names.
+# Bind the counterpart before constructing FastMCP so both routes share one
+# registry without a redundant third-name fallthrough.
 _THIS_MODULE = sys.modules[__name__]
-if __name__ == "server":
-    sys.modules.setdefault("gco_mcp.server", _THIS_MODULE)
-elif __name__ == "gco_mcp.server":
-    sys.modules.setdefault("server", _THIS_MODULE)
+_OTHER_MODULE_NAME = {
+    "server": "gco_mcp.server",
+    "gco_mcp.server": "server",
+}[__name__]
+sys.modules.setdefault(_OTHER_MODULE_NAME, _THIS_MODULE)
 
 mcp = FastMCP(
     "GCO",

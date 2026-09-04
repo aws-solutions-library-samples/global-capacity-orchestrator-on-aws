@@ -306,6 +306,8 @@ def _scaffold_plan(
                     "falling back to the deterministic single-worker plan.",
                     err=True,
                 )
+        else:
+            fallback_reason = "sampling_backend_unavailable"
     if plan is None:
         try:
             plan = swarm_scaffold.generate_deterministic_plan(

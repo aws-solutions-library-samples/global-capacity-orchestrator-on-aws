@@ -83,16 +83,16 @@ function loadBalancer(overrides = {}) {
   };
 }
 
-function ownershipClient(loadBalancers, tags = []) {
+function ownershipClient(loadBalancers, tags = [], responses = {}) {
   return {
     calls: [],
     async send(command) {
       this.calls.push(command);
       if (command.constructor.name === "DescribeLoadBalancersCommand") {
-        return { LoadBalancers: loadBalancers };
+        return responses.loadBalancers ?? { LoadBalancers: loadBalancers };
       }
       if (command.constructor.name === "DescribeTagsCommand") {
-        return {
+        return responses.tags ?? {
           TagDescriptions: [{ Tags: tags }],
         };
       }
@@ -121,15 +121,36 @@ test("environment bounds, clocks, regions, and AWS client caches are determinist
   assert.equal(__test.boundedEnvFloat("TEST_FLOAT", 2.5, 1, 3), 2.5);
   assert.equal(__test.boundedEnvInt("TEST_INT", 7, 1, 10), 7);
 
-  setEnvironment({ TEST_FLOAT: " 2.75 ", TEST_INT: "+8" });
-  assert.equal(__test.boundedEnvFloat("TEST_FLOAT", 2.5, 1, 3), 2.75);
-  assert.equal(__test.boundedEnvInt("TEST_INT", 7, 1, 10), 8);
-
-  for (const value of ["", "NaN", "0.5", "4"]) {
+  for (const [value, expected] of [
+    [" 2.75 ", 2.75],
+    ["1", 1],
+    ["3", 3],
+  ]) {
+    setEnvironment({ TEST_FLOAT: value });
+    assert.equal(__test.boundedEnvFloat("TEST_FLOAT", 2.5, 1, 3), expected);
+  }
+  for (const value of ["", "   ", "NaN", "Infinity", "0.5", "4"]) {
     setEnvironment({ TEST_FLOAT: value });
     assert.equal(__test.boundedEnvFloat("TEST_FLOAT", 2.5, 1, 3), 2.5);
   }
-  for (const value of ["1.2", "text", "0", "90071992547409999"]) {
+
+  for (const [value, expected] of [
+    ["+8", 8],
+    ["1", 1],
+    ["10", 10],
+  ]) {
+    setEnvironment({ TEST_INT: value });
+    assert.equal(__test.boundedEnvInt("TEST_INT", 7, 1, 10), expected);
+  }
+  for (const value of [
+    "",
+    "   ",
+    "1.2",
+    "text",
+    "0",
+    "11",
+    "90071992547409999",
+  ]) {
     setEnvironment({ TEST_INT: value });
     assert.equal(__test.boundedEnvInt("TEST_INT", 7, 1, 10), 7);
   }
@@ -142,8 +163,15 @@ test("environment bounds, clocks, regions, and AWS client caches are determinist
     ),
     "us-west-2",
   );
-  assert.equal(__test.secretRegion("not-an-arn"), undefined);
-  assert.equal(__test.secretRegion(null), undefined);
+  for (const arn of [
+    "not-an-arn",
+    "notarn:aws:secretsmanager:us-west-2:123456789012:secret",
+    "arn:aws:ssm:us-west-2:123456789012:parameter/gco",
+    "arn:aws:secretsmanager::123456789012:secret:gco-signing",
+    null,
+  ]) {
+    assert.equal(__test.secretRegion(arn), undefined);
+  }
 
   const regionalSecret = __test.getSecretsClient(
     "arn:aws:secretsmanager:us-west-2:123456789012:secret:gco-signing",
@@ -221,10 +249,15 @@ test("signing secret refreshes are shared and malformed values are rejected", as
   ]);
 
   const invalidResponses = [
+    undefined,
+    null,
     {},
+    { SecretString: null },
     { SecretString: "{" },
+    { SecretString: "null" },
     { SecretString: "{}" },
     { SecretString: JSON.stringify({ token: "" }) },
+    { SecretString: JSON.stringify({ token: 123 }) },
   ];
   for (const response of invalidResponses) {
     __test.resetRuntimeStateForTest();
@@ -261,18 +294,27 @@ test("TLS settings and public trust material are validated before agent creation
     retry: 0.5,
   });
 
-  setEnvironment({ BACKEND_TLS_SERVER_NAME: "not a dns name" });
-  assert.throws(__test.tlsSettings, /server identity is not configured/);
-  setEnvironment({
-    BACKEND_TLS_SERVER_NAME: "backend.gco.internal",
-    BACKEND_TLS_ROOT_CA_PARAMETER: "relative-name",
-  });
-  assert.throws(__test.tlsSettings, /trust parameter is not configured/);
-  setEnvironment({ BACKEND_TLS_ROOT_CA_PARAMETER: "/gco/root", BACKEND_TLS_ROOT_CA_REGION: "" });
-  assert.throws(__test.tlsSettings, /trust parameter is not configured/);
+  const invalidSettings = [
+    [{ BACKEND_TLS_SERVER_NAME: undefined }, /server identity is not configured/],
+    [{ BACKEND_TLS_SERVER_NAME: "   " }, /server identity is not configured/],
+    [{ BACKEND_TLS_SERVER_NAME: "not a dns name" }, /server identity is not configured/],
+    [{ BACKEND_TLS_ROOT_CA_PARAMETER: undefined }, /trust parameter is not configured/],
+    [{ BACKEND_TLS_ROOT_CA_PARAMETER: "   " }, /trust parameter is not configured/],
+    [{ BACKEND_TLS_ROOT_CA_PARAMETER: "relative-name" }, /trust parameter is not configured/],
+    [{ BACKEND_TLS_ROOT_CA_REGION: undefined }, /trust parameter is not configured/],
+    [{ BACKEND_TLS_ROOT_CA_REGION: "   " }, /trust parameter is not configured/],
+  ];
+  for (const [overrides, pattern] of invalidSettings) {
+    setEnvironment(validTlsEnvironment(overrides));
+    assert.throws(__test.tlsSettings, pattern);
+  }
 
   assert.throws(
     () => __test.validateTrustBundle("-----BEGIN PRIVATE KEY-----"),
+    /invalid public material/,
+  );
+  assert.throws(
+    () => __test.validateTrustBundle("ordinary public text"),
     /invalid public material/,
   );
   assert.throws(
@@ -345,12 +387,21 @@ test("TLS trust refreshes are shared, bounded-stale, and fail closed", async () 
   assert.equal(transportA.agent, transportB.agent);
   transportA.agent.destroy();
 
-  __test.resetRuntimeStateForTest();
-  seedClient(__test.ssmClients, "us-east-1", () => ({ Parameter: {} }));
-  await assert.rejects(
-    __test.getTlsTransport(),
-    /Backend TLS trust bundle is unavailable/,
-  );
+  for (const response of [
+    undefined,
+    null,
+    {},
+    { Parameter: null },
+    { Parameter: {} },
+    { Parameter: { Value: null } },
+  ]) {
+    __test.resetRuntimeStateForTest();
+    seedClient(__test.ssmClients, "us-east-1", () => response);
+    await assert.rejects(
+      __test.getTlsTransport(),
+      /Backend TLS trust bundle is unavailable/,
+    );
+  }
 });
 
 test("regional discovery validates SSM, paginated ALB ownership, tags, and cache", async () => {
@@ -429,11 +480,15 @@ test("regional discovery validates SSM, paginated ALB ownership, tags, and cache
     Name: "/gco-test/alb-hostname-us-west-2",
   });
 
-  setEnvironment({ REGIONAL_ENDPOINT_CACHE_TTL_SECONDS: "0" });
-  assert.equal(__test.regionalEndpointCacheTtl(), 0);
-  assert.equal(await __test.resolveRegionalEndpoint(102), endpoint);
+  assert.equal(await __test.resolveRegionalEndpoint(160), endpoint);
   assert.equal(ssm.calls.length, 2);
   assert.equal(alb.calls.length, 6);
+
+  setEnvironment({ REGIONAL_ENDPOINT_CACHE_TTL_SECONDS: "0" });
+  assert.equal(__test.regionalEndpointCacheTtl(), 0);
+  assert.equal(await __test.resolveRegionalEndpoint(161), endpoint);
+  assert.equal(ssm.calls.length, 3);
+  assert.equal(alb.calls.length, 9);
   assert.equal(__test.regionalEndpointCache.size, 1);
 });
 
@@ -477,9 +532,12 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
     { Key: "gco.aws/gateway", Value: "gco-system/gco-gateway" },
   ];
 
-  async function rejected(name, balancers, tags, pattern) {
+  async function rejected(name, balancers, tags, pattern, responses) {
     await t.test(name, async () => {
-      __test.elbClients.set(region, ownershipClient(balancers, tags));
+      __test.elbClients.set(
+        region,
+        ownershipClient(balancers, tags, responses),
+      );
       await assert.rejects(
         __test.validateRegionalEndpointOwnership(
           endpoint,
@@ -493,6 +551,19 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
   }
 
   await rejected("missing", [], [], /does not exist/);
+  await rejected(
+    "omitted load balancers",
+    [],
+    [],
+    /does not exist/,
+    { loadBalancers: {} },
+  );
+  await rejected(
+    "omitted DNS name",
+    [loadBalancer({ DNSName: undefined })],
+    [],
+    /does not exist/,
+  );
   await rejected(
     "non-application",
     [loadBalancer({ Type: "network" })],
@@ -508,6 +579,23 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
   await rejected(
     "malformed ARN",
     [loadBalancer({ LoadBalancerArn: "not-an-arn" })],
+    validTags,
+    /ownership is invalid/,
+  );
+  await rejected(
+    "omitted ARN",
+    [loadBalancer({ LoadBalancerArn: undefined })],
+    validTags,
+    /ownership is invalid/,
+  );
+  await rejected(
+    "wrong ARN service",
+    [
+      loadBalancer({
+        LoadBalancerArn:
+          "arn:aws:ec2:us-west-2:123456789012:loadbalancer/app/gco/abc",
+      }),
+    ],
     validTags,
     /ownership is invalid/,
   );
@@ -548,16 +636,49 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
     [{ Key: "eks:eks-cluster-name", Value: "gco-test-us-west-2" }],
     /not the GCO Gateway/,
   );
+  await rejected(
+    "omitted tag descriptions",
+    [loadBalancer()],
+    [],
+    /not owned by the GCO cluster/,
+    { tags: {} },
+  );
+  await rejected(
+    "omitted tags",
+    [loadBalancer()],
+    [],
+    /not owned by the GCO cluster/,
+    { tags: { TagDescriptions: [{}] } },
+  );
 });
 
 test("regional resolution rejects incomplete registry configuration and bad values", async () => {
-  setEnvironment(validRegionalEnvironment({ REGISTRY_REGION: "invalid" }));
-  await assert.rejects(
-    __test.resolveRegionalEndpoint(100),
-    /Regional endpoint registry is not configured/,
-  );
+  const invalidConfigurations = [
+    { REGISTRY_REGION: undefined },
+    { REGISTRY_REGION: "invalid" },
+    { TARGET_REGION: undefined },
+    { TARGET_REGION: "invalid" },
+    { PROJECT_NAME: undefined },
+    { PROJECT_NAME: "" },
+    { AWS_ACCOUNT_ID: undefined },
+    { AWS_ACCOUNT_ID: "" },
+  ];
+  for (const overrides of invalidConfigurations) {
+    setEnvironment(validRegionalEnvironment(overrides));
+    await assert.rejects(
+      __test.resolveRegionalEndpoint(100),
+      /Regional endpoint registry is not configured/,
+    );
+  }
 
   setEnvironment(validRegionalEnvironment());
+  for (const response of [undefined, null, {}, { Parameter: null }, { Parameter: {} }]) {
+    __test.resetRuntimeStateForTest();
+    seedClient(__test.ssmClients, "us-east-1", () => response);
+    await assert.rejects(__test.resolveRegionalEndpoint(101));
+  }
+
+  __test.resetRuntimeStateForTest();
   seedClient(__test.ssmClients, "us-east-1", () => ({
     Parameter: { Value: "attacker.example.com" },
   }));

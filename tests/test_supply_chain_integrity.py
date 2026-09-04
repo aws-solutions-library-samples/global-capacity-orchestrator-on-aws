@@ -795,6 +795,30 @@ def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
         assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"
 
 
+def test_npm_audit_retries_a_registry_operational_error() -> None:
+    """`npm audit`'s advisory-bulk fetch against registry.npmjs.org has
+    returned a transient 503, which npm reports as {"error": {...}} instead
+    of a real {"vulnerabilities": {...}} report. That single unlucky fetch
+    must not fail the job the way it did in CI — it is retried before the
+    checker script ever sees the report."""
+    step = _workflow_job_step(
+        ".github/workflows/security.yml",
+        "security-npm-audit",
+        "Install and audit every locked npm graph",
+    )
+    body = step["run"]
+
+    assert "AUDIT_ATTEMPTS" in step.get("env", {})
+    assert re.search(r"npm audit .*--json", body, re.DOTALL)
+    assert "isinstance(data.get('error'), dict)" in body
+    assert 'sleep "$AUDIT_RETRY_DELAY"' in body
+    # The retry loop must run before the exact/expiring checker, so a
+    # transient fetch failure never reaches the finding-comparison logic.
+    retry_index = body.index("while true; do")
+    checker_index = body.index("check_npm_audit.py")
+    assert retry_index < checker_index
+
+
 def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:
     """Map job name -> its job-level ``env`` pins (``*_VERSION`` / ``*_SHA256``).
 

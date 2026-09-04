@@ -28,8 +28,8 @@ from fastmcp.exceptions import ToolError
 from tools._task_status import TaskStatusWriter, is_valid_task_id, make_task_id
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T20:49:27Z
+# Generated from Git commit: c253a0ea3c715f5325d9e7549d2376f629f25c16
 # Flowchart(s) generated from this file:
 #   * ``_run_long_task`` -> ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.png``)
@@ -312,6 +312,12 @@ async def _run_long_task(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await coordination
 
+    async def _cancel_heartbeat_task(task: asyncio.Task[None]) -> None:
+        """Cancel one heartbeat task and await its cancellation."""
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
     try:
         if total_units is not None and total_units > 0:
             await _best_effort_client_call(progress, "set_total", int(total_units))
@@ -335,7 +341,12 @@ async def _run_long_task(
         coordination = asyncio.gather(wait_task, *drains)
         results = await asyncio.shield(coordination)
         return_code = int(results[0])
+        # Reached only on success, by which point heartbeat is always set:
+        # nothing between its creation above and this line can raise.
+        await _cancel_heartbeat_task(heartbeat)
     except asyncio.CancelledError:
+        if heartbeat is not None:
+            await _cancel_heartbeat_task(heartbeat)
         with contextlib.suppress(Exception):
             await _clean_process_tasks()
         status_writer.finish(
@@ -347,6 +358,8 @@ async def _run_long_task(
             raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None
         raise
     except Exception as exc:
+        if heartbeat is not None:
+            await _cancel_heartbeat_task(heartbeat)
         with contextlib.suppress(Exception):
             await _clean_process_tasks()
         status_writer.finish(
@@ -358,21 +371,8 @@ async def _run_long_task(
             ),
         )
         raise
-    finally:
-        if heartbeat is not None:
-            heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await heartbeat
 
     duration = int(time.monotonic() - started)
-    if return_code is None:
-        # Coordination only completes normally after process.wait(). Keep the
-        # guard explicit for unusual Process implementations and static safety.
-        return_code = process.returncode if process is not None else None
-    if return_code is None:
-        status_writer.finish(state="failed", error="subprocess return code unavailable")
-        raise RuntimeError("subprocess return code unavailable")
-
     if return_code != 0:
         payload: dict[str, Any] = {
             "error": f"exit_code={return_code}",

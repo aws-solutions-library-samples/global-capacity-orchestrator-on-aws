@@ -20,7 +20,7 @@
 #   - unit:fresh-install            — pip install from scratch, verify imports
 #   - unit:lockfile:freshness       — requirements-lock.txt matches pyproject.toml
 #   - unit:mcp:install              — uv-installs gco-mcp from source, then launches the server
-#   - unit:pytest:core              — combines shard coverage and enforces the 90% floor
+#   - unit:pytest:core              — combines shard coverage and enforces the 100% floor
 #   - unit:pytest:core (shard N/M)  — one dynamic balanced slice of the core suite
 #   - unit:recorder:macos-bash32    — recorder syntax and redaction under system Bash 3.2
 #   - unit:workload:imports         — K8s service import + circular-import detection
@@ -94,7 +94,7 @@ jobs:
 
   # --------------------------------------------------------------------------
   # The core suite is sharded across parallel jobs, then coverage from every
-  # shard is combined in one place so the 90% floor is still enforced against
+  # shard is combined in one place so the 100% floor is still enforced against
   # the whole codebase rather than against a fraction of it.
   #
   # TO CHANGE THE SHARD COUNT, edit `matrix.shard` below and nothing else:
@@ -182,7 +182,7 @@ jobs:
         # --cov-fail-under=0 is required, not redundant. pytest-cov reads
         # fail_under from [tool.coverage.report] in pyproject and enforces it
         # even when --cov-report= suppresses all reports, so without this every
-        # shard fails with "Required test coverage of 90.0% not reached".
+        # shard fails with "Required test coverage of 100.0% not reached".
         # --cov-report= then leaves just the raw data file to combine.
         #
         # --durations prints the slowest tests (setup+call+teardown) in every
@@ -287,7 +287,7 @@ jobs:
           merge-multiple: true
       - name: Combine coverage and enforce the floor
         # `coverage combine` maps each shard's data onto the checkout, which sits
-        # at the same absolute path on every runner. fail_under = 90 comes from
+        # at the same absolute path on every runner. fail_under = 100 comes from
         # pyproject's [tool.coverage.report], so the floor lives in one place.
         run: |
           set -euo pipefail

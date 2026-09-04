@@ -89,7 +89,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.warning(f"Failed to initialize CloudWatch metrics publisher: {e}")
             health_metrics = None
-        health_check_task = asyncio.create_task(background_health_monitor())
+        health_task = asyncio.create_task(background_health_monitor())
+        health_check_task = health_task
         logger.info("Health monitoring started")
 
         # Start webhook dispatcher for job event notifications
@@ -106,18 +107,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.error(f"Failed to start health monitoring: {e}")
         raise
 
-    yield
-
-    # Shutdown
-    logger.info("Shutting down Health API Service")
-    if health_check_task:
-        health_check_task.cancel()
+    try:
+        yield
+    finally:
+        # Shutdown must also run when a lifespan consumer raises.
+        logger.info("Shutting down Health API Service")
+        health_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await health_check_task
-    if webhook_dispatcher:
-        await webhook_dispatcher.stop()
-        logger.info("Webhook dispatcher stopped")
-    logger.info("Health monitoring stopped")
+            await health_task
+        if webhook_dispatcher:
+            await webhook_dispatcher.stop()
+            logger.info("Webhook dispatcher stopped")
+        logger.info("Health monitoring stopped")
 
 
 # Create FastAPI app with lifespan management
@@ -216,38 +217,40 @@ async def health_check() -> JSONResponse:
     global current_health_status
 
     try:
+        status = current_health_status
         # If we don't have a current status, get one immediately
-        if current_health_status is None:
+        if status is None:
             if health_monitor is None:
                 raise HTTPException(status_code=503, detail="Health monitor not initialized")
-            current_health_status = await health_monitor.get_health_status()
+            status = await health_monitor.get_health_status()
+            current_health_status = status
 
         # Check if status is too old (more than 2 minutes)
-        if current_health_status:
-            age_seconds = (datetime.now() - current_health_status.timestamp).total_seconds()
-            if age_seconds > 120 and health_monitor is not None:  # 2 minutes
-                logger.warning(f"Health status is {age_seconds:.0f} seconds old, refreshing")
-                current_health_status = await health_monitor.get_health_status()
+        age_seconds = (datetime.now() - status.timestamp).total_seconds()
+        if age_seconds > 120 and health_monitor is not None:  # 2 minutes
+            logger.warning(f"Health status is {age_seconds:.0f} seconds old, refreshing")
+            status = await health_monitor.get_health_status()
+            current_health_status = status
 
         # Return appropriate HTTP status based on health
-        if current_health_status.status == "healthy":
+        if status.status == "healthy":
             return JSONResponse(
                 status_code=200,
                 content={
                     "status": "healthy",
-                    "timestamp": current_health_status.timestamp.isoformat(),
-                    "cluster_id": current_health_status.cluster_id,
-                    "region": current_health_status.region,
+                    "timestamp": status.timestamp.isoformat(),
+                    "cluster_id": status.cluster_id,
+                    "region": status.region,
                 },
             )
         return JSONResponse(
             status_code=503,
             content={
                 "status": "unhealthy",
-                "timestamp": current_health_status.timestamp.isoformat(),
-                "cluster_id": current_health_status.cluster_id,
-                "region": current_health_status.region,
-                "message": current_health_status.message,
+                "timestamp": status.timestamp.isoformat(),
+                "cluster_id": status.cluster_id,
+                "region": status.region,
+                "message": status.message,
             },
         )
 

@@ -8,7 +8,7 @@
   },
   "packageManager": "npm@12.0.2",
   "scripts": {
-    "test": "node --test --experimental-test-coverage --test-coverage-lines=93 --test-coverage-functions=93 --test-coverage-branches=93 ../../tests/inference-streaming-proxy/*.test.mjs"
+    "test": "node --test --experimental-test-coverage --test-coverage-include=index.mjs --test-coverage-lines=100 --test-coverage-functions=100 --test-coverage-branches=100 ../../tests/inference-streaming-proxy/*.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-elastic-load-balancing-v2": "3.1123.0",

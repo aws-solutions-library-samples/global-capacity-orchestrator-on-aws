@@ -169,9 +169,6 @@ class ModelManager:
             # S3 accepts at most 1,000 identifiers per DeleteObjects request.
             for start in range(0, len(versioned_objects), 1000):
                 batch = versioned_objects[start : start + 1000]
-                if not batch:
-                    continue
-
                 response = s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
                 errors = response.get("Errors", []) if isinstance(response, dict) else []
                 errors = [error for error in errors if isinstance(error, dict)]

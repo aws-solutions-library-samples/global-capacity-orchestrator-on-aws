@@ -274,6 +274,18 @@ class TestOutputFormatterTable:
             assert "item1" in result
             assert "item2" in result
 
+    def test_format_table_scalar_falls_back_to_str(self):
+        """A scalar that is neither a dataclass, dict, nor list (e.g. an int
+        or plain string) is rendered with str() rather than as a table."""
+        from cli.output import OutputFormatter
+
+        with patch("cli.output.get_config") as mock_config:
+            mock_config.return_value = MagicMock(output_format="table")
+            formatter = OutputFormatter()
+
+            assert formatter.format(42) == "42"
+            assert formatter.format("plain string") == "plain string"
+
 
 class TestOutputFormatterCells:
     """Tests for cell formatting."""

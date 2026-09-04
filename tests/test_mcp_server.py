@@ -535,6 +535,37 @@ class TestToolRegistration:
 class TestJobTools:
     """Tests for job management tools."""
 
+    def test_ctx_warning_no_op_when_get_context_raises(self):
+        """Outside an MCP tool call, ``get_context()`` raises and the helper
+        must suppress that and return without dispatching anywhere."""
+        from tools.jobs import _ctx_warning
+
+        asyncio.run(_ctx_warning("deleting old-job in us-east-1/gco-jobs"))
+
+    def test_ctx_warning_emits_warning_when_context_present(self):
+        from tools import jobs as jobs_mod
+
+        captured: list[str] = []
+
+        class _StubCtx:
+            async def warning(self, message: str) -> None:
+                captured.append(message)
+
+        with patch("fastmcp.server.dependencies.get_context", return_value=_StubCtx()):
+            asyncio.run(jobs_mod._ctx_warning("deleting old-job"))
+
+        assert captured == ["deleting old-job"]
+
+    def test_ctx_warning_swallows_dispatch_failure(self):
+        from tools import jobs as jobs_mod
+
+        class _AngryCtx:
+            async def warning(self, message: str) -> None:
+                raise RuntimeError("transport closed")
+
+        with patch("fastmcp.server.dependencies.get_context", return_value=_AngryCtx()):
+            asyncio.run(jobs_mod._ctx_warning("oh no"))
+
     def test_list_jobs_all_regions(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout='{"jobs":[]}', stderr="")
@@ -588,6 +619,15 @@ class TestJobTools:
             assert "submit" in cmd
             assert "-n" in cmd
             assert "test" in cmd
+
+    def test_submit_job_api_without_namespace(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.submit_job_api("job.yaml")
+            cmd = mock.call_args[0][0]
+            assert "submit" in cmd
+            assert "job.yaml" in cmd
+            assert "-n" not in cmd
 
     def test_get_job(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -658,6 +698,13 @@ class TestJobTools:
                 "trainer",
             ]
 
+    def test_get_pod_logs_without_container(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.get_pod_logs("my-job", "my-job-abc12", "us-east-1")
+            cmd = mock.call_args[0][0]
+            assert "--container" not in cmd
+
     def test_get_job_metrics(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
@@ -698,6 +745,49 @@ class TestJobTools:
             cmd = mock.call_args[0][0]
             assert "queue-status" in cmd
 
+    def test_queue_status_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.queue_status(region="us-west-2")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-west-2"]
+            assert "--all-regions" not in cmd
+
+    def test_get_job_validation_policy(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.get_job_validation_policy("eu-west-1")
+            cmd = mock.call_args[0][0]
+            assert "policy" in cmd
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "eu-west-1"]
+
+    def test_check_job_policy_minimal(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.check_job_policy("manifest.yaml")
+            cmd = mock.call_args[0][0]
+            assert "check-policy" in cmd
+            assert "manifest.yaml" in cmd
+            assert "-r" not in cmd
+            assert "-n" not in cmd
+            assert "--offline" not in cmd
+
+    def test_check_job_policy_full_options(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.check_job_policy(
+                "manifest.yaml",
+                regions=["us-east-1", "us-west-2"],
+                namespace="ml-jobs",
+                offline=True,
+            )
+            cmd = mock.call_args[0][0]
+            assert cmd.count("-r") == 2
+            assert "us-east-1" in cmd
+            assert "us-west-2" in cmd
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "ml-jobs"]
+            assert "--offline" in cmd
+
 
 class TestCapacityTools:
     """Tests for capacity tools."""
@@ -716,6 +806,14 @@ class TestCapacityTools:
             run_mcp.instance_info("p5.48xlarge")
             cmd = mock.call_args[0][0]
             assert cmd[cmd.index("instance-info") + 1] == "p5.48xlarge"
+            assert "-r" not in cmd
+
+    def test_instance_info_with_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.instance_info("p5.48xlarge", region="eu-west-1")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "eu-west-1"]
 
     def test_recommend_capacity(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -1311,6 +1409,27 @@ class TestNewParityWrappers:
             ]
 
     @pytest.mark.asyncio
+    async def test_fleet_status_default_argv(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.fleet_status()
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("status")] == "status"
+            assert "-r" not in cmd
+            assert "--with-costs" not in cmd
+            assert "--with-nodepools" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_fleet_status_region_and_optional_flags(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.fleet_status(region="us-east-1", with_costs=True, with_nodepools=True)
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("-r") + 1] == "us-east-1"
+            assert "--with-costs" in cmd
+            assert "--with-nodepools" in cmd
+
+    @pytest.mark.asyncio
     @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
     async def test_addons_install_all_regions(self):
         importlib.reload(run_mcp)
@@ -1581,7 +1700,9 @@ class TestSourceResources:
         result = asyncio.run(run_mcp.mcp.read_resource("source://gco/index"))
         content = result.contents[0].content
         assert "source://gco/config/pyproject.toml" in content
-        assert "source://gco/config/.gitlab-ci.yml" in content
+        # A logical name whose real file lives under .github/config/ — the index
+        # advertises the stable URI, not the on-disk location.
+        assert "source://gco/config/.yamllint.yml" in content
         assert "source://gco/config/.pre-commit-config.yaml" in content
 
     def test_source_index_lists_files(self):
@@ -1593,11 +1714,6 @@ class TestSourceResources:
         result = asyncio.run(run_mcp.mcp.read_resource("source://gco/config/pyproject.toml"))
         content = result.contents[0].content
         assert "gco-cli" in content
-
-    def test_config_resource_reads_gitlab_ci(self):
-        result = asyncio.run(run_mcp.mcp.read_resource("source://gco/config/.gitlab-ci.yml"))
-        content = result.contents[0].content
-        assert len(content) > 10
 
     def test_config_resource_reads_pre_commit(self):
         result = asyncio.run(

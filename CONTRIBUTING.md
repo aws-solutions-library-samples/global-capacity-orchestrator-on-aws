@@ -440,7 +440,7 @@ ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 python scripts/accelerator_catalog.py validate
 pytest tests/test_accelerator_catalog.py -q
-pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=90
+pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=100
 ```
 
 **Success indicator:** all six commands complete with no reported failures —
@@ -487,7 +487,7 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 | `.github/workflows/floci-tests.yml` | Floci Tests | Credential-free wire-level and live-validation harness contracts against the pinned Floci emulator |
 | `.github/workflows/integration-tests.yml` | Integration Tests | Container, dev-image, kind, manifest, Lambda, and MCP integration contracts |
 | `.github/workflows/security.yml` | Security | Python/npm/container/IaC/secret scans and Python+JavaScript CodeQL |
-| `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 streaming-Lambda tests with 93% line/function/branch gates |
+| `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 streaming-Lambda tests with exact 100% line/function/branch gates |
 | `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, strict MkDocs, mypy, Ruff, ShellCheck, and yamllint |
 
 Each workflow file has a comment header documenting triggers and per-job purpose. Every job uses `category:tool:test_name` display names (for example, `unit:pytest:core`) and `category-tool-test_name` job IDs.
@@ -540,7 +540,7 @@ mypy gco/stacks/ app.py
 bandit -r gco/ cli/ -c pyproject.toml --severity-level medium
 
 # Run tests with coverage (matches unit:pytest:core)
-pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-report=html --cov-fail-under=90 \
+pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-report=html --cov-fail-under=100 \
     --ignore=tests/test_nag_compliance.py
 
 # Run cdk-nag compliance matrix serially (matches unit:cdk:nag-compliance)
@@ -568,10 +568,6 @@ The README badge label tells you the workflow and job. For example, `unit:pytest
 - Actions UI: repo → Actions → "Unit Tests" → latest run → `unit:pytest:core`
 
 Click any badge to land on the workflow page; the Actions UI lists every job.
-
-#### Frozen GitLab pipeline
-
-`.github/legacy/.gitlab-ci.yml` is kept as a frozen reference for anyone forking to GitLab. It is NOT maintained and may drift as tools evolve. GitHub Actions is authoritative. See `.github/legacy/README.md`.
 
 ### Integration Tests
 

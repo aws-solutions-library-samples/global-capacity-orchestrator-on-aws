@@ -98,8 +98,8 @@ from gco.services.manifest_processor import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)
@@ -139,20 +139,20 @@ def _parse_memory_string(memory_str: str) -> int:
         return 0
     s = memory_str.strip()
     if s.endswith("Ki"):
-        return int(s[:-2]) * 1024
+        return int(float(s[:-2]) * 1024)
     if s.endswith("Mi"):
-        return int(s[:-2]) * 1024**2
+        return int(float(s[:-2]) * 1024**2)
     if s.endswith("Gi"):
-        return int(s[:-2]) * 1024**3
+        return int(float(s[:-2]) * 1024**3)
     if s.endswith("Ti"):
-        return int(s[:-2]) * 1024**4
+        return int(float(s[:-2]) * 1024**4)
     if s.endswith("k"):
-        return int(s[:-1]) * 1000
+        return int(float(s[:-1]) * 1000)
     if s.endswith("M"):
-        return int(s[:-1]) * 1000**2
+        return int(float(s[:-1]) * 1000**2)
     if s.endswith("G"):
-        return int(s[:-1]) * 1000**3
-    return int(s)
+        return int(float(s[:-1]) * 1000**3)
+    return int(float(s))
 
 
 # --- Configuration from environment ---
@@ -416,7 +416,6 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     #   - TrainJob: synthetic spec.trainer view weighted by numNodes, plus every
     #     pod spec embedded under spec (runtimePatches) weighted 1 — see
     #     manifest_processor.TrainJobPodSpecs for why this decomposition exists.
-    spec = m.get("spec", {})
     weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
     if kind == "TrainJob":
         trainjob_specs = extract_trainjob_pod_specs(m)
@@ -427,15 +426,19 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
             "examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)"
         )
     else:
-        pod_spec = None
-        if "template" in spec:
-            pod_spec = spec["template"].get("spec", {})
-        elif "jobTemplate" in spec:
-            pod_spec = spec["jobTemplate"].get("spec", {}).get("template", {}).get("spec", {})
-        elif "containers" in spec:
-            # Plain Pod manifest
-            pod_spec = spec
-        if pod_spec:
+        pod_spec = _extract_pod_spec(m)
+        workload_kinds = {
+            "Job",
+            "CronJob",
+            "Deployment",
+            "StatefulSet",
+            "DaemonSet",
+            "ReplicaSet",
+            "Pod",
+        }
+        if kind in workload_kinds and pod_spec is None:
+            return False, f"{kind} manifest must contain a valid pod spec"
+        if pod_spec is not None:
             weighted_pod_specs.append((pod_spec, 1))
         toleration_hint_example = "examples/gpu-job.yaml"
 
@@ -557,17 +560,7 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
                 else:
                     total_cpu += multiplier * int(float(cpu_str) * 1000)
                 mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113 - dict.get(), not HTTP requests
-                if isinstance(mem_str, str):
-                    if mem_str.endswith("Gi"):
-                        mem_bytes = int(float(mem_str[:-2]) * 1024**3)
-                    elif mem_str.endswith("Mi"):
-                        mem_bytes = int(float(mem_str[:-2]) * 1024**2)
-                    elif mem_str.endswith("Ki"):
-                        mem_bytes = int(float(mem_str[:-2]) * 1024)
-                    else:
-                        mem_bytes = int(mem_str)
-                else:
-                    mem_bytes = int(mem_str)
+                mem_bytes = _parse_memory_string(str(mem_str))
                 total_memory += multiplier * mem_bytes
 
         errors = []

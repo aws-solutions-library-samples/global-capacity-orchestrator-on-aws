@@ -165,6 +165,9 @@ jobs:
           fi
       - name: Install and audit every locked npm graph
         shell: bash
+        env:
+          AUDIT_ATTEMPTS: "3"
+          AUDIT_RETRY_DELAY: "15"
         run: |
           set -euo pipefail
           # shellcheck source=.github/scripts/lib_dependency_scan.sh
@@ -178,8 +181,40 @@ jobs:
             report_name="${report_name//\//-}"
             echo "=== Auditing ${package_dir} ==="
             npm ci --prefix "$package_dir" --ignore-scripts --no-audit --no-fund
-            npm audit --prefix "$package_dir" --audit-level=high \
-              --json > "npm-audit-reports/${report_name}.json" || true
+            # registry.npmjs.org's advisory-bulk endpoint intermittently answers
+            # 503 (observed in CI), which npm surfaces as a report shaped
+            # {"error": {...}} instead of the real {"vulnerabilities": {...}}
+            # document. That is a transient fault on an endpoint we don't
+            # control, not a finding, so the fetch itself is retried; a
+            # genuine vulnerability report never has this shape and is used
+            # on the first attempt.
+            attempt=1
+            while true; do
+              npm audit --prefix "$package_dir" --audit-level=high \
+                --json > "npm-audit-reports/${report_name}.json" || true
+              is_operational_error=0
+              python3 -c "
+          import json, sys
+          with open(sys.argv[1]) as f:
+              data = json.load(f)
+          sys.exit(1 if isinstance(data.get('error'), dict) else 0)
+          " "npm-audit-reports/${report_name}.json" || is_operational_error=1
+              if [ "$is_operational_error" -eq 0 ]; then
+                break
+              fi
+              if [ "$attempt" -ge "$AUDIT_ATTEMPTS" ]; then
+                echo "::warning::npm audit for ${package_dir} kept returning an" \
+                  "operational error after ${AUDIT_ATTEMPTS} attempt(s); the" \
+                  "checker below will fail loudly on the error report."
+                break
+              fi
+              echo "::warning::npm audit for ${package_dir} returned an" \
+                "operational error (attempt ${attempt}/${AUDIT_ATTEMPTS});" \
+                "retrying in ${AUDIT_RETRY_DELAY}s. Usually a transient" \
+                "registry.npmjs.org outage."
+              sleep "$AUDIT_RETRY_DELAY"
+              attempt=$((attempt + 1))
+            done
             if ! python3 .github/scripts/check_npm_audit.py \
               --report "npm-audit-reports/${report_name}.json" \
               --package-dir "$package_dir" \

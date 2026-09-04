@@ -1523,12 +1523,15 @@ class ConfigLoader:
             if region in region_overrides:
                 region_config = region_overrides[region]
                 if isinstance(region_config, dict):
+                    # Preserve the fully merged default/global node group before
+                    # the top-level regional overlay replaces that nested value.
+                    # A regional node_group is a patch, not a wholesale reset.
+                    existing_node_group = merged_config.get("node_group")
                     merged_config = {**merged_config, **region_config}
                     # Handle nested node_group override
                     if "node_group" in region_config:
                         region_node_group = region_config["node_group"]
                         if isinstance(region_node_group, dict):
-                            existing_node_group = merged_config.get("node_group")
                             if isinstance(existing_node_group, dict):
                                 base_node_group = existing_node_group
                             else:

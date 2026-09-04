@@ -525,3 +525,163 @@ class TestMockedRunnerLifecycle:
         assert process.kill_calls == 0
         assert process.returncode == -15
         assert writer.finishes == [{"state": "cancelled", "exit_code": -15, "error": "cancelled"}]
+
+
+class TestResidualCleanupBranches:
+    async def test_exact_payload_budget_truncates_when_more_bytes_arrive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A line that fills the payload budget still marks later discarded bytes."""
+        monkeypatch.setattr(
+            long_task,
+            "_STREAM_LINE_MAX_BYTES",
+            len(long_task._TRUNCATED_TEXT.encode()) + 4,
+        )
+        stream = _ChunkStream([b"abcd", b"e\n"])
+
+        assert [line async for line in long_task._bounded_stream_lines(stream)] == [
+            "abcd" + long_task._TRUNCATED_TEXT
+        ]
+
+    async def test_failed_wait_that_sets_returncode_does_not_kill(self) -> None:
+        """A reaped process is not signalled again when its wait task raises."""
+        process = _FakeProcess(
+            stdout=_ChunkStream([]),
+            stderr=_ChunkStream([]),
+            exit_code=-15,
+        )
+
+        async def failed_after_reap() -> int:
+            process.returncode = -15
+            raise RuntimeError("wait callback failed")
+
+        wait_task = asyncio.create_task(failed_after_reap())
+        await long_task._terminate_and_reap(process, wait_task)  # type: ignore[arg-type]
+
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 0
+        assert process.returncode == -15
+
+    async def test_cancellation_consumes_pending_drains_and_coordination(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Caller cancellation explicitly cancels every still-pending auxiliary future."""
+
+        class BlockingStream:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = False
+
+            async def read(self, _size: int) -> bytes:
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return b""
+
+        class BlockingProcess(_FakeProcess):
+            def __init__(self) -> None:
+                self.stdout_stream = BlockingStream()
+                self.stderr_stream = BlockingStream()
+                super().__init__(
+                    stdout=self.stdout_stream,  # type: ignore[arg-type]
+                    stderr=self.stderr_stream,  # type: ignore[arg-type]
+                    exit_code=-15,
+                )
+                self.release = asyncio.Event()
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                await self.release.wait()
+                self.returncode = self.exit_code
+                return self.exit_code
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+                self.release.set()
+
+        process = BlockingProcess()
+        real_gather = asyncio.gather
+        coordination = asyncio.get_running_loop().create_future()
+        gather_calls = 0
+
+        def selective_gather(*awaitables: object, **kwargs: object):
+            nonlocal gather_calls
+            gather_calls += 1
+            if gather_calls == 1:
+                return coordination
+            return real_gather(*awaitables, **kwargs)
+
+        async def fake_spawn(*_argv: str, **_kwargs: object) -> BlockingProcess:
+            return process
+
+        monkeypatch.setattr(long_task, "TaskStatusWriter", _WriterSpy)
+        monkeypatch.setattr(long_task, "_try_get_task_id", lambda _ctx: None)
+        monkeypatch.setattr(long_task, "make_task_id", lambda _tool: "pending-cleanup")
+        monkeypatch.setattr(long_task.asyncio, "create_subprocess_exec", fake_spawn)
+        monkeypatch.setattr(long_task.asyncio, "gather", selective_gather)
+
+        runner = asyncio.create_task(
+            long_task._run_long_task(
+                ["command"],
+                ctx=_Context(),
+                progress=_Progress(),
+                is_stack_op=False,
+            )
+        )
+        await process.stdout_stream.started.wait()
+        await process.stderr_stream.started.wait()
+        runner.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+
+        assert process.stdout_stream.cancelled is True
+        assert process.stderr_stream.cancelled is True
+        assert coordination.cancelled() is True
+        assert process.terminate_calls == 1
+
+
+class TestCancellationBeforeHeartbeatExists:
+    """Cancellation raised before ``heartbeat`` is ever assigned.
+
+    ``heartbeat`` is created immediately before the process-wait/drain
+    coordination, with nothing awaited in between. The only way to observe
+    ``heartbeat is None`` inside the ``CancelledError`` handler is to cancel
+    while still inside (or before) ``asyncio.create_subprocess_exec`` itself.
+    """
+
+    async def test_cancellation_during_spawn_skips_heartbeat_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spawn_started = asyncio.Event()
+
+        async def blocking_spawn(*_argv: str, **_kwargs: object) -> Any:
+            spawn_started.set()
+            await asyncio.Event().wait()  # Never resolves; cancellation interrupts this.
+
+        monkeypatch.setattr(long_task, "TaskStatusWriter", _WriterSpy)
+        monkeypatch.setattr(long_task, "_try_get_task_id", lambda _ctx: None)
+        monkeypatch.setattr(long_task, "make_task_id", lambda _tool: "pre-spawn-cancel")
+        monkeypatch.setattr(long_task.asyncio, "create_subprocess_exec", blocking_spawn)
+
+        runner = asyncio.create_task(
+            long_task._run_long_task(
+                ["command"],
+                ctx=_Context(),
+                progress=_Progress(),
+                is_stack_op=False,
+            )
+        )
+        await spawn_started.wait()
+        runner.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+
+        writer = _WriterSpy.latest
+        assert writer is not None
+        # process was never assigned, so exit_code is None and cleanup is a no-op.
+        assert writer.finishes == [{"state": "cancelled", "exit_code": None, "error": "cancelled"}]

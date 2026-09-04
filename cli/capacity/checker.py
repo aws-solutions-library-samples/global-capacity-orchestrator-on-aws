@@ -541,9 +541,6 @@ class CapacityChecker:
 
             results = []
             for az, prices in az_prices.items():
-                if not prices:
-                    continue
-
                 current = prices[0]
                 avg = statistics.mean(prices)
                 min_price = min(prices)
@@ -984,8 +981,7 @@ class CapacityChecker:
                 avg_spot_ratio = sum(ratios) / len(ratios)
                 has_price_signal = True
             stabilities = [sp.price_stability for sp in spot_prices]
-            if stabilities:
-                avg_stability = sum(stabilities) / len(stabilities)
+            avg_stability = sum(stabilities) / len(stabilities)
 
         # --- Signal 4: AZ coverage (passed in from caller) ---
         has_az_signal = az_coverage is not None
@@ -1137,13 +1133,14 @@ class CapacityChecker:
                     "Spot availability is medium; on-demand recommended for reliability",
                 )
 
-            if best_spot.availability == "low":
-                if fault_tolerance == "high":
-                    return (
-                        "spot",
-                        "Low spot availability but acceptable with high fault tolerance",
-                    )
-                return "on-demand", "Spot capacity is limited; on-demand recommended"
+            # ``unknown`` values were filtered above; high and medium already
+            # returned, so low is the only remaining availability in the model.
+            if fault_tolerance == "high":
+                return (
+                    "spot",
+                    "Low spot availability but acceptable with high fault tolerance",
+                )
+            return "on-demand", "Spot capacity is limited; on-demand recommended"
 
         # Default to on-demand
         return "on-demand", "On-demand recommended (spot availability unknown or limited)"
@@ -1479,10 +1476,6 @@ class CapacityChecker:
 
         numerator = sum((i - x_mean) * (bins[i] - y_mean) for i in range(n))
         denominator = sum((i - x_mean) ** 2 for i in range(n))
-
-        if denominator == 0:
-            return 0.0
-
         slope = numerator / denominator
 
         # Normalize slope to -1..1 range relative to the mean offering count.
@@ -2034,10 +2027,10 @@ class CapacityChecker:
         ec2 = self._session.client("ec2", region_name=region)
 
         if dry_run:
-            # Validate the offering exists by describing capacity block offerings
-            # and matching the ID
             try:
-                # Use EC2 DryRun to validate permissions without purchasing
+                # AWS signals an authorized DryRun with DryRunOperation. A
+                # normal return violates that protocol and must never fall
+                # through to the real purchase call.
                 ec2.purchase_capacity_block(
                     CapacityBlockOfferingId=offering_id,
                     InstancePlatform="Linux/UNIX",
@@ -2046,7 +2039,6 @@ class CapacityChecker:
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code", "")
                 if error_code == "DryRunOperation":
-                    # DryRunOperation means the request would have succeeded
                     return {
                         "success": True,
                         "dry_run": True,
@@ -2063,6 +2055,14 @@ class CapacityChecker:
                     "error_code": error_code,
                     "error": error_msg,
                 }
+            return {
+                "success": False,
+                "dry_run": True,
+                "offering_id": offering_id,
+                "region": region,
+                "error_code": "DryRunProtocolError",
+                "error": "AWS returned normally for a DryRun request; no purchase was attempted.",
+            }
 
         try:
             response = ec2.purchase_capacity_block(
@@ -2199,13 +2199,14 @@ class CapacityChecker:
                     "error": error_msg,
                 }
             return {
-                "success": True,
+                "success": False,
                 "dry_run": True,
                 "instance_type": canonical,
                 "availability_zone": availability_zone,
                 "region": region,
                 "instance_count": instance_count,
-                "message": "Dry run completed.",
+                "error_code": "DryRunProtocolError",
+                "error": "AWS returned normally for a DryRun request; no reservation was created.",
             }
 
         try:
@@ -2285,11 +2286,12 @@ class CapacityChecker:
                     "error": error_msg,
                 }
             return {
-                "success": True,
+                "success": False,
                 "dry_run": True,
                 "reservation_id": reservation_id,
                 "region": region,
-                "message": "Dry run completed.",
+                "error_code": "DryRunProtocolError",
+                "error": "AWS returned normally for a DryRun request; no reservation was cancelled.",
             }
 
         try:

@@ -581,6 +581,8 @@ test("stream finalization fails safely before and after metadata framing", async
       this.destroyCalls += 1;
     },
   };
+  metadataFailure.response.statusCode = 200;
+  metadataFailure.response.headers = {};
   await assert.rejects(
     __test.streamFinalResponse(
       metadataFailure,
@@ -612,6 +614,8 @@ test("stream finalization fails safely before and after metadata framing", async
       this.destroyCalls += 1;
     },
   };
+  streamFailure.response.statusCode = 200;
+  streamFailure.response.headers = {};
   const state = { started: false };
   await __test.streamFinalResponse(
     streamFailure,
@@ -971,4 +975,147 @@ test("streamingHandler suppresses writes after downstream or started-response fa
     );
     assert.equal(responseMetadata.has(downstream), false);
   });
+});
+
+test("openUpstream handles empty bodies and failures after response headers", async (t) => {
+  await t.test("empty request body is omitted", async () => {
+    const incoming = new FakeIncoming();
+    let request;
+    const resource = await __test.openUpstream(
+      upstreamArguments(undefined, { bodyBuffer: Buffer.alloc(0) }),
+      (_options, callback) => {
+        request = new FakeRequest({
+          onEnd() {
+            queueMicrotask(() => callback(incoming));
+          },
+        });
+        return request;
+      },
+    );
+    assert.equal(request.endedBody, undefined);
+    resource.destroy();
+    assert.match(request.destroyError.message, /cancelled/);
+    resource.cleanup();
+  });
+
+  await t.test("late request error destroys the resolved response", async () => {
+    const failure = codedError("ECONNRESET", "late request failure");
+    const incoming = new FakeIncoming();
+    let request;
+    const resource = await __test.openUpstream(
+      upstreamArguments(),
+      (_options, callback) => {
+        request = new FakeRequest({
+          onEnd() {
+            queueMicrotask(() => callback(incoming));
+          },
+        });
+        return request;
+      },
+    );
+
+    request.emit("error", failure);
+    assert.equal(incoming.destroyed, true);
+    assert.equal(incoming.destroyError, failure);
+    resource.cleanup();
+  });
+
+  await t.test("absolute deadline remains active after headers", async () => {
+    const incoming = new FakeIncoming();
+    let request;
+    const resource = await __test.openUpstream(
+      upstreamArguments(undefined, { remainingMs: 1 }),
+      (_options, callback) => {
+        request = new FakeRequest({
+          onEnd() {
+            queueMicrotask(() => callback(incoming));
+          },
+        });
+        return request;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(request.destroyed, true);
+    assert.ok(request.destroyError instanceof __test.UpstreamTimeoutError);
+    assert.equal(incoming.destroyed, true);
+    assert.ok(incoming.destroyError instanceof __test.UpstreamTimeoutError);
+    resource.cleanup();
+  });
+});
+
+test("forwardRequest retries every retryable status and defaults missing status to 502", async () => {
+  for (const method of ["GET", "HEAD"]) {
+    for (const statusCode of [429, 502, 503, 504]) {
+      const resources = [
+        fakeResource(statusCode),
+        fakeResource(statusCode),
+        fakeResource(statusCode),
+      ];
+      const operations = queuedOperations([...resources]);
+      await __test.forwardRequest(
+        forwardingArguments({ method }),
+        operations,
+      );
+      assert.equal(operations.openCalls.length, 3);
+      assert.equal(operations.sleepCalls.length, 2);
+      assert.equal(resources[0].cleanupCalls, 1);
+      assert.equal(resources[0].destroyCalls, 1);
+      assert.equal(resources[1].cleanupCalls, 1);
+      assert.equal(resources[1].destroyCalls, 1);
+      assert.equal(operations.streamCalls[0].resource, resources[2]);
+    }
+  }
+
+  const missingStatus = fakeResource();
+  delete missingStatus.response.statusCode;
+  const success = fakeResource(200);
+  const missingStatusOperations = queuedOperations([missingStatus, success]);
+  await __test.forwardRequest(
+    forwardingArguments({ method: "GET" }),
+    missingStatusOperations,
+  );
+  assert.equal(missingStatusOperations.openCalls.length, 2);
+  assert.equal(missingStatus.cleanupCalls, 1);
+  assert.equal(missingStatus.destroyCalls, 1);
+  assert.equal(missingStatusOperations.streamCalls[0].resource, success);
+
+  const missingPostStatus = fakeResource();
+  delete missingPostStatus.response.statusCode;
+  const postOperations = queuedOperations([missingPostStatus]);
+  await __test.forwardRequest(
+    forwardingArguments({ method: "POST" }),
+    postOperations,
+  );
+  assert.equal(postOperations.openCalls.length, 1);
+  assert.equal(postOperations.sleepCalls.length, 0);
+  assert.equal(postOperations.streamCalls[0].resource, missingPostStatus);
+});
+
+test("streamingHandler ignores close events once downstream ending has begun", async () => {
+  setEnvironment({
+    ROUTING_MODE: "global",
+    GLOBAL_ACCELERATOR_ENDPOINT: "global.example.com",
+  });
+
+  for (const state of [
+    { writableFinished: true, writableEnded: false },
+    { writableFinished: false, writableEnded: true },
+  ]) {
+    const downstream = new EventEmitter();
+    Object.assign(downstream, state);
+    await __test.streamingHandler(
+      validEvent(),
+      downstream,
+      { getRemainingTimeInMillis: () => 30_000 },
+      baseDependencies({
+        async forwardRequest({ signal }) {
+          downstream.emit("close");
+          assert.equal(signal.aborted, false);
+        },
+      }),
+    );
+    assert.equal(downstream.listenerCount("close"), 0);
+    assert.equal(downstream.listenerCount("error"), 0);
+  }
 });

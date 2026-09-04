@@ -11,6 +11,20 @@ from ..output import get_output_formatter
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 
+def _parse_labels(raw_labels: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeated ``--label KEY=VALUE`` options without dropping bad input."""
+    labels: dict[str, str] = {}
+    for raw_label in raw_labels:
+        key, separator, value = raw_label.partition("=")
+        if not separator or not key or not value:
+            raise click.BadParameter(
+                "must be KEY=VALUE with a non-empty key and value",
+                param_hint="--label",
+            )
+        labels[key] = value
+    return labels
+
+
 @click.group()
 @pass_config
 def queue(config: Any) -> None:
@@ -85,12 +99,8 @@ def queue_submit(
         formatter.print_error(gate_error)
         sys.exit(1)
 
-    # Parse labels
-    labels = {}
-    for lbl in label:
-        if "=" in lbl:
-            k, v = lbl.split("=", 1)
-            labels[k] = v
+    # Parse labels before opening the manifest or constructing an AWS client.
+    labels = _parse_labels(tuple(label))
 
     try:
         # Load manifest

@@ -7,7 +7,7 @@
 # the suppressed rule IDs in this version-controlled data file (mirroring
 # .github/config/.trivyignore and .github/config/.pip-audit-ignore) means a
 # suppression is reviewed as an explicit data change rather than being buried
-# inside pipeline YAML, and the GitHub Actions + GitLab pipelines share one list.
+# inside pipeline YAML, and every caller shares this one list.
 #
 # Format: one full semgrep rule ID per line. Inline comments (from `#`) and
 # blank lines are ignored. Prefer fixing a finding over suppressing it; only add

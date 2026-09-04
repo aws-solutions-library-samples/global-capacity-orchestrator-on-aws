@@ -126,7 +126,8 @@ spec:
               command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 12
+            timeoutSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             exec:
               command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
@@ -188,7 +189,8 @@ spec:
               port: https
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 12
+            timeoutSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             tcpSocket:
               port: https

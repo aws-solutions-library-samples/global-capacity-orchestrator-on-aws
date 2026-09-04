@@ -360,9 +360,6 @@ def images_delete_tag(config: Any, name: Any, tag: Any, yes: Any) -> None:
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
-    if not yes:
-        formatter.print_error("--yes is required for destructive commands")
-        sys.exit(1)
     try:
         result = get_image_manager(config).delete_tag(name, tag)
         formatter.print_success(
@@ -385,9 +382,6 @@ def images_delete_repo(config: Any, name: Any, force: Any, yes: Any) -> None:
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
-    if not yes:
-        formatter.print_error("--yes is required for destructive commands")
-        sys.exit(1)
     try:
         result = get_image_manager(config).delete_repo(name, force=force)
         formatter.print_success(f"Deleted repository {result['name']}")
@@ -408,9 +402,6 @@ def images_cleanup(config: Any, name: Any, all_repos: Any, yes: Any) -> None:
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
-    if not yes:
-        formatter.print_error("--yes is required for destructive commands")
-        sys.exit(1)
     if not name and not all_repos:
         formatter.print_error("Provide --name <repo> or --all")
         sys.exit(1)
@@ -441,9 +432,6 @@ def images_prune(config: Any, dry_run: Any, yes: Any) -> None:
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
-    if not yes:
-        formatter.print_error("--yes is required for destructive commands")
-        sys.exit(1)
     try:
         result = get_image_manager(config).prune(dry_run=dry_run)
         verb = "Would delete" if dry_run else "Deleted"

@@ -695,7 +695,7 @@ class TestOnlinePolicyCommand:
             "kind": "Pod",
             "metadata": {"name": "helper", "namespace": "declared"},
         }
-        manager.load_manifests.return_value = [missing_ns, declared]
+        manager.load_manifests.return_value = [missing_ns, declared, "ignored-non-mapping"]
         policies = [
             _readable("us-east-1"),
             _readable("us-west-2"),

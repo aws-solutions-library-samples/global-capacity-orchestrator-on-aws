@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
@@ -199,8 +199,6 @@ async def get_job(namespace: str, name: str) -> Response:
 
         return JSONResponse(status_code=200, content=response)
 
-    except HTTPException:
-        raise
     except Exception as e:
         if "NotFound" in str(e) or "404" in str(e):
             raise HTTPException(
@@ -377,8 +375,6 @@ async def get_job_events(namespace: str, name: str) -> Response:
 
         return JSONResponse(status_code=200, content=response)
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error getting job events: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {e!s}") from e
@@ -437,8 +433,6 @@ async def get_job_pods(namespace: str, name: str) -> Response:
 
         return JSONResponse(status_code=200, content=response)
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error getting job pods: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {e!s}") from e
@@ -801,11 +795,10 @@ async def retry_job(namespace: str, name: str) -> Response:
             },
         }
 
-        spec_dict = new_job_manifest.get("spec", {})
-        if isinstance(spec_dict, dict):
-            template_dict = spec_dict.get("template", {})
-            if isinstance(template_dict, dict) and "status" in template_dict:
-                del template_dict["status"]
+        spec_dict = cast(dict[str, Any], new_job_manifest["spec"])
+        template_dict = spec_dict.get("template", {})
+        if isinstance(template_dict, dict) and "status" in template_dict:
+            del template_dict["status"]
 
         submission_request = ManifestSubmissionRequest(
             manifests=[new_job_manifest], namespace=namespace, dry_run=False, validate=True

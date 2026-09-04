@@ -23,8 +23,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStatus, JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``process_queued_jobs_once`` -> ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.png``)
@@ -441,12 +441,6 @@ async def reconcile_active_jobs_once(
                 observed, error = _observed_job_state(k8s_job)
 
         if observed == current:
-            continue
-        if observed not in {
-            JobStatus.PENDING.value,
-            JobStatus.RUNNING.value,
-            *_TERMINAL_STATUSES,
-        }:
             continue
         if observed not in {
             status.value

@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-02T15:43:36Z">
-        <meta name="gco-source-commit" content="61928c2ff509188fc812466fbd21fd76868efeae">
-        <meta name="gco-flow-digest" content="a4a49e21ca362e3e">
+        <meta name="gco-generated-at" content="2026-09-03T18:56:22Z">
+        <meta name="gco-source-commit" content="37fd4384775eeebf18fea3e5e085cef9645077be">
+        <meta name="gco-flow-digest" content="e976e048a5f2a053">
         <title>gco jobs submit — direct kubectl apply path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -216,11 +216,10 @@ cond14=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
 sub24=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
 cond29=>condition: if labels
 cond34=>condition: for manifest in manifest_list
-cond39=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond50=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub60=>subroutine: manifest['metadata']['labels'].update(labels)
-io70=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
-e68=>end: end function return
+cond39=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub49=>subroutine: manifest['metadata']['labels'].update(labels)
+io59=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
+e57=>end: end function return
 
 op2->op4
 op4->op6
@@ -231,12 +230,11 @@ sub24(left)->cond9
 cond9(no)->cond29
 cond29(yes)->cond34
 cond34(yes)->cond39
-cond39->cond50
-cond50->sub60
-sub60(left)->cond34
-cond34(no)->io70
-io70->e68
-cond29(no)->io70
+cond39->sub49
+sub49(left)->cond34
+cond34(no)->io59
+io59->e57
+cond29(no)->io59
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,17 +244,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-02T15:43:36Z -->
-        <!-- Generated from Git commit: 61928c2ff509188fc812466fbd21fd76868efeae -->
+        <!-- Generated at (UTC): 2026-09-03T18:56:22Z -->
+        <!-- Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-02T15:43:36Z">2026-09-02T15:43:36Z</time>
+            Generated at (UTC): <time datetime="2026-09-03T18:56:22Z">2026-09-03T18:56:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>61928c2ff509188fc812466fbd21fd76868efeae</code>
+            Source commit: <code>37fd4384775eeebf18fea3e5e085cef9645077be</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>a4a49e21ca362e3e</code>
+            Flow content SHA-256: <code>e976e048a5f2a053</code>
           </p>
           <div id="canvas"></div>
         </div>

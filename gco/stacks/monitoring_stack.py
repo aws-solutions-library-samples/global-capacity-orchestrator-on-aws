@@ -71,8 +71,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-04T04:29:00Z
+# Generated from Git commit: a41926c5b2139d2571c9a9e297a74d70229b3c14
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
@@ -2516,17 +2516,18 @@ class GCOMonitoringStack(Stack):
             )
             regional_alarms[region].append(eks_memory_alarm)
 
-        # Create composite alarm for critical regional issues
+        # Create composite alarm for critical regional issues. Every region
+        # above appends exactly the CPU and memory alarms (two), so this
+        # always fires; no `len(alarms) >= 2` guard is needed here.
         for region, alarms in regional_alarms.items():
             region_id = region.replace("-", "").title()
-            if len(alarms) >= 2:
-                composite_alarm = cloudwatch.CompositeAlarm(
-                    self,
-                    f"RegionalCriticalAlarm{region_id}",
-                    alarm_description=f"Critical: Multiple issues detected in {region}",
-                    alarm_rule=cloudwatch.AlarmRule.all_of(*alarms),
-                )
-                composite_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
+            composite_alarm = cloudwatch.CompositeAlarm(
+                self,
+                f"RegionalCriticalAlarm{region_id}",
+                alarm_description=f"Critical: Multiple issues detected in {region}",
+                alarm_rule=cloudwatch.AlarmRule.all_of(*alarms),
+            )
+            composite_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
         # API Gateway + Lambda composite alarm (only if api_gateway_stack is available)
         if self.api_gateway_stack and self.api_gateway_stack.proxy_lambda is not None:

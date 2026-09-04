@@ -17,8 +17,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T20:21:43Z
-# Generated from Git commit: 839304b75eee1f16d041474ff2a68d2cced65f48
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -1002,7 +1002,7 @@ class InferenceManager:
         # terminal removal acknowledgement before resources can be recreated.
         region_generations[region] = secrets.token_hex(32)
         try:
-            return store.update_target_regions(
+            result = store.update_target_regions(
                 endpoint_name,
                 regions,
                 cleanup_regions,
@@ -1013,6 +1013,9 @@ class InferenceManager:
         except Exception as e:
             logger.error("Failed to add region: %s", e)
             return None
+        if result is None:
+            self._raise_write_conflict(endpoint_name, "added to a Region")
+        return result
 
     def remove_region(self, endpoint_name: str, region: str) -> dict[str, Any] | None:
         """Remove a target without erasing its authoritative cleanup history."""
@@ -1045,7 +1048,7 @@ class InferenceManager:
         # remove/re-add cycle for the same Region.
         region_generations[region] = secrets.token_hex(32)
         try:
-            return store.update_target_regions(
+            result = store.update_target_regions(
                 endpoint_name,
                 regions,
                 cleanup_regions,
@@ -1056,6 +1059,9 @@ class InferenceManager:
         except Exception as e:
             logger.error("Failed to remove region: %s", e)
             return None
+        if result is None:
+            self._raise_write_conflict(endpoint_name, "removed from a Region")
+        return result
 
     def canary_deploy(
         self,

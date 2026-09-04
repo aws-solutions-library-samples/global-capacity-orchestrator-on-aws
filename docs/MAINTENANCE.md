@@ -45,7 +45,7 @@ decisions.
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
 | When the scan flags a newer same-family model | Bump the Bedrock default model pin | `deps-scan` **Bedrock default model** row |
 | Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
-| Every PR | Keep measured Python coverage ~92% and label the PR so release notes categorize | Opening a pull request |
+| Every PR | Hold exact 100% Python line + branch coverage and label the PR so release notes categorize | Opening a pull request |
 | Every release | Bump the version and confirm the generated GitHub Release notes | Cutting a version |
 | On alarm | Follow the matching runbook in `docs/RUNBOOKS.md` | CloudWatch alarm via the SNS alert topic |
 
@@ -615,16 +615,20 @@ analyzes both Python and JavaScript. See
 
 ### Coverage expectation
 
-Python line + branch coverage has an enforced floor of **90%** (`fail_under = 90`
-in `pyproject.toml` `[tool.coverage.report]`), applied by `unit:pytest:core`
-with `--cov-fail-under=90` over `gco`, `cli`, and `gco_mcp`. The project still
-targets **~92% measured coverage** for pull requests and releases; review the
-CI artifact against that target without raising the global failure floor. The
-dedicated `unit:node:inference-streaming-proxy` job separately requires at
-least 93% lines, functions, and branches from Node.js 24's built-in V8
-coverage. The Python HTML report is published to GitHub Pages after each
-`main` run by `pages.yml`. Ship new code with tests that hold the ~92% target
-rather than lowering the 90% floor.
+Python line + branch coverage has an enforced floor of **exact 100%**
+(`fail_under = 100` in `pyproject.toml` `[tool.coverage.report]`), applied by
+`unit:pytest:core` to the combined shard data over `gco`, `cli`, and
+`gco_mcp`. The dedicated `unit:node:inference-streaming-proxy` job separately
+requires **exact 100%** lines, functions, and branches over
+`lambda/inference-streaming-proxy/index.mjs` from Node.js 24's built-in V8
+coverage (V8 reports no statement metric, so none is claimed). The Python HTML
+report is published to GitHub Pages after each `main` run by `pages.yml`.
+
+An exact floor leaves no headroom, which is the point: any new uncovered line
+or branch fails CI on the pull request that introduced it. Ship new code with
+the tests that cover it rather than lowering the floor, adding `pragma: no
+cover`, or extending the `omit` list — each of those hides the gap instead of
+closing it.
 
 ### Test layout
 
@@ -639,8 +643,8 @@ rather than lowering the 90% floor.
   demo recorders, cluster-access setup), run by the `unit:bats:*` jobs.
 - `tests/inference-streaming-proxy/` — native `node:test` coverage for the
   production response-streaming Lambda. Its isolated Node.js 24 workflow runs
-  `npm ci` in the Lambda's dependency graph before enforcing 93%
-  line/function/branch coverage.
+  `npm ci` in the Lambda's dependency graph before enforcing exact 100%
+  line/function/branch coverage over `index.mjs`.
 - Many tests are **guard tests** that pin an invariant so a partial change
   fails loudly — version-skew guards, manifest-shape guards, the docs index,
   the pip-audit-ignore validator, and accelerator catalog/NodePool/watch-list

@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import boto3
@@ -57,6 +57,11 @@ def _validated_local_destination(local_path: str) -> str:
     if ":" in local_path:
         raise ValueError("local_path must not contain ':' because kubectl treats it as a pod path")
     return local_path
+
+
+def _create_local_destination_parent(local_path: str) -> None:
+    """Create only the parent kubectl needs, preserving leaf copy semantics."""
+    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 def _validated_pod_remote_path(remote_path: str) -> str:
@@ -473,6 +478,7 @@ class FileSystemClient:
         local_path = _validated_local_destination(local_path)
         if container is not None:
             container = _validated_kubernetes_name(container, "container", allow_subdomains=False)
+        _create_local_destination_parent(local_path)
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
@@ -500,7 +506,10 @@ class FileSystemClient:
                     for filename in filenames
                 )
             else:
-                size = 0
+                raise RuntimeError(
+                    "kubectl cp reported success but did not create the local destination: "
+                    f"{local_path}"
+                )
 
             return {
                 "status": "success",
@@ -748,6 +757,7 @@ class FileSystemClient:
         mount_path = "/efs" if storage_type == "efs" else "/fsx"
         storage_sub_path = _storage_sub_path(remote_path)
         full_remote_path = _storage_remote_path(mount_path, remote_path)
+        _create_local_destination_parent(local_path)
 
         # Generate unique pod name
         helper_pod_name = f"gco-download-helper-{uuid.uuid4().hex[:8]}"
@@ -824,7 +834,10 @@ class FileSystemClient:
                     for filename in filenames
                 )
             else:
-                size = 0
+                raise RuntimeError(
+                    "kubectl cp reported success but did not create the local destination: "
+                    f"{local_path}"
+                )
 
             return {
                 "status": "success",

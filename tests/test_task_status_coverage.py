@@ -791,3 +791,83 @@ class TestTailAndDecodeBranches:
         assert record is not None
         assert record["is_alive"] is False
         assert record["state"] == "orphaned"
+
+
+class TestResidualTaskArtifactBranches:
+    def test_open_regular_rejects_directory_before_open(self, tmp_path: Path) -> None:
+        """Directory artifacts are rejected by the initial private-file gate."""
+        directory = tmp_path / "not-a-file"
+        directory.mkdir()
+        with pytest.raises(OSError, match="not a private regular file"):
+            task_status_module._open_regular_nofollow(directory)
+
+    def test_new_private_log_rejects_invalid_post_open_type_and_closes_fd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A create/open race cannot turn a task log into a special artifact."""
+        path = tmp_path / "raced.log"
+        real_close = os.close
+        closed: list[int] = []
+
+        def tracked_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(
+            task_status_module.os,
+            "fstat",
+            lambda _fd: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_nlink=1),
+        )
+        monkeypatch.setattr(task_status_module.os, "close", tracked_close)
+
+        with pytest.raises(OSError, match="not a private regular file"):
+            task_status_module._open_private_log(path)
+
+        assert len(closed) == 1
+
+    def test_private_log_fchmod_failure_closes_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Permission hardening failure never leaks the newly opened descriptor."""
+        path = tmp_path / "permission.log"
+        real_close = os.close
+        closed: list[int] = []
+
+        def tracked_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(
+            task_status_module.os,
+            "fchmod",
+            lambda *_args: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+        monkeypatch.setattr(task_status_module.os, "close", tracked_close)
+
+        with pytest.raises(PermissionError, match="denied"):
+            task_status_module._open_private_log(path)
+
+        assert len(closed) == 1
+
+    def test_read_regular_file_returns_none_when_open_fails(self, tmp_path: Path) -> None:
+        assert task_status_module._read_regular_file(tmp_path / "missing", 100) is None
+
+    def test_tail_handles_truncation_between_stat_and_read(
+        self, status_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A log truncated after fstat yields an empty, closed read."""
+        (status_root / "shrunk.log").write_text("content\n", encoding="utf-8")
+        monkeypatch.setattr(task_status_module, "_TASK_TAIL_MAX_BYTES", 1)
+        monkeypatch.setattr(task_status_module.os, "read", lambda _fd, _size: b"")
+
+        assert task_status_module.tail_log("shrunk", directory=status_root) == []
+
+    def test_tail_uses_marker_only_when_window_cannot_fit_suffix(
+        self, status_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tiny bounded window remains explicit without exceeding its budget."""
+        marker = task_status_module._TRUNCATED_TEXT
+        monkeypatch.setattr(task_status_module, "_TASK_TAIL_MAX_BYTES", len(marker.encode()))
+        (status_root / "giant.log").write_text("x" * 200, encoding="utf-8")
+
+        assert task_status_module.tail_log("giant", directory=status_root) == [marker]

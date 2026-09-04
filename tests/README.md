@@ -529,13 +529,14 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_doc_hygiene.py` | Per-feature companion to `test_no_spec_references.py` for the *aggressive* spec-breadcrumb patterns (requirement IDs like `R12.6`, bare `Property N`, `Requirement N`, `task N`, `Validates:`, planning-doc filenames, and "the design" / "the spec" prose) that would false-positive if run repo-wide. One parametrized case per spec-driven feature (currently `mission-metric-reader-tools`, `mission-allow-all-tools`, `mission-semantic-progress-judge`), each scanning only that feature's explicit source files and its own `tests/test_<feature>_*.py` modules; documentation, examples, and a feature's functional flag names / `[gated by ...]` prefixes are out of scope. Adding a feature means appending one `_Feature` row, not a new test file. |
 | `test_pip_audit_ignore_validator.py` | Pins the contract of `.github/scripts/check_pip_audit_ignore.py`, which gates the pip-audit job in `.github/workflows/security.yml`. Every entry in `.pip-audit-ignore` must carry an `exp:YYYY-MM-DD` marker; the validator fails the workflow when any entry is on-or-before today (inclusive — no bonus day) or is missing the marker entirely. Tests cover happy paths (single, multi, blank-line / comment skipping, missing-file-is-clean), expired-date detection (past dates, equal-to-today, ±1 day boundary), missing or malformed markers, `main()` exit codes / stdout, and a live-file check that runs the committed suppression file through the validator with today's date. |
 | `test_npm_audit_checker.py` | Pins the exact, expiring npm-audit suppression gate in `.github/scripts/check_npm_audit.py`: suppression-file parsing, inclusive expiration and duplicate rejection, advisory extraction, malformed and operational-error JSON, exact package-directory/package/advisory/node matching, compound-record fail-closed behavior, severity thresholds, stale entries, and `main()` exit codes. Uses synthetic reports and temporary files only; it never contacts npm or the network. |
-| `test_ci_config_paths.py` | Guards CI config against stale path references left by a package rename (the `mcp` to `gco_mcp` move broke the CodeQL autobuilder with FileNotFoundError). Asserts every `paths:` entry in `.github/codeql/codeql-config.yml` is a real directory, every `--cov=<pkg>` target across `.github/workflows/*.yml` and `.github/legacy/.gitlab-ci.yml` resolves to an existing top-level directory, and every `[tool.coverage.run] source` dir in `pyproject.toml` exists. Catches the silent failure mode where a renamed package leaves coverage recording nothing and CodeQL crashing at scan time. |
+| `test_ci_config_paths.py` | Guards CI config against stale path references left by a package rename (the `mcp` to `gco_mcp` move broke the CodeQL autobuilder with FileNotFoundError). Asserts every `paths:` entry in `.github/codeql/codeql-config.yml` is a real directory, every `--cov=<pkg>` target across `.github/workflows/*.yml` resolves to an existing top-level directory, and every `[tool.coverage.run] source` dir in `pyproject.toml` exists. Catches the silent failure mode where a renamed package leaves coverage recording nothing and CodeQL crashing at scan time. |
 | `test_docs_coverage.py` | Documentation-coverage guard with four cases: every `tests/test_*.py` module appears in `tests/README.md`; every `gco` Click command (the full command tree, walked recursively) is documented in `docs/CLI.md` (matched as a `gco <command>` entry); every registered MCP tool — enumerated in a subprocess with `GCO_ENABLE_ALL_TOOLS` so the full catalog is visible — appears in `gco_mcp/tools/README.md`; and every documented `uvx` / `uv tool install` snippet in `gco_mcp/README.md` pins `--python` to the minimum version from pyproject's `requires-python` (so installs cannot fail resolution on hosts whose default Python is older, and a future Python bump cannot leave the docs requesting a stale interpreter). Each case fails with the list of offending items so the fix is mechanical. |
 | `test_documentation_consistency.py` | Bidirectional human-index contracts: all 31 top-level guides exactly match `docs/README.md`; all 26 Click command modules exactly match the `docs/CLI.md` TOC and `cli/README.md`; all 14 workflows have the same six-primary/eight-satellite partition in the three authoritative inventories; and all six `image-*` dependency groups map one-to-one to Dockerfiles selecting only their own group. |
 | `test_mcp_cli_contract.py` | Contract guard: every MCP tool that shells out to the `gco` CLI must build an invocation the Click command tree actually accepts. A subprocess (with `GCO_ENABLE_ALL_TOOLS`) invokes each tool with dummy args — patching `cli_runner._run_cli` to capture the argv instead of running it, and only invoking tools whose body references `_run_cli` so non-CLI backends aren't executed — and the parent resolves each captured argv against the live tree, flagging unknown subcommands and unknown options. Catches the class of bug where a tool passes a flag/subcommand the CLI rejects (this guard found and drove the fix of ten such pre-existing mismatches, e.g. `nodepools_create_odcr` passing `--count`/`--cluster`, `enable_analytics` calling `stacks analytics enable`, `webhooks_create` passing `--secret-name`). The check is strict — any mismatch fails. |
 | `test_mcp_tool_count_docs.py` | Drift guard for the human-readable MCP tool counts. Enumerates the live registry in two subprocesses (clean env for the default count, `GCO_ENABLE_ALL_TOOLS` for the ceiling) and asserts every "N tools by default (up to M with all flags enabled)" figure quoted in `README.md`, `QUICKSTART.md`, `gco_mcp/README.md`, and `gco_mcp/tools/README.md` matches. Requires both figures in every expected file, so duplicate wording in one document cannot hide a missing or stale count in another. |
 | `test_trivyignore_validator.py` | Applies the shared `.github/scripts/check_pip_audit_ignore.py` validator (its line format — `<ID> exp:YYYY-MM-DD` — is identical) to `.github/config/.trivyignore`: every suppression must carry a future `exp:` marker, and the committed file must validate clean against today so an expired Trivy suppression can't silently outlive its fix. Covers valid/expired/missing-marker fixtures plus a live-file check and a well-formed-token check. |
 | `test_helm_charts_validation.py` | Pins the contract of `.github/scripts/validate_helm_charts.py`, which gates the `integration:helm:charts-valid` job in `.github/workflows/integration-tests.yml`. Every `(chart, version)` pinned in `lambda/helm-installer/charts.yaml` must be a real, installable Helm chart. The offline tier checks required fields, SemVer versions, and `oci://`/`use_oci` consistency, builds the same chart reference the installer Lambda uses, and runs the committed `charts.yaml` through `main()`; an opt-in online tier (gated behind `GCO_HELM_CHART_VALIDATION=1` plus a `helm` binary) resolves each chart at its exact version (`helm show chart`) and renders it (`helm template`) so a typo'd name or a version that never shipped fails in CI rather than mid-deploy. Covers structural happy/failure fixtures, classic-vs-OCI reference construction, `main()` exit codes (0/1/2), the live charts.yaml, and both lockstep contracts: the Gateway API CRD-bundle/chart pairing and the Kubeflow Trainer runtime lockstep — the always-on offline half proves the committed `torch-distributed` extraction, the TrainJob example image, and the `docs/DISTRIBUTED_TRAINING.md` snippet agree, while fixture-driven online tests (plus an opt-in live render) prove a chart bump without re-extraction, a non-image spec drift beyond the documented pod-template deviations (`automountServiceAccountToken: false`, NoNewPrivs on the `node` container), or a dropped `trainer.kubeflow.org/*` label fails with an actionable message. |
+| `test_workload_probe_timing_contract.py` | Pins the probe timing that a live release validation failure exposed. The kubelet defaults `timeoutSeconds` to **1**, and an absent key looks like nothing is wrong, so every `startupProbe` in the repo silently ran on a 1s budget while the liveness and readiness probes on the same containers set 5s and 3s — the probe that runs when a process is coldest got the least time. These probes shell out to `python -c`, paying interpreter startup and an import before opening a socket, so on a CPU-contended node the kubelet reported `command timed out after 1s` and killed a container whose own log said `Application startup complete` a second later; two health-monitor replicas crash-looped 11 times each and failed the topology check, while the same workload on a less crowded node was fine. Four invariants close it: every probe declares `timeoutSeconds` explicitly (no invisible default); exec probes allow at least 3s for interpreter startup; each startup probe's `failureThreshold * periodSeconds` floor covers at least 120s, against a ~80s measured cold start; and no startup timeout is tighter than the liveness timeout on the same container, which is the exact inversion that caused the incident and which an absolute floor alone would miss. A non-trivial-inventory test guards the guard, since a parsing regression in the placeholder-stubbing helper would otherwise turn every parametrized case green while checking no manifest at all. |
 | `test_k8s_manifest_validation.py` | Pins the contract of `.github/scripts/validate_k8s_manifests.py`, which gates the `integration:k8s:manifest-schema` job in `.github/workflows/integration-tests.yml`. Schema-validates the kubectl-applier manifests and the `examples/` gallery with kubeconform (not just YAML syntax). The offline tier covers placeholder rendering (`{{...}}` tokens to schema-shaped stubs — generic string, bare integer, quoted Kubernetes quantity, and the structural VPC-CIDR ipBlock — including the inference TLS request/HPA target typing), target-file selection (only `*.yaml`/`*.yml`, `pipeline-dag.yaml` and `*.json` fixtures excluded, `dag-step-*.yaml` included), `format_failures` parsing (`statusInvalid`/`statusError` fail; `statusValid`/`statusSkipped` don't), the binary-missing exit code, and the design constants (GVK-qualified Ray/Volcano skips, Datree CRD-catalog URL); an opt-in online tier (gated behind `GCO_KUBECONFORM_VALIDATION=1` plus a `kubeconform` binary) runs the committed manifests and confirms a schema violation is caught. |
 | `test_dockerfile_os_patch.py` | Every tracked OS-base Dockerfile (final stage using a package manager) must run a build-time security upgrade (`apt-get`/`dnf`/`apk` upgrade), the convention the Debian service images already follow and the helm-installer image was missing when it shipped HIGH CVEs. `scratch`/distroless bases are skipped automatically; a Dockerfile may opt out with a `# os-patch-lint: skip - <reason>` comment. Includes a sanity floor on the number of Dockerfiles discovered. |
 | `test_bats_readme_coverage.py` | Keeps the BATS suite index honest: every `tests/BATS/*.bats` file must have a row in the "What's Tested" table of `tests/BATS/README.md`, and the table must not carry rows for suites that no longer exist. Scoped to backtick-wrapped `test_*.bats` names on table-row lines, so the `test_my_script.bats` placeholder in the README's "Adding New Tests" prose neither satisfies the forward check nor trips the reverse one. |
@@ -719,7 +720,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_network_policies_manifest.py` | Tests for the NetworkPolicy manifest at lambda/kubectl-applier-simple/manifests/03-network-policies.yaml. |
 | `test_nodepools_extended.py` | Extended tests for cli/nodepools.py. |
 | `test_proxy_utils_extended.py` | Extended tests for lambda/proxy-shared/proxy_utils.py. |
-| `test_python_base_image_consistency.py` | Python base-image pins stay consistent across services and CI. |
+| `test_python_base_image_consistency.py` | Python base-image pins stay consistent across service containers and the dev image. |
 | `test_regional_api_gateway_stack.py` | Tests for gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack. |
 | `test_request_size_limit.py` | Tests for the RequestSizeLimitMiddleware on the Manifest API. |
 | `test_resource_quota_config.py` | End-to-end tests that cdk.json resource quota values flow into the Kubernetes manifests applied on the cluster. |
@@ -738,6 +739,47 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_waf_rate_limit.py` | Tests for the WAF PerIPRateLimit rule on GCOApiGatewayGlobalStack. |
 | `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
 | `test_yaml_parsing_limits.py` | Tests for YAML parsing limits on the manifest processor. |
+
+### Residual Coverage and Edge-Case Tests
+
+The modules below closed the last measured Python coverage gaps when the global
+floor moved from 90% to exact 100%. They are grouped here because they share a
+purpose rather than a subject: each one drives a defensive branch, error path,
+or rendering boundary that the subject-oriented suites above exercise only on
+their happy path. Every test asserts observable behaviour — no `pragma: no
+cover`, no omit list, and no mock that contradicts the real producer's
+contract.
+
+| File | Description |
+|------|-------------|
+| `test_analytics_and_dependency_cli_behaviors.py` | Behavior tests for analytics workflows and dependency-scan helpers. |
+| `test_capacity_cli_output_and_fallback_behaviors.py` | Capacity CLI output-mode, fallback, and error-boundary tests. |
+| `test_capacity_fallback_and_history_behaviors.py` | Focused regression tests for capacity fallback, history, and DryRun boundaries. |
+| `test_examples_cli_behaviors.py` | Behavior tests for the example-manifest validation CLI wrapper. |
+| `test_fleet_status_rendering_and_boundary_behaviors.py` | Fleet-status rendering and section-boundary regression tests. |
+| `test_inference_endpoint_lifecycle_edge_cases.py` | Behavioral gap coverage for inference services, CLI adapters, and MCP tools. |
+| `test_inference_monitor_reconciliation_edge_cases.py` | Behavioral coverage for the inference monitor's defensive branches. |
+| `test_job_submission_and_service_api_edge_cases.py` | Focused behavior coverage for the service/API baseline gaps. |
+| `test_mcp_reader_judge_residual_coverage.py` | Pure residual coverage for metric readers and the semantic-progress judge. |
+| `test_mcp_resource_residual_coverage.py` | Residual behavior coverage for the non-Mission MCP resource registry. |
+| `test_mcp_runtime_residual_coverage.py` | Residual runtime coverage for the non-Mission MCP server surface. |
+| `test_mcp_source_resource_security.py` | Security and error-path tests for the `source://` MCP resources — path-escape refusal, skipped-directory refusal, unserved suffixes, and missing files. |
+| `test_mcp_tool_residual_coverage.py` | Residual argv, warning, search, and staging coverage for MCP tool wrappers. |
+| `test_mission_engine_sampling_edge_cases.py` | Targeted baseline-gap coverage for Mission runtime orchestration. |
+| `test_mission_persistence_memory_and_audit.py` | Targeted Mission runtime persistence, memory, embedding, and audit tests. |
+| `test_mission_sandbox_and_validation_edge_cases.py` | Targeted Mission runtime AST, validation, and scaffold trust-boundary tests. |
+| `test_mission_swarm_cli_and_scaffolding_edge_cases.py` | Behavioral coverage for Mission/Swarm CLI, pure rules, and resources. |
+| `test_mission_swarm_mcp_tool_edge_cases.py` | Direct, hermetic coverage for the gated Mission and Swarm MCP wrappers. |
+| `test_nodepool_deletion_behaviors.py` | NodePool client-lifecycle and deletion behavior tests. |
+| `test_operational_cli_regression_behaviors.py` | Regression tests for operational CLI copy, retry, and tunnel behavior. |
+| `test_operational_command_rendering_behaviors.py` | Behavior tests for operational CLI rendering, confirmation, and callback edges. |
+| `test_operational_data_module_behaviors.py` | Behavior tests for operational and data-oriented production helpers. |
+| `test_queue_cli_spot_gate_and_rendering_behaviors.py` | Queue CLI boundary tests for label validation, spot gating, and rendering. |
+| `test_stack_config_lifecycle_and_asset_edge_cases.py` | Behavior-focused tests for the stack-domain baseline coverage gaps. |
+| `test_storage_and_file_boundary_behaviors.py` | Boundary and race-behavior tests for storage and filesystem operations. |
+| `test_swarm_runner_reconciliation_edge_cases.py` | Hermetic lifecycle coverage for `mission.swarm_runner`. |
+| `test_vector_and_cost_cli_behaviors.py` | Output and failure-path tests for vector and cost CLI commands. |
+| `test_vector_config_aws_tunnel_behaviors.py` | Behavior tests for vector, managed-config, AWS, and SSM tunnel edges. |
 
 ## Writing New Tests
 
@@ -906,12 +948,19 @@ valid_job_manifest = {
 
 ## Coverage Requirements
 
-The global Python line + branch coverage floor is 90% across `gco/`, `cli/`,
-and `gco_mcp/` in `unit:pytest:core`; pull requests and releases target ~92%
-measured coverage. The dedicated streaming-Lambda workflow independently
-enforces at least 93% lines, functions, and branches with Node 24's built-in
-V8 coverage. Current measured values come from CI artifacts; add tests to hold
-the ~92% Python target rather than raising or lowering the global floor.
+The global Python floor is exact 100% line + branch coverage across `gco/`,
+`cli/`, and `gco_mcp/`, enforced on the combined shard data by
+`unit:pytest:core`. The dedicated streaming-Lambda workflow independently
+enforces exact 100% lines, functions, and branches over
+`lambda/inference-streaming-proxy/index.mjs` using Node 24's built-in V8
+coverage (V8 reports no statement metric, so none is claimed).
+
+At an exact floor there is no headroom: a new uncovered line or branch fails
+CI. Cover the new behaviour instead of relaxing the gate — the floor lives in
+`[tool.coverage.report] fail_under` in `pyproject.toml` and in the `test`
+script of `lambda/inference-streaming-proxy/package.json`, one place each.
+Suppressing a gap with `pragma: no cover`, an `omit` entry, or a mock that
+contradicts the real producer's contract defeats the point of the gate.
 
 To check the Python report:
 

@@ -23,7 +23,6 @@ def infra_index() -> str:
         lines.append("- `infra://gco/helm/charts.yaml` — Helm chart versions and config")
     lines.append("\n## CI/CD")
     lines.append("- `ci://gco/index` — GitHub Actions workflows, composite actions, scripts")
-    lines.append("- `source://gco/config/.gitlab-ci.yml` — GitLab CI pipeline (frozen reference)")
     lines.append("- `source://gco/config/.pre-commit-config.yaml` — Pre-commit hooks")
     lines.append("\n## Security & Linting")
     for name in (

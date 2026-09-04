@@ -198,3 +198,84 @@ test("JSON errors are finite, metadata-framed, and omit internal details", async
   assert.equal(responseMetadata.has(disconnected), false);
   assert.equal(disconnected.chunks.length, 0);
 });
+
+test("missing upstream status defaults the final response to 502", async () => {
+  const upstream = Readable.from(["upstream body"]);
+  upstream.headers = {};
+  const resource = {
+    response: upstream,
+    cleanup() {},
+    destroy(error) {
+      upstream.destroy(error);
+    },
+  };
+  const downstream = new CollectingWritable();
+
+  await __test.streamFinalResponse(
+    resource,
+    downstream,
+    { started: false },
+    new AbortController().signal,
+  );
+
+  assert.equal(responseMetadata.get(downstream).statusCode, 502);
+  assert.equal(downstream.text(), "upstream body");
+});
+
+test("aborting an active upstream stream cleans up without a second response", async () => {
+  const upstream = new Readable({
+    read() {},
+  });
+  upstream.statusCode = 200;
+  upstream.headers = { "Content-Type": "text/event-stream" };
+  let cleanupCalls = 0;
+  let destroyCalls = 0;
+  const resource = {
+    response: upstream,
+    cleanup() {
+      cleanupCalls += 1;
+    },
+    destroy(error) {
+      destroyCalls += 1;
+      upstream.destroy(error);
+    },
+  };
+  const downstream = new CollectingWritable();
+  const state = { started: false };
+  const controller = new AbortController();
+
+  const pending = __test.streamFinalResponse(
+    resource,
+    downstream,
+    state,
+    controller.signal,
+  );
+  assert.equal(state.started, true);
+  controller.abort();
+  await pending;
+
+  assert.equal(cleanupCalls, 1);
+  assert.equal(destroyCalls, 1);
+  assert.equal(responseMetadata.get(downstream).statusCode, 200);
+  assert.equal(downstream.text(), "");
+});
+
+test("synchronous JSON error framing failures are swallowed", async () => {
+  let writeCalls = 0;
+  let endCalls = 0;
+  const downstream = {
+    destroyed: false,
+    write() {
+      writeCalls += 1;
+      throw new Error("synchronous downstream write failure");
+    },
+    end() {
+      endCalls += 1;
+    },
+  };
+
+  await __test.sendJsonError(downstream, 500, "Internal server error");
+
+  assert.equal(writeCalls, 1);
+  assert.equal(endCalls, 0);
+});

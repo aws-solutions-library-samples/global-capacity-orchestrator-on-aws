@@ -134,15 +134,16 @@ def _render_inference(data: dict[str, Any]) -> list[str]:
 
 def _render_costs(data: dict[str, Any]) -> list[str]:
     lines = []
-    if "total_cost" in data:
-        lines.append(
-            f"total ${data.get('total_cost', 0.0):.2f} over {data.get('period_days')} days"
-        )
-    for service, amount in data.get("by_service", {}).items():
-        lines.append(f"{service:<40}  ${amount:.2f}")
+    if "total" in data:
+        lines.append(f"total ${data.get('total', 0.0):.2f} over {data.get('window_days')} days")
+    for item in data.get("by_service", []):
+        lines.append(f"{item.get('service', ''):<40}  ${item.get('amount', 0.0):.2f}")
     tags = data.get("allocation_tags")
     if tags is not None:
-        lines.append(f"cost allocation tags active: {tags.get('active', 'unknown')}")
+        rendered_tags = ", ".join(
+            f"{item.get('tag_key', '')}={item.get('status', 'unknown')}" for item in tags
+        )
+        lines.append(f"cost allocation tags: {rendered_tags or 'none'}")
     if data.get("as_of"):
         lines.append(f"as of {data['as_of']}")
     return lines
@@ -368,7 +369,7 @@ def status(
                 interval=watch,
                 fail_on_findings=fail_on_findings,
             )
-        except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
+        except KeyboardInterrupt:
             return
         return
 

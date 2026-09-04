@@ -28,7 +28,6 @@ _SOURCE_EXTENSIONS = {".py", ".yaml", ".yml", ".json", ".txt", ".toml", ".cfg", 
 # (the key) is kept stable even though several files now live under .github/, so
 # existing references to these URIs keep resolving.
 _GITHUB_CONFIG_DIR = PROJECT_ROOT / ".github" / "config"
-_GITHUB_LEGACY_DIR = PROJECT_ROOT / ".github" / "legacy"
 _CONFIG_FILES = {
     "pyproject.toml": PROJECT_ROOT / "pyproject.toml",
     "cdk.json": PROJECT_ROOT / "cdk.json",
@@ -38,7 +37,6 @@ _CONFIG_FILES = {
     ".dockerignore": PROJECT_ROOT / ".dockerignore",
     ".gitignore": PROJECT_ROOT / ".gitignore",
     ".semgrepignore": PROJECT_ROOT / ".semgrepignore",
-    ".gitlab-ci.yml": _GITHUB_LEGACY_DIR / ".gitlab-ci.yml",
     ".yamllint.yml": _GITHUB_CONFIG_DIR / ".yamllint.yml",
     ".checkov.yaml": _GITHUB_CONFIG_DIR / ".checkov.yaml",
     ".kics.yaml": _GITHUB_CONFIG_DIR / ".kics.yaml",
@@ -91,9 +89,10 @@ def config_file_resource(filename: str) -> str:
 
 @mcp.resource("source://gco/file/{filepath*}")
 def source_file_resource(filepath: str) -> str:
-    """Read any source file by its path relative to the project root."""
-    path = (PROJECT_ROOT / filepath).resolve()
-    if not str(path).startswith(str(PROJECT_ROOT.resolve())):
+    """Read a source file confined beneath the project root."""
+    root = PROJECT_ROOT.resolve()
+    path = (root / filepath).resolve()
+    if not path.is_relative_to(root):
         return "Access denied: path is outside the project."
     if any(skip in path.parts for skip in _SKIP_DIRS):
         return "Access denied: path is in a skipped directory."

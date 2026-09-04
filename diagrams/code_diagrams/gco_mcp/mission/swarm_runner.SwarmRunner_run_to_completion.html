@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="f64729dcae402347">
+        <meta name="gco-generated-at" content="2026-09-03T18:56:22Z">
+        <meta name="gco-source-commit" content="37fd4384775eeebf18fea3e5e085cef9645077be">
+        <meta name="gco-flow-digest" content="61105a524e6f8489">
         <title>Swarm runner lifecycle (fleet guard, respawn, settlement, cascade shutdown)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,12 +208,11 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op8350=>operation: "Drive orchestrator and fleet until the orchestrator is terminal.\n\n        Also the resume path: on startup every live registry slot gets a\n        driver scheduled, and children that went terminal while\n        unsupervised get their restart policy evaluated on settlement.\n\n        ``max_orchestrator_iterations`` bounds one call's orchestrator\n        iterations (the ``mission_iterate`` shape). Hitting the bound\n        **detaches** rather than terminates: drivers are cancelled,\n        children stay non-terminal and resumable, no abort cascade runs,\n        and the swarm heartbeat finishes ``cancelled`` so the next\n        runner's guard sees a released fleet. The abort cascade runs\n        only on a genuinely terminal (or already-terminal) orchestrator.\n        "
-sub8352=>subroutine: self._acquire_guard()
-op8355=>operation: self._reconcile_orphans()
+        <div><textarea id="code" style="width: 100%;" rows="11">op3468=>operation: "Drive orchestrator and fleet until the orchestrator is terminal.\n\n        Also the resume path: on startup every live registry slot gets a\n        driver scheduled, and children that went terminal while\n        unsupervised get their restart policy evaluated on settlement.\n\n        ``max_orchestrator_iterations`` bounds one call's orchestrator\n        iterations (the ``mission_iterate`` shape). Hitting the bound\n        **detaches** rather than terminates: drivers are cancelled,\n        children stay non-terminal and resumable, no abort cascade runs,\n        and the swarm heartbeat finishes ``cancelled`` so the next\n        runner's guard sees a released fleet. The abort cascade runs\n        only on a genuinely terminal (or already-terminal) orchestrator.\n        "
+sub3470=>subroutine: self._acquire_guard()
+op3473=>operation: self._reconcile_orphans()
 self._flush_registry()
-session = self._backend.load_session(self._orchestrator_id)
-assert session is not None
+session = self._load_orchestrator_session()
 engine = await self._build_orchestrator_engine(session)
 for entry in self._live_entries():
     self._schedule_child(entry['slot'])
@@ -221,9 +220,7 @@ terminal = False
 ran = 0
 observed_ticks = self._progress_ticks
 while True:
-    current = self._backend.load_session(self._orchestrator_id)
-    if current is None:
-        break
+    current = self._load_orchestrator_session()
     if current['status'] in TERMINAL_STATES:
         terminal = True
         break
@@ -246,34 +243,32 @@ while True:
 if terminal:
     await self._cascade_shutdown()
     self._flush_registry()
-    final = self._backend.load_session(self._orchestrator_id)
-    assert final is not None
-    self._refresh_report_children(cast('SessionState', final))
+    final = self._load_orchestrator_session()
+    self._refresh_report_children(final)
     if self._swarm_writer is not None:
         succeeded = final.get('final_verdict') == 'complete'
         self._swarm_writer.finish(state='succeeded' if succeeded else 'failed')
-    return cast('SessionState', final)
+    return final
 self._flush_registry()
-detached = self._backend.load_session(self._orchestrator_id)
-assert detached is not None
+detached = self._load_orchestrator_session()
 if self._swarm_writer is not None:
     self._swarm_writer.finish(state='cancelled')
-return cast('SessionState', detached)
-cond8354=>condition: exception raised?
-cond8362=>condition: for task in self._tasks.values()
-cond8367=>operation: task.cancel() if  not task.done()
-cond8380=>operation: await asyncio.gather(*self._tasks.values(), return_exceptions=True) if  self._tasks
-sub8390=>subroutine: self._flush_registry()
+return detached
+cond3472=>condition: exception raised?
+cond3480=>condition: for task in self._tasks.values()
+cond3485=>operation: task.cancel() if  not task.done()
+cond3498=>operation: await asyncio.gather(*self._tasks.values(), return_exceptions=True) if  self._tasks
+sub3508=>subroutine: self._flush_registry()
 
-op8350->sub8352
-sub8352->op8355
-op8355->cond8354
-cond8354(yes)->cond8362
-cond8362(yes)->cond8367
-cond8367->cond8362
-cond8362(no)->cond8380
-cond8380->sub8390
-cond8354(no)->cond8362
+op3468->sub3470
+sub3470->op3473
+op3473->cond3472
+cond3472(yes)->cond3480
+cond3480(yes)->cond3485
+cond3485->cond3480
+cond3480(no)->cond3498
+cond3498->sub3508
+cond3472(no)->cond3480
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -283,17 +278,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-03T18:56:22Z -->
+        <!-- Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-03T18:56:22Z">2026-09-03T18:56:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>37fd4384775eeebf18fea3e5e085cef9645077be</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>f64729dcae402347</code>
+            Flow content SHA-256: <code>61105a524e6f8489</code>
           </p>
           <div id="canvas"></div>
         </div>

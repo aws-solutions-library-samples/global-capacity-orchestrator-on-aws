@@ -18,9 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CODEQL_CONFIG = PROJECT_ROOT / ".github" / "codeql" / "codeql-config.yml"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 WORKFLOWS_DIR = PROJECT_ROOT / ".github" / "workflows"
-CI_FILES = sorted(WORKFLOWS_DIR.glob("*.yml")) + [
-    PROJECT_ROOT / ".github" / "legacy" / ".gitlab-ci.yml"
-]
+CI_FILES = sorted(WORKFLOWS_DIR.glob("*.yml"))
 
 _COV_RE = re.compile(r"--cov=([A-Za-z0-9_./]+)")
 
@@ -41,10 +39,9 @@ def test_codeql_scan_paths_exist() -> None:
 
 def test_coverage_cov_flags_point_at_real_dirs() -> None:
     """Every --cov flag in CI maps to a real top-level directory."""
+    assert CI_FILES, f"no workflow files discovered under {WORKFLOWS_DIR}"
     offenders: list[str] = []
     for ci_file in CI_FILES:
-        if not ci_file.exists():
-            continue
         for target in _COV_RE.findall(ci_file.read_text()):
             if not (PROJECT_ROOT / _top_level_dir(target)).is_dir():
                 offenders.append(ci_file.name + ": --cov=" + target)

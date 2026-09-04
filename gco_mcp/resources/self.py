@@ -151,27 +151,10 @@ _TOOL_GATING_TABLE: dict[str, str] = {
 
 
 def _make_not_found(message: str) -> Exception:
-    """Construct the best available "not found" exception.
+    """Construct the pinned FastMCP resource-not-found exception."""
+    from fastmcp.exceptions import NotFoundError
 
-    Prefers :class:`fastmcp.exceptions.NotFoundError` because the
-    FastMCP error-handling middleware maps it to MCP error code
-    ``-32002`` for resource reads. Falls back through ``ResourceError``
-    and finally :class:`KeyError` so the resource layer still surfaces
-    a structured not-found regardless of the FastMCP build in use.
-    """
-    try:
-        from fastmcp.exceptions import NotFoundError
-
-        return NotFoundError(message)
-    except ImportError:
-        pass
-    try:
-        from fastmcp.exceptions import ResourceError
-
-        return ResourceError(message)
-    except ImportError:
-        pass
-    return KeyError(message)
+    return NotFoundError(message)
 
 
 def _source_info_for_fn(fn: Any) -> tuple[str | None, int | None]:
@@ -344,8 +327,9 @@ async def _feature_flags() -> str:
     """
     by_flag: dict[str, list[str]] = {flag: [] for flag in ALL_FLAGS}
     for tool_name, flag in _TOOL_GATING_TABLE.items():
-        if flag in by_flag:
-            by_flag[flag].append(tool_name)
+        # The table is executable registry metadata: drift must fail loudly
+        # rather than silently omitting a gated tool from introspection.
+        by_flag[flag].append(tool_name)
 
     flags_list: list[dict[str, Any]] = [
         {

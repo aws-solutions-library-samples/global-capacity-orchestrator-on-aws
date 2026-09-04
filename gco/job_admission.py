@@ -482,15 +482,8 @@ def weighted_pod_specs(manifest: dict[str, Any]) -> list[tuple[dict[str, Any], i
         specs.extend((item, 1) for item in trainjob_specs.embedded)
         return specs
 
-    spec = manifest.get("spec", {})
-    pod_spec: dict[str, Any] = {}
-    if "template" in spec:  # Deployment, StatefulSet, etc.
-        pod_spec = spec.get("template", {}).get("spec", {})
-    elif "jobTemplate" in spec:  # CronJob
-        pod_spec = spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
-    elif "containers" in spec:  # Pod
-        pod_spec = spec
-    specs.append((pod_spec, 1))
+    pod_spec = extract_pod_spec(manifest)
+    specs.append((pod_spec if pod_spec is not None else {}, 1))
     return specs
 
 

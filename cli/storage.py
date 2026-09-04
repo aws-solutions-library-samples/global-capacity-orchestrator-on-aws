@@ -64,12 +64,6 @@ class _PinnedRoot:
             ) from exc
 
         root_stat = os.fstat(self._fd)
-        if not stat.S_ISDIR(root_stat.st_mode):
-            os.close(self._fd)
-            self._fd = -1
-            raise NotADirectoryError(
-                f"The configured storage confinement root is not a directory: {self.root}"
-            )
         if (root_stat.st_dev, root_stat.st_ino) != (contract.device, contract.inode):
             os.close(self._fd)
             self._fd = -1
@@ -118,12 +112,7 @@ class _PinnedRoot:
                 f"Local sync path must stay within GCO_STORAGE_LOCAL_ROOT: {local_path}"
             ) from exc
 
-        parts = tuple(relative.parts)
-        if any(part in ("", ".", "..") for part in parts):
-            raise ValueError(
-                f"Local sync path must stay within GCO_STORAGE_LOCAL_ROOT: {local_path}"
-            )
-        return parts
+        return tuple(relative.parts)
 
     def display_path(self, parts: tuple[str, ...]) -> Path:
         """Return a human-readable path without using it for confined access."""
@@ -231,9 +220,6 @@ class _PinnedRoot:
             child_fd = os.open(name, self._directory_flags(), dir_fd=parent_fd)
         except OSError as exc:
             raise ValueError(f"Upload source directory changed or is linked: {display}") from exc
-        if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-            os.close(child_fd)
-            raise ValueError(f"Upload source is not a directory: {display}")
         return child_fd
 
     def open_child_regular_file(self, parent_fd: int, name: str, display: Path) -> int:
@@ -827,13 +813,10 @@ class StorageManager:
         device: int | None,
         inode: int | None,
     ) -> _ConfinementContract | None:
-        supplied = (root is not None, device is not None, inode is not None)
-        if not any(supplied):
+        if root is None and device is None and inode is None:
             return None
-        if not all(supplied) or not root:
+        if not root or device is None or inode is None:
             raise ValueError("The internal storage confinement contract is incomplete")
-        if device is None or inode is None:  # pragma: no cover - narrowed by all()
-            raise ValueError("The internal storage confinement identity is incomplete")
         if device < 0 or inode < 0:
             raise ValueError("The internal storage confinement identity is invalid")
         root_path = Path(root).expanduser()
@@ -1669,13 +1652,13 @@ class StorageManager:
         candidate = destination.joinpath(*parts).resolve()
         if candidate == destination or not candidate.is_relative_to(destination):
             raise ValueError(f"S3 object key escapes the sync destination: {source_key!r}")
-        for parent in candidate.parents:
-            if parent == destination:
-                break
+        parent = candidate.parent
+        while parent != destination:
             if parent.exists() and not parent.is_dir():
                 raise NotADirectoryError(
                     f"S3 object '{source_key}' has a local parent that is not a directory: {parent}"
                 )
+            parent = parent.parent
         if candidate.exists() and candidate.is_dir():
             raise IsADirectoryError(
                 f"S3 object '{source_key}' maps to an existing directory: {candidate}"

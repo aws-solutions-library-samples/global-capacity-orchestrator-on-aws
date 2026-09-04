@@ -958,3 +958,116 @@ def test_stage_upload_path_rejects_invalid_staged_result_and_cleans_up(
     _assert_no_stage_directories(local_root)
     assert source.read_bytes() == b"payload"
     assert os.stat(source, follow_symlinks=False).st_nlink == 1
+
+
+class TestResidualResolutionFailures:
+    def test_root_resolution_runtime_error_is_wrapped(
+        self,
+        local_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resolution cycles in the configured root fail with the safe-root contract."""
+        real_resolve = Path.resolve
+
+        def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+            if path == local_root:
+                raise RuntimeError("symlink loop")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        with pytest.raises(ValueError, match="could not be resolved safely"):
+            local_data.resolve_local_path("payload", require_exists=False)
+
+    def test_non_eloop_source_oserror_propagates(
+        self,
+        local_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unexpected filesystem errors retain their original type and errno."""
+        real_resolve = Path.resolve
+        calls = 0
+        expected = OSError(errno.EACCES, "permission denied")
+
+        def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise expected
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        with pytest.raises(OSError) as exc_info:
+            local_data.resolve_local_path("payload", require_exists=False)
+
+        assert exc_info.value is expected
+
+    def test_source_resolution_runtime_error_is_wrapped(
+        self,
+        local_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A source resolution cycle is reported as a confined-path failure."""
+        real_resolve = Path.resolve
+        calls = 0
+
+        def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("source cycle")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        with pytest.raises(ValueError, match="path could not be resolved safely"):
+            local_data.resolve_local_path("payload", require_exists=False)
+
+    def test_source_disappearing_before_descriptor_open_cleans_up(
+        self,
+        local_root: Path,
+    ) -> None:
+        """A validate/open race fails closed without leaving a private stage."""
+        source = local_root / "payload.bin"
+        source.write_bytes(b"payload")
+        contract = local_data.resolve_local_path("payload.bin", require_exists=True)
+        source.unlink()
+
+        with pytest.raises(FileNotFoundError), local_data.stage_upload_path(contract):
+            raise AssertionError("a vanished source must never be yielded")
+
+        assert _stage_directories(local_root) == []
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_stage_upload_path_validates_descriptor_argument_type_without_host_traversal(
+    local_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid: bool,
+) -> None:
+    """Final descriptor-path validation accepts files and rejects special artifacts."""
+    if not Path("/dev/fd").is_dir():
+        pytest.skip("secure upload staging requires /dev/fd")
+
+    source = local_root / "payload.bin"
+    source.write_bytes(b"payload")
+    contract = local_data.resolve_local_path("payload.bin", require_exists=True)
+    real_stat = os.stat
+
+    def selective_stat(path: object, *args: object, **kwargs: object):
+        if isinstance(path, str) and path.startswith("/dev/fd/"):
+            mode = stat.S_IFREG | 0o600 if valid else stat.S_IFIFO | 0o600
+            return SimpleNamespace(st_mode=mode)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_data.os, "stat", selective_stat)
+    if valid:
+        with local_data.stage_upload_path(contract) as staged:
+            assert staged.argument.endswith("/payload.bin")
+            assert staged.directory_fd >= 0
+    else:
+        with (
+            pytest.raises(ValueError, match="produced an invalid source"),
+            local_data.stage_upload_path(contract),
+        ):
+            raise AssertionError("an invalid staged artifact must never be yielded")
+
+    assert _stage_directories(local_root) == []

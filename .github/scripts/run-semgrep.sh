@@ -9,8 +9,8 @@
 # `--exclude-rule <id>` argument and then runs `semgrep scan`. Keeping the IDs
 # in a version-controlled data file (the same posture as .trivyignore and
 # .pip-audit-ignore) means a suppression is reviewed as a data change rather
-# than hardwired into pipeline YAML, and the GitHub Actions and GitLab
-# pipelines call this one script instead of duplicating the flag list.
+# than hardwired into pipeline YAML, and every caller invokes this one script
+# instead of duplicating the flag list.
 #
 # Any arguments passed to this script are forwarded to `semgrep scan` ahead of
 # the scan target (the repository root).

@@ -286,9 +286,9 @@ def start_api_tunnel(
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
                 connection.close()
-                if exited_api_tunnel_detail(proc) is None:
+                detail = exited_api_tunnel_detail(proc)
+                if detail is None:
                     return proc
-                detail = exited_api_tunnel_detail(proc) or "process exited without diagnostics"
                 raise RuntimeError(f"SSM port-forwarding session exited during readiness: {detail}")
 
             remaining = deadline - time.monotonic()

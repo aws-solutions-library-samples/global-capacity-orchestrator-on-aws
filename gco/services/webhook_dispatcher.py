@@ -71,8 +71,8 @@ from kubernetes.watch import Watch
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``WebhookDispatcher._deliver_webhook`` -> ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.png``)
@@ -619,29 +619,28 @@ class WebhookDispatcher:
                 continue
             if isinstance(result, asyncio.CancelledError):
                 raise result
-            if isinstance(result, BaseException):
-                raw_webhook_id = webhook.get("id")
-                webhook_id = raw_webhook_id if isinstance(raw_webhook_id, str) else "<unknown>"
-                raw_url = webhook.get("url")
-                url = raw_url if isinstance(raw_url, str) else ""
-                logger.error(
-                    "Webhook delivery escaped boundary: webhook_id=%s error_type=%s",
-                    webhook_id,
-                    type(result).__name__,
+            raw_webhook_id = webhook.get("id")
+            webhook_id = raw_webhook_id if isinstance(raw_webhook_id, str) else "<unknown>"
+            raw_url = webhook.get("url")
+            url = raw_url if isinstance(raw_url, str) else ""
+            logger.error(
+                "Webhook delivery escaped boundary: webhook_id=%s error_type=%s",
+                webhook_id,
+                type(result).__name__,
+            )
+            self._deliveries_total += 1
+            self._deliveries_failed += 1
+            delivery_results.append(
+                WebhookDeliveryResult(
+                    webhook_id=webhook_id,
+                    url=url,
+                    event=event.value,
+                    success=False,
+                    error=f"Delivery failure: {type(result).__name__}",
+                    attempts=0,
+                    duration_ms=0.0,
                 )
-                self._deliveries_total += 1
-                self._deliveries_failed += 1
-                delivery_results.append(
-                    WebhookDeliveryResult(
-                        webhook_id=webhook_id,
-                        url=url,
-                        event=event.value,
-                        success=False,
-                        error=f"Delivery failure: {type(result).__name__}",
-                        attempts=0,
-                        duration_ms=0.0,
-                    )
-                )
+            )
 
         return delivery_results
 

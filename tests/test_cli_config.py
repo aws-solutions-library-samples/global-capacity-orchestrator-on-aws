@@ -139,6 +139,15 @@ class TestGCOConfigFromFile:
         assert config.default_region == "us-east-1"
         assert config.cache_dir.endswith(".gco/cache")
 
+    def test_non_mapping_yaml_document_is_rejected(self, tmp_path):
+        """A YAML file whose top-level document is a list, not a mapping, must
+        fail loudly rather than silently coercing into an empty config."""
+        config_path = tmp_path / "list.yaml"
+        config_path.write_text(yaml.safe_dump(["not", "a", "mapping"]))
+
+        with pytest.raises(ValueError, match="must contain a mapping"):
+            GCOConfig.from_file(str(config_path))
+
     def test_loads_default_factory_fields(self, tmp_path):
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.safe_dump({"cache_dir": str(tmp_path / "cache")}))

@@ -52,8 +52,8 @@ from pathlib import Path
 from typing import Any, cast
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``SwarmRunner.run_to_completion`` -> ``diagrams/code_diagrams/gco_mcp/mission/swarm_runner.SwarmRunner_run_to_completion.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/swarm_runner.SwarmRunner_run_to_completion.png``)
@@ -703,6 +703,16 @@ class SwarmRunner:
     # Main loop
     # ------------------------------------------------------------------ #
 
+    def _load_orchestrator_session(self) -> SessionState:
+        """Load the orchestrator or report concurrent deletion consistently."""
+        session = self._backend.load_session(self._orchestrator_id)
+        if session is None:
+            raise MissionValidationError(
+                "session_not_found",
+                details={"session_id": self._orchestrator_id},
+            )
+        return cast("SessionState", session)
+
     async def run_to_completion(
         self, *, max_orchestrator_iterations: int | None = None
     ) -> SessionState:
@@ -724,8 +734,7 @@ class SwarmRunner:
         try:
             self._reconcile_orphans()
             self._flush_registry()
-            session = self._backend.load_session(self._orchestrator_id)
-            assert session is not None  # constructor verified existence
+            session = self._load_orchestrator_session()
             engine = await self._build_orchestrator_engine(session)
             for entry in self._live_entries():
                 self._schedule_child(entry["slot"])
@@ -733,9 +742,7 @@ class SwarmRunner:
             ran = 0
             observed_ticks = self._progress_ticks
             while True:
-                current = self._backend.load_session(self._orchestrator_id)
-                if current is None:
-                    break
+                current = self._load_orchestrator_session()
                 if current["status"] in TERMINAL_STATES:
                     terminal = True
                     break
@@ -767,21 +774,19 @@ class SwarmRunner:
             if terminal:
                 await self._cascade_shutdown()
                 self._flush_registry()
-                final = self._backend.load_session(self._orchestrator_id)
-                assert final is not None
-                self._refresh_report_children(cast("SessionState", final))
+                final = self._load_orchestrator_session()
+                self._refresh_report_children(final)
                 if self._swarm_writer is not None:
                     succeeded = final.get("final_verdict") == "complete"
                     self._swarm_writer.finish(state="succeeded" if succeeded else "failed")
-                return cast("SessionState", final)
+                return final
             # Detached (iteration bound or pause): leave the fleet
             # resumable and release the guard record.
             self._flush_registry()
-            detached = self._backend.load_session(self._orchestrator_id)
-            assert detached is not None
+            detached = self._load_orchestrator_session()
             if self._swarm_writer is not None:
                 self._swarm_writer.finish(state="cancelled")
-            return cast("SessionState", detached)
+            return detached
         finally:
             for task in self._tasks.values():
                 if not task.done():

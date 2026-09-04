@@ -57,10 +57,15 @@ workflow runs these commands in CI.
 
 ## Coverage policy
 
-The package script enforces at least 93% line, function, and branch coverage
-with Node's built-in V8 coverage. This dedicated JavaScript gate is separate
-from the repository-wide Python coverage configuration, whose enforced floor
-remains 90% while the project targets ~92% measured coverage.
+The package script enforces exact 100% line, function, and branch coverage with
+Node's built-in V8 coverage, scoped by `--test-coverage-include=index.mjs` so
+the figure describes the production module alone. Without that scope Node also
+counts `support.mjs` in this directory, which would let test-harness lines
+inflate the result. V8 reports no statement metric, so none is claimed.
+
+This dedicated JavaScript gate is separate from the repository-wide Python
+configuration, which enforces its own exact 100% line + branch floor via
+`[tool.coverage.report] fail_under` in `pyproject.toml`.
 
 Do not weaken a threshold to accommodate new behavior. Add focused tests for
 new success, failure, timeout, cancellation, and cleanup paths instead.

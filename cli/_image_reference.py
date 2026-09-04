@@ -40,7 +40,7 @@ def _valid_repository_component(component: str) -> bool:
         return False
     index = 0
     length = len(component)
-    while index < length:
+    while True:
         while index < length and component[index] in _LOWER_ALNUM:
             index += 1
         if index == length:
@@ -58,7 +58,6 @@ def _valid_repository_component(component: str) -> bool:
             return False
         if index == length or component[index] not in _LOWER_ALNUM:
             return False
-    return True
 
 
 def immutable_sha256_digest(value: object) -> str | None:
@@ -96,7 +95,7 @@ def immutable_sha256_digest(value: object) -> str | None:
         return None
 
     segments = repository.split("/")
-    if not segments or any(not segment for segment in segments):
+    if any(not segment for segment in segments):
         return None
     first = segments[0]
     has_registry = len(segments) > 1 and (
@@ -107,8 +106,6 @@ def immutable_sha256_digest(value: object) -> str | None:
         if not _valid_registry(first):
             return None
         repository_segments = segments[1:]
-    if not repository_segments or not all(
-        _valid_repository_component(component) for component in repository_segments
-    ):
+    if not all(_valid_repository_component(component) for component in repository_segments):
         return None
     return digest

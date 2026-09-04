@@ -528,8 +528,7 @@ function parseEndpoint(endpoint) {
 }
 
 function encodeRequestPath(path) {
-  const requestPath = path.startsWith("/") ? path : `/${path}`;
-  const repaired = requestPath.replace(/%(?![0-9a-fA-F]{2})/g, "%25");
+  const repaired = path.replace(/%(?![0-9a-fA-F]{2})/g, "%25");
   return encodeURIComponent(repaired)
     .replace(/%2F/g, "/")
     .replace(/%3A/g, ":")
@@ -575,7 +574,7 @@ function nonEmptyMapping(value) {
 
 function encodedQueryFromMapping(queryParameters) {
   const pairs = [];
-  for (const [name, rawValue] of Object.entries(queryParameters || {})) {
+  for (const [name, rawValue] of Object.entries(queryParameters)) {
     const values = Array.isArray(rawValue) ? rawValue : [rawValue];
     for (const value of values) {
       pairs.push(`${encodeQueryComponent(name)}=${encodeQueryComponent(value)}`);
@@ -585,15 +584,15 @@ function encodedQueryFromMapping(queryParameters) {
 }
 
 function requestQuery(event) {
-  if (typeof event?.rawQueryString === "string") {
+  if (typeof event.rawQueryString === "string") {
     if (/[\r\n]/.test(event.rawQueryString)) {
       throw new PublicError(400, "Invalid query string");
     }
     return event.rawQueryString;
   }
-  const parameters = nonEmptyMapping(event?.multiValueQueryStringParameters)
+  const parameters = nonEmptyMapping(event.multiValueQueryStringParameters)
     ? event.multiValueQueryStringParameters
-    : nonEmptyMapping(event?.queryStringParameters)
+    : nonEmptyMapping(event.queryStringParameters)
       ? event.queryStringParameters
       : {};
   return encodedQueryFromMapping(parameters);
@@ -627,9 +626,9 @@ function eventMethod(event) {
 
 function eventPath(event) {
   const value =
-    typeof event?.rawPath === "string"
+    typeof event.rawPath === "string"
       ? event.rawPath
-      : event?.path;
+      : event.path;
   if (
     typeof value !== "string" ||
     /[\r\n\0]/.test(value) ||
@@ -733,7 +732,7 @@ function outboundHeaders(headers) {
 
 function sanitizeResponseHeaders(headers) {
   const sanitized = {};
-  for (const [name, value] of Object.entries(headers || {})) {
+  for (const [name, value] of Object.entries(headers)) {
     const normalized = String(name).toLowerCase();
     if (
       HOP_BY_HOP_HEADERS.has(normalized) ||
@@ -1235,10 +1234,7 @@ async function streamingHandler(
     let target;
     try {
       target = buildTarget(endpoint, path, query);
-    } catch (error) {
-      if (error instanceof PublicError) {
-        throw error;
-      }
+    } catch {
       throw new PublicError(
         mode === "global" ? 503 : 502,
         mode === "global"

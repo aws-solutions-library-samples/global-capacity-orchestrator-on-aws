@@ -148,7 +148,20 @@ spec:
               command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 12
+            # timeoutSeconds is NOT optional here. The kubelet default is 1s,
+            # and this probe has to fork a CPython interpreter, import
+            # urllib.request, and complete an HTTP round trip inside that
+            # budget. On a CPU-contended node it cannot, so the probe reports
+            # "command timed out after 1s" while the process underneath is
+            # perfectly healthy, and the kubelet kills a container that was
+            # about to serve. Keep this at the same 5s the liveness probe on
+            # this container already uses.
+            timeoutSeconds: 5
+            # 24 attempts x 5s period = a 120-240s window (each attempt can
+            # itself burn up to timeoutSeconds). A cold start on a saturated
+            # node was measured at ~80s, which the previous 12-attempt budget
+            # could not cover even once the timeout above was correct.
+            failureThreshold: 24
           livenessProbe:
             exec:
               command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
@@ -211,7 +224,8 @@ spec:
               port: https
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 12
+            timeoutSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             tcpSocket:
               port: https

@@ -7,12 +7,33 @@ return codes surfaced as RuntimeError, CalledProcessError handling,
 and the friendly "AWS CLI not found" message when the binary is missing.
 """
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cli.kubectl_helpers import update_kubeconfig
+
+
+class TestUpdateKubeconfigInputValidation:
+    """update_kubeconfig validates before touching the filesystem or AWS CLI."""
+
+    def test_rejects_invalid_cluster_name(self):
+        with (
+            patch("cli.kubectl_helpers.subprocess.run") as mock_run,
+            pytest.raises(ValueError, match="Invalid cluster name"),
+        ):
+            update_kubeconfig("bad cluster name!", "us-east-1")
+        mock_run.assert_not_called()
+
+    def test_rejects_invalid_region(self):
+        with (
+            patch("cli.kubectl_helpers.subprocess.run") as mock_run,
+            pytest.raises(ValueError, match="Invalid AWS region"),
+        ):
+            update_kubeconfig("my-cluster", "not-a-region")
+        mock_run.assert_not_called()
 
 
 class TestUpdateKubeconfig:
@@ -143,6 +164,19 @@ class TestTunnelPreservation:
 
     def test_missing_kubeconfig_is_refreshed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KUBECONFIG", str(tmp_path / "does-not-exist"))
+        with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            update_kubeconfig("my-cluster", "us-east-1")
+        mock_run.assert_called_once()
+
+    def test_kubeconfig_env_with_leading_empty_path_falls_back_to_default(
+        self, tmp_path, monkeypatch
+    ):
+        """A ``KUBECONFIG`` whose first ``:``-separated entry is empty (e.g.
+        ``:/other/path``) must fall back to the default ``~/.kube/config``
+        location rather than treating the empty string as a real path."""
+        monkeypatch.setenv("KUBECONFIG", f"{os.pathsep}{tmp_path / 'other'}")
+        monkeypatch.setenv("HOME", str(tmp_path))
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             update_kubeconfig("my-cluster", "us-east-1")

@@ -70,8 +70,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-03T18:56:22Z
+# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -3473,7 +3473,8 @@ class StackManager:
             if expected_stack_id is None and not prepared_change_sets
             else 1
         )
-        for inspection_attempt in range(inspection_attempts):
+        inspection_attempt = 0
+        while True:
             try:
                 change_set = cfn.describe_change_set(
                     ChangeSetName=change_set_name,
@@ -3492,6 +3493,7 @@ class StackManager:
                             "Strict change-set inspection cancelled before ownership checkpoint"
                         ) from exc
                     time.sleep(_STRICT_CHANGE_SET_INSPECTION_RETRY_SECONDS)
+                    inspection_attempt += 1
                     continue
                 if not self._change_set_missing(exc) and not fresh_create_not_visible:
                     raise RuntimeError(

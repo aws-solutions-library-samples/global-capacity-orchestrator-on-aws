@@ -226,7 +226,7 @@ def test_shards_explicitly_disable_the_coverage_floor(workflow: dict[str, Any]) 
     This is load-bearing rather than redundant. pytest-cov reads ``fail_under``
     from ``[tool.coverage.report]`` and enforces it even when ``--cov-report=``
     suppresses every report, so a shard without this flag fails with "Required
-    test coverage of 90.0% not reached" no matter how healthy the codebase is —
+    test coverage of 100.0% not reached" no matter how healthy the codebase is —
     a shard only exercises its own slice. The real floor is applied to the
     combined data by ``unit:pytest:core``.
     """
@@ -291,14 +291,14 @@ def _all_run_commands(workflow: dict[str, Any]) -> str:
 
 
 def test_the_floor_value_lives_only_in_pyproject(workflow: dict[str, Any]) -> None:
-    """The 90 is written once, in pyproject, and never restated in the workflow.
+    """The 100 is written once, in pyproject, and never restated in the workflow.
 
     Shards may pass ``--cov-fail-under=0`` to switch the inherited check off, but
     no job may name a different threshold: that would be a second source of truth
     which could drift away from ``[tool.coverage.report]``.
     """
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "fail_under = 90" in pyproject
+    assert "fail_under = 100" in pyproject
 
     # Covers both spellings: pytest-cov's --cov-fail-under and coverage's own
     # --fail-under, either of which could restate the threshold.

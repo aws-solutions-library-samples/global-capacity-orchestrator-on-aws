@@ -1101,7 +1101,7 @@ Everything under `.github/` — workflows, composite actions, issue/PR templates
 | Resource | Description |
 |----------|-------------|
 | `source://gco/index` | Browse all source files grouped by package |
-| `source://gco/config/{filename}` | Project config files (pyproject.toml, cdk.json, .gitlab-ci.yml, linter configs, etc.) |
+| `source://gco/config/{filename}` | Project config files (pyproject.toml, cdk.json, linter configs, etc.) |
 | `source://gco/file/{path}` | Any source file by relative path |
 
 Source code resources cover `gco/`, `cli/`, `lambda/`, `gco_mcp/`, `scripts/`, `demo/`, and `dockerfiles/`. Build artifacts and caches are filtered out. Path traversal outside the project is blocked.

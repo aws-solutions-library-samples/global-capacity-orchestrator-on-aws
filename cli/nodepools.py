@@ -14,6 +14,10 @@ See: https://karpenter.sh/docs/tasks/odcrs/
 
 import base64
 import logging
+import os
+import tempfile
+import weakref
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +29,18 @@ logger = logging.getLogger(__name__)
 
 # Default vCPU count when instance type lookup fails (conservative estimate)
 DEFAULT_VCPUS_PER_NODE = 96
+
+
+def _unlink_temp_ca_cert(path: str) -> None:
+    """Best-effort cleanup for a CA file owned by a Kubernetes API client."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        # Already gone (e.g. removed by another cleanup path) — the goal is an
+        # absent file, so this is success, not a failure to log or retry.
+        pass
+    except OSError as exc:
+        logger.debug("Failed to remove temporary Kubernetes CA certificate %s: %s", path, exc)
 
 
 def get_vcpus_for_instance_type(instance_type: str, region: str = "us-east-1") -> int:
@@ -476,28 +492,41 @@ def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
     configuration.host = cluster["endpoint"]
     configuration.verify_ssl = True
 
-    # Decode CA certificate using secure tempfile method
+    # The ApiClient reads this path throughout its lifetime. Keep the file until
+    # that client is collected, while cleaning every partially constructed path.
     ca_cert = base64.b64decode(cluster["certificateAuthority"]["data"])
-    import os
-    import tempfile
-
     fd, ca_cert_path = tempfile.mkstemp(suffix=".crt")
+    fd_owned = True
+    api_client = None
     try:
-        with os.fdopen(fd, "wb") as ca_file:
+        ca_file = os.fdopen(fd, "wb")
+        fd_owned = False  # os.fdopen transferred descriptor ownership to ca_file.
+        with ca_file:
             ca_file.write(ca_cert)
             ca_file.flush()
         configuration.ssl_ca_cert = ca_cert_path
-    except Exception:
-        os.close(fd)
+
+        # Generate EKS token
+        eks_token = get_eks_token(cluster_name, region)
+        configuration.api_key = {"authorization": f"Bearer {eks_token}"}
+
+        # Create API client with the configuration explicitly
+        api_client = client.ApiClient(configuration)
+        custom_api = client.CustomObjectsApi(api_client)
+    except BaseException:
+        if fd_owned:
+            with suppress(OSError):
+                os.close(fd)
+        if api_client is not None:
+            with suppress(Exception):
+                api_client.close()
+        _unlink_temp_ca_cert(ca_cert_path)
         raise
 
-    # Generate EKS token
-    eks_token = get_eks_token(cluster_name, region)
-    configuration.api_key = {"authorization": f"Bearer {eks_token}"}
-
-    # Create API client with the configuration explicitly
-    api_client = client.ApiClient(configuration)
-    return client.CustomObjectsApi(api_client)
+    # CustomObjectsApi retains api_client, so the certificate remains available
+    # for lazy TLS setup and is removed when the owning client is released.
+    weakref.finalize(api_client, _unlink_temp_ca_cert, ca_cert_path)
+    return custom_api
 
 
 def list_cluster_nodepools(cluster_name: str, region: str) -> list[dict[str, Any]]:

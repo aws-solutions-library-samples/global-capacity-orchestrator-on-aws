@@ -73,6 +73,17 @@ class TestPortForwardCommand:
                 "monitoring", "svc/x", 3000, 80, server="http://localhost:8443"
             )
 
+    def test_rejects_bad_tls_server_name(self) -> None:
+        with pytest.raises(ValueError, match="--tls-server-name"):
+            build_port_forward_command(
+                "monitoring",
+                "svc/x",
+                3000,
+                80,
+                server="https://127.0.0.1:8443",
+                tls_server_name="not a valid hostname!",
+            )
+
     @pytest.mark.parametrize("port", [0, 70000, "abc", -1])
     def test_rejects_bad_ports(self, port: object) -> None:
         with pytest.raises(ValueError):

@@ -25,7 +25,7 @@ Six primary workflows run on every push and pull request:
   shellcheck, and yamllint. The strict MkDocs build of this wiki runs here
   too.
 - **Inference streaming proxy** — native Node.js tests for the production
-  streaming Lambda with their own coverage thresholds.
+  streaming Lambda, with their own exact 100% line/function/branch gate.
 
 Eight satellite workflows cover the two-stage release path, weekly CVE
 re-scans, the monthly dependency-drift issue, Pages publication, the pinned
@@ -35,9 +35,9 @@ permissions.
 
 ## The coverage gate
 
-The unit suite enforces a **90% coverage floor** — shards each run a slice,
-a combining job merges their coverage, and the final report applies the
-floor. The HTML report published from every `main` run is embedded in this
+The unit suite enforces an **exact 100% line + branch coverage floor** —
+shards each run a slice, a combining job merges their coverage, and the final
+report applies the floor. The HTML report published from every `main` run is embedded in this
 site:
 
 **[Browse the live coverage report](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/)**

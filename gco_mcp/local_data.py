@@ -79,8 +79,6 @@ def resolve_local_path(
         root_stat = os.fstat(root_fd)
     finally:
         os.close(root_fd)
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError(f"{_LOCAL_ROOT_ENV} is not a directory: {root}")
 
     supplied = Path(local_path).expanduser()
     candidate = supplied if supplied.is_absolute() else root / supplied
@@ -327,8 +325,12 @@ def stage_upload_path(contract: LocalPathContract) -> Iterator[StagedUpload]:
         stage_name, stage_fd = _create_stage_directory(root_fd)
         target_name = contract.resolved_path.name or "upload"
         if stat.S_ISREG(source_stat.st_mode):
-            if source_parent_fd is None or source_name is None:
-                raise ValueError("Regular upload source has no parent directory")
+            # ``_open_source`` returns a null parent/name pair only for the root
+            # directory itself, and the root is opened with ``O_DIRECTORY``, so a
+            # regular source always carries both values. Stating that invariant
+            # here narrows the types and fails loudly if it is ever broken,
+            # rather than carrying an unreachable user-error path.
+            assert source_parent_fd is not None and source_name is not None
             _link_verified_regular(
                 source_parent_fd,
                 source_name,

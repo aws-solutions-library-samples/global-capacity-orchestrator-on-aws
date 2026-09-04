@@ -717,6 +717,36 @@ class TestCliOptions:
             result = runner.invoke(cli, ["--verbose", "jobs", "list", "--region", "us-east-1"])
             assert result.exit_code == 0
 
+    def test_cli_with_gco_log_level_debug_env_var(self, monkeypatch):
+        """``GCO_LOG_LEVEL=DEBUG`` turns on DEBUG the same way --verbose does."""
+        from cli.main import cli
+
+        monkeypatch.setenv("GCO_LOG_LEVEL", "DEBUG")
+        runner = CliRunner()
+
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.list_jobs.return_value = []
+            mock_manager.return_value = mock_jm
+
+            result = runner.invoke(cli, ["jobs", "list", "--region", "us-east-1"])
+            assert result.exit_code == 0
+
+    def test_cli_with_gco_log_level_non_debug_env_var(self, monkeypatch):
+        """A non-DEBUG ``GCO_LOG_LEVEL`` (e.g. INFO) is resolved via getattr(logging, ...)."""
+        from cli.main import cli
+
+        monkeypatch.setenv("GCO_LOG_LEVEL", "INFO")
+        runner = CliRunner()
+
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.list_jobs.return_value = []
+            mock_manager.return_value = mock_jm
+
+            result = runner.invoke(cli, ["jobs", "list", "--region", "us-east-1"])
+            assert result.exit_code == 0
+
     def test_cli_with_region(self):
         """Test CLI with --region global option."""
         from cli.main import cli
@@ -743,6 +773,16 @@ class TestMainEntryPoint:
         from cli.main import main
 
         assert callable(main)
+
+    def test_main_invokes_cli_with_no_object(self):
+        """``main()`` is the console-script entry point: it calls ``cli(obj=None)``
+        letting Click parse ``sys.argv`` itself."""
+        import cli.main as main_module
+
+        with patch.object(main_module, "cli") as mock_cli:
+            main_module.main()
+
+        mock_cli.assert_called_once_with(obj=None)
 
 
 class TestJobsSubmitCommand:

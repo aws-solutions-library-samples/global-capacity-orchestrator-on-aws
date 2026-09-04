@@ -12,15 +12,12 @@ _REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _PARTITION_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _PROJECT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 _ACCOUNT_ID_RE = re.compile(r"^[0-9]{12}$")
-_EKS_ARN_RE = re.compile(
-    r"^arn:([a-z][a-z0-9-]*):eks:([a-z0-9-]+):([0-9]{12}):"
-    r"cluster/([a-z][a-z0-9-]{1,99})$"
-)
+_MAX_REGION_LENGTH = 32
 
 
 def is_valid_region(region: str) -> bool:
     """Return whether ``region`` has the bounded AWS region shape GCO accepts."""
-    return _REGION_RE.fullmatch(region) is not None
+    return len(region) <= _MAX_REGION_LENGTH and _REGION_RE.fullmatch(region) is not None
 
 
 def eks_context_for_region(region: str, project_name: str | None = None) -> str:
@@ -47,13 +44,4 @@ def eks_context_for_region(region: str, project_name: str | None = None) -> str:
         raise ValueError(f"AWS SDK returned an invalid partition for region {region}")
 
     cluster_name = f"{project}-{region}"
-    arn = f"arn:{partition}:eks:{region}:{account}:cluster/{cluster_name}"
-    match = _EKS_ARN_RE.fullmatch(arn)
-    if (
-        match is None
-        or match.group(1) != partition
-        or match.group(2) != region
-        or match.group(4) != cluster_name
-    ):
-        raise ValueError("failed to construct a valid EKS cluster ARN")
-    return arn
+    return f"arn:{partition}:eks:{region}:{account}:cluster/{cluster_name}"

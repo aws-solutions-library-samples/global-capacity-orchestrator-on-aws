@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="06232feeaf8a1170">
+        <meta name="gco-generated-at" content="2026-09-03T18:56:22Z">
+        <meta name="gco-source-commit" content="37fd4384775eeebf18fea3e5e085cef9645077be">
+        <meta name="gco-flow-digest" content="152077a60fd4d922">
         <title>Mission iteration loop (propose -> execute -> observe -> evaluate -> decide)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,82 +208,82 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5696=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
-op5698=>operation: session = self.backend.load_session(session_id)
-cond5701=>operation: raise MissionEngineError('session_not_found') if  session is None
-op5711=>operation: status = session['status']
-cond5714=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
-cond5725=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
-cond5736=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
-op5746=>operation: iteration_start = self.now()
-cond5749=>condition: if session['status'] == 'pending'
-op5753=>operation: session['status'] = 'running'
-op5755=>operation: session['started_at'] = iteration_start.isoformat()
-op5760=>operation: iteration_index = len(session['iterations'])
-op5762=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
-op5765=>operation: strategy = await self._propose_phase(session, ctx, record)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2558=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
+op2560=>operation: session = self.backend.load_session(session_id)
+cond2563=>operation: raise MissionEngineError('session_not_found') if  session is None
+op2573=>operation: status = session['status']
+cond2576=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
+cond2587=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
+cond2598=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
+op2608=>operation: iteration_start = self.now()
+cond2611=>condition: if session['status'] == 'pending'
+op2615=>operation: session['status'] = 'running'
+op2617=>operation: session['started_at'] = iteration_start.isoformat()
+op2622=>operation: iteration_index = len(session['iterations'])
+op2624=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
+op2627=>operation: strategy = await self._propose_phase(session, ctx, record)
 executed_calls = await self._execute_phase(session, strategy, ctx, record)
 await self._observe_phase(session, strategy, executed_calls, record)
 await self._evaluate_phase(session, record)
 verdict, reason = await self._decide_phase(session, record)
-cond5764=>condition: exception raised?
-cond5767=>condition: except Exception
-op5771=>operation: record['ended_at'] = self.now().isoformat()
-sub5773=>subroutine: session['iterations'].append(record)
-op5775=>operation: session['status'] = 'failed'
-op5777=>operation: session['ended_at'] = record['ended_at']
-op5779=>operation: with contextlib.suppress(Exception):
+cond2626=>condition: exception raised?
+cond2629=>condition: except Exception
+op2633=>operation: record['ended_at'] = self.now().isoformat()
+sub2635=>subroutine: session['iterations'].append(record)
+op2637=>operation: session['status'] = 'failed'
+op2639=>operation: session['ended_at'] = record['ended_at']
+op2641=>operation: with contextlib.suppress(Exception):
     self.backend.save_session(session)
-sub5781=>subroutine: raise
-op5786=>operation: record['verdict'] = verdict
-op5788=>operation: record['verdict_reason'] = reason
-op5790=>operation: record['ended_at'] = self.now().isoformat()
-sub5792=>subroutine: session['iterations'].append(record)
-sub5794=>subroutine: self._update_session_post_iteration(session, record)
-sub5796=>subroutine: self.backend.save_session(session)
-cond5799=>condition: if verdict in TERMINAL_VERDICTS
-op5803=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
-sub5805=>subroutine: self.backend.save_session(session)
-sub5810=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
-io5815=>inputoutput: output: record
-e5813=>end: end function return
+sub2643=>subroutine: raise
+op2648=>operation: record['verdict'] = verdict
+op2650=>operation: record['verdict_reason'] = reason
+op2652=>operation: record['ended_at'] = self.now().isoformat()
+sub2654=>subroutine: session['iterations'].append(record)
+sub2656=>subroutine: self._update_session_post_iteration(session, record)
+sub2658=>subroutine: self.backend.save_session(session)
+cond2661=>condition: if verdict in TERMINAL_VERDICTS
+op2665=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
+sub2667=>subroutine: self.backend.save_session(session)
+sub2672=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
+io2677=>inputoutput: output: record
+e2675=>end: end function return
 
-op5696->op5698
-op5698->cond5701
-cond5701->op5711
-op5711->cond5714
-cond5714->cond5725
-cond5725->cond5736
-cond5736->op5746
-op5746->cond5749
-cond5749(yes)->op5753
-op5753->op5755
-op5755->op5760
-op5760->op5762
-op5762->op5765
-op5765->cond5764
-cond5764(yes)->cond5767
-cond5767(yes)->op5771
-op5771->sub5773
-sub5773->op5775
-op5775->op5777
-op5777->op5779
-op5779->sub5781
-cond5767(no)->op5786
-op5786->op5788
-op5788->op5790
-op5790->sub5792
-sub5792->sub5794
-sub5794->sub5796
-sub5796->cond5799
-cond5799(yes)->op5803
-op5803->sub5805
-sub5805->sub5810
-sub5810->io5815
-io5815->e5813
-cond5799(no)->sub5810
-cond5764(no)->op5786
-cond5749(no)->op5760
+op2558->op2560
+op2560->cond2563
+cond2563->op2573
+op2573->cond2576
+cond2576->cond2587
+cond2587->cond2598
+cond2598->op2608
+op2608->cond2611
+cond2611(yes)->op2615
+op2615->op2617
+op2617->op2622
+op2622->op2624
+op2624->op2627
+op2627->cond2626
+cond2626(yes)->cond2629
+cond2629(yes)->op2633
+op2633->sub2635
+sub2635->op2637
+op2637->op2639
+op2639->op2641
+op2641->sub2643
+cond2629(no)->op2648
+op2648->op2650
+op2650->op2652
+op2652->sub2654
+sub2654->sub2656
+sub2656->sub2658
+sub2658->cond2661
+cond2661(yes)->op2665
+op2665->sub2667
+sub2667->sub2672
+sub2672->io2677
+io2677->e2675
+cond2661(no)->sub2672
+cond2626(no)->op2648
+cond2611(no)->op2622
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -293,17 +293,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-03T18:56:22Z -->
+        <!-- Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-03T18:56:22Z">2026-09-03T18:56:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>37fd4384775eeebf18fea3e5e085cef9645077be</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>06232feeaf8a1170</code>
+            Flow content SHA-256: <code>152077a60fd4d922</code>
           </p>
           <div id="canvas"></div>
         </div>

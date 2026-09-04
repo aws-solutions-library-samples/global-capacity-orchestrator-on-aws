@@ -23,7 +23,6 @@ security configuration, issue templates, and reusable automation.
 | [`config/`](config/README.md) | Shared linter and security-scanner configuration |
 | [`ISSUE_TEMPLATE/`](ISSUE_TEMPLATE/README.md) | Bug, feature, and support intake templates |
 | [`kind/`](kind/README.md) | Local Kubernetes-in-Docker CI configuration |
-| [`legacy/`](legacy/README.md) | Inactive historical CI material |
 | [`oidc_provider/`](oidc_provider/README.md) | Optional GitHub OIDC bootstrap stack |
 | [`scripts/`](scripts/README.md) | CI validation and security helper scripts |
 | [`workflows/`](workflows/README.md) | GitHub Actions workflow definitions |

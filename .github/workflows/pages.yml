@@ -134,7 +134,7 @@ jobs:
         # keeping it there means the shields URL — and its fork-migration
         # rewrite rule — never change.
         #
-        # Bright green marks the same 90% --cov-fail-under floor enforced in
+        # Bright green marks the same 100% --cov-fail-under floor enforced in
         # unit-tests.yml, keeping the published badge aligned with the test
         # gate rather than introducing a second coverage threshold.
         #
@@ -148,7 +148,7 @@ jobs:
           import json
           with open("coverage-data/coverage.json") as f:
               pct = json.load(f)["totals"]["percent_covered"]
-          color = "brightgreen" if pct >= 90 else "red"
+          color = "brightgreen" if pct >= 100 else "red"
           badge = {
               "schemaVersion": 1,
               "label": "coverage",

@@ -136,6 +136,62 @@ class TestMultiRegionAdmissibility:
         assert {"namespace", "images", "resource_caps"} <= checks
         assert len(issues) >= 3
 
+    def test_kind_security_and_toleration_failures_are_each_reported(self) -> None:
+        """The three checks the happy-path job never trips: disallowed kind,
+        a blocked security-context flag, and a missing GPU toleration."""
+        manifest = {
+            "apiVersion": "batch/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "trainer", "namespace": "gco-jobs"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "hostNetwork": True,
+                        "containers": [
+                            {
+                                "name": "c",
+                                "image": "docker.io/pytorch/pytorch:2",
+                                "resources": {"limits": {"nvidia.com/gpu": "1"}},
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        issues = evaluate_manifest(manifest, _region("us-east-1").policy)  # type: ignore[arg-type]
+
+        by_check = {issue.check: issue.message for issue in issues}
+        assert "kind" in by_check
+        assert "security_context" in by_check
+        assert "hostNetwork" in by_check["security_context"]
+        assert "tolerations" in by_check
+
+    def test_toleration_check_skipped_when_policy_does_not_require_it(self) -> None:
+        """``require_accelerator_toleration=False`` means a GPU job with no
+        toleration is not flagged — the check itself never runs."""
+        policy = _region("us-east-1", require_accelerator_toleration=False).policy
+        manifest = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": "trainer", "namespace": "gco-jobs"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "c",
+                                "image": "docker.io/pytorch/pytorch:2",
+                                "resources": {"limits": {"nvidia.com/gpu": "1"}},
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+        issues = evaluate_manifest(manifest, policy)  # type: ignore[arg-type]
+
+        assert "tolerations" not in {issue.check for issue in issues}
+
     def test_issues_name_the_manifest_they_came_from(self) -> None:
         policies = [_region("us-east-1")]
         verdicts = region_verdicts([_job(namespace="nope")], policies)
@@ -173,6 +229,20 @@ class TestCrossRegionDrift:
         assert [item.field for item in drift] == ["max_gpu_count"]
         assert drift[0].values == {"us-east-1": 16, "us-east-2": 8}
 
+    def test_frozenset_field_drift_renders_as_a_plain_list(self) -> None:
+        """``allowed_kinds`` normalizes to a tuple of scalars (not 2-tuples),
+        so it takes _renderable's plain-list path rather than the dict path
+        the ``security`` field drift exercises below."""
+        drift = detect_policy_drift(
+            [
+                _region("us-east-1"),
+                _region("us-east-2", allowed_kinds=["Job", "Pod", "TrainJob", "CronJob"]),
+            ]
+        )
+        (found,) = [d for d in drift if d.field == "allowed_kinds"]
+        assert isinstance(found.values["us-east-2"], list)
+        assert "CronJob" in found.values["us-east-2"]
+
     def test_security_toggle_drift_is_detected(self) -> None:
         other = _policy_document()["manifest_security_policy"] | {"block_run_as_root": True}
         drift = detect_policy_drift(
@@ -209,6 +279,9 @@ class TestRegistryDrift:
             trusted_registries=["docker.io", "111122223333.dkr.ecr.us-east-2.amazonaws.com"],
         )
         assert registry_drift([east1, east2]) is None
+
+    def test_a_single_readable_region_cannot_drift(self) -> None:
+        assert registry_drift([_region("us-east-1")]) is None
 
     def test_a_real_registry_difference_is_drift(self) -> None:
         east1 = _region("us-east-1", trusted_registries=["docker.io", "quay.io"])
@@ -337,6 +410,17 @@ class TestFetching:
     def test_empty_region_list(self) -> None:
         assert fetch_region_policies(MagicMock(), []) == []
 
+    def test_single_region_skips_the_thread_pool(self) -> None:
+        """A single region takes the direct-call fast path, not the pool."""
+        client = MagicMock()
+        client.get_job_validation_policy.return_value = {"policy": _policy_document()}
+
+        results = fetch_region_policies(client, ["us-east-1"])
+
+        assert [entry.region for entry in results] == ["us-east-1"]
+        assert results[0].ok is True
+        client.get_job_validation_policy.assert_called_once_with(region="us-east-1")
+
 
 class TestManifestLabel:
     def test_uses_kind_and_name(self) -> None:
@@ -370,3 +454,16 @@ class TestAdmissionLoggingIsQuiet:
         before = admission.level
         evaluate_manifests([_job()], _region("r").policy)  # type: ignore[arg-type]
         assert admission.level == before
+
+    def test_non_dict_manifests_are_skipped_not_raised(self) -> None:
+        """A malformed load result (e.g. a YAML scalar or list document mixed
+        into a directory scan) is skipped rather than crashing the batch."""
+        from cli.job_policy import evaluate_manifests
+
+        issues = evaluate_manifests(
+            [_job(namespace="nope"), "not-a-manifest", None, 42],  # type: ignore[list-item]
+            _region("r").policy,  # type: ignore[arg-type]
+        )
+
+        assert len(issues) == 1
+        assert issues[0].check == "namespace"

@@ -461,56 +461,47 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     from tools import jobs as _jobs_mod  # noqa: E402
 
     _importlib.reload(_jobs_mod)
-    if hasattr(_jobs_mod, "delete_job"):
-        delete_job = _jobs_mod.delete_job  # noqa: F811
+    delete_job = _jobs_mod.delete_job  # noqa: F811
 
     from tools import inference as _inf_mod  # noqa: E402
 
     _importlib.reload(_inf_mod)
-    if hasattr(_inf_mod, "delete_inference"):
-        delete_inference = _inf_mod.delete_inference  # noqa: F811
+    delete_inference = _inf_mod.delete_inference  # noqa: F811
 
     from tools import templates as _tpl_mod  # noqa: E402
 
     _importlib.reload(_tpl_mod)
-    if hasattr(_tpl_mod, "delete_template"):
-        globals()["delete_template"] = _tpl_mod.delete_template
+    globals()["delete_template"] = _tpl_mod.delete_template
 
     from tools import webhooks as _wh_mod  # noqa: E402
 
     _importlib.reload(_wh_mod)
-    if hasattr(_wh_mod, "delete_webhook"):
-        globals()["delete_webhook"] = _wh_mod.delete_webhook
+    globals()["delete_webhook"] = _wh_mod.delete_webhook
 
     from tools import nodepools as _np_mod  # noqa: E402
 
     _importlib.reload(_np_mod)
-    if hasattr(_np_mod, "delete_nodepool"):
-        globals()["delete_nodepool"] = _np_mod.delete_nodepool
+    globals()["delete_nodepool"] = _np_mod.delete_nodepool
 
     from tools import analytics as _an_mod  # noqa: E402
 
     _importlib.reload(_an_mod)
-    if hasattr(_an_mod, "analytics_user_remove"):
-        globals()["analytics_user_remove"] = _an_mod.analytics_user_remove
+    globals()["analytics_user_remove"] = _an_mod.analytics_user_remove
 
     from tools import queue as _q_mod  # noqa: E402
 
     _importlib.reload(_q_mod)
-    if hasattr(_q_mod, "cancel_queue_job"):
-        globals()["cancel_queue_job"] = _q_mod.cancel_queue_job
+    globals()["cancel_queue_job"] = _q_mod.cancel_queue_job
 
     from tools import monitoring as _mon_mod  # noqa: E402
 
     _importlib.reload(_mon_mod)
-    if hasattr(_mon_mod, "monitoring_user_remove"):
-        globals()["monitoring_user_remove"] = _mon_mod.monitoring_user_remove
+    globals()["monitoring_user_remove"] = _mon_mod.monitoring_user_remove
 
     from tools import tasks as _tasks_mod  # noqa: E402
 
     _importlib.reload(_tasks_mod)
-    if hasattr(_tasks_mod, "task_prune"):
-        globals()["task_prune"] = _tasks_mod.task_prune
+    globals()["task_prune"] = _tasks_mod.task_prune
 
 # tools.models is reloaded if either the destructive flag (delete_model)
 # or the model-upload flag (models_upload) is set, so do it once here
@@ -537,20 +528,22 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_LOCAL_METRICS):
     from tools import metrics as _metrics_mod  # noqa: E402
 
     _importlib.reload(_metrics_mod)
-    if hasattr(_metrics_mod, "metrics_from_local_file"):
-        metrics_from_local_file = _metrics_mod.metrics_from_local_file
+    metrics_from_local_file = _metrics_mod.metrics_from_local_file
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SEMANTIC_PROGRESS):
     from tools import semantic_progress as _semantic_progress_mod  # noqa: E402
 
     _importlib.reload(_semantic_progress_mod)
-    if hasattr(_semantic_progress_mod, "metrics_semantic_progress"):
-        metrics_semantic_progress = _semantic_progress_mod.metrics_semantic_progress
+    metrics_semantic_progress = _semantic_progress_mod.metrics_semantic_progress
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
     from tools import mission as _mission_tools_mod  # noqa: E402
 
     _importlib.reload(_mission_tools_mod)
+    # Unlike the images/models/storage reload blocks above, every name here is
+    # defined under the exact same `is_enabled(FLAG_MISSION)` gate this block
+    # is itself conditioned on, so a `hasattr` guard would never see a miss —
+    # it is a straight rebind.
     for _name in (
         "mission_start",
         "mission_status",
@@ -563,13 +556,14 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
         "mission_list",
         "mission_memory_search",
     ):
-        if hasattr(_mission_tools_mod, _name):
-            globals()[_name] = getattr(_mission_tools_mod, _name)
+        globals()[_name] = getattr(_mission_tools_mod, _name)
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SWARM):
     from tools import swarm as _swarm_tools_mod  # noqa: E402
 
     _importlib.reload(_swarm_tools_mod)
+    # Same reasoning as the mission block above: every name is defined under
+    # this same `is_enabled(FLAG_SWARM)` gate, so `hasattr` cannot miss.
     for _name in (
         "swarm_start",
         "swarm_iterate",
@@ -578,8 +572,7 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SWARM):
         "swarm_list",
         "swarm_plan",
     ):
-        if hasattr(_swarm_tools_mod, _name):
-            globals()[_name] = getattr(_swarm_tools_mod, _name)
+        globals()[_name] = getattr(_swarm_tools_mod, _name)
 
 # --- Re-export resource directory constants for tests ---
 from resources.ci import (  # noqa: E402, F401

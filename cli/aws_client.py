@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlsplit
 
 import boto3
@@ -132,11 +132,9 @@ def _decode_log_payload(payload: Any) -> str:
     if isinstance(payload, str):
         if len(payload) >= 3 and payload[0] == "b" and payload[1] in {"'", '"'}:
             try:
-                decoded = ast.literal_eval(payload)
+                return cast(bytes, ast.literal_eval(payload)).decode("utf-8", errors="replace")
             except SyntaxError, ValueError:
                 return payload
-            if isinstance(decoded, bytes):
-                return decoded.decode("utf-8", errors="replace")
         return payload
     if isinstance(payload, (bytes, bytearray)):
         return bytes(payload).decode("utf-8", errors="replace")
@@ -638,12 +636,12 @@ class GCOAWSClient:
         # Read-only requests retry transient failures and may refresh expired
         # SigV4 credentials once. Mutating requests receive exactly one network
         # attempt and return its response unchanged.
-        last_response = None
         retried_auth = False
         attempt_limit = (
             (max_attempts if max_attempts is not None else _MAX_RETRIES) if retryable_method else 1
         )
-        for attempt in range(attempt_limit):
+        attempt = 0
+        while True:
             response = requests.request(
                 method=method,
                 url=url,
@@ -652,7 +650,6 @@ class GCOAWSClient:
                 timeout=(10, 310) if stream else 30,
                 stream=stream,
             )
-            last_response = response
 
             # A read-only 403 may mean an expired SigV4 signature. Refresh and
             # retry once; mutating requests are never replayed automatically.
@@ -677,36 +674,34 @@ class GCOAWSClient:
                     return response  # No credentials available, return the 403
                 SigV4Auth(credentials, "execute-api", endpoint.region).add_auth(aws_request)
                 response.close()
+                attempt += 1
                 continue
 
             if response.status_code not in _RETRYABLE_STATUS_CODES or not retryable_method:
                 return response
+            if attempt == attempt_limit - 1:
+                return response
 
-            # Retryable read-only error — back off and retry.
-            if attempt < attempt_limit - 1:
-                wait_time = _RETRY_BACKOFF_BASE * (2**attempt)
-                logger.warning(
-                    "Request to %s returned %d, retrying in %.1fs (attempt %d/%d)",
-                    path,
-                    response.status_code,
-                    wait_time,
-                    attempt + 1,
-                    attempt_limit,
-                )
-                response.close()
-                time.sleep(wait_time)
+            # Retryable read-only error — close before backoff, then re-sign.
+            wait_time = _RETRY_BACKOFF_BASE * (2**attempt)
+            logger.warning(
+                "Request to %s returned %d, retrying in %.1fs (attempt %d/%d)",
+                path,
+                response.status_code,
+                wait_time,
+                attempt + 1,
+                attempt_limit,
+            )
+            response.close()
+            time.sleep(wait_time)
 
-                # Re-sign the request for the retry (credentials/time may have changed)
-                aws_request = AWSRequest(
-                    method=method, url=url, headers=request_headers, data=body_str
-                )
-                credentials = self._session.get_credentials()
-                if credentials is None:
-                    return last_response
-                SigV4Auth(credentials, "execute-api", endpoint.region).add_auth(aws_request)
-
-        # All retries exhausted — return the last response
-        return last_response  # type: ignore[return-value]
+            # Re-sign the request for the retry (credentials/time may have changed).
+            aws_request = AWSRequest(method=method, url=url, headers=request_headers, data=body_str)
+            credentials = self._session.get_credentials()
+            if credentials is None:
+                return response
+            SigV4Auth(credentials, "execute-api", endpoint.region).add_auth(aws_request)
+            attempt += 1
 
     def submit_manifests(
         self,

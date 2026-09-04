@@ -490,7 +490,7 @@ def test_code_mode_sandbox_limits_invalid_env_falls_back() -> None:
     env = {
         "GCO_MCP_TOOL_SEARCH": "code_mode",
         "GCO_MCP_CODE_MODE_MAX_DURATION_SECS": "banana",
-        "GCO_MCP_CODE_MODE_MAX_MEMORY": "",
+        "GCO_MCP_CODE_MODE_MAX_MEMORY": "banana",
     }
     with patch.dict(os.environ, env, clear=False):
         _reload_mcp_with_env(env)
@@ -500,3 +500,13 @@ def test_code_mode_sandbox_limits_invalid_env_falls_back() -> None:
         "max_duration_secs": 30.0,
         "max_memory": 200_000_000,
     }
+
+
+def test_regex_search_mode_installs_search_surface() -> None:
+    """Regex mode takes its dedicated transform branch and exposes discovery tools."""
+    env = {"GCO_MCP_TOOL_SEARCH": "regex"}
+    with patch.dict(os.environ, env, clear=False):
+        mcp_instance = _reload_mcp_with_env(env)
+        names = set(_list_tool_names_via_public_api(mcp_instance))
+
+    assert {"search_tools", "call_tool", "list_resources", "read_resource"} <= names

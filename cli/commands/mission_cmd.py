@@ -1000,6 +1000,7 @@ def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: st
             "checkpoint_evaluated": it.get("checkpoint_evaluated", False),
         }
         for it in iterations
+        if isinstance(it, Mapping)
     ]
     if output == "table":
         for s in summaries:

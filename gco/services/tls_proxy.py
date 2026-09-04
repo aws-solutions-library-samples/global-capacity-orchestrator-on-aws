@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
 import os
 import signal
 import ssl
@@ -52,17 +53,19 @@ def _positive_port(name: str, default: int) -> int:
 
 def _non_negative_number(name: str, default: float) -> float:
     value = float(os.getenv(name, str(default)))
-    if value < 0:
-        raise RuntimeError(f"{name} must be non-negative")
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be a finite non-negative number")
     return value
 
 
 def load_proxy_config() -> ProxyConfig:
     """Resolve process configuration, failing closed on an incomplete keypair."""
-    cert_file = Path(os.getenv(TLS_CERT_FILE_ENV, DEFAULT_CERT_FILE).strip())
-    key_file = Path(os.getenv(TLS_KEY_FILE_ENV, DEFAULT_KEY_FILE).strip())
-    if not str(cert_file) or not str(key_file):
+    cert_value = os.getenv(TLS_CERT_FILE_ENV, DEFAULT_CERT_FILE).strip()
+    key_value = os.getenv(TLS_KEY_FILE_ENV, DEFAULT_KEY_FILE).strip()
+    if not cert_value or not key_value:
         raise RuntimeError(f"{TLS_CERT_FILE_ENV} and {TLS_KEY_FILE_ENV} must not be empty")
+    cert_file = Path(cert_value)
+    key_file = Path(key_value)
     return ProxyConfig(
         host=os.getenv("TLS_PROXY_HOST", "0.0.0.0"),  # nosec B104 — pod listener
         port=_positive_port("TLS_PROXY_PORT", 8443),

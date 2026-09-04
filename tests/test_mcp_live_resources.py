@@ -127,6 +127,14 @@ class TestJobsLiveResource:
         parsed = json.loads(content)
         assert parsed["code"] == "eks_region_required"
 
+    def test_jobs_resource_rejects_invalid_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            content = _read_resource("gco://jobs/not_a_region/my-job")
+        mock.assert_not_called()
+        parsed = json.loads(content)
+        assert parsed["error"] == "invalid region"
+        assert parsed["value"] == "not_a_region"
+
     def test_jobs_resource_rejects_invalid_name(self):
         with patch("cli_runner.subprocess.run") as mock:
             content = _read_resource("gco://jobs/us-east-1/Bad_Name")
@@ -134,6 +142,18 @@ class TestJobsLiveResource:
         parsed = json.loads(content)
         assert parsed["error"] == "invalid job_name"
         assert parsed["value"] == "Bad_Name"
+
+    def test_jobs_resource_reports_unresolvable_eks_context(self):
+        """A credential/session failure while resolving the context is a structured error."""
+        with (
+            patch("resources.jobs.eks_context_for_region", side_effect=ValueError("no creds")),
+            patch("cli_runner.subprocess.run") as mock,
+        ):
+            content = _read_resource("gco://jobs/us-east-1/my-job")
+        mock.assert_not_called()
+        parsed = json.loads(content)
+        assert parsed["error"] == "unable to resolve EKS context"
+        assert "no creds" in parsed["detail"]
 
     def test_jobs_resource_reports_kubectl_failure(self):
         fake = MagicMock(returncode=1, stdout="", stderr="not found\n")

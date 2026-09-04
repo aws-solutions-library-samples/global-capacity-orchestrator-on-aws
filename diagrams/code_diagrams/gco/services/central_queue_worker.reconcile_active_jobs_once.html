@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="e2d22a50cb4f62d5">
+        <meta name="gco-generated-at" content="2026-09-03T18:56:22Z">
+        <meta name="gco-source-commit" content="37fd4384775eeebf18fea3e5e085cef9645077be">
+        <meta name="gco-flow-digest" content="e11c713a75c16e0a">
         <title>Central queue status reconciliation (Kubernetes UID fencing + terminal transitions)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,84 +208,82 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3570=>operation: 'Reconcile pending/running queue records with their exact Kubernetes Jobs.'
-op3572=>operation: jobs = await asyncio.to_thread(store.get_active_jobs_for_region, processor.region, limit)
-op3574=>operation: transitions = 0
-cond3577=>condition: for queued_job in jobs
-cond3582=>operation: break if  stop_event is not None and stop_event.is_set()
-op3592=>operation: job_id = str(queued_job.get('job_id', ''))
-op3594=>operation: job_name = queued_job.get('k8s_job_name')
-op3596=>operation: namespace = queued_job.get('k8s_job_namespace')
-op3598=>operation: expected_uid = str(queued_job.get('k8s_job_uid') or '')
-op3600=>operation: current = str(queued_job.get('status') or '')
-cond3603=>condition: if not job_id or not isinstance(job_name, str) or (not isinstance(namespace, str)) or (not expected_uid) or (current not in {JobStatus.PENDING.value, JobStatus.RUNNING.value})
-sub3607=>subroutine: logger.error('Ignoring active queue record %s with incomplete Kubernetes identity', job_id)
-sub3609=>subroutine: continue
-op3614=>operation: observed: str
-op3616=>operation: error: str | None
-op3621=>operation: k8s_job = await asyncio.to_thread(processor.read_queued_job, job_name, namespace)
-cond3618=>condition: exception raised?
-cond3623=>condition: except ApiException as exc
-cond3628=>condition: if exc.status == 404
-op3632=>operation: observed, error = (JobStatus.FAILED.value, 'Kubernetes Job no longer exists')
-cond3668=>operation: continue if  observed == current
-cond3679=>operation: continue if  observed not in {JobStatus.PENDING.value, JobStatus.RUNNING.value, *_TERMINAL_STATUSES}
-cond3690=>operation: continue if  observed not in {status.value for status in (JobStatus.RUNNING, JobStatus.SUCCEEDED, JobStatus.FAILED)}
-op3700=>operation: message = {JobStatus.RUNNING.value: 'Kubernetes Job is running', JobStatus.SUCCEEDED.value: 'Kubernetes Job completed successfully', JobStatus.FAILED.value: 'Kubernetes Job failed'}[observed]
-op3702=>operation: updated = await asyncio.to_thread(store.transition_job, job_id, target_region=processor.region, expected_status=current, status=observed, message=message, error=error, expected_k8s_uid=expected_uid)
-cond3705=>operation: transitions += 1 if  updated
-sub3636=>subroutine: logger.warning('Unable to reconcile central queue job %s: %s', sanitize_log_value(job_id), exc)
-sub3638=>subroutine: continue
-cond3641=>condition: except Exception as exc
-sub3645=>subroutine: logger.warning('Unable to reconcile central queue job %s: %s', sanitize_log_value(job_id), exc)
-sub3647=>subroutine: continue
-op3652=>operation: actual_uid = str(getattr(k8s_job.metadata, 'uid', '') or '')
-cond3655=>condition: if actual_uid != expected_uid
-op3659=>operation: observed, error = (JobStatus.FAILED.value, 'Kubernetes Job identity changed')
-op3663=>operation: observed, error = _observed_job_state(k8s_job)
-io3720=>inputoutput: output: transitions
-e3718=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1977=>operation: 'Reconcile pending/running queue records with their exact Kubernetes Jobs.'
+op1979=>operation: jobs = await asyncio.to_thread(store.get_active_jobs_for_region, processor.region, limit)
+op1981=>operation: transitions = 0
+cond1984=>condition: for queued_job in jobs
+cond1989=>operation: break if  stop_event is not None and stop_event.is_set()
+op1999=>operation: job_id = str(queued_job.get('job_id', ''))
+op2001=>operation: job_name = queued_job.get('k8s_job_name')
+op2003=>operation: namespace = queued_job.get('k8s_job_namespace')
+op2005=>operation: expected_uid = str(queued_job.get('k8s_job_uid') or '')
+op2007=>operation: current = str(queued_job.get('status') or '')
+cond2010=>condition: if not job_id or not isinstance(job_name, str) or (not isinstance(namespace, str)) or (not expected_uid) or (current not in {JobStatus.PENDING.value, JobStatus.RUNNING.value})
+sub2014=>subroutine: logger.error('Ignoring active queue record %s with incomplete Kubernetes identity', job_id)
+sub2016=>subroutine: continue
+op2021=>operation: observed: str
+op2023=>operation: error: str | None
+op2028=>operation: k8s_job = await asyncio.to_thread(processor.read_queued_job, job_name, namespace)
+cond2025=>condition: exception raised?
+cond2030=>condition: except ApiException as exc
+cond2035=>condition: if exc.status == 404
+op2039=>operation: observed, error = (JobStatus.FAILED.value, 'Kubernetes Job no longer exists')
+cond2075=>operation: continue if  observed == current
+cond2086=>operation: continue if  observed not in {status.value for status in (JobStatus.RUNNING, JobStatus.SUCCEEDED, JobStatus.FAILED)}
+op2096=>operation: message = {JobStatus.RUNNING.value: 'Kubernetes Job is running', JobStatus.SUCCEEDED.value: 'Kubernetes Job completed successfully', JobStatus.FAILED.value: 'Kubernetes Job failed'}[observed]
+op2098=>operation: updated = await asyncio.to_thread(store.transition_job, job_id, target_region=processor.region, expected_status=current, status=observed, message=message, error=error, expected_k8s_uid=expected_uid)
+cond2101=>operation: transitions += 1 if  updated
+sub2043=>subroutine: logger.warning('Unable to reconcile central queue job %s: %s', sanitize_log_value(job_id), exc)
+sub2045=>subroutine: continue
+cond2048=>condition: except Exception as exc
+sub2052=>subroutine: logger.warning('Unable to reconcile central queue job %s: %s', sanitize_log_value(job_id), exc)
+sub2054=>subroutine: continue
+op2059=>operation: actual_uid = str(getattr(k8s_job.metadata, 'uid', '') or '')
+cond2062=>condition: if actual_uid != expected_uid
+op2066=>operation: observed, error = (JobStatus.FAILED.value, 'Kubernetes Job identity changed')
+op2070=>operation: observed, error = _observed_job_state(k8s_job)
+io2116=>inputoutput: output: transitions
+e2114=>end: end function return
 
-op3570->op3572
-op3572->op3574
-op3574->cond3577
-cond3577(yes)->cond3582
-cond3582->op3592
-op3592->op3594
-op3594->op3596
-op3596->op3598
-op3598->op3600
-op3600->cond3603
-cond3603(yes)->sub3607
-sub3607->sub3609
-cond3603(no)->op3614
-op3614->op3616
-op3616->op3621
-op3621->cond3618
-cond3618(yes)->cond3623
-cond3623(yes)->cond3628
-cond3628(yes)->op3632
-op3632->cond3668
-cond3668->cond3679
-cond3679->cond3690
-cond3690->op3700
-op3700->op3702
-op3702->cond3705
-cond3705->cond3577
-cond3628(no)->sub3636
-sub3636->sub3638
-cond3623(no)->cond3641
-cond3641(yes)->sub3645
-sub3645->sub3647
-cond3641(no)->cond3668
-cond3618(no)->op3652
-op3652->cond3655
-cond3655(yes)->op3659
-op3659->cond3668
-cond3655(no)->op3663
-op3663->cond3668
-cond3577(no)->io3720
-io3720->e3718
+op1977->op1979
+op1979->op1981
+op1981->cond1984
+cond1984(yes)->cond1989
+cond1989->op1999
+op1999->op2001
+op2001->op2003
+op2003->op2005
+op2005->op2007
+op2007->cond2010
+cond2010(yes)->sub2014
+sub2014->sub2016
+cond2010(no)->op2021
+op2021->op2023
+op2023->op2028
+op2028->cond2025
+cond2025(yes)->cond2030
+cond2030(yes)->cond2035
+cond2035(yes)->op2039
+op2039->cond2075
+cond2075->cond2086
+cond2086->op2096
+op2096->op2098
+op2098->cond2101
+cond2101->cond1984
+cond2035(no)->sub2043
+sub2043->sub2045
+cond2030(no)->cond2048
+cond2048(yes)->sub2052
+sub2052->sub2054
+cond2048(no)->cond2075
+cond2025(no)->op2059
+op2059->cond2062
+cond2062(yes)->op2066
+op2066->cond2075
+cond2062(no)->op2070
+op2070->cond2075
+cond1984(no)->io2116
+io2116->e2114
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -295,17 +293,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-03T18:56:22Z -->
+        <!-- Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-03T18:56:22Z">2026-09-03T18:56:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>37fd4384775eeebf18fea3e5e085cef9645077be</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>e2d22a50cb4f62d5</code>
+            Flow content SHA-256: <code>e11c713a75c16e0a</code>
           </p>
           <div id="canvas"></div>
         </div>

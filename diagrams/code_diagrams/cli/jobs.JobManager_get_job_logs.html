@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-02T15:43:36Z">
-        <meta name="gco-source-commit" content="61928c2ff509188fc812466fbd21fd76868efeae">
-        <meta name="gco-flow-digest" content="4e985bbff8d64835">
+        <meta name="gco-generated-at" content="2026-09-03T18:56:22Z">
+        <meta name="gco-source-commit" content="37fd4384775eeebf18fea3e5e085cef9645077be">
+        <meta name="gco-flow-digest" content="5824c56fb8cfdf9b">
         <title>gco jobs logs — TrainJob rank resolution and CloudWatch fallback chain</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,16 +208,16 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op223=>operation: "\n        Get logs from a job.\n\n        Tries the Kubernetes API first (via the GCO API). A name the batch\n        Job endpoint does not know is retried as a Kubeflow TrainJob: the\n        torch runtime runs the whole job as one child Job named\n        ``<name>-node-0`` whose indexed pods are the node ranks, so the\n        rank-``node`` pod's logs are fetched (rank 0 by default). If the pod\n        is no longer available (completed/deleted), falls back to CloudWatch\n        Logs where Container Insights stores application logs.\n\n        Args:\n            job_name: Name of the job\n            namespace: Namespace of the job\n            region: Region where the job is running\n            tail_lines: Number of lines to return\n            follow: Stream logs (not implemented yet)\n            since_hours: Hours to look back in CloudWatch (default 24)\n            node: Node rank to fetch for a distributed TrainJob (default 0)\n\n        Returns:\n            Log content as string\n        "
-cond226=>operation: raise NotImplementedError('Log streaming not yet implemented') if  follow
-op236=>operation: target_region = region or self.config.default_region
-io244=>inputoutput: output: self._aws_client.get_job_logs(job_name=job_name, namespace=namespace, region=target_region, tail_lines=tail_lines)
-e242=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3373=>operation: "\n        Get logs from a job.\n\n        Tries the Kubernetes API first (via the GCO API). A name the batch\n        Job endpoint does not know is retried as a Kubeflow TrainJob: the\n        torch runtime runs the whole job as one child Job named\n        ``<name>-node-0`` whose indexed pods are the node ranks, so the\n        rank-``node`` pod's logs are fetched (rank 0 by default). If the pod\n        is no longer available (completed/deleted), falls back to CloudWatch\n        Logs where Container Insights stores application logs.\n\n        Args:\n            job_name: Name of the job\n            namespace: Namespace of the job\n            region: Region where the job is running\n            tail_lines: Number of lines to return\n            follow: Stream logs (not implemented yet)\n            since_hours: Hours to look back in CloudWatch (default 24)\n            node: Node rank to fetch for a distributed TrainJob (default 0)\n\n        Returns:\n            Log content as string\n        "
+cond3376=>operation: raise NotImplementedError('Log streaming not yet implemented') if  follow
+op3386=>operation: target_region = region or self.config.default_region
+io3394=>inputoutput: output: self._aws_client.get_job_logs(job_name=job_name, namespace=namespace, region=target_region, tail_lines=tail_lines)
+e3392=>end: end function return
 
-op223->cond226
-cond226->op236
-op236->io244
-io244->e242
+op3373->cond3376
+cond3376->op3386
+op3386->io3394
+io3394->e3392
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -227,17 +227,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-02T15:43:36Z -->
-        <!-- Generated from Git commit: 61928c2ff509188fc812466fbd21fd76868efeae -->
+        <!-- Generated at (UTC): 2026-09-03T18:56:22Z -->
+        <!-- Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-02T15:43:36Z">2026-09-02T15:43:36Z</time>
+            Generated at (UTC): <time datetime="2026-09-03T18:56:22Z">2026-09-03T18:56:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>61928c2ff509188fc812466fbd21fd76868efeae</code>
+            Source commit: <code>37fd4384775eeebf18fea3e5e085cef9645077be</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>4e985bbff8d64835</code>
+            Flow content SHA-256: <code>5824c56fb8cfdf9b</code>
           </p>
           <div id="canvas"></div>
         </div>

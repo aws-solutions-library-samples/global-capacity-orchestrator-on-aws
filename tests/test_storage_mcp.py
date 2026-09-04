@@ -22,6 +22,22 @@ import cli_runner  # noqa: E402
 import local_data  # noqa: E402
 
 
+def _require_dev_fd_directory_access(root: Path) -> None:
+    """Skip only when this POSIX host cannot traverse an open directory fd."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(root, flags)
+    probe = root / ".dev-fd-probe"
+    probe.write_bytes(b"probe")
+    try:
+        try:
+            os.stat(f"/dev/fd/{descriptor}/{probe.name}", follow_symlinks=False)
+        except OSError as exc:
+            pytest.skip(f"/dev/fd directory traversal is unavailable: {exc}")
+    finally:
+        probe.unlink(missing_ok=True)
+        os.close(descriptor)
+
+
 class _FakeMCP:
     def tool(self, **_kwargs: Any):
         def decorate(function: Any) -> Any:
@@ -132,6 +148,7 @@ class TestMCPStorageTools:
         root = tmp_path / "root"
         source = root / "model.bin"
         source.parent.mkdir()
+        _require_dev_fd_directory_access(root)
         source.write_bytes(b"weights")
         source_identity = (source.stat().st_dev, source.stat().st_ino)
 

@@ -36,5 +36,21 @@ jobs:
         run: bash ../../.github/scripts/use-pinned-npm.sh package.json
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
-      - name: Run native Node.js unit tests with a strict 93% V8 coverage floor
-        run: npm test
+      # The floor itself lives in package.json's `test` script (exact 100% for
+      # lines, functions, and branches over index.mjs alone), so it is written
+      # once and enforced identically here and on a developer's machine. The
+      # output is teed to a file — with pipefail so the tee never masks a
+      # non-zero node exit — and uploaded below, giving a reviewer the V8
+      # per-file table without re-running the job.
+      - name: Run native Node.js unit tests at an exact 100% V8 coverage floor
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee node-coverage.txt
+      - name: Upload the V8 coverage output
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: node-inference-streaming-proxy-coverage
+          path: lambda/inference-streaming-proxy/node-coverage.txt
+          retention-days: 7
+          if-no-files-found: error

@@ -168,3 +168,21 @@ test("the target-region header denial is global-mode specific", async () => {
     assert.equal(parsed.incomingHeaders["X-GCO-Target-Region"], "us-west-2");
   });
 });
+
+test("production dependency defaults remain behind preflight validation", async () => {
+  const downstream = new CollectingWritable();
+
+  await __test.streamingHandler(undefined, downstream, {
+    getRemainingTimeInMillis: () => 30_000,
+  });
+
+  assert.deepEqual(responseMetadata.get(downstream), {
+    statusCode: 400,
+    headers: { "content-type": "application/json" },
+  });
+  assert.deepEqual(JSON.parse(downstream.text()), {
+    error: "Invalid request method",
+  });
+  assert.equal(downstream.listenerCount("close"), 0);
+  assert.equal(downstream.listenerCount("error"), 0);
+});

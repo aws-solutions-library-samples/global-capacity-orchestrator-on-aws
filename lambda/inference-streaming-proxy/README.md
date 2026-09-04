@@ -28,7 +28,7 @@ The execution role needs `secretsmanager:GetSecretValue` and trust-parameter `ss
 
 ## Dependencies and CI
 
-`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 11.18.0, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html), diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
+`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 12.0.2, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html), diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
 
 ```bash
 npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund
@@ -37,8 +37,9 @@ npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --n
 The native `node:test` suite lives in `tests/inference-streaming-proxy/`; the
 package's `npm test` script invokes it while keeping dependency resolution
 anchored to this production graph. The dedicated `Inference Streaming Proxy`
-workflow runs it on Node 24 and enforces at least 93% lines, functions, and
-branches. `security:npm-audit:all-packages`, JavaScript CodeQL, Semgrep, Trivy,
+workflow runs it on Node 24 and enforces exact 100% lines, functions, and
+branches over `index.mjs` (the script scopes V8 coverage to that file, so the
+number is a guarantee about production code rather than about test helpers). `security:npm-audit:all-packages`, JavaScript CodeQL, Semgrep, Trivy,
 Dependabot, and the monthly dependency-consistency scan cover this graph. The
 shared Lambda packaging action stages production dependencies with
 `npm ci --omit=dev --ignore-scripts`; it never resolves packages on demand.

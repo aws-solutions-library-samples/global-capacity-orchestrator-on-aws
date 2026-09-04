@@ -99,9 +99,11 @@ class OutputFormatter:
         else:
             return str(data)
 
-        # Determine columns
+        # Determine columns. `rows` is always non-empty here: every branch
+        # above either returns early (None, empty list) or assigns at least
+        # one row (a dict becomes `[data]`, even an empty `{}`).
         if columns is None:
-            columns = list(rows[0].keys()) if rows else []
+            columns = list(rows[0].keys())
 
         # Filter to only requested columns
         rows = [{k: v for k, v in row.items() if k in columns} for row in rows]

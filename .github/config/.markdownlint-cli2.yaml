@@ -85,10 +85,10 @@ config:
   # case-insensitive substring match, which mangles legitimate lowercase
   # identifiers that happen to share letters with product names:
   # `cdk.json` would be rewritten to `cdk.JSON`, `kubernetes-sigs/karpenter`
-  # to `Kubernetes-sigs/karpenter`, `.gitlab-ci.yml` to `.GitLab-ci.yml`,
-  # `simple-job.yaml` to `simple-job.YAML`, and so on. In a technical repo
-  # where these tokens are filenames, URL paths, and module names, review
-  # catches mistyped product names far more reliably than the rule does.
+  # to `Kubernetes-sigs/karpenter`, `simple-job.yaml` to `simple-job.YAML`,
+  # and so on. In a technical repo where these tokens are filenames, URL
+  # paths, and module names, review catches mistyped product names far more
+  # reliably than the rule does.
 
   # MD029 (ol-prefix) — allow either `1.` repeated or sequential numbers.
   # Repeated `1.` is easier to maintain when editing long ordered lists.
