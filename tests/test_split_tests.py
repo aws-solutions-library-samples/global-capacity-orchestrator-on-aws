@@ -257,9 +257,15 @@ def test_combining_job_enforces_the_floor_and_needs_every_shard(
         "rules continue to match"
     )
     assert job["needs"] == "unit-pytest-core-shard"
-    assert job["if"] == "${{ always() }}", (
+    assert job["if"] == (
+        "${{ always() && (github.event_name != 'pull_request' "
+        "|| github.event.pull_request.draft == false) }}"
+    ), (
         "the stable required check must run even when a matrix shard fails; a "
-        "skipped required job can otherwise be treated as non-blocking"
+        "skipped required job can otherwise be treated as non-blocking. The "
+        "draft clause is the only permitted narrowing: a draft PR cannot merge, "
+        "and marking it ready re-runs the workflow with the clause true, so "
+        "every mergeable state still produces a real aggregate result"
     )
 
     guard = next(

@@ -37,6 +37,19 @@ on:
     # the body as first submitted.
     types: [opened, edited, reopened, ready_for_review]
 
+# `edited` fires on every title or body tweak, so without this a burst of
+# wording edits leaves a queue of runs that all compute the same final label.
+# Cancel per ref and let the newest win: the label is derived purely from the
+# current PR body, so a superseded run has nothing to contribute.
+#
+# This job is deliberately NOT draft-gated, unlike the test and lint gates.
+# It costs one short job, and the type label is what drives release-note
+# grouping and review routing — worth having correct while a PR is still a
+# draft rather than only from the moment it is marked ready.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

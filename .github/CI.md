@@ -11,6 +11,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
   - [Primary (run on every push + PR)](#primary-run-on-every-push--pr)
   - [Satellites](#satellites)
   - [Naming conventions](#naming-conventions)
+  - [Draft pull requests](#draft-pull-requests)
   - [Cross-cutting defaults](#cross-cutting-defaults)
   - [Action pinning](#action-pinning)
 - [Live release validation stays local](#live-release-validation-stays-local)
@@ -92,7 +93,7 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
 | `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Publish the project site to GitHub Pages via `actions/deploy-pages`: build the MkDocs orientation wiki (`wiki/` + `mkdocs.yml`, strict mode) from the triggering run's commit at the site root, download that run's `pytest-coverage` artifact and serve `htmlcov/` at `/coverage/`, and regenerate the shields.io badge JSON at the site root (so the README badge's percent-encoded URL never changes). Split out of `unit-tests.yml` so a GitHub Pages backend stall — or a wiki build failure — surfaces here instead of failing the test gate; the PR-side `lint:mkdocs:strict` job runs the identical build pre-merge |
 | `workflows/mooncake-image.yml` | `push`: `main`, PR, manual | Pull the upstream Mooncake vLLM image pinned in `cli/images.py` (`_DISAGGREGATED_DEFAULT_IMAGE`) and run `tests/test_mooncake_image_contract.py`: prefill-decode proxy health under the image's `python3`, `MooncakeStoreConfig` acceptance of the rendered store config, and KV-connector name registration. Deliberately not Trivy/CVE-scanned — the image is upstream and unpatchable; version drift is surfaced by `deps-scan` |
-| `workflows/pr-type-label.yml` | PR opened/edited/reopened/ready | Sync the declared type-of-change checkbox to the corresponding release-note label without using `pull_request_target` or interpolating untrusted body text into shell; fork PRs are skipped for maintainer labelling |
+| `workflows/pr-type-label.yml` | PR opened/edited/reopened/ready (drafts included) | Sync the declared type-of-change checkbox to the corresponding release-note label without using `pull_request_target` or interpolating untrusted body text into shell; fork PRs are skipped for maintainer labelling |
 | `workflows/grafana-dashboards.yml` | Paths-filtered `push`/PR + manual | Resolve the Grafana image from the pinned kube-prometheus-stack chart, provision every curated dashboard ConfigMap into the real image, and require each uid to load without provisioning errors |
 
 ### Naming conventions
@@ -100,6 +101,19 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 - **Display names:** colon-delimited `category:tool:test_name`, for example `unit:pytest:core`, `security:trivy:container-scan`, `lint:mypy:stacks`.
 - **Job IDs:** hyphen-delimited (GitHub Actions requires `[A-Za-z0-9_-]`), for example `unit-pytest-core`, `security-trivy-container-scan`.
 - **Click target for every badge:** the workflow file on the Actions tab, not a per-job deep link. GitHub's per-job URL scheme is inconsistent; the Actions tab surfaces every job of a workflow in one view.
+
+### Draft pull requests
+
+Every job in a PR-triggered workflow is gated on `github.event.pull_request.draft == false`, so a draft PR starts nothing. GitHub has no workflow-level `if:`, which is why the clause is repeated per job rather than declared once — and why one ungated job is enough to keep spending runner capacity.
+
+Two details make that safe rather than lossy:
+
+- `ready_for_review` is in every PR workflow's trigger `types`, so the full suite fires the moment a PR leaves draft. Without it a PR could reach a mergeable state having never run CI.
+- Declaring `types` at all **replaces** the default `[opened, synchronize, reopened]`, so those three are restated explicitly. Dropping `synchronize` would silently stop CI on pushes to an open PR while opened/reopened kept working.
+
+`unit:pytest:core` composes the draft clause with its `always()` schedule. That is the only permitted narrowing of the stable required check: a draft PR cannot merge, and marking it ready re-runs the workflow with the clause true, so every mergeable state still yields a real aggregate result instead of a skip standing in for a pass.
+
+`pr-type-label.yml` is the one deliberate exemption — one short job, and the type label drives release-note grouping and review routing, both worth having correct while a PR is still a draft. `tests/test_workflow_draft_pr_gating_contract.py` pins the gate, the trigger types, the concurrency defaults, and that exemption.
 
 ### Cross-cutting defaults
 

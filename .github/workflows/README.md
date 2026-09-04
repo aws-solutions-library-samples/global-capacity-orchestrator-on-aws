@@ -1,6 +1,6 @@
 # GitHub Actions Workflows
 
-CI/CD workflow definitions that run on every push, pull request, or on a schedule.
+CI/CD workflow definitions that run on every push, non-draft pull request, or on a schedule.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ CI/CD workflow definitions that run on every push, pull request, or on a schedul
 
 ## Primary Workflows
 
-Six primary workflows run on every push to `main` and every pull request.
+Six primary workflows run on every push to `main` and every pull request that is not a draft. Draft PRs skip every job until they are marked ready for review — see [Draft pull requests](../CI.md#draft-pull-requests).
 
 | File | Badge | Description |
 |------|-------|-------------|
@@ -53,5 +53,6 @@ failing the scheduled workflow.
 1. Create a new `.yml` file in this directory
 2. Set `permissions:` to the minimum required (default: `contents: read`)
 3. Add `concurrency` with `cancel-in-progress: true` for PR workflows
-4. Set `timeout-minutes` on every job
-5. Document the workflow in `../CI.md`
+4. For a PR workflow, add `types: [opened, synchronize, reopened, ready_for_review]` and gate **every** job on `github.event_name != 'pull_request' || github.event.pull_request.draft == false`, then add the file to `tests/test_workflow_draft_pr_gating_contract.py`
+5. Set `timeout-minutes` on every job
+6. Document the workflow in `../CI.md`

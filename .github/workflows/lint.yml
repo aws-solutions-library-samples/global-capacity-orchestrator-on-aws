@@ -6,8 +6,12 @@
 #
 # Triggers:
 #   - push to main
-#   - pull_request
+#   - pull_request (opened, synchronize, reopened, ready_for_review)
 #   - workflow_dispatch (manual)
+#
+# Draft PRs run nothing here: every job is gated on
+# `pull_request.draft == false`, and `ready_for_review` is in the trigger
+# types so the suite fires the moment a PR leaves draft.
 #
 # Jobs (display names are colon-delimited, job IDs are hyphen-delimited):
 #   - lint:actionlint:workflows   — validates .github/workflows/*.yml
@@ -34,6 +38,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -48,6 +53,7 @@ jobs:
     name: "lint:actionlint:workflows"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # The monthly dependency scan tracks this version against upstream.
       # Bump the version and reviewed release-asset checksum together.
@@ -77,6 +83,7 @@ jobs:
     name: "lint:actions:pinning"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -102,6 +109,7 @@ jobs:
     name: "lint:yamllint:yaml"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -118,6 +126,7 @@ jobs:
     name: "lint:ruff:python"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: ruff format --check
@@ -162,6 +171,7 @@ jobs:
     name: "lint:markdownlint:md"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -188,6 +198,7 @@ jobs:
     name: "lint:mkdocs:strict"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -204,6 +215,7 @@ jobs:
     name: "lint:hadolint:dockerfile"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull hadolint image
@@ -243,6 +255,7 @@ jobs:
     name: "lint:shellcheck:shell"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # Exact release tag shared by pre-pull and execution.
       SHELLCHECK_IMAGE: "koalaman/shellcheck-alpine:v0.11.0"
@@ -281,6 +294,7 @@ jobs:
     name: "lint:mypy:strict"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -306,6 +320,7 @@ jobs:
     name: "lint:mypy:stacks"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -328,6 +343,7 @@ jobs:
     name: "lint:mypy:lambda"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

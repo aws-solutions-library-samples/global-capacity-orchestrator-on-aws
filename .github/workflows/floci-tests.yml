@@ -44,6 +44,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -63,6 +64,7 @@ jobs:
     name: "floci:integration"
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
         image: floci/floci:2.0.0@sha256:a6e5fc9f8f36448a453fc6a1babd7de23d601e7bf52044f3d710e7066bd5481b
@@ -150,6 +152,7 @@ jobs:
     name: "floci:e2e:release-validate"
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
         image: floci/floci:2.0.0@sha256:a6e5fc9f8f36448a453fc6a1babd7de23d601e7bf52044f3d710e7066bd5481b
