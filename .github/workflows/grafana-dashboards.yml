@@ -37,6 +37,7 @@ on:
       - ".github/scripts/validate_grafana_dashboards.py"
       - ".github/workflows/grafana-dashboards.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml"
       - "lambda/helm-installer/charts.yaml"
@@ -60,6 +61,7 @@ jobs:
     name: "grafana:dashboards:provision"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

@@ -8,7 +8,8 @@ This page is the fly-over.
 
 ## CI at a glance
 
-Six primary workflows run on every push and pull request:
+Six primary workflows run on every push and every pull request that is not a
+draft (draft PRs skip every job until marked ready for review):
 
 - **Unit Tests** — the sharded pytest suite with a combined-coverage gate,
   plus CDK synth and a 34-combination config matrix, lockfile freshness,

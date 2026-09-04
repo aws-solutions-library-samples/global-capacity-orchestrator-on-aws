@@ -477,7 +477,9 @@ See the [Example Job Validation guide](docs/EXAMPLE_VALIDATION.md) for the full 
 
 ### CI/CD Pipeline
 
-The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel. Eight satellite workflows cover release publication, scheduled scans, Pages, and feature-specific contracts; some satellites also run on push or pull request.
+The project uses GitHub Actions for automated testing. Every push and every non-draft pull request runs six primary workflows in parallel. Eight satellite workflows cover release publication, scheduled scans, Pages, and feature-specific contracts; some satellites also run on push or pull request.
+
+Open a PR as a draft while you iterate and CI stays idle: every job in a PR-triggered workflow skips on drafts, and the full suite fires when you mark the PR ready for review. See [Draft pull requests](.github/CI.md#draft-pull-requests) for why the gate is per job and what `ready_for_review` guarantees.
 
 #### Primary workflows (run on every push + PR)
 

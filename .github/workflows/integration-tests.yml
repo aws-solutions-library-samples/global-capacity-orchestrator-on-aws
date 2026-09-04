@@ -6,6 +6,10 @@
 #
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
+# Draft PRs run nothing here: every job is gated on
+# `pull_request.draft == false`, and `ready_for_review` is in the trigger
+# types so the suite fires the moment a PR leaves draft.
+#
 # Jobs (alphabetical by display name):
 #   - integration:autopilot:boot                  — `gco autopilot` installs pinned Claude Code + boots the MCP/Bedrock stack to the cred boundary
 #   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs
@@ -37,6 +41,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -74,6 +79,7 @@ jobs:
     # (those are toggled on via cdk.json, so their pins must be valid too).
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -122,6 +128,7 @@ jobs:
     name: "integration:k8s:manifest-schema"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # Scoped to this job: kubeconform is a lint-time-only tool, used
       # exclusively by the schema-validation step below, so it's installed
@@ -285,6 +292,7 @@ jobs:
     name: "integration:lambda:imports"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
     # instantiate boto3 clients at module import time, so boto3 needs a
     # region even though no AWS calls are made. Matches the top-level
@@ -309,6 +317,7 @@ jobs:
     name: "integration:pytest:cross-module"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # tests/test_integration.py imports every Lambda handler, including
     # modules that instantiate boto3 clients at import time. Set a default
     # region so those imports succeed without real AWS calls.
@@ -346,6 +355,7 @@ jobs:
     name: "integration:mcp:server"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -392,6 +402,7 @@ jobs:
     name: "integration:autopilot:boot"
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -431,6 +442,7 @@ jobs:
     name: "integration:docker:cost-monitor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -474,6 +486,7 @@ jobs:
     name: "integration:docker:health-monitor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -560,6 +573,7 @@ jobs:
     name: "integration:docker:manifest-processor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -625,6 +639,7 @@ jobs:
     name: "integration:docker:inference-monitor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -690,6 +705,7 @@ jobs:
     name: "integration:docker:inference-proxy"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -730,6 +746,7 @@ jobs:
     name: "integration:docker:queue-processor"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       # A real SQS wire API for the container under test. This is the same
       # digest-pinned emulator floci-tests.yml runs, reused rather than
@@ -944,6 +961,7 @@ jobs:
     name: "integration:docker:helm-installer"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -1000,6 +1018,7 @@ jobs:
     name: "integration:docker:tls-certificate-manager"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -1044,6 +1063,7 @@ jobs:
     # step through binfmt.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -1263,6 +1283,7 @@ jobs:
     name: "integration:kind:cluster-e2e"
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # kind does not provide the EKS managed add-on used in production. Pin
       # upstream test-cluster components, authenticate their manifests, and
@@ -1918,6 +1939,7 @@ jobs:
     # their own bounded gate.
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # Helm pin (version + checksum) is derived at runtime from
       # lambda/helm-installer/Dockerfile by the derive step below — the same
@@ -2529,6 +2551,7 @@ jobs:
     name: "integration:dev-alias:docker"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Verify the preinstalled Docker runtime
@@ -2546,6 +2569,7 @@ jobs:
     name: "integration:dev-alias:podman"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install the latest Podman (with retry)
@@ -2613,6 +2637,7 @@ jobs:
     name: "integration:dev-alias:finch"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prepare the runfinch APT repo
@@ -2687,6 +2712,7 @@ jobs:
     name: "integration:dev-alias:none"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prove setup-dev-alias.sh refuses when no runtime answers
