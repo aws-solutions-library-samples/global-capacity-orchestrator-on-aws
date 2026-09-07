@@ -117,7 +117,9 @@ class TestFullScan:
     def test_json_envelope_shape(self, monkeypatch):
         monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(has_drift=True))
         result = _invoke(["scan"], output_format="json")
-        payload = json.loads(result.output)
+        # Click's test Result.output mixes stderr warnings into stdout under
+        # newer Click releases; the real CLI streams remain separate.
+        payload = json.loads(result.stdout)
         assert payload["has_drift"] is True
         assert payload["scan_complete"] is True
         assert "fake drift" in payload["report_markdown"]
