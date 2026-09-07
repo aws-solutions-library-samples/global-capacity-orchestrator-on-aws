@@ -174,3 +174,29 @@ def test_helm_installer_verifier_rejects_a_mismatched_runtime_version(
             ROOT / "lambda" / "helm-installer" / "Dockerfile",
             runner=_helm_runner(kubectl_version="v1.36.2"),
         )
+
+
+def test_lambda_mypy_inventory_covers_every_python_package() -> None:
+    """The Lambda mypy loop must discover every authored Python package."""
+    import re
+
+    import yaml
+
+    workflow_path = ROOT / ".github" / "workflows" / "lint.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["lint-mypy-lambda"]
+    step = next(item for item in job["steps"] if item.get("name") == "Run mypy on each Lambda dir")
+    configured = set(re.findall(r"\blambda/([a-z0-9-]+)\b", step["run"]))
+
+    lambda_root = ROOT / "lambda"
+    actual = {
+        path.name
+        for path in lambda_root.iterdir()
+        if path.is_dir() and not path.name.endswith("-build") and any(path.glob("*.py"))
+    }
+
+    assert configured == actual, (
+        "lint:mypy:lambda inventory drifted; "
+        f"missing={sorted(actual - configured)!r}, "
+        f"stale={sorted(configured - actual)!r}"
+    )

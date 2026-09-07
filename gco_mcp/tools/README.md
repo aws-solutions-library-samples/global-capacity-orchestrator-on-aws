@@ -313,7 +313,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `config_get` | `gco config get` — read a CLI configuration value. |
+| `config_get` | `gco config-cmd get` — read a CLI configuration value. |
 
 ### `metrics.py`
 

@@ -37,6 +37,8 @@ CDK context.
 
 ## Source Files
 
-- [`__init__.py`](__init__.py) exports the package's public API.
-- [`config_loader.py`](config_loader.py) contains defaults, accessors, and
-  validation rules.
+| File | Description |
+|------|-------------|
+| `__init__.py` | Exports the package's public configuration API. |
+| `accelerator_catalog.json` | Reviewed NVIDIA GPU and AWS Neuron instance catalog consumed by configuration and capacity validation. |
+| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. |

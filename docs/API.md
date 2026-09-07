@@ -1890,8 +1890,13 @@ Deployed only for endpoints using Mooncake disaggregation, as the
 |----------|-------------|
 | `GET /health`, `GET /healthz` | Liveness for the proxy pod |
 | `POST /instances/add` | Register a prefill or decode instance. Requires the `ADMIN_API_KEY` shared secret via `x-admin-api-key` or `Authorization: Bearer`; `403` otherwise. Never exposed through an Ingress |
-| `POST /{path}` | Disaggregation dispatch for serving paths. `503` when no decode backend is Ready |
-| `GET /{path}` | Catch-all `200` so ALB health checks succeed |
+| `POST /{path}` | Disaggregation dispatch for serving paths; non-serving POSTs pass through to decode. Bodies must be JSON objects (`400` otherwise). `503` when no decode backend is Ready |
+| `GET /{path}` | Pass through to decode, including OpenAI-compatible model discovery such as `GET /v1/models`; path and query are preserved |
+
+The Mooncake hop forwards the inference proxy's approved end-to-end request
+headers (excluding request `content-encoding`, because JSON is re-serialized)
+and relays response metadata after removing hop-by-hop framing and
+`content-length`.
 
 The inference proxy's allowlist blocks the `instances` path segment, so
 `/instances/add` cannot be reached through `/inference/{endpoint_name}/...`.

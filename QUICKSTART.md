@@ -193,7 +193,7 @@ The recommended **Onboarding_Path** from a fresh clone to this milestone is the 
    Success looks like the `gco` CLI printing its version and exiting without error:
 
    ```text
-   gco, version 2.0.2
+   gco, version <current-version>
    ```
 
    When you see a `gco, version …` line and no error, your environment is correctly set up and you have reached the First Success Milestone.
