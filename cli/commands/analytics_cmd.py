@@ -28,7 +28,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, emit_structured_document, get_output_formatter, prompt
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -97,7 +97,7 @@ def analytics_enable(config: Any, hyperpod: bool, canvas: bool, yes: bool) -> No
             formatter.print_info("  Hyperpod sub-toggle will also be enabled.")
         if canvas:
             formatter.print_info("  Canvas sub-toggle will also be enabled.")
-        click.confirm("\nEnable the analytics environment?", abort=True)
+        confirm("\nEnable the analytics environment?", abort=True)
 
     try:
         current = get_analytics_config()
@@ -150,7 +150,7 @@ def analytics_disable(config: Any, yes: bool) -> None:
         formatter.print_warning(
             "Existing SageMaker Studio / Cognito / EMR resources will be destroyed on next deploy."
         )
-        click.confirm("Are you sure?", abort=True)
+        confirm("Are you sure?", abort=True)
 
     try:
         update_analytics_config({"enabled": False})
@@ -258,7 +258,8 @@ def users_add(
         formatter.print_error(f"Failed to create user {username}: {error_code}")
         sys.exit(1)
 
-    formatter.print_success(f"Created Cognito user: {username}")
+    if config.output_format == "table":
+        formatter.print_success(f"Created Cognito user: {username}")
 
     # Password path — explicit or generated — takes precedence over the
     # temporary-password path so the resulting credentials don't get
@@ -282,21 +283,53 @@ def users_add(
             )
             sys.exit(1)
 
-        if generate_password:
-            formatter.print_info(f"Generated password (printed exactly once): {final_password}")
+        if config.output_format == "table":
+            if generate_password:
+                formatter.print_info(f"Generated password (printed exactly once): {final_password}")
+            else:
+                formatter.print_info(f"Password set (permanent) for {username}")
         else:
-            formatter.print_info(f"Password set (permanent) for {username}")
+            result: dict[str, Any] = {
+                "created": True,
+                "username": username,
+                "email": email,
+                "user_pool_id": pool_id,
+                "region": region,
+                "password_state": "permanent",
+                "password_generated": generate_password,
+                "password_source": "generated" if generate_password else "provided",
+                "password_permanent": True,
+            }
+            if generate_password:
+                result["password"] = final_password
+            formatter.print(result)
         return
 
-    if temporary_password:
-        formatter.print_info(f"Temporary password (printed exactly once): {temporary_password}")
+    if config.output_format == "table":
+        if temporary_password:
+            formatter.print_info(f"Temporary password (printed exactly once): {temporary_password}")
+        else:
+            formatter.print_info(
+                "Cognito did not return a temporary password. "
+                "If --no-email was passed, set one via "
+                "`aws cognito-idp admin-set-user-password` "
+                "or re-run `gco analytics users add` with --password or --generate-password."
+            )
     else:
-        formatter.print_info(
-            "Cognito did not return a temporary password. "
-            "If --no-email was passed, set one via "
-            "`aws cognito-idp admin-set-user-password` "
-            "or re-run `gco analytics users add` with --password or --generate-password."
-        )
+        result = {
+            "created": True,
+            "username": username,
+            "email": email,
+            "user_pool_id": pool_id,
+            "region": region,
+            "password_state": "temporary" if temporary_password else "not_returned",
+            "password_generated": False,
+            "password_source": "cognito" if temporary_password else "unavailable",
+            "password_permanent": False if temporary_password else None,
+        }
+        if temporary_password:
+            result["password"] = temporary_password
+        formatter.print(result)
 
 
 @users_cmd.command("list")
@@ -319,7 +352,11 @@ def users_list(config: Any, as_json: bool) -> None:
         sys.exit(1)
 
     if as_json:
-        print(json.dumps(users, indent=2))
+        emit_structured_document(
+            users,
+            output_format="json",
+            rendered=json.dumps(users, indent=2),
+        )
         return
     formatter.print(users)
 
@@ -338,7 +375,7 @@ def users_remove(config: Any, username: str, yes: bool) -> None:
     pool_id, region = _require_cognito_pool_id(config)
 
     if not yes:
-        click.confirm(f"Delete Cognito user '{username}'?", abort=True)
+        confirm(f"Delete Cognito user '{username}'?", abort=True)
 
     try:
         admin_delete_user(pool_id, region, username)
@@ -411,17 +448,22 @@ def users_set_password(
     elif password is not None:
         new_password = password
     else:
-        new_password = click.prompt(
-            "New password",
-            hide_input=True,
-            confirmation_prompt=True,
-        )
+        prompt_kwargs: dict[str, Any] = {
+            "hide_input": True,
+            "confirmation_prompt": True,
+        }
+        if config.output_format != "table":
+            prompt_kwargs["err"] = True
+        new_password = prompt("New password", **prompt_kwargs)
 
     if not yes:
         qualifier = "temporary" if temporary else "permanent"
-        click.confirm(
+        confirm_kwargs: dict[str, Any] = {"abort": True}
+        if config.output_format != "table":
+            confirm_kwargs["err"] = True
+        confirm(
             f"Set a new {qualifier} password for Cognito user '{username}'?",
-            abort=True,
+            **confirm_kwargs,
         )
 
     try:
@@ -438,9 +480,24 @@ def users_set_password(
         sys.exit(1)
 
     qualifier = "temporary" if temporary else "permanent"
-    formatter.print_success(f"Password set ({qualifier}) for {username}")
-    if generate_password:
-        formatter.print_info(f"Generated password (printed exactly once): {new_password}")
+    if config.output_format == "table":
+        formatter.print_success(f"Password set ({qualifier}) for {username}")
+        if generate_password:
+            formatter.print_info(f"Generated password (printed exactly once): {new_password}")
+    else:
+        result: dict[str, Any] = {
+            "password_set": True,
+            "username": username,
+            "user_pool_id": pool_id,
+            "region": region,
+            "password_state": qualifier,
+            "password_generated": generate_password,
+            "password_source": "generated" if generate_password else "provided",
+            "password_permanent": not temporary,
+        }
+        if generate_password:
+            result["password"] = new_password
+        formatter.print(result)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +561,7 @@ def studio_login(
         sys.exit(1)
 
     if password is None:
-        password = click.prompt("Password", hide_input=True)
+        password = prompt("Password", hide_input=True)
 
     try:
         tokens = srp_authenticate(

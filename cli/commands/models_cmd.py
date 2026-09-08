@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -164,7 +164,7 @@ def models_delete(config: Any, model_name: Any, yes: Any) -> None:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Permanently delete model '{model_name}', including all current files "
             "and historical S3 versions? This cannot be undone.",
             abort=True,
@@ -200,7 +200,10 @@ def models_uri(config: Any, model_name: Any) -> None:
     try:
         manager = get_model_manager(config)
         uri = manager.get_model_uri(model_name)
-        print(uri)
+        if config.output_format == "table":
+            print(uri)
+        else:
+            formatter.print({"model_name": model_name, "s3_uri": uri})
 
     except Exception as e:
         formatter.print_error(f"Failed to get model URI: {e}")

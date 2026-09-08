@@ -72,7 +72,26 @@ def _check_feature_flag() -> None:
 
 def _emit_json(payload: Any, *, err: bool = False) -> None:
     """Emit ``payload`` as a single JSON line."""
-    click.echo(json.dumps(payload, default=str), err=err)
+    from ..output import emit_structured_document
+
+    emit_structured_document(
+        payload,
+        output_format="json",
+        rendered=json.dumps(payload, default=str),
+        err=err,
+    )
+
+
+def _emit_json_text(text: str) -> None:
+    """Emit pre-rendered JSON while registering its native document shape."""
+    from ..output import emit_structured_document
+
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        click.echo(text)
+        return
+    emit_structured_document(document, output_format="json", rendered=text)
 
 
 def _emit_error(code: str, details: dict[str, Any] | None = None) -> None:
@@ -550,7 +569,7 @@ def _emit_report(final: dict[str, Any]) -> None:
     """Print the Final_Report JSON to stdout when present, else a summary."""
     report_path = final.get("final_report_path")
     if report_path and Path(str(report_path)).exists():
-        click.echo(Path(str(report_path)).read_text(encoding="utf-8"))
+        _emit_json_text(Path(str(report_path)).read_text(encoding="utf-8"))
         return
     _emit_json(
         {

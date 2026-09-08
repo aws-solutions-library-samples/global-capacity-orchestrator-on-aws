@@ -742,7 +742,7 @@ class TestCliRunner:
         assert payload["error"] == "boom"
         assert payload["exit_code"] == 1
 
-    def test_run_cli_returns_status_ok_when_empty_stdout(self) -> None:
+    def test_run_cli_rejects_empty_success_stdout(self) -> None:
         import cli_runner
 
         result = MagicMock()
@@ -752,7 +752,8 @@ class TestCliRunner:
         with patch.object(cli_runner.subprocess, "run", return_value=result):
             output = cli_runner._run_cli("status")
         payload = json.loads(output)
-        assert payload == {"status": "ok"}
+        assert payload["exit_code"] == 1
+        assert "empty stdout" in payload["error"]
 
     def test_run_cli_rejects_path_traversal(self) -> None:
         import cli_runner

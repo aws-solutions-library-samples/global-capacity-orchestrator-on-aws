@@ -50,7 +50,7 @@ from ..autopilot import (
     write_mcp_config,
 )
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, emit_structured_document, get_output_formatter
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-09-01T14:42:56Z
@@ -210,7 +210,7 @@ def _resolve_resume_args(
         not yes
         and plan["resumable_session"]
         and _stdin_is_interactive()
-        and click.confirm(
+        and confirm(
             "Resume your previous Claude Code session in this workspace?",
             default=False,
         )
@@ -633,6 +633,13 @@ def autopilot(
         formatter.print_error("Pass either --continue or --resume, not both.")
         sys.exit(1)
 
+    if config.output_format != "table" and not (dry_run or print_config):
+        formatter.print_error(
+            "Live Autopilot sessions require terminal output. Use `--output table`, "
+            "or combine machine output with `--dry-run` or `--print-config`."
+        )
+        sys.exit(2)
+
     try:
         resolved_engine = resolve_engine(engine)
         if resolved_engine is AutopilotEngine.CODEX:
@@ -664,7 +671,11 @@ def autopilot(
             click.echo(plan["codex_config"], nl=False)
         else:
             # Preserve Claude's raw JSON machine-readable surface.
-            click.echo(json.dumps(plan["mcp_config"], indent=2))
+            emit_structured_document(
+                plan["mcp_config"],
+                output_format="json",
+                rendered=json.dumps(plan["mcp_config"], indent=2),
+            )
         return
 
     if dry_run:
@@ -684,7 +695,7 @@ def autopilot(
         codex_binary = plan["codex_binary"]
         if codex_binary is None:
             formatter.print_info(f"Codex is not installed (pinned: {plan['codex_pin']}).")
-            if not yes and not click.confirm(f"Install it now with `{plan['install_command']}`?"):
+            if not yes and not confirm(f"Install it now with `{plan['install_command']}`?"):
                 formatter.print_error(
                     "Codex is required for this engine. Install it manually with "
                     f"`{plan['install_command']}` and re-run `gco autopilot --engine codex`."
@@ -744,7 +755,7 @@ def autopilot(
     claude_binary = plan["claude_binary"]
     if claude_binary is None:
         formatter.print_info(f"Claude Code is not installed (pinned: {plan['claude_code_pin']}).")
-        if not yes and not click.confirm(f"Install it now with `{plan['install_command']}`?"):
+        if not yes and not confirm(f"Install it now with `{plan['install_command']}`?"):
             formatter.print_error(
                 "Claude Code is required. Install it manually with "
                 f"`{plan['install_command']}` and re-run `gco autopilot`."

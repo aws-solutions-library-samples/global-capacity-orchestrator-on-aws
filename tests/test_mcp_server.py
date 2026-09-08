@@ -43,11 +43,26 @@ class TestRunCli:
             assert "--output" in cmd
             assert "json" in cmd
 
-    def test_empty_stdout_returns_ok(self):
+    def test_empty_stdout_fails_closed(self):
         with patch("cli_runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = cli_runner._run_cli("stacks", "list")
-            assert json.loads(result) == {"status": "ok"}
+            payload = json.loads(result)
+            assert payload["exit_code"] == 1
+            assert "empty stdout" in payload["error"]
+
+    @pytest.mark.parametrize(
+        "stdout",
+        ["not json", '{}\n{"second": true}', "NaN", "Infinity", "-Infinity"],
+    )
+    def test_malformed_or_multiple_success_stdout_fails_closed(self, stdout):
+        with patch("cli_runner.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=stdout, stderr="warning")
+            result = cli_runner._run_cli("jobs", "delete", "old-job")
+
+        payload = json.loads(result)
+        assert payload["exit_code"] == 1
+        assert "malformed or multiple" in payload["error"]
 
     def test_nonzero_exit_returns_error(self):
         with patch("cli_runner.subprocess.run") as mock_run:
@@ -654,12 +669,35 @@ class TestJobTools:
         import importlib
 
         importlib.reload(run_mcp)
+        payload = {
+            "deleted": True,
+            "job_name": "old-job",
+            "namespace": "gco-jobs",
+            "region": "us-east-1",
+        }
         with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            await run_mcp.delete_job("old-job", "us-east-1")
+            mock.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="advisory only",
+            )
+            result = await run_mcp.delete_job("old-job", "us-east-1")
+            assert json.loads(result) == payload
             cmd = mock.call_args[0][0]
             assert "delete" in cmd
             assert "-y" in cmd
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"})
+    async def test_delete_job_failure_preserves_error_envelope(self):
+        import importlib
+
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=2, stdout="", stderr="delete denied")
+            result = await run_mcp.delete_job("old-job", "us-east-1")
+
+        assert json.loads(result) == {"error": "delete denied", "exit_code": 2}
 
     def test_get_job_events(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -1491,13 +1529,18 @@ class TestModelTools:
             assert "list" in cmd
 
     def test_get_model_uri(self):
+        payload = {"model_name": "llama3-8b", "s3_uri": "s3://bucket/model"}
         with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="s3://bucket/model", stderr="")
+            mock.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
             result = run_mcp.get_model_uri("llama3-8b")
             cmd = mock.call_args[0][0]
             assert "uri" in cmd
             assert "llama3-8b" in cmd
-            assert result == "s3://bucket/model"
+            assert json.loads(result) == payload
 
 
 class TestResourceRegistration:

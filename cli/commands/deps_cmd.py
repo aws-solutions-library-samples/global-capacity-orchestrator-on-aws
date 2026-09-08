@@ -307,7 +307,13 @@ def scan(ctx: click.Context, nodepools_only: bool, report_file: Path | None) -> 
         envelope = _run_full_scan(repo_root, stream=not json_output)
 
     if json_output:
-        click.echo(json.dumps(envelope, indent=2))
+        from ..output import emit_structured_document
+
+        emit_structured_document(
+            envelope,
+            output_format="json",
+            rendered=json.dumps(envelope, indent=2),
+        )
         return
 
     if nodepools_only:

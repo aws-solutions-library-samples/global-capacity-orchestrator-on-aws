@@ -413,6 +413,23 @@ class TestOutputFormatterPrint:
             assert "ℹ" in captured.out
             assert "FYI" in captured.out
 
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    @pytest.mark.parametrize("method_name", ["print_success", "print_info"])
+    def test_human_messages_are_suppressed_in_machine_modes(
+        self, capsys, output_format, method_name
+    ):
+        """Human-only helpers must never contaminate structured stdout."""
+        from cli.output import OutputFormatter
+
+        with patch("cli.output.get_config") as mock_config:
+            mock_config.return_value = MagicMock(output_format=output_format)
+            formatter = OutputFormatter()
+            getattr(formatter, method_name)("human progress")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
 
 class TestConvenienceFunctions:
     """Tests for convenience formatting functions."""

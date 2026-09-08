@@ -78,6 +78,31 @@ def _gco_executable() -> str:
     return shutil.which("gco") or "gco"
 
 
+def _validated_cli_json_output(output: str) -> str:
+    """Return one strict JSON value or a fail-closed MCP error envelope."""
+    if not output:
+        return json.dumps(
+            {
+                "error": "gco CLI returned empty stdout despite --output json",
+                "exit_code": 1,
+            }
+        )
+
+    def reject_nonstandard_constant(token: str) -> None:
+        raise ValueError(f"non-standard JSON constant: {token}")
+
+    try:
+        json.loads(output, parse_constant=reject_nonstandard_constant)
+    except json.JSONDecodeError, ValueError:
+        return json.dumps(
+            {
+                "error": "gco CLI returned malformed or multiple JSON documents",
+                "exit_code": 1,
+            }
+        )
+    return output
+
+
 def _run_cli(
     *args: str,
     timeout_seconds: int = 120,
@@ -124,7 +149,7 @@ def _run_cli(
         if result.returncode != 0:
             error = result.stderr.strip() or output
             return json.dumps({"error": error, "exit_code": result.returncode})
-        return output if output else json.dumps({"status": "ok"})
+        return _validated_cli_json_output(output)
     except subprocess.TimeoutExpired:
         return json.dumps({"error": f"Command timed out after {timeout_seconds} seconds"})
     except FileNotFoundError:
@@ -205,4 +230,4 @@ async def _run_cli_async(
     if process.returncode != 0:
         error = stderr_bytes.decode(errors="replace").strip() or output
         return json.dumps({"error": error, "exit_code": process.returncode})
-    return output if output else json.dumps({"status": "ok"})
+    return _validated_cli_json_output(output)

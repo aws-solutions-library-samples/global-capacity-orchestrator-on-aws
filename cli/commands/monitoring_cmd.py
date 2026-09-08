@@ -25,7 +25,7 @@ import click
 import requests
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, emit_structured_document, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -125,7 +125,7 @@ def monitoring_enable(config: Any, yes: bool) -> None:
         formatter.print_info(
             "Cluster observability (kube-prometheus-stack) will be enabled on every region."
         )
-        click.confirm("\nEnable cluster observability?", abort=True)
+        confirm("\nEnable cluster observability?", abort=True)
 
     try:
         update_cluster_observability_config({"enabled": True})
@@ -157,7 +157,7 @@ def monitoring_disable(config: Any, yes: bool) -> None:
         formatter.print_warning(
             "Prometheus/Grafana/Alertmanager and their EBS volumes are removed on next deploy."
         )
-        click.confirm("Are you sure?", abort=True)
+        confirm("Are you sure?", abort=True)
 
     try:
         update_cluster_observability_config({"enabled": False})
@@ -373,9 +373,23 @@ def users_add(
         formatter.print_error(f"Failed to create Grafana user {username!r}: {exc}")
         sys.exit(1)
 
-    formatter.print_success(f"Created Grafana user {username!r} (id={user_id})")
-    if generate_password:
-        formatter.print_info(f"Generated password (printed exactly once): {final_password}")
+    if config.output_format == "table":
+        formatter.print_success(f"Created Grafana user {username!r} (id={user_id})")
+        if generate_password:
+            formatter.print_info(f"Generated password (printed exactly once): {final_password}")
+    else:
+        result: dict[str, Any] = {
+            "created": True,
+            "username": username,
+            "user_id": user_id,
+            "email": email,
+            "password_state": "set",
+            "password_generated": generate_password,
+            "password_source": "generated" if generate_password else "provided",
+        }
+        if generate_password:
+            result["password"] = final_password
+        formatter.print(result)
 
 
 @users_cmd.command("list")
@@ -403,7 +417,11 @@ def users_list(
     if as_json:
         import json
 
-        print(json.dumps(users, indent=2))
+        emit_structured_document(
+            users,
+            output_format="json",
+            rendered=json.dumps(users, indent=2),
+        )
         return
     formatter.print(users)
 
@@ -426,7 +444,7 @@ def users_remove(
 
     formatter = get_output_formatter(config)
     if not yes:
-        click.confirm(f"Delete Grafana user '{username}'?", abort=True)
+        confirm(f"Delete Grafana user '{username}'?", abort=True)
 
     try:
         auth = _resolve_grafana_auth(admin_user, admin_password)

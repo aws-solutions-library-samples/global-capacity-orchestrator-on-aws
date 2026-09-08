@@ -80,6 +80,40 @@ These options are available for all commands:
 | `--help` | | Show help message |
 | `--version` | | Show version |
 
+### Structured Output Contract
+
+`--output json` and `--output yaml` apply to every registered CLI command,
+including the root `--help` and `--version` eager options. On a successful
+invocation, stdout contains exactly one document in the requested format;
+warnings, errors, and interactive machine-mode prompts remain on stderr.
+Explicit command-native mapping/list payloads retain their schema. Unregistered
+stdout is always treated as raw text rather than guessed from its syntax (most
+human prose is also valid YAML). Legacy commands that produce no payload, a
+scalar, or raw/streamed text are normalized into a stable envelope:
+
+```json
+{"status": "ok"}
+{"status": "ok", "result": "scalar value"}
+{"status": "ok", "output": "captured human or streamed output"}
+```
+
+Table mode is unchanged and continues to stream human-readable progress. A
+non-zero command preserves its exit code and existing stderr diagnostics rather
+than being rewritten as a success document. JSON output is strict
+RFC-compatible JSON: non-standard numeric constants such as `NaN` and
+`Infinity` are rejected. CLI-backed MCP tools additionally validate successful
+JSON stdout and fail closed if an older or mismatched CLI returns empty,
+malformed, non-standard, or multiple documents.
+
+Commands with a native machine contract expose richer fields. For example:
+
+```bash
+gco --output json jobs delete my-job -r us-east-1 -y
+```
+
+returns the backend deletion result plus `deleted`, `job_name`, `namespace`,
+and `region`, while ordinary table output retains `✓ Job my-job deleted`.
+
 ### Regional API Mode
 
 Every workload region has a regional API bridge because the centralized

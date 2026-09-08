@@ -40,6 +40,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
+from click import Abort
 
 
 @pytest.fixture
@@ -252,7 +253,7 @@ class TestImageRegistryDestroyPreflight:
             ),
             patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
             patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("builtins.input", return_value="yes"),
+            patch("cli.stacks.confirm", return_value=True),
         ):
             mock_stdin.isatty.return_value = True
             assert manager._image_registry_destroy_preflight(force=False) is True
@@ -273,7 +274,7 @@ class TestImageRegistryDestroyPreflight:
             ),
             patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
             patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("builtins.input", return_value="n"),
+            patch("cli.stacks.confirm", return_value=False),
         ):
             mock_stdin.isatty.return_value = True
             assert manager._image_registry_destroy_preflight(force=False) is False
@@ -295,11 +296,48 @@ class TestImageRegistryDestroyPreflight:
             ),
             patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
             patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("builtins.input", side_effect=EOFError),
+            patch("cli.stacks.confirm", side_effect=Abort),
         ):
             mock_stdin.isatty.return_value = True
             assert manager._image_registry_destroy_preflight(force=False) is False
         assert "Aborted" in capsys.readouterr().out
+
+    def test_destroy_tty_machine_mode_keeps_inventory_and_prompt_on_stderr(
+        self,
+        manager: Any,
+        capsys: Any,
+    ) -> None:
+        import cli.output as output_module
+
+        inventory = {
+            "repo_count": 1,
+            "tag_count": 1,
+            "total_bytes": 0,
+            "endpoint_refs": 0,
+            "job_refs": 0,
+        }
+        token = output_module._structured_emissions_var.set([])
+        try:
+            with (
+                patch.object(
+                    manager,
+                    "_read_images_config",
+                    return_value={"removal_policy": "destroy", "empty_on_delete": True},
+                ),
+                patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
+                patch("cli.stacks.sys.stdin") as mock_stdin,
+                patch("cli.output.click.confirm", return_value=False) as click_confirm,
+            ):
+                mock_stdin.isatty.return_value = True
+                assert manager._image_registry_destroy_preflight(force=False) is False
+        finally:
+            output_module._structured_emissions_var.reset(token)
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Image registry inventory" in captured.err
+        assert "Aborted" in captured.err
+        assert click_confirm.call_args.kwargs["err"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+import yaml
 from click.testing import CliRunner
 
 from cli import monitoring_user_mgmt as mum
@@ -184,6 +185,57 @@ class TestUsersCli:
         assert captured["auth"] == ("admin", "from-secret")
         # generated password is printed exactly once
         assert "Generated password" in result.output
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_generated_password_survives_machine_output_once(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        output_format: str,
+    ) -> None:
+        secret = "Grafana!Password1"
+        monkeypatch.setattr(
+            "cli.monitoring_user_mgmt.generate_password",
+            lambda: secret,
+        )
+        monkeypatch.setattr(
+            "cli.monitoring_user_mgmt.create_user",
+            lambda *_args, **_kwargs: 42,
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "--output",
+                output_format,
+                "monitoring",
+                "users",
+                "add",
+                "--username",
+                "bob",
+                "--email",
+                "bob@example.invalid",
+                "--generate-password",
+                "--admin-password",
+                "adminpw",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count(secret) == 1
+        payload = (
+            json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+        )
+        assert payload == {
+            "created": True,
+            "username": "bob",
+            "user_id": 42,
+            "email": "bob@example.invalid",
+            "password_state": "set",
+            "password_generated": True,
+            "password_source": "generated",
+            "password": secret,
+        }
 
     def test_add_rejects_conflicting_password_flags(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

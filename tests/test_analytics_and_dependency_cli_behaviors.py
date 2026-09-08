@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import click
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
@@ -38,8 +39,9 @@ def _invoke_analytics(
     args: list[str],
     *,
     input_text: str | None = None,
+    output_format: str = "table",
 ):
-    kwargs: dict[str, object] = {"obj": _config()}
+    kwargs: dict[str, object] = {"obj": _config(output_format=output_format)}
     if input_text is not None:
         kwargs["input"] = input_text
     return runner.invoke(analytics, args, **kwargs)
@@ -507,3 +509,96 @@ def test_analytics_doctor_successfully_emits_checks_without_remediation(
     assert "✓ cdk.json parses as JSON" in result.output
     assert "→" not in result.output
     assert "All pre-flight checks passed" in result.output
+
+
+def _load_machine_document(output: str, output_format: str) -> dict[str, object]:
+    payload = json.loads(output) if output_format == "json" else yaml.safe_load(output)
+    assert isinstance(payload, dict)
+    return payload
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_generated_creation_password_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Generated!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value=secret),
+        patch("cli.analytics_user_mgmt.admin_set_user_password") as set_password,
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice", "--generate-password"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["created"] is True
+    assert payload["username"] == "alice"
+    assert payload["password"] == secret
+    assert payload["password_generated"] is True
+    assert payload["password_permanent"] is True
+    set_password.assert_called_once()
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_temporary_creation_password_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Temporary!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, secret)),
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password"] == secret
+    assert payload["password_state"] == "temporary"
+    assert payload["password_permanent"] is False
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_generated_password_reset_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Reset!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value=secret),
+        patch("cli.analytics_user_mgmt.admin_set_user_password") as set_password,
+    ):
+        result = _invoke_analytics(
+            runner,
+            [
+                "users",
+                "set-password",
+                "--username",
+                "alice",
+                "--generate-password",
+                "--yes",
+            ],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password_set"] is True
+    assert payload["password"] == secret
+    assert payload["password_generated"] is True
+    assert payload["password_state"] == "permanent"
+    set_password.assert_called_once()

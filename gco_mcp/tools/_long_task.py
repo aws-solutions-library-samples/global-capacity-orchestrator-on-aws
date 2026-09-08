@@ -212,7 +212,12 @@ async def _run_long_task(
 
     spawn_argv = list(logical_argv)
     if spawn_argv and spawn_argv[0] == "gco":
-        spawn_argv[0] = cli_runner._gco_executable()
+        spawn_argv = [
+            cli_runner._gco_executable(),
+            "--output",
+            "table",
+            *spawn_argv[1:],
+        ]
 
     started = time.monotonic()
     # Initialize observability before spawning. The writer degrades to an

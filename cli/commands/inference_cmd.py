@@ -8,7 +8,12 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import (
+    confirm,
+    emit_structured_document,
+    get_output_formatter,
+    interactive_echo,
+)
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -571,7 +576,7 @@ def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Stop endpoint '{endpoint_name}'?", abort=True)
+        confirm(f"Stop endpoint '{endpoint_name}'?", abort=True)
 
     try:
         manager = get_inference_manager(config)
@@ -674,7 +679,7 @@ def inference_delete(
         sys.exit(1)
 
     if not yes:
-        click.confirm(f"Delete endpoint '{endpoint_name}' from all regions?", abort=True)
+        confirm(f"Delete endpoint '{endpoint_name}' from all regions?", abort=True)
 
     try:
         manager = get_inference_manager(config)
@@ -962,7 +967,11 @@ def inference_invoke(
                 if text and config.output_format == "table":
                     print(f"\n{text.strip()}\n")
                 else:
-                    print(_json.dumps(resp_json, indent=2))
+                    emit_structured_document(
+                        resp_json,
+                        output_format="json",
+                        rendered=_json.dumps(resp_json, indent=2),
+                    )
             except _json.JSONDecodeError:
                 print(response.text)
         else:
@@ -1060,10 +1069,10 @@ def inference_promote(config: Any, endpoint_name: Any, yes: Any) -> None:
 
         if not yes:
             current_image = endpoint.get("spec", {}).get("image", "unknown")
-            click.echo(f"  Current primary: {current_image}")
-            click.echo(f"  Canary image:    {canary.get('image', 'unknown')}")
-            click.echo(f"  Canary weight:   {canary.get('weight', 0)}%")
-            if not click.confirm("  Promote canary to primary?"):
+            interactive_echo(f"  Current primary: {current_image}")
+            interactive_echo(f"  Canary image:    {canary.get('image', 'unknown')}")
+            interactive_echo(f"  Canary weight:   {canary.get('weight', 0)}%")
+            if not confirm("  Promote canary to primary?"):
                 formatter.print_info("Cancelled")
                 return
 
@@ -1113,9 +1122,9 @@ def inference_rollback(config: Any, endpoint_name: Any, yes: Any) -> None:
             sys.exit(1)
 
         if not yes:
-            click.echo(f"  Canary image:  {canary.get('image', 'unknown')}")
-            click.echo(f"  Canary weight: {canary.get('weight', 0)}%")
-            if not click.confirm("  Remove canary and restore full traffic to primary?"):
+            interactive_echo(f"  Canary image:  {canary.get('image', 'unknown')}")
+            interactive_echo(f"  Canary weight: {canary.get('weight', 0)}%")
+            if not confirm("  Remove canary and restore full traffic to primary?"):
                 formatter.print_info("Cancelled")
                 return
 
@@ -1149,7 +1158,6 @@ def inference_health(config: Any, endpoint_name: Any, region: Any) -> None:
 
         gco inference health my-llm -r us-east-1
     """
-    import json as _json
     import time as _time
 
     from ..aws_client import get_aws_client
@@ -1193,14 +1201,14 @@ def inference_health(config: Any, endpoint_name: Any, region: Any) -> None:
         except Exception:
             result["body"] = response.text[:200] if response.text else None
 
-        if config.output_format == "json":
-            print(_json.dumps(result, indent=2))
-        else:
+        if config.output_format == "table":
             status_icon = "✓" if response.ok else "✗"
             formatter.print_info(
                 f"{status_icon} {endpoint_name}: {result['status']} "
                 f"(HTTP {response.status_code}, {result['latency_ms']}ms)"
             )
+        else:
+            formatter.print(result)
 
     except Exception as e:
         formatter.print_error(f"Health check failed: {e}")
@@ -1264,7 +1272,11 @@ def inference_models(
         if response.ok:
             try:
                 resp_json = response.json()
-                print(_json.dumps(resp_json, indent=2))
+                emit_structured_document(
+                    resp_json,
+                    output_format="json",
+                    rendered=_json.dumps(resp_json, indent=2),
+                )
             except _json.JSONDecodeError:
                 print(response.text)
         else:

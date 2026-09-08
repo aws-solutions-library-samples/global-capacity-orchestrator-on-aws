@@ -32,9 +32,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-import click
-
 from . import ephemeral_bastion, kubectl_helpers, ssm_tunnel
+from .output import confirm
 
 # Sentinel for --via-ssm: provision (and later destroy) an ephemeral bastion
 # instead of tunnelling through a caller-supplied instance id.
@@ -218,7 +217,7 @@ def provision_bastion(
             f"inbound ports (SSM is outbound-only), self-terminates after {ttl_minutes} minutes, "
             "and is torn down automatically when the tunnel closes."
         )
-        click.confirm("Provision the ephemeral bastion?", abort=True)
+        confirm("Provision the ephemeral bastion?", abort=True)
 
     formatter.print_info(
         f"Provisioning ephemeral SSM bastion in {region} "

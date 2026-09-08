@@ -7,7 +7,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig, _load_cdk_json
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter, interactive_echo
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -200,7 +200,7 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Are you sure you want to destroy {stack_name}?", abort=True)
+        confirm(f"Are you sure you want to destroy {stack_name}?", abort=True)
 
     try:
         manager = get_stack_manager(config)
@@ -372,8 +372,11 @@ def destroy_all_orchestrated(
         if not yes:
             formatter.print_warning("This will destroy ALL GCO stacks:")
             for stack in ordered:
-                formatter.print_info(f"  - {stack}")
-            click.confirm("\nAre you sure you want to destroy all stacks?", abort=True)
+                if config.output_format == "table":
+                    formatter.print_info(f"  - {stack}")
+                else:
+                    interactive_echo(f"  - {stack}")
+            confirm("\nAre you sure you want to destroy all stacks?", abort=True)
 
         total_stacks = len(stacks)
 
@@ -901,7 +904,7 @@ def eks_endpoint_set(config: Any, mode: str, cidrs: tuple[str, ...], yes: bool) 
             "PUBLIC_AND_PRIVATE; storing the allowlist for a later flip."
         )
     if not yes:
-        click.confirm(f"Update cdk.json: {summary}?", abort=True)
+        confirm(f"Update cdk.json: {summary}?", abort=True)
 
     from ..stacks import update_eks_cluster_config
 
@@ -988,7 +991,7 @@ def regions_add(config: Any, region: Any, config_path: Any, yes: Any) -> None:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Add {region} to deployment_regions.regional in cdk.json?", abort=True)
+        confirm(f"Add {region} to deployment_regions.regional in cdk.json?", abort=True)
 
     try:
         report = add_deployment_region(region, config_path=config_path)
@@ -1032,7 +1035,7 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
             f"This only edits cdk.json — a deployed {config.project_name}-{region} "
             "stack is NOT destroyed by this change."
         )
-        click.confirm(f"Remove {region} from deployment_regions.regional in cdk.json?", abort=True)
+        confirm(f"Remove {region} from deployment_regions.regional in cdk.json?", abort=True)
 
     try:
         report = remove_deployment_region(region, config_path=config_path)
@@ -1076,7 +1079,7 @@ def regions_set(config: Any, role: Any, region: Any, config_path: Any, yes: Any)
             "This only edits cdk.json — already-deployed stacks are not moved "
             "or destroyed; the next deploy creates the stack in the new Region."
         )
-        click.confirm(f"Set deployment_regions.{role} to {region} in cdk.json?", abort=True)
+        confirm(f"Set deployment_regions.{role} to {region} in cdk.json?", abort=True)
 
     try:
         report = set_deployment_region_role(role, region, config_path=config_path)
@@ -1153,9 +1156,7 @@ def bedrock_set_mission_model(config: Any, model_id: Any, config_path: Any, yes:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
-            f"Set bedrock.mission_default_model_id to {model_id} in cdk.json?", abort=True
-        )
+        confirm(f"Set bedrock.mission_default_model_id to {model_id} in cdk.json?", abort=True)
 
     try:
         report = set_mission_default_model(model_id, config_path=config_path)
@@ -1200,7 +1201,7 @@ def bedrock_set_capacity_advisor_model(
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Set bedrock.capacity_advisor_default_model_id to {model_id} in cdk.json?",
             abort=True,
         )
@@ -1244,7 +1245,7 @@ def bedrock_set_claude_code_model(config: Any, model_id: Any, config_path: Any, 
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Set bedrock.claude_code_default_model_id to {model_id} in cdk.json?",
             abort=True,
         )
@@ -1287,7 +1288,7 @@ def bedrock_set_codex_model(config: Any, model_id: Any, config_path: Any, yes: A
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Set bedrock.codex_default_model_id to {model_id} in cdk.json?",
             abort=True,
         )
@@ -1335,7 +1336,7 @@ def bedrock_set_codex_reasoning_effort(
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Set bedrock.codex.reasoning_effort to {reasoning_effort} in cdk.json?",
             abort=True,
         )
@@ -1447,7 +1448,7 @@ def fsx_enable(
             formatter.print_info(f"  Import Path: {import_path}")
         if export_path:
             formatter.print_info(f"  Export Path: {export_path}")
-        click.confirm(f"\nEnable FSx for Lustre for {scope}?", abort=True)
+        confirm(f"\nEnable FSx for Lustre for {scope}?", abort=True)
 
     try:
         fsx_settings = {
@@ -1498,7 +1499,7 @@ def fsx_disable(config: Any, region: Any, yes: Any) -> None:
     if not yes:
         formatter.print_warning(f"This will disable FSx for Lustre for {scope}.")
         formatter.print_warning("Existing FSx file systems will be deleted on next deploy.")
-        click.confirm("Are you sure?", abort=True)
+        confirm("Are you sure?", abort=True)
 
     try:
         update_fsx_config({"enabled": False}, region)
@@ -1575,7 +1576,7 @@ def valkey_enable(
         formatter.print_info(f"  Max Data Storage: {max_storage} GB")
         formatter.print_info(f"  Max eCPU/second: {max_ecpu}")
         formatter.print_info(f"  Snapshot Retention: {snapshot_retention} days")
-        click.confirm("\nEnable Valkey Serverless?", abort=True)
+        confirm("\nEnable Valkey Serverless?", abort=True)
 
     try:
         valkey_settings = {
@@ -1613,7 +1614,7 @@ def valkey_disable(config: Any, yes: Any) -> None:
     if not yes:
         formatter.print_warning("This will disable Valkey Serverless.")
         formatter.print_warning("Existing Valkey caches will be deleted on next deploy.")
-        click.confirm("Are you sure?", abort=True)
+        confirm("Are you sure?", abort=True)
 
     try:
         update_valkey_config({"enabled": False})
@@ -1702,7 +1703,7 @@ def aurora_enable(
         formatter.print_info(f"  Max ACU: {max_acu}")
         formatter.print_info(f"  Backup Retention: {backup_retention} days")
         formatter.print_info(f"  Deletion Protection: {deletion_protection}")
-        click.confirm("\nEnable Aurora pgvector?", abort=True)
+        confirm("\nEnable Aurora pgvector?", abort=True)
 
     try:
         aurora_settings = {
@@ -1745,7 +1746,7 @@ def aurora_disable(config: Any, yes: Any) -> None:
             "Existing Aurora clusters will be deleted on next deploy "
             "(unless deletion protection is enabled)."
         )
-        click.confirm("Are you sure?", abort=True)
+        confirm("Are you sure?", abort=True)
 
     try:
         update_aurora_config({"enabled": False})

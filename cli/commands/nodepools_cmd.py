@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -211,7 +211,7 @@ def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, 
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Delete NodePool '{nodepool_name}' in {region}?", abort=True)
+        confirm(f"Delete NodePool '{nodepool_name}' in {region}?", abort=True)
 
     try:
         cluster_name = cluster or f"{config.project_name}-{region}"

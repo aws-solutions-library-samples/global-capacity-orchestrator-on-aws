@@ -11,7 +11,7 @@ from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 from ..capacity import get_capacity_checker
 from ..capacity.history import METRIC_FIELDS
 from ..config import GCOConfig
-from ..output import format_capacity_table, get_output_formatter
+from ..output import confirm, format_capacity_table, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -1283,7 +1283,7 @@ def cancel_reservation(
     checker = get_capacity_checker(config)
 
     if not dry_run and not yes:
-        click.confirm(f"Cancel capacity reservation '{reservation_id}' in {region}?", abort=True)
+        confirm(f"Cancel capacity reservation '{reservation_id}' in {region}?", abort=True)
 
     try:
         if dry_run:
@@ -1723,9 +1723,7 @@ def traffic_dial_set(config: Any, region: Any, percentage: Any, yes: Any) -> Non
     from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
 
     formatter = get_output_formatter(config)
-    if not yes and not click.confirm(
-        f"Dial {region} to {percentage}% of its optimally routed traffic?"
-    ):
+    if not yes and not confirm(f"Dial {region} to {percentage}% of its optimally routed traffic?"):
         formatter.print_info("Aborted; no changes made.")
         return
 

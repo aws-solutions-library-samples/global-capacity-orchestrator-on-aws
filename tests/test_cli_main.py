@@ -9,8 +9,11 @@ but focuses on argument validation and the --all-regions global
 aggregation path.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+import yaml
 from click.testing import CliRunner
 
 
@@ -34,6 +37,59 @@ class TestCliVersion:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "GCO CLI" in result.output
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    @pytest.mark.parametrize(
+        ("eager_option", "expected_text"),
+        [("--help", "Usage:"), ("--version", "gco")],
+    )
+    def test_machine_output_normalizes_eager_help_and_version(
+        self,
+        output_format: str,
+        eager_option: str,
+        expected_text: str,
+    ) -> None:
+        """Root eager options participate in the structured transaction."""
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["--output", output_format, eager_option])
+
+        assert result.exit_code == 0, result.output
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+        else:
+            documents = list(yaml.safe_load_all(result.stdout))
+            assert len(documents) == 1
+            payload = documents[0]
+        assert payload["status"] == "ok"
+        assert expected_text.lower() in payload["output"].lower()
+
+    @pytest.mark.parametrize(
+        ("args", "expected_text"),
+        [
+            (["-vojson", "--help"], "Usage:"),
+            (["-vo", "json", "--version"], "gco"),
+            (["-vr", "us-east-1", "-o", "json", "--help"], "Usage:"),
+            (["-voyaml", "--version"], "gco"),
+        ],
+    )
+    def test_clustered_root_flags_normalize_eager_output(
+        self,
+        args: list[str],
+        expected_text: str,
+    ) -> None:
+        """The early scanner follows Click's short-option clustering rules."""
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 0, result.output
+        output_format = "yaml" if "yaml" in args[0] else "json"
+        payload = (
+            yaml.safe_load(result.stdout) if output_format == "yaml" else json.loads(result.stdout)
+        )
+        assert payload["status"] == "ok"
+        assert expected_text.lower() in payload["output"].lower()
 
 
 class TestJobsCommands:
@@ -150,8 +206,35 @@ class TestJobsCommands:
             assert result.exit_code == 0
             assert "Log output" in result.output
 
+    def test_jobs_logs_yaml_like_text_uses_raw_output_envelope(self):
+        """Job logs are raw text even when their bytes happen to be valid YAML."""
+        from cli.main import cli
+
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.get_job_logs.return_value = "warning: detail\n- first\n- second"
+            mock_manager.return_value = mock_jm
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--output",
+                    "yaml",
+                    "jobs",
+                    "logs",
+                    "test-job",
+                    "--region",
+                    "us-east-1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(result.stdout) == {
+            "status": "ok",
+            "output": "warning: detail\n- first\n- second",
+        }
+
     def test_jobs_delete_with_confirm(self):
-        """Test jobs delete requires --region."""
+        """Test jobs delete requires --region and preserves table success text."""
         from cli.main import cli
 
         runner = CliRunner()
@@ -163,13 +246,166 @@ class TestJobsCommands:
         # With --region should work
         with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
             mock_jm = MagicMock()
+            mock_jm.delete_job.return_value = {"status": "deleted"}
             mock_manager.return_value = mock_jm
 
             result = runner.invoke(
                 cli, ["jobs", "delete", "test-job", "--region", "us-east-1", "-y"]
             )
             assert result.exit_code == 0
+            assert result.stdout == "✓ Job test-job deleted\n"
             mock_jm.delete_job.assert_called_once()
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_jobs_delete_machine_output_is_one_structured_document(self, output_format):
+        """Delete success is directly parseable by CLI and MCP callers."""
+        from cli.main import cli
+
+        backend_result = {
+            "status": "deleted",
+            "message": "Job deleted successfully",
+            "uid": "uid-123",
+        }
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.delete_job.return_value = backend_result
+            mock_manager.return_value = mock_jm
+
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--output",
+                    output_format,
+                    "jobs",
+                    "delete",
+                    "test-job",
+                    "--namespace",
+                    "ml-jobs",
+                    "--region",
+                    "us-east-1",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+        else:
+            documents = list(yaml.safe_load_all(result.stdout))
+            assert len(documents) == 1
+            payload = documents[0]
+        assert payload == {
+            **backend_result,
+            "deleted": True,
+            "job_name": "test-job",
+            "namespace": "ml-jobs",
+            "region": "us-east-1",
+        }
+        assert "✓" not in result.stdout
+        assert result.stderr == ""
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_jobs_delete_machine_confirmation_stays_on_stderr(self, output_format):
+        """An interactive prompt cannot contaminate the deletion document."""
+        from cli.main import cli
+
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.delete_job.return_value = {"status": "deleted"}
+            mock_manager.return_value = mock_jm
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--output",
+                    output_format,
+                    "jobs",
+                    "delete",
+                    "test-job",
+                    "--region",
+                    "us-east-1",
+                ],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = (
+            json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+        )
+        assert payload["deleted"] is True
+        assert payload["job_name"] == "test-job"
+        assert "Delete job test-job" not in result.stdout
+        assert "Delete job test-job" in result.stderr
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_jobs_retry_machine_confirmation_preserves_native_schema(self, output_format):
+        """Retry confirmation stays on stderr instead of wrapping the result."""
+        from cli.main import cli
+
+        backend_result = {
+            "success": True,
+            "new_job": "test-job-retry",
+            "source_job": "test-job",
+        }
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.retry_job.return_value = backend_result
+            mock_manager.return_value = mock_jm
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--output",
+                    output_format,
+                    "jobs",
+                    "retry",
+                    "test-job",
+                    "--region",
+                    "us-east-1",
+                ],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = (
+            json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+        )
+        assert payload == backend_result
+        assert "Retry job test-job" not in result.stdout
+        assert "Retry job test-job" in result.stderr
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_jobs_bulk_delete_machine_confirmation_preserves_native_schema(
+        self,
+        output_format,
+    ):
+        """Bulk-delete confirmation stays on stderr instead of wrapping the result."""
+        from cli.main import cli
+
+        backend_result = {"deleted_count": 2, "deleted_jobs": ["a", "b"]}
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.bulk_delete_jobs.return_value = backend_result
+            mock_manager.return_value = mock_jm
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--output",
+                    output_format,
+                    "jobs",
+                    "bulk-delete",
+                    "--region",
+                    "us-east-1",
+                    "--execute",
+                ],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = (
+            json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+        )
+        assert payload == backend_result
+        assert "permanently delete matching jobs" not in result.stdout
+        assert "permanently delete matching jobs" in result.stderr
 
 
 class TestCapacityCommands:
@@ -702,6 +938,24 @@ class TestCliOptions:
                 cli, ["--output", "json", "jobs", "list", "--region", "us-east-1"]
             )
             assert result.exit_code == 0
+            assert json.loads(result.stdout) == []
+
+    def test_cli_with_output_yaml(self):
+        """The root YAML option emits exactly one YAML document."""
+        from cli.main import cli
+
+        with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
+            mock_jm = MagicMock()
+            mock_jm.list_jobs.return_value = []
+            mock_manager.return_value = mock_jm
+
+            result = CliRunner().invoke(
+                cli, ["--output", "yaml", "jobs", "list", "--region", "us-east-1"]
+            )
+
+        assert result.exit_code == 0
+        documents = list(yaml.safe_load_all(result.stdout))
+        assert documents == [[]]
 
     def test_cli_with_verbose(self):
         """Test CLI with --verbose."""
@@ -959,7 +1213,7 @@ class TestJobsDeleteError:
     """Tests for jobs delete error handling."""
 
     def test_jobs_delete_error(self):
-        """Test jobs delete with error."""
+        """Delete failures keep nonzero status and stderr diagnostics."""
         from cli.main import cli
 
         runner = CliRunner()
@@ -974,6 +1228,24 @@ class TestJobsDeleteError:
             )
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
+
+            result = runner.invoke(
+                cli,
+                [
+                    "--output",
+                    "json",
+                    "jobs",
+                    "delete",
+                    "test-job",
+                    "--region",
+                    "us-east-1",
+                    "--yes",
+                ],
+            )
+            assert result.exit_code == 1
+            assert result.stdout == ""
+            assert "failed" in result.stderr.lower()
+            assert "api error" in result.stderr.lower()
 
 
 class TestCapacityErrors:

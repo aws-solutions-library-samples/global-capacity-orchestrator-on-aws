@@ -481,6 +481,7 @@ async def test_run_long_task_tool_name_derived_from_gco_argv(tmp_path, monkeypat
     """A logical ``gco`` argv records a readable tool name while spawning the
     version-matched executable from the MCP environment at the project root."""
     monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tmp_path))
+    monkeypatch.setenv("GCO_OUTPUT_FORMAT", "json")
     monkeypatch.delenv("GCO_DISABLE_TASK_STATUS", raising=False)
 
     progress = _FakeProgress()
@@ -510,6 +511,8 @@ async def test_run_long_task_tool_name_derived_from_gco_argv(tmp_path, monkeypat
 
     assert observed["argv"] == (
         cli_runner._gco_executable(),
+        "--output",
+        "table",
         "stacks",
         "deploy-all",
         "-y",

@@ -437,6 +437,24 @@ def test_json_dry_run_emits_the_plan_without_the_full_config(runner: CliRunner) 
     assert "resumable_session" in plan
 
 
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_live_launch_rejects_machine_output_before_exec(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.exec_claude") as exec_claude,
+        patch("cli.commands.autopilot_cmd.exec_codex") as exec_codex,
+    ):
+        result = _invoke(runner, [], config=_config(output_format=output_format))
+
+    assert result.exit_code == 2
+    assert "require terminal output" in result.output
+    assert "--output table" in result.output
+    exec_claude.assert_not_called()
+    exec_codex.assert_not_called()
+
+
 def test_plan_resolution_failures_exit_with_a_clear_error(runner: CliRunner) -> None:
     with patch(
         "cli.commands.autopilot_cmd.resolve_model",
