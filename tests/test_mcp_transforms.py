@@ -123,19 +123,12 @@ def _list_tool_names_via_public_api(mcp_instance: object) -> list[str]:
     return [t.name for t in tools]
 
 
-# Sentinel marker — once ``delete_inference`` is gated behind
-# ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS``, drop the skip and these tests run
-# on every CI build.
-_DESTRUCTIVE_GATING_PENDING = "delete_inference is not yet gated behind GCO_ENABLE_DESTRUCTIVE_OPERATIONS — skip until that gating lands"
+def test_search_tools_excludes_gated_tool() -> None:
+    """Default BM25 search must never expose the gated destructive tool.
 
-
-@pytest.mark.skip(reason=_DESTRUCTIVE_GATING_PENDING)
-def test_search_tools_filters_gated_tools() -> None:
-    """Under default (bm25) + clean env, ``search_tools(query="delete_inference")`` returns ``[]``.
-
-    The premise is that ``delete_inference`` is registered only when the
-    destructive-operations flag is set, so a search against a clean
-    environment finds nothing matching that query.
+    BM25 may legitimately return related non-destructive inference tools for
+    this query; the security property is that ``delete_inference`` itself is
+    absent until its registration flag is enabled.
     """
     clean_env = {"GCO_MCP_TOOL_SEARCH": "bm25"}
     for var in (
@@ -147,10 +140,12 @@ def test_search_tools_filters_gated_tools() -> None:
         mcp_instance = _reload_mcp_with_env(clean_env)
         result = asyncio.run(mcp_instance.call_tool("search_tools", {"query": "delete_inference"}))
     matches = result.structured_content.get("result", [])
-    assert matches == [], f"expected empty results for gated tool under clean env, got {matches!r}"
+    names = [match["name"] for match in matches]
+    assert "delete_inference" not in names, (
+        f"gated tool leaked into search results under a clean environment: {names!r}"
+    )
 
 
-@pytest.mark.skip(reason=_DESTRUCTIVE_GATING_PENDING)
 def test_search_tools_returns_results_under_flag() -> None:
     """Under ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true``, ``delete_inference`` shows up in search.
 

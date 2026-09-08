@@ -155,3 +155,117 @@ def test_image_dependency_groups_match_dockerfiles_one_to_one() -> None:
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     assert "The six `image-*` groups" in contributing
     assert all(f"[{group}]" in contributing for group in groups)
+
+
+def _backticked_first_cells(section: str) -> set[str]:
+    """Return backticked identifiers from the first cell of Markdown rows."""
+    values: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        first_cell = line.split("|", 2)[1].strip()
+        match = re.fullmatch(r"`([^`]+)`", first_cell)
+        if match:
+            values.add(match.group(1))
+    return values
+
+
+def test_service_module_readme_inventory_is_exact() -> None:
+    services = ROOT / "gco" / "services"
+    actual = {path.name for path in services.glob("*.py")}
+    readme = (services / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Module Inventory", "## API Routes"))
+    assert documented == actual, (
+        "gco/services/README.md module inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )
+
+
+def test_lambda_readme_inventory_is_exact() -> None:
+    lambda_dir = ROOT / "lambda"
+    actual = {
+        path.name + "/"
+        for path in lambda_dir.iterdir()
+        if path.is_dir() and not path.name.endswith("-build")
+    }
+    readme = (lambda_dir / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Contents", "## Build"))
+    assert documented == actual, (
+        "lambda/README.md package inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )
+
+
+def test_scripts_readme_inventory_is_exact() -> None:
+    scripts = ROOT / "scripts"
+    actual_files = {
+        path.name
+        for path in scripts.iterdir()
+        if path.is_file() and path.suffix in {".py", ".sh"} and path.name != "__init__.py"
+    }
+    actual_packages = {
+        path.name + "/"
+        for path in scripts.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file() and not path.name.startswith("__")
+    }
+    readme = (scripts / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Contents", "## Usage"))
+    actual = actual_files | actual_packages
+    assert documented == actual, (
+        "scripts/README.md inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )
+
+
+def test_mcp_copy_paste_release_refs_match_version() -> None:
+    """Every exact MCP launch ref follows VERSION; historical prose is exempt."""
+    expected = "v" + (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    readme = (ROOT / "gco_mcp" / "README.md").read_text(encoding="utf-8")
+    exact_refs = re.findall(r"@v\d+\.\d+\.\d+", readme)
+    variable_refs = re.findall(r"(?m)^GCO_REF=(v\d+\.\d+\.\d+)\b", readme)
+
+    assert len(exact_refs) >= 10, "MCP setup examples no longer expose the expected exact refs"
+    assert variable_refs, "MCP setup no longer defines GCO_REF"
+    assert set(exact_refs) == {f"@{expected}"}
+    assert set(variable_refs) == {expected}
+
+
+def test_stack_module_readme_inventory_is_exact() -> None:
+    stacks = ROOT / "gco" / "stacks"
+    actual = {path.name for path in stacks.glob("*.py")}
+    readme = (stacks / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Files", "## Deployment"))
+    assert documented == actual, (
+        "gco/stacks/README.md module inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )
+
+
+def test_model_module_readme_inventory_is_exact() -> None:
+    models = ROOT / "gco" / "models"
+    actual = {path.name for path in models.glob("*.py")}
+    readme = (models / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Files", "## Usage"))
+    assert documented == actual, (
+        "gco/models/README.md module inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )
+
+
+def test_config_package_readme_inventory_is_exact() -> None:
+    config = ROOT / "gco" / "config"
+    actual = {
+        path.name for path in config.iterdir() if path.is_file() and path.suffix in {".py", ".json"}
+    }
+    readme = (config / "README.md").read_text(encoding="utf-8")
+    documented = _backticked_first_cells(_section(readme, "## Source Files", None))
+    assert documented == actual, (
+        "gco/config/README.md source inventory drifted; "
+        f"missing={sorted(actual - documented)!r}, "
+        f"stale={sorted(documented - actual)!r}"
+    )

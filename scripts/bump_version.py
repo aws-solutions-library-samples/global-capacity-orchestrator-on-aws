@@ -4,11 +4,12 @@ Version bump script for GCO.
 
 The authoritative version lives in the top-level ``VERSION`` file so that
 shell scripts, Dockerfiles, and CI workflows can read it without importing
-Python. This script keeps three locations in sync:
+Python. This script keeps the release version and maintained exact-ref examples in sync:
 
 - ``VERSION``                  (source of truth, plain text: ``MAJOR.MINOR.PATCH``)
 - ``gco/_version.py``          (mirrors VERSION as ``__version__``)
 - ``cli/__init__.py``          (fallback ``__version__`` when ``gco`` is not importable)
+- ``gco_mcp/README.md``        (exact release refs in copy-paste MCP launch examples)
 
 ``gco._version.__version__`` reads its value at import time and should always
 match ``VERSION`` on a clean checkout.
@@ -41,6 +42,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 VERSION_FILE = PROJECT_ROOT / "VERSION"
 VERSION_PY = PROJECT_ROOT / "gco" / "_version.py"
 CLI_INIT_FILE = PROJECT_ROOT / "cli" / "__init__.py"
+MCP_README_FILE = PROJECT_ROOT / "gco_mcp" / "README.md"
 
 
 def get_version() -> str:
@@ -99,6 +101,22 @@ def update_cli_init(version: str, dry_run: bool = False) -> None:
     print(f"  ✓ Updated {CLI_INIT_FILE.relative_to(PROJECT_ROOT)}")
 
 
+def update_mcp_readme_release_refs(version: str, dry_run: bool = False) -> None:
+    """Update exact release refs in copy-paste MCP launch examples."""
+    if dry_run:
+        print(f"  [dry-run] Would update {MCP_README_FILE.relative_to(PROJECT_ROOT)}")
+        return
+    content = MCP_README_FILE.read_text(encoding="utf-8")
+    new_content = re.sub(r"@v\d+\.\d+\.\d+", f"@v{version}", content)
+    new_content = re.sub(
+        r"(?m)^GCO_REF=v\d+\.\d+\.\d+",
+        f"GCO_REF=v{version}",
+        new_content,
+    )
+    MCP_README_FILE.write_text(new_content, encoding="utf-8")
+    print(f"  ✓ Updated {MCP_README_FILE.relative_to(PROJECT_ROOT)}")
+
+
 def bump_version(bump_type: str) -> str:
     """Bump version based on type (major, minor, patch)."""
     current = get_version()
@@ -120,12 +138,13 @@ def bump_version(bump_type: str) -> str:
 
 
 def set_version(version: str, dry_run: bool = False) -> None:
-    """Update version in all three locations."""
+    """Update the source version, Python mirrors, and documented launch refs."""
     action = "Would update" if dry_run else "Updating"
     print(f"\n{action} version to {version}:")
     update_version_file(version, dry_run)
     update_version_py(version, dry_run)
     update_cli_init(version, dry_run)
+    update_mcp_readme_release_refs(version, dry_run)
 
 
 def main() -> None:
@@ -139,6 +158,7 @@ def main() -> None:
         print(f"  - {VERSION_FILE.relative_to(PROJECT_ROOT)}  (source of truth)")
         print(f"  - {VERSION_PY.relative_to(PROJECT_ROOT)}")
         print(f"  - {CLI_INIT_FILE.relative_to(PROJECT_ROOT)}")
+        print(f"  - {MCP_README_FILE.relative_to(PROJECT_ROOT)}  (MCP launch refs)")
         return
 
     bump_type = args[0]
@@ -154,11 +174,15 @@ def main() -> None:
         print(f"\n[dry-run] Would bump version: {old_version} -> {new_version}")
     else:
         print(f"\n✓ Bumped version: {old_version} -> {new_version}")
-        print("\nTo complete the release:")
-        print("  git add VERSION gco/_version.py cli/__init__.py")
+        print("\nTo complete the release PR:")
+        print("  git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md")
         print(f"  git commit -m 'Release v{new_version}'")
-        print(f"  git tag v{new_version}")
-        print("  git push origin main --tags")
+        print("  git push -u origin HEAD")
+        print(
+            f"  gh pr create --base main --title 'Release v{new_version}' "
+            "--body 'Version bump; release-publish.yml tags the reviewed merge.'"
+        )
+        print("\nAfter review, squash-merge the PR; release-publish.yml creates the tag.")
 
 
 if __name__ == "__main__":

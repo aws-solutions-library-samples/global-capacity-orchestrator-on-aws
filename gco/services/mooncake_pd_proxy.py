@@ -21,6 +21,11 @@ Per request on the public ``/v1/*`` serving paths it:
    the prefill step returned (with ``do_remote_prefill=true``) so decode pulls the
    KV instead of recomputing, and streams the decode response back to the client.
 
+Non-health GET requests (for example OpenAI-compatible ``/v1/models`` discovery)
+and non-generation POST requests pass through to decode with their query string
+preserved. JSON request bodies must be objects; arrays and scalars are rejected
+with a client error before either backend is called.
+
 Prefill and decode are addressed through their in-cluster Services, so kube-proxy
 load-balances across only the Ready role pods. When the decode Service has no
 Ready endpoints the proxy rejects the request with a stable 503 rather than
@@ -50,8 +55,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: affbf6eccf3773dc3cfeac202e2cc6cbf92d4fc7
 # Flowchart(s) generated from this file:
 #   * ``_dispatch`` -> ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.png``)
@@ -79,6 +84,38 @@ ADMIN_PATH = "/instances/add"
 # Ready decode pods (empty Service endpoints) surfaces quickly as a 503 rather
 # than hanging the client; reads are unbounded for long generations.
 _TIMEOUT = httpx.Timeout(None, connect=5.0)
+
+# Keep this allowlist aligned with the authenticated inference proxy's public
+# boundary. ``content-encoding`` is intentionally excluded here: this proxy
+# parses and re-serializes JSON, so forwarding the original encoding would
+# falsely describe the new body bytes.
+_ALLOWED_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "cache-control",
+        "content-type",
+        "idempotency-key",
+        "if-match",
+        "if-none-match",
+        "prefer",
+        "range",
+        "user-agent",
+        "x-request-id",
+    }
+)
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
 
 app = FastAPI()
 _client = httpx.AsyncClient(timeout=_TIMEOUT)
@@ -134,12 +171,44 @@ async def _prime_prefill(path: str, body: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-async def _stream_decode(path: str, body: dict[str, Any]) -> Response:
-    """Forward the request to decode and stream the response back to the client."""
-    want_stream = bool(body.get("stream"))
-    request = _client.build_request("POST", f"{DECODE_URL}{path}", json=body)
+def _request_target(request: Request) -> str:
+    """Return the path and query string exactly as they should reach decode."""
+    path = request.url.path
+    return f"{path}?{request.url.query}" if request.url.query else path
+
+
+def _request_headers(request: Request) -> list[tuple[str, str]]:
+    """Forward only explicitly supported end-to-end model headers."""
+    return [
+        (name.lower(), value)
+        for name, value in request.headers.items()
+        if name.lower() in _ALLOWED_REQUEST_HEADERS
+    ]
+
+
+def _response_headers(response: httpx.Response) -> dict[str, str]:
+    """Relay end-to-end metadata while dropping hop-by-hop framing."""
+    blocked = _HOP_BY_HOP_HEADERS | {"content-length"}
+    return {name: value for name, value in response.headers.items() if name.lower() not in blocked}
+
+
+async def _stream_decode(
+    method: str,
+    target: str,
+    body: dict[str, Any] | None = None,
+    headers: list[tuple[str, str]] | None = None,
+) -> Response:
+    """Forward one request to decode and stream its response to the client."""
+    want_stream = bool(body and body.get("stream"))
+    url = f"{DECODE_URL}{target}"
+    request_kwargs: dict[str, Any] = {}
+    if body is not None:
+        request_kwargs["json"] = body
+    if headers is not None:
+        request_kwargs["headers"] = headers
+    upstream_request = _client.build_request(method, url, **request_kwargs)
     try:
-        resp = await _client.send(request, stream=True)
+        resp = await _client.send(upstream_request, stream=True)
     except httpx.ConnectError:
         # No Ready decode endpoint behind the Service: reject with a stable
         # status instead of emitting any partial output.
@@ -155,10 +224,18 @@ async def _stream_decode(path: str, body: dict[str, Any]) -> Response:
         finally:
             await resp.aclose()
 
-    media_type = (
-        "text/event-stream" if want_stream else resp.headers.get("content-type", "application/json")
+    response_headers = _response_headers(resp)
+    response_headers["content-type"] = (
+        "text/event-stream"
+        if want_stream
+        else response_headers.get("content-type", "application/json")
     )
-    return StreamingResponse(_body_iter(), status_code=resp.status_code, media_type=media_type)
+    return StreamingResponse(
+        _body_iter(),
+        status_code=resp.status_code,
+        headers=response_headers,
+        media_type=None,
+    )
 
 
 @app.post(ADMIN_PATH)
@@ -180,9 +257,13 @@ async def _admin_add(request: Request) -> JSONResponse:
 
 
 @app.api_route("/{full_path:path}", methods=["GET"])
-async def _get_catch_all(full_path: str) -> JSONResponse:
-    """Answer any GET (including ALB target-group health checks) with 200."""
-    return JSONResponse({"status": "ok"})
+async def _get_passthrough(full_path: str, request: Request) -> Response:
+    """Forward non-health GETs, including OpenAI-compatible model discovery."""
+    return await _stream_decode(
+        "GET",
+        _request_target(request),
+        headers=_request_headers(request),
+    )
 
 
 @app.api_route("/{full_path:path}", methods=["POST"])
@@ -194,18 +275,26 @@ async def _dispatch(full_path: str, request: Request) -> Any:
 
     raw = await request.body()
     try:
-        body = json.loads(raw or b"{}")
+        decoded = json.loads(raw or b"{}")
     except ValueError:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(decoded, dict):
+        return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
 
+    request_headers = _request_headers(request)
+    target = _request_target(request)
     if not _is_serving_path(path):
-        # Not a generation path (e.g. /v1/models): pass straight through to decode.
-        return await _stream_decode(path, body)
+        return await _stream_decode("POST", target, decoded, request_headers)
 
     # Residency check: non-blocking, treated as a miss so the prompt always goes
     # to prefill first (the store is never on the request's critical path).
-    prefill_kv_params = await _prime_prefill(path, body)
-    return await _stream_decode(path, _decode_body(body, prefill_kv_params))
+    prefill_kv_params = await _prime_prefill(path, decoded)
+    return await _stream_decode(
+        "POST",
+        target,
+        _decode_body(decoded, prefill_kv_params),
+        request_headers,
+    )
 
 
 if __name__ == "__main__":

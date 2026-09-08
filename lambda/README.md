@@ -13,19 +13,25 @@
 
 | Directory | Description |
 |-----------|-------------|
-| `kubectl-applier-simple/` | Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during CDK deployment. Contains the nodepool, RBAC, service, and storage manifests in `manifests/`. |
-| `helm-installer/` | Installs Helm charts (KEDA, Volcano, KubeRay, Kueue) into EKS clusters during deployment. |
-| `helm-orchestrator/` | [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install [Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html) state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
-| `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
-| `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by both global and regional `/inference/*` [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) integrations. Owns an isolated exact-pinned AWS SDK graph. |
-| `api-gateway-proxy/` | Proxies IAM-authenticated global requests through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) to regional ALBs using request-bound HMAC plus strict deployment-local private-root TLS. |
-| `regional-api-proxy/` | [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy behind every regional aggregation bridge; resolves/verifies its internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) and uses HMAC plus private-root TLS. Direct user invocation is optional. |
-| `cross-region-aggregator/` | Discovers deterministic regional API Gateway stacks and aggregates their SigV4-authenticated AWS-TLS responses; it never connects directly to ALBs. |
-| `secret-rotation/` | Rotates the backend HMAC key in AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) on a daily schedule with overlap-safe validation. |
-| `tls-certificate-manager/` | Bootstraps the KMS-encrypted deployment-local root, rotates short-lived regional ACM leaves in place, publishes public trust, and manages staged root rollover. |
-| `tls-shared/` | Canonical strict private-root TLS/SNI client used by backend proxy packages. |
-| `ga-registration/` | Registers regional ALB endpoints with AWS Global Accelerator during stack deployment. |
-| `proxy-shared/` | Shared request-signing, header-sanitization, URL-building, timeout, and retry utilities used by both API Gateway proxy Lambda functions. |
+| `analytics-cleanup/` | CloudFormation deletion custom resource that drains SageMaker Studio apps, spaces, profiles, and EFS access points before analytics teardown. |
+| `analytics-presigned-url/` | Exchanges a Cognito-authorized request for a short-lived SageMaker Studio URL, lazily provisioning the user's profile and EFS access point. |
+| `api-gateway-proxy/` | Proxies IAM-authenticated global requests through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) using request-bound HMAC and strict private-root TLS. |
+| `capacity-poller/` | Scheduled read-only EC2 capacity snapshotter for the DynamoDB historical-capacity surface. |
+| `cross-region-aggregator/` | Discovers regional API Gateway bridges and aggregates their AWS-TLS, SigV4-authenticated responses. |
+| `drift-detection/` | Scheduled CloudFormation drift detection and SNS notification handler. |
+| `ga-registration/` | Registers verified regional ALB endpoints with Global Accelerator during deployment. |
+| `helm-installer/` | Per-chart Helm installation task Lambda used by the deployment Step Functions state machine. |
+| `helm-orchestrator/` | Async [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom-resource provider that starts and polls the Helm-install state machine. |
+| `image-lookup/` | Adopts or creates retained `gco/<name>` [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories without same-name deployment failures. |
+| `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by global and regional `/inference/*` [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) integrations. |
+| `kubectl-applier-simple/` | Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during CDK deployment. |
+| `proxy-shared/` | Shared request signing, header sanitization, URL, timeout, and retry utilities for API proxy Lambdas. |
+| `regional-api-proxy/` | [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy behind each regional aggregation bridge; verifies the internal ALB and uses HMAC plus private-root TLS. |
+| `secret-rotation/` | Daily overlap-safe rotation of the backend HMAC key in [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html). |
+| `tls-certificate-manager/` | Bootstraps the encrypted private root, rotates regional ACM leaves, publishes trust, and manages staged root rollover. |
+| `tls-shared/` | Canonical strict private-root TLS and SNI client shared by backend proxy packages. |
+| `traffic-dial-controller/` | Scheduled, health-driven Global Accelerator traffic-dial convergence with manual overrides and last-healthy-region protection. |
+| `vector-ingest/` | S3-triggered chunking and Bedrock embedding pipeline for the optional DynamoDB global vector store. |
 
 ## Build
 
@@ -71,6 +77,13 @@ CDK Deploy → kubectl-applier-simple → EKS (applies manifests)
 
 Scheduled → secret-rotation → HMAC secret
           → tls-certificate-manager → stable regional ACM certificate ARNs
+          → capacity-poller → DynamoDB capacity history
+          → traffic-dial-controller → Global Accelerator endpoint-group dials
+          → drift-detection → CloudFormation drift status + SNS
+
+S3 ObjectCreated → vector-ingest → Bedrock embeddings → DynamoDB global table
+Cognito API request → analytics-presigned-url → SageMaker Studio session URL
+Analytics stack delete → analytics-cleanup → Studio + EFS dependency drain
 ```
 
 ## Control-Flow Diagrams

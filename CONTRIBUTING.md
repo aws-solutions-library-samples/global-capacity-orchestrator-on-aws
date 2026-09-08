@@ -248,22 +248,23 @@ pip install -e . --no-deps
 
 ### Type Checking
 
-mypy runs across the entire codebase with `--check-untyped-defs` enabled. The CI pipeline has two type-checking jobs:
+mypy runs with the strict options in `pyproject.toml`. CI separates three dependency and module-resolution boundaries:
 
-1. **`lint:typecheck`** — Checks `gco/config/`, `gco/models/`, `gco/services/`, and `cli/`. Installs only mypy + type stubs (fast, no CDK needed).
-2. **`lint:typecheck-stacks`** — Checks `gco/stacks/`. Installs CDK dependencies since stack code uses CDK types.
+1. **`lint:mypy:strict`** — checks `gco/`, `cli/`, `gco_mcp/`, and `scripts/`, excluding `gco/stacks/` so the fast job does not need CDK.
+2. **`lint:mypy:stacks`** — checks `gco/stacks/` and `app.py` with the CDK dependencies installed.
+3. **`lint:mypy:lambda`** — checks every authored Python package under `lambda/` one directory at a time. Lambda packages reuse names such as `handler.py`, so combining them in one invocation would create false duplicate-module errors. A CI contract discovers Python Lambda directories and requires the workflow inventory to remain complete.
 
-To run locally:
+To run the same scopes locally:
 
 ```bash
-# Check everything except stacks (fast, no CDK needed)
-mypy gco/config/ gco/models/ gco/services/ cli/ --ignore-missing-imports --check-untyped-defs
+# Strict non-stack packages (fast, no CDK needed)
+mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 
-# Check stacks (requires CDK: pip install -e ".[cdk,typecheck]")
-mypy gco/stacks/ --ignore-missing-imports --check-untyped-defs
+# Stacks and app entry point (requires: pip install -e ".[cdk,typecheck]")
+mypy gco/stacks/ app.py
 
-# Check everything at once (requires CDK installed)
-mypy gco/ cli/ --ignore-missing-imports --check-untyped-defs
+# A changed Lambda package; run each package separately
+mypy lambda/<package-name>
 ```
 
 ### Authentication
@@ -780,7 +781,7 @@ git checkout -b release/v1.2.3 main
 python scripts/bump_version.py patch  # or minor/major
 
 # Commit and open the PR (title must stay "Release v1.2.3")
-git add VERSION gco/_version.py cli/__init__.py
+git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md
 git commit -m "Release v1.2.3"
 git push -u origin release/v1.2.3
 gh pr create --base main --title "Release v1.2.3" \

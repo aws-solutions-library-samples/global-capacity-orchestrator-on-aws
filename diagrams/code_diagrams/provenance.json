@@ -57,9 +57,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/services/central_queue_worker.py": {
-      "digest": "4bc31e2d5c525f342357a42137c2a93af2d92239cb720924e3fd7dc1eb7e1a75",
-      "generated_at": "2026-09-03T18:56:22Z",
-      "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
+      "digest": "bba90f2280d40ea2e493e023a6d3ea53ff739a340f26902da4ea8a6d8e05eebb",
+      "generated_at": "2026-08-30T12:00:00Z",
+      "source_commit": "affbf6eccf3773dc3cfeac202e2cc6cbf92d4fc7"
     },
     "gco/services/health_monitor.py": {
       "digest": "33cc71a4356331f86aaada55440f491539835db966fd71f9a02bdefb193831fd",
@@ -82,9 +82,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/services/mooncake_pd_proxy.py": {
-      "digest": "87c92496c8a6c5f6ab6a149a870e55cb33a791f165f7041141252aa66e34f28b",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "c8e1eee06526dce7581cd692456ce832d0ff57da6f020b97fbc98c8654e7a819",
+      "generated_at": "2026-08-30T12:00:00Z",
+      "source_commit": "affbf6eccf3773dc3cfeac202e2cc6cbf92d4fc7"
     },
     "gco/services/queue_processor.py": {
       "digest": "61c3c524547b1b3760f25cf322d2fdc2d99ac5d3636603023b6fa8c368c30a09",

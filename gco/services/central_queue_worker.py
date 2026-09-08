@@ -23,8 +23,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStatus, JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-03T18:56:22Z
-# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: affbf6eccf3773dc3cfeac202e2cc6cbf92d4fc7
 # Flowchart(s) generated from this file:
 #   * ``process_queued_jobs_once`` -> ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.png``)
@@ -217,18 +217,28 @@ async def process_queued_jobs_once(
         if deferral is not None:
             processed.append(deferral)
             continue
-        attempted += 1
 
         claimed: dict[str, Any] | None = None
         try:
-            claimed = await asyncio.to_thread(
-                store.claim_job,
-                job_id,
-                processor.region,
-                owner,
-            )
+            try:
+                claimed = await asyncio.to_thread(
+                    store.claim_job,
+                    job_id,
+                    processor.region,
+                    owner,
+                )
+            except Exception:
+                # Unlike an explicit None (a known conditional-write loss), a
+                # transport/service exception can be post-commit. Count that
+                # ambiguous outcome so this pass cannot exceed its claim bound.
+                attempted += 1
+                raise
             if not claimed:
                 continue
+            # Only a claim this worker actually acquired consumes the apply
+            # budget. A conditional-write race lost to another worker must not
+            # prevent later candidates from being considered in this pass.
+            attempted += 1
             claim_token = str(claimed.get("claim_token") or "")
             claim_generation = int(claimed.get("claim_generation", 0))
             if not claim_token or claim_generation <= 0:

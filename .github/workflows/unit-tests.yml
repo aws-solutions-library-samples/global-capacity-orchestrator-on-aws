@@ -609,12 +609,30 @@ jobs:
         run: python .github/scripts/verify_inference_streaming_bundle_freshness.py
       - name: cdk synth
         run: npm exec -- cdk synth --quiet
+      - name: Validate synthesized cloud assembly
+        # These assertions used to live only in integration:pytest:cross-module,
+        # whose clean checkout has no gitignored cdk.out and therefore skipped
+        # every case. Run them where the artifact is produced so absence or
+        # malformed templates fail rather than report a vacuous pass.
+        env:
+          AWS_ACCESS_KEY_ID: "fake"
+          AWS_SECRET_ACCESS_KEY: "fake"
+          AWS_DEFAULT_REGION: "us-east-1"
+          AWS_REGION: "us-east-1"
+        run: |
+          set -euo pipefail
+          test -d cdk.out
+          test -f cdk.out/manifest.json
+          pytest tests/test_integration.py::TestCDKOutput -q \
+            --junitxml=report-cdk-output.xml
       - name: Upload cdk.out
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: cdk-synth-output
-          path: cdk.out/
+          path: |
+            cdk.out/
+            report-cdk-output.xml
           retention-days: 7
 
   unit-cdk-config-matrix:

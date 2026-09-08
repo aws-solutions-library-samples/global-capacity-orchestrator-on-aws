@@ -314,3 +314,27 @@ def test_the_floor_value_lives_only_in_pyproject(workflow: dict[str, Any]) -> No
         "belongs in [tool.coverage.report] alone. Only an explicit 0 is allowed, to "
         "switch the inherited check off where it does not apply."
     )
+
+
+def test_cdk_output_contract_runs_in_the_synthesizing_job(
+    workflow: dict[str, Any],
+) -> None:
+    """Synthesized-output assertions must run after the job creates cdk.out."""
+    steps = workflow["jobs"]["unit-cdk-synth"]["steps"]
+    synth_index = next(index for index, step in enumerate(steps) if step.get("name") == "cdk synth")
+    validation_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Validate synthesized cloud assembly"
+    )
+
+    assert validation_index > synth_index
+    validation = steps[validation_index]
+    assert "tests/test_integration.py::TestCDKOutput" in validation["run"]
+    assert "test -d cdk.out" in validation["run"]
+    assert "test -f cdk.out/manifest.json" in validation["run"]
+    assert validation["env"]["AWS_DEFAULT_REGION"] == "us-east-1"
+
+    upload = next(step for step in steps if step.get("name") == "Upload cdk.out")
+    assert "cdk.out/" in upload["with"]["path"]
+    assert "report-cdk-output.xml" in upload["with"]["path"]

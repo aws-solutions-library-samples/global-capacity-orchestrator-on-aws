@@ -2,8 +2,8 @@
 Tests for scripts/bump_version.py.
 
 Exercises the SemVer version bumper that reads the source of truth from
-the top-level ``VERSION`` file and keeps ``gco/_version.py`` and
-``cli/__init__.py`` in sync: reading the current version, patch/minor/major
+the top-level ``VERSION`` file and keeps ``gco/_version.py``,
+``cli/__init__.py``, and exact MCP launch refs in sync: reading the current version, patch/minor/major
 bumps with correct field resets, dry-run mode that prints but doesn't
 write, invalid-input error paths, and the main() CLI dispatcher including
 case-insensitive bump arguments. Uses a tmp_path-backed fixture that
@@ -39,11 +39,21 @@ def version_files(tmp_path):
         'except ImportError:\n    __version__ = "1.2.3"\n'
     )
 
+    mcp_readme = tmp_path / "gco_mcp" / "README.md"
+    mcp_readme.parent.mkdir(parents=True)
+    mcp_readme.write_text(
+        "GCO_REF=v1.2.3\n"
+        "git+https://example.invalid/global-capacity-orchestrator-on-aws.git@v1.2.3\n"
+        "historical first release: v3.2.0\n",
+        encoding="utf-8",
+    )
+
     with (
         patch.object(bump_version, "PROJECT_ROOT", tmp_path),
         patch.object(bump_version, "VERSION_FILE", version_file),
         patch.object(bump_version, "VERSION_PY", version_py),
         patch.object(bump_version, "CLI_INIT_FILE", cli_init),
+        patch.object(bump_version, "MCP_README_FILE", mcp_readme),
     ):
         yield tmp_path, version_file, version_py, cli_init
 
@@ -155,23 +165,51 @@ class TestUpdateCliInit:
         assert cli_init.read_text() == original
 
 
+class TestUpdateMcpReadme:
+    def test_updates_exact_refs_but_preserves_historical_version(self, version_files):
+        root, _, _, _ = version_files
+        readme = root / "gco_mcp" / "README.md"
+
+        bump_version.update_mcp_readme_release_refs("2.0.0")
+
+        content = readme.read_text(encoding="utf-8")
+        assert "GCO_REF=v2.0.0" in content
+        assert ".git@v2.0.0" in content
+        assert "historical first release: v3.2.0" in content
+
+    def test_dry_run_no_change(self, version_files):
+        root, _, _, _ = version_files
+        readme = root / "gco_mcp" / "README.md"
+        original = readme.read_text(encoding="utf-8")
+
+        bump_version.update_mcp_readme_release_refs("2.0.0", dry_run=True)
+
+        assert readme.read_text(encoding="utf-8") == original
+
+
 class TestSetVersion:
-    def test_updates_all_three_files(self, version_files):
-        _, version_file, version_py, cli_init = version_files
+    def test_updates_all_version_surfaces(self, version_files):
+        root, version_file, version_py, cli_init = version_files
         bump_version.set_version("5.0.0")
         assert version_file.read_text() == "5.0.0\n"
         assert '__version__ = "5.0.0"' in version_py.read_text()
         assert '__version__ = "5.0.0"' in cli_init.read_text()
+        mcp_readme = (root / "gco_mcp" / "README.md").read_text(encoding="utf-8")
+        assert "GCO_REF=v5.0.0" in mcp_readme
+        assert ".git@v5.0.0" in mcp_readme
 
     def test_dry_run_updates_nothing(self, version_files):
-        _, version_file, version_py, cli_init = version_files
+        root, version_file, version_py, cli_init = version_files
+        mcp_readme = root / "gco_mcp" / "README.md"
         orig_version = version_file.read_text()
         orig_py = version_py.read_text()
         orig_cli = cli_init.read_text()
+        orig_mcp = mcp_readme.read_text(encoding="utf-8")
         bump_version.set_version("5.0.0", dry_run=True)
         assert version_file.read_text() == orig_version
         assert version_py.read_text() == orig_py
         assert cli_init.read_text() == orig_cli
+        assert mcp_readme.read_text(encoding="utf-8") == orig_mcp
 
 
 class TestMain:
@@ -193,6 +231,11 @@ class TestMain:
         assert version_file.read_text() == "1.2.4\n"
         assert '__version__ = "1.2.4"' in version_py.read_text()
         assert '__version__ = "1.2.4"' in cli_init.read_text()
+        assert "git push -u origin HEAD" in out
+        assert "gh pr create --base main --title 'Release v1.2.4'" in out
+        assert "release-publish.yml creates the tag" in out
+        assert "git push origin main" not in out
+        assert "git tag" not in out
 
     def test_minor_bump(self, version_files, capsys):
         _, version_file, version_py, _ = version_files

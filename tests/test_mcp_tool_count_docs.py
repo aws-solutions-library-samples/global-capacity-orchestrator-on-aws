@@ -126,7 +126,7 @@ def test_live_counts_are_current_values() -> None:
     """Pin today's known-good numbers so an accidental registry change is loud.
 
     Not a substitute for the drift guard above — this simply documents the
-    expected 139/195 and turns an unexpected count change into an obvious
+    expected 139/196 and turns an unexpected count change into an obvious
     failure with context, alongside the exact-inventory guard in
     test_mcp_server.py.
     """

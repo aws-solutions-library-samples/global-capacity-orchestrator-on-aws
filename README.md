@@ -54,7 +54,7 @@
 </details>
 
 <details>
-<summary>🤖 OpenAI Codex Autopilot recording — the same GCO context with the Codex engine</summary>
+<summary>🤖 OpenAI Codex Autopilot recording — the Codex engine, ready in one command</summary>
 
 ![GCO Autopilot with OpenAI Codex](demo/autopilot-codex.gif)
 
@@ -68,7 +68,7 @@
 
 **Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) [Auto Mode](https://aws.amazon.com/eks/auto-mode/) `system` and `general-purpose` [NodePools](https://karpenter.sh/docs/concepts/nodepools/) plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), [Mooncake](https://kvcache-ai.github.io/Mooncake/) EFA, [Neuron](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/), and CPU NodePools.
 
-**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across 34 config matrix combinations in CI.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across the full curated configuration matrix in CI.
 
 ---
 

@@ -4,7 +4,9 @@ The request-shaping helpers are pinned elsewhere; these checks drive the parts
 of the proxy that talk to the prefill and decode Services and answer the admin
 and health surfaces. Every test mocks the module-level outbound httpx client and
 the URL / key globals through monkeypatch so the restore is automatic and no
-state leaks across xdist workers, and no real network is ever touched.
+state leaks across xdist workers, and no real network is ever touched. The
+suite also pins explicit health handling, GET passthrough, query preservation,
+and rejection of valid JSON values that are not request objects.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
+from fastapi.testclient import TestClient
 
 import gco.services.mooncake_pd_proxy as proxy
 
@@ -33,9 +37,10 @@ class _FakeStreamResponse:
         *,
         content_type: str = "application/json",
         status_code: int = 200,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._chunks = chunks
-        self.headers = {"content-type": content_type}
+        self.headers = {"content-type": content_type, **(headers or {})}
         self.status_code = status_code
         self.closed = False
 
@@ -47,13 +52,23 @@ class _FakeStreamResponse:
         self.closed = True
 
 
-def _fake_request(path: str, *, body: bytes = b"", headers: dict[str, str] | None = None):
+def _fake_request(
+    path: str,
+    *,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+    query: str = "",
+):
     """A minimal stand-in for the Starlette Request the handlers read from."""
 
     async def _body() -> bytes:
         return body
 
-    return SimpleNamespace(url=SimpleNamespace(path=path), headers=headers or {}, body=_body)
+    return SimpleNamespace(
+        url=SimpleNamespace(path=path, query=query),
+        headers=headers or {},
+        body=_body,
+    )
 
 
 async def _drive(coro):
@@ -129,7 +144,7 @@ def test_stream_decode_rejects_when_no_decode_backend(monkeypatch) -> None:
     monkeypatch.setattr(proxy, "NO_DECODE_MESSAGE", "no available decode backend")
     monkeypatch.setattr(proxy, "_client", client)
 
-    response = asyncio.run(proxy._stream_decode("/v1/completions", {"stream": True}))
+    response = asyncio.run(proxy._stream_decode("POST", "/v1/completions", {"stream": True}))
 
     assert isinstance(response, proxy.JSONResponse)
     assert response.status_code == 503
@@ -150,12 +165,12 @@ def test_stream_decode_streams_decode_response(monkeypatch) -> None:
     monkeypatch.setattr(proxy, "_client", client)
 
     response, chunks = asyncio.run(
-        _drive(proxy._stream_decode("/v1/chat/completions", {"stream": False}))
+        _drive(proxy._stream_decode("POST", "/v1/chat/completions", {"stream": False}))
     )
 
     assert isinstance(response, proxy.StreamingResponse)
     assert response.status_code == 200
-    assert response.media_type == "application/x-ndjson"
+    assert response.headers["content-type"] == "application/x-ndjson"
     assert chunks == [b"hello ", b"world"]
     assert upstream.closed is True
     client.send.assert_awaited_once()
@@ -171,10 +186,10 @@ def test_stream_decode_uses_event_stream_media_type_when_streaming(monkeypatch) 
     monkeypatch.setattr(proxy, "_client", client)
 
     response, chunks = asyncio.run(
-        _drive(proxy._stream_decode("/v1/completions", {"stream": True}))
+        _drive(proxy._stream_decode("POST", "/v1/completions", {"stream": True}))
     )
 
-    assert response.media_type == "text/event-stream"
+    assert response.headers["content-type"] == "text/event-stream"
     assert chunks == [b"data: tok\n\n"]
     assert upstream.closed is True
 
@@ -230,6 +245,22 @@ def test_dispatch_routes_admin_path_to_admin_handler(monkeypatch) -> None:
     assert response.status_code == 200
 
 
+def test_header_policy_matches_authenticated_proxy_boundary() -> None:
+    """The standalone ConfigMap program mirrors the outer proxy allowlist."""
+    from gco.services.api_routes import inference_proxy
+
+    assert proxy._HOP_BY_HOP_HEADERS == inference_proxy._HOP_BY_HOP_HEADERS
+    assert (
+        inference_proxy._ALLOWED_REQUEST_HEADERS - {"content-encoding"}
+        == proxy._ALLOWED_REQUEST_HEADERS
+    )
+
+
+def test_request_target_without_query() -> None:
+    """A request without a query string keeps only its path."""
+    assert proxy._request_target(_fake_request("/v1/models")) == "/v1/models"
+
+
 def test_dispatch_rejects_invalid_json_body() -> None:
     """A body that is not valid JSON is rejected with a 400 before any upstream call."""
     request = _fake_request("/v1/completions", body=b"{not valid json")
@@ -241,8 +272,20 @@ def test_dispatch_rejects_invalid_json_body() -> None:
     assert json.loads(response.body) == {"error": "invalid JSON body"}
 
 
-def test_dispatch_passes_non_serving_path_straight_to_decode(monkeypatch) -> None:
-    """A non-generation path such as /v1/models skips prefill priming entirely."""
+@pytest.mark.parametrize("body", [b"null", b"[]", b'"text"', b"1", b"true"])
+def test_dispatch_rejects_non_object_json(body: bytes) -> None:
+    """Valid JSON scalars and arrays are client errors, not internal failures."""
+    request = _fake_request("/v1/completions", body=body)
+
+    response = asyncio.run(proxy._dispatch("v1/completions", request))
+
+    assert isinstance(response, proxy.JSONResponse)
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "JSON body must be an object"}
+
+
+def test_dispatch_passes_non_serving_post_straight_to_decode(monkeypatch) -> None:
+    """A non-generation POST skips prefill and preserves its query string."""
     upstream = _FakeStreamResponse([b'{"data": []}'])
     client = MagicMock()
     client.post = AsyncMock()
@@ -251,13 +294,19 @@ def test_dispatch_passes_non_serving_path_straight_to_decode(monkeypatch) -> Non
     monkeypatch.setattr(proxy, "PREFILL_URL", "http://ep-prefill:8000")
     monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
     monkeypatch.setattr(proxy, "_client", client)
-    request = _fake_request("/v1/models", body=b"{}")
+    request = _fake_request("/v1/models", body=b"{}", query="limit=5")
 
     response, chunks = asyncio.run(_drive(proxy._dispatch("v1/models", request)))
 
     assert isinstance(response, proxy.StreamingResponse)
     assert chunks == [b'{"data": []}']
     client.post.assert_not_called()
+    client.build_request.assert_called_once_with(
+        "POST",
+        "http://ep-decode:8000/v1/models?limit=5",
+        json={},
+        headers=[],
+    )
     client.send.assert_awaited_once()
 
 
@@ -275,7 +324,9 @@ def test_dispatch_primes_prefill_then_streams_decode_for_serving_path(monkeypatc
     monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
     monkeypatch.setattr(proxy, "_client", client)
     request = _fake_request(
-        "/v1/completions", body=json.dumps({"prompt": "hi", "stream": True}).encode()
+        "/v1/completions",
+        body=json.dumps({"prompt": "hi", "stream": True}).encode(),
+        query="trace=request-1",
     )
 
     response, chunks = asyncio.run(_drive(proxy._dispatch("v1/completions", request)))
@@ -283,20 +334,78 @@ def test_dispatch_primes_prefill_then_streams_decode_for_serving_path(monkeypatc
     assert isinstance(response, proxy.StreamingResponse)
     assert chunks == [b"data: hi\n\n"]
     client.post.assert_awaited_once()
+    client.build_request.assert_called_once()
+    assert client.build_request.call_args.args == (
+        "POST",
+        "http://ep-decode:8000/v1/completions?trace=request-1",
+    )
     client.send.assert_awaited_once()
 
 
-def test_health_endpoint_returns_ok() -> None:
-    """The liveness / readiness endpoint answers 200 with an ok status."""
-    response = asyncio.run(proxy._health())
+def test_health_endpoints_remain_local(monkeypatch) -> None:
+    """Explicit liveness routes win over the GET passthrough."""
+    outbound = MagicMock()
+    outbound.send = AsyncMock()
+    monkeypatch.setattr(proxy, "_client", outbound)
+
+    with TestClient(proxy.app) as client:
+        for path in ("/health", "/healthz"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok"}
+
+    outbound.send.assert_not_called()
+
+
+def test_get_passthrough_preserves_safe_transport_metadata(monkeypatch) -> None:
+    """Model discovery keeps safe headers and strips hop-by-hop framing."""
+    upstream = _FakeStreamResponse(
+        [b"compressed-model-list"],
+        headers={
+            "cache-control": "max-age=30",
+            "content-encoding": "gzip",
+            "content-length": "21",
+            "connection": "keep-alive",
+            "etag": '"models-v1"',
+            "x-request-id": "decode-request",
+        },
+    )
+    client = MagicMock()
+    client.build_request = MagicMock(return_value="REQ")
+    client.send = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
+    monkeypatch.setattr(proxy, "_client", client)
+    request = _fake_request(
+        "/v1/models",
+        query="limit=5",
+        headers={
+            "accept": "application/json",
+            "accept-encoding": "gzip",
+            "authorization": "Bearer must-not-forward",
+            "host": "public.example",
+            "if-none-match": '"models-v1"',
+            "x-request-id": "outer-request",
+        },
+    )
+
+    response, chunks = asyncio.run(_drive(proxy._get_passthrough("v1/models", request)))
 
     assert response.status_code == 200
-    assert json.loads(response.body) == {"status": "ok"}
-
-
-def test_get_catch_all_returns_ok() -> None:
-    """Any GET (including ALB target-group health checks) is answered with 200."""
-    response = asyncio.run(proxy._get_catch_all("inference/ep/whatever"))
-
-    assert response.status_code == 200
-    assert json.loads(response.body) == {"status": "ok"}
+    assert chunks == [b"compressed-model-list"]
+    client.build_request.assert_called_once_with(
+        "GET",
+        "http://ep-decode:8000/v1/models?limit=5",
+        headers=[
+            ("accept", "application/json"),
+            ("accept-encoding", "gzip"),
+            ("if-none-match", '"models-v1"'),
+            ("x-request-id", "outer-request"),
+        ],
+    )
+    client.send.assert_awaited_once_with("REQ", stream=True)
+    assert response.headers["cache-control"] == "max-age=30"
+    assert response.headers["content-encoding"] == "gzip"
+    assert response.headers["etag"] == '"models-v1"'
+    assert response.headers["x-request-id"] == "decode-request"
+    assert "content-length" not in response.headers
+    assert "connection" not in response.headers

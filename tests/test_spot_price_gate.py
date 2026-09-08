@@ -384,6 +384,80 @@ class TestWorkerSpotGateIntegration:
         store.claim_job.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_lost_claim_race_does_not_consume_apply_budget(self):
+        processor = MagicMock()
+        processor.region = "us-east-1"
+        resource = MagicMock()
+        resource.name = "run-me"
+        resource.namespace = "gco-jobs"
+        resource.uid = "uid-1"
+        processor.apply_queued_job.return_value = resource
+
+        store = _worker_store([{"job_id": "race-lost"}, {"job_id": "run-1"}])
+        store.claim_job.side_effect = [
+            None,
+            {
+                "claim_token": "token",
+                "claim_generation": 1,
+                "manifest": {"metadata": {"name": "run-me"}},
+                "namespace": "gco-jobs",
+            },
+        ]
+        store.transition_job.side_effect = [
+            {"status": "applying"},
+            {"status": "pending"},
+        ]
+        gate = _open_gate(price=0.10)
+
+        with patch.object(worker_module, "_lease_heartbeat", AsyncMock()):
+            polled, processed = await process_queued_jobs_once(
+                processor, store, limit=1, spot_gate=gate
+            )
+
+        assert polled == 2
+        assert processed == [
+            {
+                "job_id": "run-1",
+                "status": "applied",
+                "k8s_job_name": "run-me",
+                "k8s_job_uid": "uid-1",
+            }
+        ]
+        assert store.claim_job.call_count == 2
+        processor.apply_queued_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_claim_error_consumes_apply_budget(self):
+        processor = MagicMock()
+        processor.region = "us-east-1"
+        store = _worker_store([{"job_id": "ambiguous"}, {"job_id": "run-1"}])
+        store.claim_job.side_effect = [
+            RuntimeError("DynamoDB timeout after update"),
+            {
+                "claim_token": "token",
+                "claim_generation": 1,
+                "manifest": {"metadata": {"name": "run-me"}},
+                "namespace": "gco-jobs",
+            },
+        ]
+        gate = _open_gate(price=0.10)
+
+        polled, processed = await process_queued_jobs_once(
+            processor, store, limit=1, spot_gate=gate
+        )
+
+        assert polled == 2
+        assert processed == [
+            {
+                "job_id": "ambiguous",
+                "status": "fenced",
+                "error": "DynamoDB timeout after update",
+            }
+        ]
+        store.claim_job.assert_called_once()
+        processor.apply_queued_job.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_apply_budget_still_bounds_dispatch(self):
         processor = MagicMock()
         processor.region = "us-east-1"

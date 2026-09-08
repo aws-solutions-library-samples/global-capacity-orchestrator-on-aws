@@ -71,6 +71,7 @@ _NON_FASTAPI_ENDPOINTS: dict[str, str] = {
     "/api/v1/global/status": "cross-region aggregator Lambda at the global API Gateway",
     "/health": "Mooncake prefill/decode proxy (gco/services/mooncake_pd_proxy.py)",
     "/instances/add": "Mooncake prefill/decode proxy admin route",
+    "/v1/models": "Mooncake prefill/decode proxy passthrough to the decode backend",
     "/{}": "Mooncake prefill/decode proxy catch-all dispatch",
 }
 
