@@ -1,0 +1,29 @@
+{
+  "model_id": "nvidia.nemotron-super-3-120b",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T15:13:22.386798+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"find_docs_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"inference_in_results\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[{\"criterion_id\": \"val_loss_below_threshold\", \"kind\": \"metric_threshold\", \"required\": true, \"metric\": \"metrics.val_loss\", \"op\": \"<\", \"target\": 0.1}]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[{\"criterion_id\": \"wait_for_goal_reached\", \"kind\": \"event\", \"event_name\": \"goal_reached\", \"required\": true}]"
+    }
+  }
+}

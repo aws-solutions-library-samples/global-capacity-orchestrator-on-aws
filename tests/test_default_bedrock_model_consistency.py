@@ -435,6 +435,17 @@ def test_openai_gpt_converse_options_drop_unsupported_temperature() -> None:
     assert options == {"inferenceConfig": {"maxTokens": 2048}}
 
 
+def test_xai_grok_converse_options_drop_unsupported_temperature() -> None:
+    """Grok rejects temperature while retaining supported generic controls."""
+    options = build_bedrock_converse_options(
+        "global.xai.grok-4.6",
+        inference_config={"maxTokens": 2048, "temperature": 0.2},
+        apply_default_reasoning=False,
+    )
+
+    assert options == {"inferenceConfig": {"maxTokens": 2048}}
+
+
 def test_nova_default_still_translates_to_reasoning_config(tmp_path: Path) -> None:
     """Moving a generation default back to Nova 2 keeps its own dialect intact."""
     config_path = tmp_path / "cdk.json"
@@ -575,9 +586,10 @@ def test_explicit_other_model_keeps_inference_config_without_nova_reasoning(
     assert options == {"inferenceConfig": inference_config}
 
 
-def test_explicit_nova_override_does_not_load_or_apply_canonical_reasoning(
+def test_explicit_restricted_claude_keeps_no_canonical_reasoning(
     tmp_path: Path,
 ) -> None:
+    """Explicit Claude remains reasoning-free but still gets request compatibility."""
     inference_config = {"maxTokens": 1024, "temperature": 0.2}
 
     options = build_bedrock_converse_options(
@@ -587,7 +599,7 @@ def test_explicit_nova_override_does_not_load_or_apply_canonical_reasoning(
         apply_default_reasoning=False,
     )
 
-    assert options == {"inferenceConfig": inference_config}
+    assert options == {"inferenceConfig": {"maxTokens": 1024}}
 
 
 def _bedrock_payload(

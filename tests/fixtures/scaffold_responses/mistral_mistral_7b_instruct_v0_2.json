@@ -1,0 +1,32 @@
+{
+  "model_id": "mistral.mistral-7b-instruct-v0:2",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T15:58:03.883736+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "prompt_sha256": "25094d2759091da9dcce3a6747647acdc8e01ed654c30abf072b65378fa61b70",
+      "raw_response": " [\n{\"criterion_id\": \"find_docs_tool_succeeded\", \"kind\": \"tool_call_succeeded\", \"required\": true, \"tool_name\": \"find_docs\"},\n{\"criterion_id\": \"num_docs_found\", \"kind\": \"metric_threshold\", \"required\": true, \"metric\": \"len(obs['tool_results'])\", \"op\": \">\", \"target\": 0},\n{\"criterion_id\": \"inference_endpoint_documented\", \"kind\": \"metric_threshold\", \"required\": true, \"metric\": \"obs['metrics'].get('documentation_found', 0)\", \"op\": \">\", \"target\": 0}\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "97bcd0c378d0198b68d3c6d0730e31b58467bbf0df2e2177cb2defb704738b4a",
+      "raw_response": " [\n{\"criterion_id\": \"c1\", \"kind\": \"metric_threshold\", \"required\": true, \"metric\": \"metrics.val_loss\", \"op\": \"<\", \"target\": 0.1},\n{\"criterion_id\": \"c2\", \"kind\": \"tool_call_succeeded\", \"required\": true, \"tool_name\": \"find_examples\"}\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "63df0c1141c559105545197c90b6cd08dafa3730265d1470f0b5b6dc45c250ae",
+      "raw_response": " [\n{\"criterion_id\": \"goal_reached_event\", \"kind\": \"event\", \"required\": true, \"event_name\": \"goal_reached\"},\n{\"criterion_id\": \"training_job_completed\", \"kind\": \"event\", \"required\": true, \"event_name\": \"job_completed\"},\n{\"criterion_id\": \"find_examples_tool_succeeded\", \"kind\": \"tool_call_succeeded\", \"required\": true, \"tool_name\": \"find_examples\"}\n]"
+    }
+  }
+}

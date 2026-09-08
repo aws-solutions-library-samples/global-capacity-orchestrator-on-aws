@@ -1,0 +1,29 @@
+{
+  "model_id": "global.openai.gpt-5.6-luna",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T14:29:52.396430+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"inference_endpoint_documentation_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() and 'endpoint' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"documentation_result_returned\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and len(str(r)) > 0 for r in obs['tool_results'])\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"validation_loss_below_target\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"training_tool_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  }\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"goal-reached-event\",\n    \"kind\": \"event\",\n    \"event_name\": \"goal_reached\",\n    \"required\": true\n  }\n]"
+    }
+  }
+}
