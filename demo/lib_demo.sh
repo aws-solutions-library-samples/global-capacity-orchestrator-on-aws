@@ -379,6 +379,134 @@ verify_recording_aws_account() {
     fi
 }
 
+# verify_legacy_live_recording_authorization <repo_root>
+#
+# Fail-closed gate for the three publishable legacy recordings. A caller must
+# explicitly acknowledge live mutations and bind the session to one reviewed
+# commit and one authorized AWS account. The six generated legacy artifacts
+# may be dirty so deploy, live-demo, and destroy can be captured sequentially
+# from the same checkout; every source or Autopilot path must remain clean.
+verify_legacy_live_recording_authorization() {
+    local repo_root="$1"
+    if [ "${GCO_RECORDING_LIVE:-}" != "1" ]; then
+        echo "Set GCO_RECORDING_LIVE=1 to acknowledge live AWS/Kubernetes mutations." >&2
+        return 1
+    fi
+    if [ -z "${GCO_EXPECTED_GIT_SHA:-}" ]; then
+        echo "GCO_EXPECTED_GIT_SHA is required for a live legacy recording." >&2
+        return 1
+    fi
+    if [ -z "${GCO_EXPECTED_ACCOUNT_ID:-}" ]; then
+        echo "GCO_EXPECTED_ACCOUNT_ID is required for a live legacy recording." >&2
+        return 1
+    fi
+    verify_recording_git_state "$repo_root" \
+        "demo/deploy.cast" "demo/deploy.gif" \
+        "demo/live_demo.cast" "demo/live_demo.gif" \
+        "demo/destroy.cast" "demo/destroy.gif" || return 1
+    verify_recording_aws_account || return 1
+}
+
+# verify_recording_kube_context <cluster-name> <region>
+#
+# Bind the active kubectl context to the EKS cluster resolved through the same
+# AWS identity that passed the account guard. Exact endpoint comparison prevents
+# namespace-wide cleanup from reaching an unrelated but otherwise healthy
+# cluster in another account or context.
+verify_recording_kube_context() {
+    local cluster_name="$1"
+    local region="$2"
+    local expected_endpoint current_endpoint
+    if ! expected_endpoint=$(aws eks describe-cluster \
+            --name "$cluster_name" \
+            --region "$region" \
+            --query 'cluster.endpoint' \
+            --output text 2>/dev/null); then
+        echo "Unable to resolve the expected EKS endpoint for recording." >&2
+        return 1
+    fi
+    if ! current_endpoint=$(kubectl config view --minify \
+            -o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null); then
+        echo "Unable to resolve the active kubectl server." >&2
+        return 1
+    fi
+    expected_endpoint="${expected_endpoint%/}"
+    current_endpoint="${current_endpoint%/}"
+    if [ -z "$expected_endpoint" ] || [ "$expected_endpoint" = "None" ] || \
+            [ "$current_endpoint" != "$expected_endpoint" ]; then
+        echo "Active kubectl context does not match the authorized GCO EKS cluster." >&2
+        return 1
+    fi
+}
+
+# A fixed hard-link beneath Git's common directory serializes all legacy
+# recorders across linked worktrees without dirtying any checkout. Each process
+# prepares a private owner file before atomically linking it into the fixed lock
+# path. Registering both paths first lets handled signals clean up safely before,
+# during, or immediately after acquisition without touching another owner. A
+# SIGKILL can still leave the lock fail-closed for operator inspection.
+LEGACY_RECORDING_LOCK_FILE=""
+LEGACY_RECORDING_LOCK_OWNER_FILE=""
+
+acquire_legacy_recording_lock() {
+    local repo_root="$1"
+    local git_common
+    if ! git_common=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null); then
+        echo "Unable to resolve the Git common directory for recording lock." >&2
+        return 1
+    fi
+    case "$git_common" in
+        /*) ;;
+        *) git_common="${repo_root}/${git_common}" ;;
+    esac
+    if ! git_common=$(cd "$git_common" 2>/dev/null && pwd -P); then
+        echo "Unable to canonicalize the Git common directory for recording lock." >&2
+        return 1
+    fi
+
+    local lock_file="${git_common}/gco-legacy-recording.lock"
+    local owner_file="${lock_file}.owner.${BASHPID:-$$}.${RANDOM}"
+    LEGACY_RECORDING_LOCK_FILE="$lock_file"
+    LEGACY_RECORDING_LOCK_OWNER_FILE="$owner_file"
+
+    if ! (umask 077; set -o noclobber; printf 'pid=%s\nrepo=%s\n' \
+            "$$" "$repo_root" > "$owner_file") 2>/dev/null; then
+        LEGACY_RECORDING_LOCK_FILE=""
+        LEGACY_RECORDING_LOCK_OWNER_FILE=""
+        echo "Unable to create recording lock owner file: ${owner_file}." >&2
+        return 1
+    fi
+    if ! ln "$owner_file" "$lock_file" 2>/dev/null; then
+        rm -f -- "$owner_file" || true
+        LEGACY_RECORDING_LOCK_FILE=""
+        LEGACY_RECORDING_LOCK_OWNER_FILE=""
+        echo "Another legacy demo recorder holds ${lock_file}." >&2
+        return 1
+    fi
+}
+
+release_legacy_recording_lock() {
+    local lock_file="${LEGACY_RECORDING_LOCK_FILE:-}"
+    local owner_file="${LEGACY_RECORDING_LOCK_OWNER_FILE:-}"
+    if [ -z "$lock_file" ] || [ -z "$owner_file" ]; then
+        return 0
+    fi
+
+    if [ -e "$lock_file" ] && [ -e "$owner_file" ] && \
+            [ "$owner_file" -ef "$lock_file" ]; then
+        if ! rm -f -- "$lock_file"; then
+            echo "Unable to release legacy recording lock: ${lock_file}" >&2
+            return 1
+        fi
+    fi
+    if [ -e "$owner_file" ] && ! rm -f -- "$owner_file"; then
+        echo "Unable to remove recording lock owner file: ${owner_file}" >&2
+        return 1
+    fi
+    LEGACY_RECORDING_LOCK_FILE=""
+    LEGACY_RECORDING_LOCK_OWNER_FILE=""
+}
+
 # sanitize_cast <cast_file>
 #
 # Redacts AWS account IDs and temporary/long-lived AWS access-key IDs from an

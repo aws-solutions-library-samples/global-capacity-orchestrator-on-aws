@@ -7,9 +7,11 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Live Demo](live_demo.gif)
 
-> Automated demo showing costs, capacity-aware placement, 4 schedulers running simultaneously
-> (Volcano, Kueue, YuniKorn, Slurm), high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)), and live
-> LLM inference — all on one platform. Re-record with `bash demo/record_demo.sh`.
+> Automated demo showing fleet status, cost and policy agreement, capacity-aware placement,
+> 4 schedulers running simultaneously (Volcano, Kueue, YuniKorn, Slurm),
+> high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)), and live
+> LLM inference — all on one platform. See the guarded live and offline
+> re-render commands in [LIVE_DEMO.md](LIVE_DEMO.md#recording-the-demo).
 
 </details>
 
@@ -63,7 +65,7 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 |---|---|
 | `DEMO_WALKTHROUGH.md` | Step-by-step demo script covering infrastructure, jobs, health, and API |
 | `INFERENCE_WALKTHROUGH.md` | End-to-end inference demo: deploy, invoke, scale, autoscale, stop/start, model weights, Valkey cache |
-| `live_demo.sh` | Automated live demo script — runs through costs, schedulers, storage, inference, and EFS |
+| `live_demo.sh` | Automated live demo script — runs through fleet status/cost/policy, schedulers, storage, inference, and EFS |
 | `lib_demo.sh` | Shared function library sourced by `live_demo.sh`, `record_demo.sh`, and BATS tests |
 | `LIVE_DEMO.md` | Documentation for the live demo script: usage, customization, and maintenance |
 | `record_demo.sh` | Records `live_demo.sh` as an animated GIF using asciinema + agg |
@@ -84,30 +86,37 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ## Recording Deployment Lifecycles
 
-For an auditable deploy/live-test/destroy recording, start from a CI-green
-40-character commit SHA and set both guards explicitly:
+For an auditable deploy/live-demo/destroy recording, start from a CI-green
+40-character commit SHA, select an explicitly authorized account, and opt in to
+live mutation:
 
 ```bash
+export GCO_RECORDING_LIVE=1
 export GCO_EXPECTED_GIT_SHA="<40-character CI-green commit SHA>"
 export GCO_EXPECTED_ACCOUNT_ID="<12-digit authorized AWS account ID>"
 bash demo/record_deploy.sh
-# Run the bounded live checks against this deployment.
+bash demo/record_demo.sh
 bash demo/record_destroy.sh
 ```
 
-When the SHA guard is set, each recorder verifies that `HEAD` matches exactly
-and that no source file differs. Only the four generated lifecycle outputs
-(`demo/deploy.cast`, `demo/deploy.gif`, `demo/destroy.cast`, and
-`demo/destroy.gif`) may be dirty, allowing the destroy recording to follow the
-deploy recording before all four assets are committed. The account guard uses
-`aws sts get-caller-identity` and fails before deploy or destroy if the active
-identity is not the authorized account. The reusable scripts intentionally do
-not hardcode an account.
+The three live recorders fail closed unless all guards are present. Each verifies
+that `HEAD` matches exactly and that no source file differs. Only the six legacy
+recording outputs (`deploy`, `live_demo`, and `destroy`, each `.cast` + `.gif`)
+may be dirty, allowing the complete sequence to be captured before its assets
+are committed. The account guard uses `aws sts get-caller-identity`; reusable
+scripts never hardcode an account. For the live demo, the recorder snapshots
+only the authorized current context into a private mode-`0600` kubeconfig under
+its staging directory. Repository CLI and `kubectl` children inherit that
+single disposable file, so their normal context refreshes cannot rewrite the
+operator's kubeconfig; the snapshot is removed on every handled exit. Use
+`RENDER_EXISTING=1` to iterate GIF speed, size, theme, or font entirely offline
+from an already verified cast.
 
 Each cast is sanitized before GIF rendering: 12-digit account IDs and AWS
 access-key-ID patterns are replaced, then an independent verification pass
-rejects any residual match. `SKIP_SANITIZE=1` is for local troubleshooting only;
-never commit or distribute artifacts produced with that bypass.
+rejects any residual match. Publishable legacy recorders reject
+`SKIP_SANITIZE=1`; that bypass remains only in lower-level helpers for isolated
+local debugging.
 
 The security workflow fully decodes the five tracked GIFs and enforces reviewed
 size, canvas, and frame-count ceilings. If a deliberate re-recording exceeds a

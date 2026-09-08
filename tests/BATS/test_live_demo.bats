@@ -255,10 +255,24 @@ setup() {
 # ── Script Completeness ──────────────────────────────────────────────────────
 
 @test "script contains all expected demo sections" {
-    for section in "COST VISIBILITY" "CAPACITY DISCOVERY" "VOLCANO" "KUEUE" "YUNIKORN" "SLURM" \
+    for section in "FLEET OVERVIEW" "CAPACITY DISCOVERY" "VOLCANO" "KUEUE" "YUNIKORN" "SLURM" \
                    "FSx FOR LUSTRE" "VALKEY" "INFERENCE" "EFS" "Demo Complete"; do
         grep -q "$section" "$SCRIPT"
     done
+}
+
+@test "fleet overview uses aggregate status and states the MCP policy boundary" {
+    grep -q 'gco status --with-costs --with-policy' "$SCRIPT"
+    grep -q 'base fleet document.*MCP server' "$SCRIPT"
+    grep -q 'Policy comparison is CLI-only' "$SCRIPT"
+    run grep -q 'The same document.*MCP server' "$SCRIPT"
+    [ "$status" -ne 0 ]
+}
+
+@test "inference demo uses the current pinned vLLM image" {
+    grep -q 'vllm/vllm-openai:v0.28.0' "$SCRIPT"
+    run grep -q 'vllm/vllm-openai:v0.25.1' "$SCRIPT"
+    [ "$status" -ne 0 ]
 }
 
 @test "inference section has deploy, invoke, and delete lifecycle" {

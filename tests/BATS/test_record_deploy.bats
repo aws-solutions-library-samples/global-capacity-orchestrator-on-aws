@@ -23,14 +23,14 @@ SCRIPT="demo/record_deploy.sh"
     grep -q "source.*lib_demo.sh" "$SCRIPT"
 }
 
-@test "default speed is 10x for long deploy" {
-    run bash -c 'SPEED="${DEMO_SPEED:-10}"; echo "$SPEED"'
-    [ "$output" = "10" ]
+@test "default speed is 15x for long deploy" {
+    run bash -c 'SPEED="${DEMO_SPEED:-15}"; echo "$SPEED"'
+    [ "$output" = "15" ]
 }
 
-@test "default dimensions are 160x40" {
-    grep -q 'COLS="${DEMO_COLS:-160}"' "$SCRIPT"
-    grep -q 'ROWS="${DEMO_ROWS:-40}"' "$SCRIPT"
+@test "default dimensions are 140x37" {
+    grep -q 'COLS="${DEMO_COLS:-140}"' "$SCRIPT"
+    grep -q 'ROWS="${DEMO_ROWS:-37}"' "$SCRIPT"
 }
 
 @test "output files go to demo/ directory" {
@@ -46,8 +46,21 @@ SCRIPT="demo/record_deploy.sh"
     grep -q "command -v asciinema" "$SCRIPT"
 }
 
-@test "checks for AWS credentials" {
-    grep -q "aws sts get-caller-identity" "$SCRIPT"
+@test "delegates AWS identity verification to the shared guard" {
+    grep -q "verify_legacy_live_recording_authorization" "$SCRIPT"
+    grep -q "aws sts get-caller-identity" demo/lib_demo.sh
+}
+
+@test "requires explicit live consent and reviewed SHA/account guards" {
+    grep -q 'GCO_RECORDING_LIVE=1' "$SCRIPT"
+    grep -q 'GCO_EXPECTED_GIT_SHA' "$SCRIPT"
+    grep -q 'GCO_EXPECTED_ACCOUNT_ID' "$SCRIPT"
+    grep -q 'verify_legacy_live_recording_authorization' "$SCRIPT"
+}
+
+@test "supports offline render-existing mode" {
+    grep -q 'RENDER_EXISTING="${RENDER_EXISTING:-0}"' "$SCRIPT"
+    grep -q 'cp -p "$CAST_FILE" "$RAW_CAST_FILE"' "$SCRIPT"
 }
 
 @test "checks the repository GCO CLI module" {
@@ -72,9 +85,8 @@ SCRIPT="demo/record_deploy.sh"
     grep -q "SKIP_GIF" "$SCRIPT"
 }
 
-@test "supports SKIP_SANITIZE env var" {
-    # Documented escape hatch for bypassing account-ID redaction.
-    grep -q "SKIP_SANITIZE" "$SCRIPT"
+@test "documents SKIP_SANITIZE rejection" {
+    grep -q "SKIP_SANITIZE is not allowed for publishable recordings" "$SCRIPT"
 }
 
 @test "supports SKIP_EMOJI_STRIP env var" {
@@ -122,8 +134,8 @@ SCRIPT="demo/record_deploy.sh"
 @test "failed recorded deploy leaves the existing cast and GIF unchanged" {
     local fixture="$BATS_TEST_TMPDIR/deploy recorder; literal \$checkout"
     local fake_bin="$fixture/bin"
-    local argv_file="$fixture/asciinema.argv"
-    local python_file="$fixture/python.argv"
+    local argv_file="$BATS_TEST_TMPDIR/deploy-asciinema.argv"
+    local python_file="$BATS_TEST_TMPDIR/deploy-python.argv"
     mkdir -p "$fixture/demo" "$fake_bin"
     cp "$SCRIPT" "$fixture/demo/record_deploy.sh"
     cp demo/lib_demo.sh "$fixture/demo/lib_demo.sh"
@@ -164,12 +176,22 @@ exit 0
 FAKE_PYTHON
     cat > "$fake_bin/aws" <<'FAKE_AWS'
 #!/usr/bin/env bash
-exit 0
+printf '%s\n' '123456789012'
 FAKE_AWS
     chmod +x "$fake_bin/asciinema" "$fake_bin/python3" "$fake_bin/aws"
 
+    git -C "$fixture" init -q
+    git -C "$fixture" add .
+    git -C "$fixture" -c user.name=CI -c user.email=ci@example.invalid \
+        commit -q -m recording-fixture
+    local expected_sha
+    expected_sha=$(git -C "$fixture" rev-parse HEAD)
+
     run env \
         PATH="$fake_bin:$PATH" \
+        GCO_RECORDING_LIVE=1 \
+        GCO_EXPECTED_GIT_SHA="$expected_sha" \
+        GCO_EXPECTED_ACCOUNT_ID=123456789012 \
         SKIP_GIF=1 \
         FAKE_ASCIINEMA_ARGV_FILE="$argv_file" \
         FAKE_ASCIINEMA_CHILD_STATUS=42 \
@@ -187,5 +209,82 @@ FAKE_AWS
     [ "$(sed -n '6p' "$python_file")" = "-y" ]
     [ "$(cat "$fixture/demo/deploy.cast")" = "existing deploy cast" ]
     [ "$(cat "$fixture/demo/deploy.gif")" = "existing deploy gif" ]
+    [ -z "$(compgen -G "$fixture/demo/.deploy-recording.*" || true)" ]
+}
+
+
+@test "deploy render-existing mode performs no AWS or asciinema call" {
+    local fixture="$BATS_TEST_TMPDIR/deploy-render"
+    local fake_bin="$fixture/bin"
+    mkdir -p "$fixture/demo" "$fake_bin"
+    cp "$SCRIPT" "$fixture/demo/record_deploy.sh"
+    cp demo/lib_demo.sh "$fixture/demo/lib_demo.sh"
+    {
+        printf '{"version":2,"width":140,"height":37}\n'
+        printf '[0.1,"o","verified deploy cast"]\n'
+    } > "$fixture/demo/deploy.cast"
+    printf 'old gif\n' > "$fixture/demo/deploy.gif"
+
+    cat > "$fake_bin/agg" <<'FAKE_AGG'
+#!/usr/bin/env bash
+printf 'new gif\n' > "${!#}"
+FAKE_AGG
+    for command in aws asciinema; do
+        cat > "$fake_bin/$command" <<'FORBIDDEN'
+#!/usr/bin/env bash
+exit 97
+FORBIDDEN
+    done
+    chmod +x "$fake_bin"/*
+    git -C "$fixture" init -q
+    git -C "$fixture" add .
+    git -C "$fixture" -c user.name=CI -c user.email=ci@example.invalid \
+        commit -q -m render-fixture
+
+    run env PATH="$fake_bin:$PATH" RENDER_EXISTING=1 \
+        bash "$fixture/demo/record_deploy.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$fixture/demo/deploy.gif")" = "new gif" ]
+    [ -z "$(compgen -G "$fixture/demo/.deploy-recording.*" || true)" ]
+}
+
+
+@test "deploy render-existing without agg preserves the pair" {
+    local fixture="$BATS_TEST_TMPDIR/deploy-no-agg"
+    local fake_bin="$fixture/bin"
+    mkdir -p "$fixture/demo" "$fake_bin"
+    cp "$SCRIPT" "$fixture/demo/record_deploy.sh"
+    cp demo/lib_demo.sh "$fixture/demo/lib_demo.sh"
+    printf '{"version":2,"width":140,"height":37}\n' > "$fixture/demo/deploy.cast"
+    printf 'old gif\n' > "$fixture/demo/deploy.gif"
+
+    run env PATH="$fake_bin:/usr/bin:/bin" RENDER_EXISTING=1 \
+        bash "$fixture/demo/record_deploy.sh"
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$fixture/demo/deploy.gif")" = "old gif" ]
+    [ -z "$(compgen -G "$fixture/demo/.deploy-recording.*" || true)" ]
+}
+
+@test "deploy rejects SKIP_SANITIZE before touching artifacts" {
+    local fixture="$BATS_TEST_TMPDIR/deploy-skip-sanitize"
+    local fake_bin="$fixture/bin"
+    mkdir -p "$fixture/demo" "$fake_bin"
+    cp "$SCRIPT" "$fixture/demo/record_deploy.sh"
+    cp demo/lib_demo.sh "$fixture/demo/lib_demo.sh"
+    printf '{"version":2,"width":140,"height":37}\n' > "$fixture/demo/deploy.cast"
+    printf 'old gif\n' > "$fixture/demo/deploy.gif"
+    cat > "$fake_bin/agg" <<'FAKE_AGG'
+#!/usr/bin/env bash
+exit 97
+FAKE_AGG
+    chmod +x "$fake_bin/agg"
+
+    run env PATH="$fake_bin:$PATH" RENDER_EXISTING=1 SKIP_SANITIZE=1 \
+        bash "$fixture/demo/record_deploy.sh"
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$fixture/demo/deploy.gif")" = "old gif" ]
     [ -z "$(compgen -G "$fixture/demo/.deploy-recording.*" || true)" ]
 }

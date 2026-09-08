@@ -67,7 +67,8 @@ Everything needed for `live_demo.sh` (see [Prerequisites](#prerequisites) above)
   apt install asciinema      # Debian/Ubuntu
   ```
 
-- `agg` — converts `.cast` to animated GIF (optional — skipped gracefully if missing)
+- `agg` — converts `.cast` to animated GIF; required for offline
+  `RENDER_EXISTING=1` and normal GIF publication
 
   ```bash
   brew install agg           # macOS
@@ -77,17 +78,39 @@ Everything needed for `live_demo.sh` (see [Prerequisites](#prerequisites) above)
 ### Recording
 
 ```bash
-# Record and generate GIF (from repo root)
+# Live recording from one reviewed commit/account (mutates jobs and inference)
+GCO_RECORDING_LIVE=1 \
+GCO_EXPECTED_GIT_SHA="<40-character CI-green SHA>" \
+GCO_EXPECTED_ACCOUNT_ID="<12-digit authorized account>" \
 bash demo/record_demo.sh
 
-# Record only the .cast file (skip GIF conversion)
-SKIP_GIF=1 bash demo/record_demo.sh
+# Re-render the verified tracked cast without AWS or Kubernetes calls
+RENDER_EXISTING=1 bash demo/record_demo.sh
 
 # Custom dimensions and speed
-DEMO_COLS=140 DEMO_ROWS=40 DEMO_SPEED=3 bash demo/record_demo.sh
+RENDER_EXISTING=1 DEMO_COLS=116 DEMO_ROWS=36 DEMO_SPEED=3 \
+  bash demo/record_demo.sh
 ```
 
-The script runs its own preflight validation (tools, cluster access, disk space) before recording. Output files:
+Live mode is fail-closed: it requires explicit mutation consent, an exact clean
+Git SHA (apart from the six legacy recording outputs), and an STS-verified
+account. The authorized EKS target is derived from the configured project and
+region, with `GCO_DEMO_REGION` taking precedence. The recorder copies only the
+active context into a mode-`0600` kubeconfig inside its private staging
+directory, exports that disposable file to the repository CLI and every
+`kubectl` child, and verifies its endpoint before recording. CLI context
+refreshes therefore cannot rewrite the operator's kubeconfig. Guarded child
+execution cannot auto-configure access or force past a failed preflight and
+revalidates the isolated endpoint immediately before namespace-wide cleanup.
+The staged kubeconfig may contain raw credentials and is unlinked before
+publication rollback begins on every handled exit. If rollback itself fails,
+noncredential staging may be preserved for recovery, but the kubeconfig is not.
+
+The recorder stages both output assets, propagates the child exit status,
+sanitizes and independently verifies the cast, renders before publication, and
+rolls the pair back on ordinary failures or handled signals.
+
+Output files:
 
 | File | Description |
 |---|---|
@@ -96,13 +119,10 @@ The script runs its own preflight validation (tools, cluster access, disk space)
 
 ### Re-recording After Changes
 
-After editing `live_demo.sh` or `lib_demo.sh`, re-record:
-
-```bash
-bash demo/record_demo.sh
-```
-
-The GIF is embedded in both `demo/README.md` and the main `README.md`. Commit the updated `.gif` and `.cast` files.
+After editing `live_demo.sh` or `lib_demo.sh`, commit the recorder changes, wait
+for CI, then record from that exact green SHA with the live guards above. Use
+`RENDER_EXISTING=1` for subsequent visual tuning without repeating cloud
+mutations.
 
 ### Replay Without Re-recording
 
@@ -116,7 +136,7 @@ asciinema play demo/live_demo.cast
 
 | Section | Feature | Condition |
 |---|---|---|
-| 1 | Cost visibility — summary, regional breakdown, daily trend | Always |
+| 1 | Fleet overview — stacks, queue/jobs, capacity, inference, cost, and CLI policy agreement | Always |
 | 2 | Capacity discovery — GPU availability, region recommendation, auto-region SQS | Always |
 | 3 | Volcano scheduler — gang scheduling example | `volcano.enabled = true` in cdk.json |
 | 4 | Kueue scheduler — quota-based job queueing | `kueue.enabled = true` in cdk.json |
@@ -127,6 +147,9 @@ asciinema play demo/live_demo.cast
 | 9 | Inference endpoint — deploy, invoke, and teardown | Always (skip with `SKIP_INFERENCE=1`) |
 | 10 | EFS shared storage — persistent job outputs | Always |
 
+The MCP `fleet_status` tool exposes the base fleet document. Policy comparison
+in the demonstrated fleet overview is currently CLI-only.
+
 ---
 
 ## Customization
@@ -134,7 +157,7 @@ asciinema play demo/live_demo.cast
 - **Skip sections:** Set environment variables to skip specific parts:
 
   ```bash
-  SKIP_COSTS=1 bash demo/live_demo.sh         # Skip cost section
+  SKIP_COSTS=1 bash demo/live_demo.sh         # Skip fleet/cost overview
   SKIP_CAPACITY=1 bash demo/live_demo.sh      # Skip capacity section
   SKIP_SCHEDULERS=1 bash demo/live_demo.sh    # Skip all scheduler demos
   ```
@@ -159,7 +182,7 @@ This script depends on the example manifests in `examples/` and the `gco` CLI. W
 
 1. **New schedulers or features added to cdk.json** — Add a detection block and demo section in `live_demo.sh`. Follow the pattern of existing scheduler sections.
 2. **Example manifest names changed** — Update the corresponding `submit` commands in the script. The manifest filenames are referenced directly.
-3. **CLI command changes** — If `gco` subcommands change syntax, update the commands in the script. The script calls `gco costs`, `gco jobs`, and `gco files` directly.
+3. **CLI command changes** — If `gco` subcommands change syntax, update the commands in the script. The recorded overview uses `gco status --with-costs --with-policy`; later sections call `gco capacity`, `gco jobs`, `gco files`, and `gco inference`.
 4. **New example jobs** — If a new example is added that showcases a feature worth demoing, add a section. Use the `section_header`, `narrate`, and `run_cmd` helper functions for consistent formatting.
 5. **cdk.json schema changes** — The script parses `cdk.json` with `jq`. If the config structure changes (e.g., `helm.volcano.enabled` moves), update the `jq` queries.
 

@@ -26,47 +26,70 @@ check would reject the valid second half of the same recording session.
 We will make recorded deployment lifecycles guarded, reproducible, and
 fail-closed for normal committed output.
 
-1. A release or pull-request validation run records only a full commit SHA that
-   has completed the required CI checks. The operator supplies that SHA through
-   `GCO_EXPECTED_GIT_SHA`; the recorder compares it with `HEAD` and rejects any
-   unexpected source-tree change. The four generated lifecycle artifacts
-   (`deploy.cast`, `deploy.gif`, `destroy.cast`, and `destroy.gif`) are the only
-   paths allowed to differ so teardown can follow a just-recorded deployment.
-2. The operator supplies the authorized 12-digit account through
+1. A release or pull-request recording starts only from a full commit SHA that
+   has completed required CI. The operator explicitly opts in with
+   `GCO_RECORDING_LIVE=1` and supplies that SHA through
+   `GCO_EXPECTED_GIT_SHA`; each legacy recorder compares it with `HEAD` and
+   rejects any unexpected source-tree change. The six generated legacy
+   artifacts (`deploy`, `live_demo`, and `destroy`, each `.cast` + `.gif`) are
+   the only paths allowed to differ so the full sequence can be captured from
+   one checkout.
+2. The operator must supply the authorized 12-digit account through
    `GCO_EXPECTED_ACCOUNT_ID`. The recorder resolves the active identity with
    `aws sts get-caller-identity` and stops before any infrastructure command if
    it does not match. Reusable scripts do not embed an account number.
 3. Deploy, bounded live validation, and destroy use the same expected SHA and
-   account. Accelerator use is opt-in, tightly bounded in duration and scale,
-   and followed by teardown verification; a recording is not evidence of
-   cleanup by itself.
+   account. The live recorder first resolves the expected EKS endpoint through
+   that AWS identity and requires the active minified kubectl context to match
+   it exactly. After acquiring the recorder lock, it copies only that context
+   with `kubectl config view --raw --minify --flatten` into a mode-`0600` file
+   in its private staging directory, exports the single file as `KUBECONFIG`,
+   and repeats endpoint and reachability checks. Repository CLI context
+   refreshes can modify only this disposable copy, never the operator's
+   kubeconfig. Guarded child execution cannot auto-configure access or force
+   through a failed preflight, and it repeats the endpoint check immediately
+   before `kubectl delete jobs --all`. The raw snapshot may contain credential
+   material and is unlinked before publication rollback on every handled exit;
+   if rollback fails, only noncredential staging is preserved for recovery.
+   Accelerator use is opt-in, tightly bounded in duration and scale, and
+   followed by teardown verification; a recording is not evidence of cleanup
+   by itself.
 4. Each cast is sanitized before GIF rendering. Every standalone 12-digit
    account-ID-shaped value is replaced with `000000000000`, AWS access-key-ID
    patterns are replaced with a non-secret marker, and a separate verification
    pass rejects any residual pattern before `agg` can render it into pixels.
    Longer numeric identifiers are not account IDs and are left intact rather
    than being partially rewritten.
-5. Recorders invoke `asciinema rec --return`, so a failed deploy or destroy
-   command fails the recorder and cannot proceed to sanitization or publication.
-6. Raw casts, rendered GIFs, wrappers, and prior-artifact backups are staged
-   beside the tracked outputs. Final cast/GIF publication uses two individually
-   atomic renames wrapped in a shared rollback transaction: an `EXIT` trap
-   restores both prior artifacts (or removes both new artifacts) after an
-   ordinary failure or handled `HUP`, `INT`, or `TERM`. Publication is complete
-   only after both final-path operations succeed. `SIGKILL` cannot be trapped.
-7. `SKIP_SANITIZE=1` remains a local debugging escape hatch only. Output from a
-   bypassed run must not be committed or distributed.
+5. Recorders invoke `asciinema rec --return`, so a failed deploy, live demo, or
+   destroy command fails the recorder and cannot proceed to sanitization or
+   publication.
+6. A repository-wide fixed lock path beneath Git's common directory serializes
+   every legacy recorder across linked worktrees from before child execution
+   through rollback cleanup. A process writes a private owner file and acquires
+   the fixed path with an atomic same-directory hard link. Cleanup compares file
+   identity before unlinking, so a contender or handled signal cannot remove
+   another process's lock. Raw casts, rendered GIFs, wrappers, the live
+   kubeconfig, and prior-artifact backups are staged beside the tracked outputs.
+   Final cast/GIF publication uses two individually atomic renames wrapped in a
+   shared rollback transaction: an `EXIT` trap restores both prior artifacts
+   (or removes both new artifacts) after an ordinary failure or handled `HUP`,
+   `INT`, or `TERM`. Publication is complete only after both final-path
+   operations succeed. `SIGKILL` cannot be trapped and leaves the lock
+   fail-closed for operator inspection.
+7. `SKIP_SANITIZE=1` remains a lower-level local debugging escape hatch. The
+   three publishable legacy recorders reject it and never install bypassed
+   artifacts.
 
-The SHA and account guards remain optional for casual local demonstrations so
-the reusable scripts retain their existing ergonomics. They are mandatory for
-an auditable PR, release, or published lifecycle recording.
+The live consent, SHA, and account guards are mandatory for all three legacy
+recorders. `RENDER_EXISTING=1` is the non-mutating path for replaying a verified
+cast through visual rendering without AWS or Kubernetes calls.
 
 ## Consequences
 
 ### Positive
 
-- A published deploy/destroy pair is tied to the exact reviewed source and
-  authorized account used for the live validation.
+- Published deploy/live-demo/destroy pairs are tied to the exact reviewed
+  source and authorized account used for the live validation.
 - Wrong-account and dirty-source mistakes fail before an infrastructure
   mutation begins.
 - Casts and derived GIFs have a machine-checked redaction boundary rather than

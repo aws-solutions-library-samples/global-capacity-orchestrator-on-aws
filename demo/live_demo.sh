@@ -172,8 +172,14 @@ elif echo "$KUBECTL_TEST" | grep -qi "no resources found"; then
     # Cluster responded but has zero nodes (normal for scale-to-zero)
     preflight_pass "kubectl connected to cluster (0 nodes — will scale on demand)"
 else
-    # kubectl can't reach the cluster — try auto-configuring
-    if [ -f "./scripts/setup-cluster-access.sh" ]; then
+    # Guarded recordings never auto-configure cluster access after the recorder
+    # has exported and validated its private kubeconfig snapshot. Repository CLI
+    # calls may refresh that disposable copy; the operator's kubeconfig remains
+    # untouched. Normal interactive demos retain the convenience auto-setup path.
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        preflight_fail "kubectl cannot reach the pre-authorized cluster" \
+            "Restore the validated context before recording; auto-setup is disabled"
+    elif [ -f "./scripts/setup-cluster-access.sh" ]; then
         narrate "  Attempting to configure cluster access..."
         bash ./scripts/setup-cluster-access.sh "gco-$REGION" "$REGION" 2>&1 || true
         KUBECTL_RETRY=$(kubectl get nodes --request-timeout=5s 2>&1 || true)
@@ -231,6 +237,10 @@ echo "  ${DIM}──────────────────────
 if [ "$PREFLIGHT_FAIL" -gt 0 ]; then
     spacer
     echo "  ${RED}${BOLD}$PREFLIGHT_FAIL check(s) failed. Fix the issues above before demoing.${RESET}"
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        echo "  ${RED}Guarded recording mode never force-continues preflight failures.${RESET}"
+        exit 1
+    fi
     spacer
     echo "  ${DIM}Press Enter to exit, or type 'force' to continue anyway:${RESET}"
     if [ "${GCO_DEMO_NONINTERACTIVE:-}" = "1" ]; then
@@ -272,6 +282,12 @@ pause_for_audience
 # resource quota until they're fully gone — skipping the wait makes the
 # next Kueue or Volcano submit fail with a quota error. Runs silently.
 narrate "Cleaning up any leftover jobs from previous runs..."
+if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+    recording_project=$(jq -r '.context.project_name // "gco"' "$CDK_JSON")
+    detect_region "$CDK_JSON"
+    verify_recording_kube_context \
+        "${recording_project}-${REGION}" "$REGION"
+fi
 kubectl delete jobs --all -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 kubectl delete vcjob --all -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 gco inference delete demo-llm -y >/dev/null 2>&1 || true
@@ -320,7 +336,7 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
     narrate "Pre-deploying inference endpoint (GPU will provision in background)..."
     # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet
     for _ in $(seq 1 5); do
-        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.25.1 \
+        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.28.0 \
             --gpu-count 1 --replicas 1 -r "$REGION" \
             --extra-args '--model' --extra-args 'facebook/opt-125m' \
             2>&1 || true)
@@ -334,37 +350,27 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION: Cost Visibility
+# SECTION: Fleet Overview
 # ═════════════════════════════════════════════════════════════════════════════
-# This section always runs (unless SKIP_COSTS=1). It shows the audience that
-# GCO has built-in cost tracking — no separate tool needed.
+# One aggregate document replaces four separate cost/status calls in the
+# recording: stack state, queue/jobs, capacity, inference, policy agreement,
+# and the optional 30-day Cost Explorer view.
 
 if [ "${SKIP_COSTS:-}" != "1" ]; then
 
-SECTION=$((SECTION + 1)); section_header "$SECTION" "COST VISIBILITY" "$GREEN"
+SECTION=$((SECTION + 1)); section_header "$SECTION" "FLEET OVERVIEW — Status, Cost, and Policy" "$GREEN"
 
-narrate "Before we touch any workloads, let's see what the platform costs."
-narrate "GCO tracks spend by service, region, and day — all from the CLI."
+narrate "Start with one fleet-wide answer: what is deployed, what is queued,"
+narrate "where capacity exists, whether policy agrees, and what it costs."
 spacer
 
-highlight "Total spend by AWS service"
-run_cmd "gco costs summary --days 7"
+highlight "Aggregate status across every configured region"
+run_cmd "gco status --with-costs --with-policy"
 sleep "$PAUSE_SHORT"
 
-highlight "Where is the money going geographically?"
-run_cmd "gco costs regions --days 7"
-sleep "$PAUSE_SHORT"
-
-highlight "Daily cost trend with inline chart"
-run_cmd "gco costs trend --days 7"
-sleep "$PAUSE_SHORT"
-
-highlight "What are running workloads costing right now?"
-run_cmd "gco costs workloads" || true
-sleep "$PAUSE_SHORT"
-
-success "Full cost visibility without leaving the terminal."
-narrate "This data comes from AWS Cost Explorer, filtered by GCO resource tags."
+success "One command joins the control plane without hiding unavailable sections."
+narrate "The base fleet document is also available through the MCP server."
+narrate "Policy comparison is CLI-only; the CLI can also emit strict JSON."
 
 pause_for_audience
 
@@ -821,7 +827,7 @@ banner "Demo Complete"
 
 echo "  ${BOLD}What we covered:${RESET}"
 spacer
-echo "  ${GREEN}✓${RESET} Cost visibility across services, regions, and workloads"
+echo "  ${GREEN}✓${RESET} Fleet status, cost visibility, and policy agreement"
 if [ "${SKIP_CAPACITY:-}" != "1" ]; then
     echo "  ${GREEN}✓${RESET} Capacity discovery and auto-region job placement"
 fi
