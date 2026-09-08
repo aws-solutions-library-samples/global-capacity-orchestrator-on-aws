@@ -150,6 +150,12 @@ asciinema play demo/live_demo.cast
 The MCP `fleet_status` tool exposes the base fleet document. Policy comparison
 in the demonstrated fleet overview is currently CLI-only.
 
+Kubernetes pod readiness is only the first inference gate. The script then
+performs a bounded real completion through the global authenticated route before
+displaying the audience prompt. Deployment, visible generation, and deletion
+must all succeed; otherwise endpoint cleanup is attempted and the recorder exits
+nonzero without publishing the failed take.
+
 ---
 
 ## Customization

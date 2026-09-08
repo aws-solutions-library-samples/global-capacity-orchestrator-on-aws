@@ -42,6 +42,20 @@ setup_pauses
 WAIT_FOR_POD="${GCO_DEMO_FAST:+15}"
 WAIT_FOR_POD="${WAIT_FOR_POD:-30}"
 
+# Once an inference deployment is accepted, keep a child-shell EXIT fallback
+# armed until the normal delete succeeds. This prevents a later demo failure or
+# interruption from silently leaving the endpoint running.
+INFERENCE_CLEANUP_PENDING=0
+cleanup_demo_inference_on_exit() {
+    local exit_code="$1"
+    trap - EXIT
+    if [ "${INFERENCE_CLEANUP_PENDING:-0}" = "1" ] && \
+            [ -n "${INFERENCE_NAME:-}" ]; then
+        cleanup_inference_endpoint "$INFERENCE_NAME" || true
+    fi
+    exit "$exit_code"
+}
+
 # ── Preflight Validation ─────────────────────────────────────────────────────
 # Before the demo starts, we automatically check every prerequisite.
 # This prevents embarrassing failures mid-presentation. Each check prints
@@ -334,17 +348,31 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
         sleep 3
     done
     narrate "Pre-deploying inference endpoint (GPU will provision in background)..."
-    # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet
-    for _ in $(seq 1 5); do
-        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.28.0 \
-            --gpu-count 1 --replicas 1 -r "$REGION" \
-            --extra-args '--model' --extra-args 'facebook/opt-125m' \
-            2>&1 || true)
-        if echo "$DEPLOY_OUTPUT" | grep -qi "registered\|success"; then
+    # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet.
+    DEPLOY_OUTPUT=""
+    INFERENCE_DEPLOYED=false
+    for deploy_attempt in $(seq 1 5); do
+        if DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.28.0 \
+                --gpu-count 1 --replicas 1 -r "$REGION" \
+                --extra-args '--model' --extra-args 'facebook/opt-125m' 2>&1) && \
+                echo "$DEPLOY_OUTPUT" | grep -qi "registered\|success"; then
+            INFERENCE_DEPLOYED=true
             break
         fi
-        sleep 5
+        if [ "$deploy_attempt" -lt 5 ]; then
+            sleep 5
+        fi
     done
+    if [ "$INFERENCE_DEPLOYED" != "true" ]; then
+        if [ -n "$DEPLOY_OUTPUT" ]; then
+            printf '  %s\n' "${DEPLOY_OUTPUT//$'\n'/$'\n  '}"
+        fi
+        warn "Inference deployment was not accepted after 5 attempts."
+        cleanup_inference_endpoint "$INFERENCE_NAME" || true
+        exit 1
+    fi
+    INFERENCE_CLEANUP_PENDING=1
+    trap 'cleanup_demo_inference_on_exit "$?"' EXIT
     success "Inference endpoint queued for deployment."
     spacer
 fi
@@ -789,30 +817,44 @@ for attempt in $(seq 1 50); do
     fi
 done
 
+INFERENCE_INVOKE_OK=0
 if [ "$INFERENCE_READY" = "true" ]; then
-    success "Inference endpoint is live."
-    spacer
+    success "Inference pod is Kubernetes-ready."
+    narrate "Kubernetes readiness is local; validating one real generation through the global route."
+    if wait_for_inference_generation "$INFERENCE_NAME" 4 10; then
+        success "End-to-end global inference route is ready."
+        spacer
 
-    highlight "Sending a prompt to the endpoint"
-    narrate "The shared inference route is already registered on the internal ALB."
-    narrate "Requests traverse API Gateway → Global Accelerator → ALB → authenticated proxy → vLLM."
-    narrate "API Gateway validates SigV4; the private backend hop uses private-root TLS plus a request-bound HMAC."
-    run_cmd "gco inference invoke $INFERENCE_NAME -p 'The benefits of GPU orchestration for ML workloads are: 1)' --max-tokens 80" || true
-    sleep "$PAUSE_LONG"
-
-    success "Live LLM response from a GPU that didn't exist minutes ago."
+        highlight "Sending a prompt to the endpoint"
+        narrate "The shared inference route is already registered on the internal ALB."
+        narrate "Requests traverse API Gateway → Global Accelerator → ALB → authenticated proxy → vLLM."
+        narrate "API Gateway validates SigV4; the private backend hop uses private-root TLS plus a request-bound HMAC."
+        if run_cmd "gco inference invoke $INFERENCE_NAME -p 'The benefits of GPU orchestration for ML workloads are: 1)' --max-tokens 80"; then
+            INFERENCE_INVOKE_OK=1
+            sleep "$PAUSE_LONG"
+            success "Live LLM response from a GPU that didn't exist minutes ago."
+        fi
+    else
+        warn "The end-to-end inference route did not become ready after 4 attempts."
+    fi
 else
-    warn "Endpoint not ready yet — GPU node may still be provisioning."
-    narrate "In a real demo, give it another minute. For now, moving on."
+    warn "Endpoint did not become Kubernetes-ready within the bounded wait."
 fi
 
 spacer
 highlight "Cleaning up the inference endpoint"
 narrate "This deletes the endpoint Deployment and internal Service. The GPU node"
 narrate "scales back to zero automatically once the pod is gone."
-run_cmd "gco inference delete $INFERENCE_NAME -y" || true
+INFERENCE_DELETE_OK=0
+if run_cmd "gco inference delete $INFERENCE_NAME -y"; then
+    INFERENCE_DELETE_OK=1
+    INFERENCE_CLEANUP_PENDING=0
+    trap - EXIT
+fi
 
-success "Endpoint deployed, invoked, and torn down — full lifecycle."
+if ! report_inference_lifecycle_result "$INFERENCE_INVOKE_OK" "$INFERENCE_DELETE_OK"; then
+    exit 1
+fi
 
 pause_for_audience
 

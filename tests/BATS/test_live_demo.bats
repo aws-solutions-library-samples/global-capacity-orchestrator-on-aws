@@ -119,6 +119,55 @@ setup() {
     [ "${result_lines[2]}" = "3" ]
 }
 
+@test "run_cmd propagates the wrapped command status" {
+    run run_cmd "bash -c 'exit 42'"
+    [ "$status" -eq 42 ]
+    [[ "$output" == *"Command exited with code 42"* ]]
+}
+
+@test "inference generation wait retries the exact global completion contract" {
+    local counter="$BATS_TEST_TMPDIR/inference-attempts"
+    local argv_log="$BATS_TEST_TMPDIR/inference-argv"
+    printf '0\n' > "$counter"
+    gco() {
+        local count
+        printf '%s\n' "$*" >> "$argv_log"
+        count=$(cat "$counter")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$counter"
+        [ "$count" -ge 2 ]
+    }
+    sleep() { :; }
+
+    run wait_for_inference_generation demo-llm 4 0
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$counter")" -eq 2 ]
+    [ "$(wc -l < "$argv_log" | tr -d ' ')" -eq 2 ]
+    while IFS= read -r invocation; do
+        [[ "$invocation" == "inference invoke demo-llm -p Reply with ready. --max-tokens 1" ]]
+        [[ "$invocation" != *" -r "* ]]
+        [[ "$invocation" != *" --region "* ]]
+    done < "$argv_log"
+}
+
+@test "inference generation wait fails at its bounded attempt limit" {
+    local counter="$BATS_TEST_TMPDIR/inference-exhausted-attempts"
+    printf '0\n' > "$counter"
+    gco() {
+        local count
+        count=$(cat "$counter")
+        printf '%s\n' "$((count + 1))" > "$counter"
+        return 1
+    }
+    sleep() { :; }
+
+    run wait_for_inference_generation demo-llm 3 0
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$counter")" -eq 3 ]
+}
+
 # ── Pause Duration Logic (calling real setup_pauses) ──────────────────────────
 
 @test "setup_pauses defaults to 3/5 without GCO_DEMO_FAST" {
@@ -275,14 +324,27 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-@test "inference section has deploy, invoke, and delete lifecycle" {
+@test "inference section fails closed around deploy invoke and delete" {
     grep -q "gco inference deploy" "$SCRIPT"
+    grep -q "wait_for_inference_generation" "$SCRIPT"
     grep -q "gco inference invoke" "$SCRIPT"
     grep -q "gco inference delete" "$SCRIPT"
+    grep -q "INFERENCE_INVOKE_OK" "$SCRIPT"
+    grep -q "INFERENCE_DELETE_OK" "$SCRIPT"
+    grep -q "report_inference_lifecycle_result" "$SCRIPT"
+    grep -q "cleanup_demo_inference_on_exit" "$SCRIPT"
+    run grep -E 'run_cmd "gco inference (invoke|delete).*" \|\| true' "$SCRIPT"
+    [ "$status" -ne 0 ]
+
+    local delete_line report_line
+    delete_line=$(grep -n 'if run_cmd "gco inference delete' "$SCRIPT" | cut -d: -f1)
+    report_line=$(grep -n 'if ! report_inference_lifecycle_result' "$SCRIPT" | cut -d: -f1)
+    [ "$delete_line" -lt "$report_line" ]
 }
 
-@test "inference polling loop has a bounded retry count" {
+@test "inference polling and global-route warm-up are bounded" {
     grep -q "seq 1 50" "$SCRIPT"
+    grep -q 'wait_for_inference_generation "\$INFERENCE_NAME" 4 10' "$SCRIPT"
 }
 
 @test "cleanup handles Volcano vcjob custom resource type" {
@@ -291,4 +353,30 @@ setup() {
 
 @test "live_demo.sh sources lib_demo.sh" {
     grep -q "source.*lib_demo.sh" "$SCRIPT"
+}
+
+@test "fallback inference cleanup warns with an actionable command on failure" {
+    gco() { return 1; }
+
+    run cleanup_inference_endpoint demo-llm
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"endpoint 'demo-llm' may still be running"* ]]
+    [[ "$output" == *"gco inference delete demo-llm -y"* ]]
+}
+
+@test "inference lifecycle report suppresses success on either failure" {
+    run report_inference_lifecycle_result 1 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Endpoint deployed, invoked, and torn down"* ]]
+
+    run report_inference_lifecycle_result 0 1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Endpoint deployed, invoked, and torn down"* ]]
+    [[ "$output" == *"false-success recording"* ]]
+
+    run report_inference_lifecycle_result 1 0
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Endpoint deployed, invoked, and torn down"* ]]
+    [[ "$output" == *"incomplete lifecycle recording"* ]]
 }

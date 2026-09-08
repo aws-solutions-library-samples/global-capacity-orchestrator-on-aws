@@ -109,6 +109,63 @@ run_cmd() {
     return "$exit_code"
 }
 
+# wait_for_inference_generation <endpoint> [attempts] [delay_seconds]
+#
+# Kubernetes readiness proves only the pod-local health endpoint. Before the
+# visible demo prompt, send a tiny real completion through the same unpinned
+# global API route narrated by live_demo.sh. This deliberately retries at the
+# workflow level: the generic client never replays POST automatically.
+wait_for_inference_generation() {
+    local endpoint="$1"
+    local attempts="${2:-4}"
+    local delay_seconds="${3:-10}"
+    local attempt
+
+    for attempt in $(seq 1 "$attempts"); do
+        if gco inference invoke "$endpoint" \
+                -p 'Reply with ready.' --max-tokens 1 >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            narrate "The global inference route is still converging; retrying in ${delay_seconds}s..."
+            sleep "$delay_seconds"
+        fi
+    done
+    return 1
+}
+
+# cleanup_inference_endpoint <endpoint>
+#
+# Best-effort fallback for ambiguous deployment failures and abnormal exits.
+# Preserve the caller's original status, but never hide a possible GPU leak.
+cleanup_inference_endpoint() {
+    local endpoint="$1"
+    if gco inference delete "$endpoint" -y >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "WARNING: inference endpoint '${endpoint}' may still be running." >&2
+    echo "Run: gco inference delete ${endpoint} -y" >&2
+    return 1
+}
+
+# report_inference_lifecycle_result <invoke_ok> <delete_ok>
+#
+# Print the full-lifecycle claim only when generation and normal cleanup both
+# succeeded. Callers propagate a nonzero result to the recorder.
+report_inference_lifecycle_result() {
+    local invoke_ok="$1"
+    local delete_ok="$2"
+    if [ "$invoke_ok" -ne 1 ]; then
+        warn "Inference generation failed; refusing to publish a false-success recording."
+        return 1
+    fi
+    if [ "$delete_ok" -ne 1 ]; then
+        warn "Inference cleanup failed; refusing to publish an incomplete lifecycle recording."
+        return 1
+    fi
+    success "Endpoint deployed, invoked, and torn down — full lifecycle."
+}
+
 pause_for_audience() {
     if [ "${GCO_DEMO_NONINTERACTIVE:-}" = "1" ]; then
         sleep 1
