@@ -2507,7 +2507,8 @@ class StackManager:
             ):
                 return True
         except Abort:
-            pass
+            interactive_echo("Aborted.")
+            return False
         interactive_echo("Aborted.")
         return False
 

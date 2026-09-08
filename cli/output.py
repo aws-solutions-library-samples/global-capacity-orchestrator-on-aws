@@ -310,9 +310,9 @@ class _StdoutCapture:
             raise
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        cleanup_error: BaseException | None = None
+        cleanup_error: Exception | None = None
 
-        def remember(error: BaseException) -> None:
+        def remember(error: Exception) -> None:
             nonlocal cleanup_error
             if cleanup_error is None:
                 cleanup_error = error
@@ -321,12 +321,12 @@ class _StdoutCapture:
             if self._redirect is not None:
                 try:
                     self._redirect.__exit__(exc_type, exc, traceback)
-                except BaseException as error:
+                except Exception as error:
                     remember(error)
                 try:
                     assert self._string_buffer is not None
                     self.text = self._string_buffer.getvalue()
-                except BaseException as error:
+                except Exception as error:
                     remember(error)
             else:
                 assert self._stream_fd is not None
@@ -334,25 +334,25 @@ class _StdoutCapture:
                 assert self._temporary is not None
                 try:
                     self._stream.flush()
-                except BaseException as error:
+                except Exception as error:
                     remember(error)
                 restored = False
                 try:
                     os.dup2(self._saved_fd, self._stream_fd)
                     restored = True
-                except BaseException:
+                except Exception:
                     # Keep the original descriptor alive and retry once before
                     # giving up; a transient restore failure must not strand
                     # process stdout on the capture file.
                     try:
                         os.dup2(self._saved_fd, self._stream_fd)
                         restored = True
-                    except BaseException as error:
+                    except Exception as error:
                         remember(error)
                 if restored:
                     try:
                         os.close(self._saved_fd)
-                    except BaseException as error:
+                    except Exception as error:
                         remember(error)
                     finally:
                         self._saved_fd = None
@@ -367,13 +367,13 @@ class _StdoutCapture:
                         )
                     except LookupError:
                         self.text = captured_bytes.decode("utf-8", errors="replace")
-                except BaseException as error:
+                except Exception as error:
                     remember(error)
                 finally:
                     if restored:
                         try:
                             self._temporary.close()
-                        except BaseException as error:
+                        except Exception as error:
                             remember(error)
                         self._temporary = None
         finally:
