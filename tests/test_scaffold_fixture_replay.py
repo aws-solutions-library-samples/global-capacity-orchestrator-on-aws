@@ -24,6 +24,7 @@ from mission.validation import validate_criteria  # noqa: E402
 from tests._scaffold_replay import (  # noqa: E402
     CANONICAL_CAPTURE_SLUGS,
     FIXTURES,
+    FIXTURES_BY_MODEL,
     REPLAY_CASES,
 )
 
@@ -59,11 +60,14 @@ def test_captured_response_round_trips_through_scaffolder(
     parsed = criteria_scaffold._parse_response(raw_response)
     if len(parsed) > _MAX:
         parsed = parsed[:_MAX]
-    parsed = [criteria_scaffold._normalize_kind_name(criterion) for criterion in parsed]
-    parsed = [criteria_scaffold._normalize_metric_path(criterion) for criterion in parsed]
-    parsed = [criteria_scaffold._autofix_predicate(criterion) for criterion in parsed]
+    parsed = criteria_scaffold._normalize_sampled_criteria(parsed)
 
     validated = validate_criteria(parsed)
+    criteria_scaffold._validate_sampled_criteria_context(
+        validated,
+        directive=directive,
+        allowlist=allowlist,
+    )
     assert validated
 
 
@@ -73,3 +77,11 @@ def test_fixture_catalog_contains_every_canonical_capture() -> None:
     required_slugs = set(CANONICAL_CAPTURE_SLUGS)
     for fixture in FIXTURES:
         assert required_slugs <= {capture.slug for capture in fixture.captures}, fixture.model_id
+
+
+def test_fixture_catalog_covers_the_maintained_capture_registry() -> None:
+    """Every default/curated model remains represented by an exact fixture."""
+    from scripts.capture_scaffold_fixtures import _default_models
+
+    missing = sorted(set(_default_models()) - FIXTURES_BY_MODEL.keys())
+    assert missing == []

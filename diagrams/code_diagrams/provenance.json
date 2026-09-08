@@ -152,9 +152,9 @@
       "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
     },
     "gco_mcp/mission/criteria_scaffold.py": {
-      "digest": "e718c12113830d89f27f464fec8d2f884c93f34b3baa04849dd89dc5fa751381",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "a79aaa4e28d34babd14c9904c812119910fdeb8dec08a87892c75fd6a976398e",
+      "generated_at": "2026-09-08T17:29:55Z",
+      "source_commit": "d90e024a1cf9e4e6aa80df5db9a888591c37625b"
     },
     "gco_mcp/mission/decide.py": {
       "digest": "3b11189acba687a20193bb83c95962628454502afdaf4d4a2de5d349cdebbef2",

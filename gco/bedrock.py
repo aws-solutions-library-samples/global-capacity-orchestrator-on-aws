@@ -64,17 +64,30 @@ _CLAUDE_ADAPTIVE_THINKING_MODELS = frozenset(
         "anthropic.claude-sonnet-4-6",
     }
 )
-# Claude dropped sampling controls starting with Opus 4.7 ("temperature,
-# top_p, and top_k parameters are no longer supported"); verified live against
-# the Opus 5 global profile, which answers a ValidationException for each.
-# ``maxTokens`` is accepted and passes through, but only when a caller opts
-# into a cap; GCO's own call sites deliberately set none, so the Converse
-# default — the model's own maximum output length — applies.
+# Claude request compatibility is deliberately independent of adaptive-thinking
+# support. Explicit model overrides never receive canonical reasoning fields,
+# but they still need model-safe sampling controls before the provenance return.
+# Opus 4.7/4.8/5 and Sonnet 5 deprecate these controls. Fable 5/5.1 accept
+# only constrained values (temperature unset or 1.0, topP unset or >= 0.99,
+# and no topK), so GCO's generic 0.1/0.2 temperatures are invalid there too.
+# Enumerate verified model lines rather than guessing from version-like names.
+_CLAUDE_RESTRICTED_SAMPLING_MODELS = frozenset(
+    {
+        "anthropic.claude-fable-5",
+        "anthropic.claude-fable-5-1",
+        "anthropic.claude-opus-4-7",
+        "anthropic.claude-opus-4-8",
+        "anthropic.claude-opus-5",
+        "anthropic.claude-sonnet-5",
+    }
+)
 _CLAUDE_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature", "topP", "topK"})
-# OpenAI GPT inference profiles currently reject Converse ``temperature`` even
-# for explicit overrides. Keep the normalization in this shared request builder
-# so Mission, the capacity advisor, and future Converse callers cannot drift.
+# OpenAI GPT and xAI Grok inference profiles currently reject Converse
+# ``temperature`` even for explicit overrides. Keep normalization in this
+# shared request builder so Mission, the capacity advisor, fixture capture, and
+# future Converse callers cannot drift.
 _OPENAI_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature"})
+_XAI_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature"})
 BEDROCK_READ_TIMEOUT_SECONDS = 3600
 _DISTRIBUTION_NAME = "gco-cli"
 _SOURCE_ROOT = Path(__file__).resolve().parent.parent
@@ -432,10 +445,22 @@ def _supports_claude_adaptive_thinking(model_id: str) -> bool:
     return base in _CLAUDE_ADAPTIVE_THINKING_MODELS
 
 
+def _requires_claude_sampling_normalization(model_id: str) -> bool:
+    """Return whether GCO's generic sampling controls are invalid for this Claude line."""
+    base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
+    return base in _CLAUDE_RESTRICTED_SAMPLING_MODELS
+
+
 def _is_openai_model(model_id: str) -> bool:
     """Return whether an id names an OpenAI foundation model or profile."""
     base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
     return base.startswith("openai.")
+
+
+def _is_xai_model(model_id: str) -> bool:
+    """Return whether an id names an xAI foundation model or profile."""
+    base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
+    return base.startswith("xai.")
 
 
 def _nova_reasoning_options(
@@ -511,18 +536,30 @@ def build_bedrock_converse_options(
       ``topK`` are dropped because Claude removed them from Opus 4.7 onward.
     * Nova 2 ``reasoningConfig`` — ``maxReasoningEffort``, with ``maxTokens``,
       ``temperature``, and ``topP`` dropped at ``high`` effort only.
-    * OpenAI GPT — unsupported ``temperature`` is dropped for canonical and
-      explicit models; no Converse reasoning dialect is inferred.
+    * OpenAI GPT and xAI Grok — unsupported ``temperature`` is dropped for
+      canonical and explicit models; no Converse reasoning dialect is inferred.
 
     A default model in neither reasoning dialect keeps its remaining
     caller-supplied inference controls and receives no reasoning fields.
     """
     resolved_inference = dict(inference_config or {})
+    if _requires_claude_sampling_normalization(model_id):
+        resolved_inference = {
+            key: value
+            for key, value in resolved_inference.items()
+            if key not in _CLAUDE_UNSUPPORTED_SAMPLING_FIELDS
+        }
     if _is_openai_model(model_id):
         resolved_inference = {
             key: value
             for key, value in resolved_inference.items()
             if key not in _OPENAI_UNSUPPORTED_SAMPLING_FIELDS
+        }
+    if _is_xai_model(model_id):
+        resolved_inference = {
+            key: value
+            for key, value in resolved_inference.items()
+            if key not in _XAI_UNSUPPORTED_SAMPLING_FIELDS
         }
     inference_only = {"inferenceConfig": resolved_inference} if resolved_inference else {}
     if apply_default_reasoning is False:

@@ -1,0 +1,32 @@
+{
+  "model_id": "google.gemma-3-12b-it",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T16:04:55.835762+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "prompt_sha256": "7df04bb911bde1893e1241d039969412d553e78c6f76911b4c6838849fea86ad",
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"doc_found_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"doc_found_2\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"docs_found\"\n  },\n  {\n    \"criterion_id\": \"examples_found_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"docs_mention_inference\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'] if r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs')\"\n  }\n]\n```"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "938a15f69283c31a4b94d2afb9b5bd886adfd27af4be2acec0ad50b6cfbc06eb",
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"val_loss_below_0.1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"find_examples_ok_status\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": false,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"val_loss_exists\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(k == 'val_loss' for k in obs['metrics'].keys())\"\n  }\n]\n```"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "1ce5245d5817c54a57da0fb991e3be9c17f0e764ccc7192e9e750b69cfd74710",
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"goal_reached_event_1\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_success_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"find_examples_success_2\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": false,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 2\n  },\n  {\n    \"criterion_id\": \"no_errors_1\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"find_examples_ok_status_1\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]\n```"
+    }
+  }
+}

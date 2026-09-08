@@ -20,6 +20,7 @@ Three groups of tests:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -867,3 +868,295 @@ class TestPromptToolCallSucceededTeach:
         assert ".items()" in prompt
         assert ".keys()" in prompt
         assert ".values()" in prompt
+
+
+class TestReasoningEnvelopeBoundaries:
+    """Reasoning delimiters require an unambiguous complete JSON suffix."""
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            (
+                "```json\nrationale\n</think>\n[]",
+                "unclosed Markdown fence",
+            ),
+            (
+                "rationale\n</think>\n",
+                "no JSON document follows </think>",
+            ),
+        ],
+    )
+    def test_malformed_reasoning_envelope_is_rejected(
+        self,
+        payload: str,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            criteria_scaffold._parse_response(payload)
+
+
+class TestNormalizeCriterionIds:
+    """Model-generated IDs are normalized without dropping any condition."""
+
+    def test_trims_ids_reserves_suffixes_and_preserves_invalid_entries(self) -> None:
+        criteria = [
+            {"criterion_id": "dup", "kind": "predicate"},
+            {"criterion_id": "dup", "kind": "predicate"},
+            {"criterion_id": "dup_2", "kind": "predicate"},
+            {"criterion_id": "  spaced  ", "kind": "predicate"},
+            {"kind": "predicate"},
+        ]
+
+        normalized = criteria_scaffold._normalize_criterion_ids(criteria)
+
+        assert [criterion.get("criterion_id") for criterion in normalized] == [
+            "dup",
+            "dup_3",
+            "dup_2",
+            "spaced",
+            None,
+        ]
+        assert [criterion.get("criterion_id") for criterion in criteria] == [
+            "dup",
+            "dup",
+            "dup_2",
+            "  spaced  ",
+            None,
+        ]
+        assert normalized[0] is criteria[0]
+        assert normalized[4] is criteria[4]
+        assert normalized[1] is not criteria[1]
+        assert normalized[3] is not criteria[3]
+
+        with pytest.raises(mission_validation.MissionValidationError) as exc_info:
+            mission_validation.validate_criteria([normalized[4]])
+        assert exc_info.value.details["reason"] == "criterion_id_missing_or_invalid"
+
+
+class TestPredicateToolReferences:
+    """Static tool-name proof accepts only complete literal comparisons."""
+
+    @staticmethod
+    def _validated(expression: str) -> dict[str, Any]:
+        return mission_validation.validate_criteria(
+            [
+                {
+                    "criterion_id": "tool-proof",
+                    "kind": "predicate",
+                    "required": True,
+                    "expression": expression,
+                }
+            ]
+        )[0]
+
+    @pytest.mark.parametrize(
+        ("criterion", "expected_names", "expected_unanalyzable"),
+        [
+            ({"expression": None}, set(), False),
+            ({"expression": "True"}, set(), False),
+            ({"expression": "tool_name +"}, set(), True),
+        ],
+    )
+    def test_defensive_uncached_inputs(
+        self,
+        criterion: dict[str, Any],
+        expected_names: set[str],
+        expected_unanalyzable: bool,
+    ) -> None:
+        assert criteria_scaffold._predicate_tool_references(criterion) == (
+            expected_names,
+            expected_unanalyzable,
+        )
+
+    @pytest.mark.parametrize(
+        ("expression", "expected_names", "expected_unanalyzable"),
+        [
+            (
+                "any(r.get('tool_name') in () for r in obs['tool_results'])",
+                set(),
+                True,
+            ),
+            (
+                "any(r.get('tool_name') in ('find_docs', 1) for r in obs['tool_results'])",
+                set(),
+                True,
+            ),
+            (
+                "any(r.get('tool_name') == r.get('expected_tool') for r in obs['tool_results'])",
+                set(),
+                True,
+            ),
+            (
+                "any(r.get('expected_tool') == r.get('tool_name') for r in obs['tool_results'])",
+                set(),
+                True,
+            ),
+            (
+                "any(k == 'tool_name' for k, v in obs['tool_results'][0].items())",
+                set(),
+                True,
+            ),
+            (
+                "any('find_docs' == r.get('tool_name') == 'other' for r in obs['tool_results'])",
+                set(),
+                True,
+            ),
+            (
+                "any('find_docs' == r.get('tool_name') for r in obs['tool_results'])",
+                {"find_docs"},
+                False,
+            ),
+        ],
+    )
+    def test_structurally_valid_reference_shapes(
+        self,
+        expression: str,
+        expected_names: set[str],
+        expected_unanalyzable: bool,
+    ) -> None:
+        criterion = self._validated(expression)
+        assert criteria_scaffold._predicate_tool_references(criterion) == (
+            expected_names,
+            expected_unanalyzable,
+        )
+
+
+class TestSampledCriteriaContext:
+    """Sampled criteria retry when they cannot be satisfied in context."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("bad_criterion", "expected_reason", "expected_signal"),
+        [
+            (
+                {
+                    "criterion_id": "dynamic-tool",
+                    "kind": "predicate",
+                    "required": True,
+                    "expression": (
+                        "any(k == 'tool_name' for k, v in obs['tool_results'][0].items())"
+                    ),
+                },
+                "tool_name_reference_not_statically_allowlisted",
+                None,
+            ),
+            (
+                {
+                    "criterion_id": "wrong-tool",
+                    "kind": "tool_call_succeeded",
+                    "required": True,
+                    "tool_name": "find_examples",
+                },
+                "tool_name_not_allowlisted",
+                None,
+            ),
+            (
+                {
+                    "criterion_id": "copied-loss-metric",
+                    "kind": "metric_threshold",
+                    "required": True,
+                    "metric": "metrics.val_loss",
+                    "op": "<",
+                    "target": 0.1,
+                },
+                "criterion_not_relevant_to_directive",
+                "val_loss",
+            ),
+            (
+                {
+                    "criterion_id": "copied-loss-predicate",
+                    "kind": "predicate",
+                    "required": True,
+                    "expression": "obs['metrics']['val_loss'] < 0.1",
+                },
+                "criterion_not_relevant_to_directive",
+                "val_loss",
+            ),
+            (
+                {
+                    "criterion_id": "copied-goal-event",
+                    "kind": "event",
+                    "required": True,
+                    "event_name": "goal_reached",
+                },
+                "criterion_not_relevant_to_directive",
+                "goal_reached",
+            ),
+            (
+                {
+                    "criterion_id": "copied-goal-predicate",
+                    "kind": "predicate",
+                    "required": True,
+                    "expression": ("any(e['event_name'] == 'goal_reached' for e in obs['events'])"),
+                },
+                "criterion_not_relevant_to_directive",
+                "goal_reached",
+            ),
+        ],
+    )
+    async def test_context_rejection_is_returned_as_retry_feedback(
+        self,
+        bad_criterion: dict[str, Any],
+        expected_reason: str,
+        expected_signal: str | None,
+    ) -> None:
+        good_criterion = {
+            "criterion_id": "accepted",
+            "kind": "predicate",
+            "required": True,
+            "expression": "True",
+        }
+        backend = _FakeBackend([json.dumps([bad_criterion]), json.dumps([good_criterion])])
+
+        result = await criteria_scaffold.generate_sampled_criteria(
+            backend,  # type: ignore[arg-type]
+            "Summarize documentation.",
+            allowlist=["find_docs"],
+            retries=1,
+        )
+
+        assert result[0]["criterion_id"] == "accepted"
+        assert expected_reason in backend.calls[1]
+        if expected_signal is not None:
+            assert expected_signal in backend.calls[1]
+
+    def test_non_string_tool_name_is_left_for_structural_validation(self) -> None:
+        malformed = {
+            "criterion_id": "bad-tool",
+            "kind": "tool_call_succeeded",
+            "required": True,
+            "tool_name": 7,
+        }
+
+        criteria_scaffold._validate_sampled_criteria_context(
+            [malformed],
+            directive="Summarize documentation.",
+            allowlist=["find_docs"],
+        )
+        with pytest.raises(mission_validation.MissionValidationError) as exc_info:
+            mission_validation.validate_criteria([malformed])
+        assert exc_info.value.details["reason"] == "tool_name_missing_or_invalid"
+
+
+def test_goal_directive_prompt_does_not_forbid_its_goal_signal() -> None:
+    prompt = criteria_scaffold.build_scaffold_prompt(
+        "Wait for the training job to emit a goal_reached event."
+    )
+
+    assert "Do not emit or reference goal_reached." not in prompt
+    assert "Do not emit or reference val_loss." in prompt
+
+
+@pytest.mark.asyncio
+async def test_anthropic_ftu_error_propagates_without_retry() -> None:
+    error = criteria_scaffold.BedrockFTUFormNotAcceptedError("FTU required")
+    backend = _FakeBackend([error])
+
+    with pytest.raises(criteria_scaffold.BedrockFTUFormNotAcceptedError) as exc_info:
+        await criteria_scaffold.generate_sampled_criteria(
+            backend,  # type: ignore[arg-type]
+            "Summarize documentation.",
+        )
+
+    assert exc_info.value is error
+    assert len(backend.calls) == 1

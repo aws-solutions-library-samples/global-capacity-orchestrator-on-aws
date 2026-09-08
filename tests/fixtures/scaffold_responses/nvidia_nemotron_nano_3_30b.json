@@ -1,0 +1,32 @@
+{
+  "model_id": "nvidia.nemotron-nano-3-30b",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T16:01:32.898903+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "prompt_sha256": "7df04bb911bde1893e1241d039969412d553e78c6f76911b4c6838849fea86ad",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"find_docs_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"find_examples_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"docs_contain_inference\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"inference_endpoint_found\"\n  },\n  {\n    \"criterion_id\": \"examples_contain_inference\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"example_inference_endpoint\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "938a15f69283c31a4b94d2afb9b5bd886adfd27af4be2acec0ad50b6cfbc06eb",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"criterion_001\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<=\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"criterion_002\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  }\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "1ce5245d5817c54a57da0fb991e3be9c17f0e764ccc7192e9e750b69cfd74710",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"training_job_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  }\n]"
+    }
+  }
+}

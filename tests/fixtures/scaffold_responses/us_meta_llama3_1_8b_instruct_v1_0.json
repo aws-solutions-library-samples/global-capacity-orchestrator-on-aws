@@ -1,0 +1,32 @@
+{
+  "model_id": "us.meta.llama3-1-8b-instruct-v1:0",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T15:58:23.174943+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "prompt_sha256": "25094d2759091da9dcce3a6747647acdc8e01ed654c30abf072b65378fa61b70",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n\n```json\n[\n  {\n    \"criterion_id\": \"inference_endpoints_found\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_documented\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.inference_endpoints\",\n    \"op\": \">\",\n    \"target\": 1\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_not_empty\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_not_empty_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_documented_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"inference_endpoints_documented\"\n  }\n]\n```\n\nThis JSON array meets all the requirements specified:\n\n* It contains exactly 5 criterion entries.\n* Each entry has a unique `criterion_id`.\n* Each entry has a `kind` field that is one of \"metric_threshold\", \"event\", \"predicate\", or \"tool_call_succeeded\".\n* Each entry has a `required` field that is a JSON boolean.\n* The \"metric_threshold\" kind has the required fields \"metric\", \"op\", and \"target\".\n* The \"event\" kind has the required field \"event_name\".\n* The \"tool_call_succeeded\" kind has the required field \"tool_name\" and an optional field \"min_count\" (not used in this example).\n* The \"predicate\" kind has the required field \"expression\".\n* The `expression` field in the \"predicate\" kind uses only allowed vocabulary and syntax.\n* The `tool_name` field in the \"tool_call_succeeded\" kind comes from the supplied allowlist.\n* The `event_name` field in the \"event\" kind is a non-empty string.\n* The `metric` field in the \"metric_threshold\" kind is a dot-path into the Observation."
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "97bcd0c378d0198b68d3c6d0730e31b58467bbf0df2e2177cb2defb704738b4a",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n\n```\n[\n  {\n    \"criterion_id\": \"drive_val_loss_below_0_1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  }\n]\n```\n\nThis criterion meets all the requirements:\n\n* It has a unique `criterion_id` value.\n* It has a `kind` value of \"metric_threshold\", which is one of the allowed kinds.\n* It has a `required` value of `true`, indicating that this criterion must be met.\n* It has a `metric` value of \"metrics.val_loss\", which is a valid dot-path into the Observation object.\n* It has an `op` value of \"<\", which is one of the allowed operators.\n* It has a `target` value of 0.1, which is a number.\n\nNote that I've used the `drive_val_loss_below_0_1` value for `criterion_id`, which is a unique and descriptive value that matches the directive."
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "63df0c1141c559105545197c90b6cd08dafa3730265d1470f0b5b6dc45c250ae",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n```\n[\n  {\n    \"criterion_id\": \"wait_for_goal_reached\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  }\n]\n```\nThis array meets all the requirements specified:\n\n* It contains at most 5 criterion entries.\n* Each criterion object has the required keys: `criterion_id`, `kind`, and `required`.\n* The `criterion_id` values are unique and non-empty strings.\n* The `kind` values are one of the allowed types: \"metric_threshold\", \"event\", \"predicate\", or \"tool_call_succeeded\".\n* The \"event\" criterion uses the `event_name` key and does not use the `expression` key.\n* The \"tool_call_succeeded\" criterion uses the `tool_name` key and comes from the supplied allowlist.\n* The \"predicate\" kind is not used in this example, but it would require a valid predicate expression as the `expression` key."
+    }
+  }
+}

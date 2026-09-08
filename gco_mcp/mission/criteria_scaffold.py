@@ -31,6 +31,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -41,8 +42,8 @@ from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-08T17:29:55Z
+# Generated from Git commit: d90e024a1cf9e4e6aa80df5db9a888591c37625b
 # Flowchart(s) generated from this file:
 #   * ``generate_sampled_criteria`` -> ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.png``)
@@ -334,6 +335,18 @@ def build_scaffold_prompt(
     response was rejected.
     """
     allowlist_block = "(none specified)" if not allowlist else ", ".join(allowlist)
+    folded_directive = directive.casefold().replace("-", "_")
+    context_guardrails: list[str] = []
+    if allowlist:
+        context_guardrails.append(
+            "The only valid tool_name values are: " + ", ".join(allowlist) + "."
+        )
+    else:
+        context_guardrails.append("Do not emit tool_call_succeeded criteria.")
+    if "loss" not in folded_directive:
+        context_guardrails.append("Do not emit or reference val_loss.")
+    if "goal_reached" not in folded_directive and "goal reached" not in folded_directive:
+        context_guardrails.append("Do not emit or reference goal_reached.")
     sections: list[str] = []
     sections.append(
         "You are drafting Success_Criteria for a Mission goal-directed "
@@ -459,6 +472,16 @@ def build_scaffold_prompt(
         "  obs['x'].y.z                     # attribute walk after subscript"
     )
     sections.append("")
+    sections.append("=== Final checklist ===")
+    sections.append(
+        "Use only conditions directly relevant to the operator's directive. "
+        "Do not copy example-only metric, event, or tool names unless the "
+        "directive calls for them. Every object must contain criterion_id, "
+        "kind, and an explicit required boolean, and all criterion_id values "
+        "must be unique. An event criterion must use event_name and must never "
+        "use expression. " + " ".join(context_guardrails)
+    )
+    sections.append("")
     sections.append("Output only the JSON array. No prose, no markdown fences.")
     if feedback:
         sections.append("")
@@ -467,27 +490,56 @@ def build_scaffold_prompt(
     return "\n".join(sections)
 
 
+def _strip_markdown_fence(text: str, *, require_closed: bool = False) -> str:
+    """Remove one Markdown fence, optionally requiring a closing delimiter."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    closed = len(stripped) >= 6 and stripped.endswith("```")
+    if not closed:
+        if require_closed:
+            raise ValueError("unclosed Markdown fence in model response")
+        first_newline = stripped.find("\n")
+        return stripped[first_newline + 1 :].strip() if first_newline != -1 else stripped
+    body = stripped[3:-3]
+    first_newline = body.find("\n")
+    if first_newline != -1:
+        body = body[first_newline + 1 :]
+    return body.strip()
+
+
 def _parse_response(text: str) -> list[dict[str, Any]]:
     """Extract a JSON array from a model response.
 
-    Models occasionally wrap JSON in markdown fences; tolerate that.
-    Raises ``ValueError`` when no JSON array is recoverable.
+    Models occasionally wrap JSON in Markdown fences. Reasoning models can
+    also expose prose followed by a standalone ``</think>`` terminator and a
+    final JSON document. For that exact envelope, only a complete strict-JSON
+    suffix is accepted; scanning rationale for an earlier draft array would be
+    ambiguous. Responses without the marker retain the established first-array
+    extraction behavior. Raises ``ValueError`` when no array is recoverable.
     """
-    stripped = text.strip()
-    # Strip markdown fences if present.
-    if stripped.startswith("```"):
-        # remove first fence line
-        first_newline = stripped.find("\n")
-        if first_newline != -1:
-            stripped = stripped[first_newline + 1 :]
-        if stripped.endswith("```"):
-            stripped = stripped[:-3].rstrip()
-    # Find the first '[' and last ']' so we tolerate trailing prose.
-    start = stripped.find("[")
-    end = stripped.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("no JSON array found in response")
-    parsed = json.loads(stripped[start : end + 1])
+    think_pattern = r"(?m)^[ \t]*</think>[ \t]*$"
+    stripped = _strip_markdown_fence(
+        text,
+        require_closed=re.search(think_pattern, text.strip()) is not None,
+    )
+    think_ends = list(re.finditer(think_pattern, stripped))
+    if think_ends:
+        stripped = _strip_markdown_fence(
+            stripped[think_ends[-1].end() :],
+            require_closed=True,
+        )
+        if not stripped:
+            raise ValueError("no JSON document follows </think> terminator")
+        parsed = json.loads(stripped)
+    else:
+        # Find the first '[' and last ']' so ordinary responses can carry
+        # leading/trailing prose without accepting arbitrary non-JSON syntax.
+        start = stripped.find("[")
+        end = stripped.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("no JSON array found in response")
+        parsed = json.loads(stripped[start : end + 1])
     if not isinstance(parsed, list):
         raise ValueError("JSON payload is not a list")
     out: list[dict[str, Any]] = []
@@ -685,6 +737,308 @@ def _autofix_predicate(criterion: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _materialize_required_default(criterion: dict[str, Any]) -> dict[str, Any]:
+    """Materialize the fail-closed default when a model omits ``required``.
+
+    Explicit values, including invalid non-booleans, remain untouched so the
+    validator can reject them. Only an absent key becomes ``True``; this cannot
+    make Mission completion less strict.
+    """
+    if "required" in criterion:
+        return criterion
+    out = dict(criterion)
+    out["required"] = True
+    return out
+
+
+def _normalize_criterion_ids(criteria: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Trim valid IDs and suffix model-generated collisions deterministically.
+
+    Every condition is retained. Missing, non-string, or blank IDs remain
+    untouched for validation, while later duplicates receive an unused numeric
+    suffix. Original suffixed IDs are reserved up front so a repair never
+    steals a name that a later criterion already owns.
+    """
+    original_ids: list[str | None] = []
+    for criterion in criteria:
+        criterion_id = criterion.get("criterion_id")
+        if isinstance(criterion_id, str) and criterion_id.strip():
+            original_ids.append(criterion_id.strip())
+        else:
+            original_ids.append(None)
+
+    reserved = {criterion_id for criterion_id in original_ids if criterion_id is not None}
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for criterion, base in zip(criteria, original_ids, strict=True):
+        if base is None:
+            normalized.append(criterion)
+            continue
+        candidate = base
+        if candidate in seen:
+            suffix = 2
+            while f"{base}_{suffix}" in reserved:
+                suffix += 1
+            candidate = f"{base}_{suffix}"
+            reserved.add(candidate)
+        seen.add(candidate)
+        if criterion.get("criterion_id") == candidate:
+            normalized.append(criterion)
+            continue
+        out = dict(criterion)
+        out["criterion_id"] = candidate
+        normalized.append(out)
+    return normalized
+
+
+def _normalize_sampled_criteria(criteria: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply the conservative model-output normalizations in one stable order."""
+    normalized = [_normalize_kind_name(criterion) for criterion in criteria]
+    normalized = [_normalize_metric_path(criterion) for criterion in normalized]
+    normalized = [_autofix_predicate(criterion) for criterion in normalized]
+    normalized = [_materialize_required_default(criterion) for criterion in normalized]
+    return _normalize_criterion_ids(normalized)
+
+
+def _is_tool_name_accessor(node: ast.AST) -> bool:
+    """Return whether an expression reads a result's ``tool_name`` field."""
+    if isinstance(node, ast.Subscript):
+        return isinstance(node.slice, ast.Constant) and node.slice.value == "tool_name"
+    return bool(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "tool_name"
+    )
+
+
+def _literal_string_options(node: ast.AST) -> tuple[set[str], bool]:
+    """Return literal string choices and whether the whole operand is proven."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}, True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        if not node.elts:
+            return set(), False
+        values: set[str] = set()
+        for element in node.elts:
+            if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
+                return set(), False
+            values.add(element.value)
+        return values, True
+    return set(), False
+
+
+def _predicate_tool_references(criterion: Mapping[str, Any]) -> tuple[set[str], bool]:
+    """Return explicit tool IDs and whether any tool-name read is unanalyzable.
+
+    A tool-name accessor is accepted only when it is a direct comparison
+    operand against one or more literal strings. Wrappers, computed keys,
+    starred ``get`` arguments, dictionary enumeration, and other dynamic reads
+    from ``tool_results`` fail closed because the analyzer cannot prove that
+    their resulting tool IDs stay inside the caller's allowlist.
+    """
+    expression = criterion.get("expression")
+    if not isinstance(expression, str):
+        return set(), False
+
+    parsed = criterion.get("_parsed_ast")
+    if not isinstance(parsed, ast.Expression):
+        try:
+            parsed = parse_predicate(expression)
+        except PredicateRejected:
+            return set(), "tool_name" in expression
+
+    nodes = tuple(ast.walk(parsed))
+    string_literals = [
+        node.value
+        for node in nodes
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    compact_source = re.sub(r"[^a-z0-9_]", "", expression.casefold())
+    mentions_tool_name = "tool_name" in compact_source or "tool_name" in "".join(
+        value.casefold() for value in string_literals
+    )
+    references_tool_results = any(
+        value.casefold() == "tool_results" for value in string_literals
+    ) or any(
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "obs"
+        and node.attr == "tool_results"
+        for node in nodes
+    )
+    has_dynamic_observation_access = any(
+        (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "obs"
+            and not (
+                isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, (str, int))
+            )
+        )
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "obs"
+            and node.func.attr == "get"
+            and (
+                not node.args
+                or not isinstance(node.args[0], ast.Constant)
+                or not isinstance(node.args[0].value, str)
+            )
+        )
+        for node in nodes
+    )
+
+    has_dynamic_tool_result_access = False
+    if references_tool_results:
+        for node in nodes:
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and (
+                    node.func.attr == "items"
+                    or (
+                        node.func.attr == "get"
+                        and (
+                            not node.args
+                            or not isinstance(node.args[0], ast.Constant)
+                            or not isinstance(node.args[0].value, str)
+                        )
+                    )
+                )
+            ) or (
+                isinstance(node, ast.Subscript)
+                and not (
+                    isinstance(node.slice, ast.Constant)
+                    and isinstance(node.slice.value, (str, int))
+                )
+            ):
+                has_dynamic_tool_result_access = True
+
+    accessor_ids = {id(node) for node in nodes if _is_tool_name_accessor(node)}
+    if not accessor_ids:
+        return (
+            set(),
+            mentions_tool_name or has_dynamic_observation_access or has_dynamic_tool_result_access,
+        )
+
+    names: set[str] = set()
+    matched_accessor_ids: set[int] = set()
+    for node in nodes:
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        if len(node.ops) > 1 and any(id(operand) in accessor_ids for operand in operands):
+            # One accessor participates in multiple comparison legs. Treat the
+            # chain as unanalyzable rather than letting one literal leg mask a
+            # computed or off-allowlist sibling.
+            continue
+        for left, right in zip(operands, operands[1:], strict=False):
+            if id(left) in accessor_ids:
+                literals, fully_literal = _literal_string_options(right)
+                if fully_literal:
+                    names.update(literals)
+                    matched_accessor_ids.add(id(left))
+            if id(right) in accessor_ids:
+                literals, fully_literal = _literal_string_options(left)
+                if fully_literal:
+                    names.update(literals)
+                    matched_accessor_ids.add(id(right))
+    return (
+        names,
+        has_dynamic_observation_access
+        or has_dynamic_tool_result_access
+        or matched_accessor_ids != accessor_ids,
+    )
+
+
+def _validate_sampled_criteria_context(
+    criteria: Sequence[Mapping[str, Any]],
+    *,
+    directive: str,
+    allowlist: list[str] | None,
+) -> None:
+    """Reject model criteria that cannot be satisfied in the supplied context.
+
+    Structural validation alone cannot know which tools Mission may execute or
+    whether schema examples leaked into an unrelated directive. This sampled-
+    output-only gate keeps direct and predicate tool references inside the
+    caller's allowlist and rejects the two exact example signals when the
+    directive does not mention them. It never rewrites model intent.
+    """
+    allowed_tools = set(allowlist or ())
+    folded_directive = directive.casefold().replace("-", "_")
+    mentions_loss = "loss" in folded_directive
+    mentions_goal = "goal_reached" in folded_directive or "goal reached" in folded_directive
+
+    for criterion in criteria:
+        criterion_id = criterion.get("criterion_id")
+        referenced_tools: set[str] = set()
+        has_unanalyzable_tool_reference = False
+        if criterion.get("kind") == "tool_call_succeeded":
+            tool_name = criterion.get("tool_name")
+            if isinstance(tool_name, str):
+                referenced_tools.add(tool_name)
+        elif criterion.get("kind") == "predicate":
+            referenced_tools, has_unanalyzable_tool_reference = _predicate_tool_references(
+                criterion
+            )
+        if has_unanalyzable_tool_reference:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "criteria",
+                    "criterion_id": criterion_id,
+                    "reason": "tool_name_reference_not_statically_allowlisted",
+                },
+            )
+        disallowed = sorted(referenced_tools - allowed_tools)
+        if disallowed:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "criteria",
+                    "criterion_id": criterion_id,
+                    "reason": "tool_name_not_allowlisted",
+                    "tool_names": disallowed,
+                },
+            )
+
+        metric = criterion.get("metric")
+        expression = criterion.get("expression")
+        event_name = criterion.get("event_name")
+        if not mentions_loss and (
+            metric == "metrics.val_loss"
+            or (isinstance(expression, str) and "val_loss" in expression.casefold())
+        ):
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "criteria",
+                    "criterion_id": criterion_id,
+                    "reason": "criterion_not_relevant_to_directive",
+                    "signal": "val_loss",
+                },
+            )
+        if not mentions_goal and (
+            event_name == "goal_reached"
+            or (isinstance(expression, str) and "goal_reached" in expression.casefold())
+        ):
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "criteria",
+                    "criterion_id": criterion_id,
+                    "reason": "criterion_not_relevant_to_directive",
+                    "signal": "goal_reached",
+                },
+            )
+
+
 async def generate_sampled_criteria(
     backend: SamplingBackend,
     directive: str,
@@ -747,40 +1101,20 @@ async def generate_sampled_criteria(
                 f"markdown fences. ({exc})"
             )
             continue
-        # Cap to max_criteria — if the model returned more, truncate
-        # rather than rejecting outright. The structural validator
-        # below catches everything else.
+        # Cap before normalization so model output can never exceed the
+        # operator-selected criterion budget. The shared helper then applies
+        # only conservative, meaning-preserving model-output repairs before
+        # strict structural validation.
         if len(parsed) > max_criteria:
             parsed = parsed[:max_criteria]
-        # Best-effort kind-name normalisation runs first so the
-        # metric-path / predicate-autofix passes branch correctly on
-        # the canonical ``kind``. Models occasionally pluralise
-        # (``tool_calls_succeeded``) or hyphenate
-        # (``tool-call-succeeded``) the kind name; rewriting to the
-        # canonical form here saves a retry round-trip. The map is
-        # closed and explicit — see ``_KIND_ALIASES``.
-        parsed = [_normalize_kind_name(c) for c in parsed]
-        # Best-effort normalisation: a model that emits a bare metric
-        # name (``"val_loss"``) instead of the dot-path
-        # (``"metrics.val_loss"``) the engine actually walks would
-        # otherwise produce a session whose metric_threshold criterion
-        # silently evaluates ``inconclusive: metric_path_missing`` on
-        # every iteration. The prompt now teaches this convention but
-        # we still post-process for robustness against older prompts
-        # and models that ignore the schema.
-        parsed = [_normalize_metric_path(c) for c in parsed]
-        # Best-effort autofix for predicate expressions: the predicate
-        # AST validator rejects attribute-walk patterns
-        # (``obs.metrics.val_loss``) and method-call shapes
-        # (``obs.get('x')``, ``obs.x.any()``) — both are common Python
-        # idioms the model defaults to. The rewriter rescues the
-        # attribute-walk shape into subscript notation; method-call
-        # shapes that need creative rewriting fall through to the
-        # standard retry-with-feedback path so the model gets the
-        # rejection token and tries again.
-        parsed = [_autofix_predicate(c) for c in parsed]
+        parsed = _normalize_sampled_criteria(parsed)
         try:
             validated = _validation.validate_criteria(parsed)
+            _validate_sampled_criteria_context(
+                validated,
+                directive=directive,
+                allowlist=allowlist,
+            )
         except MissionValidationError as exc:
             details = exc.details or {}
             last_reason = str(details.get("reason") or exc.code)

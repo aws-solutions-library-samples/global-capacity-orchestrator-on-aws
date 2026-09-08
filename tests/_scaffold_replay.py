@@ -10,6 +10,7 @@ module.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,15 +20,29 @@ from gco.bedrock import get_default_mission_model_id
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scaffold_responses"
+PROVENANCE_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "scaffold_response_capture_provenance.json"
+)
 
 # Scaffold fixtures are Mission sampling captures, so replay follows the
-# Mission knob.
+# Mission knob. Canonical slugs are bound to exact prompt inputs so a renamed
+# or repurposed capture cannot masquerade as one of the three branches.
 DEFAULT_MODEL_ID = get_default_mission_model_id()
-CANONICAL_CAPTURE_SLUGS = (
-    "search_inference_docs",
-    "metric_drive_loss",
-    "event_goal_reached",
-)
+CANONICAL_CAPTURE_INPUTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "search_inference_docs": (
+        "Find documentation about inference endpoints.",
+        ("find_examples", "find_docs"),
+    ),
+    "metric_drive_loss": (
+        "Drive validation loss below 0.1 on the demo training tool.",
+        ("find_examples",),
+    ),
+    "event_goal_reached": (
+        "Wait for the training job to emit a goal_reached event.",
+        ("find_examples",),
+    ),
+}
+CANONICAL_CAPTURE_SLUGS = tuple(CANONICAL_CAPTURE_INPUTS)
 
 
 class FixtureContractError(ValueError):
@@ -43,6 +58,7 @@ class ScaffoldReplayCapture:
     slug: str
     directive: str
     allowlist: tuple[str, ...]
+    prompt_sha256: str | None
     raw_response: str
 
 
@@ -90,6 +106,74 @@ def _nonempty_string(value: Any, *, path: Path, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise FixtureContractError(f"{_location(path, field)} must be a non-empty string")
     return value
+
+
+def _load_prompt_provenance(path: Path) -> tuple[frozenset[str], dict[str, dict[str, str]]]:
+    """Load legacy exceptions and prompt hashes for pre-hash capture cohorts."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FixtureContractError(f"could not load prompt provenance {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise FixtureContractError(f"{path} must contain provenance version 1")
+
+    legacy_payload = payload.get("legacy_unversioned_model_ids")
+    if not isinstance(legacy_payload, list) or not all(
+        isinstance(model_id, str) and model_id.strip() for model_id in legacy_payload
+    ):
+        raise FixtureContractError(f"{path}:legacy_unversioned_model_ids must be strings")
+    if len(legacy_payload) != len(set(legacy_payload)):
+        raise FixtureContractError(f"{path}:legacy_unversioned_model_ids contains duplicates")
+    legacy = frozenset(legacy_payload)
+
+    cohorts = payload.get("cohorts")
+    if not isinstance(cohorts, list):
+        raise FixtureContractError(f"{path}:cohorts must be a list")
+    prompt_hashes: dict[str, dict[str, str]] = {}
+    for index, cohort in enumerate(cohorts):
+        if not isinstance(cohort, dict):
+            raise FixtureContractError(f"{path}:cohorts.{index} must be an object")
+        _nonempty_string(cohort.get("name"), path=path, field=f"cohorts.{index}.name")
+        source_sha = _nonempty_string(
+            cohort.get("source_git_sha"),
+            path=path,
+            field=f"cohorts.{index}.source_git_sha",
+        )
+        if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+            raise FixtureContractError(f"{path}:cohorts.{index}.source_git_sha is not a full SHA")
+
+        hashes_payload = cohort.get("prompt_sha256_by_slug")
+        if not isinstance(hashes_payload, dict) or set(hashes_payload) != set(
+            CANONICAL_CAPTURE_SLUGS
+        ):
+            raise FixtureContractError(
+                f"{path}:cohorts.{index}.prompt_sha256_by_slug must cover canonical slugs"
+            )
+        hashes: dict[str, str] = {}
+        for slug in CANONICAL_CAPTURE_SLUGS:
+            digest = hashes_payload.get(slug)
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise FixtureContractError(
+                    f"{path}:cohorts.{index}.prompt_sha256_by_slug.{slug} is invalid"
+                )
+            hashes[slug] = digest
+
+        model_ids = cohort.get("model_ids")
+        if not isinstance(model_ids, list) or not all(
+            isinstance(model_id, str) and model_id.strip() for model_id in model_ids
+        ):
+            raise FixtureContractError(f"{path}:cohorts.{index}.model_ids must be strings")
+        if len(model_ids) != len(set(model_ids)):
+            raise FixtureContractError(f"{path}:cohorts.{index}.model_ids contains duplicates")
+        for model_id in model_ids:
+            if model_id in legacy or model_id in prompt_hashes:
+                raise FixtureContractError(f"{path}: duplicate provenance for {model_id}")
+            prompt_hashes[model_id] = dict(hashes)
+
+    return legacy, prompt_hashes
+
+
+LEGACY_UNVERSIONED_MODELS, COHORT_PROMPT_HASHES = _load_prompt_provenance(PROVENANCE_PATH)
 
 
 def load_fixture(path: Path) -> ScaffoldReplayFixture:
@@ -171,6 +255,35 @@ def load_fixture(path: Path) -> ScaffoldReplayFixture:
                 f"{_location(path, f'{capture_field}.prompt_allowlist')} contains "
                 "duplicate tool names"
             )
+        allowlist = tuple(allowlist_payload)
+
+        expected_inputs = CANONICAL_CAPTURE_INPUTS.get(slug)
+        if expected_inputs is not None and (directive, allowlist) != expected_inputs:
+            raise FixtureContractError(
+                f"{_location(path, capture_field)} does not match canonical prompt inputs"
+            )
+
+        prompt_sha256 = capture_payload.get("prompt_sha256")
+        if prompt_sha256 is not None:
+            if (
+                not isinstance(prompt_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", prompt_sha256) is None
+            ):
+                raise FixtureContractError(
+                    f"{_location(path, f'{capture_field}.prompt_sha256')} is invalid"
+                )
+        else:
+            cohort_hashes = COHORT_PROMPT_HASHES.get(model_id)
+            if cohort_hashes is not None:
+                prompt_sha256 = cohort_hashes.get(slug)
+                if prompt_sha256 is None:
+                    raise FixtureContractError(
+                        f"{_location(path, capture_field)} has no cohort prompt hash"
+                    )
+            elif model_id not in LEGACY_UNVERSIONED_MODELS:
+                raise FixtureContractError(
+                    f"{_location(path, capture_field)} has no prompt provenance"
+                )
 
         captures.append(
             ScaffoldReplayCapture(
@@ -178,7 +291,8 @@ def load_fixture(path: Path) -> ScaffoldReplayFixture:
                 model_id=model_id,
                 slug=slug,
                 directive=directive,
-                allowlist=tuple(allowlist_payload),
+                allowlist=allowlist,
+                prompt_sha256=prompt_sha256,
                 raw_response=raw_response,
             )
         )
@@ -210,6 +324,13 @@ def load_fixture_catalog(
     )
     if duplicate_model_ids:
         raise FixtureContractError("duplicate fixture model ids: " + ", ".join(duplicate_model_ids))
+
+    documented_models = LEGACY_UNVERSIONED_MODELS | COHORT_PROMPT_HASHES.keys()
+    stale_provenance = sorted(set(documented_models) - set(model_ids))
+    if stale_provenance:
+        raise FixtureContractError(
+            "prompt provenance references missing fixtures: " + ", ".join(stale_provenance)
+        )
 
     if DEFAULT_MODEL_ID not in model_ids:
         raise FixtureContractError(f"default model fixture is missing: {DEFAULT_MODEL_ID}")

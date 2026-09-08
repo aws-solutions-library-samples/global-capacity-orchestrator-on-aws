@@ -1,0 +1,29 @@
+{
+  "model_id": "minimax.minimax-m2.1",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T15:11:54.265299+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "\n\n[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": false,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"results_contain_inference\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"results_contain_endpoints\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('endpoint' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"documentation_content_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(len(str(r)) > 50 and ('doc' in str(r).lower() or 'api' in str(r).lower() or 'guide' in str(r).lower()) for r in obs['tool_results'])\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "\n\n[\n  {\n    \"criterion_id\": \"val_loss_below_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"val_loss_metric_exists\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(k == 'val_loss' for k in obs['metrics'].keys())\"\n  },\n  {\n    \"criterion_id\": \"tool_results_present\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  }\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "\n\n[{\"criterion_id\": \"goal_reached_event\", \"kind\": \"event\", \"required\": true, \"event_name\": \"goal_reached\"}, {\"criterion_id\": \"no_errors\", \"kind\": \"predicate\", \"required\": false, \"expression\": \"len(obs.get('errors', [])) == 0\"}]"
+    }
+  }
+}

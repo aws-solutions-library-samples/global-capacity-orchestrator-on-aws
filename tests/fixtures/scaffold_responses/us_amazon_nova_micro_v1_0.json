@@ -1,7 +1,7 @@
 {
   "model_id": "us.amazon.nova-micro-v1:0",
   "region": "us-east-1",
-  "captured_at": "2026-05-29T12:49:46.960334+00:00",
+  "captured_at": "2026-09-08T16:01:39.840545+00:00",
   "captures": {
     "search_inference_docs": {
       "prompt_directive": "Find documentation about inference endpoints.",
@@ -9,21 +9,24 @@
         "find_examples",
         "find_docs"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"docs_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  }\n]"
+      "prompt_sha256": "7df04bb911bde1893e1241d039969412d553e78c6f76911b4c6838849fea86ad",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"example_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"docs_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"example_tool_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"doc_tool_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]"
     },
     "metric_drive_loss": {
       "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"loss_below_0.1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<=\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_called_at_least_once\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('tool_name') == 'find_examples' for r in obs['tool_results'])\"\n  }\n]"
+      "prompt_sha256": "938a15f69283c31a4b94d2afb9b5bd886adfd27af4be2acec0ad50b6cfbc06eb",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"loss_below_0.1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<=\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]"
     },
     "event_goal_reached": {
       "prompt_directive": "Wait for the training job to emit a goal_reached event.",
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_tool_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"tool_results_not_empty\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"metric_val_loss_exists\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(k == 'val_loss' for k in obs['metrics'].keys())\"\n  }\n]"
+      "prompt_sha256": "1ce5245d5817c54a57da0fb991e3be9c17f0e764ccc7192e9e750b69cfd74710",
+      "raw_response": "[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"find_examples_called\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('tool_name') == 'find_examples' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"training_job_not_failed\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"not any(e['event_name'] == 'training_job_failed' for e in obs['events'])\"\n  }\n]"
     }
   }
 }

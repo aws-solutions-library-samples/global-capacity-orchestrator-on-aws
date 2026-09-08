@@ -1,0 +1,32 @@
+{
+  "model_id": "meta.llama3-8b-instruct-v1:0",
+  "region": "us-east-1",
+  "captured_at": "2026-09-08T16:01:29.507116+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "prompt_sha256": "7df04bb911bde1893e1241d039969412d553e78c6f76911b4c6838849fea86ad",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n\n```\n[\n  {\n    \"criterion_id\": \"inference_endpoint_docs_found\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"tool_results.0.documentation_found\",\n    \"op\": \">\",\n    \"target\": 1\n  },\n  {\n    \"criterion_id\": \"inference_endpoint_examples_found\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"tool_results.0.example_found\",\n    \"op\": \">\",\n    \"target\": 1\n  },\n  {\n    \"criterion_id\": \"find_docs_tool_called\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]\n```"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "938a15f69283c31a4b94d2afb9b5bd886adfd27af4be2acec0ad50b6cfbc06eb",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n\n```\n[\n  {\n    \"criterion_id\": \"metric_threshold_1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"tool_call_succeeded_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  }\n]\n```\n\nThis JSON array contains two criterion objects. The first criterion is a metric threshold criterion that checks if the `val_loss` metric is less than 0.1. The second criterion is a tool call succeeded criterion that checks if the `find_examples` tool was called at least once."
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "prompt_sha256": "1ce5245d5817c54a57da0fb991e3be9c17f0e764ccc7192e9e750b69cfd74710",
+      "raw_response": "\n\nHere is the JSON array of criterion objects that the operator can hand to `gco mission start --criteria-file`:\n\n```\n[\n  {\n    \"criterion_id\": \"wait_for_goal_reached\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  }\n]\n```\n\nThis array contains two criterion objects. The first criterion is an event criterion that waits for the \"goal_reached\" event to be emitted. The second criterion is a tool call succeeded criterion that checks if the \"find_examples\" tool ran successfully."
+    }
+  }
+}
