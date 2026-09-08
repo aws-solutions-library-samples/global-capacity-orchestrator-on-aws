@@ -853,16 +853,16 @@ FIXTURE
     [ "$KUEUE_ENABLED" = "true" ]
 }
 
-@test "detect_features honors GCO_DEMO_ENABLE for all five optional features" {
+@test "detect_features honors GCO_DEMO_ENABLE for all six optional features" {
     command -v jq &>/dev/null || skip "jq not installed"
     local cdk="$TEST_TMPDIR/cdk.json"
     cat > "$cdk" <<'FIXTURE'
 {"context":{"helm":{"volcano":{"enabled":true},"kueue":{"enabled":true},
 "yunikorn":{"enabled":false},"slurm":{"enabled":false}},
 "fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
-"aurora_pgvector":{"enabled":false}}}
+"aurora_pgvector":{"enabled":false},"vector_store":{"enabled":false}}}
 FIXTURE
-    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
     export GCO_DEMO_ENABLE
     detect_features "$cdk"
     [ "$YUNIKORN_ENABLED" = "true" ]
@@ -870,6 +870,26 @@ FIXTURE
     [ "$FSX_ENABLED" = "true" ]
     [ "$VALKEY_ENABLED" = "true" ]
     [ "$AURORA_PGVECTOR_ENABLED" = "true" ]
+    [ "$VECTOR_STORE_ENABLED" = "true" ]
+}
+
+@test "detect_features reads the committed vector_store flag and forces it one-way" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"vector_store":{"enabled":false}}}
+FIXTURE
+    unset GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "false" ]
+    # Exact-name only: a longer name that contains it must not enable it.
+    GCO_DEMO_ENABLE="vector_store_extra"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "false" ]
+    GCO_DEMO_ENABLE="vector_store"
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "true" ]
 }
 
 @test "detect_features overrides are selective" {
@@ -902,8 +922,8 @@ FIXTURE
     [ "$FSX_ENABLED" = "true" ]
 }
 
-@test "verify_enablement_overrides accepts the documented five-feature set" {
-    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
+@test "verify_enablement_overrides accepts the documented six-feature set" {
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
     export GCO_DEMO_ENABLE
     run verify_enablement_overrides "$(pwd)"
     [ "$status" -eq 0 ]

@@ -285,6 +285,7 @@ echo "  ${BOLD}Slurm:${RESET}           $(feature_status "$SLURM_ENABLED")"
 echo "  ${BOLD}FSx Lustre:${RESET}      $(feature_status "$FSX_ENABLED")"
 echo "  ${BOLD}Valkey:${RESET}          $(feature_status "$VALKEY_ENABLED")"
 echo "  ${BOLD}Aurora pgvector:${RESET} $(feature_status "$AURORA_PGVECTOR_ENABLED")"
+echo "  ${BOLD}Vector store:${RESET}    $(feature_status "$VECTOR_STORE_ENABLED")"
 spacer
 
 pause_for_audience
@@ -760,6 +761,74 @@ pause_for_audience
 fi  # AURORA_PGVECTOR
 
 # ═════════════════════════════════════════════════════════════════════════════
+# SECTION: Globally Replicated Vector Store
+# ═════════════════════════════════════════════════════════════════════════════
+# The complement to Aurora pgvector rather than a competitor: pgvector gives
+# SQL (joins, range predicates, transactions), this gives a DynamoDB global
+# table whose vector index and data replicate to every deployment region, so
+# every cluster reads its own local replica. Ingestion is S3-triggered — drop
+# a document on the cluster-shared bucket and a Lambda chunks, embeds, and
+# writes it. This section only runs if the vector store is enabled.
+
+if [ "$VECTOR_STORE_ENABLED" = "true" ]; then
+
+SECTION=$((SECTION + 1)); section_header "$SECTION" "VECTOR STORE — Globally Replicated Semantic Search" "$BLUE"
+
+narrate "RAG workloads need their corpus close to the accelerators using it."
+narrate "GCO can provision a DynamoDB global table with a vector index whose"
+narrate "definition AND data replicate to every deployment region, so a job"
+narrate "in any region searches a local replica — no cross-region hop."
+spacer
+
+highlight "Vector store, replicas, and index state"
+run_cmd "gco vector status --output table" || true
+
+spacer
+narrate "Ingestion is just an upload: the S3 event invokes a Lambda that"
+narrate "chunks each document, embeds it with Amazon Bedrock Titan, and"
+narrate "writes the vectors. Let's seed it with GCO's own documentation."
+spacer
+
+VECTOR_INGESTED=0
+highlight "Ingesting the checkout's docs/*.md as a demo corpus"
+if run_cmd "gco vector ingest --demo --wait --output table"; then
+    VECTOR_INGESTED=1
+fi
+
+VECTOR_SEARCHED=0
+if [ "$VECTOR_INGESTED" -eq 1 ]; then
+    spacer
+    narrate "Now a semantic query — not a keyword grep. The store returns the"
+    narrate "passages closest in embedding space, with their similarity scores."
+    spacer
+
+    highlight "Semantic search: \"how does capacity history work?\""
+    if run_cmd "gco vector search 'how does capacity history work?' --top-k 5 --output table"; then
+        VECTOR_SEARCHED=1
+    fi
+
+    highlight "The same query against the ${REGION} replica (local read)"
+    run_cmd "gco vector search 'how does capacity history work?' --top-k 3 --region $REGION --output table" || true
+fi
+
+# The claim is "globally replicated semantic search", so both halves must hold:
+# a corpus that actually ingested, and a query that actually returned matches.
+VECTOR_PROVEN=0
+if [ "$VECTOR_INGESTED" -eq 1 ] && [ "$VECTOR_SEARCHED" -eq 1 ]; then
+    VECTOR_PROVEN=1
+fi
+if ! report_feature_result "$VECTOR_PROVEN" "Vector store" \
+        "Globally replicated vector search — ingest once, query in every region."; then
+    exit 1
+fi
+narrate "Complementary to Aurora pgvector, not a replacement: pgvector brings"
+narrate "SQL joins and transactions, this brings managed global replication."
+
+pause_for_audience
+
+fi  # VECTOR_STORE
+
+# ═════════════════════════════════════════════════════════════════════════════
 # SECTION: EFS Shared Storage
 # ═════════════════════════════════════════════════════════════════════════════
 # EFS (Elastic File System) is always deployed — it's the default shared
@@ -928,6 +997,9 @@ if [ "$VALKEY_ENABLED" = "true" ]; then
 fi
 if [ "$AURORA_PGVECTOR_ENABLED" = "true" ]; then
     echo "  ${GREEN}✓${RESET} Aurora pgvector serverless vector database"
+fi
+if [ "$VECTOR_STORE_ENABLED" = "true" ]; then
+    echo "  ${GREEN}✓${RESET} Globally replicated vector store with semantic search"
 fi
 echo "  ${GREEN}✓${RESET} EFS persistent shared storage"
 if [ "${SKIP_INFERENCE:-}" != "1" ]; then

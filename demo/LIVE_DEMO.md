@@ -149,8 +149,16 @@ it for this run (see [Feature detection](#feature-detection)).
 | 7 | FSx for Lustre — high-performance scratch storage | `fsx_lustre.enabled` or `GCO_DEMO_ENABLE=fsx_lustre` |
 | 8 | Valkey cache — serverless K/V caching | `valkey.enabled` or `GCO_DEMO_ENABLE=valkey` |
 | 9 | Aurora pgvector — serverless vector database | `aurora_pgvector.enabled` or `GCO_DEMO_ENABLE=aurora_pgvector` |
-| 10 | EFS shared storage — persistent job outputs | Always |
-| 11 | Inference endpoint — deploy, invoke, and teardown | Always (skip with `SKIP_INFERENCE=1`) |
+| 10 | Vector store — globally replicated semantic search (`gco vector status` / `ingest --demo` / `search`) | `vector_store.enabled` or `GCO_DEMO_ENABLE=vector_store` |
+| 11 | EFS shared storage — persistent job outputs | Always |
+| 12 | Inference endpoint — deploy, invoke, and teardown | Always (skip with `SKIP_INFERENCE=1`) |
+
+Section 10 ingests the checkout's `docs/*.md` with `gco vector ingest --demo --wait`,
+then runs a semantic query against both the global table and the regional replica.
+Its success claim requires the ingest *and* the search to succeed, so an empty or
+still-building index fails the recording instead of printing an unearned tick.
+The vector index takes several minutes to become `ACTIVE` after a first deploy —
+`gco vector status` reports that state, and searches fail until it is.
 
 Sections 3-6 are additionally skipped as a block by `SKIP_SCHEDULERS=1`.
 
@@ -193,7 +201,7 @@ nonzero without publishing the failed take.
 out of `cdk.json` with `jq`, then applies `GCO_DEMO_ENABLE` on top:
 
 ```bash
-GCO_DEMO_ENABLE=fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn bash demo/live_demo.sh
+GCO_DEMO_ENABLE=fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn bash demo/live_demo.sh
 ```
 
 `GCO_DEMO_ENABLE` takes the same names as

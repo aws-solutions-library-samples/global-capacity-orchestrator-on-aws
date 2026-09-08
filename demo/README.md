@@ -10,7 +10,9 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 > Automated demo showing fleet status, cost and policy agreement, capacity-aware placement,
 > 4 schedulers running simultaneously (Volcano, Kueue, YuniKorn, Slurm),
 > high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)),
-> an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) vector database, and live
+> an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) vector database,
+> a globally replicated vector store answering a real semantic query over GCO's
+> own docs (`gco vector ingest --demo` then `gco vector search`), and live
 > LLM inference — all on one platform. See the guarded live and offline
 > re-render commands in [LIVE_DEMO.md](LIVE_DEMO.md#recording-the-demo).
 
@@ -21,9 +23,9 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Deploy](deploy.gif)
 
-*Fresh `gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn`
+*Fresh `gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn`
 from a clean account, provisioning the full optional topology the live demo then
-exercises ([re-record](record_deploy.sh)). The five add-ons ship disabled in
+exercises ([re-record](record_deploy.sh)). The six add-ons ship disabled in
 `cdk.json` because each bills continuously, so the recording enables them for one
 run through [run-scoped overrides](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides)
 rather than changing the committed defaults.*
@@ -35,7 +37,7 @@ rather than changing the committed defaults.*
 
 ![GCO Destroy](destroy.gif)
 
-*Full teardown with `gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn`
+*Full teardown with `gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn`
 ([re-record](record_destroy.sh)). The teardown repeats the deploy's overrides so it
 evaluates the same app; deletion itself does not depend on them, since
 `DeleteStack` removes whatever the deployed template contains.*
@@ -103,7 +105,7 @@ live mutation:
 export GCO_RECORDING_LIVE=1
 export GCO_EXPECTED_GIT_SHA="<40-character CI-green commit SHA>"
 export GCO_EXPECTED_ACCOUNT_ID="<12-digit authorized AWS account ID>"
-export GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
+export GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
 bash demo/record_deploy.sh
 bash demo/record_demo.sh
 bash demo/record_destroy.sh

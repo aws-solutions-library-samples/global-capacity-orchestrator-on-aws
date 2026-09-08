@@ -305,7 +305,8 @@ setup() {
 
 @test "script contains all expected demo sections" {
     for section in "FLEET OVERVIEW" "CAPACITY DISCOVERY" "VOLCANO" "KUEUE" "YUNIKORN" "SLURM" \
-                   "FSx FOR LUSTRE" "VALKEY" "INFERENCE" "EFS" "Demo Complete"; do
+                   "FSx FOR LUSTRE" "VALKEY" "AURORA PGVECTOR" "VECTOR STORE" \
+                   "INFERENCE" "EFS" "Demo Complete"; do
         grep -q "$section" "$SCRIPT"
     done
 }
@@ -379,4 +380,33 @@ setup() {
     [ "$status" -ne 0 ]
     [[ "$output" != *"Endpoint deployed, invoked, and torn down"* ]]
     [[ "$output" == *"incomplete lifecycle recording"* ]]
+}
+
+@test "vector store section is gated and exercises status, ingest, and search" {
+    # The claim is "globally replicated semantic search", so the section must
+    # actually ingest a corpus and run a query rather than only report state.
+    grep -q 'if \[ "\$VECTOR_STORE_ENABLED" = "true" \]; then' "$SCRIPT"
+    grep -q 'gco vector status --output table' "$SCRIPT"
+    grep -q 'gco vector ingest --demo --wait --output table' "$SCRIPT"
+    grep -q 'gco vector search .* --top-k 5 --output table' "$SCRIPT"
+    grep -q 'fi  # VECTOR_STORE' "$SCRIPT"
+}
+
+@test "vector store section demonstrates a regional replica read" {
+    # Local-replica reads are the whole point of the global table, so the
+    # recording must show a query bound to a specific region.
+    grep -q 'gco vector search .*--region \$REGION' "$SCRIPT"
+}
+
+@test "vector store success claim requires both ingest and search to succeed" {
+    # Either half failing makes "ingest once, query in every region" false.
+    grep -q 'VECTOR_INGESTED=0' "$SCRIPT"
+    grep -q 'VECTOR_SEARCHED=0' "$SCRIPT"
+    grep -q 'if \[ "\$VECTOR_INGESTED" -eq 1 \] && \[ "\$VECTOR_SEARCHED" -eq 1 \]; then' "$SCRIPT"
+    grep -q 'report_feature_result "\$VECTOR_PROVEN" "Vector store"' "$SCRIPT"
+}
+
+@test "vector store appears in the feature summary and the closing recap" {
+    grep -q 'feature_status "\$VECTOR_STORE_ENABLED"' "$SCRIPT"
+    grep -q 'Globally replicated vector store with semantic search' "$SCRIPT"
 }

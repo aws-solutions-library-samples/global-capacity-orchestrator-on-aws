@@ -1437,8 +1437,8 @@ Every optional add-on ships **disabled** in `cdk.json` because each one bills co
 Sometimes you want a feature on for **one run** without changing that shipped posture: trying a scheduler before committing to a config change, validating an example that needs optional infrastructure, or recording a demo of the full topology. `--enable` does exactly that. It threads the request through CDK context instead of rewriting `cdk.json`, so the file stays clean (which also keeps clean-worktree preflights in the validation harnesses intact).
 
 ```bash
-# One run with all five optional features on; cdk.json is not modified.
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
+# One run with all six optional features on; cdk.json is not modified.
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn
 ```
 
 Names are validated before any AWS call, so a typo fails immediately rather than deploying without the feature you asked for. Repeated and comma-joined forms are equivalent (`--enable valkey --enable slurm` = `--enable valkey,slurm`).
@@ -1458,7 +1458,7 @@ Two properties matter:
 Teardown does **not** need the flag for correctness: `cdk destroy` issues a CloudFormation `DeleteStack`, which removes whatever the deployed template contains, and none of these names gates a whole stack. Passing it anyway keeps `destroy` evaluating the same app as the `deploy` that created the resources, which is why the demo recorders do:
 
 ```bash
-gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
+gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn
 ```
 
 `--enable` is most meaningful on the `-all` commands. On a single-stack `gco stacks deploy`, the context reaches only that stack, and none of the feature names is confined to one stack — `vector_store` creates its table in the global stack while regional stacks grant access to it, and `fsx_lustre`, `valkey`, and `aurora_pgvector` add dashboard widgets to the monitoring stack. A single-stack override therefore synthesizes and deploys a half-wired topology without complaining.

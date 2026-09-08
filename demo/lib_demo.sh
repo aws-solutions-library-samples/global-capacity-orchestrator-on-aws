@@ -376,6 +376,7 @@ detect_features() {
     FSX_ENABLED=$(jq -r '.context.fsx_lustre.enabled // false' "$cdk")
     VALKEY_ENABLED=$(jq -r '.context.valkey.enabled // false' "$cdk")
     AURORA_PGVECTOR_ENABLED=$(jq -r '.context.aurora_pgvector.enabled // false' "$cdk")
+    VECTOR_STORE_ENABLED=$(jq -r '.context.vector_store.enabled // false' "$cdk")
 
     # Overrides are one-way, matching the CDK context semantics: they can only
     # turn a feature on, never off. A feature an operator disabled stays
@@ -387,6 +388,7 @@ detect_features() {
     if demo_feature_forced fsx_lustre; then FSX_ENABLED=true; fi
     if demo_feature_forced valkey; then VALKEY_ENABLED=true; fi
     if demo_feature_forced aurora_pgvector; then AURORA_PGVECTOR_ENABLED=true; fi
+    if demo_feature_forced vector_store; then VECTOR_STORE_ENABLED=true; fi
 }
 
 detect_region() {

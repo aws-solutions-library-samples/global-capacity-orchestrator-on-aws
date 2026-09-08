@@ -353,13 +353,13 @@ FAKE_AWS
         GCO_RECORDING_LIVE=1 \
         GCO_EXPECTED_GIT_SHA="$expected_sha" \
         GCO_EXPECTED_ACCOUNT_ID=123456789012 \
-        GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn" \
+        GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn" \
         SKIP_GIF=1 \
         FAKE_PYTHON_INVOCATION_FILE="$python_file" \
         bash "$fixture/demo/record_destroy.sh"
 
     [ "$status" -eq 0 ]
     grep -Fxq -- '--enable' "$python_file"
-    grep -Fxq -- 'fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn' "$python_file"
+    grep -Fxq -- 'fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn' "$python_file"
     [ "$(grep -c -- '--enable' "$python_file")" -eq 1 ]
 }
