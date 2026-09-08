@@ -73,8 +73,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-08T04:02:10Z
-# Generated from Git commit: 90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4
+# Generated at (UTC): 2026-09-08T04:13:50Z
+# Generated from Git commit: f3e5b374540636aa07fb57c16ec36a51228dba7f
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
