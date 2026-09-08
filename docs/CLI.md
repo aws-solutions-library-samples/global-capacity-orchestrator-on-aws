@@ -1321,6 +1321,7 @@ gco stacks deploy STACK_NAME [OPTIONS]
 | `--yes` | `-y` | Skip confirmation |
 | `--outputs-file` | `-o` | Write stack outputs to a file |
 | `--tag` | `-t` | Add a stack tag (`KEY=VALUE`), repeatable |
+| `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
 
 **Example:**
 
@@ -1345,13 +1346,20 @@ gco stacks deploy-all [OPTIONS]
 | `--tag` | `-t` | Add a stack tag (`KEY=VALUE`), repeatable |
 | `--parallel` | `-p` | Deploy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
+| `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
 
 **Example:**
 
 ```bash
 gco stacks deploy-all -y
 gco stacks deploy-all -y --parallel --max-workers 8
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
 ```
+
+See [Run-scoped enablement overrides](CUSTOMIZATION.md#run-scoped-enablement-overrides)
+for the valid names and why `--enable` exists instead of editing `cdk.json`. Note
+that a later `deploy-all` *without* the same names deletes the resources this run
+forced on, because they are no longer in the synthesized template.
 
 #### `gco stacks destroy`
 
@@ -1367,6 +1375,7 @@ gco stacks destroy STACK_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--yes` | `-y` | Skip confirmation |
 | `--retain-volumes` | | Report the cluster's orphaned EBS volumes instead of deleting them |
+| `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
 
 #### `gco stacks destroy-all`
 
@@ -1384,6 +1393,7 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
+| `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
 
 ##### Dynamically provisioned EBS volumes
 

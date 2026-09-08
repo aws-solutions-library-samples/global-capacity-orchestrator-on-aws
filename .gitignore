@@ -64,6 +64,10 @@ logs/
 
 # Test coverage
 .coverage
+# Parallel-run shards (coverage combine inputs). Untracked shards would
+# otherwise fail the recorders' verify_recording_git_state, which inspects
+# --untracked-files=all, after any local `pytest -n` run.
+.coverage.*
 coverage.json
 coverage.xml
 .pytest_cache/

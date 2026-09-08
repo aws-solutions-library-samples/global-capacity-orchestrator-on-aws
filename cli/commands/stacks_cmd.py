@@ -2,6 +2,7 @@
 
 import re
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import click
@@ -10,6 +11,50 @@ from ..config import GCOConfig, _load_cdk_json
 from ..output import confirm, get_output_formatter, interactive_echo
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+_ENABLE_OPTION_HELP = (
+    "Force-enable an off-by-default feature or Helm chart for this run only "
+    "(repeatable, or comma-separated). Threads the request through CDK context "
+    "rather than rewriting cdk.json, so the committed opt-in defaults survive."
+)
+
+
+def _validate_enable(
+    ctx: click.Context, param: click.Parameter, value: tuple[str, ...]
+) -> dict[str, str]:
+    """Resolve ``--enable`` names into CDK context pairs at parse time.
+
+    Validating in the callback means a typo fails before any AWS call and
+    before the command's own ``try`` block, so an unknown name reports as a
+    bad parameter instead of masquerading as a deployment failure.
+    """
+    from gco.enablement_overrides import EnablementOverrideError, route_enablement_overrides
+
+    try:
+        return route_enablement_overrides(value)
+    except EnablementOverrideError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+def _apply_enable_overrides(formatter: Any, manager: Any, enable: Mapping[str, str]) -> None:
+    """Register run-scoped enablement context and disclose it before mutating AWS.
+
+    The context rides every CDK invocation of the command so ``list``, ``synth``,
+    and the lifecycle call all evaluate the same app.
+
+    On ``destroy`` this is about synth symmetry, not about what gets deleted:
+    ``cdk destroy`` issues a CloudFormation ``DeleteStack``, which removes
+    whatever the *deployed* template contains, and none of the override names
+    gates a whole stack. The hazard runs the other way — see the ``--enable``
+    warning in docs/CUSTOMIZATION.md: re-deploying *without* the overrides
+    synthesizes a template that no longer declares the forced-on resources, and
+    CloudFormation deletes them as an ordinary stack update.
+    """
+    if not enable:
+        return
+    manager.set_extra_cdk_context(dict(enable))
+    for key, value in sorted(enable.items()):
+        formatter.print_info(f"Run-scoped override: {key}={value}")
 
 
 @click.group()
@@ -124,8 +169,23 @@ def _print_cluster_access_hint(formatter: Any, config: Any, stack_name: str) -> 
 @click.option("--yes", "-y", is_flag=True, help="Skip approval prompts")
 @click.option("--outputs-file", "-o", help="Write outputs to file")
 @click.option("--tag", "-t", multiple=True, help="Add tags (key=value)")
+@click.option(
+    "--enable",
+    "enable",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_validate_enable,
+    help=_ENABLE_OPTION_HELP,
+)
 @pass_config
-def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag: Any) -> None:
+def deploy_stack(
+    config: Any,
+    stack_name: Any,
+    yes: Any,
+    outputs_file: Any,
+    tag: Any,
+    enable: Mapping[str, str],
+) -> None:
     """Deploy a single CDK stack to AWS.
 
     For deploying all stacks in the correct order, use 'deploy-all'.
@@ -134,6 +194,13 @@ def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag:
         gco stacks deploy gco-us-east-1
         gco stacks deploy gco-global -y
         gco stacks deploy gco-us-east-1 -t Environment=prod
+        gco stacks deploy gco-us-east-1 -y --enable fsx_lustre,valkey
+
+    --enable is scoped to this one stack, and no override name is confined to a
+    single stack (vector_store's table lives in the global stack; FSx, Valkey,
+    and Aurora add monitoring-stack dashboard widgets). A single-stack override
+    therefore deploys a partially wired feature without complaining. Prefer
+    'deploy-all --enable' unless you specifically want that.
     """
     from ..stacks import get_stack_manager
 
@@ -148,6 +215,7 @@ def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag:
 
     try:
         manager = get_stack_manager(config)
+        _apply_enable_overrides(formatter, manager, enable)
 
         formatter.print_info(f"Deploying {stack_name}...")
 
@@ -178,8 +246,22 @@ def deploy_stack(config: Any, stack_name: Any, yes: Any, outputs_file: Any, tag:
     is_flag=True,
     help="Report the cluster's orphaned EBS volumes instead of deleting them",
 )
+@click.option(
+    "--enable",
+    "enable",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_validate_enable,
+    help=_ENABLE_OPTION_HELP,
+)
 @pass_config
-def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -> None:
+def destroy_stack(
+    config: Any,
+    stack_name: Any,
+    yes: Any,
+    retain_volumes: Any,
+    enable: Mapping[str, str],
+) -> None:
     """Destroy a single CDK stack.
 
     For destroying all stacks in the correct order, use 'destroy-all'.
@@ -194,6 +276,7 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -
         gco stacks destroy gco-us-east-1
         gco stacks destroy gco-us-east-1 -y
         gco stacks destroy gco-us-east-1 -y --retain-volumes
+        gco stacks destroy gco-us-east-1 -y --enable fsx_lustre,valkey
     """
     from ..stacks import get_stack_manager
 
@@ -204,6 +287,7 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -
 
     try:
         manager = get_stack_manager(config)
+        _apply_enable_overrides(formatter, manager, enable)
 
         formatter.print_info(f"Destroying {stack_name}...")
 
@@ -235,9 +319,23 @@ def destroy_stack(config: Any, stack_name: Any, yes: Any, retain_volumes: Any) -
 @click.option("--tag", "-t", multiple=True, help="Add tags (key=value)")
 @click.option("--parallel", "-p", is_flag=True, help="Deploy regional stacks in parallel")
 @click.option("--max-workers", "-w", default=4, help="Max parallel deployments (default: 4)")
+@click.option(
+    "--enable",
+    "enable",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_validate_enable,
+    help=_ENABLE_OPTION_HELP,
+)
 @pass_config
 def deploy_all_orchestrated(
-    config: Any, yes: Any, outputs_file: Any, tag: Any, parallel: Any, max_workers: Any
+    config: Any,
+    yes: Any,
+    outputs_file: Any,
+    tag: Any,
+    parallel: Any,
+    max_workers: Any,
+    enable: Mapping[str, str],
 ) -> None:
     """Deploy all stacks in the correct order.
 
@@ -255,6 +353,7 @@ def deploy_all_orchestrated(
         gco stacks deploy-all -y --parallel
         gco stacks deploy-all -y -p --max-workers 8
         gco stacks deploy-all -y -t Environment=prod
+        gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
     """
     from ..stacks import get_stack_manager
 
@@ -269,6 +368,7 @@ def deploy_all_orchestrated(
 
     try:
         manager = get_stack_manager(config)
+        _apply_enable_overrides(formatter, manager, enable)
         stacks = manager.list_stacks()
 
         formatter.print_info(f"Found {len(stacks)} stacks to deploy")
@@ -317,9 +417,22 @@ def deploy_all_orchestrated(
     is_flag=True,
     help="Report each cluster's orphaned EBS volumes instead of deleting them",
 )
+@click.option(
+    "--enable",
+    "enable",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_validate_enable,
+    help=_ENABLE_OPTION_HELP,
+)
 @pass_config
 def destroy_all_orchestrated(
-    config: Any, yes: Any, parallel: Any, max_workers: Any, retain_volumes: Any
+    config: Any,
+    yes: Any,
+    parallel: Any,
+    max_workers: Any,
+    retain_volumes: Any,
+    enable: Mapping[str, str],
 ) -> None:
     """Destroy all stacks in the correct order.
 
@@ -349,6 +462,7 @@ def destroy_all_orchestrated(
         gco stacks destroy-all -y
         gco stacks destroy-all -y --parallel
         gco stacks destroy-all -y -p --max-workers 8
+        gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
     """
     import time
 
@@ -363,6 +477,7 @@ def destroy_all_orchestrated(
 
     try:
         manager = get_stack_manager(config)
+        _apply_enable_overrides(formatter, manager, enable)
         stacks = manager.list_stacks()
         ordered = get_stack_destroy_order(
             stacks,

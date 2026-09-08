@@ -404,3 +404,19 @@ FAKE_NOOP
     ! grep -q '|delete jobs --all ' "$kubectl_calls_file"
     [ -z "$(compgen -G "$fixture/demo/.live-demo-recording.*" || true)" ]
 }
+
+@test "exports GCO_DEMO_ENABLE so the recorded demo detects the same features" {
+    # detect_features reads this variable inside the asciinema child, so the
+    # recorder must export it rather than relying on it happening to be set.
+    grep -q 'export GCO_DEMO_ENABLE="\${GCO_DEMO_ENABLE:-}"' "$SCRIPT"
+    # And it must be exported before the recording starts.
+    local export_line recording_line
+    export_line=$(grep -n 'export GCO_DEMO_ENABLE=' "$SCRIPT" | head -1 | cut -d: -f1)
+    recording_line=$(grep -n 'asciinema rec' "$SCRIPT" | head -1 | cut -d: -f1)
+    [ "$export_line" -lt "$recording_line" ]
+}
+
+@test "validates GCO_DEMO_ENABLE during preflight" {
+    grep -q 'verify_enablement_overrides "\$REPO_ROOT"' "$SCRIPT"
+    grep -q 'unknown feature or chart' "$SCRIPT"
+}

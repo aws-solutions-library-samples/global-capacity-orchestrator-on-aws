@@ -155,6 +155,25 @@ case "$RENDER_EXISTING" in
         else
             preflight_fail "cdk.json not found" "Run from a GCO checkout"
         fi
+        override_status=0
+        verify_enablement_overrides "$REPO_ROOT" || override_status=$?
+        case "$override_status" in
+            0)
+                if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+                    preflight_pass "Run-scoped enablement overrides valid (${GCO_DEMO_ENABLE})"
+                else
+                    preflight_pass "No run-scoped overrides (cdk.json defaults apply)"
+                fi
+                ;;
+            2)
+                preflight_fail "Cannot validate GCO_DEMO_ENABLE" \
+                    "python3 must be available to check the requested names"
+                ;;
+            *)
+                preflight_fail "GCO_DEMO_ENABLE names an unknown feature or chart" \
+                    "Use names from gco/enablement_overrides.py (see gco stacks deploy-all --help)"
+                ;;
+        esac
         if command -v jq &>/dev/null; then
             preflight_pass "jq installed ($(jq --version 2>&1))"
         else
@@ -293,6 +312,9 @@ WRAPPER_SCRIPT
     echo "Recording live demo (${COLS}x${ROWS})..."
     echo "Output: ${CAST_FILE}"
     export REPO_ROOT
+    # Inherited by the wrapper so detect_features narrates exactly the features
+    # the paired deploy recording provisioned with the same value.
+    export GCO_DEMO_ENABLE="${GCO_DEMO_ENABLE:-}"
     export GCO_RECORDING_COLUMNS="$COLS"
     export GCO_RECORDING_WRAPPER="$WRAPPER"
     asciinema rec \

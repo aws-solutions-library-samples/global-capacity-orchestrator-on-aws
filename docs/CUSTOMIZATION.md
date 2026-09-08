@@ -43,6 +43,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Add CloudWatch Container Insights](#add-cloudwatch-container-insights)
   - [Load Balancer Configuration](#load-balancer-configuration)
   - [Add Prometheus Monitoring](#add-prometheus-monitoring)
+- [Run-scoped Enablement Overrides](#run-scoped-enablement-overrides)
 - [FSx for Lustre Configuration](#fsx-for-lustre-configuration)
   - [Enable FSx](#enable-fsx)
   - [Configure FSx Storage](#configure-fsx-storage)
@@ -1428,6 +1429,41 @@ gco costs k8s top --by cluster # Top spenders
 gco costs report status        # OpenCost + report pipeline health
 gco costs dashboard            # Open the Grafana cost dashboard
 ```
+
+## Run-scoped Enablement Overrides
+
+Every optional add-on ships **disabled** in `cdk.json` because each one bills continuously once provisioned — FSx for Lustre has a 1.2 TiB provisioned floor, Aurora Serverless v2 keeps a writer and a reader, and Valkey Serverless charges for storage and ECPUs. Turning one on is therefore a deliberate, cost-bearing decision, and the committed defaults stay off so cloning this repository and deploying never surprises you with a bill.
+
+Sometimes you want a feature on for **one run** without changing that shipped posture: trying a scheduler before committing to a config change, validating an example that needs optional infrastructure, or recording a demo of the full topology. `--enable` does exactly that. It threads the request through CDK context instead of rewriting `cdk.json`, so the file stays clean (which also keeps clean-worktree preflights in the validation harnesses intact).
+
+```bash
+# One run with all five optional features on; cdk.json is not modified.
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
+```
+
+Names are validated before any AWS call, so a typo fails immediately rather than deploying without the feature you asked for. Repeated and comma-joined forms are equivalent (`--enable valkey --enable slurm` = `--enable valkey,slurm`).
+
+| Category | Valid names | CDK context key |
+|----------|-------------|-----------------|
+| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store` | `feature_enabled_overrides` |
+| Helm charts | `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
+
+Two properties matter:
+
+- **Overrides only enable.** A feature you deliberately turned off in `cdk.json` stays off unless you name it explicitly. There is no `--disable`.
+- **Every name applies per region.** The override is applied after the per-region merge, so `--enable fsx_lustre` provisions one filesystem in each configured region, not one in total. Size the cost accordingly.
+
+> **The next plain deploy removes what you forced on.** This is the one sharp edge. `--enable` is scoped to the invocation that carries it, so a later `gco stacks deploy` or `deploy-all` *without* the same names synthesizes a template that no longer declares those resources, and CloudFormation deletes them as a routine stack update. FSx filesystems and the Aurora cluster (`RemovalPolicy.DESTROY`, `deletion_protection: false` by default) go with it, along with their data. If you want a feature to survive arbitrary future deploys, set its `enabled` flag in `cdk.json` instead of using `--enable`.
+
+Teardown does **not** need the flag for correctness: `cdk destroy` issues a CloudFormation `DeleteStack`, which removes whatever the deployed template contains, and none of these names gates a whole stack. Passing it anyway keeps `destroy` evaluating the same app as the `deploy` that created the resources, which is why the demo recorders do:
+
+```bash
+gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
+```
+
+`--enable` is most meaningful on the `-all` commands. On a single-stack `gco stacks deploy`, the context reaches only that stack, and none of the feature names is confined to one stack — `vector_store` creates its table in the global stack while regional stacks grant access to it, and `fsx_lustre`, `valkey`, and `aurora_pgvector` add dashboard widgets to the monitoring stack. A single-stack override therefore synthesizes and deploys a half-wired topology without complaining.
+
+To make a feature permanent instead, set its `enabled` flag in `cdk.json` and redeploy, as described in the per-feature sections below. The demo recorders drive the same mechanism from a single `GCO_DEMO_ENABLE` variable — see [demo/README.md](../demo/README.md).
 
 ## FSx for Lustre Configuration
 

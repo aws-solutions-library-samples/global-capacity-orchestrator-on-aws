@@ -21,7 +21,7 @@ Automated feature demonstration for **Global Capacity Orchestrator (GCO)** — *
 
 `live_demo.sh` is a single script designed to be run in a visible terminal during a live presentation. It walks through GCO's core capabilities automatically, with clear narration, pauses, and visually formatted output so the audience can follow along.
 
-The script reads `cdk.json` to detect which optional features are enabled (schedulers, FSx, Valkey) and adapts its flow accordingly — it only demos what's actually deployed.
+The script detects which optional features are enabled (schedulers, FSx, Valkey, Aurora pgvector) and adapts its flow accordingly — it only demos what's actually deployed. See [Feature detection](#feature-detection) for how that decision is made.
 
 ---
 
@@ -134,18 +134,25 @@ asciinema play demo/live_demo.cast
 
 ## What the Script Covers
 
+Sections are numbered in the order the script runs them. Each optional section
+is entered when its `cdk.json` flag is `true` **or** when `GCO_DEMO_ENABLE` names
+it for this run (see [Feature detection](#feature-detection)).
+
 | Section | Feature | Condition |
 |---|---|---|
 | 1 | Fleet overview — stacks, queue/jobs, capacity, inference, cost, and CLI policy agreement | Always |
 | 2 | Capacity discovery — GPU availability, region recommendation, auto-region SQS | Always |
-| 3 | Volcano scheduler — gang scheduling example | `volcano.enabled = true` in cdk.json |
-| 4 | Kueue scheduler — quota-based job queueing | `kueue.enabled = true` in cdk.json |
-| 5 | YuniKorn scheduler — app-aware fair scheduling | `yunikorn.enabled = true` in cdk.json |
-| 6 | Slurm operator — HPC batch scheduling | `slurm.enabled = true` in cdk.json |
-| 7 | FSx for Lustre — high-performance scratch storage | `fsx_lustre.enabled = true` in cdk.json |
-| 8 | Valkey cache — serverless K/V caching | `valkey.enabled = true` in cdk.json |
-| 9 | Inference endpoint — deploy, invoke, and teardown | Always (skip with `SKIP_INFERENCE=1`) |
+| 3 | Volcano scheduler — gang scheduling example | `helm.volcano.enabled` or `GCO_DEMO_ENABLE=volcano` |
+| 4 | Kueue scheduler — quota-based job queueing | `helm.kueue.enabled` or `GCO_DEMO_ENABLE=kueue` |
+| 5 | YuniKorn scheduler — app-aware fair scheduling | `helm.yunikorn.enabled` or `GCO_DEMO_ENABLE=yunikorn` |
+| 6 | Slurm operator — HPC batch scheduling | `helm.slurm.enabled` or `GCO_DEMO_ENABLE=slurm` |
+| 7 | FSx for Lustre — high-performance scratch storage | `fsx_lustre.enabled` or `GCO_DEMO_ENABLE=fsx_lustre` |
+| 8 | Valkey cache — serverless K/V caching | `valkey.enabled` or `GCO_DEMO_ENABLE=valkey` |
+| 9 | Aurora pgvector — serverless vector database | `aurora_pgvector.enabled` or `GCO_DEMO_ENABLE=aurora_pgvector` |
 | 10 | EFS shared storage — persistent job outputs | Always |
+| 11 | Inference endpoint — deploy, invoke, and teardown | Always (skip with `SKIP_INFERENCE=1`) |
+
+Sections 3-6 are additionally skipped as a block by `SKIP_SCHEDULERS=1`.
 
 The MCP `fleet_status` tool exposes the base fleet document. Policy comparison
 in the demonstrated fleet overview is currently CLI-only.
@@ -179,6 +186,32 @@ nonzero without publishing the failed take.
   ```bash
   GCO_DEMO_FAST=1 bash demo/live_demo.sh      # Shorter pauses
   ```
+
+### Feature detection
+
+`detect_features` in `lib_demo.sh` reads each optional feature's `enabled` flag
+out of `cdk.json` with `jq`, then applies `GCO_DEMO_ENABLE` on top:
+
+```bash
+GCO_DEMO_ENABLE=fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn bash demo/live_demo.sh
+```
+
+`GCO_DEMO_ENABLE` takes the same names as
+[`gco stacks deploy-all --enable`](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides),
+and that is the point: GCO ships every optional add-on disabled because each one
+bills continuously, so demonstrating the full topology means enabling features
+for one run rather than committing a config change. Driving the deploy and the
+demo from one variable is what keeps them honest — the recorder passes it to
+`gco stacks deploy-all --enable` and exports it for this script, so the narration
+cannot claim a feature the deploy never provisioned.
+
+Two properties follow from that:
+
+- **Enable only.** A feature disabled in `cdk.json` and not named stays skipped;
+  a feature enabled in `cdk.json` is never turned off by this variable.
+- **Names must be exact.** Matching is on whole comma-separated names, so
+  `valkey_extra` does not enable `valkey`. The recorders validate the value
+  against the canonical name sets during preflight and refuse to start on a typo.
 
 ---
 
@@ -215,6 +248,7 @@ GCO_DEMO_FAST=1 bash demo/live_demo.sh
 | Jobs stuck in Pending | Check node provisioning: `kubectl get nodes -w` — GPU nodes take 60-90s |
 | Script skips a scheduler you enabled | Re-run `gco stacks deploy-all -y` after changing cdk.json |
 | Colors not rendering | Ensure your terminal supports ANSI colors. Try `TERM=xterm-256color` |
-| FSx/Valkey section skipped | Verify `fsx_lustre.enabled` / `valkey.enabled` is `true` in cdk.json |
+| FSx / Valkey / Aurora section skipped | Set that feature's `enabled` to `true` in cdk.json, or name it in `GCO_DEMO_ENABLE` for a one-run demo |
+| A section runs but its commands fail | The feature is enabled for detection but was never deployed. Deploy with the matching `gco stacks deploy-all --enable <name>` (or set the cdk.json flag and redeploy) |
 
 > **Installing the GCO CLI on your host?** GCO pins exact versions of many Python packages, so host installs frequently fail with `ResolutionImpossible` / dependency-resolver errors. Prefer the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) — it ships every dependency at the exact versions CI uses. See [Common Issues](../QUICKSTART.md#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts) for the resolver-error fix.

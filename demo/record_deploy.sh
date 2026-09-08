@@ -174,6 +174,25 @@ case "$RENDER_EXISTING" in
         else
             preflight_fail "cdk.json not found" "Run from repo root"
         fi
+        override_status=0
+        verify_enablement_overrides "$REPO_ROOT" || override_status=$?
+        case "$override_status" in
+            0)
+                if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+                    preflight_pass "Run-scoped enablement overrides valid (${GCO_DEMO_ENABLE})"
+                else
+                    preflight_pass "No run-scoped overrides (cdk.json defaults apply)"
+                fi
+                ;;
+            2)
+                preflight_fail "Cannot validate GCO_DEMO_ENABLE" \
+                    "python3 must be available to check the requested names"
+                ;;
+            *)
+                preflight_fail "GCO_DEMO_ENABLE names an unknown feature or chart" \
+                    "Use names from gco/enablement_overrides.py (see gco stacks deploy-all --help)"
+                ;;
+        esac
         if verify_legacy_live_recording_authorization "$REPO_ROOT"; then
             preflight_pass "Live consent, Git SHA, and AWS account guards verified"
         else
@@ -234,21 +253,39 @@ else
     echo "Recording deploy (${COLS}x${ROWS})..."
     echo "Output: ${CAST_FILE}"
     echo ""
-    echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y${RESET}"
+    if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y --enable ${GCO_DEMO_ENABLE}${RESET}"
+    else
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y${RESET}"
+    fi
     echo "  ${DIM}The deploy can take up to an hour. The recording captures everything.${RESET}"
     echo ""
 
     # Create a wrapper script so asciinema runs one repository-bound command.
+    #
+    # GCO_DEMO_ENABLE is threaded through as `--enable` so the deploy and the
+    # live demo are driven by one knob: whatever this recording provisions is
+    # exactly what the demo recording will narrate. The committed cdk.json is
+    # never rewritten, so verify_recording_git_state's clean-worktree rule and
+    # the shipped opt-in defaults both survive.
+    #
+    # The two branches avoid expanding an empty bash array under `set -u`,
+    # which is an error on the macOS bash 3.2 the recorder CI job exercises.
     cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$REPO_ROOT"
 export COLUMNS="$GCO_RECORDING_COLUMNS"
-python3 -m cli.main stacks deploy-all -y
+if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+    python3 -m cli.main stacks deploy-all -y --enable "$GCO_DEMO_ENABLE"
+else
+    python3 -m cli.main stacks deploy-all -y
+fi
 WRAPPER_SCRIPT
     chmod +x "$WRAPPER"
 
     export REPO_ROOT
+    export GCO_DEMO_ENABLE="${GCO_DEMO_ENABLE:-}"
     export GCO_RECORDING_COLUMNS="$COLS"
     export GCO_RECORDING_WRAPPER="$WRAPPER"
     asciinema rec \

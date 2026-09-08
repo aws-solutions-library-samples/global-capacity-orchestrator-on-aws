@@ -9,7 +9,8 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 > Automated demo showing fleet status, cost and policy agreement, capacity-aware placement,
 > 4 schedulers running simultaneously (Volcano, Kueue, YuniKorn, Slurm),
-> high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)), and live
+> high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)),
+> an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) vector database, and live
 > LLM inference — all on one platform. See the guarded live and offline
 > re-render commands in [LIVE_DEMO.md](LIVE_DEMO.md#recording-the-demo).
 
@@ -20,7 +21,12 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Deploy](deploy.gif)
 
-*Fresh `gco stacks deploy-all -y` from a clean account ([re-record](record_deploy.sh))*
+*Fresh `gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn`
+from a clean account, provisioning the full optional topology the live demo then
+exercises ([re-record](record_deploy.sh)). The five add-ons ship disabled in
+`cdk.json` because each bills continuously, so the recording enables them for one
+run through [run-scoped overrides](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides)
+rather than changing the committed defaults.*
 
 </details>
 
@@ -29,7 +35,10 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Destroy](destroy.gif)
 
-*Full teardown with `gco stacks destroy-all -y` ([re-record](record_destroy.sh))*
+*Full teardown with `gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn`
+([re-record](record_destroy.sh)). The teardown repeats the deploy's overrides so it
+evaluates the same app; deletion itself does not depend on them, since
+`DeleteStack` removes whatever the deployed template contains.*
 
 </details>
 
@@ -94,10 +103,35 @@ live mutation:
 export GCO_RECORDING_LIVE=1
 export GCO_EXPECTED_GIT_SHA="<40-character CI-green commit SHA>"
 export GCO_EXPECTED_ACCOUNT_ID="<12-digit authorized AWS account ID>"
+export GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
 bash demo/record_deploy.sh
 bash demo/record_demo.sh
 bash demo/record_destroy.sh
 ```
+
+`GCO_DEMO_ENABLE` is the single knob for the optional topology. `record_deploy.sh`
+and `record_destroy.sh` pass it to `gco stacks deploy-all|destroy-all --enable`,
+while `record_demo.sh` exports it so `detect_features` enters the matching demo
+sections. It takes the same names as
+[`--enable`](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides); each
+recorder validates the value during preflight and refuses to start on a typo.
+Omit it to record the shipped `cdk.json` defaults, in which case the optional
+sections are skipped.
+
+**Export it once and keep it exported for all three recorders.** One variable
+driving both the deploy and the demo is a convention, not an enforced invariant:
+these are three separate script runs, and `detect_features` reads the variable
+rather than interrogating the cluster. Naming *fewer* features on the demo than
+the deploy simply skips sections. Naming *more* means a section runs against
+infrastructure that was never created — its commands fail visibly in the cast, and
+`live_demo.sh` exits non-zero rather than publishing the take, but the cheap
+protection is to set the value once and not touch it between the three runs.
+
+Because these features are enabled per run rather than in `cdk.json`, the
+committed opt-in defaults stay off and the recorders' clean-worktree guard still
+holds. Note the cost while a full-topology recording is live: FSx for Lustre
+provisions 1.2 TiB **per configured region**, and Aurora Serverless v2 and Valkey
+Serverless bill until the destroy completes.
 
 The three live recorders fail closed unless all guards are present. Each verifies
 that `HEAD` matches exactly and that no source file differs. Only the six legacy

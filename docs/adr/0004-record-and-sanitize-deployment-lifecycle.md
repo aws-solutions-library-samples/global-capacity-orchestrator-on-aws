@@ -79,6 +79,24 @@ fail-closed for normal committed output.
 7. `SKIP_SANITIZE=1` remains a lower-level local debugging escape hatch. The
    three publishable legacy recorders reject it and never install bypassed
    artifacts.
+8. The optional topology a recording shows is selected per run through
+   `GCO_DEMO_ENABLE`, never by editing `cdk.json`. Every optional add-on ships
+   disabled because each bills continuously, and rewriting the config would
+   both change the shipped default for every user and violate guard 1's
+   clean-source-tree rule. One variable drives all three recorders: the deploy
+   and destroy recorders pass it to `gco stacks deploy-all|destroy-all
+   --enable`, and the live recorder exports it so `detect_features` enters the
+   matching sections. Each recorder validates the value against the canonical
+   name sets during preflight and refuses to start on an unknown name.
+   Because the value is read independently by three separate script runs, it is
+   a convention rather than an enforced invariant; guard 9 is what keeps a
+   mismatch from being published.
+9. A demo section may not claim a feature it did not exercise. The optional
+   feature sections and the inference lifecycle report their result from
+   observed evidence, and under `GCO_DEMO_GUARDED_RECORDING=1` an unproven
+   claim fails the recorder through guard 5 instead of publishing. A section
+   whose infrastructure was never created is therefore a failed recording, not
+   a green claim.
 
 The live consent, SHA, and account guards are mandatory for all three legacy
 recorders. `RENDER_EXISTING=1` is the non-mutating path for replaying a verified

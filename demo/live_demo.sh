@@ -548,15 +548,21 @@ narrate "multiple teams compete for GPU resources."
 narrate "YuniKorn also supports gang scheduling and preemption."
 spacer
 
+YUNIKORN_SUBMITTED=0
 highlight "Submitting a YuniKorn-scheduled job"
-run_cmd "gco jobs submit-direct examples/yunikorn-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/yunikorn-job.yaml -r $REGION -n gco-jobs"; then
+    YUNIKORN_SUBMITTED=1
+fi
 sleep "$PAUSE_SHORT"
 
 highlight "Checking YuniKorn pod scheduling"
 countdown "Waiting for YuniKorn to place pods" "$PAUSE_SHORT"
 run_cmd "kubectl get pods -n gco-jobs -l app=yunikorn-demo --no-headers 2>/dev/null || echo '  (pods scheduling...)'"
 
-success "YuniKorn provides enterprise-grade multi-tenant scheduling."
+if ! report_feature_result "$YUNIKORN_SUBMITTED" "YuniKorn" \
+        "YuniKorn provides enterprise-grade multi-tenant scheduling."; then
+    exit 1
+fi
 # Release resource-quota reservations from these jobs before the next section.
 kubectl delete job yunikorn-sample-job yunikorn-gpu-job yunikorn-gang-job -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 SCHEDULER_COUNT=$((SCHEDULER_COUNT + 1))
@@ -580,8 +586,11 @@ narrate "so existing sbatch scripts and workflows work unchanged."
 narrate "This bridges the gap between HPC and cloud-native."
 spacer
 
+SLURM_SUBMITTED=0
 highlight "Submitting a Slurm batch job via Kubernetes"
-run_cmd "gco jobs submit-direct examples/slurm-cluster-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/slurm-cluster-job.yaml -r $REGION -n gco-jobs"; then
+    SLURM_SUBMITTED=1
+fi
 sleep "$PAUSE_SHORT"
 
 highlight "Checking Slurm job pod"
@@ -591,7 +600,10 @@ run_cmd "kubectl get pods -n gco-jobs -l job-name=slurm-test --no-headers 2>/dev
 highlight "Tailing Slurm job logs"
 run_cmd "kubectl logs job/slurm-test -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l job-name=slurm-test --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Existing HPC workflows run on Kubernetes without modification."
+if ! report_feature_result "$SLURM_SUBMITTED" "Slurm" \
+        "Existing HPC workflows run on Kubernetes without modification."; then
+    exit 1
+fi
 # Release resource-quota reservations so FSx / Valkey / EFS sections don't
 # hit quota errors. slurm-test itself goes away quickly; we also clean up
 # any Slurm-operator-owned workload pods that were spawned for this job.
@@ -632,8 +644,11 @@ narrate "sub-millisecond latency — purpose-built for HPC and ML."
 narrate "GCO provisions it automatically and mounts it into every cluster."
 spacer
 
+FSX_SUBMITTED=0
 highlight "Submitting a job that exercises FSx Lustre storage"
-run_cmd "gco jobs submit-direct examples/fsx-lustre-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/fsx-lustre-job.yaml -r $REGION -n gco-jobs"; then
+    FSX_SUBMITTED=1
+fi
 
 highlight "Watching the FSx job"
 wait_for_job "fsx-lustre-example" "gco-jobs"
@@ -647,7 +662,10 @@ spacer
 highlight "Checking job logs for I/O performance"
 run_cmd "kubectl logs job/fsx-lustre-example -n gco-jobs --all-containers=true --tail=30 2>/dev/null || kubectl logs -n gco-jobs -l example=fsx-lustre --all-containers=true --tail=30 2>/dev/null || echo '  (no logs yet)'"
 
-success "FSx for Lustre: sub-millisecond latency, hundreds of GB/s throughput."
+if ! report_feature_result "$FSX_SUBMITTED" "FSx for Lustre" \
+        "FSx for Lustre: sub-millisecond latency, hundreds of GB/s throughput."; then
+    exit 1
+fi
 # Release resource-quota reservations before Valkey/inference/EFS sections.
 kubectl delete job fsx-lustre-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "Compare: EFS tops out around 10 GB/s. For large-scale training,"
@@ -674,8 +692,11 @@ narrate "session state, or any low-latency K/V access from your jobs."
 narrate "The endpoint is injected automatically — no config needed in manifests."
 spacer
 
+VALKEY_SUBMITTED=0
 highlight "Submitting a job that exercises the Valkey cache"
-run_cmd "gco jobs submit-direct examples/valkey-cache-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/valkey-cache-job.yaml -r $REGION -n gco-jobs"; then
+    VALKEY_SUBMITTED=1
+fi
 
 highlight "Watching the Valkey job"
 wait_for_job "valkey-cache-example" "gco-jobs"
@@ -684,7 +705,10 @@ run_cmd "kubectl get pods -n gco-jobs -l app=valkey-cache-example --no-headers 2
 highlight "Valkey job output"
 run_cmd "kubectl logs job/valkey-cache-example -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l app=valkey-cache-example --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Serverless Valkey: zero management, auto-scaling, per-region."
+if ! report_feature_result "$VALKEY_SUBMITTED" "Valkey" \
+        "Serverless Valkey: zero management, auto-scaling, per-region."; then
+    exit 1
+fi
 # Release resource-quota reservations before the inference/EFS sections.
 kubectl delete job valkey-cache-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "Prompt caching alone can cut inference costs by 30-50%."
@@ -710,8 +734,11 @@ narrate "capacity and requires no instance management."
 narrate "Credentials are in Secrets Manager — pods discover them via ConfigMap."
 spacer
 
+AURORA_SUBMITTED=0
 highlight "Submitting a job that exercises Aurora pgvector"
-run_cmd "gco jobs submit-direct examples/aurora-pgvector-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/aurora-pgvector-job.yaml -r $REGION -n gco-jobs"; then
+    AURORA_SUBMITTED=1
+fi
 
 highlight "Watching the Aurora pgvector job"
 wait_for_job "aurora-pgvector-example" "gco-jobs"
@@ -720,7 +747,10 @@ run_cmd "kubectl get pods -n gco-jobs -l app=aurora-pgvector-example --no-header
 highlight "Aurora pgvector job output"
 run_cmd "kubectl logs job/aurora-pgvector-example -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l app=aurora-pgvector-example --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Serverless Aurora pgvector: vector search with zero management."
+if ! report_feature_result "$AURORA_SUBMITTED" "Aurora pgvector" \
+        "Serverless Aurora pgvector: vector search with zero management."; then
+    exit 1
+fi
 # Release resource-quota reservations before the next section.
 kubectl delete job aurora-pgvector-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "pgvector supports HNSW and IVFFlat indexes for fast similarity search."

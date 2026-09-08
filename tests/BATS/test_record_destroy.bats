@@ -293,3 +293,73 @@ FAKE_AGG
     grep -q 'echo "Embed in README:"' "$SCRIPT"
     grep -F -q "echo '  ![GCO Destroy](demo/destroy.gif)'" "$SCRIPT"
 }
+
+@test "GCO_DEMO_ENABLE reaches the recorded destroy as --enable" {
+    # The recorded teardown must evaluate the same app the recorded deploy did,
+    # so the pair is an honest before/after rather than two different runs.
+    local fixture="$BATS_TEST_TMPDIR/destroy-enable"
+    local fake_bin="$fixture/bin"
+    local python_file="$BATS_TEST_TMPDIR/destroy-enable-python.argv"
+    mkdir -p "$fixture/demo" "$fake_bin"
+    cp "$SCRIPT" "$fixture/demo/record_destroy.sh"
+    cp demo/lib_demo.sh "$fixture/demo/lib_demo.sh"
+    printf '{}\n' > "$fixture/cdk.json"
+    printf 'existing destroy cast\n' > "$fixture/demo/destroy.cast"
+    printf 'existing destroy gif\n' > "$fixture/demo/destroy.gif"
+
+    cat > "$fake_bin/asciinema" <<'FAKE_ASCIINEMA'
+#!/usr/bin/env bash
+output_file=""
+child_command=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --return) shift ;;
+        --cols|--rows) shift 2 ;;
+        --command) child_command="$2"; shift 2 ;;
+        --overwrite) shift ;;
+        *) output_file="$1"; shift ;;
+    esac
+done
+if [ -n "$child_command" ]; then
+    bash -c "$child_command"
+fi
+printf '{"version": 2, "width": 80, "height": 24}\n' > "$output_file"
+FAKE_ASCIINEMA
+    cat > "$fake_bin/python3" <<'FAKE_PYTHON'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    if [ "$arg" = "destroy-all" ]; then
+        printf '%s\n' "$@" > "$FAKE_PYTHON_INVOCATION_FILE"
+        break
+    fi
+done
+exit 0
+FAKE_PYTHON
+    cat > "$fake_bin/aws" <<'FAKE_AWS'
+#!/usr/bin/env bash
+printf '%s\n' '123456789012'
+FAKE_AWS
+    chmod +x "$fake_bin/asciinema" "$fake_bin/python3" "$fake_bin/aws"
+
+    git -C "$fixture" init -q
+    git -C "$fixture" add .
+    git -C "$fixture" -c user.name=CI -c user.email=ci@example.invalid \
+        commit -q -m recording-fixture
+    local expected_sha
+    expected_sha=$(git -C "$fixture" rev-parse HEAD)
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        GCO_RECORDING_LIVE=1 \
+        GCO_EXPECTED_GIT_SHA="$expected_sha" \
+        GCO_EXPECTED_ACCOUNT_ID=123456789012 \
+        GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn" \
+        SKIP_GIF=1 \
+        FAKE_PYTHON_INVOCATION_FILE="$python_file" \
+        bash "$fixture/demo/record_destroy.sh"
+
+    [ "$status" -eq 0 ]
+    grep -Fxq -- '--enable' "$python_file"
+    grep -Fxq -- 'fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn' "$python_file"
+    [ "$(grep -c -- '--enable' "$python_file")" -eq 1 ]
+}

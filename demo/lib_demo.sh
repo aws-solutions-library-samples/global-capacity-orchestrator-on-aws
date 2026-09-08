@@ -166,6 +166,40 @@ report_inference_lifecycle_result() {
     success "Endpoint deployed, invoked, and torn down — full lifecycle."
 }
 
+# report_feature_result <submitted_ok> <feature label> <success claim>
+#
+# The same fail-closed rule as report_inference_lifecycle_result, applied to the
+# optional feature sections. Their commands are individually forgiving —
+# `submit-direct ... || true` keeps a presentation moving, `wait_for_job` always
+# returns 0, and the kubectl reads end in `|| echo '(pod scheduling...)'` — so
+# without this the section printed a green claim about FSx throughput or Valkey
+# caching even when nothing was ever submitted. In a published recording an
+# unearned claim is worse than a missing section.
+#
+# A feature can be absent for two reasons that look identical here: it was named
+# in GCO_DEMO_ENABLE but never deployed, or it is deployed and genuinely broken.
+# Both make the claim false, so both fail.
+#
+# Returns nonzero on failure; guarded recordings propagate that and publish
+# nothing. Live presentations degrade to a warning and keep going.
+report_feature_result() {
+    local submitted_ok="$1"
+    local label="$2"
+    local claim="$3"
+    if [ "$submitted_ok" -eq 1 ]; then
+        success "$claim"
+        return 0
+    fi
+    warn "${label} did not run: its workload could not be submitted."
+    narrate "Verify ${label} is actually deployed — a section enabled through"
+    narrate "GCO_DEMO_ENABLE still needs the matching 'deploy-all --enable'."
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        warn "Refusing to publish a recording that claims an unproven feature."
+        return 1
+    fi
+    return 0
+}
+
 pause_for_audience() {
     if [ "${GCO_DEMO_NONINTERACTIVE:-}" = "1" ]; then
         sleep 1
@@ -262,6 +296,77 @@ wait_for_job() {
 # Reads cdk.json and sets global variables for each feature flag.
 # Requires jq and CDK_JSON to be set.
 
+# demo_feature_forced <name>
+#
+# True when GCO_DEMO_ENABLE names this feature or chart. The variable carries
+# the same comma-separated names as `gco stacks deploy-all --enable`, which is
+# the whole point: the recorders derive both values from one knob, so a session
+# can never deploy a feature and then skip demonstrating it (or narrate a
+# feature it never deployed).
+#
+# GCO ships every optional add-on disabled in cdk.json because each carries
+# recurring cost. Recording a full-topology demo therefore needs a run-scoped
+# override rather than a committed config change — see docs/CUSTOMIZATION.md
+# (Run-scoped enablement overrides).
+#
+# Names with no demo section (keda, cert_manager, ...) are accepted and simply
+# have no effect here; they still reach the deploy. A typo is caught by the
+# deploy itself, which validates `--enable` against the canonical name sets in
+# gco/enablement_overrides.py before making any AWS call.
+demo_feature_forced() {
+    local wanted="$1"
+    local requested
+    requested=$(printf '%s' "${GCO_DEMO_ENABLE:-}" | tr -d '[:space:]')
+    case ",${requested}," in
+        *",${wanted},"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# verify_enablement_overrides <repo_root>
+#
+# Validates GCO_DEMO_ENABLE against the canonical name sets in
+# gco/enablement_overrides.py, which is the same authority `gco stacks
+# deploy-all --enable` validates against.
+#
+# The deploy and destroy recorders get this for free because the CLI rejects an
+# unknown --enable name before any AWS call. The live-demo recorder does not:
+# it only *reads* the variable for section detection, so an unnoticed typo
+# would silently skip the very section the operator set out to record — after
+# the deploy already ran. Checking here keeps that failure loud and early.
+#
+# No-op when unset or empty, so unguarded default recordings are unaffected.
+verify_enablement_overrides() {
+    local repo_root="$1"
+    local requested="${GCO_DEMO_ENABLE:-}"
+    if [ -z "$requested" ]; then
+        return 0
+    fi
+    # Distinguish "cannot check" from "check failed", so a broken interpreter is
+    # not reported to the operator as an invalid feature name.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is required to validate GCO_DEMO_ENABLE." >&2
+        return 2
+    fi
+    # The Python body is deliberately flush-left: it lives inside a quoted
+    # shell string, so any indentation would reach the interpreter verbatim and
+    # raise IndentationError. Errors are reported as one line rather than a
+    # traceback, because this surfaces inside preflight output.
+    (
+        cd "$repo_root" || exit 1
+        python3 -c '
+import sys
+
+from gco.enablement_overrides import EnablementOverrideError, route_enablement_overrides
+
+try:
+    route_enablement_overrides(sys.argv[1:])
+except EnablementOverrideError as exc:
+    sys.exit(str(exc))
+' "$requested"
+    )
+}
+
 detect_features() {
     local cdk="${1:-cdk.json}"
     VOLCANO_ENABLED=$(jq -r '.context.helm.volcano.enabled // false' "$cdk")
@@ -271,6 +376,17 @@ detect_features() {
     FSX_ENABLED=$(jq -r '.context.fsx_lustre.enabled // false' "$cdk")
     VALKEY_ENABLED=$(jq -r '.context.valkey.enabled // false' "$cdk")
     AURORA_PGVECTOR_ENABLED=$(jq -r '.context.aurora_pgvector.enabled // false' "$cdk")
+
+    # Overrides are one-way, matching the CDK context semantics: they can only
+    # turn a feature on, never off. A feature an operator disabled stays
+    # disabled unless it is named explicitly.
+    if demo_feature_forced volcano; then VOLCANO_ENABLED=true; fi
+    if demo_feature_forced kueue; then KUEUE_ENABLED=true; fi
+    if demo_feature_forced yunikorn; then YUNIKORN_ENABLED=true; fi
+    if demo_feature_forced slurm; then SLURM_ENABLED=true; fi
+    if demo_feature_forced fsx_lustre; then FSX_ENABLED=true; fi
+    if demo_feature_forced valkey; then VALKEY_ENABLED=true; fi
+    if demo_feature_forced aurora_pgvector; then AURORA_PGVECTOR_ENABLED=true; fi
 }
 
 detect_region() {

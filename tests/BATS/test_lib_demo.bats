@@ -785,3 +785,147 @@ FAKE_LN
         done
     done
 }
+
+# ── Run-scoped enablement overrides ──────────────────────────────────────────
+# GCO ships every optional add-on disabled in cdk.json because each one bills
+# continuously. A full-topology demo therefore needs a run-scoped override, and
+# the recorders drive both the deploy and the demo from GCO_DEMO_ENABLE so the
+# narration can never disagree with what was provisioned.
+
+@test "demo_feature_forced matches an exact name in GCO_DEMO_ENABLE" {
+    GCO_DEMO_ENABLE="fsx_lustre,valkey"
+    export GCO_DEMO_ENABLE
+    demo_feature_forced fsx_lustre
+    demo_feature_forced valkey
+}
+
+@test "demo_feature_forced is false when the name is absent" {
+    GCO_DEMO_ENABLE="fsx_lustre"
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+}
+
+@test "demo_feature_forced is false when GCO_DEMO_ENABLE is unset or empty" {
+    unset GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+    GCO_DEMO_ENABLE=""
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+}
+
+@test "demo_feature_forced tolerates whitespace around names" {
+    GCO_DEMO_ENABLE=" fsx_lustre , valkey ,"
+    export GCO_DEMO_ENABLE
+    demo_feature_forced fsx_lustre
+    demo_feature_forced valkey
+}
+
+@test "demo_feature_forced does not match on a substring" {
+    # A prefix/suffix match would silently demo the wrong feature.
+    GCO_DEMO_ENABLE="valkey_extra,xfsx_lustre"
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+    run demo_feature_forced fsx_lustre
+    [ "$status" -ne 0 ]
+}
+
+@test "detect_features leaves committed defaults alone without an override" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true},"kueue":{"enabled":true},
+"yunikorn":{"enabled":false},"slurm":{"enabled":false}},
+"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false}}}
+FIXTURE
+    unset GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$YUNIKORN_ENABLED" = "false" ]
+    [ "$SLURM_ENABLED" = "false" ]
+    [ "$FSX_ENABLED" = "false" ]
+    [ "$VALKEY_ENABLED" = "false" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "false" ]
+    [ "$VOLCANO_ENABLED" = "true" ]
+    [ "$KUEUE_ENABLED" = "true" ]
+}
+
+@test "detect_features honors GCO_DEMO_ENABLE for all five optional features" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true},"kueue":{"enabled":true},
+"yunikorn":{"enabled":false},"slurm":{"enabled":false}},
+"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false}}}
+FIXTURE
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$YUNIKORN_ENABLED" = "true" ]
+    [ "$SLURM_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "true" ]
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "true" ]
+}
+
+@test "detect_features overrides are selective" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false}}}
+FIXTURE
+    GCO_DEMO_ENABLE="valkey"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "false" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "false" ]
+}
+
+@test "detect_features overrides are one-way and never disable" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true}},"valkey":{"enabled":true}}}
+FIXTURE
+    # Naming nothing must not turn configured-on features off.
+    GCO_DEMO_ENABLE="fsx_lustre"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$VOLCANO_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "true" ]
+}
+
+@test "verify_enablement_overrides accepts the documented five-feature set" {
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn"
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_enablement_overrides is a no-op when unset or empty" {
+    unset GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+    GCO_DEMO_ENABLE=""
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_enablement_overrides rejects a typo with a single-line error" {
+    GCO_DEMO_ENABLE="fsx_lustre,slurmm"
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slurmm"* ]]
+    # The valid list is offered, and no Python traceback leaks into preflight.
+    [[ "$output" == *"yunikorn"* ]]
+    [[ "$output" != *"Traceback"* ]]
+}

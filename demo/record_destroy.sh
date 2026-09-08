@@ -173,6 +173,25 @@ case "$RENDER_EXISTING" in
         else
             preflight_fail "cdk.json not found" "Run from repo root"
         fi
+        override_status=0
+        verify_enablement_overrides "$REPO_ROOT" || override_status=$?
+        case "$override_status" in
+            0)
+                if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+                    preflight_pass "Run-scoped enablement overrides valid (${GCO_DEMO_ENABLE})"
+                else
+                    preflight_pass "No run-scoped overrides (cdk.json defaults apply)"
+                fi
+                ;;
+            2)
+                preflight_fail "Cannot validate GCO_DEMO_ENABLE" \
+                    "python3 must be available to check the requested names"
+                ;;
+            *)
+                preflight_fail "GCO_DEMO_ENABLE names an unknown feature or chart" \
+                    "Use names from gco/enablement_overrides.py (see gco stacks destroy-all --help)"
+                ;;
+        esac
         if verify_legacy_live_recording_authorization "$REPO_ROOT"; then
             preflight_pass "Live consent, Git SHA, and AWS account guards verified"
         else
@@ -233,21 +252,40 @@ else
     echo "Recording destroy (${COLS}x${ROWS})..."
     echo "Output: ${CAST_FILE}"
     echo ""
-    echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks destroy-all -y${RESET}"
+    if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks destroy-all -y --enable ${GCO_DEMO_ENABLE}${RESET}"
+    else
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks destroy-all -y${RESET}"
+    fi
     echo "  ${DIM}The destroy takes 10-20 minutes. The recording captures everything.${RESET}"
     echo ""
 
     # Create a wrapper script so asciinema runs one repository-bound command.
+    #
+    # The destroy carries the same GCO_DEMO_ENABLE as the deploy so both
+    # recordings evaluate an identical app. Deletion itself does not depend on
+    # it: `cdk destroy` issues a CloudFormation DeleteStack, which removes
+    # whatever the deployed template contains, and no override name gates a
+    # whole stack. Passing it keeps the recorded teardown an honest counterpart
+    # to the recorded deploy rather than a differently-configured run.
+    #
+    # The two branches avoid expanding an empty bash array under `set -u`,
+    # which is an error on the macOS bash 3.2 the recorder CI job exercises.
     cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$REPO_ROOT"
 export COLUMNS="$GCO_RECORDING_COLUMNS"
-python3 -m cli.main stacks destroy-all -y
+if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+    python3 -m cli.main stacks destroy-all -y --enable "$GCO_DEMO_ENABLE"
+else
+    python3 -m cli.main stacks destroy-all -y
+fi
 WRAPPER_SCRIPT
     chmod +x "$WRAPPER"
 
     export REPO_ROOT
+    export GCO_DEMO_ENABLE="${GCO_DEMO_ENABLE:-}"
     export GCO_RECORDING_COLUMNS="$COLS"
     export GCO_RECORDING_WRAPPER="$WRAPPER"
     asciinema rec \
