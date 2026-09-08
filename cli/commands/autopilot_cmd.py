@@ -53,8 +53,8 @@ from ..config import GCOConfig
 from ..output import confirm, emit_structured_document, get_output_formatter
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-08T04:02:10Z
+# Generated from Git commit: 90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4
 # Flowchart(s) generated from this file:
 #   * ``_plan`` -> ``diagrams/code_diagrams/cli/commands/autopilot_cmd._plan.html``
 #     (PNG: ``diagrams/code_diagrams/cli/commands/autopilot_cmd._plan.png``)
