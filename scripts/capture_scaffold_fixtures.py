@@ -519,7 +519,7 @@ async def _capture_model(
             handle.flush()
             os.fsync(handle.fileno())
         assert temporary_path is not None
-        os.chmod(temporary_path, 0o644)
+        os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, output_path)
         temporary_path = None
     finally:
