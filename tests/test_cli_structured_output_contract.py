@@ -835,3 +835,45 @@ def test_swarm_file_report_keeps_native_mapping_at_root(
 
     assert result.exit_code == 0, result.output
     assert _load_one(result.stdout, output_format) == report
+
+
+def test_structured_group_bypasses_transaction_for_shell_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli.output as output_module
+
+    command = _contract_cli()
+    monkeypatch.setattr(output_module, "_shell_completion_requested", lambda *_args: True)
+    with patch.object(click.Group, "main", return_value="completed") as parent_main:
+        assert command.main(args=["--output", "json"], standalone_mode=False) == "completed"
+    parent_main.assert_called_once()
+
+
+def test_structured_group_uses_sys_argv_when_args_are_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = _contract_cli()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["contract", "--output", "json", "document"],
+    )
+
+    command.main(args=None, standalone_mode=False)
+
+    assert json.loads(capsys.readouterr().out) == {"value": 1}
+
+
+def test_nonzero_exit_replays_when_click_returns_code_in_nonstandalone_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _contract_cli().main(
+        args=["--output", "json", "fail"],
+        standalone_mode=False,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 7
+    assert captured.out == "partial stdout\n"
+    assert captured.err == "failure detail\n"

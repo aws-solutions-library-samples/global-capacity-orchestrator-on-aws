@@ -340,3 +340,41 @@ class TestUsersCli:
         result = runner.invoke(cli, ["monitoring", "users", "list"])
         assert result.exit_code == 1
         assert "Failed to list Grafana users" in result.output
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_grafana_explicit_password_machine_schema_omits_secret(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    monkeypatch.setattr(
+        "cli.monitoring_user_mgmt.create_user",
+        lambda *_args, **_kwargs: 42,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--output",
+            output_format,
+            "monitoring",
+            "users",
+            "add",
+            "--username",
+            "bob",
+            "--password",
+            "Provided!Password1",
+            "--admin-password",
+            "adminpw",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = (
+        json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+    )
+    assert payload["password_generated"] is False
+    assert payload["password_source"] == "provided"
+    assert "password" not in payload
+    assert "Provided!Password1" not in result.output

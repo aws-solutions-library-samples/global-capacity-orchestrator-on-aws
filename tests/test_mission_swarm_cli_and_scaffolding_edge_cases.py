@@ -1157,3 +1157,13 @@ def test_mission_sampling_enabled_without_backend_falls_back_deterministically(
     assert persisted["criteria"][0]["criterion_id"] == "fallback"
     assert json.loads(run_result.stderr)["sampling_path"] is False
     assert deterministic.call_count == 2
+
+
+@pytest.mark.parametrize("module", [mission_cmd_mod, swarm_cmd_mod])
+def test_pre_rendered_invalid_json_falls_back_to_raw_text(
+    module: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module._emit_json_text("not-json")
+
+    assert capsys.readouterr().out == "not-json\n"
