@@ -601,6 +601,21 @@ def test_incomplete_reports_do_not_claim_zero_count_surfaces_are_current() -> No
     assert "Zero-count surfaces are provisional, not confirmed current." in scanner
 
 
+def test_release_stage_one_commits_every_version_bump_output() -> None:
+    """The workflow must stage every tracked file the bumper maintains."""
+    step = _workflow_step(".github/workflows/release.yml", "Push release branch")
+    matches = re.findall(r"^\s*git add (.+)$", step, re.MULTILINE)
+
+    assert len(matches) == 1
+    assert set(matches[0].split()) == {
+        "VERSION",
+        "gco/_version.py",
+        "cli/__init__.py",
+        "gco_mcp/README.md",
+    }
+    assert step.index("git add ") < step.index("git diff --exit-code") < step.index("git commit ")
+
+
 def test_release_stage_one_never_writes_to_main() -> None:
     """Stage 1 (release.yml) must go through the PR gate like any other change.
 
