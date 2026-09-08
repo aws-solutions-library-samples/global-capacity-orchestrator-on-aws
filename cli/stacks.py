@@ -61,6 +61,7 @@ from threading import Event, Lock, RLock, Thread, local
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypedDict
 
 from botocore.exceptions import ClientError
+from click import Abort
 
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 from gco.stacks.constants import (
@@ -69,9 +70,11 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
 )
 
+from .output import confirm, interactive_echo
+
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-05T22:58:10Z
-# Generated from Git commit: 745b3fa3a9af9380bfe2797a5d9716fe8ce3a557
+# Generated at (UTC): 2026-09-08T04:13:50Z
+# Generated from Git commit: f3e5b374540636aa07fb57c16ec36a51228dba7f
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -2485,29 +2488,29 @@ class StackManager:
 
         inventory = self._build_image_registry_inventory()
         gib = inventory["total_bytes"] / (1024**3) if inventory["total_bytes"] else 0.0
-        print("Image registry inventory before destroy:")
-        print(f"  repos:            {inventory['repo_count']}")
-        print(f"  tags:             {inventory['tag_count']}")
-        print(f"  total size:       {gib:.2f} GiB")
-        print(f"  referencing endpoints: {inventory['endpoint_refs']}")
-        print(f"  recent job refs:  {inventory['job_refs']}")
+        interactive_echo("Image registry inventory before destroy:")
+        interactive_echo(f"  repos:            {inventory['repo_count']}")
+        interactive_echo(f"  tags:             {inventory['tag_count']}")
+        interactive_echo(f"  total size:       {gib:.2f} GiB")
+        interactive_echo(f"  referencing endpoints: {inventory['endpoint_refs']}")
+        interactive_echo(f"  recent job refs:  {inventory['job_refs']}")
 
         # Already confirmed via -y, or non-interactive — proceed.
         if force or not sys.stdin.isatty():
             return True
 
         try:
-            response = input(
+            if confirm(
                 f"Destroy {self.config.project_name}-global and delete every "
-                f"{self.config.project_name}/* repo? [y/N]: "
-            )
-        except EOFError, KeyboardInterrupt:
-            print("Aborted.")
+                f"{self.config.project_name}/* repo?",
+                default=False,
+            ):
+                return True
+        except Abort:
+            interactive_echo("Aborted.")
             return False
-        if response.strip().lower() not in ("y", "yes"):
-            print("Aborted.")
-            return False
-        return True
+        interactive_echo("Aborted.")
+        return False
 
     @staticmethod
     def _stack_missing(exc: ClientError) -> bool:

@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig, _load_cdk_json
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -467,7 +467,7 @@ def costs_allocation_activate(
     ]
 
     if not assume_yes:
-        click.confirm(
+        confirm(
             f"Activate cost allocation for {', '.join(keys)} in this billing "
             "account (management/payer account required in an Organization)?",
             abort=True,

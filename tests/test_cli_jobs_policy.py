@@ -1133,7 +1133,10 @@ class TestRemainingJobsStateMatrix:
         assert "read denied" in formatter.print_error.call_args.args[0]
 
     def test_delete_confirmed_success_and_failure(self) -> None:
+        backend_result = {"status": "deleted", "message": "Job deleted successfully"}
         manager = MagicMock()
+        manager.delete_job.return_value = backend_result
+
         result, _, formatter = _invoke(
             ["jobs", "delete", "trainer", "--region", "us-east-1"],
             manager,
@@ -1142,10 +1145,28 @@ class TestRemainingJobsStateMatrix:
         assert result.exit_code == 0
         manager.delete_job.assert_called_once_with("trainer", "gco-jobs", "us-east-1")
         formatter.print_success.assert_called_once_with("Job trainer deleted")
+        formatter.print.assert_not_called()
+
+        manager.reset_mock()
+        result, _, formatter = _invoke(
+            ["--output", "json", "jobs", "delete", "trainer", "--region", "us-east-1", "--yes"],
+            manager,
+        )
+        assert result.exit_code == 0
+        formatter.print_success.assert_not_called()
+        formatter.print.assert_called_once_with(
+            {
+                **backend_result,
+                "deleted": True,
+                "job_name": "trainer",
+                "namespace": "gco-jobs",
+                "region": "us-east-1",
+            }
+        )
 
         manager.delete_job.side_effect = RuntimeError("delete denied")
         result, _, formatter = _invoke(
-            ["jobs", "delete", "trainer", "--region", "us-east-1", "--yes"],
+            ["--output", "json", "jobs", "delete", "trainer", "--region", "us-east-1", "--yes"],
             manager,
         )
         assert result.exit_code == 1

@@ -333,7 +333,7 @@ class TestMockedRunnerLifecycle:
             "duration_seconds": payload["duration_seconds"],
             "last_stack": "gco-stack",
         }
-        assert observed["argv"] == ("/fake/gco", "images")
+        assert observed["argv"] == ("/fake/gco", "--output", "table", "images")
         assert observed["kwargs"] == {
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,

@@ -305,7 +305,11 @@ class TestAuditLoggedOnRealTools:
             caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
             patch("cli_runner.subprocess.run") as mock,
         ):
-            mock.return_value = MagicMock(returncode=0, stdout="s3://bucket/model", stderr="")
+            mock.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"model_name": "llama3", "s3_uri": "s3://bucket/model"}),
+                stderr="",
+            )
             run_mcp.get_model_uri(model_name="llama3")
 
         audit_records = [r for r in caplog.records if r.name == "gco.mcp.audit"]
@@ -659,7 +663,7 @@ class TestAuditContextCapture:
     async def test_audit_captures_client_warning(self, caplog):
         """ctx.warning() during a tool call lands in client_messages."""
 
-        test_mcp = FastMCP("audit-test-warning")
+        test_mcp = FastMCP("audit-test-warning", client_log_level="critical")
         test_mcp.add_middleware(AuditCaptureMiddleware())
 
         @test_mcp.tool
@@ -699,7 +703,7 @@ class TestAuditContextCapture:
         before the original ``Context.error`` runs.
         """
 
-        test_mcp = FastMCP("audit-test-error")
+        test_mcp = FastMCP("audit-test-error", client_log_level="critical")
         test_mcp.add_middleware(AuditCaptureMiddleware())
 
         @test_mcp.tool

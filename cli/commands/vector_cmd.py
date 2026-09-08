@@ -27,7 +27,14 @@ _VECTOR_UNAVAILABLE_HINT = (
 
 def _emit_json(payload: Any, *, err: bool = False) -> None:
     """Emit ``payload`` as a single JSON line (datetime/Path safe)."""
-    click.echo(json.dumps(payload, default=str), err=err)
+    from ..output import emit_structured_document
+
+    emit_structured_document(
+        payload,
+        output_format="json",
+        rendered=json.dumps(payload, default=str),
+        err=err,
+    )
 
 
 def _emit_error(code: str, details: dict[str, Any] | None = None) -> None:

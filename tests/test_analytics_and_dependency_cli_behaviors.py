@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import click
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
@@ -38,8 +39,9 @@ def _invoke_analytics(
     args: list[str],
     *,
     input_text: str | None = None,
+    output_format: str = "table",
 ):
-    kwargs: dict[str, object] = {"obj": _config()}
+    kwargs: dict[str, object] = {"obj": _config(output_format=output_format)}
     if input_text is not None:
         kwargs["input"] = input_text
     return runner.invoke(analytics, args, **kwargs)
@@ -507,3 +509,178 @@ def test_analytics_doctor_successfully_emits_checks_without_remediation(
     assert "✓ cdk.json parses as JSON" in result.output
     assert "→" not in result.output
     assert "All pre-flight checks passed" in result.output
+
+
+def _load_machine_document(output: str, output_format: str) -> dict[str, object]:
+    payload = json.loads(output) if output_format == "json" else yaml.safe_load(output)
+    assert isinstance(payload, dict)
+    return payload
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_generated_creation_password_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Generated!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value=secret),
+        patch("cli.analytics_user_mgmt.admin_set_user_password") as set_password,
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice", "--generate-password"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["created"] is True
+    assert payload["username"] == "alice"
+    assert payload["password"] == secret
+    assert payload["password_generated"] is True
+    assert payload["password_permanent"] is True
+    set_password.assert_called_once()
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_temporary_creation_password_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Temporary!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, secret)),
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password"] == secret
+    assert payload["password_state"] == "temporary"
+    assert payload["password_permanent"] is False
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_generated_password_reset_survives_machine_output_once(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    secret = "Reset!Password1"
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value=secret),
+        patch("cli.analytics_user_mgmt.admin_set_user_password") as set_password,
+    ):
+        result = _invoke_analytics(
+            runner,
+            [
+                "users",
+                "set-password",
+                "--username",
+                "alice",
+                "--generate-password",
+                "--yes",
+            ],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(secret) == 1
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password_set"] is True
+    assert payload["password"] == secret
+    assert payload["password_generated"] is True
+    assert payload["password_state"] == "permanent"
+    set_password.assert_called_once()
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_explicit_creation_password_machine_schema_omits_secret(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    set_password = Mock()
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)),
+        patch("cli.analytics_user_mgmt.admin_set_user_password", set_password),
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice", "--password", "Provided!Password1"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password_generated"] is False
+    assert payload["password_source"] == "provided"
+    assert payload["password_permanent"] is True
+    assert "password" not in payload
+    assert "Provided!Password1" not in result.output
+    set_password.assert_called_once()
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_analytics_missing_temporary_password_machine_schema_is_explicit(
+    runner: CliRunner,
+    output_format: str,
+) -> None:
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)),
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "add", "--username", "alice"],
+            output_format=output_format,
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = _load_machine_document(result.output, output_format)
+    assert payload["password_state"] == "not_returned"
+    assert payload["password_source"] == "unavailable"
+    assert payload["password_permanent"] is None
+    assert "password" not in payload
+
+
+def test_analytics_machine_password_prompt_and_confirmation_use_stderr_options(
+    runner: CliRunner,
+) -> None:
+    set_password = Mock()
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch.object(analytics_cmd, "prompt", return_value="Prompted!Password1") as prompt_mock,
+        patch.object(analytics_cmd, "confirm", return_value=True) as confirm_mock,
+        patch("cli.analytics_user_mgmt.admin_set_user_password", set_password),
+    ):
+        result = _invoke_analytics(
+            runner,
+            ["users", "set-password", "--username", "alice"],
+            output_format="json",
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["password_generated"] is False
+    assert payload["password_source"] == "provided"
+    assert "password" not in payload
+    assert prompt_mock.call_args.kwargs["err"] is True
+    assert confirm_mock.call_args.kwargs["err"] is True
+    set_password.assert_called_once_with(
+        pool_id="pool",
+        region="us-east-1",
+        username="alice",
+        password="Prompted!Password1",
+        permanent=True,
+    )

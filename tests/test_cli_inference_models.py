@@ -10,9 +10,11 @@ during tests.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from cli.config import GCOConfig
@@ -625,7 +627,15 @@ class TestModelsUri:
         with patch("cli.models.get_model_manager", return_value=mock_mgr):
             result = runner.invoke(cli, ["models", "uri", "llama3"])
         assert result.exit_code == 0
-        assert "s3://bucket/models/llama3" in result.output
+        assert result.stdout == "s3://bucket/models/llama3\n"
+
+        with patch("cli.models.get_model_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["--output", "json", "models", "uri", "llama3"])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {
+            "model_name": "llama3",
+            "s3_uri": "s3://bucket/models/llama3",
+        }
 
     def test_uri_error(self, runner):
         mock_mgr = MagicMock()
@@ -1052,8 +1062,9 @@ class TestInferenceHealth:
         assert result.exit_code != 0
         assert "Health check failed" in result.output
 
-    def test_health_json_output(self, runner, mock_config):
-        mock_config.output_format = "json"
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_health_machine_output(self, runner, mock_config, output_format):
+        mock_config.output_format = output_format
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint()
         mock_client = MagicMock()
@@ -1067,10 +1078,18 @@ class TestInferenceHealth:
             patch("cli.inference.get_inference_manager", return_value=mock_mgr),
             patch("cli.aws_client.get_aws_client", return_value=mock_client),
         ):
-            result = runner.invoke(cli, ["-o", "json", "inference", "health", "ep"])
+            result = runner.invoke(
+                cli,
+                ["-o", output_format, "inference", "health", "ep"],
+            )
         assert result.exit_code == 0
-        assert '"status": "healthy"' in result.output
-        assert '"http_status": 200' in result.output
+        payload = (
+            json.loads(result.stdout) if output_format == "json" else yaml.safe_load(result.stdout)
+        )
+        assert payload["endpoint"] == "ep"
+        assert payload["status"] == "healthy"
+        assert payload["http_status"] == 200
+        assert payload["path"] == "/inference/ep/health"
 
 
 class TestInferenceModels:

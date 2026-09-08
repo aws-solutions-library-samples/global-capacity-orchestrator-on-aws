@@ -1357,3 +1357,32 @@ def test_capacity_reservation_check_renders_empty_blocks_and_forwards_window(
         earliest_start="2026-08-01",
         latest_start="2026-08-10",
     )
+
+
+def test_stacks_destroy_all_machine_confirmation_lists_targets_on_stderr(
+    runner: CliRunner,
+) -> None:
+    manager = MagicMock()
+    stack_names = ["test-gco-global", "test-gco-us-east-1"]
+    manager.list_stacks.return_value = stack_names
+    manager.destroy_orchestrated.return_value = (True, stack_names, [])
+
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch(
+            "cli.stacks.get_stack_destroy_order",
+            return_value=["test-gco-us-east-1", "test-gco-global"],
+        ),
+    ):
+        result = _invoke(
+            runner,
+            stacks,
+            ["destroy-all"],
+            config=_config(output_format="json"),
+            input_text="y\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "test-gco-us-east-1" in result.stderr
+    assert "test-gco-global" in result.stderr
+    assert "Are you sure you want to destroy all stacks?" in result.stderr

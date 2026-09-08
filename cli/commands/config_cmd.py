@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -62,7 +62,7 @@ def init_config(config: Any, force: Any) -> None:
     config_path = Path.home() / ".gco" / "config.yaml"
 
     if config_path.exists() and not force:
-        click.confirm(f"Config file exists at {config_path}. Overwrite?", abort=True)
+        confirm(f"Config file exists at {config_path}. Overwrite?", abort=True)
 
     config.save(str(config_path))
     click.echo(f"Configuration saved to {config_path}")

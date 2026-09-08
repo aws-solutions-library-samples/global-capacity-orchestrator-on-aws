@@ -27,6 +27,8 @@ from typing import Any
 
 import click
 
+from ..output import confirm, emit_structured_document
+
 
 def _status_dir() -> Path:
     """Honour ``GCO_TASK_STATUS_DIR`` for tests, fall back to ``~/.gco/tasks``.
@@ -166,7 +168,11 @@ def tasks_list(limit: int, as_json: bool) -> None:
     records = _list_records(_status_dir())[:limit] if limit > 0 else _list_records(_status_dir())
 
     if as_json:
-        click.echo(json.dumps({"tasks": records}, indent=2, sort_keys=True))
+        emit_structured_document(
+            {"tasks": records},
+            output_format="json",
+            rendered=json.dumps({"tasks": records}, indent=2, sort_keys=True),
+        )
         return
 
     if not records:
@@ -210,7 +216,11 @@ def tasks_show(task_id: str) -> None:
     if record is None:
         click.echo(f"Task not found: {task_id}", err=True)
         sys.exit(1)
-    click.echo(json.dumps(record, indent=2, sort_keys=True))
+    emit_structured_document(
+        record,
+        output_format="json",
+        rendered=json.dumps(record, indent=2, sort_keys=True),
+    )
 
 
 @tasks.command("tail")
@@ -304,7 +314,7 @@ def tasks_prune(keep: int, yes: bool) -> None:
         return
 
     if not yes:
-        click.confirm(
+        confirm(
             f"Delete {len(stale)} task record(s) older than the {keep} most recent?",
             abort=True,
         )

@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -300,7 +300,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Cancel job {job_id}?", abort=True)
+        confirm(f"Cancel job {job_id}?", abort=True)
 
     try:
         from ..aws_client import get_aws_client

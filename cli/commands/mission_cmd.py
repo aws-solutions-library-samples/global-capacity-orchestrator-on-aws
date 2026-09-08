@@ -113,7 +113,26 @@ def _emit_json(payload: Any, *, err: bool = False) -> None:
     a CLI command may surface a partially-built dict (e.g., the start
     summary before save) and we want every output path to succeed.
     """
-    click.echo(json.dumps(payload, default=str), err=err)
+    from ..output import emit_structured_document
+
+    emit_structured_document(
+        payload,
+        output_format="json",
+        rendered=json.dumps(payload, default=str),
+        err=err,
+    )
+
+
+def _emit_json_text(text: str) -> None:
+    """Emit pre-rendered JSON while registering its native document shape."""
+    from ..output import emit_structured_document
+
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        click.echo(text)
+        return
+    emit_structured_document(document, output_format="json", rendered=text)
 
 
 def _emit_error(code: str, details: dict[str, Any] | None = None) -> None:
@@ -517,7 +536,7 @@ def _run_to_completion(session_id: str, *, dry_run: bool = False) -> None:
     if isinstance(backend, FilesystemBackend):
         report_path = backend.root / f"{session_id}.report.json"
         if report_path.exists():
-            click.echo(report_path.read_text(encoding="utf-8"))
+            _emit_json_text(report_path.read_text(encoding="utf-8"))
             return
     if session is not None:
         _emit_json(_strip_private_criteria(session))
@@ -1227,7 +1246,7 @@ def mission_scaffold_criteria_cmd(
                 f"kind={c.get('kind'):<16}  required={c.get('required')}"
             )
         return
-    click.echo(payload)
+    _emit_json_text(payload)
 
 
 # ---------------------------------------------------------------------------

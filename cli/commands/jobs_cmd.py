@@ -9,7 +9,7 @@ import click
 
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
-from ..output import format_job_table, get_output_formatter
+from ..output import confirm, format_job_table, get_output_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -615,11 +615,26 @@ def delete_job(config: Any, job_name: Any, namespace: Any, region: Any, yes: Any
     job_manager = get_job_manager(config)
 
     if not yes:
-        click.confirm(f"Delete job {job_name} in namespace {namespace} ({region})?", abort=True)
+        confirm(
+            f"Delete job {job_name} in namespace {namespace} ({region})?",
+            abort=True,
+            err=config.output_format != "table",
+        )
 
     try:
-        job_manager.delete_job(job_name, namespace, region)
-        formatter.print_success(f"Job {job_name} deleted")
+        result = job_manager.delete_job(job_name, namespace, region)
+        if config.output_format == "table":
+            formatter.print_success(f"Job {job_name} deleted")
+        else:
+            formatter.print(
+                {
+                    **result,
+                    "deleted": True,
+                    "job_name": job_name,
+                    "namespace": namespace,
+                    "region": region,
+                }
+            )
     except Exception as e:
         formatter.print_error(f"Failed to delete job: {e}")
         sys.exit(1)
@@ -841,7 +856,7 @@ def retry_job(config: Any, job_name: Any, namespace: Any, region: Any, yes: Any)
     job_manager = get_job_manager(config)
 
     if not yes:
-        click.confirm(f"Retry job {job_name} in namespace {namespace} ({region})?", abort=True)
+        confirm(f"Retry job {job_name} in namespace {namespace} ({region})?", abort=True)
 
     try:
         result = job_manager.retry_job(job_name, namespace, region)
@@ -910,9 +925,7 @@ def bulk_delete_jobs(
 
     if not dry_run and not yes:
         scope = f"region {region}" if region else "ALL regions"
-        click.confirm(
-            f"This will permanently delete matching jobs in {scope}. Continue?", abort=True
-        )
+        confirm(f"This will permanently delete matching jobs in {scope}. Continue?", abort=True)
 
     try:
         if region:

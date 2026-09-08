@@ -209,7 +209,9 @@ def test_sync_cli_runner_skips_flags_and_forwards_private_descriptors() -> None:
     ):
         result = cli_runner._run_cli("--literal-flag", "safe", pass_fds=(7,))
 
-    assert json.loads(result) == {"status": "ok"}
+    payload = json.loads(result)
+    assert payload["exit_code"] == 1
+    assert "empty stdout" in payload["error"]
     assert run.call_args.kwargs["pass_fds"] == (7,)
     assert run.call_args.kwargs["cwd"] == str(cli_runner.PROJECT_ROOT)
 

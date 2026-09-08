@@ -6,7 +6,7 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import get_output_formatter
+from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -194,7 +194,7 @@ def templates_delete(config: Any, name: Any, region: Any, yes: Any) -> None:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Delete template '{name}'?", abort=True)
+        confirm(f"Delete template '{name}'?", abort=True)
 
     try:
         from ..aws_client import get_aws_client

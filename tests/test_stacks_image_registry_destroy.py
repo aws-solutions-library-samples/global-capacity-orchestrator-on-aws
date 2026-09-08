@@ -202,7 +202,7 @@ def test_destroy_tty_prompt_decline(
         ),
         patch.object(mgr, "_run_cdk") as mock_cdk,
         patch("cli.stacks.sys.stdin") as mock_stdin,
-        patch("builtins.input", return_value="n"),
+        patch("cli.stacks.confirm", return_value=False),
     ):
         mock_stdin.isatty.return_value = True
         # ``force=False`` makes the prompt path active.
@@ -234,7 +234,7 @@ def test_destroy_tty_prompt_accept(manager_factory, cdk_json_factory):
         patch.object(mgr, "_run_cdk") as mock_cdk,
         patch.object(mgr, "_stack_exists_in_cloudformation", return_value=False),
         patch("cli.stacks.sys.stdin") as mock_stdin,
-        patch("builtins.input", return_value="y"),
+        patch("cli.stacks.confirm", return_value=True),
     ):
         mock_stdin.isatty.return_value = True
         mock_cdk.return_value = MagicMock(returncode=0)

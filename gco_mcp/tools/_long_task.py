@@ -28,8 +28,8 @@ from fastmcp.exceptions import ToolError
 from tools._task_status import TaskStatusWriter, is_valid_task_id, make_task_id
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-03T20:49:27Z
-# Generated from Git commit: c253a0ea3c715f5325d9e7549d2376f629f25c16
+# Generated at (UTC): 2026-09-08T04:02:10Z
+# Generated from Git commit: 90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4
 # Flowchart(s) generated from this file:
 #   * ``_run_long_task`` -> ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.png``)
@@ -212,7 +212,12 @@ async def _run_long_task(
 
     spawn_argv = list(logical_argv)
     if spawn_argv and spawn_argv[0] == "gco":
-        spawn_argv[0] = cli_runner._gco_executable()
+        spawn_argv = [
+            cli_runner._gco_executable(),
+            "--output",
+            "table",
+            *spawn_argv[1:],
+        ]
 
     started = time.monotonic()
     # Initialize observability before spawning. The writer degrades to an

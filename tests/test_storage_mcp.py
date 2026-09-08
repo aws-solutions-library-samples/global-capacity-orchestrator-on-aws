@@ -381,7 +381,13 @@ class TestAsyncCliRunner:
         ("process", "expected"),
         [
             (_FakeProcess(stdout=b'{"ok": true}'), {"ok": True}),
-            (_FakeProcess(stdout=b""), {"status": "ok"}),
+            (
+                _FakeProcess(stdout=b""),
+                {
+                    "error": "gco CLI returned empty stdout despite --output json",
+                    "exit_code": 1,
+                },
+            ),
             (
                 _FakeProcess(stderr=b"denied", final_returncode=2),
                 {"error": "denied", "exit_code": 2},
@@ -404,6 +410,20 @@ class TestAsyncCliRunner:
                 return await cli_runner._run_cli_async("storage", "list")
 
         assert json.loads(asyncio.run(run())) == expected
+
+    @pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+    def test_async_runner_rejects_nonstandard_json_constants(self, constant: bytes) -> None:
+        async def run() -> str:
+            process = _FakeProcess(stdout=constant)
+            with patch(
+                "cli_runner.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ):
+                return await cli_runner._run_cli_async("storage", "list")
+
+        payload = json.loads(asyncio.run(run()))
+        assert payload["exit_code"] == 1
+        assert "malformed or multiple" in payload["error"]
 
     def test_async_runner_rejects_traversal_and_missing_cli(self) -> None:
         assert (

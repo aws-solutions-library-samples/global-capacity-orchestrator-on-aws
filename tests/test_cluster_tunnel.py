@@ -199,7 +199,7 @@ class TestBastionHelpers:
         def _abort(*a: object, **k: object) -> None:
             raise click.exceptions.Abort()
 
-        monkeypatch.setattr(ct.click, "confirm", _abort)
+        monkeypatch.setattr(ct, "confirm", _abort)
         fmt = _FakeFormatter()
         with pytest.raises(click.exceptions.Abort):
             ct.provision_bastion(fmt, "gco-us-east-1", "us-east-1", 120, assume_yes=False)

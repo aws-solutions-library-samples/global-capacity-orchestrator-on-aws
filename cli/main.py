@@ -51,6 +51,7 @@ from .commands import (
     webhooks,
 )
 from .config import get_config
+from .output import StructuredOutputGroup
 
 
 def _configure_cli_logging(verbose: bool) -> None:
@@ -93,7 +94,7 @@ def _configure_cli_logging(verbose: bool) -> None:
         logging.getLogger(name).setLevel(third_party_level)
 
 
-@click.group()
+@click.group(cls=StructuredOutputGroup)
 @click.version_option(version=__version__, prog_name="gco")
 @click.option("--config", "-c", "config_file", help="Path to config file")
 @click.option("--region", "-r", "default_region", help="Default AWS region")
