@@ -208,6 +208,42 @@ CVE-2026-73566 exp:2026-11-14
 # this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-10-22
+# CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
+# (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
+# against the built dev image, under its python-pkg target.
+#
+# NOT clearable by the AWS CLI pin bump, and the provenance recorded here
+# previously (the AWS CLI v2 vendored bundle) no longer holds. Bumping
+# AWSCLI_VERSION 2.36.36 -> 2.36.41 on 2026-09-08 was expected to clear both and
+# did not: the container scan still reports the same two versions. That
+# prediction came from the release artifact, and the artifact says the opposite
+# of the image — in the 2.36.41 x86_64 bundle, and in the installed
+# /usr/local/aws-cli layout produced by running the real `./aws/install`, there
+# is exactly one dist-info (prompt_toolkit), zero egg-info, zero PKG-INFO, no
+# msgpack file at all, and no file containing "70.3.0"; a pinned-Trivy 0.74.0
+# scan of that bundle is clean. This is precisely the trap rule 5 warns about:
+# the release bundle is not a valid proxy for the built image.
+#
+# Also ruled out on 2026-09-08, so nobody repeats the search: the
+# python:3.14.7-slim base image (a fresh pull ships neither, by `pip list` and a
+# dist-info search), the apt layer (the install list is curl, git, unzip, groff,
+# less — none provide python3-setuptools or python3-msgpack, and
+# APT_SECURITY_EPOCH only refreshes .deb packages, so bumping it cannot reach a
+# python-pkg finding), and our own resolvable tree (msgpack appears nowhere in
+# requirements-lock.txt; setuptools appears only as a commented
+# "considered unsafe" marker).
+#
+# Next step is therefore an in-image check, not another artifact inspection:
+# build the dev image and read the file paths Trivy reports for these two ids.
+# Do not delete either id on the strength of an artifact-only inspection.
+#
+# Low runtime risk: the dev image is a contributor/CI tool that is never
+# deployed to a cluster, and neither flagged path runs as a network service.
+#
+# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
+#             https://github.com/advisories/GHSA-6v7p-g79w-8964
+CVE-2025-47273 exp:2026-11-14
+GHSA-6v7p-g79w-8964 exp:2026-11-14
 
 # -----------------------------------------------------------------------------
 # CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
