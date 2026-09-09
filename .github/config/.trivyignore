@@ -212,33 +212,51 @@ CVE-2026-50163 exp:2026-10-22
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
 # against the built dev image, under its python-pkg target.
 #
-# NOT clearable by the AWS CLI pin bump, and the provenance recorded here
-# previously (the AWS CLI v2 vendored bundle) no longer holds. Bumping
-# AWSCLI_VERSION 2.36.36 -> 2.36.41 on 2026-09-08 was expected to clear both and
-# did not: the container scan still reports the same two versions. That
-# prediction came from the release artifact, and the artifact says the opposite
-# of the image — in the 2.36.41 x86_64 bundle, and in the installed
-# /usr/local/aws-cli layout produced by running the real `./aws/install`, there
-# is exactly one dist-info (prompt_toolkit), zero egg-info, zero PKG-INFO, no
-# msgpack file at all, and no file containing "70.3.0"; a pinned-Trivy 0.74.0
-# scan of that bundle is clean. This is precisely the trap rule 5 warns about:
-# the release bundle is not a valid proxy for the built image.
+# Provenance, established 2026-09-08 and correcting the AWS CLI attribution
+# this entry previously carried: both come from pip's vendored dependency
+# manifest in the base image, at
+# usr/local/lib/python3.14/site-packages/pip/_vendor/vendor.txt, which pins
+#   msgpack==1.1.2
+#   setuptools==70.3.0
+# Trivy's python-pkg analyzer parses that file, which is why neither package has
+# a dist-info of its own and neither appears in `pip list` — they are vendored,
+# not installed. Reproduced on the completely unmodified base image:
+#   trivy image python:3.14.7-slim
+# reports exactly these two ids and nothing else, with no repository content,
+# no AWS CLI and no apt package involved.
 #
-# Also ruled out on 2026-09-08, so nobody repeats the search: the
-# python:3.14.7-slim base image (a fresh pull ships neither, by `pip list` and a
-# dist-info search), the apt layer (the install list is curl, git, unzip, groff,
-# less — none provide python3-setuptools or python3-msgpack, and
-# APT_SECURITY_EPOCH only refreshes .deb packages, so bumping it cannot reach a
-# python-pkg finding), and our own resolvable tree (msgpack appears nowhere in
-# requirements-lock.txt; setuptools appears only as a commented
-# "considered unsafe" marker).
+# Not clearable by any pin we control — checked 2026-09-08: python:3.14.7-slim
+# ships pip 26.2.1, which is the newest pip on PyPI, and it still vendors both
+# affected versions inside its published wheel. `pip install --upgrade pip` is a
+# no-op here, and no base-image bump can help because no fixed pip exists yet.
+# APT_SECURITY_EPOCH cannot reach this either: it only refreshes .deb packages,
+# and this is a python-pkg finding.
 #
-# Next step is therefore an in-image check, not another artifact inspection:
-# build the dev image and read the file paths Trivy reports for these two ids.
-# Do not delete either id on the strength of an artifact-only inspection.
+# The earlier AWS CLI attribution was wrong, and bumping AWSCLI_VERSION
+# 2.36.36 -> 2.36.41 on the strength of it did not clear either id. Recorded so
+# the dead end is not re-walked: the 2.36.41 bundle and its installed
+# /usr/local/aws-cli layout contain one dist-info (prompt_toolkit), zero
+# egg-info, zero PKG-INFO, no msgpack file and no file containing "70.3.0", and
+# a pinned-Trivy scan of that bundle is clean. Our own tree is clear too —
+# msgpack appears nowhere in requirements-lock.txt and setuptools only as a
+# commented "considered unsafe" marker.
 #
-# Low runtime risk: the dev image is a contributor/CI tool that is never
-# deployed to a cluster, and neither flagged path runs as a network service.
+# Low runtime risk, and for setuptools the vulnerable code is not even shipped:
+#   * CVE-2025-47273 is a path traversal in setuptools.package_index.PackageIndex.
+#     pip vendors pkg_resources, not setuptools — there is no
+#     pip/_vendor/setuptools directory in the image, so the flagged module is
+#     absent and vendor.txt records the version for provenance only.
+#   * msgpack 1.1.2 code is present at pip/_vendor/msgpack, reached only through
+#     cachecontrol serialising pip's own HTTP cache while pip talks to a package
+#     index. Impact is a crash of pip (availability only, no code execution).
+#   * The dev image is contributor/CI tooling that is never deployed to a
+#     cluster, and neither path runs as a network service.
+#
+# Clears when pip re-vendors msgpack >= 1.2.1 and setuptools >= 78.1.1 (or drops
+# the setuptools line): pull a base image carrying that pip, confirm with
+# `trivy image` on the base alone, then drop both ids. Because the finding is
+# entirely upstream of this repository, a published VEX statement would be the
+# durable alternative to re-dating this entry.
 #
 # Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
 #             https://github.com/advisories/GHSA-6v7p-g79w-8964
