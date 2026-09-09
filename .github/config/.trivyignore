@@ -21,18 +21,29 @@
 
 # CVE-2026-56854 — golang.org/x/crypto/ssh authentication bypass caused by
 # unenforced source-address restrictions, fixed in x/crypto v0.55.0. The
-# latest stable Buildx v0.36.1 and Helm v4.2.4 binaries both embed v0.54.0.
-# Official release candidates contain the fix, but this release deliberately
-# consumes stable tooling only; no fixed stable wrapper release exists as of
-# 2026-09-01. Neither binary exposes an SSH server: Buildx is contributor/CI
-# build tooling and Helm is a deploy-time chart client, so the vulnerable
-# server-side authentication path is not reachable. This new suppression has
-# a 30-day review window and can be removed only after stable Buildx and Helm
-# releases both embed x/crypto >= v0.55.0.
+# Now carried only by the pinned Helm binary (helm-v4.2.4-linux-amd64,
+# lambda/helm-installer/Dockerfile), which still embeds v0.54.0. Buildx was the
+# other carrier and no longer is: re-checked 2026-09-08, stable Buildx v0.37.0
+# shipped 2026-09-02 and its released binaries link x/crypto v0.55.0 (verified
+# with `go version -m` against both published architectures), so bumping
+# ARG BUILDX_VERSION cleared the dev image and left only this Helm copy.
+#
+# Not clearable by a stable pin bump: v4.2.4 (2026-08-13) is still the latest
+# Helm release, so there is no fixed stable Helm to move to.
+#
+# Low runtime risk: Helm is a deploy-time chart client and exposes no SSH
+# server, so the vulnerable server-side authentication path is unreachable.
+#
+# Clears when a stable Helm release embeds x/crypto >= v0.55.0: bump the
+# authenticated Helm URL and SHA256 trust anchor in
+# lambda/helm-installer/Dockerfile, update the expected pins in
+# tests/test_supply_chain_integrity.py, then drop this entry. Re-dated to
+# 2026-10-22 to review alongside CVE-2026-50163, the other suppression waiting
+# on exactly that stable Helm release.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-56854
-CVE-2026-56854 exp:2026-10-01
+CVE-2026-56854 exp:2026-10-22
 
-# CVE-2026-17106 (GHSA-hfg8-hc9c-6c3h) — github.com/moby/go-archive v0.2.1: a
+# CVE-2026-17106 (GHSA-hfg8-hc9c-6c3h) — github.com/moby/go-archive v0.2.0: a
 # crafted tar archive can write outside the extraction directory during
 # untar. Statically linked into the docker-buildx CLI plugin that
 # Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
@@ -44,10 +55,12 @@ CVE-2026-56854 exp:2026-10-01
 # Security workflow was green on main at eeeab67 (2026-08-18T20:50Z), 27
 # minutes before publication, so this appeared on an unchanged buildx binary.
 #
-# Not clearable by a stable pin bump: re-checked 2026-09-01 — v0.36.1 is
-# the latest stable Buildx release and requires moby/go-archive v0.2.1. The
-# available v0.37.0 release candidate still uses v0.2.0, so even accepting a
-# prerelease would not clear this finding; no upstream branch uses >= v0.3.0.
+# Not clearable by a stable pin bump: re-checked 2026-09-08 against the now
+# current stable Buildx v0.37.0, which this repository pins. Upstream published
+# go-archive v0.3.0 on 2026-07-30 (v0.3.3 by 2026-08-05), but Buildx has not
+# adopted it — v0.37.0 links v0.2.0, verified with `go version -m` against both
+# published architectures. The advisory range is `< 0.3.0`, so v0.37.0 moving
+# down from v0.2.1 to v0.2.0 neither clears nor worsens the finding.
 #
 # Low runtime risk: the flagged path is tar extraction. buildx is a
 # build-time CLI plugin that extracts contexts and cache artifacts authored by
@@ -196,31 +209,6 @@ CVE-2026-73566 exp:2026-11-14
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-10-22
 
-# CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
-# (msgpack 1.1.2, fixed 1.2.1) — both live only inside the AWS CLI v2
-# vendored bundle (usr/local/aws-cli/v2/2.36.26/dist/) in the dev image,
-# not in our resolvable dependency tree (msgpack appears nowhere in
-# requirements-lock.txt, and site-packages setuptools is current).
-#
-# Re-confirmed 2026-09-01 by a pinned-Trivy 0.74.0 scan of a full dev-image
-# trial build with latest AWS CLI 2.36.36: both findings remain against the
-# vendored bundle. Scanning only the release zip is insufficient; the built
-# image is authoritative per rule 5 above.
-#
-# Not clearable by a pin bump: 2.36.36 is the newest AWS CLI v2 release and
-# still vendors the affected versions. Clears when a newer AWS CLI release
-# rebuilds its bundle with patched deps — bump AWSCLI_VERSION in
-# Dockerfile.dev and re-check.
-#
-# Low runtime risk: the dev image is a contributor/CI tool that is never
-# deployed; the flagged code paths run only inside `aws` CLI invocations
-# against operator-supplied input.
-#
-# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
-#             https://github.com/advisories/GHSA-6v7p-g79w-8964
-CVE-2025-47273 exp:2026-11-14
-GHSA-6v7p-g79w-8964 exp:2026-11-14
-
 # -----------------------------------------------------------------------------
 # CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
 # HTTP/2), CVE-2026-56858 (html/template XSS), CVE-2026-56859 (encoding/xml
@@ -241,10 +229,15 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 # window, so they appeared on unchanged binaries.
 #
 # Flagged in the scanned stable-tool images:
-#   dev (Dockerfile.dev)                    docker, docker-buildx, kubectl
+#   dev (Dockerfile.dev)                    kubectl
 #   helm-installer                          helm, kubectl
 # A fresh 2026-09-01 pull of the AWS Lambda Python 3.14 base scans clean for
 # aws-lambda-rie, so the remaining occurrences are all in pins we track.
+# docker and docker-buildx both dropped off this list on 2026-09-08: stable
+# Docker 29.8.0 and Buildx v0.37.0 are built with go1.26.8, past the 1.26.6 fix
+# line. Verified per binary with `go version` and a pinned-Trivy 0.74.0 rootfs
+# scan: the 29.8.0 and v0.37.0 binaries report zero stdlib findings, while the
+# 29.7.2 and v0.36.1 binaries they replace each reported all eight.
 #
 # Not clearable by an allowed pin bump — upstream re-checked 2026-09-01:
 #   kubectl        v1.36.4 is latest stable-1.36 and reports go1.26.5. Both
@@ -252,9 +245,10 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 #                  ±1 minor skew against cdk.json::kubernetes_version.
 #   helm           v4.2.4 is the latest stable release and reports go1.26.5;
 #                  only a prerelease currently carries patched Go.
-#   docker         29.7.2 is the newest static stable build.
-#   docker-buildx  v0.36.1 is the latest stable release; only a prerelease
-#                  currently carries patched Go.
+#   docker         cleared 2026-09-08 by bumping to stable 29.8.0 (go1.26.8).
+#   docker-buildx  cleared 2026-09-08 by bumping to stable v0.37.0 (go1.26.8).
+# Only kubectl keeps these ids alive in the dev image, and only kubectl and
+# helm keep them alive in helm-installer.
 #
 # Low runtime risk. Every flagged binary is a short-lived CLI/tooling client,
 # never a long-lived network service:
@@ -281,73 +275,3 @@ CVE-2026-56860 exp:2026-11-14
 CVE-2026-56862 exp:2026-11-14
 CVE-2026-39821 exp:2026-11-14
 CVE-2026-46600 exp:2026-11-14
-# -----------------------------------------------------------------------------
-# CVE-2026-56864 (a malicious GOSUMDB could serve arbitrary module content) and
-# CVE-2026-56865 (a malicious GOPROXY could forge sumdb responses) —
-# golang.org/x/mod at v0.38.0, statically linked into the docker-buildx CLI
-# plugin that Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
-# security:trivy:container-scan on the GCO dev image, which is the only
-# scanned image carrying the Buildx plugin; every other binary in that image
-# scanned clean. Fixed in x/mod 0.40.0.
-#
-# Not introduced by any change of ours: the Security workflow was green on
-# main at 2a05133 (2026-08-19 12:14Z) and red on a pull request at
-# 2026-08-19 17:45Z whose diff touches no image contents. The two x/mod
-# advisories landed in the Trivy DB in that window, so they appeared on an
-# unchanged buildx binary — main goes red on its next scan for the same reason.
-#
-# Not clearable by a stable pin bump — upstream re-checked 2026-09-01:
-# Buildx v0.36.1 requires the flagged x/mod v0.38.0. v0.37.0-rc1 carries
-# v0.40.0, but this release deliberately excludes prerelease tooling; remove
-# these entries when a stable Buildx release carries the fix.
-#
-# Low runtime risk: both flaws sit in the Go module download and verification
-# path — they need a hostile GOSUMDB or GOPROXY serving forged module content
-# to a client that is fetching Go modules. buildx fetches no Go modules; it
-# vendors x/mod for module-path and semver parsing, so the vulnerable code
-# path is not reachable in this usage. The dev image is contributor/CI
-# tooling and is never deployed.
-#
-# Clears when a buildx release ships requiring x/mod >= 0.40.0: bump
-# ARG BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan tracks it) and
-# drop these entries.
-# Advisories: https://avd.aquasec.com/nvd/cve-2026-56864
-#             https://avd.aquasec.com/nvd/cve-2026-56865
-CVE-2026-56864 exp:2026-11-14
-CVE-2026-56865 exp:2026-11-14
-
-# CVE-2026-84304 — google.golang.org/grpc heap memory exhaustion. Prior to
-# 1.83.1, internal/transport/transport.go stores every fragmented HTTP/2 DATA
-# frame as a separate recvMsg in recvBuffer, so millions of one-byte frames
-# consume disproportionate heap even while staying inside the connection and
-# stream flow-control windows. An unauthenticated remote peer can drive a
-# gRPC *server* to a panic or OOM through concurrent multiplexed streams.
-# Statically linked into the docker-buildx CLI plugin Dockerfile.dev installs
-# (ARG BUILDX_VERSION), so only security:trivy:container-scan on the dev image
-# surfaces it — the same binary already carrying CVE-2026-56854 and the x/mod
-# pair below.
-#
-# Not introduced by any change of ours: the entry reached the Trivy DB between
-# the green pull-request run of #322 and the push run of the identical commit
-# on main, so it appeared on a dev image whose Buildx pin did not move.
-#
-# Not clearable by a stable pin bump — upstream checked 2026-09-02: the latest
-# stable Buildx v0.36.1 requires grpc v1.82.1. v0.37.0-rc2 already carries
-# v1.83.2, but this release deliberately consumes stable tooling only, and an
-# availability-only defect in contributor tooling does not justify shipping a
-# release candidate as every contributor's and CI job's build toolchain.
-#
-# Low runtime risk, and availability-only: CVSS 4.0 records VC:N/VI:N/VA:H
-# with no confidentiality or integrity impact. Reaching it requires being a
-# gRPC server that accepts connections from a hostile peer. buildx is a
-# client: it dials a BuildKit instance the developer already controls over a
-# local socket, and exposes no gRPC listener to untrusted input. The dev image
-# is contributor/CI tooling and is never deployed.
-#
-# Clears when a stable Buildx release requires grpc >= 1.83.1: bump
-# ARG BUILDX_VERSION in Dockerfile.dev with its reviewed per-architecture
-# checksums (the monthly deps-scan tracks the pin) and drop this entry. Dated
-# to 2026-10-01 to land in the same review as CVE-2026-56854, the other
-# suppression waiting on exactly that stable Buildx release.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-84304
-CVE-2026-84304 exp:2026-10-01
