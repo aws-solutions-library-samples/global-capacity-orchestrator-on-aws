@@ -7,9 +7,14 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Live Demo](live_demo.gif)
 
-> Automated demo showing costs, capacity-aware placement, 4 schedulers running simultaneously
-> (Volcano, Kueue, YuniKorn, Slurm), high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)), and live
-> LLM inference — all on one platform. Re-record with `bash demo/record_demo.sh`.
+> Automated demo showing fleet status, cost and policy agreement, capacity-aware placement,
+> 4 schedulers running simultaneously (Volcano, Kueue, YuniKorn, Slurm),
+> high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)),
+> an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) vector database,
+> a globally replicated vector store answering a real semantic query over GCO's
+> own docs (`gco vector ingest --demo` then `gco vector search`), and live
+> LLM inference — all on one platform. See the guarded live and offline
+> re-render commands in [LIVE_DEMO.md](LIVE_DEMO.md#recording-the-demo).
 
 </details>
 
@@ -18,7 +23,12 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Deploy](deploy.gif)
 
-*Fresh `gco stacks deploy-all -y` from a clean account ([re-record](record_deploy.sh))*
+*Fresh `gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn`
+from a clean account, provisioning the full optional topology the live demo then
+exercises ([re-record](record_deploy.sh)). The six add-ons ship disabled in
+`cdk.json` because each bills continuously, so the recording enables them for one
+run through [run-scoped overrides](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides)
+rather than changing the committed defaults.*
 
 </details>
 
@@ -27,7 +37,10 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Destroy](destroy.gif)
 
-*Full teardown with `gco stacks destroy-all -y` ([re-record](record_destroy.sh))*
+*Full teardown with `gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn`
+([re-record](record_destroy.sh)). The teardown repeats the deploy's overrides so it
+evaluates the same app; deletion itself does not depend on them, since
+`DeleteStack` removes whatever the deployed template contains.*
 
 </details>
 
@@ -63,7 +76,7 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 |---|---|
 | `DEMO_WALKTHROUGH.md` | Step-by-step demo script covering infrastructure, jobs, health, and API |
 | `INFERENCE_WALKTHROUGH.md` | End-to-end inference demo: deploy, invoke, scale, autoscale, stop/start, model weights, Valkey cache |
-| `live_demo.sh` | Automated live demo script — runs through costs, schedulers, storage, inference, and EFS |
+| `live_demo.sh` | Automated live demo script — runs through fleet status/cost/policy, schedulers, storage, inference, and EFS |
 | `lib_demo.sh` | Shared function library sourced by `live_demo.sh`, `record_demo.sh`, and BATS tests |
 | `LIVE_DEMO.md` | Documentation for the live demo script: usage, customization, and maintenance |
 | `record_demo.sh` | Records `live_demo.sh` as an animated GIF using asciinema + agg |
@@ -84,30 +97,62 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ## Recording Deployment Lifecycles
 
-For an auditable deploy/live-test/destroy recording, start from a CI-green
-40-character commit SHA and set both guards explicitly:
+For an auditable deploy/live-demo/destroy recording, start from a CI-green
+40-character commit SHA, select an explicitly authorized account, and opt in to
+live mutation:
 
 ```bash
+export GCO_RECORDING_LIVE=1
 export GCO_EXPECTED_GIT_SHA="<40-character CI-green commit SHA>"
 export GCO_EXPECTED_ACCOUNT_ID="<12-digit authorized AWS account ID>"
+export GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
 bash demo/record_deploy.sh
-# Run the bounded live checks against this deployment.
+bash demo/record_demo.sh
 bash demo/record_destroy.sh
 ```
 
-When the SHA guard is set, each recorder verifies that `HEAD` matches exactly
-and that no source file differs. Only the four generated lifecycle outputs
-(`demo/deploy.cast`, `demo/deploy.gif`, `demo/destroy.cast`, and
-`demo/destroy.gif`) may be dirty, allowing the destroy recording to follow the
-deploy recording before all four assets are committed. The account guard uses
-`aws sts get-caller-identity` and fails before deploy or destroy if the active
-identity is not the authorized account. The reusable scripts intentionally do
-not hardcode an account.
+`GCO_DEMO_ENABLE` is the single knob for the optional topology. `record_deploy.sh`
+and `record_destroy.sh` pass it to `gco stacks deploy-all|destroy-all --enable`,
+while `record_demo.sh` exports it so `detect_features` enters the matching demo
+sections. It takes the same names as
+[`--enable`](../docs/CUSTOMIZATION.md#run-scoped-enablement-overrides); each
+recorder validates the value during preflight and refuses to start on a typo.
+Omit it to record the shipped `cdk.json` defaults, in which case the optional
+sections are skipped.
+
+**Export it once and keep it exported for all three recorders.** One variable
+driving both the deploy and the demo is a convention, not an enforced invariant:
+these are three separate script runs, and `detect_features` reads the variable
+rather than interrogating the cluster. Naming *fewer* features on the demo than
+the deploy simply skips sections. Naming *more* means a section runs against
+infrastructure that was never created — its commands fail visibly in the cast, and
+`live_demo.sh` exits non-zero rather than publishing the take, but the cheap
+protection is to set the value once and not touch it between the three runs.
+
+Because these features are enabled per run rather than in `cdk.json`, the
+committed opt-in defaults stay off and the recorders' clean-worktree guard still
+holds. Note the cost while a full-topology recording is live: FSx for Lustre
+provisions 1.2 TiB **per configured region**, and Aurora Serverless v2 and Valkey
+Serverless bill until the destroy completes.
+
+The three live recorders fail closed unless all guards are present. Each verifies
+that `HEAD` matches exactly and that no source file differs. Only the six legacy
+recording outputs (`deploy`, `live_demo`, and `destroy`, each `.cast` + `.gif`)
+may be dirty, allowing the complete sequence to be captured before its assets
+are committed. The account guard uses `aws sts get-caller-identity`; reusable
+scripts never hardcode an account. For the live demo, the recorder snapshots
+only the authorized current context into a private mode-`0600` kubeconfig under
+its staging directory. Repository CLI and `kubectl` children inherit that
+single disposable file, so their normal context refreshes cannot rewrite the
+operator's kubeconfig; the snapshot is removed on every handled exit. Use
+`RENDER_EXISTING=1` to iterate GIF speed, size, theme, or font entirely offline
+from an already verified cast.
 
 Each cast is sanitized before GIF rendering: 12-digit account IDs and AWS
 access-key-ID patterns are replaced, then an independent verification pass
-rejects any residual match. `SKIP_SANITIZE=1` is for local troubleshooting only;
-never commit or distribute artifacts produced with that bypass.
+rejects any residual match. Publishable legacy recorders reject
+`SKIP_SANITIZE=1`; that bypass remains only in lower-level helpers for isolated
+local debugging.
 
 The security workflow fully decodes the five tracked GIFs and enforces reviewed
 size, canvas, and frame-count ceilings. If a deliberate re-recording exceeds a

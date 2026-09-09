@@ -16,19 +16,24 @@
 #   - AWS credentials configured
 #
 # Usage:
+#   GCO_RECORDING_LIVE=1 \
+#   GCO_EXPECTED_GIT_SHA=<40-char-sha> \
+#   GCO_EXPECTED_ACCOUNT_ID=<12-digit-account> \
 #   bash demo/record_deploy.sh
+#   RENDER_EXISTING=1 bash demo/record_deploy.sh  # no AWS calls
 #
 # Options (via environment variables):
-#   GCO_EXPECTED_GIT_SHA     Optional full SHA guard; when set, HEAD must match
-#                            and only the four lifecycle artifacts may be dirty
-#   GCO_EXPECTED_ACCOUNT_ID  Optional 12-digit AWS account guard
-#   DEMO_COLS=160            Terminal width (default: 160)
-#   DEMO_ROWS=40             Terminal height (default: 40)
-#   DEMO_SPEED=10            Playback speed for GIF (default: 10 — deploy is long)
+#   GCO_RECORDING_LIVE=1   Required acknowledgement for live recording
+#   GCO_EXPECTED_GIT_SHA   Required full reviewed SHA for live recording
+#   GCO_EXPECTED_ACCOUNT_ID Required authorized account for live recording
+#   RENDER_EXISTING=1      Re-render the existing verified cast without AWS
+#   DEMO_COLS=140          Terminal width (default: 140)
+#   DEMO_ROWS=37           Terminal height (default: 37)
+#   DEMO_SPEED=15          Playback speed for GIF (default: 15 — deploy is long)
 #   DEMO_THEME=monokai       agg color theme (default: monokai)
 #   DEMO_FONT_FAMILY         agg font fallback chain (default: see lib_demo.sh)
 #   SKIP_GIF=1               Only produce the .cast file
-#   SKIP_SANITIZE=1          Skip account/access-key redaction (debugging only)
+#   SKIP_SANITIZE=1          Rejected for publishable recordings
 #   SKIP_EMOJI_STRIP=1       Skip emoji substitution (debugging only)
 #
 # The raw cast and GIF are written under a same-filesystem temporary directory.
@@ -69,7 +74,8 @@ RECORDING_TMP_DIR=""
 cleanup_recording_temps() {
     local exit_code="$1"
     local rollback_succeeded=1
-    trap - EXIT HUP INT TERM
+    trap - EXIT
+    trap '' HUP INT TERM
 
     if ! rollback_recording_publication; then
         echo "Recording publication rollback failed; preserving staging at ${RECORDING_TMP_DIR}." >&2
@@ -81,6 +87,9 @@ cleanup_recording_temps() {
             exit_code=1
         fi
     fi
+    if ! release_legacy_recording_lock; then
+        exit_code=1
+    fi
     exit "$exit_code"
 }
 trap 'cleanup_recording_temps "$?"' EXIT
@@ -88,13 +97,15 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Terminal dimensions (same as record_demo.sh)
-COLS="${DEMO_COLS:-160}"
-ROWS="${DEMO_ROWS:-40}"
+# A 140x37 canvas keeps CloudFormation output readable while leaving room
+# under the reviewed 1360x803/1000-frame GIF policy.
+COLS="${DEMO_COLS:-140}"
+ROWS="${DEMO_ROWS:-37}"
 
-# Deploy takes up to an hour — 10x speed makes the GIF watchable (~5-6 min)
-SPEED="${DEMO_SPEED:-10}"
+# Compress long CloudFormation waits enough to preserve frame-count headroom.
+SPEED="${DEMO_SPEED:-15}"
 THEME="${DEMO_THEME:-monokai}"
+RENDER_EXISTING="${RENDER_EXISTING:-0}"
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 
@@ -124,70 +135,84 @@ echo ""
 echo "  ${BOLD}Preflight Check${RESET}"
 echo ""
 
-# Check tools
-if command -v asciinema &>/dev/null; then
-    preflight_pass "asciinema installed"
-else
-    preflight_fail "asciinema not installed" "brew install asciinema"
-fi
-
+# GIF rendering is required unless explicitly producing a cast only.
 if [ "${SKIP_GIF:-}" != "1" ]; then
     if command -v agg &>/dev/null; then
         preflight_pass "agg installed"
     else
-        preflight_warn "agg not installed — will produce .cast only" \
-            "brew install agg"
-        SKIP_GIF=1
+        if [ "$RENDER_EXISTING" = "1" ]; then
+            preflight_fail "agg is required for RENDER_EXISTING=1" \
+                "Install agg; the existing deploy GIF will be preserved"
+        else
+            preflight_warn "agg not installed — will produce .cast only" \
+                "brew install agg"
+            SKIP_GIF=1
+        fi
     fi
 fi
 
-if (cd "$REPO_ROOT" && python3 -c 'from cli.main import main; assert callable(main)'); then
-    preflight_pass "Repository GCO CLI module importable"
-else
-    preflight_fail "Repository GCO CLI module is not importable" \
-        "Install this checkout's Python dependencies before recording"
+if [ "${SKIP_SANITIZE:-}" = "1" ]; then
+    preflight_fail "SKIP_SANITIZE is not allowed for publishable recordings" \
+        "Unset SKIP_SANITIZE so verification remains fail-closed"
 fi
 
-if [ -f "${REPO_ROOT}/cdk.json" ]; then
-    preflight_pass "cdk.json found"
-else
-    preflight_fail "cdk.json not found" "Run from repo root"
-fi
-
-# A supplied SHA makes provenance fail-closed. Recorder outputs are the only
-# permitted dirty paths so this same checkout can record deploy then destroy.
-if [ -n "${GCO_EXPECTED_GIT_SHA:-}" ]; then
-    if verify_recording_git_state "$REPO_ROOT" \
-            "demo/deploy.cast" "demo/deploy.gif" \
-            "demo/destroy.cast" "demo/destroy.gif"; then
-        preflight_pass "Git HEAD and source tree match the expected SHA"
-    else
-        preflight_fail "Git provenance guard failed" \
-            "Checkout the exact CI-green SHA and remove unexpected changes"
-    fi
-else
-    preflight_warn "Exact Git SHA guard not set" \
-        "Set GCO_EXPECTED_GIT_SHA to publish an auditable recording"
-fi
-
-# Check AWS credentials
-if aws sts get-caller-identity &>/dev/null; then
-    preflight_pass "AWS credentials configured"
-else
-    preflight_fail "AWS credentials not configured" "aws configure or aws sso login"
-fi
-
-if [ -n "${GCO_EXPECTED_ACCOUNT_ID:-}" ]; then
-    if verify_recording_aws_account; then
-        preflight_pass "Active AWS account matches the expected account"
-    else
-        preflight_fail "AWS account guard failed" \
-            "Select credentials for GCO_EXPECTED_ACCOUNT_ID"
-    fi
-else
-    preflight_warn "Expected AWS account guard not set" \
-        "Set GCO_EXPECTED_ACCOUNT_ID to publish an auditable recording"
-fi
+case "$RENDER_EXISTING" in
+    0)
+        if command -v asciinema &>/dev/null; then
+            preflight_pass "asciinema installed"
+        else
+            preflight_fail "asciinema not installed" "brew install asciinema"
+        fi
+        if (cd "$REPO_ROOT" && python3 -c 'from cli.main import main; assert callable(main)'); then
+            preflight_pass "Repository GCO CLI module importable"
+        else
+            preflight_fail "Repository GCO CLI module is not importable" \
+                "Install this checkout's Python dependencies before recording"
+        fi
+        if [ -f "${REPO_ROOT}/cdk.json" ]; then
+            preflight_pass "cdk.json found"
+        else
+            preflight_fail "cdk.json not found" "Run from repo root"
+        fi
+        override_status=0
+        verify_enablement_overrides "$REPO_ROOT" || override_status=$?
+        case "$override_status" in
+            0)
+                if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+                    preflight_pass "Run-scoped enablement overrides valid (${GCO_DEMO_ENABLE})"
+                else
+                    preflight_pass "No run-scoped overrides (cdk.json defaults apply)"
+                fi
+                ;;
+            2)
+                preflight_fail "Cannot validate GCO_DEMO_ENABLE" \
+                    "python3 must be available to check the requested names"
+                ;;
+            *)
+                preflight_fail "GCO_DEMO_ENABLE names an unknown feature or chart" \
+                    "Use names from gco/enablement_overrides.py (see gco stacks deploy-all --help)"
+                ;;
+        esac
+        if verify_legacy_live_recording_authorization "$REPO_ROOT"; then
+            preflight_pass "Live consent, Git SHA, and AWS account guards verified"
+        else
+            preflight_fail "Live recording authorization failed" \
+                "Set GCO_RECORDING_LIVE, GCO_EXPECTED_GIT_SHA, and GCO_EXPECTED_ACCOUNT_ID"
+        fi
+        ;;
+    1)
+        if [ -f "$CAST_FILE" ]; then
+            preflight_pass "Existing deploy cast found for offline rendering"
+        else
+            preflight_fail "Existing deploy cast not found" \
+                "Record once with guarded live mode before using RENDER_EXISTING=1"
+        fi
+        ;;
+    *)
+        preflight_fail "RENDER_EXISTING must be 0 or 1" \
+            "Use RENDER_EXISTING=1 only for offline re-rendering"
+        ;;
+esac
 
 # Check disk space
 AVAILABLE_MB=$(df -m "${SCRIPT_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
@@ -208,50 +233,72 @@ if [ "$PREFLIGHT_FAIL" -gt 0 ]; then
     exit 1
 fi
 
-# ── Record ───────────────────────────────────────────────────────────────────
+acquire_legacy_recording_lock "$REPO_ROOT"
 
-echo ""
-echo "Recording deploy (${COLS}x${ROWS})..."
-echo "Output: ${CAST_FILE}"
-echo ""
-echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y${RESET}"
-echo "  ${DIM}The deploy can take up to an hour. The recording captures everything.${RESET}"
-echo ""
+# ── Record ───────────────────────────────────────────────────────────────────
 
 # Stage every raw output beside the final files so successful `mv` publication
 # cannot cross filesystems. Existing tracked artifacts remain untouched until
-# sanitization (and GIF rendering, when enabled) succeeds.
+# verification and GIF rendering succeed.
 RECORDING_TMP_DIR=$(mktemp -d "${SCRIPT_DIR}/.deploy-recording.XXXXXX")
 RAW_CAST_FILE="${RECORDING_TMP_DIR}/deploy.cast"
 RAW_GIF_FILE="${RECORDING_TMP_DIR}/deploy.gif"
 WRAPPER="${RECORDING_TMP_DIR}/run.sh"
 
-# Create a wrapper script so asciinema runs a single command without
-# needing --env or shell features like && in --command. Keep checkout paths
-# out of generated shell syntax: the fixed wrapper reads quoted environment
-# variables at runtime, preserving spaces and metacharacters as data.
-cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
+if [ "$RENDER_EXISTING" = "1" ]; then
+    echo "Re-rendering verified deploy cast (${COLS}x${ROWS}, speed=${SPEED}x)..."
+    cp -p "$CAST_FILE" "$RAW_CAST_FILE"
+else
+    echo ""
+    echo "Recording deploy (${COLS}x${ROWS})..."
+    echo "Output: ${CAST_FILE}"
+    echo ""
+    if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y --enable ${GCO_DEMO_ENABLE}${RESET}"
+    else
+        echo "  ${YELLOW}${BOLD}This will run python3 -m cli.main stacks deploy-all -y${RESET}"
+    fi
+    echo "  ${DIM}The deploy can take up to an hour. The recording captures everything.${RESET}"
+    echo ""
+
+    # Create a wrapper script so asciinema runs one repository-bound command.
+    #
+    # GCO_DEMO_ENABLE is threaded through as `--enable` so the deploy and the
+    # live demo are driven by one knob: whatever this recording provisions is
+    # exactly what the demo recording will narrate. The committed cdk.json is
+    # never rewritten, so verify_recording_git_state's clean-worktree rule and
+    # the shipped opt-in defaults both survive.
+    #
+    # The two branches avoid expanding an empty bash array under `set -u`,
+    # which is an error on the macOS bash 3.2 the recorder CI job exercises.
+    cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$REPO_ROOT"
 export COLUMNS="$GCO_RECORDING_COLUMNS"
-python3 -m cli.main stacks deploy-all -y
+if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+    python3 -m cli.main stacks deploy-all -y --enable "$GCO_DEMO_ENABLE"
+else
+    python3 -m cli.main stacks deploy-all -y
+fi
 WRAPPER_SCRIPT
-chmod +x "$WRAPPER"
+    chmod +x "$WRAPPER"
 
-export REPO_ROOT
-export GCO_RECORDING_COLUMNS="$COLS"
-export GCO_RECORDING_WRAPPER="$WRAPPER"
-asciinema rec \
-    --return \
-    --cols "$COLS" \
-    --rows "$ROWS" \
-    --overwrite \
-    --command "bash --norc --noprofile \"\$GCO_RECORDING_WRAPPER\"" \
-    "$RAW_CAST_FILE"
+    export REPO_ROOT
+    export GCO_DEMO_ENABLE="${GCO_DEMO_ENABLE:-}"
+    export GCO_RECORDING_COLUMNS="$COLS"
+    export GCO_RECORDING_WRAPPER="$WRAPPER"
+    asciinema rec \
+        --return \
+        --cols "$COLS" \
+        --rows "$ROWS" \
+        --overwrite \
+        --command "bash --norc --noprofile \"\$GCO_RECORDING_WRAPPER\"" \
+        "$RAW_CAST_FILE"
 
-echo ""
-echo "✓ Raw recording complete; sanitizing before publication"
+    echo ""
+    echo "✓ Raw recording complete; sanitizing before publication"
+fi
 
 # ── Sanitize ────────────────────────────────────────────────────────────────
 # Redact any AWS account/access-key IDs before anyone can view the cast or the

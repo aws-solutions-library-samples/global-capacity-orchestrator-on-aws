@@ -109,6 +109,97 @@ run_cmd() {
     return "$exit_code"
 }
 
+# wait_for_inference_generation <endpoint> [attempts] [delay_seconds]
+#
+# Kubernetes readiness proves only the pod-local health endpoint. Before the
+# visible demo prompt, send a tiny real completion through the same unpinned
+# global API route narrated by live_demo.sh. This deliberately retries at the
+# workflow level: the generic client never replays POST automatically.
+wait_for_inference_generation() {
+    local endpoint="$1"
+    local attempts="${2:-4}"
+    local delay_seconds="${3:-10}"
+    local attempt
+
+    for attempt in $(seq 1 "$attempts"); do
+        if gco inference invoke "$endpoint" \
+                -p 'Reply with ready.' --max-tokens 1 >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            narrate "The global inference route is still converging; retrying in ${delay_seconds}s..."
+            sleep "$delay_seconds"
+        fi
+    done
+    return 1
+}
+
+# cleanup_inference_endpoint <endpoint>
+#
+# Best-effort fallback for ambiguous deployment failures and abnormal exits.
+# Preserve the caller's original status, but never hide a possible GPU leak.
+cleanup_inference_endpoint() {
+    local endpoint="$1"
+    if gco inference delete "$endpoint" -y >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "WARNING: inference endpoint '${endpoint}' may still be running." >&2
+    echo "Run: gco inference delete ${endpoint} -y" >&2
+    return 1
+}
+
+# report_inference_lifecycle_result <invoke_ok> <delete_ok>
+#
+# Print the full-lifecycle claim only when generation and normal cleanup both
+# succeeded. Callers propagate a nonzero result to the recorder.
+report_inference_lifecycle_result() {
+    local invoke_ok="$1"
+    local delete_ok="$2"
+    if [ "$invoke_ok" -ne 1 ]; then
+        warn "Inference generation failed; refusing to publish a false-success recording."
+        return 1
+    fi
+    if [ "$delete_ok" -ne 1 ]; then
+        warn "Inference cleanup failed; refusing to publish an incomplete lifecycle recording."
+        return 1
+    fi
+    success "Endpoint deployed, invoked, and torn down — full lifecycle."
+}
+
+# report_feature_result <submitted_ok> <feature label> <success claim>
+#
+# The same fail-closed rule as report_inference_lifecycle_result, applied to the
+# optional feature sections. Their commands are individually forgiving —
+# `submit-direct ... || true` keeps a presentation moving, `wait_for_job` always
+# returns 0, and the kubectl reads end in `|| echo '(pod scheduling...)'` — so
+# without this the section printed a green claim about FSx throughput or Valkey
+# caching even when nothing was ever submitted. In a published recording an
+# unearned claim is worse than a missing section.
+#
+# A feature can be absent for two reasons that look identical here: it was named
+# in GCO_DEMO_ENABLE but never deployed, or it is deployed and genuinely broken.
+# Both make the claim false, so both fail.
+#
+# Returns nonzero on failure; guarded recordings propagate that and publish
+# nothing. Live presentations degrade to a warning and keep going.
+report_feature_result() {
+    local submitted_ok="$1"
+    local label="$2"
+    local claim="$3"
+    if [ "$submitted_ok" -eq 1 ]; then
+        success "$claim"
+        return 0
+    fi
+    warn "${label} did not run: its workload could not be submitted."
+    narrate "Verify ${label} is actually deployed — a section enabled through"
+    narrate "GCO_DEMO_ENABLE still needs the matching 'deploy-all --enable'."
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        warn "Refusing to publish a recording that claims an unproven feature."
+        return 1
+    fi
+    return 0
+}
+
 pause_for_audience() {
     if [ "${GCO_DEMO_NONINTERACTIVE:-}" = "1" ]; then
         sleep 1
@@ -205,6 +296,77 @@ wait_for_job() {
 # Reads cdk.json and sets global variables for each feature flag.
 # Requires jq and CDK_JSON to be set.
 
+# demo_feature_forced <name>
+#
+# True when GCO_DEMO_ENABLE names this feature or chart. The variable carries
+# the same comma-separated names as `gco stacks deploy-all --enable`, which is
+# the whole point: the recorders derive both values from one knob, so a session
+# can never deploy a feature and then skip demonstrating it (or narrate a
+# feature it never deployed).
+#
+# GCO ships every optional add-on disabled in cdk.json because each carries
+# recurring cost. Recording a full-topology demo therefore needs a run-scoped
+# override rather than a committed config change — see docs/CUSTOMIZATION.md
+# (Run-scoped enablement overrides).
+#
+# Names with no demo section (keda, cert_manager, ...) are accepted and simply
+# have no effect here; they still reach the deploy. A typo is caught by the
+# deploy itself, which validates `--enable` against the canonical name sets in
+# gco/enablement_overrides.py before making any AWS call.
+demo_feature_forced() {
+    local wanted="$1"
+    local requested
+    requested=$(printf '%s' "${GCO_DEMO_ENABLE:-}" | tr -d '[:space:]')
+    case ",${requested}," in
+        *",${wanted},"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# verify_enablement_overrides <repo_root>
+#
+# Validates GCO_DEMO_ENABLE against the canonical name sets in
+# gco/enablement_overrides.py, which is the same authority `gco stacks
+# deploy-all --enable` validates against.
+#
+# The deploy and destroy recorders get this for free because the CLI rejects an
+# unknown --enable name before any AWS call. The live-demo recorder does not:
+# it only *reads* the variable for section detection, so an unnoticed typo
+# would silently skip the very section the operator set out to record — after
+# the deploy already ran. Checking here keeps that failure loud and early.
+#
+# No-op when unset or empty, so unguarded default recordings are unaffected.
+verify_enablement_overrides() {
+    local repo_root="$1"
+    local requested="${GCO_DEMO_ENABLE:-}"
+    if [ -z "$requested" ]; then
+        return 0
+    fi
+    # Distinguish "cannot check" from "check failed", so a broken interpreter is
+    # not reported to the operator as an invalid feature name.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is required to validate GCO_DEMO_ENABLE." >&2
+        return 2
+    fi
+    # The Python body is deliberately flush-left: it lives inside a quoted
+    # shell string, so any indentation would reach the interpreter verbatim and
+    # raise IndentationError. Errors are reported as one line rather than a
+    # traceback, because this surfaces inside preflight output.
+    (
+        cd "$repo_root" || exit 1
+        python3 -c '
+import sys
+
+from gco.enablement_overrides import EnablementOverrideError, route_enablement_overrides
+
+try:
+    route_enablement_overrides(sys.argv[1:])
+except EnablementOverrideError as exc:
+    sys.exit(str(exc))
+' "$requested"
+    )
+}
+
 detect_features() {
     local cdk="${1:-cdk.json}"
     VOLCANO_ENABLED=$(jq -r '.context.helm.volcano.enabled // false' "$cdk")
@@ -214,6 +376,19 @@ detect_features() {
     FSX_ENABLED=$(jq -r '.context.fsx_lustre.enabled // false' "$cdk")
     VALKEY_ENABLED=$(jq -r '.context.valkey.enabled // false' "$cdk")
     AURORA_PGVECTOR_ENABLED=$(jq -r '.context.aurora_pgvector.enabled // false' "$cdk")
+    VECTOR_STORE_ENABLED=$(jq -r '.context.vector_store.enabled // false' "$cdk")
+
+    # Overrides are one-way, matching the CDK context semantics: they can only
+    # turn a feature on, never off. A feature an operator disabled stays
+    # disabled unless it is named explicitly.
+    if demo_feature_forced volcano; then VOLCANO_ENABLED=true; fi
+    if demo_feature_forced kueue; then KUEUE_ENABLED=true; fi
+    if demo_feature_forced yunikorn; then YUNIKORN_ENABLED=true; fi
+    if demo_feature_forced slurm; then SLURM_ENABLED=true; fi
+    if demo_feature_forced fsx_lustre; then FSX_ENABLED=true; fi
+    if demo_feature_forced valkey; then VALKEY_ENABLED=true; fi
+    if demo_feature_forced aurora_pgvector; then AURORA_PGVECTOR_ENABLED=true; fi
+    if demo_feature_forced vector_store; then VECTOR_STORE_ENABLED=true; fi
 }
 
 detect_region() {
@@ -377,6 +552,134 @@ verify_recording_aws_account() {
         echo "Active AWS account does not match GCO_EXPECTED_ACCOUNT_ID." >&2
         return 1
     fi
+}
+
+# verify_legacy_live_recording_authorization <repo_root>
+#
+# Fail-closed gate for the three publishable legacy recordings. A caller must
+# explicitly acknowledge live mutations and bind the session to one reviewed
+# commit and one authorized AWS account. The six generated legacy artifacts
+# may be dirty so deploy, live-demo, and destroy can be captured sequentially
+# from the same checkout; every source or Autopilot path must remain clean.
+verify_legacy_live_recording_authorization() {
+    local repo_root="$1"
+    if [ "${GCO_RECORDING_LIVE:-}" != "1" ]; then
+        echo "Set GCO_RECORDING_LIVE=1 to acknowledge live AWS/Kubernetes mutations." >&2
+        return 1
+    fi
+    if [ -z "${GCO_EXPECTED_GIT_SHA:-}" ]; then
+        echo "GCO_EXPECTED_GIT_SHA is required for a live legacy recording." >&2
+        return 1
+    fi
+    if [ -z "${GCO_EXPECTED_ACCOUNT_ID:-}" ]; then
+        echo "GCO_EXPECTED_ACCOUNT_ID is required for a live legacy recording." >&2
+        return 1
+    fi
+    verify_recording_git_state "$repo_root" \
+        "demo/deploy.cast" "demo/deploy.gif" \
+        "demo/live_demo.cast" "demo/live_demo.gif" \
+        "demo/destroy.cast" "demo/destroy.gif" || return 1
+    verify_recording_aws_account || return 1
+}
+
+# verify_recording_kube_context <cluster-name> <region>
+#
+# Bind the active kubectl context to the EKS cluster resolved through the same
+# AWS identity that passed the account guard. Exact endpoint comparison prevents
+# namespace-wide cleanup from reaching an unrelated but otherwise healthy
+# cluster in another account or context.
+verify_recording_kube_context() {
+    local cluster_name="$1"
+    local region="$2"
+    local expected_endpoint current_endpoint
+    if ! expected_endpoint=$(aws eks describe-cluster \
+            --name "$cluster_name" \
+            --region "$region" \
+            --query 'cluster.endpoint' \
+            --output text 2>/dev/null); then
+        echo "Unable to resolve the expected EKS endpoint for recording." >&2
+        return 1
+    fi
+    if ! current_endpoint=$(kubectl config view --minify \
+            -o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null); then
+        echo "Unable to resolve the active kubectl server." >&2
+        return 1
+    fi
+    expected_endpoint="${expected_endpoint%/}"
+    current_endpoint="${current_endpoint%/}"
+    if [ -z "$expected_endpoint" ] || [ "$expected_endpoint" = "None" ] || \
+            [ "$current_endpoint" != "$expected_endpoint" ]; then
+        echo "Active kubectl context does not match the authorized GCO EKS cluster." >&2
+        return 1
+    fi
+}
+
+# A fixed hard-link beneath Git's common directory serializes all legacy
+# recorders across linked worktrees without dirtying any checkout. Each process
+# prepares a private owner file before atomically linking it into the fixed lock
+# path. Registering both paths first lets handled signals clean up safely before,
+# during, or immediately after acquisition without touching another owner. A
+# SIGKILL can still leave the lock fail-closed for operator inspection.
+LEGACY_RECORDING_LOCK_FILE=""
+LEGACY_RECORDING_LOCK_OWNER_FILE=""
+
+acquire_legacy_recording_lock() {
+    local repo_root="$1"
+    local git_common
+    if ! git_common=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null); then
+        echo "Unable to resolve the Git common directory for recording lock." >&2
+        return 1
+    fi
+    case "$git_common" in
+        /*) ;;
+        *) git_common="${repo_root}/${git_common}" ;;
+    esac
+    if ! git_common=$(cd "$git_common" 2>/dev/null && pwd -P); then
+        echo "Unable to canonicalize the Git common directory for recording lock." >&2
+        return 1
+    fi
+
+    local lock_file="${git_common}/gco-legacy-recording.lock"
+    local owner_file="${lock_file}.owner.${BASHPID:-$$}.${RANDOM}"
+    LEGACY_RECORDING_LOCK_FILE="$lock_file"
+    LEGACY_RECORDING_LOCK_OWNER_FILE="$owner_file"
+
+    if ! (umask 077; set -o noclobber; printf 'pid=%s\nrepo=%s\n' \
+            "$$" "$repo_root" > "$owner_file") 2>/dev/null; then
+        LEGACY_RECORDING_LOCK_FILE=""
+        LEGACY_RECORDING_LOCK_OWNER_FILE=""
+        echo "Unable to create recording lock owner file: ${owner_file}." >&2
+        return 1
+    fi
+    if ! ln "$owner_file" "$lock_file" 2>/dev/null; then
+        rm -f -- "$owner_file" || true
+        LEGACY_RECORDING_LOCK_FILE=""
+        LEGACY_RECORDING_LOCK_OWNER_FILE=""
+        echo "Another legacy demo recorder holds ${lock_file}." >&2
+        return 1
+    fi
+}
+
+release_legacy_recording_lock() {
+    local lock_file="${LEGACY_RECORDING_LOCK_FILE:-}"
+    local owner_file="${LEGACY_RECORDING_LOCK_OWNER_FILE:-}"
+    if [ -z "$lock_file" ] || [ -z "$owner_file" ]; then
+        return 0
+    fi
+
+    if [ -e "$lock_file" ] && [ -e "$owner_file" ] && \
+            [ "$owner_file" -ef "$lock_file" ]; then
+        if ! rm -f -- "$lock_file"; then
+            echo "Unable to release legacy recording lock: ${lock_file}" >&2
+            return 1
+        fi
+    fi
+    if [ -e "$owner_file" ] && ! rm -f -- "$owner_file"; then
+        echo "Unable to remove recording lock owner file: ${owner_file}" >&2
+        return 1
+    fi
+    LEGACY_RECORDING_LOCK_FILE=""
+    LEGACY_RECORDING_LOCK_OWNER_FILE=""
 }
 
 # sanitize_cast <cast_file>

@@ -122,9 +122,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #      https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt
 #      for node-<NODE_VERSION>-linux-{x64,arm64}.tar.gz.
 # Node's tarballs use x64/arm64 arch tags; amd64 maps to x64 below.
-ARG NODE_VERSION=v24.20.0
-ARG NODE_SHA256_AMD64=855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec
-ARG NODE_SHA256_ARM64=3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013
+ARG NODE_VERSION=v24.21.0
+ARG NODE_SHA256_AMD64=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+ARG NODE_SHA256_ARM64=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
 RUN case "${TARGETARCH}" in \
         amd64)  NODE_ARCH="x64";   NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
         arm64)  NODE_ARCH="arm64"; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
@@ -157,7 +157,7 @@ RUN npm install -g "npm@${NPM_VERSION}" \
 # (``aws-cdk``) and the CDK library (``aws-cdk-lib``) are versioned
 # independently — do not assume the two version strings match. Bump the
 # CLI in lockstep with `npm view aws-cdk version` when rebuilding.
-ARG CDK_VERSION=2.1139.0
+ARG CDK_VERSION=2.1140.0
 RUN npm install -g "aws-cdk@${CDK_VERSION}" \
     && cdk --version
 
@@ -177,7 +177,7 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARC
 # preserved across rebuilds. Bump when a new feature or bugfix is needed
 # (see https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst).
 # AWS CLI v2 uses GNU arch tags (x86_64 / aarch64) in the install URL.
-ARG AWSCLI_VERSION=2.36.36
+ARG AWSCLI_VERSION=2.36.41
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl "https://awscli.amazonaws.com/awscli-exe-linux-${GNU_ARCH}-${AWSCLI_VERSION}.zip" -o "awscliv2.zip" \
     && unzip awscliv2.zip \
@@ -196,7 +196,7 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
-ARG DOCKER_VERSION=29.7.2
+ARG DOCKER_VERSION=29.8.0
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \
@@ -227,11 +227,11 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Keep the per-architecture checksums as literal, non-overridable trust
 # anchors from the release's checksums.txt. Overriding BUILDX_VERSION alone
 # must fail closed until these reviewed hashes are updated too.
-# https://github.com/docker/buildx/releases/tag/v0.36.1
-ARG BUILDX_VERSION=v0.36.1
+# https://github.com/docker/buildx/releases/tag/v0.37.0
+ARG BUILDX_VERSION=v0.37.0
 RUN case "${TARGETARCH}" in \
-        amd64) BUILDX_SHA256="48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778" ;; \
-        arm64) BUILDX_SHA256="5d0cafd9d16afe1a0f0d9529885344ace2cc99efdd531b6c783c5455a6001569" ;; \
+        amd64) BUILDX_SHA256="ae43fa08c796b44efc86d7a63c55f73f7c35f3101188dea7bf93bcd6f99577ba" ;; \
+        arm64) BUILDX_SHA256="d263ce31bd2c9e9210aaa2c7537c67802bccabcd342e4c9fe4907085ddb41aa5" ;; \
         *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && mkdir -p /usr/local/lib/docker/cli-plugins \
@@ -251,9 +251,9 @@ RUN case "${TARGETARCH}" in \
 # other tool above: pinned direct vendor download + checksum. Bump procedure
 # (keep the three ARGs in lockstep, hashes from the per-artifact *.sha256
 # files on https://github.com/astral-sh/uv/releases):
-ARG UV_VERSION=0.12.8
-ARG UV_SHA256_AMD64=2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff
-ARG UV_SHA256_ARM64=ba8661f4fd207c8e94814191598e619b355ac10d5014e851e21eb800f9ef2b00
+ARG UV_VERSION=0.12.11
+ARG UV_SHA256_AMD64=4ae93e0f148a18434cc094072547cec88912fc4a72b984183c7d0d0e9586cb5e
+ARG UV_SHA256_ARM64=e9933d907fb9cd27d606d819bbded419f2844c0e2efc98225ecfa409288eb28d
 RUN case "${TARGETARCH}" in \
         amd64)  UV_TARGET="x86_64-unknown-linux-gnu";  UV_SHA256="${UV_SHA256_AMD64}" ;; \
         arm64)  UV_TARGET="aarch64-unknown-linux-gnu"; UV_SHA256="${UV_SHA256_ARM64}" ;; \

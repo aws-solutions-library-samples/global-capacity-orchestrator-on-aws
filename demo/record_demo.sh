@@ -1,77 +1,93 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Record the GCO live demo as an animated GIF
+# Record the GCO live feature demo as an animated GIF
 # ─────────────────────────────────────────────────────────────────────────────
-# This script uses asciinema to record a terminal session of live_demo.sh
-# running non-interactively (pauses auto-advance), then converts the
-# recording to an animated GIF using agg.
+# Live mode executes demo/live_demo.sh against an existing deployment using the
+# repository CLI. It mutates Kubernetes jobs and an inference endpoint. Offline
+# render mode only verifies and re-renders the existing tracked cast.
 #
-# Output files (deposited in demo/):
-#   demo/live_demo.cast  — asciinema recording (lightweight JSON text)
-#   demo/live_demo.gif   — animated GIF for embedding in READMEs
+# Live mode snapshots only the authorized current kubectl context into a
+# mode-0600 file beneath the private staging directory. Every recorder child
+# inherits that single KUBECONFIG, so CLI refreshes cannot alter the operator's
+# kubeconfig. The sensitive snapshot is removed by the recorder cleanup trap.
 #
-# Prerequisites:
-#   - asciinema: brew install asciinema  (or pip install asciinema)
-#   - agg:       brew install agg        (or cargo install agg)
+# Output files:
+#   demo/live_demo.cast
+#   demo/live_demo.gif
 #
 # Usage:
+#   GCO_RECORDING_LIVE=1 \
+#   GCO_EXPECTED_GIT_SHA=<40-char-sha> \
+#   GCO_EXPECTED_ACCOUNT_ID=<12-digit-account> \
 #   bash demo/record_demo.sh
+#   RENDER_EXISTING=1 bash demo/record_demo.sh  # no AWS/Kubernetes calls
 #
-# Options (via environment variables):
-#   DEMO_COLS=120        Terminal width for recording (default: 120)
-#   DEMO_ROWS=35         Terminal height for recording (default: 35)
-#   DEMO_SPEED=2         Playback speed multiplier for GIF (default: 2)
-#   DEMO_THEME=monokai   agg color theme (default: monokai)
-#   DEMO_FONT_FAMILY     agg font fallback chain (default: see lib_demo.sh —
-#                        covers Menlo/Monaco + Apple/Noto Color Emoji +
-#                        Symbola + DejaVu Sans Mono + Courier New)
-#   SKIP_GIF=1           Only produce the .cast file, skip GIF conversion
-#   SKIP_SANITIZE=1      Skip AWS-account-ID redaction (debugging only —
-#                        default always sanitizes before GIF conversion)
-#   SKIP_EMOJI_STRIP=1   Skip emoji substitution (debugging only — default
-#                        strips tofu-triggering codepoints before GIF render)
+# Options:
+#   GCO_RECORDING_LIVE=1    Required acknowledgement for live recording
+#   GCO_EXPECTED_GIT_SHA    Required full reviewed SHA for live recording
+#   GCO_EXPECTED_ACCOUNT_ID Required authorized account for live recording
+#   RENDER_EXISTING=1       Re-render the existing verified cast without AWS
+#   DEMO_COLS=116           Terminal width (default: 116)
+#   DEMO_ROWS=36            Terminal height (default: 36)
+#   DEMO_SPEED=3            GIF playback speed (default: 3)
+#   DEMO_THEME=monokai      agg color theme
+#   DEMO_FONT_FAMILY        agg font chain (default: see lib_demo.sh)
+#   SKIP_GIF=1              Publish only the cast and remove any stale GIF
+#   SKIP_EMOJI_STRIP=1      Skip known unsupported-glyph substitutions
 #
-# The recorded .cast is post-processed in two passes before the GIF is
-# rendered:
-#   1. sanitize_cast — every 12-digit sequence becomes 000000000000 so no
-#      AWS account numbers leak into committed demo artifacts.
-#   2. strip_emoji_from_cast — rewrites the five codepoints agg's text
-#      engine can't render with Menlo (ℹ ✅ ✨ 📦 🚀) to safe monochrome
-#      equivalents. See lib_demo.sh for the full mapping and rationale.
-#
-# See demo/LIVE_DEMO.md for full documentation.
+# Publishable recordings are always sanitized and independently verified.
+# SKIP_SANITIZE is deliberately rejected by this script.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-# ── Configuration ────────────────────────────────────────────────────────────
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Source the shared library for preflight helpers and feature detection.
 # shellcheck source=demo/lib_demo.sh
 source "${SCRIPT_DIR}/lib_demo.sh"
 setup_colors
 
 CAST_FILE="${SCRIPT_DIR}/live_demo.cast"
 GIF_FILE="${SCRIPT_DIR}/live_demo.gif"
-
-# Recording dimensions — 120 cols × 37 rows gives a wide, readable terminal.
-COLS="${DEMO_COLS:-120}"
-ROWS="${DEMO_ROWS:-37}"
-
-# GIF playback speed — 2x is comfortable for watching; 1 is real-time.
-SPEED="${DEMO_SPEED:-2}"
-
-# agg theme — controls colors in the GIF output.
-# Options: asciinema, dracula, monokai, solarized-dark, solarized-light
+COLS="${DEMO_COLS:-116}"
+ROWS="${DEMO_ROWS:-36}"
+SPEED="${DEMO_SPEED:-3}"
 THEME="${DEMO_THEME:-monokai}"
+RENDER_EXISTING="${RENDER_EXISTING:-0}"
 
-# ── Preflight Checks ────────────────────────────────────────────────────────
-# Validates everything needed before recording: tools, infrastructure,
-# cluster access, and the demo script itself. Uses the same pass/fail
-# format as live_demo.sh so the output is familiar.
+RECORDING_TMP_DIR=""
+RECORDING_KUBECONFIG=""
+cleanup_recording_temps() {
+    local exit_code="$1"
+    local rollback_succeeded=1
+    trap - EXIT
+    trap '' HUP INT TERM
+
+    if [ -n "$RECORDING_KUBECONFIG" ] && \
+            ! rm -f -- "$RECORDING_KUBECONFIG" "${RECORDING_KUBECONFIG}.tmp"; then
+        echo "Unable to remove the staged credential-bearing kubeconfig." >&2
+        exit_code=1
+    fi
+    if ! rollback_recording_publication; then
+        echo "Recording publication rollback failed; preserving staging at ${RECORDING_TMP_DIR}." >&2
+        rollback_succeeded=0
+        exit_code=1
+    fi
+    if [ -n "$RECORDING_TMP_DIR" ] && [ "$rollback_succeeded" -eq 1 ]; then
+        if ! rm -rf -- "${RECORDING_TMP_DIR:?}"; then
+            exit_code=1
+        fi
+    fi
+    if ! release_legacy_recording_lock; then
+        exit_code=1
+    fi
+    exit "$exit_code"
+}
+trap 'cleanup_recording_temps "$?"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 PREFLIGHT_PASS=0
 PREFLIGHT_FAIL=0
@@ -94,100 +110,140 @@ preflight_warn() {
     PREFLIGHT_WARN=$((PREFLIGHT_WARN + 1))
 }
 
-echo "=== GCO Demo Recorder ==="
+echo "=== GCO Live Demo Recorder ==="
 echo ""
 echo "  ${BOLD}Preflight Check${RESET}"
 echo ""
 
-# 1. asciinema installed (required — no recording without it)
-if command -v asciinema &>/dev/null; then
-    preflight_pass "asciinema installed ($(asciinema --version 2>&1 | head -1))"
-else
-    preflight_fail "asciinema not installed" \
-        "brew install asciinema  (macOS) or  pip install asciinema  (Linux)"
-fi
-
-# 2. agg installed (optional — needed for GIF, gracefully skipped)
 if [ "${SKIP_GIF:-}" != "1" ]; then
     if command -v agg &>/dev/null; then
         preflight_pass "agg installed ($(agg --version 2>&1 | head -1))"
     else
-        preflight_warn "agg not installed — will produce .cast only (no GIF)" \
-            "brew install agg  (macOS) or  cargo install agg  (Rust)"
-        SKIP_GIF=1
+        if [ "$RENDER_EXISTING" = "1" ]; then
+            preflight_fail "agg is required for RENDER_EXISTING=1" \
+                "Install agg; the existing live-demo GIF will be preserved"
+        else
+            preflight_warn "agg not installed — will produce .cast only" \
+                "brew install agg (macOS) or cargo install agg"
+            SKIP_GIF=1
+        fi
     fi
-else
-    preflight_warn "GIF conversion skipped (SKIP_GIF=1)" \
-        "Unset SKIP_GIF to generate the animated GIF."
 fi
 
-# 3. live_demo.sh exists
-if [ -f "${SCRIPT_DIR}/live_demo.sh" ]; then
-    preflight_pass "live_demo.sh found"
-else
-    preflight_fail "live_demo.sh not found" \
-        "Ensure demo/live_demo.sh exists in the repo"
+if [ "${SKIP_SANITIZE:-}" = "1" ]; then
+    preflight_fail "SKIP_SANITIZE is not allowed for publishable recordings" \
+        "Unset SKIP_SANITIZE so verification remains fail-closed"
 fi
 
-# 4. lib_demo.sh exists
-if [ -f "${SCRIPT_DIR}/lib_demo.sh" ]; then
-    preflight_pass "lib_demo.sh found"
-else
-    preflight_fail "lib_demo.sh not found" \
-        "Ensure demo/lib_demo.sh exists in the repo"
-fi
+case "$RENDER_EXISTING" in
+    0)
+        if command -v asciinema &>/dev/null; then
+            preflight_pass "asciinema installed ($(asciinema --version 2>&1 | head -1))"
+        else
+            preflight_fail "asciinema not installed" \
+                "brew install asciinema (macOS) or pip install asciinema"
+        fi
+        for required_file in live_demo.sh lib_demo.sh; do
+            if [ -f "${SCRIPT_DIR}/${required_file}" ]; then
+                preflight_pass "${required_file} found"
+            else
+                preflight_fail "${required_file} not found" "Restore demo/${required_file}"
+            fi
+        done
+        if [ -f "${REPO_ROOT}/cdk.json" ]; then
+            preflight_pass "cdk.json found"
+        else
+            preflight_fail "cdk.json not found" "Run from a GCO checkout"
+        fi
+        override_status=0
+        verify_enablement_overrides "$REPO_ROOT" || override_status=$?
+        case "$override_status" in
+            0)
+                if [ -n "${GCO_DEMO_ENABLE:-}" ]; then
+                    preflight_pass "Run-scoped enablement overrides valid (${GCO_DEMO_ENABLE})"
+                else
+                    preflight_pass "No run-scoped overrides (cdk.json defaults apply)"
+                fi
+                ;;
+            2)
+                preflight_fail "Cannot validate GCO_DEMO_ENABLE" \
+                    "python3 must be available to check the requested names"
+                ;;
+            *)
+                preflight_fail "GCO_DEMO_ENABLE names an unknown feature or chart" \
+                    "Use names from gco/enablement_overrides.py (see gco stacks deploy-all --help)"
+                ;;
+        esac
+        if command -v jq &>/dev/null; then
+            preflight_pass "jq installed ($(jq --version 2>&1))"
+        else
+            preflight_fail "jq not installed" "brew install jq or apt install jq"
+        fi
+        if command -v kubectl &>/dev/null; then
+            preflight_pass "kubectl installed"
+        else
+            preflight_fail "kubectl not installed" "Install kubectl before recording"
+        fi
+        if (cd "$REPO_ROOT" && python3 -c 'from cli.main import main; assert callable(main)'); then
+            preflight_pass "Repository GCO CLI module importable"
+        else
+            preflight_fail "Repository GCO CLI module is not importable" \
+                "Install this checkout's Python dependencies"
+        fi
+        authorization_verified=0
+        if verify_legacy_live_recording_authorization "$REPO_ROOT"; then
+            preflight_pass "Live consent, Git SHA, and AWS account guards verified"
+            authorization_verified=1
+        else
+            preflight_fail "Live recording authorization failed" \
+                "Set GCO_RECORDING_LIVE, GCO_EXPECTED_GIT_SHA, and GCO_EXPECTED_ACCOUNT_ID"
+        fi
 
-# 5. cdk.json exists (needed by live_demo.sh for feature detection)
-if [ -f "${REPO_ROOT}/cdk.json" ]; then
-    preflight_pass "cdk.json found"
-else
-    preflight_fail "cdk.json not found" \
-        "Run this script from the repo root"
-fi
+        kube_context_verified=0
+        if [ "$authorization_verified" -eq 1 ] && [ -f "${REPO_ROOT}/cdk.json" ] && \
+                command -v jq &>/dev/null && command -v kubectl &>/dev/null; then
+            recording_project=$(jq -r '.context.project_name // "gco"' "${REPO_ROOT}/cdk.json")
+            detect_region "${REPO_ROOT}/cdk.json"
+            recording_region="$REGION"
+            if verify_recording_kube_context \
+                    "${recording_project}-${recording_region}" "$recording_region"; then
+                preflight_pass "kubectl context matches the authorized GCO EKS cluster"
+                kube_context_verified=1
+            else
+                preflight_fail "kubectl context does not match the authorized cluster" \
+                    "Select ${recording_project}-${recording_region} before recording"
+            fi
+        fi
+        if [ "$kube_context_verified" -eq 1 ]; then
+            if kubectl get nodes --request-timeout=5s &>/dev/null; then
+                preflight_pass "kubectl connected to cluster"
+            else
+                preflight_fail "kubectl cannot reach the cluster" \
+                    "Run scripts/setup-cluster-access.sh before recording"
+            fi
+        fi
+        ;;
+    1)
+        if [ -f "$CAST_FILE" ]; then
+            preflight_pass "Existing live-demo cast found for offline rendering"
+        else
+            preflight_fail "Existing live-demo cast not found" \
+                "Record once with guarded live mode before using RENDER_EXISTING=1"
+        fi
+        ;;
+    *)
+        preflight_fail "RENDER_EXISTING must be 0 or 1" \
+            "Use RENDER_EXISTING=1 only for offline re-rendering"
+        ;;
+esac
 
-# 6. jq installed (needed by live_demo.sh for feature detection)
-if command -v jq &>/dev/null; then
-    preflight_pass "jq installed ($(jq --version 2>&1))"
-else
-    preflight_fail "jq not installed" \
-        "brew install jq  (macOS) or  apt install jq  (Linux)"
-fi
-
-# 7. gco CLI installed (needed by live_demo.sh for cost/job commands)
-if command -v gco &>/dev/null; then
-    preflight_pass "GCO CLI installed ($(gco --version 2>&1 | head -1))"
-else
-    preflight_fail "GCO CLI not installed" \
-        "pipx install -e .  (from repo root)"
-fi
-
-# 8. kubectl installed (needed by live_demo.sh for scheduler/storage demos)
-if command -v kubectl &>/dev/null; then
-    preflight_pass "kubectl installed"
-else
-    preflight_fail "kubectl not installed" \
-        "https://kubernetes.io/docs/tasks/tools/"
-fi
-
-# 9. kubectl can reach the cluster
-KUBECTL_TEST=$(kubectl get nodes --request-timeout=5s 2>&1 || true)
-if echo "$KUBECTL_TEST" | grep -qiE "NAME|Ready|no resources found"; then
-    preflight_pass "kubectl connected to cluster"
-else
-    preflight_warn "kubectl cannot reach the cluster" \
-        "The recording will capture error output. Run ./scripts/setup-cluster-access.sh first."
-fi
-
-# 10. Disk space for output files
 AVAILABLE_MB=$(df -m "${SCRIPT_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
 if [ "$AVAILABLE_MB" -gt 100 ]; then
     preflight_pass "Disk space: ${AVAILABLE_MB} MB available"
 else
-    preflight_warn "Low disk space: ${AVAILABLE_MB} MB available" \
-        "GIF files can be 10-50 MB. Free up space if the conversion fails."
+    preflight_warn "Low disk space: ${AVAILABLE_MB} MB" "Free up space before rendering"
 fi
 
-# Summary
 echo ""
 echo "  ${DIM}──────────────────────────────────────────────────────────────${RESET}"
 echo "  ${BOLD}Results:${RESET}  ${GREEN}${PREFLIGHT_PASS} passed${RESET}  ${RED}${PREFLIGHT_FAIL} failed${RESET}  ${YELLOW}${PREFLIGHT_WARN} warnings${RESET}"
@@ -195,108 +251,110 @@ echo "  ${DIM}──────────────────────
 
 if [ "$PREFLIGHT_FAIL" -gt 0 ]; then
     echo ""
-    echo "  ${RED}${BOLD}$PREFLIGHT_FAIL check(s) failed. Fix the issues above before recording.${RESET}"
-    echo ""
-    echo "  ${DIM}Press Enter to exit, or type 'force' to continue anyway:${RESET}"
-    read -r force_input
-    if [ "$force_input" != "force" ]; then
+    echo "  ${RED}${BOLD}Fix the issues above before recording.${RESET}"
+    exit 1
+fi
+
+acquire_legacy_recording_lock "$REPO_ROOT"
+
+RECORDING_TMP_DIR=$(mktemp -d "${SCRIPT_DIR}/.live-demo-recording.XXXXXX")
+chmod 700 "$RECORDING_TMP_DIR"
+RAW_CAST_FILE="${RECORDING_TMP_DIR}/live_demo.cast"
+RAW_GIF_FILE="${RECORDING_TMP_DIR}/live_demo.gif"
+WRAPPER="${RECORDING_TMP_DIR}/run.sh"
+RECORDING_KUBECONFIG="${RECORDING_TMP_DIR}/kubeconfig"
+
+if [ "$RENDER_EXISTING" = "1" ]; then
+    echo "Re-rendering verified live-demo cast (${COLS}x${ROWS}, speed=${SPEED}x)..."
+    cp -p "$CAST_FILE" "$RAW_CAST_FILE"
+else
+    KUBECONFIG_TMP="${RECORDING_KUBECONFIG}.tmp"
+    if ! (umask 077; kubectl config view --raw --minify --flatten > "$KUBECONFIG_TMP"); then
+        echo "Unable to snapshot the authorized kubectl context for recording." >&2
         exit 1
     fi
-    echo "  ${YELLOW}${BOLD}⚠ Continuing despite failures — recording may contain errors.${RESET}"
-fi
+    if [ ! -s "$KUBECONFIG_TMP" ]; then
+        echo "The authorized kubectl context snapshot is empty." >&2
+        exit 1
+    fi
+    chmod 600 "$KUBECONFIG_TMP"
+    mv -f -- "$KUBECONFIG_TMP" "$RECORDING_KUBECONFIG"
+    export KUBECONFIG="$RECORDING_KUBECONFIG"
 
-echo ""
+    recording_project=$(jq -r '.context.project_name // "gco"' "${REPO_ROOT}/cdk.json")
+    detect_region "${REPO_ROOT}/cdk.json"
+    recording_region="$REGION"
+    if ! verify_recording_kube_context \
+            "${recording_project}-${recording_region}" "$recording_region"; then
+        echo "The isolated kubeconfig does not match the authorized cluster." >&2
+        exit 1
+    fi
+    if ! kubectl get nodes --request-timeout=5s &>/dev/null; then
+        echo "The isolated kubeconfig cannot reach the authorized cluster." >&2
+        exit 1
+    fi
+    echo "✓ Private kubeconfig snapshot verified; operator kubeconfig remains untouched"
 
-# ── Create the Non-Interactive Wrapper ───────────────────────────────────────
-# live_demo.sh uses "read -r" for pauses. We feed it newlines via a pipe
-# so it advances automatically. We also set GCO_DEMO_FAST=1 for shorter
-# countdown timers, and pre-answer "n" to the cleanup prompt at the end.
-
-WRAPPER=$(mktemp)
-cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
+    cat > "$WRAPPER" <<'WRAPPER_SCRIPT'
 #!/usr/bin/env bash
-# Non-interactive wrapper: runs live_demo.sh without any stdin piping.
-# GCO_DEMO_NONINTERACTIVE=1 makes pause_for_audience() skip read -r.
-# --norc --noprofile prevents .bashrc/.bash_profile from interfering
-# with the script under asciinema's PTY.
 set -euo pipefail
-
 cd "$REPO_ROOT"
-export COLUMNS=120
+export COLUMNS="$GCO_RECORDING_COLUMNS"
 export GCO_DEMO_FAST=1
 export GCO_DEMO_NONINTERACTIVE=1
-bash --norc --noprofile demo/live_demo.sh
+export GCO_DEMO_GUARDED_RECORDING=1
+gco() { python3 -m cli.main "$@"; }
+# shellcheck source=demo/live_demo.sh
+source demo/live_demo.sh
 WRAPPER_SCRIPT
-chmod +x "$WRAPPER"
+    chmod +x "$WRAPPER"
 
-# ── Record ───────────────────────────────────────────────────────────────────
-
-echo "Recording demo (${COLS}x${ROWS})..."
-echo "Output: ${CAST_FILE}"
-echo ""
-
-# Remove old recording if it exists
-rm -f "$CAST_FILE"
-
-# Record the session.
-# --cols/--rows set the virtual terminal size.
-# --overwrite replaces any existing .cast file.
-# --command runs our wrapper script instead of an interactive shell.
-# REPO_ROOT is exported so the wrapper can cd into it.
-export REPO_ROOT
-export COLS
-asciinema rec \
-    --cols "$COLS" \
-    --rows "$ROWS" \
-    --overwrite \
-    --command "bash --norc --noprofile $WRAPPER" \
-    "$CAST_FILE"
-
-# Clean up the temp wrapper
-rm -f "$WRAPPER"
-
-echo ""
-echo "✓ Recording saved: ${CAST_FILE}"
-CAST_SIZE=$(du -h "$CAST_FILE" | cut -f1); echo "  Size: $CAST_SIZE"
-
-# ── Sanitize ────────────────────────────────────────────────────────────────
-# Redact any AWS account numbers before anyone can view the cast or the GIF
-# derived from it. See sanitize_cast() in lib_demo.sh for details.
-
-sanitize_cast "$CAST_FILE"
-echo "✓ Cast sanitized (AWS account IDs → 000000000000)"
-
-# ── Strip tofu-triggering codepoints ────────────────────────────────────────
-# Rewrite the handful of Unicode characters Menlo can't render so agg never
-# falls back to the system's LastResort tofu font. See strip_emoji_from_cast()
-# in lib_demo.sh for the substitution table.
-
-strip_emoji_from_cast "$CAST_FILE"
-echo "✓ Tofu-triggering codepoints stripped (ℹ→i, ✅→✓, ✨→*, 📦→[pkg], 🚀→>>)"
-
-# ── Convert to GIF ──────────────────────────────────────────────────────────
-
-if [ "${SKIP_GIF:-}" != "1" ]; then
-    echo ""
-    echo "Converting to GIF (speed=${SPEED}x, theme=${THEME})..."
-
-    render_gif "$CAST_FILE" "$GIF_FILE" "$SPEED" "$THEME" "$COLS" "$ROWS"
-
-    echo "✓ GIF saved: ${GIF_FILE}"
-    GIF_SIZE=$(du -h "$GIF_FILE" | cut -f1); echo "  Size: $GIF_SIZE"
+    echo "Recording live demo (${COLS}x${ROWS})..."
+    echo "Output: ${CAST_FILE}"
+    export REPO_ROOT
+    # Inherited by the wrapper so detect_features narrates exactly the features
+    # the paired deploy recording provisioned with the same value.
+    export GCO_DEMO_ENABLE="${GCO_DEMO_ENABLE:-}"
+    export GCO_RECORDING_COLUMNS="$COLS"
+    export GCO_RECORDING_WRAPPER="$WRAPPER"
+    asciinema rec \
+        --return \
+        --cols "$COLS" \
+        --rows "$ROWS" \
+        --overwrite \
+        --command "bash --norc --noprofile \"\$GCO_RECORDING_WRAPPER\"" \
+        "$RAW_CAST_FILE"
+    echo "✓ Raw recording complete; sanitizing before publication"
 fi
 
-# ── Summary ──────────────────────────────────────────────────────────────────
+sanitize_cast "$RAW_CAST_FILE"
+verify_cast_sanitized "$RAW_CAST_FILE"
+echo "✓ Cast sanitized and independently verified"
+
+strip_emoji_from_cast "$RAW_CAST_FILE"
+echo "✓ Unsupported glyphs normalized for agg"
+
+if [ "${SKIP_GIF:-}" != "1" ]; then
+    echo "Converting to GIF (speed=${SPEED}x, theme=${THEME})..."
+    render_gif "$RAW_CAST_FILE" "$RAW_GIF_FILE" "$SPEED" "$THEME" "$COLS" "$ROWS"
+fi
+
+PUBLISH_GIF_FILE=""
+if [ "${SKIP_GIF:-}" != "1" ]; then
+    PUBLISH_GIF_FILE="$RAW_GIF_FILE"
+fi
+publish_recording_artifacts \
+    "$RAW_CAST_FILE" "$PUBLISH_GIF_FILE" "$CAST_FILE" "$GIF_FILE"
+
+echo "✓ Recording pair published: ${CAST_FILE}"
+echo "  Size: $(du -h "$CAST_FILE" | cut -f1)"
+if [ "${SKIP_GIF:-}" != "1" ]; then
+    echo "✓ GIF published: ${GIF_FILE}"
+    echo "  Size: $(du -h "$GIF_FILE" | cut -f1)"
+fi
 
 echo ""
 echo "=== Done ==="
-echo ""
-echo "Files:"
-echo "  ${CAST_FILE}"
-[ "${SKIP_GIF:-}" != "1" ] && echo "  ${GIF_FILE}"
-echo ""
-echo "To replay in terminal:  asciinema play ${CAST_FILE}"
-echo "To re-generate GIF:     re-run $0 with the existing cast (skips recording if cast is newer)"
-echo ""
-echo "Embed in README:"
-echo '  ![GCO Live Demo](demo/live_demo.gif)'
+echo "To replay:       asciinema play ${CAST_FILE}"
+echo "To re-render:    RENDER_EXISTING=1 DEMO_SPEED=${SPEED} bash $0"
+echo "Embed in README: ![GCO Live Demo](demo/live_demo.gif)"

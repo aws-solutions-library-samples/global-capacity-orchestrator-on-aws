@@ -42,6 +42,20 @@ setup_pauses
 WAIT_FOR_POD="${GCO_DEMO_FAST:+15}"
 WAIT_FOR_POD="${WAIT_FOR_POD:-30}"
 
+# Once an inference deployment is accepted, keep a child-shell EXIT fallback
+# armed until the normal delete succeeds. This prevents a later demo failure or
+# interruption from silently leaving the endpoint running.
+INFERENCE_CLEANUP_PENDING=0
+cleanup_demo_inference_on_exit() {
+    local exit_code="$1"
+    trap - EXIT
+    if [ "${INFERENCE_CLEANUP_PENDING:-0}" = "1" ] && \
+            [ -n "${INFERENCE_NAME:-}" ]; then
+        cleanup_inference_endpoint "$INFERENCE_NAME" || true
+    fi
+    exit "$exit_code"
+}
+
 # ── Preflight Validation ─────────────────────────────────────────────────────
 # Before the demo starts, we automatically check every prerequisite.
 # This prevents embarrassing failures mid-presentation. Each check prints
@@ -172,8 +186,14 @@ elif echo "$KUBECTL_TEST" | grep -qi "no resources found"; then
     # Cluster responded but has zero nodes (normal for scale-to-zero)
     preflight_pass "kubectl connected to cluster (0 nodes — will scale on demand)"
 else
-    # kubectl can't reach the cluster — try auto-configuring
-    if [ -f "./scripts/setup-cluster-access.sh" ]; then
+    # Guarded recordings never auto-configure cluster access after the recorder
+    # has exported and validated its private kubeconfig snapshot. Repository CLI
+    # calls may refresh that disposable copy; the operator's kubeconfig remains
+    # untouched. Normal interactive demos retain the convenience auto-setup path.
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        preflight_fail "kubectl cannot reach the pre-authorized cluster" \
+            "Restore the validated context before recording; auto-setup is disabled"
+    elif [ -f "./scripts/setup-cluster-access.sh" ]; then
         narrate "  Attempting to configure cluster access..."
         bash ./scripts/setup-cluster-access.sh "gco-$REGION" "$REGION" 2>&1 || true
         KUBECTL_RETRY=$(kubectl get nodes --request-timeout=5s 2>&1 || true)
@@ -231,6 +251,10 @@ echo "  ${DIM}──────────────────────
 if [ "$PREFLIGHT_FAIL" -gt 0 ]; then
     spacer
     echo "  ${RED}${BOLD}$PREFLIGHT_FAIL check(s) failed. Fix the issues above before demoing.${RESET}"
+    if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+        echo "  ${RED}Guarded recording mode never force-continues preflight failures.${RESET}"
+        exit 1
+    fi
     spacer
     echo "  ${DIM}Press Enter to exit, or type 'force' to continue anyway:${RESET}"
     if [ "${GCO_DEMO_NONINTERACTIVE:-}" = "1" ]; then
@@ -261,6 +285,7 @@ echo "  ${BOLD}Slurm:${RESET}           $(feature_status "$SLURM_ENABLED")"
 echo "  ${BOLD}FSx Lustre:${RESET}      $(feature_status "$FSX_ENABLED")"
 echo "  ${BOLD}Valkey:${RESET}          $(feature_status "$VALKEY_ENABLED")"
 echo "  ${BOLD}Aurora pgvector:${RESET} $(feature_status "$AURORA_PGVECTOR_ENABLED")"
+echo "  ${BOLD}Vector store:${RESET}    $(feature_status "$VECTOR_STORE_ENABLED")"
 spacer
 
 pause_for_audience
@@ -272,6 +297,12 @@ pause_for_audience
 # resource quota until they're fully gone — skipping the wait makes the
 # next Kueue or Volcano submit fail with a quota error. Runs silently.
 narrate "Cleaning up any leftover jobs from previous runs..."
+if [ "${GCO_DEMO_GUARDED_RECORDING:-}" = "1" ]; then
+    recording_project=$(jq -r '.context.project_name // "gco"' "$CDK_JSON")
+    detect_region "$CDK_JSON"
+    verify_recording_kube_context \
+        "${recording_project}-${REGION}" "$REGION"
+fi
 kubectl delete jobs --all -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 kubectl delete vcjob --all -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 gco inference delete demo-llm -y >/dev/null 2>&1 || true
@@ -318,53 +349,57 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
         sleep 3
     done
     narrate "Pre-deploying inference endpoint (GPU will provision in background)..."
-    # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet
-    for _ in $(seq 1 5); do
-        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.25.1 \
-            --gpu-count 1 --replicas 1 -r "$REGION" \
-            --extra-args '--model' --extra-args 'facebook/opt-125m' \
-            2>&1 || true)
-        if echo "$DEPLOY_OUTPUT" | grep -qi "registered\|success"; then
+    # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet.
+    DEPLOY_OUTPUT=""
+    INFERENCE_DEPLOYED=false
+    for deploy_attempt in $(seq 1 5); do
+        if DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.28.0 \
+                --gpu-count 1 --replicas 1 -r "$REGION" \
+                --extra-args '--model' --extra-args 'facebook/opt-125m' 2>&1) && \
+                echo "$DEPLOY_OUTPUT" | grep -qi "registered\|success"; then
+            INFERENCE_DEPLOYED=true
             break
         fi
-        sleep 5
+        if [ "$deploy_attempt" -lt 5 ]; then
+            sleep 5
+        fi
     done
+    if [ "$INFERENCE_DEPLOYED" != "true" ]; then
+        if [ -n "$DEPLOY_OUTPUT" ]; then
+            printf '  %s\n' "${DEPLOY_OUTPUT//$'\n'/$'\n  '}"
+        fi
+        warn "Inference deployment was not accepted after 5 attempts."
+        cleanup_inference_endpoint "$INFERENCE_NAME" || true
+        exit 1
+    fi
+    INFERENCE_CLEANUP_PENDING=1
+    trap 'cleanup_demo_inference_on_exit "$?"' EXIT
     success "Inference endpoint queued for deployment."
     spacer
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION: Cost Visibility
+# SECTION: Fleet Overview
 # ═════════════════════════════════════════════════════════════════════════════
-# This section always runs (unless SKIP_COSTS=1). It shows the audience that
-# GCO has built-in cost tracking — no separate tool needed.
+# One aggregate document replaces four separate cost/status calls in the
+# recording: stack state, queue/jobs, capacity, inference, policy agreement,
+# and the optional 30-day Cost Explorer view.
 
 if [ "${SKIP_COSTS:-}" != "1" ]; then
 
-SECTION=$((SECTION + 1)); section_header "$SECTION" "COST VISIBILITY" "$GREEN"
+SECTION=$((SECTION + 1)); section_header "$SECTION" "FLEET OVERVIEW — Status, Cost, and Policy" "$GREEN"
 
-narrate "Before we touch any workloads, let's see what the platform costs."
-narrate "GCO tracks spend by service, region, and day — all from the CLI."
+narrate "Start with one fleet-wide answer: what is deployed, what is queued,"
+narrate "where capacity exists, whether policy agrees, and what it costs."
 spacer
 
-highlight "Total spend by AWS service"
-run_cmd "gco costs summary --days 7"
+highlight "Aggregate status across every configured region"
+run_cmd "gco status --with-costs --with-policy"
 sleep "$PAUSE_SHORT"
 
-highlight "Where is the money going geographically?"
-run_cmd "gco costs regions --days 7"
-sleep "$PAUSE_SHORT"
-
-highlight "Daily cost trend with inline chart"
-run_cmd "gco costs trend --days 7"
-sleep "$PAUSE_SHORT"
-
-highlight "What are running workloads costing right now?"
-run_cmd "gco costs workloads" || true
-sleep "$PAUSE_SHORT"
-
-success "Full cost visibility without leaving the terminal."
-narrate "This data comes from AWS Cost Explorer, filtered by GCO resource tags."
+success "One command joins the control plane without hiding unavailable sections."
+narrate "The base fleet document is also available through the MCP server."
+narrate "Policy comparison is CLI-only; the CLI can also emit strict JSON."
 
 pause_for_audience
 
@@ -514,15 +549,21 @@ narrate "multiple teams compete for GPU resources."
 narrate "YuniKorn also supports gang scheduling and preemption."
 spacer
 
+YUNIKORN_SUBMITTED=0
 highlight "Submitting a YuniKorn-scheduled job"
-run_cmd "gco jobs submit-direct examples/yunikorn-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/yunikorn-job.yaml -r $REGION -n gco-jobs"; then
+    YUNIKORN_SUBMITTED=1
+fi
 sleep "$PAUSE_SHORT"
 
 highlight "Checking YuniKorn pod scheduling"
 countdown "Waiting for YuniKorn to place pods" "$PAUSE_SHORT"
 run_cmd "kubectl get pods -n gco-jobs -l app=yunikorn-demo --no-headers 2>/dev/null || echo '  (pods scheduling...)'"
 
-success "YuniKorn provides enterprise-grade multi-tenant scheduling."
+if ! report_feature_result "$YUNIKORN_SUBMITTED" "YuniKorn" \
+        "YuniKorn provides enterprise-grade multi-tenant scheduling."; then
+    exit 1
+fi
 # Release resource-quota reservations from these jobs before the next section.
 kubectl delete job yunikorn-sample-job yunikorn-gpu-job yunikorn-gang-job -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 SCHEDULER_COUNT=$((SCHEDULER_COUNT + 1))
@@ -546,8 +587,11 @@ narrate "so existing sbatch scripts and workflows work unchanged."
 narrate "This bridges the gap between HPC and cloud-native."
 spacer
 
+SLURM_SUBMITTED=0
 highlight "Submitting a Slurm batch job via Kubernetes"
-run_cmd "gco jobs submit-direct examples/slurm-cluster-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/slurm-cluster-job.yaml -r $REGION -n gco-jobs"; then
+    SLURM_SUBMITTED=1
+fi
 sleep "$PAUSE_SHORT"
 
 highlight "Checking Slurm job pod"
@@ -557,7 +601,10 @@ run_cmd "kubectl get pods -n gco-jobs -l job-name=slurm-test --no-headers 2>/dev
 highlight "Tailing Slurm job logs"
 run_cmd "kubectl logs job/slurm-test -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l job-name=slurm-test --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Existing HPC workflows run on Kubernetes without modification."
+if ! report_feature_result "$SLURM_SUBMITTED" "Slurm" \
+        "Existing HPC workflows run on Kubernetes without modification."; then
+    exit 1
+fi
 # Release resource-quota reservations so FSx / Valkey / EFS sections don't
 # hit quota errors. slurm-test itself goes away quickly; we also clean up
 # any Slurm-operator-owned workload pods that were spawned for this job.
@@ -598,8 +645,11 @@ narrate "sub-millisecond latency — purpose-built for HPC and ML."
 narrate "GCO provisions it automatically and mounts it into every cluster."
 spacer
 
+FSX_SUBMITTED=0
 highlight "Submitting a job that exercises FSx Lustre storage"
-run_cmd "gco jobs submit-direct examples/fsx-lustre-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/fsx-lustre-job.yaml -r $REGION -n gco-jobs"; then
+    FSX_SUBMITTED=1
+fi
 
 highlight "Watching the FSx job"
 wait_for_job "fsx-lustre-example" "gco-jobs"
@@ -613,7 +663,10 @@ spacer
 highlight "Checking job logs for I/O performance"
 run_cmd "kubectl logs job/fsx-lustre-example -n gco-jobs --all-containers=true --tail=30 2>/dev/null || kubectl logs -n gco-jobs -l example=fsx-lustre --all-containers=true --tail=30 2>/dev/null || echo '  (no logs yet)'"
 
-success "FSx for Lustre: sub-millisecond latency, hundreds of GB/s throughput."
+if ! report_feature_result "$FSX_SUBMITTED" "FSx for Lustre" \
+        "FSx for Lustre: sub-millisecond latency, hundreds of GB/s throughput."; then
+    exit 1
+fi
 # Release resource-quota reservations before Valkey/inference/EFS sections.
 kubectl delete job fsx-lustre-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "Compare: EFS tops out around 10 GB/s. For large-scale training,"
@@ -640,8 +693,11 @@ narrate "session state, or any low-latency K/V access from your jobs."
 narrate "The endpoint is injected automatically — no config needed in manifests."
 spacer
 
+VALKEY_SUBMITTED=0
 highlight "Submitting a job that exercises the Valkey cache"
-run_cmd "gco jobs submit-direct examples/valkey-cache-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/valkey-cache-job.yaml -r $REGION -n gco-jobs"; then
+    VALKEY_SUBMITTED=1
+fi
 
 highlight "Watching the Valkey job"
 wait_for_job "valkey-cache-example" "gco-jobs"
@@ -650,7 +706,10 @@ run_cmd "kubectl get pods -n gco-jobs -l app=valkey-cache-example --no-headers 2
 highlight "Valkey job output"
 run_cmd "kubectl logs job/valkey-cache-example -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l app=valkey-cache-example --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Serverless Valkey: zero management, auto-scaling, per-region."
+if ! report_feature_result "$VALKEY_SUBMITTED" "Valkey" \
+        "Serverless Valkey: zero management, auto-scaling, per-region."; then
+    exit 1
+fi
 # Release resource-quota reservations before the inference/EFS sections.
 kubectl delete job valkey-cache-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "Prompt caching alone can cut inference costs by 30-50%."
@@ -676,8 +735,11 @@ narrate "capacity and requires no instance management."
 narrate "Credentials are in Secrets Manager — pods discover them via ConfigMap."
 spacer
 
+AURORA_SUBMITTED=0
 highlight "Submitting a job that exercises Aurora pgvector"
-run_cmd "gco jobs submit-direct examples/aurora-pgvector-job.yaml -r $REGION -n gco-jobs" || true
+if run_cmd "gco jobs submit-direct examples/aurora-pgvector-job.yaml -r $REGION -n gco-jobs"; then
+    AURORA_SUBMITTED=1
+fi
 
 highlight "Watching the Aurora pgvector job"
 wait_for_job "aurora-pgvector-example" "gco-jobs"
@@ -686,7 +748,10 @@ run_cmd "kubectl get pods -n gco-jobs -l app=aurora-pgvector-example --no-header
 highlight "Aurora pgvector job output"
 run_cmd "kubectl logs job/aurora-pgvector-example -n gco-jobs --all-containers=true --tail=20 2>/dev/null || kubectl logs -n gco-jobs -l app=aurora-pgvector-example --all-containers=true --tail=20 2>/dev/null || echo '  (no logs yet)'"
 
-success "Serverless Aurora pgvector: vector search with zero management."
+if ! report_feature_result "$AURORA_SUBMITTED" "Aurora pgvector" \
+        "Serverless Aurora pgvector: vector search with zero management."; then
+    exit 1
+fi
 # Release resource-quota reservations before the next section.
 kubectl delete job aurora-pgvector-example -n gco-jobs --ignore-not-found=true >/dev/null 2>&1 || true
 narrate "pgvector supports HNSW and IVFFlat indexes for fast similarity search."
@@ -694,6 +759,74 @@ narrate "pgvector supports HNSW and IVFFlat indexes for fast similarity search."
 pause_for_audience
 
 fi  # AURORA_PGVECTOR
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION: Globally Replicated Vector Store
+# ═════════════════════════════════════════════════════════════════════════════
+# The complement to Aurora pgvector rather than a competitor: pgvector gives
+# SQL (joins, range predicates, transactions), this gives a DynamoDB global
+# table whose vector index and data replicate to every deployment region, so
+# every cluster reads its own local replica. Ingestion is S3-triggered — drop
+# a document on the cluster-shared bucket and a Lambda chunks, embeds, and
+# writes it. This section only runs if the vector store is enabled.
+
+if [ "$VECTOR_STORE_ENABLED" = "true" ]; then
+
+SECTION=$((SECTION + 1)); section_header "$SECTION" "VECTOR STORE — Globally Replicated Semantic Search" "$BLUE"
+
+narrate "RAG workloads need their corpus close to the accelerators using it."
+narrate "GCO can provision a DynamoDB global table with a vector index whose"
+narrate "definition AND data replicate to every deployment region, so a job"
+narrate "in any region searches a local replica — no cross-region hop."
+spacer
+
+highlight "Vector store, replicas, and index state"
+run_cmd "gco vector status --output table" || true
+
+spacer
+narrate "Ingestion is just an upload: the S3 event invokes a Lambda that"
+narrate "chunks each document, embeds it with Amazon Bedrock Titan, and"
+narrate "writes the vectors. Let's seed it with GCO's own documentation."
+spacer
+
+VECTOR_INGESTED=0
+highlight "Ingesting the checkout's docs/*.md as a demo corpus"
+if run_cmd "gco vector ingest --demo --wait --output table"; then
+    VECTOR_INGESTED=1
+fi
+
+VECTOR_SEARCHED=0
+if [ "$VECTOR_INGESTED" -eq 1 ]; then
+    spacer
+    narrate "Now a semantic query — not a keyword grep. The store returns the"
+    narrate "passages closest in embedding space, with their similarity scores."
+    spacer
+
+    highlight "Semantic search: \"how does capacity history work?\""
+    if run_cmd "gco vector search 'how does capacity history work?' --top-k 5 --output table"; then
+        VECTOR_SEARCHED=1
+    fi
+
+    highlight "The same query against the ${REGION} replica (local read)"
+    run_cmd "gco vector search 'how does capacity history work?' --top-k 3 --region $REGION --output table" || true
+fi
+
+# The claim is "globally replicated semantic search", so both halves must hold:
+# a corpus that actually ingested, and a query that actually returned matches.
+VECTOR_PROVEN=0
+if [ "$VECTOR_INGESTED" -eq 1 ] && [ "$VECTOR_SEARCHED" -eq 1 ]; then
+    VECTOR_PROVEN=1
+fi
+if ! report_feature_result "$VECTOR_PROVEN" "Vector store" \
+        "Globally replicated vector search — ingest once, query in every region."; then
+    exit 1
+fi
+narrate "Complementary to Aurora pgvector, not a replacement: pgvector brings"
+narrate "SQL joins and transactions, this brings managed global replication."
+
+pause_for_audience
+
+fi  # VECTOR_STORE
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION: EFS Shared Storage
@@ -783,30 +916,44 @@ for attempt in $(seq 1 50); do
     fi
 done
 
+INFERENCE_INVOKE_OK=0
 if [ "$INFERENCE_READY" = "true" ]; then
-    success "Inference endpoint is live."
-    spacer
+    success "Inference pod is Kubernetes-ready."
+    narrate "Kubernetes readiness is local; validating one real generation through the global route."
+    if wait_for_inference_generation "$INFERENCE_NAME" 4 10; then
+        success "End-to-end global inference route is ready."
+        spacer
 
-    highlight "Sending a prompt to the endpoint"
-    narrate "The shared inference route is already registered on the internal ALB."
-    narrate "Requests traverse API Gateway → Global Accelerator → ALB → authenticated proxy → vLLM."
-    narrate "API Gateway validates SigV4; the private backend hop uses private-root TLS plus a request-bound HMAC."
-    run_cmd "gco inference invoke $INFERENCE_NAME -p 'The benefits of GPU orchestration for ML workloads are: 1)' --max-tokens 80" || true
-    sleep "$PAUSE_LONG"
-
-    success "Live LLM response from a GPU that didn't exist minutes ago."
+        highlight "Sending a prompt to the endpoint"
+        narrate "The shared inference route is already registered on the internal ALB."
+        narrate "Requests traverse API Gateway → Global Accelerator → ALB → authenticated proxy → vLLM."
+        narrate "API Gateway validates SigV4; the private backend hop uses private-root TLS plus a request-bound HMAC."
+        if run_cmd "gco inference invoke $INFERENCE_NAME -p 'The benefits of GPU orchestration for ML workloads are: 1)' --max-tokens 80"; then
+            INFERENCE_INVOKE_OK=1
+            sleep "$PAUSE_LONG"
+            success "Live LLM response from a GPU that didn't exist minutes ago."
+        fi
+    else
+        warn "The end-to-end inference route did not become ready after 4 attempts."
+    fi
 else
-    warn "Endpoint not ready yet — GPU node may still be provisioning."
-    narrate "In a real demo, give it another minute. For now, moving on."
+    warn "Endpoint did not become Kubernetes-ready within the bounded wait."
 fi
 
 spacer
 highlight "Cleaning up the inference endpoint"
 narrate "This deletes the endpoint Deployment and internal Service. The GPU node"
 narrate "scales back to zero automatically once the pod is gone."
-run_cmd "gco inference delete $INFERENCE_NAME -y" || true
+INFERENCE_DELETE_OK=0
+if run_cmd "gco inference delete $INFERENCE_NAME -y"; then
+    INFERENCE_DELETE_OK=1
+    INFERENCE_CLEANUP_PENDING=0
+    trap - EXIT
+fi
 
-success "Endpoint deployed, invoked, and torn down — full lifecycle."
+if ! report_inference_lifecycle_result "$INFERENCE_INVOKE_OK" "$INFERENCE_DELETE_OK"; then
+    exit 1
+fi
 
 pause_for_audience
 
@@ -821,7 +968,7 @@ banner "Demo Complete"
 
 echo "  ${BOLD}What we covered:${RESET}"
 spacer
-echo "  ${GREEN}✓${RESET} Cost visibility across services, regions, and workloads"
+echo "  ${GREEN}✓${RESET} Fleet status, cost visibility, and policy agreement"
 if [ "${SKIP_CAPACITY:-}" != "1" ]; then
     echo "  ${GREEN}✓${RESET} Capacity discovery and auto-region job placement"
 fi
@@ -850,6 +997,9 @@ if [ "$VALKEY_ENABLED" = "true" ]; then
 fi
 if [ "$AURORA_PGVECTOR_ENABLED" = "true" ]; then
     echo "  ${GREEN}✓${RESET} Aurora pgvector serverless vector database"
+fi
+if [ "$VECTOR_STORE_ENABLED" = "true" ]; then
+    echo "  ${GREEN}✓${RESET} Globally replicated vector store with semantic search"
 fi
 echo "  ${GREEN}✓${RESET} EFS persistent shared storage"
 if [ "${SKIP_INFERENCE:-}" != "1" ]; then

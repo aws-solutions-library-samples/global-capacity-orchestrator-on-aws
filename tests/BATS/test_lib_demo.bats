@@ -65,6 +65,88 @@ teardown() {
     [[ "$output" == *"source.txt"* ]]
 }
 
+@test "legacy live recording authorization requires explicit consent" {
+    run verify_legacy_live_recording_authorization "$TEST_TMPDIR"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"GCO_RECORDING_LIVE=1"* ]]
+}
+
+@test "legacy live recording authorization allows only six generated assets" {
+    local repo="$TEST_TMPDIR/repo"
+    mkdir -p "$repo/demo"
+    git -C "$repo" init -q
+    printf 'source\n' > "$repo/source.txt"
+    printf 'autopilot\n' > "$repo/demo/autopilot-codex.cast"
+    git -C "$repo" add .
+    git -C "$repo" -c user.name=CI -c user.email=ci@example.invalid \
+        commit -q -m initial
+    local sha
+    sha=$(git -C "$repo" rev-parse HEAD)
+    printf 'new deploy cast\n' > "$repo/demo/deploy.cast"
+    printf 'new live gif\n' > "$repo/demo/live_demo.gif"
+
+    aws() { printf '%s\n' '123456789012'; }
+    GCO_RECORDING_LIVE=1
+    GCO_EXPECTED_GIT_SHA="$sha"
+    GCO_EXPECTED_ACCOUNT_ID=123456789012
+    export GCO_RECORDING_LIVE GCO_EXPECTED_GIT_SHA GCO_EXPECTED_ACCOUNT_ID
+
+    run verify_legacy_live_recording_authorization "$repo"
+
+    [ "$status" -eq 0 ]
+
+    printf 'changed autopilot\n' > "$repo/demo/autopilot-codex.cast"
+    run verify_legacy_live_recording_authorization "$repo"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"autopilot-codex.cast"* ]]
+
+    unset GCO_RECORDING_LIVE GCO_EXPECTED_GIT_SHA GCO_EXPECTED_ACCOUNT_ID
+}
+
+@test "recording kube context must match the authorized EKS endpoint" {
+    aws() {
+        if [ "${1:-}" = "eks" ]; then
+            printf '%s\n' 'https://expected.eks.example'
+        else
+            printf '%s\n' '123456789012'
+        fi
+    }
+    kubectl() { printf '%s\n' 'https://expected.eks.example/'; }
+
+    run verify_recording_kube_context "gco-us-east-1" "us-east-1"
+    [ "$status" -eq 0 ]
+
+    kubectl() { printf '%s\n' 'https://wrong.eks.example'; }
+    run verify_recording_kube_context "gco-us-east-1" "us-east-1"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"does not match"* ]]
+}
+
+@test "legacy recorder lock serializes linked processes" {
+    local repo="$TEST_TMPDIR/lock-repo"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+
+    acquire_legacy_recording_lock "$repo"
+    local lock_file="$LEGACY_RECORDING_LOCK_FILE"
+    local owner_file="$LEGACY_RECORDING_LOCK_OWNER_FILE"
+    [ -f "$lock_file" ]
+    [ -f "$owner_file" ]
+    [ "$owner_file" -ef "$lock_file" ]
+
+    run bash -c 'source demo/lib_demo.sh; acquire_legacy_recording_lock "$1"' _ "$repo"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Another legacy demo recorder"* ]]
+    [ "$owner_file" -ef "$lock_file" ]
+
+    release_legacy_recording_lock
+    [ ! -e "$lock_file" ]
+    [ ! -e "$owner_file" ]
+    run bash -c 'source demo/lib_demo.sh; acquire_legacy_recording_lock "$1"; release_legacy_recording_lock' _ "$repo"
+    [ "$status" -eq 0 ]
+}
+
 # ── sanitize_cast ────────────────────────────────────────────────────────────
 
 @test "sanitize_cast replaces a single 12-digit account ID with zeros" {
@@ -324,6 +406,29 @@ PYEOF
         render_gif "cast.cast" "out.gif" "2" "monokai" "120" "37"
 
     grep -qF "Fira Code,Noto Color Emoji" "$argv_file"
+}
+
+@test "legacy 116x36 default renders below live and destroy canvas ceilings" {
+    command -v agg &>/dev/null || skip "agg not installed"
+    local cast="$TEST_TMPDIR/canvas.cast"
+    local gif="$TEST_TMPDIR/canvas.gif"
+    {
+        printf '{"version":2,"width":116,"height":36}\n'
+        printf '[0.0,"o","canvas headroom"]\n'
+    } > "$cast"
+
+    render_gif "$cast" "$gif" "3" "monokai" "116" "36"
+
+    python3 - "$gif" <<'PYEOF'
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    header = stream.read(10)
+width, height = struct.unpack_from("<HH", header, 6)
+assert width < 1024, width
+assert height < 744, height
+PYEOF
 }
 
 # ── Font family default (emoji + geometric shape coverage) ───────────────────
@@ -630,4 +735,217 @@ sys.exit(0 if all(ch in text for ch in codepoints) else 1)
     [ ! -e "$final_dir/demo.gif" ]
     [ "$RECORDING_PUBLICATION_COMPLETE" -eq 1 ]
     [ "$RECORDING_PUBLICATION_IN_PROGRESS" -eq 0 ]
+}
+
+@test "legacy recorder lock cleans handled signals around atomic acquisition" {
+    local repo="$TEST_TMPDIR/signal-lock-repo"
+    local fake_bin="$TEST_TMPDIR/signal-lock-bin"
+    local real_ln
+    real_ln=$(command -v ln)
+    mkdir -p "$repo" "$fake_bin"
+    git -C "$repo" init -q
+
+    cat > "$fake_bin/ln" <<'FAKE_LN'
+#!/usr/bin/env bash
+if [ "$LOCK_SIGNAL_PHASE" = "pre" ]; then
+    kill "-$LOCK_SIGNAL" "$PPID"
+    exit 0
+fi
+"$REAL_LN" "$@"
+kill "-$LOCK_SIGNAL" "$PPID"
+FAKE_LN
+    chmod +x "$fake_bin/ln"
+
+    local git_common
+    git_common=$(git -C "$repo" rev-parse --absolute-git-dir)
+    local lock_file="${git_common}/gco-legacy-recording.lock"
+    local signal phase
+    for signal in HUP INT TERM; do
+        for phase in pre post; do
+            run env PATH="$fake_bin:$PATH" REAL_LN="$real_ln" \
+                LOCK_SIGNAL="$signal" LOCK_SIGNAL_PHASE="$phase" \
+                bash -c '
+                    source demo/lib_demo.sh
+                    cleanup() {
+                        local exit_code="$1"
+                        trap - EXIT
+                        trap "" HUP INT TERM
+                        release_legacy_recording_lock
+                        exit "$exit_code"
+                    }
+                    trap '\''cleanup "$?"'\'' EXIT
+                    trap '\''exit 129'\'' HUP
+                    trap '\''exit 130'\'' INT
+                    trap '\''exit 143'\'' TERM
+                    acquire_legacy_recording_lock "$1"
+                ' _ "$repo"
+            [ "$status" -ne 0 ]
+            [ ! -e "$lock_file" ]
+            [ -z "$(compgen -G "${lock_file}.owner.*" || true)" ]
+        done
+    done
+}
+
+# ── Run-scoped enablement overrides ──────────────────────────────────────────
+# GCO ships every optional add-on disabled in cdk.json because each one bills
+# continuously. A full-topology demo therefore needs a run-scoped override, and
+# the recorders drive both the deploy and the demo from GCO_DEMO_ENABLE so the
+# narration can never disagree with what was provisioned.
+
+@test "demo_feature_forced matches an exact name in GCO_DEMO_ENABLE" {
+    GCO_DEMO_ENABLE="fsx_lustre,valkey"
+    export GCO_DEMO_ENABLE
+    demo_feature_forced fsx_lustre
+    demo_feature_forced valkey
+}
+
+@test "demo_feature_forced is false when the name is absent" {
+    GCO_DEMO_ENABLE="fsx_lustre"
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+}
+
+@test "demo_feature_forced is false when GCO_DEMO_ENABLE is unset or empty" {
+    unset GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+    GCO_DEMO_ENABLE=""
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+}
+
+@test "demo_feature_forced tolerates whitespace around names" {
+    GCO_DEMO_ENABLE=" fsx_lustre , valkey ,"
+    export GCO_DEMO_ENABLE
+    demo_feature_forced fsx_lustre
+    demo_feature_forced valkey
+}
+
+@test "demo_feature_forced does not match on a substring" {
+    # A prefix/suffix match would silently demo the wrong feature.
+    GCO_DEMO_ENABLE="valkey_extra,xfsx_lustre"
+    export GCO_DEMO_ENABLE
+    run demo_feature_forced valkey
+    [ "$status" -ne 0 ]
+    run demo_feature_forced fsx_lustre
+    [ "$status" -ne 0 ]
+}
+
+@test "detect_features leaves committed defaults alone without an override" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true},"kueue":{"enabled":true},
+"yunikorn":{"enabled":false},"slurm":{"enabled":false}},
+"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false}}}
+FIXTURE
+    unset GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$YUNIKORN_ENABLED" = "false" ]
+    [ "$SLURM_ENABLED" = "false" ]
+    [ "$FSX_ENABLED" = "false" ]
+    [ "$VALKEY_ENABLED" = "false" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "false" ]
+    [ "$VOLCANO_ENABLED" = "true" ]
+    [ "$KUEUE_ENABLED" = "true" ]
+}
+
+@test "detect_features honors GCO_DEMO_ENABLE for all six optional features" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true},"kueue":{"enabled":true},
+"yunikorn":{"enabled":false},"slurm":{"enabled":false}},
+"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false},"vector_store":{"enabled":false}}}
+FIXTURE
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$YUNIKORN_ENABLED" = "true" ]
+    [ "$SLURM_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "true" ]
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "true" ]
+    [ "$VECTOR_STORE_ENABLED" = "true" ]
+}
+
+@test "detect_features reads the committed vector_store flag and forces it one-way" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"vector_store":{"enabled":false}}}
+FIXTURE
+    unset GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "false" ]
+    # Exact-name only: a longer name that contains it must not enable it.
+    GCO_DEMO_ENABLE="vector_store_extra"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "false" ]
+    GCO_DEMO_ENABLE="vector_store"
+    detect_features "$cdk"
+    [ "$VECTOR_STORE_ENABLED" = "true" ]
+}
+
+@test "detect_features overrides are selective" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"fsx_lustre":{"enabled":false},"valkey":{"enabled":false},
+"aurora_pgvector":{"enabled":false}}}
+FIXTURE
+    GCO_DEMO_ENABLE="valkey"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "false" ]
+    [ "$AURORA_PGVECTOR_ENABLED" = "false" ]
+}
+
+@test "detect_features overrides are one-way and never disable" {
+    command -v jq &>/dev/null || skip "jq not installed"
+    local cdk="$TEST_TMPDIR/cdk.json"
+    cat > "$cdk" <<'FIXTURE'
+{"context":{"helm":{"volcano":{"enabled":true}},"valkey":{"enabled":true}}}
+FIXTURE
+    # Naming nothing must not turn configured-on features off.
+    GCO_DEMO_ENABLE="fsx_lustre"
+    export GCO_DEMO_ENABLE
+    detect_features "$cdk"
+    [ "$VALKEY_ENABLED" = "true" ]
+    [ "$VOLCANO_ENABLED" = "true" ]
+    [ "$FSX_ENABLED" = "true" ]
+}
+
+@test "verify_enablement_overrides accepts the documented six-feature set" {
+    GCO_DEMO_ENABLE="fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn"
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_enablement_overrides is a no-op when unset or empty" {
+    unset GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+    GCO_DEMO_ENABLE=""
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_enablement_overrides rejects a typo with a single-line error" {
+    GCO_DEMO_ENABLE="fsx_lustre,slurmm"
+    export GCO_DEMO_ENABLE
+    run verify_enablement_overrides "$(pwd)"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slurmm"* ]]
+    # The valid list is offered, and no Python traceback leaks into preflight.
+    [[ "$output" == *"yunikorn"* ]]
+    [[ "$output" != *"Traceback"* ]]
 }
