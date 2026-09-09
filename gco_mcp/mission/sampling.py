@@ -284,9 +284,12 @@ ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
 ENV_BEDROCK_REGION: str = "GCO_MISSION_BEDROCK_REGION"
 
-#: Sampling temperature for non-default Bedrock model overrides. The
-#: canonical Nova 2 default uses high reasoning, for which AWS requires
-#: temperature to be unset; :func:`build_bedrock_converse_options` removes it.
+#: Sampling temperature requested for Bedrock models that accept one. The
+#: canonical Claude Opus 5 default does not: Opus 4.7 onward deprecated
+#: ``temperature``, ``topP``, and ``topK``, so
+#: :func:`build_bedrock_converse_options` drops this field for every restricted
+#: Claude line — default or explicit override — and for OpenAI and xAI
+#: profiles. Models outside those families keep it.
 BEDROCK_TEMPERATURE: float = 0.2
 
 
