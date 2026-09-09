@@ -38,7 +38,12 @@ GIF_POLICIES = {
     Path("demo/autopilot-codex.gif"): GifPolicy(2 * MIB, 1024, 700, 800),
     Path("demo/autopilot-claude-code.gif"): GifPolicy(4 * MIB, 1024, 700, 800),
     Path("demo/deploy.gif"): GifPolicy(75 * MIB, 1360, 803, 1000),
-    Path("demo/destroy.gif"): GifPolicy(2 * MIB, 1024, 744, 150),
+    # Raised from 2 MiB / 150 frames after reviewing the full-feature teardown
+    # re-recording: it deletes FSx, Valkey, Aurora, the vector-store replica and
+    # every chart's resources, so CloudFormation repaints 158 distinct screens
+    # over 76 minutes. Frame count and byte size are set by that repaint cadence,
+    # not by render settings, so neither shrinks with playback speed.
+    Path("demo/destroy.gif"): GifPolicy(4 * MIB, 1024, 744, 200),
     Path("demo/live_demo.gif"): GifPolicy(8 * MIB, 1024, 744, 250),
 }
 MAX_CANVAS_PIXELS = max(policy.max_width * policy.max_height for policy in GIF_POLICIES.values())

@@ -23,9 +23,8 @@ SCRIPT="demo/record_destroy.sh"
     grep -q "source.*lib_demo.sh" "$SCRIPT"
 }
 
-@test "default speed is 10x for teardown" {
-    run bash -c 'SPEED="${DEMO_SPEED:-10}"; echo "$SPEED"'
-    [ "$output" = "10" ]
+@test "default speed is 50x for teardown" {
+    grep -q 'SPEED="${DEMO_SPEED:-50}"' "$SCRIPT"
 }
 
 @test "default dimensions are 116x36 with canvas headroom" {

@@ -29,7 +29,7 @@
 #   RENDER_EXISTING=1      Re-render the existing verified cast without AWS
 #   DEMO_COLS=116          Terminal width (default: 116)
 #   DEMO_ROWS=36           Terminal height (default: 36)
-#   DEMO_SPEED=10          Playback speed for GIF (default: 10)
+#   DEMO_SPEED=50          Playback speed for GIF (default: 50)
 #   DEMO_THEME=monokai       agg color theme (default: monokai)
 #   DEMO_FONT_FAMILY         agg font fallback chain (default: see lib_demo.sh)
 #   SKIP_GIF=1               Only produce the .cast file
@@ -101,8 +101,12 @@ trap 'exit 143' TERM
 COLS="${DEMO_COLS:-116}"
 ROWS="${DEMO_ROWS:-36}"
 
-# Teardown is already concise; preserve the current pacing.
-SPEED="${DEMO_SPEED:-10}"
+# A full-feature teardown deletes FSx, Valkey, Aurora, the vector-store replica
+# and every chart's resources, so it runs well over an hour of wall clock. This
+# speed keeps the rendered GIF near the ~90s of the shorter teardowns it
+# replaces; frame count and byte size are set by how often CloudFormation
+# repaints, so raising the speed costs nothing but shortens playback.
+SPEED="${DEMO_SPEED:-50}"
 THEME="${DEMO_THEME:-monokai}"
 RENDER_EXISTING="${RENDER_EXISTING:-0}"
 
