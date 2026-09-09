@@ -22,7 +22,7 @@
 
 ![GCO Live Demo](demo/live_demo.gif)
 
-*`gco` CLI demo: fleet-wide status with cost and policy agreement, capacity discovery, 5 schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), [Slurm](https://slurm.schedmd.com/slinky.html), [KEDA](https://keda.sh/)), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html). The overview spans configured regions; workload demonstrations use one selected, already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
+*`gco` CLI demo: fleet-wide status with cost and policy agreement, capacity discovery, 5 schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), [Slurm](https://slurm.schedmd.com/slinky.html), [KEDA](https://keda.sh/)), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) database, a globally replicated vector store answering a real semantic query over GCO's own docs (`gco vector ingest --demo` then `gco vector search`), [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), and live LLM inference. The overview spans configured regions; workload demonstrations use one selected, already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
 
 </details>
 
