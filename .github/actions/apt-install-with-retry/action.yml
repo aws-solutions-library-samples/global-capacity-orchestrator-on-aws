@@ -24,7 +24,15 @@ description: |
   2. Bounded fetch timeouts — a mirror that degrades mid-run costs
      seconds per fetch, not apt's 120-second default.
   3. update+install retried as one unit with backoff — a failed install
-     often means a stale index, so every retry refreshes first.
+     often means a stale index, so every retry drops any partially
+     fetched index and refreshes before installing again.
+
+  `update` is advisory: its exit code does not fail the attempt. Runner
+  images ship third-party repos this action never needs, and one of those
+  serving a stale index against a fresh signed Release ("Hash Sum
+  mismatch") made apt exit non-zero — failing jobs whose Ubuntu indexes
+  were all current and whose packages were installable. `install` is the
+  gate instead.
 
   A genuinely missing package or dependency conflict still fails on the
   final attempt with the real apt error.
@@ -127,8 +135,26 @@ runs:
         attempt=1
         while true; do
           echo "::group::apt-get update + install (attempt ${attempt}/${ATTEMPTS})"
-          if sudo -E apt-get "${apt_opts[@]}" update \
-             && sudo -E apt-get "${apt_opts[@]}" "${install_opts[@]}" install "$@"; then
+          # `update` refreshes indexes but does not gate the attempt. Hosted
+          # runner images ship third-party repos this action never needs
+          # (Google Chrome, Microsoft, ...), and when one of those serves a
+          # stale Packages index against a freshly signed Release the fetch
+          # fails its digest check ("Hash Sum mismatch") and apt exits
+          # non-zero for the whole run -- even with every Ubuntu index
+          # current and the requested packages installable. apt already
+          # degrades correctly in that case ("ignored, or old ones used
+          # instead"), and retrying cannot outrun a CDN skew that persists
+          # for hours, so `install` is the gate: a missing package, or an
+          # index that actually matters, still fails with the real apt
+          # error. The tradeoff is that a stale Ubuntu index can install a
+          # slightly older version rather than hard-failing, which is the
+          # right trade for CI whose runner image ships a recent index.
+          if ! sudo -E apt-get "${apt_opts[@]}" update; then
+            echo "::warning::apt-get update reported errors; continuing to" \
+              "install, which is the real gate. Often an unrelated" \
+              "third-party repo on the runner image."
+          fi
+          if sudo -E apt-get "${apt_opts[@]}" "${install_opts[@]}" install "$@"; then
             echo "::endgroup::"
             break
           fi
@@ -137,9 +163,12 @@ runs:
             echo "::error::apt-get install of '$*' failed after ${ATTEMPTS} attempt(s)."
             exit 1
           fi
-          echo "::warning::apt-get update/install failed" \
+          echo "::warning::apt-get install failed" \
             "(attempt ${attempt}/${ATTEMPTS}); retrying in ${DELAY}s." \
-            "Usually a transient Ubuntu-mirror/network error."
+            "Usually a transient Ubuntu-mirror/network error or a stale index."
           sleep "$DELAY"
+          # A truncated index from the failed attempt would be reused as-is by
+          # the next `update`, so drop the partials and let it refetch clean.
+          sudo rm -rf /var/lib/apt/lists/partial/* 2>/dev/null || true
           attempt=$((attempt + 1))
         done

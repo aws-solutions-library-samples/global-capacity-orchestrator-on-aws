@@ -60,8 +60,8 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-09T17:36:47Z
+# Generated from Git commit: d03cb5dc20f9b805636c85ce7af957eebb94c28e
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)
@@ -284,9 +284,12 @@ ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
 ENV_BEDROCK_REGION: str = "GCO_MISSION_BEDROCK_REGION"
 
-#: Sampling temperature for non-default Bedrock model overrides. The
-#: canonical Nova 2 default uses high reasoning, for which AWS requires
-#: temperature to be unset; :func:`build_bedrock_converse_options` removes it.
+#: Sampling temperature requested for Bedrock models that accept one. The
+#: canonical Claude Opus 5 default does not: Opus 4.7 onward deprecated
+#: ``temperature``, ``topP``, and ``topK``, so
+#: :func:`build_bedrock_converse_options` drops this field for every restricted
+#: Claude line — default or explicit override — and for OpenAI and xAI
+#: profiles. Models outside those families keep it.
 BEDROCK_TEMPERATURE: float = 0.2
 
 
