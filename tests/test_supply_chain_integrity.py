@@ -587,6 +587,42 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert 'if [ "$committed" != "$published" ]; then' in scanner
 
 
+def _scan_completeness_arguments(scanner: str) -> str:
+    """Return the argument list passed to ``dependency_scan_is_complete``.
+
+    Matching the whole call rather than ``"$X_SKIP_REASON"; then`` means adding a
+    surface to the end of the list cannot break the assertions for the ones
+    already there.
+    """
+    match = re.search(r"dependency_scan_is_complete \\\n(?P<args>.*?); then", scanner, re.DOTALL)
+    assert match is not None, "could not locate the dependency_scan_is_complete call"
+    return match.group("args")
+
+
+def test_runner_images_are_covered_by_the_monthly_drift_scan() -> None:
+    """``runs-on:`` is not a version pin, so only this scan can catch it ageing.
+
+    The two properties worth locking down: the result has to reach the report
+    (counted, summary row, all-clear condition), and a failed catalog read has to
+    become a recorded skip — otherwise an upstream README change would silently
+    turn the check into a permanent all-clear.
+    """
+    scanner = _read(".github/scripts/dependency-scan.sh")
+
+    assert "=== Checking runner images ===" in scanner
+    assert "check_runner_images.py --format rows" in scanner
+    assert "check_runner_images.py --format notes" in scanner, (
+        "preview images must be reported separately from actionable drift"
+    )
+    assert 'summary_row "Runner Images"' in scanner
+    assert "RUNNER_IMAGE_SKIP_REASON" in _scan_completeness_arguments(scanner), (
+        "RUNNER_IMAGE_SKIP_REASON must reach dependency_scan_is_complete, otherwise a "
+        "failed catalog read leaves the scan claiming completeness"
+    )
+    assert '[ "$RUNNER_IMAGE_COUNT" -eq 0 ]' in scanner
+    assert scanner.count('"$RUNNER_IMAGE_RESULTS"') >= 3
+
+
 def test_ruby_interpreter_pin_is_covered_by_the_monthly_drift_scan() -> None:
     """The Ruby series is pinned like Python's, so it needs the same currency check.
 
@@ -612,7 +648,7 @@ def test_ruby_interpreter_pin_is_covered_by_the_monthly_drift_scan() -> None:
     assert 'RUBY_PIN_CURRENT="$(read_ruby_version_pin .ruby-version)"' in scanner
     assert 'LATEST_RUBY="$(get_latest_ruby_release)"' in scanner
     assert 'summary_row "Ruby Release"' in scanner
-    assert '"$RUBY_RELEASE_SKIP_REASON"; then' in scanner, (
+    assert "RUBY_RELEASE_SKIP_REASON" in _scan_completeness_arguments(scanner), (
         "RUBY_RELEASE_SKIP_REASON must be passed to dependency_scan_is_complete, "
         "otherwise a failed endoflife.date lookup leaves the scan claiming completeness"
     )

@@ -1488,6 +1488,51 @@ RUBY_RELEASE_COUNT="$(wc -l < "$RUBY_RELEASE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$RUBY_RELEASE_COUNT" ] && RUBY_RELEASE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# Runner images
+#
+# `runs-on: ubuntu-latest` is not a version pin, so Dependabot has nothing to
+# bump and the platform underneath every job changes only when GitHub moves the
+# label. Two opposite mistakes are possible: staying on an explicitly pinned
+# image long after a newer one is generally available (and eventually on one
+# upstream has marked deprecated, which is a removal notice), or chasing an
+# image that is still in preview.
+#
+# check_runner_images.py reports those separately: `--format rows` is drift to
+# act on (newer GA, or deprecated), `--format notes` is context (a newer image
+# exists but is preview, so the current pin is deliberate). It exits 2 without
+# printing anything when the upstream catalog cannot be read, which is treated
+# as a skip here rather than as an all-clear.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking runner images ==="
+
+RUNNER_IMAGE_RESULTS="$(mktemp)"
+RUNNER_IMAGE_NOTES="$(mktemp)"
+RUNNER_IMAGE_SKIP_REASON=""
+
+if python3 .github/scripts/check_runner_images.py --format rows > "$RUNNER_IMAGE_RESULTS" 2>/dev/null; then
+  python3 .github/scripts/check_runner_images.py --format notes > "$RUNNER_IMAGE_NOTES" 2>/dev/null || true
+  while IFS='|' read -r label current recommended; do
+    [ -z "$label" ] && continue
+    echo "  - runner ${label}: ${current} -> ${recommended}"
+  done < "$RUNNER_IMAGE_RESULTS"
+  while IFS='|' read -r label current recommended; do
+    [ -z "$label" ] && continue
+    echo "  ${label} pins ${current}; ${recommended} exists but is still in preview."
+  done < "$RUNNER_IMAGE_NOTES"
+  if [ ! -s "$RUNNER_IMAGE_RESULTS" ]; then
+    echo "  every runner label in use is the newest generally-available image."
+  fi
+else
+  RUNNER_IMAGE_SKIP_REASON="Could not read the actions/runner-images catalog (network or upstream README change)."
+  echo "  $RUNNER_IMAGE_SKIP_REASON"
+  : > "$RUNNER_IMAGE_RESULTS"
+fi
+
+RUNNER_IMAGE_COUNT="$(wc -l < "$RUNNER_IMAGE_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$RUNNER_IMAGE_COUNT" ] && RUNNER_IMAGE_COUNT=0
+
+# ---------------------------------------------------------------------------
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
@@ -2145,6 +2190,11 @@ if [ -n "$RUBY_RELEASE_SKIP_REASON" ]; then
 else
   echo "Ruby release:             $RUBY_RELEASE_COUNT"
 fi
+if [ -n "$RUNNER_IMAGE_SKIP_REASON" ]; then
+  echo "Runner images:            (skipped)"
+else
+  echo "Runner images:            $RUNNER_IMAGE_COUNT"
+fi
 if [ -n "$AUTOPILOT_SKIP_REASON" ]; then
   echo "GCO autopilot pins:       (skipped)"
 else
@@ -2170,7 +2220,8 @@ if ! dependency_scan_is_complete \
   "$AUTOPILOT_SKIP_REASON" \
   "$CDK_ENUM_SKIP_REASON" \
   "$PYTHON_RELEASE_SKIP_REASON" \
-  "$RUBY_RELEASE_SKIP_REASON"; then
+  "$RUBY_RELEASE_SKIP_REASON" \
+  "$RUNNER_IMAGE_SKIP_REASON"; then
   SCAN_COMPLETE=false
 fi
 
@@ -2184,6 +2235,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
    && [ "$RUBY_RELEASE_COUNT" -eq 0 ] \
+   && [ "$RUNNER_IMAGE_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
    && [ "$ACCELERATOR_COUNT" -eq 0 ] \
    && [ "$CI_TOOLING_COUNT" -eq 0 ] \
@@ -2232,6 +2284,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Ruby release skipped: $RUBY_RELEASE_SKIP_REASON"
   fi
+  if [ -n "$RUNNER_IMAGE_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Runner images skipped: $RUNNER_IMAGE_SKIP_REASON"
+  fi
   if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Incomplete checks: $(join_scan_incomplete_reasons)"
@@ -2242,7 +2298,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     STATUS_MESSAGE="All dependencies are up to date."
   fi
   echo "$STATUS_MESSAGE"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -2331,6 +2387,7 @@ summary_row() {
   summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
   summary_row "Python Release"           "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "informational"
   summary_row "Ruby Release"             "$RUBY_RELEASE_COUNT"   "$RUBY_RELEASE_SKIP_REASON" "informational"
+  summary_row "Runner Images"            "$RUNNER_IMAGE_COUNT"   "$RUNNER_IMAGE_SKIP_REASON" "act soon"
   summary_row "CI Tooling"               "$CI_TOOLING_COUNT"     ""                          "act soon"
   summary_row "Version Consistency"      "$CONSISTENCY_COUNT"    ""                          "routine"
   summary_row "Base-image Security Epochs" "$EPOCH_COUNT"        ""                          "act soon"
@@ -2548,6 +2605,21 @@ summary_row() {
     echo ""
   fi
 
+  if [ "$RUNNER_IMAGE_COUNT" -gt 0 ]; then
+    echo "## Runner Images"
+    echo ""
+    echo "A \`runs-on:\` label below is behind a newer **generally-available** image,"
+    echo "or names one upstream has deprecated (a deprecated image is a removal"
+    echo "notice with a date attached). Images still in *preview* are deliberately"
+    echo "not listed here — see the notes under the skipped/collapsed section for"
+    echo "those, since moving to a preview trades a stable CI platform for an"
+    echo "unannounced one. Update the \`runs-on:\` value in the named workflow job."
+    echo "See <https://github.com/actions/runner-images#available-images>."
+    echo ""
+    emit_md_table "Label|Current image|Recommended" "$RUNNER_IMAGE_RESULTS"
+    echo ""
+  fi
+
   if [ "$RUBY_RELEASE_COUNT" -gt 0 ]; then
     echo "## Ruby Release"
     echo ""
@@ -2639,7 +2711,7 @@ summary_row() {
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -2654,6 +2726,7 @@ summary_row() {
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
     [ -n "$RUBY_RELEASE_SKIP_REASON" ] && echo "- **Ruby Release:** $RUBY_RELEASE_SKIP_REASON"
+    [ -n "$RUNNER_IMAGE_SKIP_REASON" ] && echo "- **Runner Images:** $RUNNER_IMAGE_SKIP_REASON"
     if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
       while IFS= read -r incomplete_reason; do
         echo "- **Incomplete lookup or parse:** ${incomplete_reason}"
@@ -2679,7 +2752,7 @@ summary_row() {
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
