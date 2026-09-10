@@ -11,8 +11,8 @@
     "test": "node --test --experimental-test-coverage --test-coverage-include=index.mjs --test-coverage-lines=100 --test-coverage-functions=100 --test-coverage-branches=100 ../../tests/inference-streaming-proxy/*.test.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-elastic-load-balancing-v2": "3.1125.0",
-    "@aws-sdk/client-secrets-manager": "3.1125.0",
-    "@aws-sdk/client-ssm": "3.1125.0"
+    "@aws-sdk/client-elastic-load-balancing-v2": "3.1126.0",
+    "@aws-sdk/client-secrets-manager": "3.1126.0",
+    "@aws-sdk/client-ssm": "3.1126.0"
   }
 }
