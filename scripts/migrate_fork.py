@@ -193,6 +193,18 @@ def _build_rules(owner: str, repo: str) -> tuple[Rule, ...]:
             why="GitHub REST API repository path",
         ),
         Rule(
+            name="shields-release-badge-path",
+            # The README's latest-release badge embeds the slug inside a
+            # shields.io URL (img.shields.io/github/v/release/<owner>/<repo>)
+            # rather than a github.com one. The bare-slug rule cannot claim it
+            # (the preceding "/" blocks its lookbehind), and without this rule
+            # only the repo name would be rewritten — leaving a fork's badge
+            # reporting the upstream repository's releases.
+            pattern=re.compile(rf"github/v/release/{up_owner}/{up_repo}"),
+            replacement=f"github/v/release/{owner}/{repo}",
+            why="shields.io latest-release badge path",
+        ),
+        Rule(
             name="repo-url",
             pattern=re.compile(rf"github\.com/{up_owner}/{up_repo}"),
             replacement=f"github.com/{owner}/{repo}",
