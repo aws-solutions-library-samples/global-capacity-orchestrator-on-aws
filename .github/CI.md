@@ -24,6 +24,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 - [Helper scripts](#helper-scripts)
   - [Dependency-scan script](#dependency-scan-script)
   - [pip-audit-ignore validator](#pip-audit-ignore-validator)
+  - [Shell coverage gate](#shell-coverage-gate)
 - [Kind config](#kind-config)
 - [Markdownlint config](#markdownlint-config)
 - [Running checks locally](#running-checks-locally)
@@ -74,11 +75,11 @@ Each file maps to one row in the README badge table.
 
 | File | README row | What it covers |
 |------|------------|----------------|
-| `workflows/unit-tests.yml` | Unit Tests | three dynamically balanced pytest shards with a stable combined-coverage gate (exact 100% line + branch floor), explicit offline accelerator catalog/NodePool/watch-list/instance-pool validation, BATS, CLI smoke, autopilot smoke (both-engine dry-run/config validation + exact pinned Claude Code and Codex installs), CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
+| `workflows/unit-tests.yml` | Unit Tests | three dynamically balanced pytest shards with a stable combined-coverage gate (exact 100% line + branch floor), explicit offline accelerator catalog/NodePool/watch-list/instance-pool validation, BATS, CLI smoke, autopilot smoke (both-engine dry-run/config validation + exact pinned Claude Code and Codex installs), CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks. BATS runs under `bashcov`, and a shell line-coverage floor is enforced from the resulting SimpleCov resultset (see [shell coverage gate](#shell-coverage-gate)) |
 | `workflows/inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the production streaming Lambda, with exact 100% line/function/branch thresholds |
 | `workflows/floci-tests.yml` | Floci Tests | Emulated-AWS integration + E2E layer against a digest-pinned [Floci](https://github.com/floci-io/floci) service container with zero AWS credentials: wire-level DynamoDB/SQS/S3/Secrets Manager/CloudFormation behavior through unmodified production classes, harness inventory scanners, and the live-validation preflight+baseline E2E via `gco release validate --emulator-endpoint` (see `docs/FLOCI_TESTING.md`) |
 | `workflows/integration-tests.yml` | Integration Tests | Autopilot boot probes for both engines (`gco autopilot` on a bare runner self-installs the pinned Claude Code — and, in the codex twin, the pinned Codex — pre-warms and boots the in-tree gco MCP server plus every curated companion under the engine, and dispatches to Bedrock with the shipped per-engine default model, stopped fail-closed at the credential boundary by fabricated keys — AWS rejecting the signed request is the success condition: 403 under claude, SigV4's 401 under codex, whose probe also asserts the engine delta that codex races MCP init against the first turn instead of blocking on connections), per-Dockerfile build + functional container tests (boot under pod-equivalent constraints, probe/auth-fail-closed/degraded-503 HTTP contracts, kubelet exec-command shapes, SIGTERM shutdown, moto-SQS consume/reject exit codes for the queue processor), dev-container smoke (pinned toolchain incl. uv/uvx, native-arch binaries, both engine plans/configs, and Codex's persisted lazy install across disposable containers), kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 5 service deployments), kind examples smoke (Calico-enforced, pinned kubeflow-trainer + mlflow charts installed with the exact `charts.yaml` values via `validate_helm_charts.py --emit-ref/--emit-values`, ServiceMonitor CRD from the pinned kube-prometheus-stack, the post-Helm mlflow NetworkPolicies applied with the deployment token filled from kind's own node CIDR so the kubelet-probe allow is exercised for real — the chart's policy admits only pod sources and silently drops probes, which is invisible under kindnet, the real `examples/kubeflow-trainjob.yaml` applied as the manifest-processor ServiceAccount and run to `Complete` with the all-reduce sentinel verified, a `SubjectAccessReview` (SAR) sweep derived from the submission allowlist — SAR is the `authorization.k8s.io` object that answers "may this user *verb* this resource?", posted as an explicit body rather than through `kubectl auth can-i`, because can-i resolves its resource argument via discovery and answers "no" for a CRD kind whose chart is not installed yet, and mlflow host-validation probes — allowed Host 200 / arbitrary Host 403 / `/health` exempt), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
-| `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
+| `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, bundler-audit on the committed gem graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
 | `workflows/lint.yml` | Linting | actionlint, action SHA-pin verification (including each version comment resolved against GitHub), hadolint, markdownlint, strict MkDocs wiki build (the same build `pages.yml` runs at deploy time, so wiki breakage fails pre-merge), mypy (strict / stacks / lambda), ruff (format + check, imports included), strict ShellCheck at `style` severity over every tracked `*.sh` path (NUL-safe, external sources enabled, empty inventory fails), yamllint |
 
 ### Satellites
@@ -309,7 +310,7 @@ If a stale run ever shows a `img.shields.io/github/actions/workflow/status/...` 
 
 ## Dependabot
 
-[`dependabot.yml`](dependabot.yml) covers **GitHub Actions, Docker, and both repository-owned npm graphs**, not Python.
+[`dependabot.yml`](dependabot.yml) covers **GitHub Actions, Docker, both repository-owned npm graphs, and the CI-only RubyGems graph**, not Python.
 
 Rationale: Python deps are pinned through `requirements-lock.txt` with `pip-compile` and reviewed intentionally; Dependabot would fight that workflow. CVE-driven Python bumps are caught by the weekly `cve-scan` workflow (Trivy) and the monthly `deps-scan` workflow.
 
@@ -318,6 +319,7 @@ Ecosystems tracked:
 - GitHub Actions, in **two** blocks: `directory: "/"` for `.github/workflows`, plus `directories: ["/.github/actions/*"]` for the composite actions. The second block is not redundant — for this ecosystem `/` scans `.github/workflows` and an `action.yml` at the *repository root* only, so without it the third-party refs inside `.github/actions/*/action.yml` would never be bumped. Only the plural `directories` key supports the `*` wildcard, and the two directory sets must not overlap. Since every ref is a commit SHA ([Action pinning](#action-pinning)), this is what keeps the pins current rather than frozen; `tests/test_workflow_security_contract.py` fails if a composite action pins something Dependabot cannot see.
 - npm root tooling (`/`) and the deployable streaming Lambda (`/lambda/inference-streaming-proxy`)
 - Docker (`dockerfiles/`, `lambda/helm-installer/`, `Dockerfile.dev` at repo root)
+- Bundler (`/`) — the CI-only gem graph behind the [shell coverage gate](#shell-coverage-gate): `bashcov` plus `bundler-audit`. Exact pins in `Gemfile`, resolved graph and per-gem checksums in `Gemfile.lock`
 
 ## Helper scripts
 
@@ -573,6 +575,60 @@ PYSEC-XXXX-XXX exp:2026-09-30
 ```
 
 Pick an `exp:` date that gives upstream a reasonable window to ship a fix or have the advisory withdrawn (90 days is the typical default). When the date arrives, the validator step fails and forces a re-evaluation — extend with fresh rationale or remove the entry once the underlying CVE is fixed.
+
+### Shell coverage gate
+
+`scripts/check_bash_coverage.py` gates the `unit:bats:shell` job. Python has an exact 100% line-and-branch floor; this is the same idea for the ~11k lines of shell the repository ships, so a script can't quietly lose its tests.
+
+#### How the measurement works
+
+The job runs the BATS suite under [`bashcov`](https://github.com/infertux/bashcov), which traces Bash through `BASH_XTRACEFD` and writes a SimpleCov resultset describing every *relevant* line it saw and how many times each one ran. Deciding which lines of a shell script are even executable is the hard part — here-documents, `case` arms, line continuations and function headers all have to be classified — so that judgement is left to SimpleCov rather than re-implemented.
+
+The suite runs **twice**, and that is deliberate. `bashcov` propagates xtrace by *exporting* `SHELLOPTS`, and an exported `SHELLOPTS` carries every option it holds into each child shell — including `nounset`, which bats sets for its own internals. Scripts that never opted into `set -u` then abort on a legitimately-unset variable (measured: `lib_demo.sh: line 274: DIM: unbound variable`), which fails 9 assertions that pass in the same container without `bashcov`. Rather than harden every script against a side effect of the coverage tool, instrumentation is kept off the correctness path:
+
+- **Run BATS suite** — uninstrumented; its exit code gates the job.
+- **Measure shell coverage** — instrumented; its exit code is advisory and a non-zero result is surfaced as a workflow notice. Lines executed are still lines executed, so the measurement stands even when an instrumented assertion aborts early.
+- **Enforce the shell coverage floor** — applies the floor, and exits `2` if the instrumented run produced no usable report, so a broken measurement cannot read as success.
+
+This also means anything driving a script to 100% has to deal with `nounset` propagation for the lines the instrumented run cannot reach.
+
+Ruby comes from `.ruby-version` via `ruby/setup-ruby`, and the gems from the committed `Gemfile.lock` installed with `frozen true` (the Bundler equivalent of `npm ci`). See [Dependabot](#dependabot) for how that graph is watched and [Dependency-scan script](#dependency-scan-script) for the monthly interpreter-currency check.
+
+#### What the checker adds
+
+Two things SimpleCov cannot know about this repository:
+
+- **Path shape.** Reported paths are absolute; the inventory, the ratchet and every error message are repository-relative. Each reported path is mapped onto the tracked script it refers to by longest path suffix (falling back to a unique basename), and hits from every path that maps to the same script are merged — so a script exercised by several suites is credited with all of them instead of looking like two half-covered files.
+- **The ratchet.** Scripts not yet fully covered are listed in `[tool.bash-coverage] ratchet` in `pyproject.toml`; everything else must be at 100%. The list only ever shrinks, and `tests/test_check_bash_coverage.py` holds its entries to real tracked shell scripts.
+
+The gate fails closed. A tracked script absent from the report entirely is an error, not a pass, because that is what a mis-scoped `bashcov` run — or a suite that never executes its subject — looks like. Exit `2` is reserved for a missing or unparseable report, so "never ran" stays distinguishable from "not covered".
+
+#### Why the ratchet starts long
+
+`bashcov` only sees a script a suite actually executes under a traced Bash, and most suites don't yet:
+
+- seven scripts have no BATS suite at all;
+- the `record_demo` / `record_deploy` / `record_destroy` suites copy the script into `$BATS_TEST_TMPDIR` and run the copy — BATS deletes that directory before SimpleCov renders the report, so those hits are dropped. These need a repository-root seam so the suite can run the file in place;
+- `test_run_semgrep.bats` invokes its subject with `sh`, which on Debian is dash — no `BASH_XTRACEFD`, nothing to trace;
+- three suites assert on the *text* of their script and never execute it.
+
+Scripts in that state are reported as `n/a`, never as a percentage, so nobody strikes an untested script off the ratchet by misreading `100%`.
+
+#### Running it locally
+
+Needs Ruby and bats. From the repository root:
+
+```bash
+bundle install
+bundle exec bashcov --root . -- bats tests/BATS/
+python3 .github/scripts/check_bash_coverage.py coverage/
+```
+
+The HTML report lands in `coverage/index.html`, and CI uploads the same directory as the `bash-coverage-report` artifact.
+
+#### Tests
+
+`tests/test_check_bash_coverage.py` exercises the whole decision surface against synthetic resultsets — path mapping, hit merging, the ratchet split, and each failure mode — with no Ruby or bats needed, since `evaluate()` and the parsing helpers take plain data. The cases that matter most are the ones where a wrong answer would read as success: a report scoped to the wrong root, a script no suite executes, and a resultset whose shape changed under a gem bump all have to fail closed.
 
 ## Kind config
 

@@ -531,6 +531,16 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
 - Both npm manifests pin `engines.node` and `packageManager`; the monthly scan
   keeps those values aligned with `.nvmrc`, `Dockerfile.dev`, and
   `LAMBDA_NODEJS_RUNTIME` in `gco/stacks/constants.py`.
+- CI-only Ruby tooling — exact `gem` pins in `Gemfile` (`bashcov`, which
+  measures shell coverage for `unit:bats:shell`, and `bundler-audit`) with the
+  resolved graph in `Gemfile.lock`, including the Bundler `CHECKSUMS` block so a
+  republished gem cannot change under us. The interpreter series is pinned in
+  `.ruby-version`, mirroring `.python-version`. Nothing shipped depends on Ruby,
+  but a CI-only dependency is still a dependency: Dependabot watches the
+  `bundler` ecosystem, `security:bundler-audit:deps` audits the graph against
+  the Ruby advisory database, the monthly scan compares `.ruby-version` against
+  the newest supported series, and `tests/test_supply_chain_integrity.py`
+  asserts the pins stay exact.
 - Versions that live outside `pyproject.toml` — workflow `*_VERSION` env pins,
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, the Python-constant Mooncake default image in
@@ -597,15 +607,16 @@ for acting on a monthly drift report.
 
 | Layer | What runs | Cadence |
 |-------|-----------|---------|
-| `security.yml` | bandit, pip-audit, npm audit (every owned graph), Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, [CodeQL](https://codeql.github.com/docs/) (Python + JavaScript) | Every push + PR |
+| `security.yml` | bandit, pip-audit, npm audit (every owned graph), bundler-audit, Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, [CodeQL](https://codeql.github.com/docs/) (Python + JavaScript) | Every push + PR |
 | `cve-scan.yml` | Trivy re-run against fresh CVE databases | Weekly (Mon 09:00 UTC) |
 | `deps-scan.yml` | Version drift across every pinned surface | Monthly |
 
 When a scanner flags a CVE with no upstream fix yet, suppress it with an
 expiring entry — see [Renewing CVE suppressions](#renewing-cve-suppressions).
 
-**Automated updates.** Dependabot is scoped to **GitHub Actions, Docker, and
-both repository-owned npm graphs** (`.github/dependabot.yml`); Python stays on
+**Automated updates.** Dependabot is scoped to **GitHub Actions, Docker, both
+repository-owned npm graphs, and the CI-only RubyGems graph**
+(`.github/dependabot.yml`); Python stays on
 the deliberate `pip-compile` path above. The security workflow runs
 `npm audit` independently in every discovered graph, and Advanced Setup CodeQL
 analyzes both Python and JavaScript. See
@@ -642,6 +653,19 @@ requires **exact 100%** lines, functions, and branches over
 `lambda/inference-streaming-proxy/index.mjs` from Node.js 24's built-in V8
 coverage (V8 reports no statement metric, so none is claimed). The Python HTML
 report is published to GitHub Pages after each `main` run by `pages.yml`.
+
+Shell scripts get the same treatment from `unit:bats:shell`, which runs the
+BATS suite under `bashcov` and then applies
+`.github/scripts/check_bash_coverage.py`. Scripts not yet fully covered are
+listed in `[tool.bash-coverage] ratchet` in `pyproject.toml` — the same
+shrink-only contract as the Python ratchet, guarded by
+`tests/test_check_bash_coverage.py`. That list starts long because `bashcov`
+only sees a script a suite actually executes under a traced Bash, and most
+suites either have no subject to run, run a copy in a temporary directory BATS
+deletes before the report is rendered, or only assert on the script's text; see
+[shell coverage gate](../.github/CI.md#shell-coverage-gate) for the breakdown
+and how to run it locally. A script missing from the report entirely fails the
+gate rather than passing it, so a mis-scoped run cannot read as success.
 
 An exact floor leaves no headroom, which is the point: any new uncovered line
 or branch fails CI on the pull request that introduced it. Ship new code with
