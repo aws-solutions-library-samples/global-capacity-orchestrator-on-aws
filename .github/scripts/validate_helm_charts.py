@@ -381,10 +381,14 @@ def _render_chart(
     if ref.values:
         fd, values_path = tempfile.mkstemp(suffix=".yaml", prefix=f"{ref.name}-values-")
         try:
+            # fdopen takes ownership of fd; the with-block closes it on any exit,
+            # so a failing dump must NOT close it again (that raised EBADF and
+            # masked the real error). Remove the half-written file instead.
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 yaml.safe_dump(ref.values, fh)
         except Exception:
-            os.close(fd)
+            with contextlib.suppress(OSError):
+                os.remove(values_path)
             raise
         args.extend(["--values", values_path])
 

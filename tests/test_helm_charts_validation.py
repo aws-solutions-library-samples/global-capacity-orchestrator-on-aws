@@ -1275,3 +1275,723 @@ class TestTrainerLockstepValidation:
         errors = _lockstep(online=True, runtime_fetcher=_boom)
         assert len(errors) == 1
         assert "registry down" in errors[0]
+
+
+# ── Remaining branches ────────────────────────────────────────────────────────
+#
+# Everything below closes a specific branch the suites above route around.
+# Grouped by the function they land in; ``validator._run`` is faked the same
+# way TestValidateOnlineRepass does, so helm is never actually invoked.
+
+
+def _fake_ref(name: str = "keda", *, use_oci: bool = False, values: dict | None = None):
+    return validator.ChartRef(
+        name=name,
+        chart=name,
+        version="1.2.3",
+        repo_name="repo",
+        repo_url="oci://example.invalid/charts" if use_oci else "https://example.invalid/charts",
+        use_oci=use_oci,
+        namespace="default",
+        enabled=True,
+        values=values or {},
+    )
+
+
+class TestBuildRefsSkips:
+    def test_a_non_mapping_entry_is_skipped(self) -> None:
+        """``validate_structure`` already reports it; no point asking Helm."""
+        assert validator.build_refs({"broken": "not-a-mapping", "keda": _classic()}) != []
+        assert [ref.name for ref in validator.build_refs({"broken": "not-a-mapping"})] == []
+
+    @pytest.mark.parametrize("field", ["chart", "repo_url"])
+    def test_an_entry_missing_a_reference_field_is_skipped(self, field: str) -> None:
+        entry = _classic()
+        entry[field] = "   "
+        assert validator.build_refs({"keda": entry}) == []
+
+
+class TestRunSubprocessBoundary:
+    def test_run_returns_the_process_streams(self) -> None:
+        rc, out, err = validator._run(
+            [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+            dict(os.environ),
+        )
+        assert (rc, out.strip(), err.strip()) == (0, "out", "err")
+
+    def test_run_maps_a_timeout_to_the_uniform_failure_contract(self) -> None:
+        """Callers get ``(-1, "", "timeout: ...")``, never an exception."""
+        rc, out, err = validator._run(
+            [sys.executable, "-c", "import time; time.sleep(5)"], dict(os.environ), timeout=1
+        )
+        assert rc == -1
+        assert out == ""
+        assert err.startswith("timeout: command exceeded")
+
+
+class TestRunWithRetryVerbose:
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
+
+    def test_verbose_narrates_each_failed_attempt_with_the_description(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator, "_run", lambda cmd, env, *, timeout=120: (1, "", "boom"))
+
+        validator._run_with_retry(
+            ["helm", "x"], {}, attempts=3, verbose=True, description="helm show chart keda"
+        )
+
+        out = capsys.readouterr().out
+        assert out.count("failed, retrying in") == 2, "the last attempt is not retried"
+        assert "helm show chart keda: boom" in out
+
+    def test_verbose_falls_back_to_the_argv_when_undescribed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator, "_run", lambda cmd, env, *, timeout=120: (1, "", "boom"))
+
+        validator._run_with_retry(["helm", "repo", "update"], {}, attempts=2, verbose=True)
+
+        assert "helm repo update: boom" in capsys.readouterr().out
+
+
+class TestRenderChartValuesFile:
+    def test_values_are_written_to_a_temp_file_and_removed_afterwards(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The values block reaches helm as ``--values <file>`` and never lingers."""
+        seen: dict[str, object] = {}
+
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            index = cmd.index("--values")
+            values_path = Path(cmd[index + 1])
+            seen["path"] = values_path
+            seen["content"] = yaml.safe_load(values_path.read_text(encoding="utf-8"))
+            return (0, "", "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        error = validator._render_chart(
+            _fake_ref(values={"replicaCount": 3}), "repo/keda", "helm", {}
+        )
+
+        assert error is None
+        assert seen["content"] == {"replicaCount": 3}
+        assert not Path(seen["path"]).exists(), "the temporary values file leaked"
+
+    def test_a_values_block_that_cannot_be_serialised_surfaces_the_real_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If ``yaml.safe_dump`` raises, *that* error propagates and no file leaks.
+
+        Regression: the handler used to ``os.close(fd)`` after ``fdopen`` had
+        already closed it, which raised ``EBADF`` in place of the real exception
+        and left the half-written values file behind.
+        """
+
+        def explode(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+            raise TypeError("unserialisable")
+
+        monkeypatch.setattr(validator.yaml, "safe_dump", explode)
+        monkeypatch.setattr(validator.tempfile, "tempdir", str(tmp_path))
+
+        with pytest.raises(TypeError, match="unserialisable"):
+            validator._render_chart(_fake_ref(values={"k": object()}), "repo/keda", "helm", {})
+
+        assert list(tmp_path.iterdir()) == [], "the temporary values file leaked"
+
+    def test_a_render_failure_is_returned_with_the_error_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (1, "", "template: bad value")
+        )
+
+        error = validator._render_chart(_fake_ref(), "repo/keda", "helm", {})
+
+        assert error == "chart failed to render (helm template): template: bad value"
+
+
+class TestSyncClassicReposFailures:
+    def test_a_failing_repo_add_is_reported_and_the_index_still_refreshed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            calls.append(list(cmd))
+            if cmd[1:3] == ["repo", "add"]:
+                return (
+                    1,
+                    "",
+                    "Error: looks like https://example.invalid is not a valid chart repository",
+                )
+            return (0, "", "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        errors = validator._sync_classic_repos({"repo": "https://example.invalid"}, "helm", {})
+
+        assert errors == [
+            "helm repo add repo (https://example.invalid) failed: Error: looks like "
+            "https://example.invalid is not a valid chart repository"
+        ]
+        assert ["helm", "repo", "update"] in calls
+
+    def test_no_classic_repos_means_no_index_refresh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An all-OCI charts file must not run ``helm repo update`` against nothing."""
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (calls.append(list(cmd)), (0, "", ""))[1],
+        )
+
+        assert validator._sync_classic_repos({}, "helm", {}) == []
+        assert calls == []
+
+
+class TestValidateRefsVerbose:
+    """The verbose narration for each resolve/render outcome."""
+
+    def _route(self, monkeypatch: pytest.MonkeyPatch, *, show: tuple, template: tuple) -> None:
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            return show if cmd[1] == "show" else template
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+    def test_resolve_failure_is_narrated(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._route(monkeypatch, show=(1, "", "not found"), template=(0, "", ""))
+
+        failures = validator._validate_refs([_fake_ref()], "helm", {}, verbose=True)
+
+        assert "keda" in failures
+        assert "FAIL  resolve  keda 1.2.3" in capsys.readouterr().out
+
+    def test_version_disagreement_is_a_failure_even_when_resolve_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Helm silently serving a different version is the classic pin-drift."""
+        self._route(monkeypatch, show=(0, "version: 9.9.9\n", ""), template=(0, "", ""))
+
+        failures = validator._validate_refs([_fake_ref()], "helm", {}, skip_template=True)
+
+        assert failures == {"keda": ["keda: requested version '1.2.3' but helm resolved '9.9.9'"]}
+
+    def test_render_success_and_failure_are_both_narrated(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._route(monkeypatch, show=(0, "version: 1.2.3\n", ""), template=(0, "", ""))
+        assert validator._validate_refs([_fake_ref()], "helm", {}, verbose=True) == {}
+        assert "ok    render   keda 1.2.3" in capsys.readouterr().out
+
+        self._route(monkeypatch, show=(0, "version: 1.2.3\n", ""), template=(1, "", "nope"))
+        failures = validator._validate_refs([_fake_ref()], "helm", {}, verbose=True)
+        assert "keda" in failures
+        assert "FAIL  render   keda 1.2.3" in capsys.readouterr().out
+
+
+class TestValidateOnlineEdges:
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
+
+    def test_no_refs_is_an_immediate_empty_result(self) -> None:
+        """Nothing to validate must not spin up a Helm home or touch the network."""
+        assert validator.validate_online([]) == []
+
+    def test_a_verbose_repass_announces_itself(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        shows = {"n": 0}
+
+        # Faked at the *retry* boundary: faking `_run` would let the inner
+        # per-command retry absorb the blip, and the outer re-pass -- the thing
+        # under test -- would never trigger.
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            if cmd[1] == "show":
+                shows["n"] += 1
+                return (1, "", "blip") if shows["n"] == 1 else (0, "version: 1.2.3\n", "")
+            return (0, "", "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        errors = validator.validate_online(
+            [_fake_ref()], skip_template=True, verbose=True, passes=2, repass_delay=0
+        )
+
+        assert errors == []
+        assert "re-pass 2/2: retrying 1 failed chart(s)" in capsys.readouterr().out
+
+
+class TestGoModFetch:
+    """``fetch_lbc_go_mod`` against a stubbed ``urlopen`` -- never the network."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def test_returns_the_decoded_go_mod(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.request
+
+        seen: dict[str, object] = {}
+
+        def fake_urlopen(url, timeout=None):  # noqa: ANN001, ANN202
+            seen["url"] = url
+            return self._Response(b"module x\n\nrequire sigs.k8s.io/gateway-api v1.5.0\n")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        text = validator.fetch_lbc_go_mod("3.5.0")
+
+        assert "gateway-api v1.5.0" in text
+        assert seen["url"] == (
+            "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v3.5.0/go.mod"
+        )
+
+    def test_retries_transient_failures_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import urllib.error
+        import urllib.request
+
+        attempts = {"n": 0}
+
+        def flaky(url, timeout=None):  # noqa: ANN001, ANN202
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise urllib.error.URLError("reset")
+            return self._Response(b"module x\n")
+
+        monkeypatch.setattr(urllib.request, "urlopen", flaky)
+
+        assert validator.fetch_lbc_go_mod("3.5.0") == "module x\n"
+        assert attempts["n"] == 3
+
+    def test_gives_up_after_the_attempt_budget_with_the_last_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import urllib.request
+
+        def down(url, timeout=None):  # noqa: ANN001, ANN202
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(urllib.request, "urlopen", down)
+
+        with pytest.raises(RuntimeError, match=r"could not fetch .*go\.mod: timed out"):
+            validator.fetch_lbc_go_mod("3.5.0")
+
+
+class TestGatewayLockstepFileFallbacks:
+    def test_an_unreadable_handler_is_reported_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(validator, "_HANDLER_PATH", tmp_path / "missing" / "handler.py")
+
+        errors = validator.validate_gateway_lockstep(
+            {"aws-load-balancer-controller": _classic(version="3.5.0")}
+        )
+
+        assert len(errors) == 1
+        assert errors[0].startswith("gateway lockstep: cannot read")
+
+
+class TestTrainerLockstepParserEdges:
+    def test_shipped_runtime_parser_returns_none_for_invalid_yaml(self) -> None:
+        assert validator.parse_shipped_torch_runtime("kind: [unterminated") is None
+
+    def test_upstream_render_parser_returns_none_for_invalid_yaml(self) -> None:
+        assert validator.upstream_torch_runtime_from_render("kind: [unterminated") is None
+
+    def test_upstream_render_parser_skips_configmaps_that_are_not_the_installer(self) -> None:
+        render = (
+            "kind: ConfigMap\nmetadata:\n  name: other-config\ndata:\n  runtimes.yaml: 'x'\n"
+            "---\nkind: ConfigMap\nmetadata:\n  name: trainer-runtimes-installer\ndata:\n"
+            "  notes.txt: 'no runtimes key'\n"
+        )
+        assert validator.upstream_torch_runtime_from_render(render) is None
+
+    def test_upstream_render_parser_returns_none_for_an_unparseable_payload(self) -> None:
+        render = (
+            "kind: ConfigMap\nmetadata:\n  name: trainer-runtimes-installer\ndata:\n"
+            "  runtimes.yaml: 'kind: [unterminated'\n"
+        )
+        assert validator.upstream_torch_runtime_from_render(render) is None
+
+    def test_upstream_render_parser_skips_a_payload_without_the_runtime(self) -> None:
+        render = (
+            "kind: ConfigMap\nmetadata:\n  name: trainer-runtimes-installer\ndata:\n"
+            "  runtimes.yaml: |\n    kind: ClusterTrainingRuntime\n    metadata:\n"
+            "      name: some-other-runtime\n"
+        )
+        assert validator.upstream_torch_runtime_from_render(render) is None
+
+    @pytest.mark.parametrize(
+        "runtime",
+        [
+            pytest.param(
+                {"spec": {"template": {"spec": {"replicatedJobs": "not-a-list"}}}},
+                id="jobs-not-a-list",
+            ),
+            pytest.param(
+                {
+                    "spec": {
+                        "template": {
+                            "spec": {"replicatedJobs": ["not-a-mapping", {"name": "other"}]}
+                        }
+                    }
+                },
+                id="no-node-job",
+            ),
+            pytest.param(
+                {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "replicatedJobs": [
+                                    {
+                                        "name": "node",
+                                        "template": {
+                                            "spec": {"template": {"spec": {"containers": "nope"}}}
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                id="containers-not-a-list",
+            ),
+            pytest.param(
+                {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "replicatedJobs": [
+                                    {
+                                        "name": "node",
+                                        "template": {
+                                            "spec": {
+                                                "template": {
+                                                    "spec": {
+                                                        "containers": [
+                                                            "not-a-mapping",
+                                                            {"name": "sidecar", "image": "x"},
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                id="no-node-container",
+            ),
+            pytest.param(
+                {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "replicatedJobs": [
+                                    {
+                                        "name": "node",
+                                        "template": {
+                                            "spec": {
+                                                "template": {
+                                                    "spec": {
+                                                        "containers": [
+                                                            {"name": "node", "image": 42}
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                id="image-not-a-string",
+            ),
+        ],
+    )
+    def test_trainer_node_image_returns_none_for_every_malformed_shape(self, runtime: dict) -> None:
+        assert validator.trainer_node_image(runtime) is None
+
+    def test_example_trainer_image_edges(self) -> None:
+        assert validator.example_trainer_image("kind: [unterminated") is None
+        assert (
+            validator.example_trainer_image("kind: TrainJob\nspec:\n  trainer:\n    image: 7\n")
+            is None
+        )
+        assert validator.example_trainer_image("kind: Job\n") is None
+
+    def test_documented_deviations_skip_malformed_node_jobs(self) -> None:
+        """A shape the deviation pass cannot navigate is left untouched, not crashed on."""
+        spec = {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        "not-a-mapping",
+                        {"name": "other"},
+                        {
+                            "name": "node",
+                            "template": {"spec": {"template": {"spec": "not-a-mapping"}}},
+                        },
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [
+                                                "not-a-mapping",
+                                                {"name": "sidecar"},
+                                                {
+                                                    "name": "node",
+                                                    "securityContext": "not-a-mapping",
+                                                },
+                                            ]
+                                        }
+                                    }
+                                }
+                            },
+                        },
+                    ]
+                }
+            }
+        }
+
+        adjusted = validator._apply_documented_runtime_deviations(spec)
+
+        node_pod = adjusted["template"]["spec"]["replicatedJobs"][3]["template"]["spec"][
+            "template"
+        ]["spec"]
+        assert node_pod["automountServiceAccountToken"] is False
+        # A non-mapping securityContext is left alone rather than overwritten.
+        assert node_pod["containers"][2]["securityContext"] == "not-a-mapping"
+        assert adjusted["template"]["spec"]["replicatedJobs"][0] == "not-a-mapping"
+
+    def test_documented_deviations_tolerate_a_non_list_jobs_field(self) -> None:
+        spec = {"template": {"spec": {"replicatedJobs": "nope"}}}
+        assert validator._apply_documented_runtime_deviations(spec) == spec
+
+
+class TestFetchUpstreamTorchRuntime:
+    """The render step of the online trainer lockstep, with helm faked."""
+
+    _RENDER = (
+        "kind: ConfigMap\nmetadata:\n  name: trainer-runtimes-installer\ndata:\n"
+        "  runtimes.yaml: |\n    kind: ClusterTrainingRuntime\n    metadata:\n"
+        "      name: torch-distributed\n    spec: {}\n"
+    )
+
+    def test_an_unbuildable_entry_is_refused(self) -> None:
+        with pytest.raises(RuntimeError, match="cannot build a Helm reference"):
+            validator.fetch_upstream_torch_runtime({"chart": ""})
+
+    def test_a_classic_entry_syncs_its_repo_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            calls.append(list(cmd))
+            return (0, self._RENDER, "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        runtime = validator.fetch_upstream_torch_runtime(_classic(chart="kubeflow-trainer"))
+
+        assert runtime["metadata"]["name"] == "torch-distributed"
+        assert calls[0][1:3] == ["repo", "add"], "classic repos are added before templating"
+        assert any("runtimes.torchDistributed.enabled=true" in call for call in calls)
+
+    def test_an_oci_entry_skips_the_repo_sync(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (calls.append(list(cmd)), (0, self._RENDER, ""))[1],
+        )
+
+        validator.fetch_upstream_torch_runtime(_oci(chart="kubeflow-trainer"))
+
+        assert all(call[1] == "template" for call in calls)
+
+    def test_a_render_failure_is_a_runtime_error_with_the_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (1, "", "registry 503")
+        )
+
+        with pytest.raises(RuntimeError, match=r"helm template .* failed: registry 503"):
+            validator.fetch_upstream_torch_runtime(_oci(chart="kubeflow-trainer"))
+
+    def test_a_render_without_the_runtime_is_an_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "kind: Service\n", "")
+        )
+
+        with pytest.raises(RuntimeError, match="no longer ships a 'runtimes-installer' ConfigMap"):
+            validator.fetch_upstream_torch_runtime(_oci(chart="kubeflow-trainer"))
+
+
+class TestTrainerLockstepFileFallbacks:
+    @pytest.mark.parametrize(
+        "attribute", ["_TRAINER_RUNTIME_MANIFEST", "_TRAINJOB_EXAMPLE", "_DISTRIBUTED_TRAINING_DOC"]
+    )
+    def test_an_unreadable_input_file_is_reported_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, attribute: str
+    ) -> None:
+        monkeypatch.setattr(validator, attribute, tmp_path / "missing")
+
+        errors = validator.validate_trainer_runtime_lockstep(
+            {"kubeflow-trainer": _oci(chart="kubeflow-trainer")}
+        )
+
+        assert len(errors) == 1
+        assert errors[0].startswith("trainer runtime lockstep: cannot read")
+
+    def test_a_shipped_runtime_without_a_node_image_fails_loudly(self) -> None:
+        manifest = (
+            "kind: ClusterTrainingRuntime\nmetadata:\n  name: torch-distributed\n"
+            "spec:\n  template:\n    spec:\n      replicatedJobs: []\n"
+        )
+
+        errors = validator.validate_trainer_runtime_lockstep(
+            {"kubeflow-trainer": _oci(chart="kubeflow-trainer")},
+            manifest_text=manifest,
+            example_text="kind: TrainJob\n",
+            doc_text="",
+        )
+
+        assert errors == [
+            "trainer runtime lockstep: the shipped torch-distributed runtime has no "
+            "containers[name=node] image; update this check alongside any restructure"
+        ]
+
+
+class TestMainRemainingPaths:
+    def test_an_unparseable_charts_file_is_exit_two(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        charts = tmp_path / "charts.yaml"
+        charts.write_text("charts: [unterminated", encoding="utf-8")
+
+        assert validator.main(["--charts", str(charts)]) == 2
+        assert "could not parse" in capsys.readouterr().err
+
+    def test_online_mode_runs_the_resolve_pass_and_reports_the_rendered_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The full online path, with helm faked at the retry boundary."""
+        charts = tmp_path / "charts.yaml"
+        charts.write_text(yaml.safe_dump({"charts": {"kueue": _oci()}}), encoding="utf-8")
+        monkeypatch.setattr(validator.shutil, "which", lambda name: "/usr/bin/helm")
+        monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
+
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            if cmd[1] == "show":
+                return (0, "version: 0.18.2\n", "")
+            return (0, "", "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        rc = validator.main(["--charts", str(charts), "--mode", "online"])
+
+        assert rc == 0
+        assert "resolvable + rendered at their pinned versions" in capsys.readouterr().out
+
+    def test_online_skip_template_reports_resolve_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        charts = tmp_path / "charts.yaml"
+        charts.write_text(yaml.safe_dump({"charts": {"kueue": _oci()}}), encoding="utf-8")
+        monkeypatch.setattr(validator.shutil, "which", lambda name: "/usr/bin/helm")
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 0.18.2\n", "")
+        )
+
+        rc = validator.main(["--charts", str(charts), "--mode", "online", "--skip-template"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "resolvable at their pinned versions" in out
+        assert "rendered" not in out
+
+    def test_enabled_only_is_reflected_in_the_summary_scope(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        charts = tmp_path / "charts.yaml"
+        charts.write_text(
+            yaml.safe_dump({"charts": {"kueue": _oci(), "off": _oci(enabled=False)}}),
+            encoding="utf-8",
+        )
+
+        rc = validator.main(["--charts", str(charts), "--mode", "offline", "--enabled-only"])
+
+        assert rc == 0
+        assert "OK: 1 Helm chart(s) (enabled) are structurally valid." in capsys.readouterr().out
+
+
+class TestLastBranches:
+    def test_show_output_with_a_non_string_version_is_none(self) -> None:
+        """``version: 1.2`` parses as a float; only a string is a version."""
+        assert validator._chart_version_from_show("version: 1.2\n") is None
+        assert validator._chart_version_from_show("name: x\n") is None
+        assert validator._chart_version_from_show("- not\n- a\n- mapping\n") is None
+
+    def test_a_quiet_render_failure_is_still_recorded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --verbose nothing is printed, but the failure must not be lost."""
+
+        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+            return (0, "version: 1.2.3\n", "") if cmd[1] == "show" else (1, "", "nope")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        failures = validator._validate_refs([_fake_ref()], "helm", {}, verbose=False)
+
+        assert failures == {"keda": ["keda: chart failed to render (helm template): nope"]}
+
+    def test_auto_mode_goes_online_when_helm_is_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``auto`` is the developer default: use helm if it is there, quietly."""
+        charts = tmp_path / "charts.yaml"
+        charts.write_text(yaml.safe_dump({"charts": {"kueue": _oci()}}), encoding="utf-8")
+        monkeypatch.setattr(validator.shutil, "which", lambda name: "/usr/bin/helm")
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 0.18.2\n", "")
+        )
+
+        rc = validator.main(["--charts", str(charts), "--mode", "auto"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "resolvable" in out
+        assert "not found on PATH" not in out
