@@ -196,6 +196,12 @@ def test_mcp_package_names_are_preserved(migrate: Any, rules: tuple[Any, ...]) -
             "url=https%3A%2F%2Fsomeone-else.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fx.json",
             "url=https%3A%2F%2Fsomeone-else.github.io%2Fgco-fork%2Fx.json",
         ),
+        # The README's one-click MCP install buttons (Kiro, VS Code) embed the
+        # git URL percent-encoded in their deep-link config parameter.
+        (
+            "config=%7B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2Faws-solutions-library-samples%2Fglobal-capacity-orchestrator-on-aws.git%40v7.6.1%22%7D",
+            "config=%7B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2Facme-labs%2Fgco-fork.git%40v7.6.1%22%7D",
+        ),
         # The OIDC trust-policy subject is a bare owner/repo slug.
         (
             '"github_repo": "aws-solutions-library-samples/global-capacity-orchestrator-on-aws",',
@@ -317,6 +323,11 @@ def test_dry_run_reports_the_repository_and_writes_nothing(migrate: Any) -> None
     assert len(report.rewrites) > 40, "expected the upstream references to be found"
     assert report.changed_files, "expected files to be reported as changing"
     assert report.follow_ups, "expected manual follow-ups to be detected"
+    assert any(target == "README.md" for target, _note in report.follow_ups), (
+        "expected a README.md follow-up: the Cursor install button's base64 "
+        "deep link cannot be reached by a string rewrite and needs the "
+        "bump_version.py table regeneration"
+    )
 
     after = subprocess.run(
         ["git", "status", "--porcelain"],

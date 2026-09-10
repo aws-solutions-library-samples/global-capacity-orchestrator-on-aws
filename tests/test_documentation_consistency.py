@@ -233,6 +233,34 @@ def test_mcp_copy_paste_release_refs_match_version() -> None:
     assert set(variable_refs) == {expected}
 
 
+def test_readme_mcp_install_table_matches_generator_and_version() -> None:
+    """The README's one-click MCP install table is exactly what
+    ``scripts/bump_version.py`` renders for the current ``VERSION``.
+
+    The deep links embed the release ref URL-encoded (Kiro, VS Code) and
+    base64-encoded (Cursor), so the plain ``@vX.Y.Z`` scan above cannot see
+    them; comparing against the generator catches both version drift and
+    hand edits inside the generated block.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import bump_version
+    finally:
+        sys.path.pop(0)
+
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    expected_block = bump_version.render_mcp_install_table(version)
+    assert expected_block in readme, (
+        "README.md one-click MCP install table drifted from "
+        "scripts/bump_version.py — rerun "
+        "`python -c \"import sys; sys.path.insert(0, 'scripts'); "
+        'import bump_version as b; b.update_root_readme_install_table(b.get_version())"`.'
+    )
+
+
 def test_stack_module_readme_inventory_is_exact() -> None:
     stacks = ROOT / "gco" / "stacks"
     actual = {path.name for path in stacks.glob("*.py")}

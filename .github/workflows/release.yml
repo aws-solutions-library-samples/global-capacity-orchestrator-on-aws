@@ -112,7 +112,7 @@ jobs:
             exit 1
           fi
           git checkout -b "$BRANCH"
-          git add VERSION gco_mcp/README.md gco/_version.py cli/__init__.py
+          git add VERSION README.md gco_mcp/README.md gco/_version.py cli/__init__.py
           # The bumper owns this complete tracked output set. If it gains a
           # target without this workflow staging it, fail before opening a
           # release PR whose VERSION disagrees with its maintained mirrors.

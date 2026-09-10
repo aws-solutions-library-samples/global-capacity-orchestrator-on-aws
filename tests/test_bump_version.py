@@ -3,15 +3,21 @@ Tests for scripts/bump_version.py.
 
 Exercises the SemVer version bumper that reads the source of truth from
 the top-level ``VERSION`` file and keeps ``gco/_version.py``,
-``cli/__init__.py``, and exact MCP launch refs in sync: reading the current version, patch/minor/major
-bumps with correct field resets, dry-run mode that prints but doesn't
-write, invalid-input error paths, and the main() CLI dispatcher including
-case-insensitive bump arguments. Uses a tmp_path-backed fixture that
-patches the module's ``PROJECT_ROOT``, ``VERSION_FILE``, ``VERSION_PY``,
-and ``CLI_INIT_FILE`` constants so the real repo files are never touched.
+``cli/__init__.py``, exact MCP launch refs, and the top-level README's
+generated one-click MCP install table in sync: reading the current version,
+patch/minor/major bumps with correct field resets, dry-run mode that prints
+but doesn't write, invalid-input error paths, and the main() CLI dispatcher
+including case-insensitive bump arguments. Uses a tmp_path-backed fixture
+that patches the module's ``PROJECT_ROOT``, ``VERSION_FILE``, ``VERSION_PY``,
+``CLI_INIT_FILE``, ``MCP_README_FILE``, and ``ROOT_README_FILE`` constants so
+the real repo files are never touched.
 """
 
+import base64
+import json
+import re
 import sys
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,12 +54,21 @@ def version_files(tmp_path):
         encoding="utf-8",
     )
 
+    root_readme = tmp_path / "README.md"
+    root_readme.write_text(
+        "# Fake project\n\nintro prose\n\n"
+        + bump_version.render_mcp_install_table("1.2.3")
+        + "\n\ntrailing prose\n",
+        encoding="utf-8",
+    )
+
     with (
         patch.object(bump_version, "PROJECT_ROOT", tmp_path),
         patch.object(bump_version, "VERSION_FILE", version_file),
         patch.object(bump_version, "VERSION_PY", version_py),
         patch.object(bump_version, "CLI_INIT_FILE", cli_init),
         patch.object(bump_version, "MCP_README_FILE", mcp_readme),
+        patch.object(bump_version, "ROOT_README_FILE", root_readme),
     ):
         yield tmp_path, version_file, version_py, cli_init
 
@@ -187,6 +202,60 @@ class TestUpdateMcpReadme:
         assert readme.read_text(encoding="utf-8") == original
 
 
+class TestRenderMcpInstallTable:
+    def test_embeds_release_ref_in_every_deeplink(self):
+        table = bump_version.render_mcp_install_table("9.9.9")
+
+        # Kiro and VS Code embed the URL-encoded config JSON.
+        encoded_ref = urllib.parse.quote('.git@v9.9.9"', safe="")
+        assert "https://kiro.dev/launch/mcp/add?name=gco&config=" in table
+        assert "https://insiders.vscode.dev/redirect/mcp/install?name=gco&config=" in table
+        assert table.count(encoded_ref) == 2
+
+        # Cursor embeds the same config base64-encoded.
+        cursor_match = re.search(r"cursor\.com/en/install-mcp\?name=gco&config=([^\"]+)", table)
+        assert cursor_match is not None
+        decoded = base64.b64decode(urllib.parse.unquote(cursor_match.group(1))).decode("utf-8")
+        config = json.loads(decoded)
+        assert config["command"] == "uvx"
+        assert config["args"][-1] == "gco-mcp"
+        assert config["args"][-2].endswith(".git@v9.9.9")
+
+    def test_wrapped_in_ownership_markers(self):
+        table = bump_version.render_mcp_install_table("1.0.0")
+        assert table.startswith(bump_version.MCP_INSTALL_TABLE_BEGIN)
+        assert table.endswith(bump_version.MCP_INSTALL_TABLE_END)
+
+
+class TestUpdateRootReadmeInstallTable:
+    def test_regenerates_block_and_preserves_surroundings(self, version_files):
+        root, _, _, _ = version_files
+        readme = root / "README.md"
+
+        bump_version.update_root_readme_install_table("2.0.0")
+
+        content = readme.read_text(encoding="utf-8")
+        assert content.startswith("# Fake project\n\nintro prose\n\n")
+        assert content.endswith("\n\ntrailing prose\n")
+        assert bump_version.render_mcp_install_table("2.0.0") in content
+        assert "v1.2.3" not in content
+
+    def test_dry_run_no_change(self, version_files):
+        root, _, _, _ = version_files
+        readme = root / "README.md"
+        original = readme.read_text(encoding="utf-8")
+
+        bump_version.update_root_readme_install_table("2.0.0", dry_run=True)
+
+        assert readme.read_text(encoding="utf-8") == original
+
+    def test_missing_markers_raises(self, version_files):
+        root, _, _, _ = version_files
+        (root / "README.md").write_text("no markers here\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="markers not found"):
+            bump_version.update_root_readme_install_table("2.0.0")
+
+
 class TestSetVersion:
     def test_updates_all_version_surfaces(self, version_files):
         root, version_file, version_py, cli_init = version_files
@@ -197,19 +266,24 @@ class TestSetVersion:
         mcp_readme = (root / "gco_mcp" / "README.md").read_text(encoding="utf-8")
         assert "GCO_REF=v5.0.0" in mcp_readme
         assert ".git@v5.0.0" in mcp_readme
+        root_readme = (root / "README.md").read_text(encoding="utf-8")
+        assert bump_version.render_mcp_install_table("5.0.0") in root_readme
 
     def test_dry_run_updates_nothing(self, version_files):
         root, version_file, version_py, cli_init = version_files
         mcp_readme = root / "gco_mcp" / "README.md"
+        root_readme = root / "README.md"
         orig_version = version_file.read_text()
         orig_py = version_py.read_text()
         orig_cli = cli_init.read_text()
         orig_mcp = mcp_readme.read_text(encoding="utf-8")
+        orig_root = root_readme.read_text(encoding="utf-8")
         bump_version.set_version("5.0.0", dry_run=True)
         assert version_file.read_text() == orig_version
         assert version_py.read_text() == orig_py
         assert cli_init.read_text() == orig_cli
         assert mcp_readme.read_text(encoding="utf-8") == orig_mcp
+        assert root_readme.read_text(encoding="utf-8") == orig_root
 
 
 class TestMain:
@@ -221,6 +295,7 @@ class TestMain:
         assert "VERSION" in out
         assert "gco/_version.py" in out
         assert "cli/__init__.py" in out
+        assert "README.md  (MCP install buttons)" in out
 
     def test_patch_bump(self, version_files, capsys):
         _, version_file, version_py, cli_init = version_files
