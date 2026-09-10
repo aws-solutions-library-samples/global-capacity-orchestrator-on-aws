@@ -587,6 +587,120 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert 'if [ "$committed" != "$published" ]; then' in scanner
 
 
+def test_ruby_interpreter_pin_is_covered_by_the_monthly_drift_scan() -> None:
+    """The Ruby series is pinned like Python's, so it needs the same currency check.
+
+    Dependabot watches the gems in Gemfile.lock but says nothing about the
+    interpreter, so without this the pin could sit on an end-of-life series
+    indefinitely. ``.ruby-version`` is compared against endoflife.date in the
+    monthly scan, and the result has to reach the report: counted, given a
+    summary row, and — when the lookup fails — recorded as a skip so a failed
+    query cannot read as "up to date".
+    """
+    pin = _read(".ruby-version").strip()
+    assert re.fullmatch(r"\d+\.\d+(\.\d+)?", pin), (
+        f".ruby-version must hold a bare Ruby series or version, found {pin!r}"
+    )
+
+    library = _read(".github/scripts/lib_dependency_scan.sh")
+    assert "get_latest_endoflife_cycle()" in library
+    assert "get_latest_ruby_release()" in library
+    assert "read_ruby_version_pin()" in library
+
+    scanner = _read(".github/scripts/dependency-scan.sh")
+    assert "=== Checking Ruby release ===" in scanner
+    assert 'RUBY_PIN_CURRENT="$(read_ruby_version_pin .ruby-version)"' in scanner
+    assert 'LATEST_RUBY="$(get_latest_ruby_release)"' in scanner
+    assert 'summary_row "Ruby Release"' in scanner
+    assert '"$RUBY_RELEASE_SKIP_REASON"; then' in scanner, (
+        "RUBY_RELEASE_SKIP_REASON must be passed to dependency_scan_is_complete, "
+        "otherwise a failed endoflife.date lookup leaves the scan claiming completeness"
+    )
+    assert '[ "$RUBY_RELEASE_COUNT" -eq 0 ]' in scanner, (
+        "the all-clear condition must include the Ruby count"
+    )
+    assert scanner.count('"$RUBY_RELEASE_RESULTS"') >= 3, (
+        "the Ruby results tempfile must be written, rendered and cleaned up"
+    )
+
+
+def test_ruby_version_file_is_the_only_source_of_the_ci_ruby() -> None:
+    """One pin, read by the workflow — never a literal duplicated in YAML."""
+    literals: list[str] = []
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for match in re.finditer(
+            r"ruby-version:\s*[\"']?([^\"'\n]+)[\"']?", workflow.read_text(encoding="utf-8")
+        ):
+            value = match.group(1).strip()
+            if value != ".ruby-version":
+                literals.append(f"{workflow.name}: {value}")
+    assert not literals, (
+        f"workflows must set ruby-version to '.ruby-version', not a literal: {literals}"
+    )
+
+    step = _workflow_job_step(".github/workflows/unit-tests.yml", "unit-bats-shell", "Set up Ruby")
+    assert step["with"]["ruby-version"] == ".ruby-version"
+
+
+def test_gem_dependencies_are_exactly_pinned_and_locked() -> None:
+    """Gems get the same treatment as pip and npm: exact pins plus a lockfile."""
+    gemfile = _read("Gemfile")
+    declared = re.findall(r'^gem "([^"]+)", "([^"]+)"$', gemfile, re.MULTILINE)
+    assert declared, "Gemfile declares no exactly-pinned gems"
+    for name, version in declared:
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+            f"gem {name} must be pinned to an exact version, found {version!r}"
+        )
+
+    lock = _read("Gemfile.lock")
+    assert "CHECKSUMS" in lock, (
+        "Gemfile.lock must carry the Bundler CHECKSUMS block so a republished "
+        "gem cannot change under us"
+    )
+    assert "BUNDLED WITH" in lock
+    for name, version in declared:
+        assert f"{name} ({version}) sha256=" in lock, f"no committed checksum for {name} {version}"
+
+    dependabot = yaml.safe_load(_read(".github/dependabot.yml"))
+    ecosystems = {entry["package-ecosystem"] for entry in dependabot["updates"]}
+    assert "bundler" in ecosystems, "Dependabot must watch the bundler ecosystem"
+
+
+def test_shell_coverage_gate_installs_the_committed_gem_lock() -> None:
+    """The bats job must install exactly Gemfile.lock, then enforce the floor."""
+    install = _workflow_job_step(
+        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Install the committed gem lock"
+    )["run"]
+    assert "bundle config set --local frozen true" in install, (
+        "without frozen, Bundler silently re-resolves instead of failing on drift"
+    )
+    assert "bundle install" in install
+
+    # The correctness gate must stay uninstrumented. bashcov propagates xtrace
+    # by exporting SHELLOPTS, which drags bats's own `nounset` into scripts that
+    # never opted into `set -u` and fails assertions that otherwise pass — so
+    # the suite runs twice and only the clean run decides whether the job fails.
+    plain = _workflow_job_step(
+        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Run BATS suite"
+    )["run"]
+    assert "bats tests/BATS/" in plain
+    assert "bashcov" not in plain, (
+        "the authoritative BATS run must not be instrumented; coverage is measured "
+        "by a separate step whose exit code is advisory"
+    )
+
+    measure = _workflow_job_step(
+        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Measure shell coverage"
+    )["run"]
+    assert "bundle exec bashcov" in measure
+    assert "bats tests/BATS/" in measure
+
+    gate = _workflow_job_step(
+        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Enforce the shell coverage floor"
+    )["run"]
+    assert "check_bash_coverage.py" in gate
+
+
 def test_dependency_scanner_remains_directly_executable() -> None:
     mode = (ROOT / ".github/scripts/dependency-scan.sh").stat().st_mode
 

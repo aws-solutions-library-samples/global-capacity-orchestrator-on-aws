@@ -1449,6 +1449,45 @@ PYTHON_RELEASE_COUNT="$(wc -l < "$PYTHON_RELEASE_RESULTS" 2>/dev/null | tr -d ' 
 [ -z "$PYTHON_RELEASE_COUNT" ] && PYTHON_RELEASE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# Ruby release
+#
+# Ruby is a CI-only toolchain: bashcov (see the Gemfile) measures which lines
+# of each shell script the BATS suite executes, and the unit:bats:shell job
+# gets its interpreter from .ruby-version via ruby/setup-ruby. Dependabot
+# watches the *gems* in Gemfile.lock but has nothing to say about the
+# interpreter series, so — exactly like .python-version — the pin is compared
+# against the newest supported series here. Informational, not a failure: a new
+# Ruby series is a deliberate move, not a security patch.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking Ruby release ==="
+
+RUBY_RELEASE_RESULTS="$(mktemp)"
+RUBY_RELEASE_SKIP_REASON=""
+
+RUBY_PIN_CURRENT="$(read_ruby_version_pin .ruby-version)"
+LATEST_RUBY="$(get_latest_ruby_release)"
+
+if [ -z "$LATEST_RUBY" ]; then
+  RUBY_RELEASE_SKIP_REASON="endoflife.date query failed (network or schema change)."
+  echo "  $RUBY_RELEASE_SKIP_REASON"
+elif [ -z "$RUBY_PIN_CURRENT" ]; then
+  RUBY_RELEASE_SKIP_REASON="Could not parse .ruby-version for the Ruby release comparison."
+  echo "  $RUBY_RELEASE_SKIP_REASON"
+else
+  if [ "$RUBY_PIN_CURRENT" != "$LATEST_RUBY" ] \
+     && [ "$(compare_semver "$RUBY_PIN_CURRENT" "$LATEST_RUBY")" = "newer" ]; then
+    echo "  - ruby (.ruby-version): ${RUBY_PIN_CURRENT} -> ${LATEST_RUBY}"
+    echo "ruby|${RUBY_PIN_CURRENT}|${LATEST_RUBY}" >> "$RUBY_RELEASE_RESULTS"
+  else
+    echo "  .ruby-version pins ${RUBY_PIN_CURRENT}; newest supported series is ${LATEST_RUBY}."
+  fi
+fi
+
+RUBY_RELEASE_COUNT="$(wc -l < "$RUBY_RELEASE_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$RUBY_RELEASE_COUNT" ] && RUBY_RELEASE_COUNT=0
+
+# ---------------------------------------------------------------------------
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
@@ -2101,6 +2140,11 @@ if [ -n "$PYTHON_RELEASE_SKIP_REASON" ]; then
 else
   echo "Python release:           $PYTHON_RELEASE_COUNT"
 fi
+if [ -n "$RUBY_RELEASE_SKIP_REASON" ]; then
+  echo "Ruby release:             (skipped)"
+else
+  echo "Ruby release:             $RUBY_RELEASE_COUNT"
+fi
 if [ -n "$AUTOPILOT_SKIP_REASON" ]; then
   echo "GCO autopilot pins:       (skipped)"
 else
@@ -2125,7 +2169,8 @@ if ! dependency_scan_is_complete \
   "$ACCELERATOR_SKIP_REASON" \
   "$AUTOPILOT_SKIP_REASON" \
   "$CDK_ENUM_SKIP_REASON" \
-  "$PYTHON_RELEASE_SKIP_REASON"; then
+  "$PYTHON_RELEASE_SKIP_REASON" \
+  "$RUBY_RELEASE_SKIP_REASON"; then
   SCAN_COMPLETE=false
 fi
 
@@ -2138,6 +2183,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$PRECOMMIT_COUNT" -eq 0 ] \
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
+   && [ "$RUBY_RELEASE_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
    && [ "$ACCELERATOR_COUNT" -eq 0 ] \
    && [ "$CI_TOOLING_COUNT" -eq 0 ] \
@@ -2182,6 +2228,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Python release skipped: $PYTHON_RELEASE_SKIP_REASON"
   fi
+  if [ -n "$RUBY_RELEASE_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Ruby release skipped: $RUBY_RELEASE_SKIP_REASON"
+  fi
   if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Incomplete checks: $(join_scan_incomplete_reasons)"
@@ -2192,7 +2242,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     STATUS_MESSAGE="All dependencies are up to date."
   fi
   echo "$STATUS_MESSAGE"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -2280,6 +2330,7 @@ summary_row() {
   summary_row "Pre-commit Hooks"         "$PRECOMMIT_COUNT"      ""                          "routine"
   summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
   summary_row "Python Release"           "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "informational"
+  summary_row "Ruby Release"             "$RUBY_RELEASE_COUNT"   "$RUBY_RELEASE_SKIP_REASON" "informational"
   summary_row "CI Tooling"               "$CI_TOOLING_COUNT"     ""                          "act soon"
   summary_row "Version Consistency"      "$CONSISTENCY_COUNT"    ""                          "routine"
   summary_row "Base-image Security Epochs" "$EPOCH_COUNT"        ""                          "act soon"
@@ -2497,6 +2548,21 @@ summary_row() {
     echo ""
   fi
 
+  if [ "$RUBY_RELEASE_COUNT" -gt 0 ]; then
+    echo "## Ruby Release"
+    echo ""
+    echo "A newer stable Ruby series is supported upstream than the one pinned in"
+    echo "\`.ruby-version\`. Ruby is CI-only — \`bundle exec bashcov\` measures shell"
+    echo "coverage in the \`unit:bats:shell\` job — so bumping is low risk, but it is"
+    echo "still a deliberate move: check that \`ruby/setup-ruby\` publishes a prebuilt"
+    echo "binary for the new series and that \`bashcov\` supports it, then update"
+    echo "\`.ruby-version\` and re-resolve \`Gemfile.lock\`."
+    echo "See <https://endoflife.date/ruby>."
+    echo ""
+    emit_md_table "Surface|Current|Latest" "$RUBY_RELEASE_RESULTS"
+    echo ""
+  fi
+
   # ----- New coverage surfaces -----
 
   if [ "$CI_TOOLING_COUNT" -gt 0 ]; then
@@ -2573,7 +2639,7 @@ summary_row() {
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -2587,6 +2653,7 @@ summary_row() {
     [ -n "$AUTOPILOT_SKIP_REASON" ]     && echo "- **GCO Autopilot Pins:** $AUTOPILOT_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
+    [ -n "$RUBY_RELEASE_SKIP_REASON" ] && echo "- **Ruby Release:** $RUBY_RELEASE_SKIP_REASON"
     if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
       while IFS= read -r incomplete_reason; do
         echo "- **Incomplete lookup or parse:** ${incomplete_reason}"
@@ -2612,7 +2679,7 @@ summary_row() {
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

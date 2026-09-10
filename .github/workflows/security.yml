@@ -13,6 +13,7 @@
 # Jobs (alphabetical by display name):
 #   - security:bandit:sast               — bandit on every authored Python file
 #                                          (repo root) + demo GIF validation
+#   - security:bundler-audit:deps        — bundler-audit on Gemfile.lock
 #   - security:checkov:iac               — checkov against the whole repo
 #   - security:codeql:javascript-code-analysis
 #                                        — CodeQL security-and-quality pack on JavaScript
@@ -150,6 +151,37 @@ jobs:
           name: pip-audit-report
           path: pip-audit-report.json
           retention-days: 30
+
+  security-bundler-audit-deps:
+    name: "security:bundler-audit:deps"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # The RubyGems half of the dependency graph: bashcov + bundler-audit
+      # itself, pinned in Gemfile and resolved in Gemfile.lock. Ruby is CI-only
+      # (bashcov measures shell coverage in unit:bats:shell), but a CI-only
+      # dependency is still a dependency, so its graph is audited on the same
+      # schedule as requirements-lock.txt and the npm lockfiles.
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+        with:
+          ruby-version: ".ruby-version"
+      - name: Install the committed gem lock
+        run: |
+          set -euo pipefail
+          bundle config set --local frozen true
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4 --retry 3
+      - name: Run bundler-audit
+        # `update` refreshes the local copy of the Ruby advisory database before
+        # checking, so the job is not scanning against whatever was vendored in
+        # the pinned gem. Both commands fail the job on error.
+        run: |
+          set -euo pipefail
+          bundle exec bundler-audit update
+          bundle exec bundler-audit check --verbose
 
   security-npm-audit:
     name: "security:npm-audit:all-packages"

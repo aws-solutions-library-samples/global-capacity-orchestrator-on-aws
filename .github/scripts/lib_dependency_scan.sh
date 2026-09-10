@@ -791,20 +791,25 @@ if versions:
 " 2>/dev/null
 }
 
-# get_latest_python_release
+# get_latest_endoflife_cycle <product>
 #
-# Queries https://endoflife.date/api/python.json and prints the
+# Queries https://endoflife.date/api/<product>.json and prints the
 # highest ``cycle`` (e.g. ``3.14``) that's already shipped and still
 # under standard support. Empty output on network failure or schema
 # change — callers treat this as "skip" rather than as drift.
 #
 # We pick endoflife.date because it's a clean, unauthenticated JSON
 # endpoint that already filters out prerelease/EOL cycles via its
-# ``releaseDate`` and ``eol`` fields. Going through python.org or the
-# python/cpython GitHub API would either rate-limit (no token) or
+# ``releaseDate`` and ``eol`` fields. Going through python.org, ruby-lang.org
+# or the upstream GitHub APIs would either rate-limit (no token) or
 # require us to hand-roll prerelease-tag filtering.
-get_latest_python_release() {
-  curl -fsSL --max-time 15 "https://endoflife.date/api/python.json" 2>/dev/null \
+#
+# Interpreters are pinned by *series* here (``3.14``, ``4.0``), not by patch,
+# because that's how .python-version and .ruby-version pin them: the patch is
+# whatever the runner or the prebuilt toolchain resolves to.
+get_latest_endoflife_cycle() {
+  local product="$1"
+  curl -fsSL --max-time 15 "https://endoflife.date/api/${product}.json" 2>/dev/null \
     | python3 -c "
 import datetime, json, sys
 try:
@@ -836,6 +841,39 @@ if candidates:
     print(max(candidates)[1])
 " 2>/dev/null
 }
+
+# get_latest_python_release
+#
+# The supported Python series, for the Lambda runtime comparison.
+get_latest_python_release() {
+  get_latest_endoflife_cycle python
+}
+
+# get_latest_ruby_release
+#
+# The supported Ruby series, for the .ruby-version comparison. Ruby is a
+# CI-only dependency (bashcov measures BATS shell coverage — see the Gemfile),
+# but it is pinned like every other toolchain, so it gets the same monthly
+# "is the pin still the current series?" check .python-version gets.
+get_latest_ruby_release() {
+  get_latest_endoflife_cycle ruby
+}
+
+# read_ruby_version_pin [version_file]
+#
+# Prints the committed Ruby series from .ruby-version (comments and blank
+# lines ignored), or nothing when the file is missing or holds no version.
+# Empty output makes the caller skip rather than report false drift.
+read_ruby_version_pin() {
+  local version_file="${1:-.ruby-version}"
+  [ -f "$version_file" ] || return 0
+  grep -vE '^[[:space:]]*(#|$)' "$version_file" 2>/dev/null \
+    | tr -d '[:space:]' \
+    | grep -oE '^(ruby-)?[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+    | sed -E 's/^ruby-//' \
+    | head -1
+}
+
 # get_latest_precommit_hook_release <repo_url>
 #
 # Given the ``repo:`` URL committed to ``.pre-commit-config.yaml``,
