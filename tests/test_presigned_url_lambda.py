@@ -535,3 +535,114 @@ def test_handler_module_exposes_pure_helpers(monkeypatch: pytest.MonkeyPatch) ->
 
     # Env vars were read at import time.
     assert os.environ["STUDIO_DOMAIN_ID"] == _STUDIO_DOMAIN_ID
+
+
+# ---------------------------------------------------------------------------
+# Remaining branches: malformed events, pagination, and boto3 error codes
+# ---------------------------------------------------------------------------
+
+
+class TestParseClaimsShapes:
+    @pytest.mark.parametrize(
+        "event",
+        [
+            "not an event",
+            {"requestContext": {"authorizer": "not a dict"}},
+            {"requestContext": {"authorizer": {"claims": ["not", "a", "dict"]}}},
+        ],
+        ids=["non-dict-event", "non-dict-authorizer", "non-dict-claims"],
+    )
+    def test_every_malformed_layer_yields_no_claims(self, handler_module, event) -> None:
+        handler, _, _ = handler_module
+        assert handler._parse_claims(event) == {}
+
+
+class TestResolveDomainId:
+    def test_follows_pagination_to_the_matching_domain(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.list_domains.side_effect = [
+            {"Domains": [{"DomainName": "other", "DomainId": "d-other"}], "NextToken": "p2"},
+            {"Domains": [{"DomainName": "gco-analytics", "DomainId": "d-target"}]},
+        ]
+
+        assert handler._resolve_domain_id("gco-analytics") == "d-target"
+        assert sagemaker_mock.list_domains.call_args_list[1].kwargs == {"NextToken": "p2"}
+
+    def test_matching_domain_without_an_id_is_treated_as_missing(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.list_domains.return_value = {"Domains": [{"DomainName": "gco-analytics"}]}
+
+        assert handler._resolve_domain_id("gco-analytics") is None
+
+
+class TestEnsureUserProfileErrorCodes:
+    def test_unexpected_describe_error_propagates(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "DescribeUserProfile"
+        )
+
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+        sagemaker_mock.create_user_profile.assert_not_called()
+
+    def test_failed_profile_that_cannot_be_deleted_is_still_recreated(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = {
+            "Status": "Failed",
+            "FailureReason": "quota",
+        }
+        sagemaker_mock.delete_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "ResourceInUse", "Message": "busy"}}, "DeleteUserProfile"
+        )
+
+        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+
+        assert status == "Provisioning"
+        sagemaker_mock.create_user_profile.assert_called_once()
+
+    def test_concurrent_creation_is_tolerated(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.create_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "ResourceInUse", "Message": "exists"}}, "CreateUserProfile"
+        )
+
+        handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+
+    def test_other_creation_failures_propagate(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.create_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "ResourceLimitExceeded", "Message": "quota"}}, "CreateUserProfile"
+        )
+
+        with pytest.raises(ClientError, match="ResourceLimitExceeded"):
+            handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+
+
+class TestEnsureAccessPointPagination:
+    def test_existing_access_point_on_a_later_page_is_reused(self, handler_module) -> None:
+        handler, _, efs_mock = handler_module
+        arn = "arn:aws:elasticfilesystem:us-east-2:123456789012:access-point/fsap-alice"
+        efs_mock.describe_access_points.side_effect = [
+            {"AccessPoints": [{"RootDirectory": {"Path": "/home/bob"}}], "NextToken": "p2"},
+            {"AccessPoints": [{"AccessPointArn": arn, "RootDirectory": {"Path": "/home/alice"}}]},
+        ]
+
+        assert handler._ensure_access_point("alice", _STUDIO_EFS_ID) == arn
+        assert efs_mock.describe_access_points.call_args_list[1].kwargs["NextToken"] == "p2"
+        efs_mock.create_access_point.assert_not_called()
+
+    def test_exhausted_pages_lead_to_creation(self, handler_module) -> None:
+        handler, _, efs_mock = handler_module
+        efs_mock.describe_access_points.side_effect = [
+            {"AccessPoints": [{"RootDirectory": {"Path": "/home/bob"}}], "NextToken": "p2"},
+            {"AccessPoints": []},
+        ]
+        efs_mock.create_access_point.return_value = {"AccessPointArn": "arn:new"}
+
+        assert handler._ensure_access_point("alice", _STUDIO_EFS_ID) == "arn:new"
+        uid, gid = handler._derive_posix_ids("alice")
+        assert efs_mock.create_access_point.call_args.kwargs["PosixUser"] == {
+            "Uid": uid,
+            "Gid": gid,
+        }
