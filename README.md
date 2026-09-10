@@ -13,6 +13,7 @@
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/security.yml"><img src="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/security.yml/badge.svg?branch=main" alt="Security"></a>
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml"><img src="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml/badge.svg?branch=main" alt="Linting"></a>
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Faws-solutions-library-samples.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
+  <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/releases/latest"><img src="https://img.shields.io/github/v/release/aws-solutions-library-samples/global-capacity-orchestrator-on-aws?sort=semver&display_name=tag" alt="Latest Release"></a>
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"></a>
 </p>
 <!-- END BADGE TABLE -->

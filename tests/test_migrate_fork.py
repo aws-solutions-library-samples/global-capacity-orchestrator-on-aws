@@ -202,6 +202,13 @@ def test_mcp_package_names_are_preserved(migrate: Any, rules: tuple[Any, ...]) -
             "config=%7B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2Faws-solutions-library-samples%2Fglobal-capacity-orchestrator-on-aws.git%40v7.6.1%22%7D",
             "config=%7B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2Facme-labs%2Fgco-fork.git%40v7.6.1%22%7D",
         ),
+        # The README's latest-release badge embeds the slug in a shields.io
+        # path (not a github.com URL). Both the owner and the repo segment
+        # must move, or a fork's badge keeps reporting upstream's releases.
+        (
+            "https://img.shields.io/github/v/release/aws-solutions-library-samples/global-capacity-orchestrator-on-aws?sort=semver",
+            "https://img.shields.io/github/v/release/acme-labs/gco-fork?sort=semver",
+        ),
         # The OIDC trust-policy subject is a bare owner/repo slug.
         (
             '"github_repo": "aws-solutions-library-samples/global-capacity-orchestrator-on-aws",',

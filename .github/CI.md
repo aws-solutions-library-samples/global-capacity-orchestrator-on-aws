@@ -280,12 +280,13 @@ The scan runs as an Advanced Setup workflow rather than Default Setup so the fil
 
 ## README badges
 
-The README's badge row has three parts, in order — five dynamic health
-signals, then a navigation link:
+The README's badge row has four parts, in order — five dynamic health
+signals, a release pointer, then a navigation link:
 
 1. **Four workflow-status badges** (`Unit Tests`, `Integration Tests`, `Security`, `Linting`) from GitHub's native `badge.svg` endpoint.
 2. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the exact 100% gate all describe one run.
-3. **A wiki badge** — a static shields.io badge linking to the Pages site root, where `pages.yml` serves the MkDocs wiki. It sits last so the dynamic quality signals stay grouped.
+3. **A latest-release badge** rendered by shields.io from the GitHub Releases API (`img.shields.io/github/v/release/<owner>/<repo>?sort=semver&display_name=tag`), linking to `/releases/latest`. It shows the newest semver tag automatically, so nothing in the repo needs bumping when a release is published. `scripts/migrate_fork.py` rewrites its owner/repo path for forks (the `shields-release-badge-path` rule); on a fork with no published releases it renders `release: no releases` until the first one exists.
+4. **A wiki badge** — a static shields.io badge linking to the Pages site root, where `pages.yml` serves the MkDocs wiki. It sits last so the dynamic quality signals stay grouped.
 
 ### "repo or workflow not found" on fresh or private repositories
 
