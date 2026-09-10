@@ -513,3 +513,131 @@ def test_every_repository_this_repo_pins_passes_the_shape_check() -> None:
     repositories = {pin.repository for pin in verifier.third_party(verifier.collect_all_pins())}
     rejected = sorted(r for r in repositories if not verifier.REPOSITORY_RE.match(r))
     assert rejected == [], f"shape check rejects action repositories in use: {rejected}"
+
+
+# ── main() with --verify-upstream ────────────────────────────────────────────
+#
+# The CLI wraps the pure functions above. What it adds is the exit-code policy:
+# a mismatch fails, an unresolved lookup is a warning unless --require-complete
+# says otherwise, and the two must never be confused. These drive main() with
+# resolve_tag replaced, so the network is never touched and the outcome of every
+# lookup is under the test's control.
+
+
+def _resolving_to(sha_for: dict[str, str] | None, *, error: str | None = None):
+    """Build a resolve_tag stand-in.
+
+    When ``error`` is set every lookup is unresolved with that message.
+    Otherwise ``sha_for`` maps ``owner/repo`` to the SHA GitHub "answers" with,
+    and a repository missing from the map resolves to an all-zero SHA -- which
+    matches no real pin, so it reads as a moved tag.
+    """
+
+    def resolve(repository: str, version: str, *, token: str | None = None):  # noqa: ANN202
+        if error is not None:
+            return verifier.TagResolution(error=error)
+        assert sha_for is not None
+        return verifier.TagResolution(sha=sha_for.get(repository, "0" * 40))
+
+    return resolve
+
+
+def _pins_all_matching() -> dict[str, str]:
+    """A resolver map where every real pin in this repository resolves to itself."""
+    return {pin.repository: pin.sha for pin in verifier.third_party(verifier.collect_all_pins())}
+
+
+def test_main_reports_pinning_problems_and_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Offline problems reach the report and drive a non-zero exit."""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "w.yml").write_text(
+        "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v7\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(verifier, "reference_files", lambda root=None: [workflows / "w.yml"])
+
+    assert verifier.main([]) == 1
+
+    out = capsys.readouterr().out
+    assert "Pinning problems:" in out
+    assert "FAILED (1 problem(s))" in out
+
+
+def test_main_verify_upstream_passes_when_every_comment_matches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(verifier, "resolve_tag", _resolving_to(_pins_all_matching()))
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+
+    assert verifier.main(["--verify-upstream"]) == 0
+
+    out = capsys.readouterr().out
+    assert "resolved" in out and "upstream" in out
+    assert "no GH_TOKEN" not in out, "a token was supplied; the unauthenticated notice is wrong"
+    assert out.rstrip().endswith("verify-action-pins: OK")
+
+
+def test_main_verify_upstream_announces_unauthenticated_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without a token the rate limit is 60/hour; say so up front."""
+    monkeypatch.setattr(verifier, "resolve_tag", _resolving_to(_pins_all_matching()))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert verifier.main(["--verify-upstream"]) == 0
+    assert "no GH_TOKEN/GITHUB_TOKEN" in capsys.readouterr().out
+
+
+def test_main_verify_upstream_fails_on_a_moved_tag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """GitHub answering with a different commit is definitive, so it fails."""
+    answers = _pins_all_matching()
+    victim = sorted(answers)[0]
+    answers[victim] = "f" * 40
+    monkeypatch.setattr(verifier, "resolve_tag", _resolving_to(answers))
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+
+    assert verifier.main(["--verify-upstream"]) == 1
+
+    out = capsys.readouterr().out
+    assert "Version comments that do not match the pinned commit:" in out
+    assert victim in out
+    assert "FAILED" in out
+
+
+def test_main_verify_upstream_tolerates_unresolved_lookups_by_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rate limit or timeout is reported, not failed on -- by default.
+
+    Failing every pull request on an API blip would train people to ignore the
+    check, which is worse than one unverified pin.
+    """
+    monkeypatch.setattr(verifier, "resolve_tag", _resolving_to(None, error="HTTP 403 rate limited"))
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+
+    assert verifier.main(["--verify-upstream"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Incomplete lookups (not treated as failures):" in out
+    assert "rate limited" in out
+    assert out.rstrip().endswith("verify-action-pins: OK")
+
+
+def test_main_require_complete_turns_unresolved_lookups_into_a_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The scheduled run wants certainty, so it can opt into failing closed."""
+    monkeypatch.setattr(verifier, "resolve_tag", _resolving_to(None, error="HTTP 403 rate limited"))
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+
+    assert verifier.main(["--verify-upstream", "--require-complete"]) == 1
+
+    out = capsys.readouterr().out
+    # No pinning problems and no mismatches: the failure is purely the
+    # incomplete lookups, so the problem count reads zero.
+    assert "FAILED (0 problem(s))" in out
