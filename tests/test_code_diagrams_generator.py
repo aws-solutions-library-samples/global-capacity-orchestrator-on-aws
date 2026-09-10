@@ -29,10 +29,13 @@ covered by the pyflowchart import in the renderer's unit tests below.
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -232,6 +235,24 @@ class TestGenerationTimestamp:
         monkeypatch.setenv("SOURCE_DATE_EPOCH", "not-an-integer")
         with pytest.raises(ValueError, match="integer Unix timestamp"):
             generation_timestamp_utc()
+
+    def test_absent_source_date_epoch_stamps_the_current_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproducibility is opt-in: without the variable, record "now".
+
+        A local run has no SOURCE_DATE_EPOCH, so this is the path humans
+        actually take, and it must not raise the way a malformed value does.
+        """
+        monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+        before = datetime.now(UTC).replace(microsecond=0)
+
+        stamped = generation_timestamp_utc()
+
+        after = datetime.now(UTC).replace(microsecond=0)
+        assert stamped.endswith("Z")
+        parsed = datetime.strptime(stamped, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        assert before <= parsed <= after, f"{stamped} is outside the window it was taken in"
 
     def test_source_commit_is_exact_and_normalized(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GCO_DIAGRAM_SOURCE_COMMIT", "A" * 40)
@@ -1280,3 +1301,219 @@ class TestProvenanceSchemaVersions:
         )
         with pytest.raises(RuntimeError, match="must record"):
             generate_mod.load_provenance_manifest(tmp_path)
+
+
+class TestSourceMarkerEdgeCases:
+    """The paths a normal regeneration never takes.
+
+    Marker insertion rewrites files that are under version control, so the
+    interesting cases are the ones where it must *not* write, must not reformat,
+    or must refuse outright. A silent write here shows up as unexplained diff
+    noise in someone else's pull request.
+    """
+
+    @staticmethod
+    def _result(
+        tmp_path: Path,
+        *,
+        function: str = "mod.func",
+        png: bool = True,
+        generated_at: str = "2026-07-16T12:00:00Z",
+        source_commit: str = "a" * 40,
+    ) -> object:
+        html_path = tmp_path / "artifacts" / f"{function.replace('.', '_')}.html"
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text("<html></html>", encoding="utf-8")
+        png_path = None
+        if png:
+            png_path = html_path.with_suffix(".png")
+            png_path.write_bytes(b"\x89PNG")
+        return RenderedTarget(
+            target=Target(source="pkg/mod.py", function=function),
+            html_path=html_path,
+            png_path=png_path,
+            generated_at=generated_at,
+            source_commit=source_commit,
+        )
+
+    def test_reinserting_an_identical_block_writes_nothing(self, tmp_path: Path) -> None:
+        """Idempotence is what keeps regeneration out of unrelated diffs."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os\n\n\ndef func():\n    return os\n", encoding="utf-8")
+        result = self._result(tmp_path)
+
+        assert (
+            _update_marker_file(source_path=source_path, results=[result], project_root=tmp_path)
+            is True
+        )
+        after_first = source_path.read_text(encoding="utf-8")
+
+        assert (
+            _update_marker_file(source_path=source_path, results=[result], project_root=tmp_path)
+            is False
+        )
+        assert source_path.read_text(encoding="utf-8") == after_first
+
+    def test_upsert_skips_formatting_when_no_file_changed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No write means no ``ruff format`` invocation at all."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os\n\n\ndef func():\n    return os\n", encoding="utf-8")
+        result = self._result(tmp_path)
+
+        # Stubbed for both runs: the real ruff would reformat the file after the
+        # first insertion, so the second run would legitimately have something to
+        # rewrite and the point being tested here would be lost.
+        calls: list[object] = []
+        monkeypatch.setattr(source_marker_mod, "_ruff_format", lambda *a, **k: calls.append((a, k)))
+
+        upsert_markers([result], project_root=tmp_path)
+        assert len(calls) == 1, "the first insertion should have triggered formatting"
+
+        upsert_markers([result], project_root=tmp_path)
+        assert len(calls) == 1, "ruff format ran again even though nothing was rewritten"
+
+    def test_ruff_format_warns_and_returns_when_ruff_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing ruff degrades to a warning; generation still has to succeed."""
+        monkeypatch.setitem(sys.modules, "ruff", None)
+        real_import = builtins.__import__
+
+        def _no_ruff(name: str, *args: object, **kwargs: object) -> object:
+            if name == "ruff":
+                raise ImportError("no ruff")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", _no_ruff)
+        ran: list[object] = []
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a))
+
+        with pytest.warns(UserWarning, match="ruff is not installed"):
+            _ruff_format([tmp_path / "pkg" / "mod.py"], project_root=tmp_path)
+
+        assert ran == [], "ruff was invoked despite being unimportable"
+
+    def test_results_disagreeing_on_the_source_commit_are_refused(self, tmp_path: Path) -> None:
+        """One block records one commit; two would make the marker a lie."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os\n", encoding="utf-8")
+        results = [
+            self._result(tmp_path, function="mod.one", source_commit="a" * 40),
+            self._result(tmp_path, function="mod.two", source_commit="b" * 40),
+        ]
+
+        with pytest.raises(ValueError, match="one Git source commit"):
+            _update_marker_file(source_path=source_path, results=results, project_root=tmp_path)
+
+    def test_a_target_without_a_png_is_listed_without_one(self, tmp_path: Path) -> None:
+        """HTML-only runs are normal (no Playwright), and must still mark up."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os\n", encoding="utf-8")
+
+        _update_marker_file(
+            source_path=source_path,
+            results=[self._result(tmp_path, png=False)],
+            project_root=tmp_path,
+        )
+        marked = source_path.read_text(encoding="utf-8")
+
+        assert "mod.func" in marked
+        assert "(PNG:" not in marked
+
+    def test_strip_all_markers_ignores_unmarked_and_missing_files(self, tmp_path: Path) -> None:
+        """Only files actually carrying a marker may be rewritten."""
+        for package in ("gco", "cli", "gco_mcp", "lambda"):
+            (tmp_path / package).mkdir()
+        unmarked = tmp_path / "gco" / "plain.py"
+        unmarked.write_text("import os\n", encoding="utf-8")
+        before = unmarked.read_text(encoding="utf-8")
+
+        marked = tmp_path / "cli" / "marked.py"
+        marked.write_text(
+            f"import os\n\n# <{SENTINEL}> BEGIN - auto-inserted, do not edit\n# <{SENTINEL}> END\n",
+            encoding="utf-8",
+        )
+        # A build directory that must be skipped even though it carries a marker.
+        build = tmp_path / "lambda" / "helm-installer-build"
+        build.mkdir()
+        skipped = build / "copy.py"
+        skipped.write_text(marked.read_text(encoding="utf-8"), encoding="utf-8")
+
+        modified = strip_all_markers(tmp_path)
+
+        assert modified == 1, "expected exactly the one eligible marked file to change"
+        assert unmarked.read_text(encoding="utf-8") == before
+        assert SENTINEL not in marked.read_text(encoding="utf-8")
+        assert SENTINEL in skipped.read_text(encoding="utf-8"), "a build copy was rewritten"
+
+    def test_a_bare_sentinel_mention_is_not_treated_as_a_block(self, tmp_path: Path) -> None:
+        """Only a complete BEGIN/END block is strippable.
+
+        The sentinel string also appears in prose — this module's own docstrings
+        mention it — so seeing the word is not sufficient reason to rewrite a
+        file. Stripping must be a no-op when there is no delimited block.
+        """
+        for package in ("gco", "cli", "gco_mcp", "lambda"):
+            (tmp_path / package).mkdir()
+        mentions = tmp_path / "gco" / "prose.py"
+        mentions.write_text(
+            f'"""A module that merely talks about {SENTINEL} blocks."""\n\nimport os\n',
+            encoding="utf-8",
+        )
+        before = mentions.read_text(encoding="utf-8")
+
+        assert strip_all_markers(tmp_path) == 0
+        assert mentions.read_text(encoding="utf-8") == before
+
+
+class TestMarkerInsertionPoint:
+    """Where the block lands, for files that are all prelude or have none."""
+
+    def test_a_file_that_is_only_imports_appends_at_the_end(self, tmp_path: Path) -> None:
+        """The import walk can finish without ever hitting a non-import node."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os\nimport sys\n", encoding="utf-8")
+
+        _update_marker_file(
+            source_path=source_path,
+            results=[TestSourceMarkerEdgeCases._result(tmp_path)],
+            project_root=tmp_path,
+        )
+        marked = source_path.read_text(encoding="utf-8")
+
+        assert marked.startswith("import os\nimport sys\n")
+        assert SENTINEL in marked
+
+    def test_a_prelude_with_no_trailing_newline_still_marks_up(self, tmp_path: Path) -> None:
+        """A file whose last prelude line lacks a newline must not lose the block."""
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("import os", encoding="utf-8")
+
+        _update_marker_file(
+            source_path=source_path,
+            results=[TestSourceMarkerEdgeCases._result(tmp_path)],
+            project_root=tmp_path,
+        )
+
+        assert SENTINEL in source_path.read_text(encoding="utf-8")
+
+    def test_a_file_with_no_prelude_marks_at_the_top(self, tmp_path: Path) -> None:
+        source_path = tmp_path / "pkg" / "mod.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("x = 1\n", encoding="utf-8")
+
+        _update_marker_file(
+            source_path=source_path,
+            results=[TestSourceMarkerEdgeCases._result(tmp_path)],
+            project_root=tmp_path,
+        )
+
+        assert SENTINEL in source_path.read_text(encoding="utf-8")
