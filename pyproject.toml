@@ -500,8 +500,6 @@ omit = [
     ".github/scripts/verify_inference_streaming_bundle_freshness.py",
     ".github/scripts/verify_lambda_imports.py",
     "diagrams/code_diagrams/_renderer.py",
-    "diagrams/code_diagrams/_source_marker.py",
-    "diagrams/code_diagrams/_timestamp.py",
     "diagrams/code_diagrams/generate.py",
     "diagrams/generate.py",
     "diagrams/infra_diagrams/generate.py",
