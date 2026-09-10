@@ -160,6 +160,18 @@ def _build_rules(owner: str, repo: str) -> tuple[Rule, ...]:
             why="percent-encoded GitHub Pages URL (shields.io badge endpoint)",
         ),
         Rule(
+            name="repo-url-encoded",
+            # The README's one-click MCP install buttons embed the git URL
+            # percent-encoded inside the Kiro and VS Code deep links. The
+            # Cursor deep link embeds the same URL base64-encoded, which no
+            # string rewrite can reach — _detect_follow_ups points migrators
+            # at the scripts/bump_version.py regeneration that fixes all
+            # three links at once.
+            pattern=re.compile(rf"github\.com%2[Ff]{up_owner}%2[Ff]{up_repo}"),
+            replacement=f"github.com%2F{owner}%2F{repo}",
+            why="percent-encoded repository URL (one-click MCP install deep links)",
+        ),
+        Rule(
             name="pages-url",
             pattern=re.compile(rf"{up_owner}\.github\.io/{up_repo}"),
             replacement=f"{owner}.github.io/{repo}",
@@ -417,6 +429,21 @@ def _detect_follow_ups() -> list[tuple[str, str]]:
                 ".github/workflows/pages.yml",
                 "Enable GitHub Pages on your fork (Settings > Pages, source: GitHub "
                 "Actions) or the coverage badge will 404 even with the URL updated.",
+            )
+        )
+
+    if "BEGIN MCP INSTALL TABLE" in _safe_read(Path("README.md")):
+        follow_ups.append(
+            (
+                "README.md",
+                "The one-click MCP install buttons embed this repository's git URL "
+                "in their deep links. The Kiro and VS Code links carry it "
+                "percent-encoded and are rewritten here, but the Cursor link "
+                "carries it base64-encoded, which a string rewrite cannot reach. "
+                "Regenerate the whole table from its owning script: "
+                "python3 -c \"import sys; sys.path.insert(0, 'scripts'); "
+                "import bump_version as b; "
+                'b.update_root_readme_install_table(b.get_version())".',
             )
         )
 
