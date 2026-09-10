@@ -624,11 +624,9 @@ def fetch_lbc_go_mod(controller_version: str) -> str:
     last_error: Exception | None = None
     for attempt in range(1, _GO_MOD_FETCH_ATTEMPTS + 1):
         try:
-            with (
-                urllib.request.urlopen(  # nosec B310  # nosemgrep: dynamic-urllib-use-detected - fixed https://raw.githubusercontent.com template; the only variable is a strictly semver-validated version segment, so no scheme or host injection is possible  # noqa: S310
-                    url, timeout=_GO_MOD_FETCH_TIMEOUT_SECONDS
-                ) as response
-            ):
+            with urllib.request.urlopen(  # nosec B310  # nosemgrep: dynamic-urllib-use-detected - fixed https://raw.githubusercontent.com template; the only variable is a strictly semver-validated version segment, so no scheme or host injection is possible  # noqa: S310
+                url, timeout=_GO_MOD_FETCH_TIMEOUT_SECONDS
+            ) as response:
                 return str(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
