@@ -131,7 +131,7 @@ def _verify_server_mapping(
 
 
 def verify_config(
-    config: dict,
+    config: dict[str, Any],
     include_companions: bool = True,
     expect_gco_env: dict[str, str] | None = None,
     gco_args: list[str] | None = None,
@@ -149,7 +149,7 @@ def verify_config(
 
 
 def verify_codex_config(
-    config: dict,
+    config: dict[str, Any],
     include_companions: bool = True,
     expect_gco_env: dict[str, str] | None = None,
     gco_args: list[str] | None = None,
@@ -237,7 +237,7 @@ def _default_model(engine: AutopilotEngine) -> str:
 
 
 def verify_plan(
-    plan: dict,
+    plan: dict[str, Any],
     claude_binary: str | None = None,
     *,
     engine: str | AutopilotEngine = AutopilotEngine.CLAUDE_CODE,
@@ -318,12 +318,13 @@ def verify_plan(
     return problems
 
 
-def _load_json(path: str) -> dict:
+def _load_json(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+        payload: dict[str, Any] = json.load(handle)
+    return payload
 
 
-def _load_toml(path: str) -> dict:
+def _load_toml(path: str) -> dict[str, Any]:
     with open(path, "rb") as handle:
         return tomllib.load(handle)
 

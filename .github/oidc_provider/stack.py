@@ -31,6 +31,7 @@ Trust Policy:
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from aws_cdk import CfnOutput, Stack
 from aws_cdk import aws_iam as iam
@@ -102,7 +103,7 @@ class GCOGitHubOIDCStack(Stack):
         github_repo: str = "aws-solutions-library-samples/global-capacity-orchestrator-on-aws",
         github_subject_prefix: str | None = None,
         github_branch: str = "main",
-        **kwargs: object,
+        **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 

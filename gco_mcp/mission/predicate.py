@@ -695,6 +695,6 @@ def evaluate_predicate(parsed: ast.Expression, obs: dict[str, Any]) -> Any:
     # the body can reach is one we put in the globals dict
     # ourselves.
     eval_globals: dict[str, Any] = {**_SAFE_GLOBALS, "obs": obs, **_SAFE_CALLABLES}
-    return eval(  # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
+    return eval(  # nosec B307  # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
         code, eval_globals, {}
     )  # noqa: S307

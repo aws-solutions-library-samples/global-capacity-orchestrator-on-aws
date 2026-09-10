@@ -610,19 +610,20 @@ npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --n
 npm --prefix lambda/inference-streaming-proxy test
 
 # Type check (matches lint:mypy:strict and lint:mypy:stacks)
-mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
-mypy gco/stacks/ app.py          # requires ".[cdk,typecheck]"
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
+mypy gco/stacks/ app.py diagrams/   # requires ".[cdk,typecheck]"
+mypy .github/oidc_provider/      # separate run: two modules named "app"
 
 # Unit tests — the whole core suite in one go. CI splits the same set across
 # `unit:pytest:core (shard N/M)` jobs and combines coverage in `unit:pytest:core`;
 # locally there is no reason to shard.
 pytest $(python scripts/split_tests.py --shard 1 --of 1) \
-    --cov=gco --cov=cli --cov=gco_mcp
+    --cov
 
 # Or run one shard exactly as CI does (coverage floor off; it applies to the
 # combined data only)
 pytest $(python scripts/split_tests.py --shard 1 --of 2) \
-    --cov=gco --cov=cli --cov=gco_mcp --cov-report= --cov-fail-under=0
+    --cov --cov-report= --cov-fail-under=0
 
 # CDK matrices run serially: concurrent in-process synths race while staging
 # shared CDK assets. CI fans cdk-nag configs across separate runners instead.
@@ -633,7 +634,7 @@ cdk synth --quiet
 pytest tests/test_cdk_synthesis_matrix.py
 
 # Security (matches security:bandit:sast)
-bandit -r gco/ cli/ -c pyproject.toml --severity-level medium
+bandit -r . -c pyproject.toml --severity-level medium
 
 # Validate workflow files (matches lint:actionlint:workflows)
 actionlint

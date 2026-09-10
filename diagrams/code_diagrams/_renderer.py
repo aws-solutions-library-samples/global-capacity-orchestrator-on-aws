@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import math
 import sys
 import warnings
 from dataclasses import dataclass
@@ -269,7 +270,7 @@ def _screenshot_scale(width: float, height: float) -> float:
     return min(
         1.0,
         max_css_dimension / max(width, height),
-        (max_css_area / (width * height)) ** 0.5,
+        math.sqrt(max_css_area / (width * height)),
     )
 
 
@@ -321,7 +322,7 @@ class _PlaywrightRenderer:
             # The area cap also avoids allocating several hundred megapixels
             # for unusually wide-and-tall control-flow charts.
             factor = _screenshot_scale(box["width"], box["height"]) if box is not None else 1.0
-            if factor < 1.0:
+            if box is not None and factor < 1.0:
                 locator.evaluate(
                     """(svg, size) => {
                         if (!svg.hasAttribute('viewBox')) {

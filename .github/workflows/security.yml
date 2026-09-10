@@ -11,7 +11,8 @@
 # types so the suite fires the moment a PR leaves draft.
 #
 # Jobs (alphabetical by display name):
-#   - security:bandit:sast               — bandit on gco/, cli/ + demo GIF validation
+#   - security:bandit:sast               — bandit on every authored Python file
+#                                          (repo root) + demo GIF validation
 #   - security:checkov:iac               — checkov against the whole repo
 #   - security:codeql:javascript-code-analysis
 #                                        — CodeQL security-and-quality pack on JavaScript
@@ -72,8 +73,14 @@ jobs:
         # script also bounds file size, canvas dimensions, and frame count.
         run: timeout 120s python .github/scripts/validate_demo_gifs.py
       - name: Run bandit
+        # Scans the whole repository, not just the application packages: Lambda
+        # handlers, repo tooling under scripts/ and .github/, the CDK entry
+        # point and the client examples are all authored Python and can all
+        # carry a security defect. What is out of scope (the test-suite,
+        # generated trees, vendored wheels) is listed in [tool.bandit]
+        # exclude_dirs in pyproject.toml.
         run: |
-          bandit -r gco/ cli/ -c pyproject.toml --severity-level medium \
+          bandit -r . -c pyproject.toml --severity-level medium \
             -f json -o bandit-report.json
       - name: Upload bandit report
         if: always()

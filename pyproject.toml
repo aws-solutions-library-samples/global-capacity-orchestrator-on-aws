@@ -259,11 +259,17 @@ Repository = "https://github.com/aws-solutions-library-samples/global-capacity-o
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+# CI runs ``ruff check .`` / ``ruff format --check .`` from the repository
+# root, so every Python file we author is linted (app.py, .github/, diagrams/,
+# dockerfiles/, docs/client-examples/, lambda/, scripts/, ...). Generated and
+# vendored trees are excluded here, in one place, rather than by hand-listing
+# source directories in the workflow.
 exclude = [
     ".git",
     ".venv",
     ".mypy_cache",
     ".pytest_cache",
+    ".worktrees",
     "__pycache__",
     "cdk.out",
     "dist",
@@ -337,12 +343,23 @@ disable_error_code = ["import-untyped", "import-not-found"]
 exclude = [
     "cdk\\.out",
     "\\.venv",
+    "\\.worktrees",
     "dist",
     "build",
     "lambda/kubectl-applier-simple-build",
     "lambda/helm-installer-build",
-    "scripts/mcp_install_smoke\\.py",
 ]
+
+# gco_mcp is checked under its bare on-disk module names (see mypy_path above).
+# scripts/mcp_install_smoke.py deliberately imports the *installed* package by
+# its dotted name (`import gco_mcp.cli_runner`) — that is the whole point of
+# the smoke test. Following that spelling would load the same files a second
+# time under a second name and abort with "Source file found twice under
+# different module names", so the dotted spelling is treated as opaque here;
+# the modules themselves are still fully checked via their bare names.
+[[tool.mypy.overrides]]
+module = "gco_mcp.*"
+follow_imports = "skip"
 
 # gco/stacks/ is type-checked separately by lint:mypy:stacks (with CDK
 # installed). When the strict job runs without CDK, aws_cdk.Stack resolves
@@ -410,18 +427,171 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["gco", "cli", "gco_mcp"]
+# Every Python file we author is measured — application packages (gco/, cli/,
+# gco_mcp/), the CDK entry point (app.py), Lambda handlers (lambda/), repo
+# tooling (scripts/, diagrams/, dockerfiles/, .github/) and the client
+# examples under docs/. Measuring the repository root (rather than a hand-kept
+# package list) means a new directory is covered by default instead of
+# silently escaping the 100% floor; anything that must not count is spelled
+# out in ``omit`` below. CI passes a bare ``--cov`` so pytest-cov inherits this
+# list rather than overriding it.
+source = ["."]
 branch = true
 omit = [
+    # The test-suite measures; it is not measured.
+    "tests/*",
     "*/tests/*",
-    "*/__pycache__/*",
-    "*/cdk.out/*",
-    "*/.venv/*",
+    # Package markers carry no logic.
     "*/__init__.py",
+    # Generated trees, vendored wheels and third-party code that can appear
+    # inside the checkout.
+    "*/__pycache__/*",
+    "cdk.out/*",
+    "*/cdk.out/*",
+    ".venv/*",
+    "*/.venv/*",
+    ".worktrees/*",
+    "*/node_modules/*",
+    "build/*",
+    "dist/*",
+    "htmlcov/*",
+    "site/*",
+    "lambda/*-build/*",
+    # Byte-identical copies of the shared Lambda sources (kept in lockstep by
+    # tests/test_lambda_shared_sources.py). Only the canonical file counts:
+    # lambda/proxy-shared/proxy_utils.py and lambda/tls-shared/backend_tls.py.
+    "lambda/api-gateway-proxy/backend_tls.py",
+    "lambda/api-gateway-proxy/proxy_utils.py",
+    "lambda/regional-api-proxy/backend_tls.py",
+    "lambda/regional-api-proxy/proxy_utils.py",
+    "lambda/proxy-shared/backend_tls.py",
+    # ------------------------------------------------------------------
+    # coverage ratchet: BEGIN
+    #
+    # These files are inside the measured surface but are not yet at 100%.
+    # They are omitted so the floor applies to everything else, and they are
+    # removed from this list — never added to it — as tests land. The list is
+    # the visible, reviewable record of what is still owed; when it is empty,
+    # delete it along with these comments.
+    #
+    # Rules (enforced by tests/test_coverage_ratchet.py):
+    #   * every entry is a real file, spelled exactly as coverage reports it;
+    #   * no entry may live under gco/, cli/ or gco_mcp/ — those packages are
+    #     already at 100% and the ratchet must not be used to weaken them;
+    #   * the list stays sorted and free of duplicates.
+    #
+    # Progress is printed by the ``unit:pytest:core`` job, which reports the
+    # omitted files separately so their coverage stays visible while it climbs.
+    # ------------------------------------------------------------------
+    ".github/oidc_provider/app.py",
+    ".github/oidc_provider/stack.py",
+    ".github/scripts/apply_pr_type_labels.py",
+    ".github/scripts/autopilot_ci_contract.py",
+    ".github/scripts/validate_demo_gifs.py",
+    ".github/scripts/validate_grafana_dashboards.py",
+    ".github/scripts/validate_helm_charts.py",
+    ".github/scripts/validate_k8s_manifests.py",
+    ".github/scripts/verify_action_pins.py",
+    ".github/scripts/verify_container_tool_versions.py",
+    ".github/scripts/verify_inference_streaming_bundle_freshness.py",
+    ".github/scripts/verify_lambda_imports.py",
+    "app.py",
+    "diagrams/code_diagrams/_renderer.py",
+    "diagrams/code_diagrams/_source_marker.py",
+    "diagrams/code_diagrams/_timestamp.py",
+    "diagrams/code_diagrams/generate.py",
+    "diagrams/generate.py",
+    "diagrams/infra_diagrams/generate.py",
+    "dockerfiles/build_scratch_rootfs.py",
+    "dockerfiles/runtime_smoke.py",
+    "docs/client-examples/python_boto3_example.py",
+    "lambda/analytics-cleanup/handler.py",
+    "lambda/analytics-presigned-url/handler.py",
+    "lambda/api-gateway-proxy/handler.py",
+    "lambda/capacity-poller/handler.py",
+    "lambda/cross-region-aggregator/handler.py",
+    "lambda/drift-detection/handler.py",
+    "lambda/ga-registration/handler.py",
+    "lambda/helm-installer/handler.py",
+    "lambda/helm-installer/teardown_provider.py",
+    "lambda/helm-orchestrator/handler.py",
+    "lambda/image-lookup/handler.py",
+    "lambda/kubectl-applier-simple/handler.py",
+    "lambda/proxy-shared/proxy_utils.py",
+    "lambda/regional-api-proxy/handler.py",
+    "lambda/secret-rotation/handler.py",
+    "lambda/tls-certificate-manager/handler.py",
+    "lambda/tls-shared/backend_tls.py",
+    "lambda/traffic-dial-controller/handler.py",
+    "lambda/vector-ingest/handler.py",
+    "scripts/accelerator_catalog.py",
+    "scripts/capture_monitoring_screenshots.py",
+    "scripts/capture_scaffold_fixtures.py",
+    "scripts/dump_nag_findings.py",
+    "scripts/example_job_validation/__main__.py",
+    "scripts/example_job_validation/actions.py",
+    "scripts/example_job_validation/drivers.py",
+    "scripts/example_job_validation/kube.py",
+    "scripts/example_job_validation/static_checks.py",
+    "scripts/generate_openapi.py",
+    "scripts/live_release_validation/__main__.py",
+    "scripts/live_release_validation/actions/baseline.py",
+    "scripts/live_release_validation/actions/central_queue.py",
+    "scripts/live_release_validation/actions/convergence.py",
+    "scripts/live_release_validation/actions/deploy.py",
+    "scripts/live_release_validation/actions/destroy.py",
+    "scripts/live_release_validation/actions/final_inventory.py",
+    "scripts/live_release_validation/actions/inference.py",
+    "scripts/live_release_validation/actions/jobs.py",
+    "scripts/live_release_validation/actions/preflight.py",
+    "scripts/live_release_validation/actions/topology.py",
+    "scripts/live_release_validation/artifact_io.py",
+    "scripts/live_release_validation/checks/alb_tls.py",
+    "scripts/live_release_validation/checks/central_queue.py",
+    "scripts/live_release_validation/checks/inference.py",
+    "scripts/live_release_validation/checks/inference_inventory.py",
+    "scripts/live_release_validation/checks/inference_runtime.py",
+    "scripts/live_release_validation/checks/jobs.py",
+    "scripts/live_release_validation/checks/opencost.py",
+    "scripts/live_release_validation/checks/policy.py",
+    "scripts/live_release_validation/checks/topology.py",
+    "scripts/live_release_validation/cleanup/ecr.py",
+    "scripts/live_release_validation/cleanup/log_groups.py",
+    "scripts/live_release_validation/cleanup/retained.py",
+    "scripts/live_release_validation/cleanup/workloads.py",
+    "scripts/live_release_validation/cli_args.py",
+    "scripts/live_release_validation/context.py",
+    "scripts/live_release_validation/inference_contract.py",
+    "scripts/live_release_validation/inventory/_shared.py",
+    "scripts/live_release_validation/inventory/ecr.py",
+    "scripts/live_release_validation/inventory/project.py",
+    "scripts/live_release_validation/inventory/scanners.py",
+    "scripts/live_release_validation/inventory/stacks.py",
+    "scripts/live_release_validation/models.py",
+    "scripts/live_release_validation/ownership/cleanup_role.py",
+    "scripts/live_release_validation/ownership/dynamodb_streams.py",
+    "scripts/live_release_validation/ownership/ecr.py",
+    "scripts/live_release_validation/ownership/efs_automatic_backups.py",
+    "scripts/live_release_validation/ownership/kms.py",
+    "scripts/live_release_validation/ownership/log_groups.py",
+    "scripts/live_release_validation/ownership/stacks.py",
+    "scripts/live_release_validation/protected.py",
+    "scripts/live_release_validation/runner.py",
+    "scripts/mcp_install_smoke.py",
+    "scripts/migrate_fork.py",
+    "scripts/mkdocs_hooks.py",
+    "scripts/split_tests.py",
+    "scripts/test_webhook_delivery.py",
+    # coverage ratchet: END
 ]
 
 [tool.coverage.report]
 precision = 2
+# Lambda handlers (lambda/*/), .github/scripts/, dockerfiles/ and
+# docs/client-examples/ have no __init__.py. Without this, coverage's
+# unexecuted-file scan stops at any directory that is not a regular package,
+# so a handler no test imports would be invisible and 0% would read as 100%.
+include_namespace_packages = true
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -438,7 +608,24 @@ show_missing = true
 directory = "htmlcov"
 
 [tool.bandit]
-exclude_dirs = ["tests", "cdk.out", ".venv"]
+# CI runs ``bandit -r .`` so every authored Python file is scanned. bandit
+# treats each entry as a *substring* of the scanned path (as well as a glob),
+# so the patterns are anchored with slashes: "/tests/" skips the test-suite
+# without also skipping scripts/split_tests.py.
+exclude_dirs = [
+    "/tests/",
+    "/cdk.out/",
+    "/.venv/",
+    "/.worktrees/",
+    "/node_modules/",
+    "/htmlcov/",
+    "/site/",
+    "/build/",
+    "/dist/",
+    "/lambda/kubectl-applier-simple-build/",
+    "/lambda/helm-installer-build/",
+    "/lambda/inference-streaming-proxy-build/",
+]
 skips = ["B101", "B104", "B113", "B311"]
 # B101: assert used in tests and CDK constructs (harmless)
 # B104: bind to 0.0.0.0 required for container services

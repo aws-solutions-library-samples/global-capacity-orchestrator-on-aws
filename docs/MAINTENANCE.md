@@ -617,8 +617,27 @@ analyzes both Python and JavaScript. See
 
 Python line + branch coverage has an enforced floor of **exact 100%**
 (`fail_under = 100` in `pyproject.toml` `[tool.coverage.report]`), applied by
-`unit:pytest:core` to the combined shard data over `gco`, `cli`, and
-`gco_mcp`. The dedicated `unit:node:inference-streaming-proxy` job separately
+`unit:pytest:core` to the combined shard data.
+
+Coverage is measured from the repository root (`source = ["."]`), so every
+authored Python file counts — application packages, Lambda handlers, the CDK
+entry point, repo tooling under `scripts/`, `diagrams/`, `dockerfiles/` and
+`.github/`, and the client examples under `docs/`. Measuring the root rather
+than a hand-kept package list means a new directory is covered by default
+instead of silently escaping the floor. `include_namespace_packages = true` is
+load-bearing here: without it coverage's unexecuted-file scan stops at any
+directory that is not a regular package, so a Lambda handler no test imports
+would be invisible and 0% would read as 100%.
+
+Files inside that surface which are not yet at 100% are listed in a delimited
+**coverage ratchet** block inside `[tool.coverage.run] omit`. The list is the
+reviewable record of what is still owed; it only ever shrinks, and
+`tests/test_coverage_ratchet.py` enforces that — entries must name real files,
+must be exact paths rather than globs, and may never cover `gco/`, `cli/` or
+`gco_mcp/`, so the ratchet cannot be used to lower a package that already
+holds 100%. When the block is empty, delete it.
+
+The dedicated `unit:node:inference-streaming-proxy` job separately
 requires **exact 100%** lines, functions, and branches over
 `lambda/inference-streaming-proxy/index.mjs` from Node.js 24's built-in V8
 coverage (V8 reports no statement metric, so none is claimed). The Python HTML
