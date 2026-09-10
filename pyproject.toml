@@ -489,7 +489,6 @@ omit = [
     # .github/oidc_provider/app.py from the gate too. The "./" prefix keeps
     # this entry pointing at the repository-root CDK entry point only.
     "./app.py",
-    ".github/scripts/apply_pr_type_labels.py",
     ".github/scripts/validate_demo_gifs.py",
     ".github/scripts/validate_grafana_dashboards.py",
     ".github/scripts/validate_helm_charts.py",
