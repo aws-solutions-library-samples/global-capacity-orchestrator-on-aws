@@ -367,3 +367,136 @@ class TestCommandLine:
         config.write_text(json.dumps(_real_config()), encoding="utf-8")
         with pytest.raises(SystemExit):
             contract.main(["verify-config", str(config), "--expect-gco-env", "NOEQUALS"])
+
+
+class TestConfigShapeRejections:
+    """Malformed documents must produce problems, never a vacuous pass.
+
+    ``verify_config`` is handed a document that a *generator* produced, so the
+    realistic failure is not a hand-typo but a generator change that alters the
+    shape. Every one of these returns a problem list rather than raising, because
+    the CI step prints all problems at once instead of stopping at the first.
+    """
+
+    def test_a_non_mapping_server_section_is_a_single_clear_problem(self) -> None:
+        """Claude's JSON: the whole point is one clear message, not a cascade."""
+        problems = contract.verify_config(
+            {"mcpServers": ["not", "a", "mapping"]},
+            include_companions=False,
+            expect_gco_env=None,
+            gco_args=None,
+        )
+
+        assert problems == ["config carries no mcpServers mapping"]
+
+    def test_the_shared_mapping_check_also_guards_its_own_input(self) -> None:
+        """Both engines funnel into ``_verify_server_mapping``.
+
+        ``verify_config`` rejects a bad ``mcpServers`` before delegating, but the
+        Codex path reaches the shared checker with a differently-shaped document,
+        so the guard has to exist on both sides of the call.
+        """
+        problems = contract._verify_server_mapping(
+            ["not", "a", "mapping"],
+            include_companions=False,
+            expect_gco_env=None,
+            gco_args=None,
+        )
+
+        assert problems == ["config carries no MCP server mapping"]
+
+    def test_a_non_mapping_entry_is_reported_and_skipped(self) -> None:
+        """One bad entry must not stop the remaining entries being checked."""
+        config = _real_config()
+        config["mcpServers"]["gco"] = "not-a-mapping"
+
+        problems = contract.verify_config(
+            config, include_companions=False, expect_gco_env=None, gco_args=None
+        )
+
+        assert any("entry must be a mapping" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            pytest.param("command", "", "command must be a non-empty string", id="empty-command"),
+            pytest.param("command", 7, "command must be a non-empty string", id="numeric-command"),
+            pytest.param("args", "uvx", "args must be a list of strings", id="args-not-a-list"),
+            pytest.param("args", [1, 2], "args must be a list of strings", id="args-not-strings"),
+        ],
+    )
+    def test_launch_recipe_fields_are_shape_checked(
+        self, field: str, value: object, expected: str
+    ) -> None:
+        config = _real_config()
+        config["mcpServers"]["gco"][field] = value
+
+        problems = contract.verify_config(
+            config, include_companions=False, expect_gco_env=None, gco_args=None
+        )
+
+        assert any(expected in problem for problem in problems)
+
+    def test_a_non_mapping_gco_entry_does_not_crash_the_env_check(self) -> None:
+        """The env assertion must still report, rather than raise, on bad input."""
+        config = _real_config()
+        config["mcpServers"]["gco"] = "not-a-mapping"
+
+        problems = contract.verify_config(
+            config,
+            include_companions=False,
+            expect_gco_env={"GCO_PROFILE": "ci"},
+            gco_args=None,
+        )
+
+        assert any("gco env 'GCO_PROFILE'" in problem for problem in problems)
+
+    def test_a_non_mapping_env_is_treated_as_absent(self) -> None:
+        config = _real_config()
+        config["mcpServers"]["gco"]["env"] = ["GCO_PROFILE=ci"]
+
+        problems = contract.verify_config(
+            config,
+            include_companions=False,
+            expect_gco_env={"GCO_PROFILE": "ci"},
+            gco_args=None,
+        )
+
+        assert any("gco env 'GCO_PROFILE'" in problem for problem in problems)
+
+
+class TestEnvPairParsing:
+    """``--expect-gco-env KEY=VALUE`` parsing."""
+
+    def test_a_well_formed_pair_splits_on_the_first_equals(self) -> None:
+        """Values legitimately contain '=' (base64, query strings), so only the
+        first separator may be treated as the delimiter."""
+        assert contract._parse_env_pair("GCO_TOKEN=a=b=c") == ("GCO_TOKEN", "a=b=c")
+
+    @pytest.mark.parametrize("pair", ("noequals", "=novalue"))
+    def test_a_malformed_pair_is_rejected_by_argparse(self, pair: str) -> None:
+        with pytest.raises(contract.argparse.ArgumentTypeError, match="expects KEY=VALUE"):
+            contract._parse_env_pair(pair)
+
+
+def test_the_module_puts_the_repository_on_sys_path_when_it_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script is run by CI as a file, not imported as part of the package.
+
+    ``python3 .github/scripts/autopilot_ci_contract.py`` puts *that directory* on
+    sys.path, not the repository root, so the script inserts the root itself
+    before importing ``cli.autopilot``. Under pytest the root is already there
+    and the guard never fires, so it is exercised by re-executing the module with
+    the root removed -- otherwise this line would be permanently unverified and
+    a regression would only surface as a CI-only ImportError.
+    """
+    monkeypatch.setattr(sys, "path", [entry for entry in sys.path if entry != str(_PROJECT_ROOT)])
+    spec = importlib.util.spec_from_file_location("_autopilot_contract_pathless", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    assert str(_PROJECT_ROOT) in sys.path, "the module did not restore the repository root"
+    assert module.expected_servers(include_companions=False), "the module failed to import cli"
