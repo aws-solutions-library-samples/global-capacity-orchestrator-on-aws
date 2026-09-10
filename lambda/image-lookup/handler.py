@@ -49,8 +49,8 @@ from typing import Any
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-10T23:26:44Z
+# Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.png``)

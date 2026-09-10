@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="0ccc8936758b3a13">
+        <meta name="gco-generated-at" content="2026-09-10T23:26:44Z">
+        <meta name="gco-source-commit" content="4c42b84d53d6cc01cd2b3c7e4011a43f850678b6">
+        <meta name="gco-flow-digest" content="898d6c92708c6b43">
         <title>Capacity snapshot poller (Region truth, pooled scores, bounded retries, writes)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,43 +208,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op7615=>operation: 'Snapshot capacity signals for every watched (instance_type, region) pair.'
-op7617=>operation: table_name = os.environ.get('CAPACITY_HISTORY_TABLE_NAME')
-cond7620=>operation: raise ValueError('CAPACITY_HISTORY_TABLE_NAME environment variable is required') if  not table_name
-op7630=>operation: instance_types = _split_csv(os.environ.get('WATCH_INSTANCE_TYPES'))
-op7632=>operation: configured_regions = _split_csv(os.environ.get('ENABLED_REGIONS'))
-op7634=>operation: retention_days = int(os.environ.get('CAPACITY_HISTORY_RETENTION_DAYS', str(DEFAULT_RETENTION_DAYS)))
-op7636=>operation: block_duration_hours = int(os.environ.get('CAPACITY_BLOCK_DURATION_HOURS', str(DEFAULT_BLOCK_DURATION_HOURS)))
-op7638=>operation: long_block_duration_hours = int(os.environ.get('CAPACITY_BLOCK_LONG_DURATION_HOURS', str(DEFAULT_LONG_BLOCK_DURATION_HOURS)))
-op7640=>operation: target_capacities = _parse_target_capacities(os.environ.get('SPOT_SCORE_TARGET_CAPACITIES'))
-op7642=>operation: pools = _parse_instance_pools(os.environ.get('INSTANCE_POOLS'))
-cond7645=>operation: logger.warning('WATCH_INSTANCE_TYPES is empty; nothing to poll') if  not instance_types
-cond7656=>operation: logger.warning('ENABLED_REGIONS is empty; nothing to poll') if  not configured_regions
-op7666=>operation: table = boto3.resource('dynamodb').Table(table_name)
-op7668=>operation: now = datetime.now(UTC)
-op7670=>operation: written = 0
-op7672=>operation: errors = 0
-op7674=>operation: regions: list[str] = []
-op7676=>operation: regions_skipped_not_enabled: list[str] = []
-op7678=>operation: regions_enablement_unknown: list[str] = []
-cond7681=>condition: for region in configured_regions
-op7685=>operation: enablement = _region_enablement_status(region)
-cond7688=>condition: if enablement == 'not-enabled'
-sub7692=>subroutine: regions_skipped_not_enabled.append(region)
-sub7694=>subroutine: continue
-sub7699=>subroutine: regions.append(region)
-cond7702=>operation: regions_enablement_unknown.append(region) if  enablement == 'unknown'
-op7714=>operation: watched = set(instance_types)
-op7716=>operation: relevant_pools = tuple(((name, members) for name, members in pools if watched.intersection(members)))
-op7718=>operation: unpooled_watch_types = sorted((itype for itype in watched if _pool_for_instance_type(pools, itype) is None))
-cond7721=>operation: logger.info('%d watched instance type(s) belong to no instance pool and get no placement score (price and Capacity Block metrics are still recorded): %s', len(unpooled_watch_types), unpooled_watch_types) if  unpooled_watch_types
-op7731=>operation: sps_client = boto3.client('ec2')
-op7733=>operation: scores, sps_counters = _collect_spot_placement_scores(sps_client, relevant_pools, target_capacities, regions)
-op7735=>operation: long_probe_enabled = long_block_duration_hours > 0
-cond7738=>condition: for region in regions
-op7742=>operation: ec2 = boto3.client('ec2', region_name=region)
-cond7745=>condition: for instance_type in instance_types
-op7750=>operation: pool = _pool_for_instance_type(pools, instance_type)
+        <div><textarea id="code" style="width: 100%;" rows="11">op46=>operation: 'Snapshot capacity signals for every watched (instance_type, region) pair.'
+op48=>operation: table_name = os.environ.get('CAPACITY_HISTORY_TABLE_NAME')
+cond51=>operation: raise ValueError('CAPACITY_HISTORY_TABLE_NAME environment variable is required') if  not table_name
+op61=>operation: instance_types = _split_csv(os.environ.get('WATCH_INSTANCE_TYPES'))
+op63=>operation: configured_regions = _split_csv(os.environ.get('ENABLED_REGIONS'))
+op65=>operation: retention_days = int(os.environ.get('CAPACITY_HISTORY_RETENTION_DAYS', str(DEFAULT_RETENTION_DAYS)))
+op67=>operation: block_duration_hours = int(os.environ.get('CAPACITY_BLOCK_DURATION_HOURS', str(DEFAULT_BLOCK_DURATION_HOURS)))
+op69=>operation: long_block_duration_hours = int(os.environ.get('CAPACITY_BLOCK_LONG_DURATION_HOURS', str(DEFAULT_LONG_BLOCK_DURATION_HOURS)))
+op71=>operation: target_capacities = _parse_target_capacities(os.environ.get('SPOT_SCORE_TARGET_CAPACITIES'))
+op73=>operation: pools = _parse_instance_pools(os.environ.get('INSTANCE_POOLS'))
+cond76=>operation: logger.warning('WATCH_INSTANCE_TYPES is empty; nothing to poll') if  not instance_types
+cond87=>operation: logger.warning('ENABLED_REGIONS is empty; nothing to poll') if  not configured_regions
+op97=>operation: table = boto3.resource('dynamodb').Table(table_name)
+op99=>operation: now = datetime.now(UTC)
+op101=>operation: written = 0
+op103=>operation: errors = 0
+op105=>operation: regions: list[str] = []
+op107=>operation: regions_skipped_not_enabled: list[str] = []
+op109=>operation: regions_enablement_unknown: list[str] = []
+cond112=>condition: for region in configured_regions
+op116=>operation: enablement = _region_enablement_status(region)
+cond119=>condition: if enablement == 'not-enabled'
+sub123=>subroutine: regions_skipped_not_enabled.append(region)
+sub125=>subroutine: continue
+sub130=>subroutine: regions.append(region)
+cond133=>operation: regions_enablement_unknown.append(region) if  enablement == 'unknown'
+op145=>operation: watched = set(instance_types)
+op147=>operation: relevant_pools = tuple(((name, members) for name, members in pools if watched.intersection(members)))
+op149=>operation: unpooled_watch_types = sorted((itype for itype in watched if _pool_for_instance_type(pools, itype) is None))
+cond152=>operation: logger.info('%d watched instance type(s) belong to no instance pool and get no placement score (price and Capacity Block metrics are still recorded): %s', len(unpooled_watch_types), unpooled_watch_types) if  unpooled_watch_types
+op162=>operation: sps_client = boto3.client('ec2')
+op164=>operation: scores, sps_counters = _collect_spot_placement_scores(sps_client, relevant_pools, target_capacities, regions)
+op166=>operation: long_probe_enabled = long_block_duration_hours > 0
+cond169=>condition: for region in regions
+op173=>operation: ec2 = boto3.client('ec2', region_name=region)
+cond176=>condition: for instance_type in instance_types
+op181=>operation: pool = _pool_for_instance_type(pools, instance_type)
 spot_scores: dict[str, int] = {}
 spot_pool: str | None = None
 if pool is not None:
@@ -271,64 +271,64 @@ if not signal_obtained:
 item = _build_item(instance_type, region, now, retention_days, spot_scores, spot_pool, spot_price, az_count, blocks_available, blocks_total, long_available, long_total)
 table.put_item(Item=item)
 written += 1
-cond7749=>condition: exception raised?
-cond7752=>condition: except Exception as exc
-op7756=>operation: errors += 1
-sub7758=>subroutine: logger.exception('failed to record %s/%s: %s', instance_type, region, exc)
-op7767=>operation: summary: dict[str, Any] = {'written': written, 'errors': errors, 'timestamp': now.isoformat(), 'regions_polled': regions, 'regions_skipped_not_enabled': regions_skipped_not_enabled, 'regions_enablement_unknown': regions_enablement_unknown, 'sps': {**sps_counters, 'pools': len(relevant_pools), 'target_capacities': [capacity for capacity, _field in target_capacities], 'unpooled_watch_types': len(unpooled_watch_types)}}
-sub7769=>subroutine: logger.info('capacity poll complete: written=%d errors=%d sps_requests=%d sps_received=%d/%d sps_missing=%d config_limit_refusals=%d regions_skipped=%d regions_enablement_unknown=%d', written, errors, summary['sps']['requests_issued'], summary['sps']['combinations_received'], summary['sps']['combinations_expected'], summary['sps']['combinations_missing_after_retry'], summary['sps']['config_limit_refusals'], len(regions_skipped_not_enabled), len(regions_enablement_unknown))
-io7774=>inputoutput: output: summary
-e7772=>end: end function return
+cond180=>condition: exception raised?
+cond183=>condition: except Exception as exc
+op187=>operation: errors += 1
+sub189=>subroutine: logger.exception('failed to record %s/%s: %s', instance_type, region, exc)
+op198=>operation: summary: dict[str, Any] = {'written': written, 'errors': errors, 'timestamp': now.isoformat(), 'regions_polled': regions, 'regions_skipped_not_enabled': regions_skipped_not_enabled, 'regions_enablement_unknown': regions_enablement_unknown, 'sps': {**sps_counters, 'pools': len(relevant_pools), 'target_capacities': [capacity for capacity, _field in target_capacities], 'unpooled_watch_types': len(unpooled_watch_types)}}
+sub200=>subroutine: logger.info('capacity poll complete: written=%d errors=%d sps_requests=%d sps_received=%d/%d sps_missing=%d config_limit_refusals=%d regions_skipped=%d regions_enablement_unknown=%d', written, errors, summary['sps']['requests_issued'], summary['sps']['combinations_received'], summary['sps']['combinations_expected'], summary['sps']['combinations_missing_after_retry'], summary['sps']['config_limit_refusals'], len(regions_skipped_not_enabled), len(regions_enablement_unknown))
+io205=>inputoutput: output: summary
+e203=>end: end function return
 
-op7615->op7617
-op7617->cond7620
-cond7620->op7630
-op7630->op7632
-op7632->op7634
-op7634->op7636
-op7636->op7638
-op7638->op7640
-op7640->op7642
-op7642->cond7645
-cond7645->cond7656
-cond7656->op7666
-op7666->op7668
-op7668->op7670
-op7670->op7672
-op7672->op7674
-op7674->op7676
-op7676->op7678
-op7678->cond7681
-cond7681(yes)->op7685
-op7685->cond7688
-cond7688(yes)->sub7692
-sub7692->sub7694
-cond7688(no)->sub7699
-sub7699->cond7702
-cond7702->cond7681
-cond7681(no)->op7714
-op7714->op7716
-op7716->op7718
-op7718->cond7721
-cond7721->op7731
-op7731->op7733
-op7733->op7735
-op7735->cond7738
-cond7738(yes)->op7742
-op7742->cond7745
-cond7745(yes)->op7750
-op7750->cond7749
-cond7749(yes)->cond7752
-cond7752(yes)->op7756
-op7756->sub7758
-sub7758->cond7745
-cond7752(no)->cond7745
-cond7749(no)->cond7745
-cond7745(no)->cond7738
-cond7738(no)->op7767
-op7767->sub7769
-sub7769->io7774
-io7774->e7772
+op46->op48
+op48->cond51
+cond51->op61
+op61->op63
+op63->op65
+op65->op67
+op67->op69
+op69->op71
+op71->op73
+op73->cond76
+cond76->cond87
+cond87->op97
+op97->op99
+op99->op101
+op101->op103
+op103->op105
+op105->op107
+op107->op109
+op109->cond112
+cond112(yes)->op116
+op116->cond119
+cond119(yes)->sub123
+sub123->sub125
+cond119(no)->sub130
+sub130->cond133
+cond133->cond112
+cond112(no)->op145
+op145->op147
+op147->op149
+op149->cond152
+cond152->op162
+op162->op164
+op164->op166
+op166->cond169
+cond169(yes)->op173
+op173->cond176
+cond176(yes)->op181
+op181->cond180
+cond180(yes)->cond183
+cond183(yes)->op187
+op187->sub189
+sub189->cond176
+cond183(no)->cond176
+cond180(no)->cond176
+cond176(no)->cond169
+cond169(no)->op198
+op198->sub200
+sub200->io205
+io205->e203
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -338,17 +338,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-10T23:26:44Z -->
+        <!-- Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-10T23:26:44Z">2026-09-10T23:26:44Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>4c42b84d53d6cc01cd2b3c7e4011a43f850678b6</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>0ccc8936758b3a13</code>
+            Flow content SHA-256: <code>898d6c92708c6b43</code>
           </p>
           <div id="canvas"></div>
         </div>

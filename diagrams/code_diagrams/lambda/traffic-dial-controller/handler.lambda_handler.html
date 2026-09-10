@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="a1c9460b980434dc">
+        <meta name="gco-generated-at" content="2026-09-10T23:26:44Z">
+        <meta name="gco-source-commit" content="4c42b84d53d6cc01cd2b3c7e4011a43f850678b6">
+        <meta name="gco-flow-digest" content="08ac3a9e46e53cba">
         <title>Traffic dial controller (health evidence, step limits, last-Region safety)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,147 +208,147 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op7919=>operation: "Evaluate every region's health and converge its traffic dial."
-op7921=>operation: listener_arn = os.environ.get('LISTENER_ARN')
-op7923=>operation: project_name = os.environ.get('PROJECT_NAME')
-cond7926=>operation: raise ValueError('LISTENER_ARN and PROJECT_NAME environment variables are required') if  not listener_arn or not project_name
-op7936=>operation: mode = os.environ.get('MODE', 'monitor').strip().lower()
-op7938=>operation: regions = sorted(_split_csv(os.environ.get('REGIONS')))
-op7940=>operation: lookback_minutes = int(os.environ.get('LOOKBACK_MINUTES', str(DEFAULT_LOOKBACK_MINUTES)))
-op7942=>operation: min_dial = int(os.environ.get('MIN_DIAL_PERCENTAGE', str(DEFAULT_MIN_DIAL_PERCENTAGE)))
-op7944=>operation: max_step = int(os.environ.get('MAX_STEP_PERCENTAGE', str(DEFAULT_MAX_STEP_PERCENTAGE)))
-op7946=>operation: full_health = int(os.environ.get('FULL_HEALTH_PERCENTAGE', str(DEFAULT_FULL_HEALTH_PERCENTAGE)))
-cond7949=>operation: logger.warning('REGIONS is empty; nothing to evaluate') if  not regions
-op7959=>operation: now = datetime.now(UTC)
-op7961=>operation: ga_client = boto3.client('globalaccelerator', region_name=GA_CONTROL_PLANE_REGION)
-op7963=>operation: ssm_client = boto3.client('ssm')
-op7965=>operation: accelerator_arn = _accelerator_arn_from_listener(listener_arn)
-op7967=>operation: accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
-op7969=>operation: accelerator_status = str(accelerator.get('Accelerator', {}).get('Status', 'UNKNOWN'))
-cond7972=>condition: if accelerator_status != 'DEPLOYED'
-sub7976=>subroutine: logger.info('Accelerator status is %s; skipping this cycle entirely', accelerator_status)
-io7981=>inputoutput: output: {'mode': mode, 'timestamp': now.isoformat(), 'accelerator_status': accelerator_status, 'skipped': 'accelerator-not-deployed', 'decisions': [], 'updates_applied': 0, 'errors': 0}
-e7979=>end: end function return
-op7987=>operation: groups = list_endpoint_groups(ga_client, listener_arn)
-op7989=>operation: overrides = read_overrides(ssm_client, project_name)
-op7991=>operation: decisions: list[dict[str, Any]] = []
-cond7994=>condition: for region in regions
-op7998=>operation: group = groups.get(region)
-op8000=>operation: decision: dict[str, Any] = {'region': region, 'endpoint_group_arn': group['arn'] if group else None, 'current_dial': group['traffic_dial'] if group else None, 'healthy_percent': None, 'target_dial': None, 'new_dial': None, 'reason': 'no-endpoint-group', 'applied': False}
-cond8003=>condition: if group is None
-sub8007=>subroutine: logger.info('No endpoint group for %s yet; nothing to dial', region)
-sub8009=>subroutine: decisions.append(decision)
-sub8011=>subroutine: continue
-op8016=>operation: current = int(group['traffic_dial'])
-cond8019=>condition: if region in overrides
-sub8023=>subroutine: decision.update({'new_dial': current, 'target_dial': current, 'reason': 'override'})
-sub8025=>subroutine: decisions.append(decision)
-sub8027=>subroutine: continue
-op8032=>operation: health = healthy_percent(region, f'{project_name}-{region}', lookback_minutes)
-op8034=>operation: decision['healthy_percent'] = None if health is None else round(health, 2)
-cond8037=>condition: if health is None
-sub8041=>subroutine: decision.update({'new_dial': current, 'target_dial': current, 'reason': 'no-health-data'})
-sub8043=>subroutine: decisions.append(decision)
-sub8045=>subroutine: continue
-op8050=>operation: target = target_dial(health, min_dial, full_health)
-op8052=>operation: decision['target_dial'] = target
-op8054=>operation: decision['new_dial'] = step_limit(current, target, max_step)
-op8056=>operation: decision['reason'] = 'healthy' if target >= 100 else 'degraded'
-sub8058=>subroutine: decisions.append(decision)
-op8062=>operation: guarded_region = apply_last_healthy_region_guard(decisions)
-cond8065=>operation: logger.warning('Every computed dial fell below 100; holding %s at 100 as the last fully dialed region', guarded_region) if  guarded_region
-op8075=>operation: updates_applied = 0
-op8077=>operation: errors = 0
-cond8080=>condition: for decision in decisions
-cond8085=>operation: continue if  decision['new_dial'] is None or decision['reason'] == 'override'
-cond8096=>operation: continue if  decision['new_dial'] == decision['current_dial']
-cond8107=>operation: continue if  mode != 'enforce'
-op8118=>operation: ga_client.update_endpoint_group(EndpointGroupArn=decision['endpoint_group_arn'], TrafficDialPercentage=float(decision['new_dial']))
+        <div><textarea id="code" style="width: 100%;" rows="11">op210=>operation: "Evaluate every region's health and converge its traffic dial."
+op212=>operation: listener_arn = os.environ.get('LISTENER_ARN')
+op214=>operation: project_name = os.environ.get('PROJECT_NAME')
+cond217=>operation: raise ValueError('LISTENER_ARN and PROJECT_NAME environment variables are required') if  not listener_arn or not project_name
+op227=>operation: mode = os.environ.get('MODE', 'monitor').strip().lower()
+op229=>operation: regions = sorted(_split_csv(os.environ.get('REGIONS')))
+op231=>operation: lookback_minutes = int(os.environ.get('LOOKBACK_MINUTES', str(DEFAULT_LOOKBACK_MINUTES)))
+op233=>operation: min_dial = int(os.environ.get('MIN_DIAL_PERCENTAGE', str(DEFAULT_MIN_DIAL_PERCENTAGE)))
+op235=>operation: max_step = int(os.environ.get('MAX_STEP_PERCENTAGE', str(DEFAULT_MAX_STEP_PERCENTAGE)))
+op237=>operation: full_health = int(os.environ.get('FULL_HEALTH_PERCENTAGE', str(DEFAULT_FULL_HEALTH_PERCENTAGE)))
+cond240=>operation: logger.warning('REGIONS is empty; nothing to evaluate') if  not regions
+op250=>operation: now = datetime.now(UTC)
+op252=>operation: ga_client = boto3.client('globalaccelerator', region_name=GA_CONTROL_PLANE_REGION)
+op254=>operation: ssm_client = boto3.client('ssm')
+op256=>operation: accelerator_arn = _accelerator_arn_from_listener(listener_arn)
+op258=>operation: accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
+op260=>operation: accelerator_status = str(accelerator.get('Accelerator', {}).get('Status', 'UNKNOWN'))
+cond263=>condition: if accelerator_status != 'DEPLOYED'
+sub267=>subroutine: logger.info('Accelerator status is %s; skipping this cycle entirely', accelerator_status)
+io272=>inputoutput: output: {'mode': mode, 'timestamp': now.isoformat(), 'accelerator_status': accelerator_status, 'skipped': 'accelerator-not-deployed', 'decisions': [], 'updates_applied': 0, 'errors': 0}
+e270=>end: end function return
+op278=>operation: groups = list_endpoint_groups(ga_client, listener_arn)
+op280=>operation: overrides = read_overrides(ssm_client, project_name)
+op282=>operation: decisions: list[dict[str, Any]] = []
+cond285=>condition: for region in regions
+op289=>operation: group = groups.get(region)
+op291=>operation: decision: dict[str, Any] = {'region': region, 'endpoint_group_arn': group['arn'] if group else None, 'current_dial': group['traffic_dial'] if group else None, 'healthy_percent': None, 'target_dial': None, 'new_dial': None, 'reason': 'no-endpoint-group', 'applied': False}
+cond294=>condition: if group is None
+sub298=>subroutine: logger.info('No endpoint group for %s yet; nothing to dial', region)
+sub300=>subroutine: decisions.append(decision)
+sub302=>subroutine: continue
+op307=>operation: current = int(group['traffic_dial'])
+cond310=>condition: if region in overrides
+sub314=>subroutine: decision.update({'new_dial': current, 'target_dial': current, 'reason': 'override'})
+sub316=>subroutine: decisions.append(decision)
+sub318=>subroutine: continue
+op323=>operation: health = healthy_percent(region, f'{project_name}-{region}', lookback_minutes)
+op325=>operation: decision['healthy_percent'] = None if health is None else round(health, 2)
+cond328=>condition: if health is None
+sub332=>subroutine: decision.update({'new_dial': current, 'target_dial': current, 'reason': 'no-health-data'})
+sub334=>subroutine: decisions.append(decision)
+sub336=>subroutine: continue
+op341=>operation: target = target_dial(health, min_dial, full_health)
+op343=>operation: decision['target_dial'] = target
+op345=>operation: decision['new_dial'] = step_limit(current, target, max_step)
+op347=>operation: decision['reason'] = 'healthy' if target >= 100 else 'degraded'
+sub349=>subroutine: decisions.append(decision)
+op353=>operation: guarded_region = apply_last_healthy_region_guard(decisions)
+cond356=>operation: logger.warning('Every computed dial fell below 100; holding %s at 100 as the last fully dialed region', guarded_region) if  guarded_region
+op366=>operation: updates_applied = 0
+op368=>operation: errors = 0
+cond371=>condition: for decision in decisions
+cond376=>operation: continue if  decision['new_dial'] is None or decision['reason'] == 'override'
+cond387=>operation: continue if  decision['new_dial'] == decision['current_dial']
+cond398=>operation: continue if  mode != 'enforce'
+op409=>operation: ga_client.update_endpoint_group(EndpointGroupArn=decision['endpoint_group_arn'], TrafficDialPercentage=float(decision['new_dial']))
 decision['applied'] = True
 updates_applied += 1
 logger.info('Dialed %s from %s to %s (%s)', decision['region'], decision['current_dial'], decision['new_dial'], decision['reason'])
-cond8117=>condition: exception raised?
-cond8120=>condition: except ClientError as exc
-op8124=>operation: errors += 1
-op8126=>operation: decision['error'] = str(exc)
-sub8128=>subroutine: logger.error('Failed to update traffic dial for %s: %s', decision['region'], exc)
-op8135=>operation: summary: dict[str, Any] = {'mode': mode, 'timestamp': now.isoformat(), 'accelerator_status': accelerator_status, 'decisions': decisions, 'updates_applied': updates_applied, 'errors': errors}
-sub8137=>subroutine: publish_metrics(boto3.client('cloudwatch'), decisions)
-sub8139=>subroutine: store_state(ssm_client, project_name, summary)
-sub8141=>subroutine: logger.info('traffic-dial cycle complete: mode=%s regions=%d updates_applied=%d errors=%d', mode, len(decisions), updates_applied, errors)
-io8146=>inputoutput: output: summary
-e8144=>end: end function return
+cond408=>condition: exception raised?
+cond411=>condition: except ClientError as exc
+op415=>operation: errors += 1
+op417=>operation: decision['error'] = str(exc)
+sub419=>subroutine: logger.error('Failed to update traffic dial for %s: %s', decision['region'], exc)
+op426=>operation: summary: dict[str, Any] = {'mode': mode, 'timestamp': now.isoformat(), 'accelerator_status': accelerator_status, 'decisions': decisions, 'updates_applied': updates_applied, 'errors': errors}
+sub428=>subroutine: publish_metrics(boto3.client('cloudwatch'), decisions)
+sub430=>subroutine: store_state(ssm_client, project_name, summary)
+sub432=>subroutine: logger.info('traffic-dial cycle complete: mode=%s regions=%d updates_applied=%d errors=%d', mode, len(decisions), updates_applied, errors)
+io437=>inputoutput: output: summary
+e435=>end: end function return
 
-op7919->op7921
-op7921->op7923
-op7923->cond7926
-cond7926->op7936
-op7936->op7938
-op7938->op7940
-op7940->op7942
-op7942->op7944
-op7944->op7946
-op7946->cond7949
-cond7949->op7959
-op7959->op7961
-op7961->op7963
-op7963->op7965
-op7965->op7967
-op7967->op7969
-op7969->cond7972
-cond7972(yes)->sub7976
-sub7976->io7981
-io7981->e7979
-cond7972(no)->op7987
-op7987->op7989
-op7989->op7991
-op7991->cond7994
-cond7994(yes)->op7998
-op7998->op8000
-op8000->cond8003
-cond8003(yes)->sub8007
-sub8007->sub8009
-sub8009->sub8011
-cond8003(no)->op8016
-op8016->cond8019
-cond8019(yes)->sub8023
-sub8023->sub8025
-sub8025->sub8027
-cond8019(no)->op8032
-op8032->op8034
-op8034->cond8037
-cond8037(yes)->sub8041
-sub8041->sub8043
-sub8043->sub8045
-cond8037(no)->op8050
-op8050->op8052
-op8052->op8054
-op8054->op8056
-op8056->sub8058
-sub8058(left)->cond7994
-cond7994(no)->op8062
-op8062->cond8065
-cond8065->op8075
-op8075->op8077
-op8077->cond8080
-cond8080(yes)->cond8085
-cond8085->cond8096
-cond8096->cond8107
-cond8107->op8118
-op8118->cond8117
-cond8117(yes)->cond8120
-cond8120(yes)->op8124
-op8124->op8126
-op8126->sub8128
-sub8128->cond8080
-cond8120(no)->cond8080
-cond8117(no)->cond8080
-cond8080(no)->op8135
-op8135->sub8137
-sub8137->sub8139
-sub8139->sub8141
-sub8141->io8146
-io8146->e8144
+op210->op212
+op212->op214
+op214->cond217
+cond217->op227
+op227->op229
+op229->op231
+op231->op233
+op233->op235
+op235->op237
+op237->cond240
+cond240->op250
+op250->op252
+op252->op254
+op254->op256
+op256->op258
+op258->op260
+op260->cond263
+cond263(yes)->sub267
+sub267->io272
+io272->e270
+cond263(no)->op278
+op278->op280
+op280->op282
+op282->cond285
+cond285(yes)->op289
+op289->op291
+op291->cond294
+cond294(yes)->sub298
+sub298->sub300
+sub300->sub302
+cond294(no)->op307
+op307->cond310
+cond310(yes)->sub314
+sub314->sub316
+sub316->sub318
+cond310(no)->op323
+op323->op325
+op325->cond328
+cond328(yes)->sub332
+sub332->sub334
+sub334->sub336
+cond328(no)->op341
+op341->op343
+op343->op345
+op345->op347
+op347->sub349
+sub349(left)->cond285
+cond285(no)->op353
+op353->cond356
+cond356->op366
+op366->op368
+op368->cond371
+cond371(yes)->cond376
+cond376->cond387
+cond387->cond398
+cond398->op409
+op409->cond408
+cond408(yes)->cond411
+cond411(yes)->op415
+op415->op417
+op417->sub419
+sub419->cond371
+cond411(no)->cond371
+cond408(no)->cond371
+cond371(no)->op426
+op426->sub428
+sub428->sub430
+sub430->sub432
+sub432->io437
+io437->e435
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -358,17 +358,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-10T23:26:44Z -->
+        <!-- Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-10T23:26:44Z">2026-09-10T23:26:44Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>4c42b84d53d6cc01cd2b3c7e4011a43f850678b6</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>a1c9460b980434dc</code>
+            Flow content SHA-256: <code>08ac3a9e46e53cba</code>
           </p>
           <div id="canvas"></div>
         </div>
