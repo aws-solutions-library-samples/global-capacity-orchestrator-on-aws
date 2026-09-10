@@ -685,3 +685,120 @@ class TestCancellationBeforeHeartbeatExists:
         assert writer is not None
         # process was never assigned, so exit_code is None and cleanup is a no-op.
         assert writer.finishes == [{"state": "cancelled", "exit_code": None, "error": "cancelled"}]
+
+
+class TestHeartbeatActivityBranches:
+    """Both heartbeat outcomes, decided by a scripted clock instead of racing.
+
+    The heartbeat's recent-activity check compares ``time.monotonic()``
+    against ``last_activity``. Under real timing, whether any tick lands
+    inside the activity window depends on scheduler jitter, so the skip
+    branch was covered only probabilistically (a 99.99% coverage flake).
+    Freezing the module clock makes every tick see zero elapsed activity
+    (skip), and advancing it past the interval makes the next tick emit —
+    each branch is then forced, not raced.
+    """
+
+    async def test_tick_skips_during_activity_then_emits_when_quiet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class ScriptedClock:
+            """``time`` stand-in whose ``monotonic()`` announces each call."""
+
+            def __init__(self) -> None:
+                self.now = 1000.0
+                self.armed: asyncio.Event | None = None
+
+            def monotonic(self) -> float:
+                if self.armed is not None:
+                    self.armed.set()
+                return self.now
+
+        class GateStream:
+            """One initial chunk, then a held-open pipe until released."""
+
+            def __init__(self, first: bytes) -> None:
+                self._first = first
+                self.release = asyncio.Event()
+
+            async def read(self, _size: int) -> bytes:
+                if self._first:
+                    chunk, self._first = self._first, b""
+                    return chunk
+                await self.release.wait()
+                return b""
+
+        class GatedProcess(_FakeProcess):
+            def __init__(self, stdout: GateStream, stderr: GateStream) -> None:
+                super().__init__(stdout=stdout, stderr=stderr, exit_code=0)  # type: ignore[arg-type]
+                self.release = asyncio.Event()
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                await self.release.wait()
+                self.returncode = self.exit_code
+                return self.exit_code
+
+        class SignallingProgress(_Progress):
+            def __init__(self) -> None:
+                super().__init__()
+                self.heartbeat_seen = asyncio.Event()
+                self.line_seen = asyncio.Event()
+
+            async def set_message(self, message: str) -> None:
+                await super().set_message(message)
+                if message.startswith("still running"):
+                    self.heartbeat_seen.set()
+                else:
+                    self.line_seen.set()
+
+        clock = ScriptedClock()
+        stdout = GateStream(b"activity\n")
+        stderr = GateStream(b"")
+        process = GatedProcess(stdout, stderr)
+        progress = SignallingProgress()
+
+        async def fake_spawn(*_argv: str, **_kwargs: object) -> GatedProcess:
+            return process
+
+        monkeypatch.setattr(long_task, "TaskStatusWriter", _WriterSpy)
+        monkeypatch.setattr(long_task, "_try_get_task_id", lambda _ctx: None)
+        monkeypatch.setattr(long_task, "make_task_id", lambda _tool: "heartbeat-branches")
+        monkeypatch.setattr(long_task.asyncio, "create_subprocess_exec", fake_spawn)
+        monkeypatch.setattr(long_task, "_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(long_task, "time", clock)
+
+        runner = asyncio.create_task(
+            long_task._run_long_task(
+                ["command"],
+                ctx=_Context(),
+                progress=progress,
+                is_stack_op=False,
+            )
+        )
+
+        # Wait until the drained line has stamped last_activity with the
+        # frozen clock; both drains then park in held-open reads, so every
+        # later monotonic() call can only come from a heartbeat tick.
+        await progress.line_seen.wait()
+        tick_observed = asyncio.Event()
+        clock.armed = tick_observed
+        await tick_observed.wait()
+        # That tick read the frozen clock: zero elapsed activity, so the
+        # skip branch ran and no heartbeat message may exist yet.
+        assert not any(m.startswith("still running") for m in progress.messages)
+
+        # Age the activity beyond the interval; the next tick must emit.
+        clock.now += 100.0
+        await progress.heartbeat_seen.wait()
+        emitted = [m for m in progress.messages if m.startswith("still running")]
+        assert emitted and "elapsed" in emitted[0]
+
+        # Release the pipes and the process; the runner finishes normally.
+        stdout.release.set()
+        stderr.release.set()
+        process.release.set()
+        payload = json.loads(await runner)
+
+        assert payload["status"] == "ok"
+        assert payload["task_id"] == "heartbeat-branches"
