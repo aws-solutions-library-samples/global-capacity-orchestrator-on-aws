@@ -248,20 +248,23 @@ pip install -e . --no-deps
 
 ### Type Checking
 
-mypy runs with the strict options in `pyproject.toml`. CI separates three dependency and module-resolution boundaries:
+mypy runs with the strict options in `pyproject.toml`, over every authored
+Python file — application packages, repo tooling and Lambda handlers alike. CI
+separates three dependency and module-resolution boundaries:
 
-1. **`lint:mypy:strict`** — checks `gco/`, `cli/`, `gco_mcp/`, and `scripts/`, excluding `gco/stacks/` so the fast job does not need CDK.
-2. **`lint:mypy:stacks`** — checks `gco/stacks/` and `app.py` with the CDK dependencies installed.
+1. **`lint:mypy:strict`** — checks `gco/`, `cli/`, `gco_mcp/`, `scripts/`, `.github/scripts/`, `dockerfiles/`, and `docs/client-examples/`, excluding `gco/stacks/` so the fast job does not need CDK.
+2. **`lint:mypy:stacks`** — checks `gco/stacks/`, `app.py`, and `diagrams/` with the CDK dependencies installed (`diagrams/infra_diagrams/` imports `aws_cdk`). It also runs `.github/oidc_provider/` as a second invocation, because that tree and the repository root both contain a module named `app` and mypy rejects two source files resolving to one module name.
 3. **`lint:mypy:lambda`** — checks every authored Python package under `lambda/` one directory at a time. Lambda packages reuse names such as `handler.py`, so combining them in one invocation would create false duplicate-module errors. A CI contract discovers Python Lambda directories and requires the workflow inventory to remain complete.
 
 To run the same scopes locally:
 
 ```bash
-# Strict non-stack packages (fast, no CDK needed)
-mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
+# Strict non-stack packages and repo tooling (fast, no CDK needed)
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
 
 # Stacks and app entry point (requires: pip install -e ".[cdk,typecheck]")
-mypy gco/stacks/ app.py
+mypy gco/stacks/ app.py diagrams/
+mypy .github/oidc_provider/  # separate run: two modules named "app"
 
 # A changed Lambda package; run each package separately
 mypy lambda/<package-name>
@@ -412,7 +415,7 @@ pytest tests/
 pytest tests/test_integration.py
 
 # Run with coverage
-pytest --cov=gco --cov=cli --cov=gco_mcp tests/
+pytest --cov tests/
 
 # Run with verbose output
 pytest tests/ -v
@@ -438,10 +441,10 @@ Run them from your dev-container shell (the recommended path — see
 ```bash
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
 python scripts/accelerator_catalog.py validate
 pytest tests/test_accelerator_catalog.py -q
-pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=100
+pytest tests/ --cov --cov-fail-under=100
 ```
 
 **Success indicator:** all six commands complete with no reported failures —
@@ -533,17 +536,18 @@ npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --n
 npm --prefix lambda/inference-streaming-proxy test
 
 # Run type checks (everything except stacks — fast, no CDK needed)
-mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
 
 # Run type checks on stacks (requires CDK)
 pip install -e ".[cdk,typecheck]"
-mypy gco/stacks/ app.py
+mypy gco/stacks/ app.py diagrams/
+mypy .github/oidc_provider/  # separate run: two modules named "app"
 
 # Run security scans
-bandit -r gco/ cli/ -c pyproject.toml --severity-level medium
+bandit -r . -c pyproject.toml --severity-level medium
 
 # Run tests with coverage (matches unit:pytest:core)
-pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-report=html --cov-fail-under=100 \
+pytest tests/ --cov --cov-report=html --cov-fail-under=100 \
     --ignore=tests/test_nag_compliance.py
 
 # Run cdk-nag compliance matrix serially (matches unit:cdk:nag-compliance)

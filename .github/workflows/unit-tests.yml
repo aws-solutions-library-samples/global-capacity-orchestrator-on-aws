@@ -185,6 +185,13 @@ jobs:
         # percentage is meaningless: the floor is enforced once, against the
         # combined data, by unit:pytest:core.
         #
+        # A bare --cov (no target) makes pytest-cov inherit
+        # [tool.coverage.run] source from pyproject, which measures the whole
+        # repository — application packages, Lambda handlers, repo tooling and
+        # the CDK entry point alike. Naming packages here instead would let a
+        # new top-level directory escape the floor until someone remembered to
+        # add it, which is exactly what happened before.
+        #
         # --cov-fail-under=0 is required, not redundant. pytest-cov reads
         # fail_under from [tool.coverage.report] in pyproject and enforces it
         # even when --cov-report= suppresses all reports, so without this every
@@ -217,7 +224,7 @@ jobs:
           mapfile -t SHARD_FILES < <(python scripts/split_tests.py --shard "$SHARD" --of "$SHARDS")
           echo "shard $SHARD/$SHARDS: ${#SHARD_FILES[@]} test files"
           pytest "${SHARD_FILES[@]}" -q \
-            --cov=gco --cov=cli --cov=gco_mcp \
+            --cov \
             --cov-report= \
             --cov-fail-under=0 \
             --junitxml="report-shard-${SHARD}.xml" \

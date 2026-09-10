@@ -19,10 +19,14 @@
 #   - lint:hadolint:dockerfile    — hadolint on every Dockerfile
 #   - lint:markdownlint:md        — markdownlint-cli2 across all Markdown files
 #   - lint:mkdocs:strict          — strict MkDocs build of the wiki (wiki/ + mkdocs.yml)
-#   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, gco_mcp/, scripts/
-#   - lint:mypy:stacks            — mypy on gco/stacks/ + app.py (requires CDK)
+#   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, gco_mcp/,
+#                                   scripts/, .github/scripts/, dockerfiles/,
+#                                   docs/client-examples/
+#   - lint:mypy:stacks            — mypy on gco/stacks/ + app.py + diagrams/ (requires
+#                                   CDK), plus .github/oidc_provider/ in its own run
 #   - lint:mypy:lambda            — mypy on each lambda/ subdir independently
-#   - lint:ruff:python            — ruff format --check + ruff check (via astral-sh/ruff-action)
+#   - lint:ruff:python            — ruff format --check + ruff check over the whole
+#                                   repo (via astral-sh/ruff-action)
 #   - lint:shellcheck:shell       — strict ShellCheck on every tracked *.sh file
 #   - lint:yamllint:yaml          — yamllint --strict across the repo
 #
@@ -140,14 +144,11 @@ jobs:
         with:
           version: "0.16.5"
           args: "format --check --diff"
-          src: >-
-            gco/
-            cli/
-            gco_mcp/
-            tests/
-            lambda/
-            scripts/
-            diagrams/
+          # The whole repository, not a hand-kept directory list: a new
+          # top-level package used to escape linting silently until someone
+          # remembered to add it here. What must not be linted is spelled out
+          # in [tool.ruff] exclude in pyproject.toml, which ruff reads itself.
+          src: "."
       - name: ruff check
         # Includes pycodestyle (E/W), Pyflakes (F), bugbear (B),
         # comprehensions (C4), pyupgrade (UP), unused-arguments (ARG),
@@ -158,14 +159,9 @@ jobs:
         with:
           version: "0.16.5"
           args: "check --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build"
-          src: >-
-            gco/
-            cli/
-            gco_mcp/
-            tests/
-            lambda/
-            scripts/
-            diagrams/
+          # See the note on the format step above: lint the repository root and
+          # let [tool.ruff] exclude decide what is out of scope.
+          src: "."
 
   lint-markdownlint-md:
     name: "lint:markdownlint:md"
@@ -314,7 +310,13 @@ jobs:
           path: .mypy_cache
           key: mypy-strict-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
       - name: Run mypy
-        run: mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
+        # Repo tooling is type-checked too: .github/scripts/ (CI gate scripts),
+        # dockerfiles/ (image build helpers) and docs/client-examples/ (the
+        # snippets users copy). They import no CDK, so they belong here rather
+        # than in lint-mypy-stacks.
+        run: >-
+          mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/
+          docs/client-examples/ --exclude 'gco/stacks/'
 
   lint-mypy-stacks:
     name: "lint:mypy:stacks"
@@ -337,7 +339,14 @@ jobs:
           path: .mypy_cache
           key: mypy-stacks-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
       - name: Run mypy on stacks + app.py
-        run: mypy gco/stacks/ app.py
+        # diagrams/ joins this job because infra_diagrams imports aws_cdk and
+        # gco.stacks, so it only type-checks where CDK is installed.
+        run: mypy gco/stacks/ app.py diagrams/
+      - name: Run mypy on the OIDC provider stack
+        # A separate invocation on purpose: .github/oidc_provider/app.py and the
+        # root app.py are both module "app", and mypy refuses two source files
+        # with the same module name in one run.
+        run: mypy .github/oidc_provider/
 
   lint-mypy-lambda:
     name: "lint:mypy:lambda"

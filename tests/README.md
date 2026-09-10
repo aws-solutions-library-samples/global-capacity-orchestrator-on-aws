@@ -25,7 +25,7 @@ This directory contains the test suite for GCO (Global Capacity Orchestrator on 
 python -m pytest
 
 # Run with coverage report
-python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=term-missing
+python -m pytest --cov --cov-report=term-missing
 
 # Run specific test file
 python -m pytest tests/test_manifest_api.py -v
@@ -533,6 +533,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_pip_audit_ignore_validator.py` | Pins the contract of `.github/scripts/check_pip_audit_ignore.py`, which gates the pip-audit job in `.github/workflows/security.yml`. Every entry in `.pip-audit-ignore` must carry an `exp:YYYY-MM-DD` marker; the validator fails the workflow when any entry is on-or-before today (inclusive — no bonus day) or is missing the marker entirely. Tests cover happy paths (single, multi, blank-line / comment skipping, missing-file-is-clean), expired-date detection (past dates, equal-to-today, ±1 day boundary), missing or malformed markers, `main()` exit codes / stdout, and a live-file check that runs the committed suppression file through the validator with today's date. |
 | `test_npm_audit_checker.py` | Pins the exact, expiring npm-audit suppression gate in `.github/scripts/check_npm_audit.py`: suppression-file parsing, inclusive expiration and duplicate rejection, advisory extraction, malformed and operational-error JSON, exact package-directory/package/advisory/node matching, compound-record fail-closed behavior, severity thresholds, stale entries, and `main()` exit codes. Uses synthetic reports and temporary files only; it never contacts npm or the network. |
 | `test_ci_config_paths.py` | Guards CI config against stale path references left by a package rename (the `mcp` to `gco_mcp` move broke the CodeQL autobuilder with FileNotFoundError). Asserts every `paths:` entry in `.github/codeql/codeql-config.yml` is a real directory, every `--cov=<pkg>` target across `.github/workflows/*.yml` resolves to an existing top-level directory, and every `[tool.coverage.run] source` dir in `pyproject.toml` exists. Catches the silent failure mode where a renamed package leaves coverage recording nothing and CodeQL crashing at scan time. |
+| `test_coverage_ratchet.py` | Guards the coverage ratchet — the delimited block inside `[tool.coverage.run] omit` listing files that are inside the measured surface but not yet at 100%, so the floor can apply to everything else while the list shrinks. Asserts the `# coverage ratchet: BEGIN`/`END` markers appear exactly once and in order; every entry names a file that exists (a rename cannot leave a stale hole); entries are exact `.py` paths rather than globs; no entry lives under `gco/`, `cli/` or `gco_mcp/`, so the ratchet can never be used to lower the packages already at 100%; the block stays sorted and duplicate-free; every entry really is in the parsed `omit` list rather than stranded in a comment; and `source = ["."]`, `fail_under = 100` and `include_namespace_packages` all remain in force, since the ratchet is only defensible while they are. |
 | `test_docs_coverage.py` | Documentation-coverage guard with four cases: every `tests/test_*.py` module appears in `tests/README.md`; every `gco` Click command (the full command tree, walked recursively) is documented in `docs/CLI.md` (matched as a `gco <command>` entry); every registered MCP tool — enumerated in a subprocess with `GCO_ENABLE_ALL_TOOLS` so the full catalog is visible — appears in `gco_mcp/tools/README.md`; and every documented `uvx` / `uv tool install` snippet in `gco_mcp/README.md` pins `--python` to the minimum version from pyproject's `requires-python` (so installs cannot fail resolution on hosts whose default Python is older, and a future Python bump cannot leave the docs requesting a stale interpreter). Each case fails with the list of offending items so the fix is mechanical. |
 | `test_documentation_consistency.py` | Bidirectional human-index contracts: all 31 top-level guides exactly match `docs/README.md`; all 26 Click command modules exactly match the `docs/CLI.md` TOC and `cli/README.md`; all 14 workflows have the same six-primary/eight-satellite partition in the three authoritative inventories; and all six `image-*` dependency groups map one-to-one to Dockerfiles selecting only their own group. |
 | `test_mcp_cli_contract.py` | Contract guard: every MCP tool that shells out to the `gco` CLI must build an invocation the Click command tree actually accepts. A subprocess (with `GCO_ENABLE_ALL_TOOLS`) invokes each tool with dummy args — patching `cli_runner._run_cli` to capture the argv instead of running it, and only invoking tools whose body references `_run_cli` so non-CLI backends aren't executed — and the parent resolves each captured argv against the live tree, flagging unknown subcommands and unknown options. Catches the class of bug where a tool passes a flag/subcommand the CLI rejects (this guard found and drove the fix of ten such pre-existing mismatches, e.g. `nodepools_create_odcr` passing `--count`/`--cluster`, `enable_analytics` calling `stacks analytics enable`, `webhooks_create` passing `--secret-name`). The check is strict — any mismatch fails. |
@@ -960,9 +961,16 @@ valid_job_manifest = {
 
 ## Coverage Requirements
 
-The global Python floor is exact 100% line + branch coverage across `gco/`,
-`cli/`, and `gco_mcp/`, enforced on the combined shard data by
-`unit:pytest:core`. The dedicated streaming-Lambda workflow independently
+The global Python floor is exact 100% line + branch coverage, enforced on the
+combined shard data by `unit:pytest:core`. Coverage is measured from the
+repository root (`source = ["."]` in `pyproject.toml`), so every authored
+Python file counts: application packages, Lambda handlers, `app.py`, and repo
+tooling under `scripts/`, `diagrams/`, `dockerfiles/`, `.github/` and
+`docs/client-examples/`. Files not yet at 100% are listed in the **coverage
+ratchet** block inside `[tool.coverage.run] omit`, which only shrinks; see
+`test_coverage_ratchet.py` for the rules that keep it honest.
+
+The dedicated streaming-Lambda workflow independently
 enforces exact 100% lines, functions, and branches over
 `lambda/inference-streaming-proxy/index.mjs` using Node 24's built-in V8
 coverage (V8 reports no statement metric, so none is claimed).
@@ -977,7 +985,7 @@ contradicts the real producer's contract defeats the point of the gate.
 To check the Python report:
 
 ```bash
-python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=term-missing
+python -m pytest --cov --cov-report=term-missing
 ```
 
 The streaming-Lambda graph uses:
@@ -990,7 +998,7 @@ npm --prefix lambda/inference-streaming-proxy test
 To generate an HTML coverage report:
 
 ```bash
-python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=html
+python -m pytest --cov --cov-report=html
 open htmlcov/index.html
 ```
 

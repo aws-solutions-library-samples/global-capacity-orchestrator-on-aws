@@ -42,6 +42,7 @@ import json
 import re
 import subprocess
 import sys
+from typing import Any
 
 #: The nine "Type of change" boxes in the pull-request template, each mapped to
 #: the label of the same name. Kept in template order so ``--dry-run`` output
@@ -95,11 +96,12 @@ def label_plan(current: list[str], declared: list[str]) -> tuple[list[str], list
     return to_add, to_remove
 
 
-def _gh_json(args: list[str]) -> dict:
+def _gh_json(args: list[str]) -> dict[str, Any]:
     proc = subprocess.run(["gh", *args], capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {proc.stderr.strip()[:400]}")
-    return json.loads(proc.stdout or "{}")
+    payload: dict[str, Any] = json.loads(proc.stdout or "{}")
+    return payload
 
 
 def fetch_pull_request(number: int) -> tuple[str | None, list[str]]:

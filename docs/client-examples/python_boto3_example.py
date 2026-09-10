@@ -14,6 +14,7 @@ Usage:
 
 import json
 from pathlib import Path
+from typing import Any
 
 import boto3
 import requests
@@ -40,7 +41,8 @@ def get_api_endpoint(region: str, project_name: str = "gco") -> str:
     for output in outputs:
         if output["OutputKey"] == "ApiEndpoint":
             # Remove trailing slash if present
-            return output["OutputValue"].rstrip("/")
+            endpoint: str = output["OutputValue"]
+            return endpoint.rstrip("/")
 
     raise ValueError(f"ApiEndpoint not found in stack {stack_name}")
 
@@ -78,10 +80,10 @@ def create_aws_auth(api_host: str, region: str) -> AWSRequestsAuth:
 def submit_manifests(
     api_endpoint: str,
     auth: AWSRequestsAuth,
-    manifests: list,
+    manifests: list[dict[str, Any]],
     namespace: str | None = None,
     dry_run: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """
     Submit Kubernetes manifests to the API Gateway.
 
@@ -107,10 +109,11 @@ def submit_manifests(
     )
 
     response.raise_for_status()
-    return response.json()
+    body: dict[str, Any] = response.json()
+    return body
 
 
-def get_health(api_endpoint: str, auth: AWSRequestsAuth) -> dict:
+def get_health(api_endpoint: str, auth: AWSRequestsAuth) -> dict[str, Any]:
     """
     Get cluster health status.
 
@@ -125,7 +128,8 @@ def get_health(api_endpoint: str, auth: AWSRequestsAuth) -> dict:
 
     response = requests.get(url, auth=auth, timeout=30)
     response.raise_for_status()
-    return response.json()
+    body: dict[str, Any] = response.json()
+    return body
 
 
 def get_deployment_config() -> tuple[str, str]:
@@ -147,7 +151,7 @@ def get_deployment_config() -> tuple[str, str]:
         return "gco", "us-east-2"
 
 
-def main():
+def main() -> None:
     project_name, api_region = get_deployment_config()
     stack_name = f"{project_name}-api-gateway"
     print(f"Using API Gateway region: {api_region}")
