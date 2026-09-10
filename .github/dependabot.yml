@@ -141,3 +141,21 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+
+  # CI-only Ruby tooling: bashcov (shell line coverage for the BATS suite) and
+  # bundler-audit (advisory scanning for this graph). Nothing shipped depends
+  # on Ruby — see the Gemfile header for why the gate needs it.
+  #
+  # Tracked here rather than left to manual bumps because RubyGems is a real
+  # ecosystem Dependabot supports, and the exact pins in Gemfile plus the
+  # CHECKSUMS block in Gemfile.lock would otherwise freeze silently.
+  - package-ecosystem: "bundler"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ruby"
