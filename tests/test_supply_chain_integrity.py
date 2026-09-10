@@ -609,6 +609,7 @@ def test_release_stage_one_commits_every_version_bump_output() -> None:
     assert len(matches) == 1
     assert set(matches[0].split()) == {
         "VERSION",
+        "README.md",
         "gco/_version.py",
         "cli/__init__.py",
         "gco_mcp/README.md",
