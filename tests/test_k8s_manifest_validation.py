@@ -786,3 +786,437 @@ class TestLiveManifestsOnline:
         failures = validator.format_failures(result)
         assert failures
         assert any("bad-pod.yaml" in f for f in failures)
+
+
+# ── main() offline, against a scripted kubeconform ───────────────────────────
+#
+# The real binary is network-bound and opt-in above. Everything main() does
+# around it -- input collection, rendering, envelope validation, exit-code
+# policy -- is deterministic and worth pinning without the network. So these
+# drive main() with a stand-in ``kubeconform`` executable that walks the
+# rendered directory and emits exactly the JSON shape the pinned v0.8.0 emits,
+# with a per-run behaviour chosen through an environment variable.
+
+
+_FAKE_KUBECONFORM = r'''#!/usr/bin/env python3
+"""Stand-in kubeconform: emit v0.8.0-shaped JSON for every rendered manifest."""
+import json, os, sys
+mode = os.environ.get("FAKE_KUBECONFORM_MODE", "valid")
+directory = sys.argv[-1]
+files = sorted(
+    os.path.join(root, name)
+    for root, _dirs, names in os.walk(directory)
+    for name in names
+    if name.endswith((".yaml", ".yml"))
+)
+if mode == "silent-crash":
+    sys.exit(3)
+if mode == "garbage":
+    sys.stdout.write("this is not json")
+    sys.exit(0)
+resources = []
+for path in files:
+    if mode == "invalid-first" and path == files[0]:
+        resources.append({"filename": path, "kind": "Pod", "name": "bad", "version": "v1",
+                          "status": "statusInvalid", "msg": "unknown field imageBogusField"})
+    else:
+        resources.append({"filename": path, "kind": "ConfigMap", "name": "ok", "version": "v1",
+                          "status": "statusValid", "msg": ""})
+if mode == "partial":
+    resources = resources[:-1]  # drop one file's record: incomplete accounting
+counts = {"valid": 0, "invalid": 0, "errors": 0, "skipped": 0}
+for r in resources:
+    counts[{"statusValid": "valid", "statusInvalid": "invalid"}[r["status"]]] += 1
+json.dump({"resources": resources, "summary": counts}, sys.stdout)
+sys.exit(1 if counts["invalid"] else (0 if mode != "nonzero-clean" else 4))
+'''
+
+
+@pytest.fixture
+def fake_kubeconform(tmp_path: Path) -> Path:
+    binary = tmp_path / "bin" / "kubeconform"
+    binary.parent.mkdir()
+    binary.write_text(_FAKE_KUBECONFORM, encoding="utf-8")
+    binary.chmod(0o755)
+    return binary
+
+
+@pytest.fixture
+def manifest_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "manifests"
+    directory.mkdir()
+    (directory / "a.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n", encoding="utf-8"
+    )
+    (directory / "b.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n", encoding="utf-8"
+    )
+    return directory
+
+
+def _run_main(binary: Path, *args: str, mode: str = "valid", monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FAKE_KUBECONFORM_MODE", mode)
+    return validator.main(["--kubeconform-binary", str(binary), *args])
+
+
+class TestMainOffline:
+    def test_a_clean_run_reports_ok_and_exits_zero(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = _run_main(fake_kubeconform, "--path", str(manifest_dir), monkeypatch=monkeypatch)
+
+        assert rc == 0
+        assert "OK: 2 manifest(s) are schema-valid" in capsys.readouterr().out
+
+    def test_verbose_lists_each_valid_resource(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = _run_main(
+            fake_kubeconform, "--path", str(manifest_dir), "--verbose", monkeypatch=monkeypatch
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert out.count("ok    ") == 2
+        assert "ConfigMap ok" in out
+
+    def test_verbose_lists_only_the_valid_resources_of_a_mixed_result(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The invalid record belongs in the failure list, not the ``ok`` list."""
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            "--verbose",
+            mode="invalid-first",
+            monkeypatch=monkeypatch,
+        )
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert out.count("ok    ") == 1
+        assert "Pod bad" not in [line for line in out.splitlines() if line.startswith("ok")]
+
+    def test_a_schema_violation_is_listed_and_exits_one(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Exit 1 is reserved for real validation failures."""
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="invalid-first",
+            monkeypatch=monkeypatch,
+        )
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "1 Kubernetes manifest validation problem(s) found" in out
+        assert "unknown field imageBogusField" in out
+        assert "SCHEMA_UNAVAILABLE_SKIPS" in out, "the remediation hint must be printed"
+
+    def test_a_missing_binary_is_exit_two_with_a_pointer_to_the_docs(
+        self,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Exit 2 keeps 'could not run' distinguishable from 'manifests are wrong'."""
+        rc = validator.main(
+            ["--kubeconform-binary", "definitely-not-on-path-xyz", "--path", str(manifest_dir)]
+        )
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "not found on PATH" in err
+        assert "docs/MAINTENANCE.md" in err
+
+    def test_no_files_at_all_is_exit_two(
+        self,
+        fake_kubeconform: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        rc = _run_main(fake_kubeconform, "--path", str(empty), monkeypatch=monkeypatch)
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        # The directory-with-no-manifests case is reported as an input error,
+        # which takes the place of the generic "no files" message.
+        assert "contains no Kubernetes YAML manifests" in err
+
+    def test_a_bad_input_is_reported_but_good_inputs_are_still_validated(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One missing path must not mask the report for the paths that exist."""
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            "--path",
+            str(tmp_path / "does-not-exist"),
+            "--verbose",
+            monkeypatch=monkeypatch,
+        )
+
+        assert rc == 2, "an input error takes precedence in the exit code"
+        captured = capsys.readouterr()
+        assert "path does not exist" in captured.err
+        assert captured.out.count("ok    ") == 2, "the valid files were still validated"
+
+    def test_unusable_json_is_exit_two_not_a_pass(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Garbage on stdout with exit 0 must fail closed, never read as OK."""
+        rc = _run_main(
+            fake_kubeconform, "--path", str(manifest_dir), mode="garbage", monkeypatch=monkeypatch
+        )
+
+        assert rc == 2
+        assert "unusable JSON output" in capsys.readouterr().err
+
+    def test_a_record_missing_for_one_file_is_exit_two(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Completeness is per rendered filename; a dropped record is not 'valid'."""
+        rc = _run_main(
+            fake_kubeconform, "--path", str(manifest_dir), mode="partial", monkeypatch=monkeypatch
+        )
+
+        assert rc == 2
+        assert "no resource result was returned for input file(s)" in capsys.readouterr().err
+
+    def test_a_silent_nonzero_exit_is_a_runtime_failure(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Non-zero with no JSON is an invocation error, reported as such."""
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="silent-crash",
+            monkeypatch=monkeypatch,
+        )
+
+        assert rc == 2
+        # No JSON at all is caught by the envelope check first.
+        assert "unusable JSON output" in capsys.readouterr().err
+
+    def test_a_nonzero_exit_with_clean_json_is_still_a_runtime_failure(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Valid-looking JSON does not excuse a non-zero process result."""
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="nonzero-clean",
+            monkeypatch=monkeypatch,
+        )
+
+        assert rc == 2
+        assert "exited non-zero without validation failures" in capsys.readouterr().err
+
+    def test_no_strict_is_forwarded(
+        self, fake_kubeconform: Path, manifest_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, list[str]] = {}
+        real_run = validator.subprocess.run
+
+        def spy(cmd, **kwargs):  # noqa: ANN001, ANN202
+            seen["cmd"] = list(cmd)
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(validator.subprocess, "run", spy)
+        _run_main(
+            fake_kubeconform, "--path", str(manifest_dir), "--no-strict", monkeypatch=monkeypatch
+        )
+
+        assert "-strict" not in seen["cmd"]
+        assert "-skip" in seen["cmd"], "the CRD skips must still be passed"
+
+
+class TestInputCollectionEdges:
+    """The ``collect_target_files`` branches the default targets never hit."""
+
+    def test_a_glob_that_matches_directories_expands_them(self, tmp_path: Path) -> None:
+        for name in ("one", "two"):
+            sub = tmp_path / name
+            sub.mkdir()
+            (sub / "m.yaml").write_text("kind: ConfigMap\n", encoding="utf-8")
+        (tmp_path / "loose.txt").write_text("not yaml", encoding="utf-8")
+
+        files, errors = validator.collect_target_files((str(tmp_path / "*"),))
+
+        assert errors == []
+        assert sorted(path.parent.name for path in files) == ["one", "two"]
+
+    def test_a_glob_matching_no_manifests_is_an_error(self, tmp_path: Path) -> None:
+        (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+
+        files, errors = validator.collect_target_files((str(tmp_path / "*.txt"),))
+
+        assert files == []
+        assert errors == [f"{tmp_path / '*.txt'}: glob matched no Kubernetes YAML manifests"]
+
+    def test_an_explicit_non_manifest_yaml_is_refused(self, tmp_path: Path) -> None:
+        """``pipeline-dag.yaml`` is GCO's own format, not a Kubernetes document."""
+        dag = tmp_path / "pipeline-dag.yaml"
+        dag.write_text("steps: []\n", encoding="utf-8")
+
+        files, errors = validator.collect_target_files((str(dag),))
+
+        assert files == []
+        assert errors == [f"{dag}: explicit file is not a Kubernetes manifest"]
+
+
+class TestEnvelopeValidationEdges:
+    """The remaining shapes ``validate_kubeconform_output`` must fail closed on."""
+
+    @staticmethod
+    def _valid(filename: str = "one.yaml") -> dict:
+        return {
+            "filename": filename,
+            "kind": "Namespace",
+            "name": "one",
+            "version": "v1",
+            "status": "statusValid",
+            "msg": "",
+        }
+
+    def test_a_non_object_resource_record_is_reported_by_index(self) -> None:
+        result = {
+            "resources": [self._valid(), "not-a-record"],
+            "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+
+        errors = validator.validate_kubeconform_output(result, expected_filenames={"one.yaml"})
+
+        assert "resources[1] is not an object" in errors
+
+    def test_a_missing_summary_is_reported_and_stops_further_checks(self) -> None:
+        errors = validator.validate_kubeconform_output(
+            {"resources": [self._valid()]}, expected_filenames={"one.yaml"}
+        )
+
+        assert errors == ["'summary' is missing or is not an object"]
+
+    @pytest.mark.parametrize(
+        ("valid_count", "expected"),
+        [
+            pytest.param(True, "is missing or is not a non-negative integer", id="bool-is-not-int"),
+            pytest.param(-1, "is missing or is not a non-negative integer", id="negative"),
+            pytest.param("1", "is missing or is not a non-negative integer", id="string"),
+            pytest.param(3, "summary.valid reports 3, but resources contain 1", id="disagrees"),
+        ],
+    )
+    def test_summary_counts_are_type_checked_and_reconciled(
+        self, valid_count: object, expected: str
+    ) -> None:
+        """``True`` is an ``int`` in Python; the check must not be fooled by it."""
+        result = {
+            "resources": [self._valid()],
+            "summary": {"valid": valid_count, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+
+        errors = validator.validate_kubeconform_output(result, expected_filenames={"one.yaml"})
+
+        assert any(expected in error for error in errors)
+
+
+class TestRunKubeconformArguments:
+    def test_no_skips_omits_the_skip_flag_entirely(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``-skip`` would be passed as a literal empty string."""
+        seen: dict[str, list[str]] = {}
+
+        def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+            seen["cmd"] = list(cmd)
+
+            class _Done:
+                returncode = 0
+                stdout = "{}"
+
+            return _Done()
+
+        monkeypatch.setattr(validator.subprocess, "run", fake_run)
+
+        validator.run_kubeconform(tmp_path, skip_gvks=())
+
+        assert "-skip" not in seen["cmd"]
+
+
+def test_main_reports_the_generic_no_files_message_for_a_bare_glob_miss(
+    fake_kubeconform: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When collection yields nothing *and* no input error explains why."""
+    # An input that is neither a glob, a file nor a directory can only be reached
+    # through a path object that exists but is something else (a FIFO). Rather
+    # than depend on that, exercise the branch the same way main() would see it:
+    # no files, no errors.
+    monkeypatch.setattr(validator, "collect_target_files", lambda targets: ([], []))
+    monkeypatch.setenv("FAKE_KUBECONFORM_MODE", "valid")
+
+    rc = validator.main(["--kubeconform-binary", str(fake_kubeconform), "--path", str(tmp_path)])
+
+    assert rc == 2
+    assert "no *.yaml/*.yml files found" in capsys.readouterr().err
+
+
+def test_collect_target_files_reports_an_unsupported_input_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path that exists but is neither file nor directory (e.g. a FIFO)."""
+    fifo = tmp_path / "pipe.yaml"
+    os.mkfifo(fifo)
+
+    files, errors = validator.collect_target_files((str(fifo),))
+
+    assert files == []
+    assert errors == [f"{fifo}: unsupported input type"]
