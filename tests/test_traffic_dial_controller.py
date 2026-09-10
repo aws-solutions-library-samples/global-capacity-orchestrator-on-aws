@@ -10,6 +10,7 @@ mid-deployment accelerator, and update failures. The load-bearing invariant —
 """
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -255,6 +256,80 @@ class TestAwsHelpers:
             is None
         )
 
+    def test_split_csv_tolerates_blanks(self, dial_module):
+        handler, _ = dial_module
+        assert handler._split_csv(None) == []
+        assert handler._split_csv("") == []
+        assert handler._split_csv(" us-east-1, ,us-west-2 ") == ["us-east-1", "us-west-2"]
+
+    def test_list_endpoint_groups_skips_incomplete_groups(self, dial_module):
+        handler, _ = dial_module
+        ga = MagicMock()
+        ga.list_endpoint_groups.return_value = {
+            "EndpointGroups": [
+                {"EndpointGroupArn": GROUP_EAST},  # no region
+                {"EndpointGroupRegion": "us-west-2"},  # no ARN
+                {
+                    "EndpointGroupArn": GROUP_WEST,
+                    "EndpointGroupRegion": "us-west-2",
+                    "TrafficDialPercentage": 50.0,
+                },
+            ]
+        }
+
+        assert handler.list_endpoint_groups(ga, LISTENER_ARN) == {
+            "us-west-2": {"arn": GROUP_WEST, "traffic_dial": 50},
+        }
+
+    def test_read_overrides_follows_pagination(self, dial_module):
+        handler, _ = dial_module
+        ssm = MagicMock()
+        ssm.get_parameters_by_path.side_effect = [
+            {
+                "Parameters": [{"Name": "/gco/traffic-dial/override-us-east-1", "Value": "10"}],
+                "NextToken": "page2",
+            },
+            {"Parameters": [{"Name": "/gco/traffic-dial/override-us-west-2", "Value": "20"}]},
+        ]
+
+        assert handler.read_overrides(ssm, "gco") == {"us-east-1": "10", "us-west-2": "20"}
+        assert ssm.get_parameters_by_path.call_args_list[1].kwargs["NextToken"] == "page2"
+
+    def test_healthy_percent_follows_pagination(self, dial_module):
+        handler, _ = dial_module
+        cloudwatch = MagicMock()
+        cloudwatch.get_metric_data.side_effect = [
+            {"MetricDataResults": [{"Values": [1.0, 1.0]}], "NextToken": "page2"},
+            {"MetricDataResults": [{"Values": [0.0, 0.0]}]},
+        ]
+
+        value = handler.healthy_percent(
+            "us-east-1", "gco-us-east-1", 15, cloudwatch_client=cloudwatch
+        )
+
+        assert value == 50.0
+        assert cloudwatch.get_metric_data.call_args_list[1].kwargs["NextToken"] == "page2"
+
+    def test_publish_metrics_failure_is_logged_not_raised(self, dial_module, caplog):
+        handler, _ = dial_module
+        cloudwatch = MagicMock()
+        cloudwatch.put_metric_data.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "no"}}, "PutMetricData"
+        )
+        with caplog.at_level(logging.WARNING):
+            handler.publish_metrics(cloudwatch, [_decision("us-east-1", new_dial=80)])
+        assert "Failed to publish traffic-dial metrics" in caplog.text
+
+    def test_store_state_failure_is_logged_not_raised(self, dial_module, caplog):
+        handler, _ = dial_module
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "no"}}, "PutParameter"
+        )
+        with caplog.at_level(logging.WARNING):
+            handler.store_state(ssm, "gco", {"decisions": []})
+        assert "Failed to store traffic-dial state" in caplog.text
+
 
 class TestLambdaHandler:
     def test_missing_required_environment_raises(self, dial_module, monkeypatch):
@@ -263,6 +338,23 @@ class TestLambdaHandler:
         monkeypatch.delenv("PROJECT_NAME", raising=False)
         with pytest.raises(ValueError, match="LISTENER_ARN and PROJECT_NAME"):
             handler.lambda_handler({}, MagicMock())
+
+    def test_empty_regions_warns_and_decides_nothing(self, dial_module, dial_env, caplog):
+        handler, mock_boto_client = dial_module
+        dial_env.setenv("REGIONS", "")
+        ga = _ga_stub()
+        ssm = _ssm_stub()
+        _route_clients(mock_boto_client, ga=ga, ssm=ssm, cloudwatch=MagicMock())
+
+        with caplog.at_level(logging.WARNING):
+            summary = handler.lambda_handler({}, MagicMock())
+
+        assert "REGIONS is empty" in caplog.text
+        assert summary["decisions"] == []
+        assert summary["updates_applied"] == 0
+        ga.update_endpoint_group.assert_not_called()
+        # The (empty) run is still recorded for `gco capacity traffic-dial show`.
+        assert json.loads(ssm.put_parameter.call_args.kwargs["Value"])["decisions"] == []
 
     def test_skips_cycle_while_accelerator_deploys(self, dial_module, dial_env):
         handler, mock_boto_client = dial_module

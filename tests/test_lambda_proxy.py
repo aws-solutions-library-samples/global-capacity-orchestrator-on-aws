@@ -369,6 +369,51 @@ class TestApiGatewayProxyHandler:
         assert "regional API endpoint" in result["body"]
         mock_pool.request.assert_not_called()
 
+    def test_base64_bodies_are_rejected(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+        # An unrelated header exercises the case-insensitive scan past a
+        # non-matching key before the region header is ruled absent.
+        event = self._make_event(method="POST", headers={"Accept": "*/*"}, body="AAAA")
+        event["isBase64Encoded"] = True
+
+        result = handler.lambda_handler(event, None)
+
+        assert result["statusCode"] == 415
+        assert json.loads(result["body"]) == {
+            "error": "Base64-encoded request bodies are not supported"
+        }
+        mock_pool.request.assert_not_called()
+
+    @pytest.mark.parametrize("failure", [KeyError("SECRET_ARN"), RuntimeError("unavailable")])
+    def test_signing_key_failure_is_a_503(self, api_gw_proxy_module, failure):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        with patch.object(handler, "get_secret_token", side_effect=failure):
+            result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 503
+        assert "authentication is temporarily unavailable" in result["body"]
+        mock_pool.request.assert_not_called()
+
+    def test_missing_backend_endpoint_is_a_503(self, api_gw_proxy_module, monkeypatch):
+        handler, _, mock_pool = api_gw_proxy_module
+        monkeypatch.delenv("GLOBAL_ACCELERATOR_ENDPOINT")
+
+        result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 503
+        assert "routing is temporarily unavailable" in result["body"]
+        mock_pool.request.assert_not_called()
+
+    def test_unroutable_path_is_a_503(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        with patch.object(handler, "build_target_url", side_effect=ValueError("bad path")):
+            result = handler.lambda_handler(self._make_event(path="/../etc"), None)
+
+        assert result["statusCode"] == 503
+        mock_pool.request.assert_not_called()
+
 
 # ============================================================================
 # regional-api-proxy handler

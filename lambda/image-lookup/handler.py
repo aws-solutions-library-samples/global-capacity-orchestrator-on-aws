@@ -153,9 +153,9 @@ def _delete_all_images(ecr: Any, repository_name: str) -> int:
 
     deleted = 0
     for chunk_start in range(0, len(digests), 100):
+        # range() stops before len(digests), so every slice holds at least
+        # one digest and at most 100 — ECR's BatchDeleteImage ceiling.
         chunk = digests[chunk_start : chunk_start + 100]
-        if not chunk:
-            continue
         resp = ecr.batch_delete_image(
             repositoryName=repository_name,
             imageIds=chunk,

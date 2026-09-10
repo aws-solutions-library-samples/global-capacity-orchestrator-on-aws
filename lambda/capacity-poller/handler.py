@@ -297,11 +297,6 @@ def _region_enablement_status(region: str) -> Literal["enabled", "not-enabled", 
         return "unknown"
 
 
-def _region_is_enabled(region: str) -> bool:
-    """Compatibility predicate: only explicit not-opted-in evidence skips."""
-    return _region_enablement_status(region) != "not-enabled"
-
-
 def _regional_scores_from_response(response: dict[str, Any], regions: set[str]) -> dict[str, int]:
     """Extract region -> regional score from one GetSpotPlacementScores page.
 

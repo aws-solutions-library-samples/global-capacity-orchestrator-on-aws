@@ -129,11 +129,6 @@ def _override_prefix(project_name: str) -> str:
     return f"/{project_name}/traffic-dial/"
 
 
-def _override_parameter_name(project_name: str, region: str) -> str:
-    """SSM parameter naming a manual per-region dial override."""
-    return f"/{project_name}/traffic-dial/override-{region}"
-
-
 def list_endpoint_groups(ga_client: Any, listener_arn: str) -> dict[str, dict[str, Any]]:
     """Return ``{region: {"arn", "traffic_dial"}}`` for the listener."""
     groups: dict[str, dict[str, Any]] = {}
