@@ -280,8 +280,10 @@ The scan runs as an Advanced Setup workflow rather than Default Setup so the fil
 
 ## README badges
 
-The README's badge row has four parts, in order — five dynamic health
-signals, a release pointer, then a navigation link:
+The README's badges sit on two rows. The first carries the five dynamic health
+signals, which change with every run; the second carries the two stable
+pointers, so a reader scanning for "where do I go next" is not parsing build
+status. The four parts, in order:
 
 1. **Four workflow-status badges** (`Unit Tests`, `Integration Tests`, `Security`, `Linting`) from GitHub's native `badge.svg` endpoint.
 2. **A coverage badge** rendered by shields.io from the endpoint JSON that `pages.yml` publishes at the Pages site root (`/coverage-badge.json`), generated from the same run whose HTML report is served at `/coverage/` — the badge links there. Badge, report, and the exact 100% gate all describe one run.
