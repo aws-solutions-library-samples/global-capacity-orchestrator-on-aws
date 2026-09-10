@@ -553,3 +553,183 @@ class TestForwardRequestSuccess:
         request_timeout = mock_http.request.call_args.kwargs["timeout"]
         assert isinstance(request_timeout, urllib3.Timeout)
         assert 0 < request_timeout.total <= 5.0
+
+
+class TestBoundedEnvParsing:
+    """Malformed or out-of-range tuning values fall back to the defaults."""
+
+    def test_float_falls_back_on_garbage_and_out_of_range(self, proxy_module, monkeypatch):
+        pu, _ = proxy_module
+        monkeypatch.setenv("PROXY_TUNING", "not-a-number")
+        assert pu._bounded_env_float("PROXY_TUNING", 0.3, 0.0, 5.0) == 0.3
+        monkeypatch.setenv("PROXY_TUNING", "9.5")
+        assert pu._bounded_env_float("PROXY_TUNING", 0.3, 0.0, 5.0) == 0.3
+        monkeypatch.setenv("PROXY_TUNING", "1.5")
+        assert pu._bounded_env_float("PROXY_TUNING", 0.3, 0.0, 5.0) == 1.5
+
+    def test_int_falls_back_on_garbage_and_out_of_range(self, proxy_module, monkeypatch):
+        pu, _ = proxy_module
+        monkeypatch.setenv("PROXY_TUNING", "three")
+        assert pu._bounded_env_int("PROXY_TUNING", 3, 1, 5) == 3
+        monkeypatch.setenv("PROXY_TUNING", "0")
+        assert pu._bounded_env_int("PROXY_TUNING", 3, 1, 5) == 3
+        monkeypatch.setenv("PROXY_TUNING", "4")
+        assert pu._bounded_env_int("PROXY_TUNING", 3, 1, 5) == 4
+
+
+class _LockThatLetsAnotherRefreshWin:
+    """Stand-in for ``_secret_lock`` that mutates module state on acquisition.
+
+    Simulates the race the double-checked locking in ``get_secret_token``
+    exists for: by the time this caller acquires the lock, a concurrent
+    invocation has already finished its own refresh (or refresh attempt).
+    """
+
+    def __init__(self, module, on_acquire):
+        self._module = module
+        self._on_acquire = on_acquire
+
+    def __enter__(self):
+        self._on_acquire(self._module)
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+class TestGetSecretTokenDoubleCheckedLocking:
+    def test_fresh_refresh_by_another_caller_is_reused_under_the_lock(self, proxy_module):
+        pu, mock_sm = proxy_module
+        # Expired from this caller's point of view before it takes the lock.
+        pu._cached_secret = "old-token"  # nosec B105 - fixture value, not a credential
+        pu._last_successful_refresh = time.monotonic() - pu._CACHE_TTL_SECONDS - 1
+        pu._last_refresh_attempt = 0.0
+
+        def other_caller_refreshed(module):
+            module._cached_secret = "refreshed-elsewhere"  # nosec B105 - fixture value
+            module._last_successful_refresh = time.monotonic()
+
+        pu._secret_lock = _LockThatLetsAnotherRefreshWin(pu, other_caller_refreshed)
+
+        assert pu.get_secret_token() == "refreshed-elsewhere"  # nosec B105 - fixture value
+        mock_sm.get_secret_value.assert_not_called()
+
+    def test_recent_failed_attempt_by_another_caller_keeps_stale_key(self, proxy_module):
+        pu, mock_sm = proxy_module
+        pu._cached_secret = "stale-token"  # nosec B105 - fixture value, not a credential
+        pu._last_successful_refresh = time.monotonic() - pu._CACHE_TTL_SECONDS - 1
+        pu._last_refresh_attempt = 0.0
+
+        def other_caller_just_tried(module):
+            module._last_refresh_attempt = time.monotonic()
+
+        pu._secret_lock = _LockThatLetsAnotherRefreshWin(pu, other_caller_just_tried)
+
+        assert pu.get_secret_token() == "stale-token"  # nosec B105 - fixture value
+        mock_sm.get_secret_value.assert_not_called()
+
+    def test_empty_token_in_secret_fails_closed(self, proxy_module):
+        pu, mock_sm = proxy_module
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps({"token": ""})}
+
+        with pytest.raises(RuntimeError, match="Authentication signing key is unavailable"):
+            pu.get_secret_token()
+
+
+class TestForwardRequestTlsAndTrust:
+    def test_tls_verification_failure_is_a_bounded_502(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.SSLError("certificate verify failed")
+
+        with patch.object(pu, "_http", mock_http):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 502
+        assert json.loads(result["body"]) == {"error": "Backend TLS verification failed"}
+        assert mock_http.request.call_count == 1
+
+    def test_tls_failure_wrapped_in_max_retry_error_is_a_502(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
+            pool=None,
+            url="https://example.com",
+            reason=urllib3.exceptions.SSLError("certificate verify failed"),
+        )
+
+        with patch.object(pu, "_http", mock_http):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 502
+        assert mock_http.request.call_count == 1
+
+    def test_unavailable_trust_bundle_is_a_503_before_any_request(self, proxy_module):
+        pu, _ = proxy_module
+
+        with (
+            patch.object(pu, "_http", None),
+            patch.object(pu, "get_backend_http_pool", side_effect=RuntimeError("no bundle")),
+        ):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"]) == {"error": "Backend trust is temporarily unavailable"}
+
+
+class TestForwardRequestBudgetEdges:
+    def test_exhausted_budget_returns_504_without_a_request(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+
+        with patch.object(pu, "_http", mock_http):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None, timeout=0.0)
+
+        assert result["statusCode"] == 504
+        assert json.loads(result["body"]) == {"error": "Gateway timeout"}
+        mock_http.request.assert_not_called()
+
+    def test_retryable_status_is_relayed_when_backoff_would_overrun(self, proxy_module):
+        pu, _ = proxy_module
+        response = MagicMock(status=503, headers={}, data=b"busy")
+        mock_http = MagicMock()
+        mock_http.request.return_value = response
+
+        with (
+            patch.object(pu, "_http", mock_http),
+            patch.object(pu, "_RETRY_BACKOFF_BASE", 100.0),
+        ):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None, timeout=1.0)
+
+        # One attempt, then the backoff would outlive the budget, so the last
+        # upstream answer is relayed instead of a synthetic timeout.
+        assert result["statusCode"] == 503
+        assert result["body"] == "busy"
+        assert mock_http.request.call_count == 1
+        response.release_conn.assert_called_once()
+
+    def test_unparseable_target_port_is_rejected(self, proxy_module):
+        pu, _ = proxy_module
+        with pytest.raises(ValueError, match="invalid port"):
+            pu.forward_request("https://example.com:notaport/api", "GET", {}, None)
+
+
+class TestBuildTargetUrlValidation:
+    def test_unparseable_endpoint_port_is_rejected(self, proxy_module):
+        pu, _ = proxy_module
+        with pytest.raises(ValueError, match="Invalid proxy endpoint"):
+            pu.build_target_url("https://example.com:notaport", "/api", None)
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://example.com",
+            "https://example.com:8443",
+            "https://user:pw@example.com",
+            "https://example.com/?q=1",
+            "https://example.com/#frag",
+        ],
+    )
+    def test_non_https_443_endpoints_are_rejected(self, proxy_module, endpoint):
+        pu, _ = proxy_module
+        with pytest.raises(ValueError, match="HTTPS on port 443"):
+            pu.build_target_url(endpoint, "/api", None)
