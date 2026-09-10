@@ -145,6 +145,33 @@ class TestRuntimeSmoke:
         assert "definitely-not-this-user" in err
         assert getpass.getuser() in err
 
+    def test_unresolvable_runtime_identity_is_reported_not_raised(
+        self,
+        smoke_at: ModuleType,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """A distroless image can have no passwd entry for its uid.
+
+        ``getpass.getuser`` then raises rather than returning a name, and the
+        smoke check has to record that as a failure like any other. Letting the
+        exception escape would abort the check before the remaining probes ran,
+        so a broken trust store or missing extension would go unreported behind
+        it.
+        """
+        _write_manifest(tmp_path)
+
+        def _no_passwd_entry() -> str:
+            raise OSError("no username found for uid 1000")
+
+        monkeypatch.setattr(getpass, "getuser", _no_passwd_entry)
+
+        assert _run_smoke(smoke_at, monkeypatch, "json") == 1
+        err = capsys.readouterr().err
+        assert "runtime identity lookup" in err
+        assert "OSError" in err
+
     def test_empty_extension_list_is_a_hard_failure(
         self,
         smoke_at: ModuleType,

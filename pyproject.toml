@@ -504,7 +504,6 @@ omit = [
     "diagrams/generate.py",
     "diagrams/infra_diagrams/generate.py",
     "dockerfiles/build_scratch_rootfs.py",
-    "dockerfiles/runtime_smoke.py",
     "docs/client-examples/python_boto3_example.py",
     "lambda/analytics-cleanup/handler.py",
     "lambda/analytics-presigned-url/handler.py",
