@@ -346,8 +346,69 @@ jobs:
         uses: ./.github/actions/apt-install-with-retry
         with:
           packages: bats jq python3 python3-yaml bash
+      # bashcov measures which lines of each shell script the suite executes.
+      # It needs Ruby; the runner image ships an older series than the one the
+      # project pins, so the version comes from .ruby-version — the same
+      # single-source-of-truth treatment .python-version gets.
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+        with:
+          ruby-version: ".ruby-version"
+      - name: Install the committed gem lock
+        # `frozen true` is the Bundler equivalent of `npm ci`: install exactly
+        # Gemfile.lock and fail if the Gemfile has drifted from it, rather than
+        # silently re-resolving. Bundler 4 also verifies the lock's CHECKSUMS
+        # block, so a republished gem cannot change under us.
+        run: |
+          set -euo pipefail
+          bundle config set --local frozen true
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4 --retry 3
       - name: Run BATS suite
+        # The authoritative correctness gate: an uninstrumented run, whose exit
+        # code fails the job. Deliberately NOT the same invocation as the
+        # coverage run below — see the comment there.
         run: bats tests/BATS/
+      - name: Measure shell coverage
+        # A second, instrumented run whose exit code is advisory. bashcov
+        # propagates xtrace by *exporting* SHELLOPTS, and an exported SHELLOPTS
+        # carries every option it holds down into each child shell — including
+        # `nounset`, which bats sets for its own internals. Scripts that never
+        # opted into `set -u` then abort on a legitimately-unset variable
+        # (measured: `lib_demo.sh: line 274: DIM: unbound variable`), failing 9
+        # assertions that pass in the same container without bashcov.
+        #
+        # So instrumentation is kept off the correctness path: the run above
+        # decides whether the suite passes, and this one only produces the
+        # coverage data. Lines executed are still lines executed, so the
+        # measurement stands even when an instrumented assertion aborts early.
+        #
+        # This is not silent: a bashcov failure is reported here, and if it
+        # produced no usable report the enforcement step below exits 2 rather
+        # than reading a missing report as success.
+        run: |
+          set -uo pipefail
+          if bundle exec bashcov --root . -- bats tests/BATS/; then
+            echo "Instrumented run completed cleanly."
+          else
+            echo "::notice::The instrumented run exited non-zero. Coverage below is" \
+                 "still measured from the lines that did execute; the uninstrumented" \
+                 "run above is what gates this job. Known cause: bats exports" \
+                 "SHELLOPTS with nounset, which bashcov's xtrace propagation carries" \
+                 "into scripts that never opted into set -u."
+          fi
+      - name: Enforce the shell coverage floor
+        # Fails when a script outside [tool.bash-coverage] ratchet has uncovered
+        # lines, or is missing from the report entirely (a mis-scoped run, or a
+        # bashcov run that produced nothing usable).
+        run: python3 .github/scripts/check_bash_coverage.py coverage/
+      - name: Upload shell coverage report
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: bash-coverage-report
+          path: coverage/
+          retention-days: 7
 
   unit-recorder-macos-bash32:
     name: "unit:recorder:macos-bash32"
