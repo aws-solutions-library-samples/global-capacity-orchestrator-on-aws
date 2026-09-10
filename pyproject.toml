@@ -490,7 +490,6 @@ omit = [
     # this entry pointing at the repository-root CDK entry point only.
     "./app.py",
     ".github/scripts/apply_pr_type_labels.py",
-    ".github/scripts/autopilot_ci_contract.py",
     ".github/scripts/validate_demo_gifs.py",
     ".github/scripts/validate_grafana_dashboards.py",
     ".github/scripts/validate_helm_charts.py",

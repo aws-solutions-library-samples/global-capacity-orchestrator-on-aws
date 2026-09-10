@@ -500,3 +500,117 @@ def test_the_module_puts_the_repository_on_sys_path_when_it_is_absent(
 
     assert str(_PROJECT_ROOT) in sys.path, "the module did not restore the repository root"
     assert module.expected_servers(include_companions=False), "the module failed to import cli"
+
+
+class TestCodexConfigRejections:
+    """Each Codex-specific invariant, violated one at a time.
+
+    These start from the real generated TOML and break exactly one thing, so a
+    problem message can be attributed to the line that produced it rather than
+    to a cascade from a malformed document.
+    """
+
+    def test_update_checks_left_enabled_are_reported(self) -> None:
+        """A generated config must never let Codex phone home for updates.
+
+        The pin is the contract; an update check that succeeded would replace
+        the pinned binary mid-session.
+        """
+        config = _real_codex_config()
+        config["check_for_update_on_startup"] = True
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert "Codex update checks must be disabled in the generated config" in problems
+
+    def test_a_missing_provider_aws_table_is_reported(self) -> None:
+        config = _real_codex_config()
+        del config["model_providers"][CODEX_BEDROCK_PROVIDER]["aws"]
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert any(".aws provider table" in problem for problem in problems)
+
+    @pytest.mark.parametrize("region", ("", None, 7), ids=("empty", "absent", "not-a-string"))
+    def test_an_unusable_provider_region_is_reported(self, region: object) -> None:
+        config = _real_codex_config()
+        aws = config["model_providers"][CODEX_BEDROCK_PROVIDER]["aws"]
+        if region is None:
+            del aws["region"]
+        else:
+            aws["region"] = region
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert any("region must be non-empty" in problem for problem in problems)
+
+    def test_a_disabled_or_slow_mcp_server_is_reported(self) -> None:
+        """Codex races MCP init against the first turn; both knobs matter."""
+        config = _real_codex_config()
+        gco = config["mcp_servers"]["gco"]
+        gco["enabled"] = False
+        gco["startup_timeout_sec"] = 1
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert "gco: Codex MCP server must be enabled" in problems
+        assert any("startup timeout must be" in problem for problem in problems)
+
+    def test_a_non_mapping_server_table_reports_once_and_skips_per_server_checks(
+        self,
+    ) -> None:
+        """The per-server loop must not run over a non-mapping."""
+        config = _real_codex_config()
+        config["mcp_servers"] = "not-a-table"
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert problems == ["config carries no MCP server mapping"]
+
+
+class TestPlanRejections:
+    """The remaining ``verify_plan`` branches."""
+
+    def test_selected_binary_field_disagreeing_with_engine_binary_is_reported(self) -> None:
+        """``engine_binary`` and the per-engine field are two views of one fact."""
+        plan = _real_plan(AutopilotEngine.CODEX, binary="/usr/bin/codex")
+        plan["codex_binary"] = "/somewhere/else/codex"
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="present")
+
+        assert "plan codex_binary disagrees with engine_binary" in problems
+
+    def test_a_non_text_codex_config_in_the_plan_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan["codex_config"] = {"already": "parsed"}
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent")
+
+        assert "Codex plan config must be TOML text when present" in problems
+
+    def test_invalid_toml_in_the_plan_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan["codex_config"] = "model = [unterminated"
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent")
+
+        assert any("invalid TOML" in problem for problem in problems)
+
+    def test_a_plan_listing_the_wrong_servers_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CLAUDE_CODE)
+        plan["mcp_servers"] = ["gco", "some-server-nobody-asked-for"]
+
+        problems = contract.verify_plan(plan, claude_binary="absent")
+
+        assert any(problem.startswith("plan servers") for problem in problems)
+
+    def test_a_codex_plan_without_the_rendered_config_is_still_valid(self) -> None:
+        """The public JSON formatter omits the large config on purpose.
+
+        ``-o json --dry-run`` prints the plan without the generated TOML, so its
+        absence is the normal CI case and must not be reported as a problem.
+        """
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan.pop("codex_config", None)
+
+        assert contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent") == []
