@@ -91,6 +91,47 @@ def test_ratchet_never_covers_the_already_enforced_packages() -> None:
     )
 
 
+def test_no_ratchet_entry_excuses_a_file_it_does_not_name() -> None:
+    """Each entry must omit exactly the one file it names — nothing else.
+
+    coverage expands a pattern with no directory separator into *two* patterns:
+    the absolutised path, and the bare pattern itself. The bare one is a glob, so
+    a lone ``app.py`` also matches ``.github/oidc_provider/app.py`` and every
+    other ``app.py`` in the tree — silently excusing files nobody listed. That
+    really happened here, which is why this asserts against coverage's own
+    matcher rather than against a spelling convention.
+    """
+    from coverage.files import GlobMatcher, abs_file, prep_patterns
+
+    tracked = [
+        path
+        for path in PROJECT_ROOT.rglob("*.py")
+        if not any(
+            part in {".git", ".venv", ".worktrees", "cdk.out", "build", "dist", "__pycache__"}
+            or part.endswith(".egg-info")
+            for part in path.relative_to(PROJECT_ROOT).parts
+        )
+    ]
+
+    overreaching: dict[str, list[str]] = {}
+    for entry in _ratchet_entries():
+        matcher = GlobMatcher(prep_patterns([entry]))
+        intended = abs_file(str(PROJECT_ROOT / entry.removeprefix("./")))
+        collateral = [
+            str(path.relative_to(PROJECT_ROOT))
+            for path in tracked
+            if matcher.match(abs_file(str(path))) and abs_file(str(path)) != intended
+        ]
+        if collateral:
+            overreaching[entry] = sorted(collateral)
+
+    assert not overreaching, (
+        "coverage ratchet entries omit files they do not name: "
+        f"{overreaching}. Prefix a repository-root entry with './' so its bare "
+        "glob cannot match the same basename deeper in the tree."
+    )
+
+
 def test_ratchet_is_sorted_and_unique() -> None:
     """Keeps review diffs one-line-per-change and blocks accidental repeats."""
     entries = _ratchet_entries()
