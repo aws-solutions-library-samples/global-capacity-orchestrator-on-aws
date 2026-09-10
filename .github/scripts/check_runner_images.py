@@ -147,7 +147,7 @@ def fetch_readme(url: str = README_URL, timeout: int = FETCH_TIMEOUT_SECONDS) ->
     what makes the ``urlopen`` call here auditable.
     """
     try:
-        with urllib.request.urlopen(  # nosec B310 - fixed https literal, no interpolation  # noqa: S310
+        with urllib.request.urlopen(  # nosec B310  # nosemgrep: dynamic-urllib-use-detected - the default is the fixed https://raw.githubusercontent.com literal in README_URL and no caller in this repository overrides it; the parameter exists only so the tests can inject a stub, so no scheme or host is ever derived from repository content  # noqa: S310
             url, timeout=timeout
         ) as response:
             return str(response.read().decode("utf-8"))
