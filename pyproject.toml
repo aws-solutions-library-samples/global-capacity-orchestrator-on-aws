@@ -483,8 +483,12 @@ omit = [
     # Progress is printed by the ``unit:pytest:core`` job, which reports the
     # omitted files separately so their coverage stays visible while it climbs.
     # ------------------------------------------------------------------
-    ".github/oidc_provider/app.py",
-    ".github/oidc_provider/stack.py",
+    # Spelled "./app.py" deliberately: coverage expands a bare "app.py" into
+    # BOTH the absolutised path and a bare glob, and the glob matches any
+    # app.py at any depth — which silently omitted
+    # .github/oidc_provider/app.py from the gate too. The "./" prefix keeps
+    # this entry pointing at the repository-root CDK entry point only.
+    "./app.py",
     ".github/scripts/apply_pr_type_labels.py",
     ".github/scripts/autopilot_ci_contract.py",
     ".github/scripts/validate_demo_gifs.py",
@@ -495,7 +499,6 @@ omit = [
     ".github/scripts/verify_container_tool_versions.py",
     ".github/scripts/verify_inference_streaming_bundle_freshness.py",
     ".github/scripts/verify_lambda_imports.py",
-    "app.py",
     "diagrams/code_diagrams/_renderer.py",
     "diagrams/code_diagrams/_source_marker.py",
     "diagrams/code_diagrams/_timestamp.py",
