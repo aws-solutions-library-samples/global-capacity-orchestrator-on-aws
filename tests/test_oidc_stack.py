@@ -5,6 +5,7 @@ Verifies that the standalone stack synthesizes correctly and produces
 the expected IAM resources with proper trust policies and permissions.
 """
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -492,3 +493,156 @@ class TestPolicyJsonFile:
                     f"Action '{action}' is not read-only. "
                     "Default CI policy should only contain Describe/Get/List actions."
                 )
+
+
+class TestSubjectPrefixValidation:
+    """The guardrails on ``github_repo`` / ``github_subject_prefix``.
+
+    This validation is the only thing standing between a copied-and-pasted ID
+    pair and a trust policy that authorises a *different* repository to assume
+    the CI role, so each rejection path is pinned individually rather than
+    inferred from the happy path.
+    """
+
+    @pytest.mark.parametrize(
+        "repo",
+        [
+            pytest.param("noslash", id="no-separator"),
+            pytest.param("owner/repo/extra", id="too-many-segments"),
+            pytest.param("/repo", id="empty-owner"),
+            pytest.param("owner/", id="empty-repo"),
+        ],
+    )
+    def test_malformed_github_repo_is_rejected(self, repo: str):
+        """A repo that is not exactly ``owner/repo`` cannot yield a valid subject."""
+        with pytest.raises(ValueError, match="github_repo must use owner/repo format"):
+            _synth_stack(github_repo=repo)
+
+    def test_non_string_subject_prefix_is_rejected(self):
+        """Context values come from cdk.json, where a number is easy to write."""
+        with pytest.raises(ValueError, match="github_subject_prefix must be a string"):
+            _synth_stack(
+                github_repo="my-org/my-repo",
+                github_subject_prefix=12345,  # type: ignore[arg-type]
+            )
+
+    def test_explicit_mutable_prefix_is_accepted_unchanged(self):
+        """Spelling out the mutable prefix must behave exactly like omitting it."""
+        explicit = _synth_stack(
+            github_repo="my-org/my-repo",
+            github_subject_prefix="repo:my-org/my-repo",
+        ).to_json()
+        implicit = _synth_stack(github_repo="my-org/my-repo").to_json()
+
+        assert explicit == implicit
+
+    def test_trailing_whitespace_prefix_is_rejected(self):
+        """A prefix is compared literally, so untrimmed input must not slip through."""
+        with pytest.raises(ValueError, match="non-empty trimmed string"):
+            _synth_stack(
+                github_repo="my-org/my-repo",
+                github_subject_prefix="repo:my-org/my-repo ",
+            )
+
+
+class TestCDKAppEntryPoint:
+    """The standalone ``app.py`` that turns cdk.json context into the stack.
+
+    Its whole job is reading context and applying defaults, and a wrong default
+    here is a silent authorisation change — an unset ``github_branch`` must mean
+    "main only", never "any branch". Executed rather than imported so each case
+    gets a fresh module with its own context.
+    """
+
+    @staticmethod
+    def _run_app(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: dict[str, object]
+    ) -> dict:
+        """Execute app.py with the given CDK context and return what it synthesized.
+
+        ``app.py`` constructs ``cdk.App()`` with no arguments, so both the
+        context it reads and the directory it writes to have to be supplied from
+        outside. Wrapping ``aws_cdk.App`` to fill in ``context`` and ``outdir``
+        does that without touching the app: ``context`` is the same constructor
+        argument the CDK CLI populates from ``cdk.json``, so
+        ``try_get_context`` is exercised exactly as it is in a real deploy, and
+        ``outdir`` only decides where the template lands (CDK otherwise picks a
+        random temporary directory the test could not find).
+        """
+        outdir = tmp_path / "cdk.out"
+        original_app = cdk.App
+
+        def _app_with_context_and_outdir(*args: object, **kwargs: object) -> cdk.App:
+            kwargs.setdefault("context", context)
+            kwargs.setdefault("outdir", str(outdir))
+            return original_app(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(cdk, "App", _app_with_context_and_outdir)
+
+        app_path = Path(__file__).parent.parent / ".github" / "oidc_provider" / "app.py"
+        spec = importlib.util.spec_from_file_location("_oidc_app_under_test", app_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        # Registered before exec so coverage attributes app.py's lines to the
+        # file on disk; a module exec'd without a sys.modules entry is invisible
+        # to the repository-root measurement.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+        template_path = outdir / "GCOGitHubOIDCStack.template.json"
+        assert template_path.is_file(), f"app.py synthesized no template at {template_path}"
+        return dict(json.loads(template_path.read_text(encoding="utf-8")))
+
+    def _trust_conditions(self, template: dict) -> dict:
+        roles = [
+            resource
+            for resource in template["Resources"].values()
+            if resource["Type"] == "AWS::IAM::Role"
+            and "Federated" in json.dumps(resource["Properties"]["AssumeRolePolicyDocument"])
+        ]
+        assert len(roles) == 1, "expected exactly one federated role"
+        statement = roles[0]["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]
+        return dict(statement["Condition"])
+
+    def test_empty_context_defaults_to_upstream_repo_on_main_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """No context at all must still produce a main-only trust policy."""
+        template = self._run_app(tmp_path, monkeypatch, {})
+        conditions = self._trust_conditions(template)
+
+        assert "StringEquals" in conditions, "an unset branch must pin exactly one ref"
+        assert "StringLike" not in conditions
+        subject = json.dumps(conditions["StringEquals"])
+        assert "aws-solutions-library-samples/global-capacity-orchestrator-on-aws" in subject
+        assert "refs/heads/main" in subject
+
+    def test_context_overrides_are_applied(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Each context key must reach the stack, not just the repo."""
+        template = self._run_app(
+            tmp_path,
+            monkeypatch,
+            {
+                "github_repo": "my-org/my-repo",
+                "github_subject_prefix": "repo:my-org@12345/my-repo@67890",
+                "github_branch": "*",
+            },
+        )
+        conditions = self._trust_conditions(template)
+
+        # A wildcard branch is an explicit opt-in and must widen the operator.
+        assert "StringLike" in conditions
+        subject = json.dumps(conditions["StringLike"])
+        assert "repo:my-org@12345/my-repo@67890" in subject
+
+    def test_the_checked_in_cdk_json_context_synthesizes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The committed context is what a deploy actually uses, so it must work."""
+        template = self._run_app(tmp_path, monkeypatch, dict(_OIDC_CONTEXT))
+        conditions = self._trust_conditions(template)
+
+        assert _UPSTREAM_SUBJECT_PREFIX in json.dumps(conditions)
