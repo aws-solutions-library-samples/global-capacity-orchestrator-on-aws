@@ -82,3 +82,31 @@ class TestSecretRotationHandler:
         }
         with pytest.raises(ValueError, match="Invalid rotation step"):
             handler.lambda_handler(event, None)
+
+    def test_dispatches_finish_secret_without_a_current_version(self, rotation_module):
+        """finishSecret promotes AWSPENDING even when nothing is AWSCURRENT yet.
+
+        A brand-new secret whose first rotation is finishing has no version
+        carrying AWSCURRENT, so the scan finds nothing to demote and the
+        stage move runs with ``RemoveFromVersionId=None``.
+        """
+        handler, mock_client = rotation_module
+        client = mock_client.return_value
+        client.describe_secret.return_value = {
+            "VersionIdsToStages": {
+                "v-previous": ["AWSPREVIOUS"],
+                "token-123": ["AWSPENDING"],
+            }
+        }
+        event = {
+            "SecretId": "test-secret",
+            "ClientRequestToken": "token-123",
+            "Step": "finishSecret",
+        }
+        handler.lambda_handler(event, None)
+        client.update_secret_version_stage.assert_called_once_with(
+            SecretId="test-secret",
+            VersionStage="AWSCURRENT",
+            MoveToVersionId="token-123",
+            RemoveFromVersionId=None,
+        )

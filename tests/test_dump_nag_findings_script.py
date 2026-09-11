@@ -252,3 +252,27 @@ def test_script_puts_repo_root_on_sys_path():
     """
     repo_root = Path(__file__).resolve().parent.parent
     assert str(repo_root) in sys.path
+
+
+def test_script_inserts_repo_root_when_it_is_missing_from_sys_path(monkeypatch):
+    """Invoked from another CWD, the script prepends the repo root itself.
+
+    The module-level guard is the only thing that makes ``tests.*`` importable
+    when the script runs as ``python3 scripts/dump_nag_findings.py``. Re-execute
+    the file with the root removed from ``sys.path`` and check it comes back at
+    position 0 exactly once.
+    """
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    monkeypatch.setattr(sys, "path", [entry for entry in sys.path if entry != repo_root])
+    assert repo_root not in sys.path
+
+    spec = importlib.util.spec_from_file_location("dump_nag_findings_reexec", _SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert sys.path[0] == repo_root
+    assert sys.path.count(repo_root) == 1
+    assert str(module.REPO_ROOT) == repo_root
+    # The re-executed copy binds the same shared matrix the pytest gate uses.
+    assert module.CONFIGS is dump_nag.CONFIGS

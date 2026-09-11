@@ -367,3 +367,250 @@ class TestCommandLine:
         config.write_text(json.dumps(_real_config()), encoding="utf-8")
         with pytest.raises(SystemExit):
             contract.main(["verify-config", str(config), "--expect-gco-env", "NOEQUALS"])
+
+
+class TestConfigShapeRejections:
+    """Malformed documents must produce problems, never a vacuous pass.
+
+    ``verify_config`` is handed a document that a *generator* produced, so the
+    realistic failure is not a hand-typo but a generator change that alters the
+    shape. Every one of these returns a problem list rather than raising, because
+    the CI step prints all problems at once instead of stopping at the first.
+    """
+
+    def test_a_non_mapping_server_section_is_a_single_clear_problem(self) -> None:
+        """Claude's JSON: the whole point is one clear message, not a cascade."""
+        problems = contract.verify_config(
+            {"mcpServers": ["not", "a", "mapping"]},
+            include_companions=False,
+            expect_gco_env=None,
+            gco_args=None,
+        )
+
+        assert problems == ["config carries no mcpServers mapping"]
+
+    def test_the_shared_mapping_check_also_guards_its_own_input(self) -> None:
+        """Both engines funnel into ``_verify_server_mapping``.
+
+        ``verify_config`` rejects a bad ``mcpServers`` before delegating, but the
+        Codex path reaches the shared checker with a differently-shaped document,
+        so the guard has to exist on both sides of the call.
+        """
+        problems = contract._verify_server_mapping(
+            ["not", "a", "mapping"],
+            include_companions=False,
+            expect_gco_env=None,
+            gco_args=None,
+        )
+
+        assert problems == ["config carries no MCP server mapping"]
+
+    def test_a_non_mapping_entry_is_reported_and_skipped(self) -> None:
+        """One bad entry must not stop the remaining entries being checked."""
+        config = _real_config()
+        config["mcpServers"]["gco"] = "not-a-mapping"
+
+        problems = contract.verify_config(
+            config, include_companions=False, expect_gco_env=None, gco_args=None
+        )
+
+        assert any("entry must be a mapping" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            pytest.param("command", "", "command must be a non-empty string", id="empty-command"),
+            pytest.param("command", 7, "command must be a non-empty string", id="numeric-command"),
+            pytest.param("args", "uvx", "args must be a list of strings", id="args-not-a-list"),
+            pytest.param("args", [1, 2], "args must be a list of strings", id="args-not-strings"),
+        ],
+    )
+    def test_launch_recipe_fields_are_shape_checked(
+        self, field: str, value: object, expected: str
+    ) -> None:
+        config = _real_config()
+        config["mcpServers"]["gco"][field] = value
+
+        problems = contract.verify_config(
+            config, include_companions=False, expect_gco_env=None, gco_args=None
+        )
+
+        assert any(expected in problem for problem in problems)
+
+    def test_a_non_mapping_gco_entry_does_not_crash_the_env_check(self) -> None:
+        """The env assertion must still report, rather than raise, on bad input."""
+        config = _real_config()
+        config["mcpServers"]["gco"] = "not-a-mapping"
+
+        problems = contract.verify_config(
+            config,
+            include_companions=False,
+            expect_gco_env={"GCO_PROFILE": "ci"},
+            gco_args=None,
+        )
+
+        assert any("gco env 'GCO_PROFILE'" in problem for problem in problems)
+
+    def test_a_non_mapping_env_is_treated_as_absent(self) -> None:
+        config = _real_config()
+        config["mcpServers"]["gco"]["env"] = ["GCO_PROFILE=ci"]
+
+        problems = contract.verify_config(
+            config,
+            include_companions=False,
+            expect_gco_env={"GCO_PROFILE": "ci"},
+            gco_args=None,
+        )
+
+        assert any("gco env 'GCO_PROFILE'" in problem for problem in problems)
+
+
+class TestEnvPairParsing:
+    """``--expect-gco-env KEY=VALUE`` parsing."""
+
+    def test_a_well_formed_pair_splits_on_the_first_equals(self) -> None:
+        """Values legitimately contain '=' (base64, query strings), so only the
+        first separator may be treated as the delimiter."""
+        assert contract._parse_env_pair("GCO_TOKEN=a=b=c") == ("GCO_TOKEN", "a=b=c")
+
+    @pytest.mark.parametrize("pair", ("noequals", "=novalue"))
+    def test_a_malformed_pair_is_rejected_by_argparse(self, pair: str) -> None:
+        with pytest.raises(contract.argparse.ArgumentTypeError, match="expects KEY=VALUE"):
+            contract._parse_env_pair(pair)
+
+
+def test_the_module_puts_the_repository_on_sys_path_when_it_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script is run by CI as a file, not imported as part of the package.
+
+    ``python3 .github/scripts/autopilot_ci_contract.py`` puts *that directory* on
+    sys.path, not the repository root, so the script inserts the root itself
+    before importing ``cli.autopilot``. Under pytest the root is already there
+    and the guard never fires, so it is exercised by re-executing the module with
+    the root removed -- otherwise this line would be permanently unverified and
+    a regression would only surface as a CI-only ImportError.
+    """
+    monkeypatch.setattr(sys, "path", [entry for entry in sys.path if entry != str(_PROJECT_ROOT)])
+    spec = importlib.util.spec_from_file_location("_autopilot_contract_pathless", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    assert str(_PROJECT_ROOT) in sys.path, "the module did not restore the repository root"
+    assert module.expected_servers(include_companions=False), "the module failed to import cli"
+
+
+class TestCodexConfigRejections:
+    """Each Codex-specific invariant, violated one at a time.
+
+    These start from the real generated TOML and break exactly one thing, so a
+    problem message can be attributed to the line that produced it rather than
+    to a cascade from a malformed document.
+    """
+
+    def test_update_checks_left_enabled_are_reported(self) -> None:
+        """A generated config must never let Codex phone home for updates.
+
+        The pin is the contract; an update check that succeeded would replace
+        the pinned binary mid-session.
+        """
+        config = _real_codex_config()
+        config["check_for_update_on_startup"] = True
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert "Codex update checks must be disabled in the generated config" in problems
+
+    def test_a_missing_provider_aws_table_is_reported(self) -> None:
+        config = _real_codex_config()
+        del config["model_providers"][CODEX_BEDROCK_PROVIDER]["aws"]
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert any(".aws provider table" in problem for problem in problems)
+
+    @pytest.mark.parametrize("region", ("", None, 7), ids=("empty", "absent", "not-a-string"))
+    def test_an_unusable_provider_region_is_reported(self, region: object) -> None:
+        config = _real_codex_config()
+        aws = config["model_providers"][CODEX_BEDROCK_PROVIDER]["aws"]
+        if region is None:
+            del aws["region"]
+        else:
+            aws["region"] = region
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert any("region must be non-empty" in problem for problem in problems)
+
+    def test_a_disabled_or_slow_mcp_server_is_reported(self) -> None:
+        """Codex races MCP init against the first turn; both knobs matter."""
+        config = _real_codex_config()
+        gco = config["mcp_servers"]["gco"]
+        gco["enabled"] = False
+        gco["startup_timeout_sec"] = 1
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert "gco: Codex MCP server must be enabled" in problems
+        assert any("startup timeout must be" in problem for problem in problems)
+
+    def test_a_non_mapping_server_table_reports_once_and_skips_per_server_checks(
+        self,
+    ) -> None:
+        """The per-server loop must not run over a non-mapping."""
+        config = _real_codex_config()
+        config["mcp_servers"] = "not-a-table"
+
+        problems = contract.verify_codex_config(config, expected_region="us-east-2")
+
+        assert problems == ["config carries no MCP server mapping"]
+
+
+class TestPlanRejections:
+    """The remaining ``verify_plan`` branches."""
+
+    def test_selected_binary_field_disagreeing_with_engine_binary_is_reported(self) -> None:
+        """``engine_binary`` and the per-engine field are two views of one fact."""
+        plan = _real_plan(AutopilotEngine.CODEX, binary="/usr/bin/codex")
+        plan["codex_binary"] = "/somewhere/else/codex"
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="present")
+
+        assert "plan codex_binary disagrees with engine_binary" in problems
+
+    def test_a_non_text_codex_config_in_the_plan_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan["codex_config"] = {"already": "parsed"}
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent")
+
+        assert "Codex plan config must be TOML text when present" in problems
+
+    def test_invalid_toml_in_the_plan_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan["codex_config"] = "model = [unterminated"
+
+        problems = contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent")
+
+        assert any("invalid TOML" in problem for problem in problems)
+
+    def test_a_plan_listing_the_wrong_servers_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CLAUDE_CODE)
+        plan["mcp_servers"] = ["gco", "some-server-nobody-asked-for"]
+
+        problems = contract.verify_plan(plan, claude_binary="absent")
+
+        assert any(problem.startswith("plan servers") for problem in problems)
+
+    def test_a_codex_plan_without_the_rendered_config_is_still_valid(self) -> None:
+        """The public JSON formatter omits the large config on purpose.
+
+        ``-o json --dry-run`` prints the plan without the generated TOML, so its
+        absence is the normal CI case and must not be reported as a problem.
+        """
+        plan = _real_plan(AutopilotEngine.CODEX)
+        plan.pop("codex_config", None)
+
+        assert contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent") == []

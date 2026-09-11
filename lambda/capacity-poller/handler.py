@@ -94,8 +94,8 @@ from typing import Any, Literal
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-10T23:26:44Z
+# Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/capacity-poller/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/capacity-poller/handler.lambda_handler.png``)
@@ -295,11 +295,6 @@ def _region_enablement_status(region: str) -> Literal["enabled", "not-enabled", 
             code or type(exc).__name__,
         )
         return "unknown"
-
-
-def _region_is_enabled(region: str) -> bool:
-    """Compatibility predicate: only explicit not-opted-in evidence skips."""
-    return _region_enablement_status(region) != "not-enabled"
 
 
 def _regional_scores_from_response(response: dict[str, Any], regions: set[str]) -> dict[str, int]:

@@ -278,3 +278,31 @@ class TestLambdaHandler:
         monkeypatch.delenv("CORPUS_PREFIX")
         with pytest.raises(RuntimeError, match="CORPUS_PREFIX"):
             handler.lambda_handler(_event(f"{_PREFIX}a.md"), context=None)
+
+
+class TestLazyClients:
+    """The three boto3 clients are built on first use and then reused."""
+
+    @pytest.mark.parametrize(
+        ("getter", "attribute", "service"),
+        [
+            ("_get_s3_client", "_s3_client", "s3"),
+            ("_get_dynamodb_client", "_dynamodb_client", "dynamodb"),
+            ("_get_bedrock_client", "_bedrock_client", "bedrock-runtime"),
+        ],
+    )
+    def test_builds_once_and_caches(self, handler, monkeypatch, getter, attribute, service):
+        built = []
+
+        def fake_client(name):
+            built.append(name)
+            return object()
+
+        monkeypatch.setattr(handler.boto3, "client", fake_client)
+        setattr(handler, attribute, None)
+
+        first = getattr(handler, getter)()
+        second = getattr(handler, getter)()
+
+        assert first is second
+        assert built == [service]

@@ -18,8 +18,10 @@ These tests mock ``subprocess.run`` directly so they never invoke
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -1994,3 +1996,1930 @@ class TestReleaseSetExpectations:
         chart, version, namespace = helm_handler._release_metadata("mlflow", by_name["mlflow"])
         assert (chart, namespace) == ("mlflow", "monitoring")
         assert version == by_name["mlflow"]["version"]
+
+
+class TestDiagnosticAndBudgetHelpers:
+    """Bounded diagnostics and the invocation-wide validation time budget."""
+
+    def test_empty_diagnostic_is_labelled_rather_than_blank(self):
+        assert helm_handler._bounded_diagnostic("") == "<empty>"
+        assert helm_handler._bounded_diagnostic("   \n") == "<empty>"
+
+    def test_short_diagnostic_is_returned_verbatim_after_strip(self):
+        assert helm_handler._bounded_diagnostic("  boom \n") == "boom"
+
+    def test_long_diagnostic_is_truncated_with_dropped_count(self):
+        text = "x" * (helm_handler.MAX_VALIDATION_DIAGNOSTIC_CHARS + 25)
+        result = helm_handler._bounded_diagnostic(text)
+        assert result.startswith("x" * helm_handler.MAX_VALIDATION_DIAGNOSTIC_CHARS)
+        assert result.endswith("... [truncated 25 chars]")
+        assert helm_handler._bounded_diagnostic("abcdef", limit=4) == "abcd... [truncated 2 chars]"
+
+    def test_exhausted_budget_raises_validation_timeout(self):
+        with pytest.raises(helm_handler._ValidationTimeout, match="exhausted"):
+            helm_handler._validation_command_timeout(time.monotonic() - 1, 120)
+
+    def test_remaining_budget_caps_the_command_timeout(self):
+        assert helm_handler._validation_command_timeout(time.monotonic() + 5000, 120) == 120
+        # Under a second-and-a-bit of budget still yields at least one second.
+        assert helm_handler._validation_command_timeout(time.monotonic() + 1.5, 120) == 1
+
+
+class TestRecordAddonStatus:
+    """Per-chart outcomes are published to SSM best-effort, never fatally."""
+
+    def test_writes_json_status_parameter_under_project_and_region(self, monkeypatch):
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+        monkeypatch.setenv("REGION", "us-east-1")
+        ssm = MagicMock()
+        with patch.object(helm_handler.boto3, "client", return_value=ssm) as mock_client:
+            helm_handler._record_addon_status("keda", "installed", "Successfully installed keda")
+
+        mock_client.assert_called_once_with("ssm")
+        ssm.put_parameter.assert_called_once()
+        kwargs = ssm.put_parameter.call_args.kwargs
+        assert kwargs["Name"] == "/gco/addons/us-east-1/keda"
+        assert kwargs["Type"] == "String"
+        assert kwargs["Overwrite"] is True
+        payload = json.loads(kwargs["Value"])
+        assert payload["chart"] == "keda"
+        assert payload["status"] == "installed"
+        assert payload["message"] == "Successfully installed keda"
+        assert isinstance(payload["updated_at"], int)
+
+    def test_message_is_truncated_to_parameter_friendly_size(self, monkeypatch):
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+        monkeypatch.setenv("REGION", "us-east-1")
+        ssm = MagicMock()
+        with patch.object(helm_handler.boto3, "client", return_value=ssm):
+            helm_handler._record_addon_status("keda", "failed", "e" * 3000)
+
+        payload = json.loads(ssm.put_parameter.call_args.kwargs["Value"])
+        assert payload["message"] == "e" * 1024
+
+    def test_ssm_failure_is_swallowed(self, monkeypatch):
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+        monkeypatch.setenv("REGION", "us-east-1")
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = Exception("ThrottlingException")
+        with patch.object(helm_handler.boto3, "client", return_value=ssm):
+            helm_handler._record_addon_status("keda", "installed", "ok")
+
+    def test_skips_ssm_when_project_or_region_is_unset(self, monkeypatch):
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+        monkeypatch.delenv("REGION", raising=False)
+        with patch.object(helm_handler.boto3, "client") as mock_client:
+            helm_handler._record_addon_status("keda", "installed", "ok")
+        mock_client.assert_not_called()
+
+
+class TestLoadChartsConfig:
+    """charts.yaml loading degrades to an empty chart set instead of crashing."""
+
+    def test_missing_charts_file_yields_empty_chart_set(self, tmp_path):
+        with patch.object(helm_handler, "CHARTS_CONFIG_PATH", tmp_path / "absent.yaml"):
+            assert helm_handler.load_charts_config() == {"charts": {}}
+
+    def test_non_mapping_document_yields_empty_chart_set(self, tmp_path):
+        charts_file = tmp_path / "charts.yaml"
+        charts_file.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+        with patch.object(helm_handler, "CHARTS_CONFIG_PATH", charts_file):
+            assert helm_handler.load_charts_config() == {"charts": {}}
+
+    def test_mapping_document_is_returned_as_is(self, tmp_path):
+        charts_file = tmp_path / "charts.yaml"
+        charts_file.write_text("charts:\n  keda:\n    namespace: keda\n", encoding="utf-8")
+        with patch.object(helm_handler, "CHARTS_CONFIG_PATH", charts_file):
+            assert helm_handler.load_charts_config() == {"charts": {"keda": {"namespace": "keda"}}}
+
+    def test_real_charts_file_loads_as_mapping(self):
+        assert isinstance(helm_handler.load_charts_config().get("charts"), dict)
+
+
+class TestSendResponse:
+    """The CloudFormation callback is a bounded PUT that never raises."""
+
+    _EVENT = {
+        "ResponseURL": "https://cloudformation-custom-resource-response.example.test/callback",
+        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/gco/0000",
+        "RequestId": "request-1",
+        "LogicalResourceId": "HelmCharts",
+    }
+
+    def test_puts_json_body_with_default_reason(self):
+        context = MagicMock()
+        context.log_stream_name = "2026/09/01/[$LATEST]abc"
+        pool = MagicMock()
+        with patch.object(helm_handler.urllib3, "PoolManager", return_value=pool):
+            helm_handler.send_response(
+                dict(self._EVENT),
+                context,
+                helm_handler.SUCCESS,
+                {"Results": "{}"},
+                "helm-HelmCharts",
+            )
+
+        pool.request.assert_called_once()
+        request = pool.request.call_args
+        assert request.args == ("PUT", self._EVENT["ResponseURL"])
+        assert request.kwargs["headers"] == {"Content-Type": "application/json"}
+        assert request.kwargs["timeout"] == 10.0
+        body = json.loads(request.kwargs["body"].decode("utf-8"))
+        assert body == {
+            "Status": "SUCCESS",
+            "Reason": "See CloudWatch Log Stream: 2026/09/01/[$LATEST]abc",
+            "PhysicalResourceId": "helm-HelmCharts",
+            "StackId": self._EVENT["StackId"],
+            "RequestId": "request-1",
+            "LogicalResourceId": "HelmCharts",
+            "Data": {"Results": "{}"},
+        }
+
+    def test_explicit_reason_overrides_log_stream_hint(self):
+        pool = MagicMock()
+        with patch.object(helm_handler.urllib3, "PoolManager", return_value=pool):
+            helm_handler.send_response(
+                dict(self._EVENT),
+                MagicMock(),
+                helm_handler.FAILED,
+                {},
+                "helm-HelmCharts",
+                "Failed charts: keda",
+            )
+
+        body = json.loads(pool.request.call_args.kwargs["body"].decode("utf-8"))
+        assert body["Status"] == "FAILED"
+        assert body["Reason"] == "Failed charts: keda"
+
+    def test_callback_transport_failure_is_logged_not_raised(self, caplog):
+        pool = MagicMock()
+        pool.request.side_effect = helm_handler.urllib3.exceptions.MaxRetryError(
+            pool, self._EVENT["ResponseURL"], reason="connection refused"
+        )
+        with (
+            patch.object(helm_handler.urllib3, "PoolManager", return_value=pool),
+            caplog.at_level(logging.ERROR),
+        ):
+            helm_handler.send_response(
+                dict(self._EVENT), MagicMock(), helm_handler.SUCCESS, {}, "helm-HelmCharts"
+            )
+
+        assert "Failed to send response" in caplog.text
+
+
+class TestEksAuthentication:
+    """EKS bearer tokens and kubeconfig files are produced offline from STS signing."""
+
+    def test_token_is_presigned_sts_url_in_k8s_aws_v1_format(self):
+        presigned = (
+            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
+            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
+        )
+        session = MagicMock()
+        session.client.return_value.meta.service_model.service_id = "STS"
+        signer = MagicMock()
+        signer.generate_presigned_url.return_value = presigned
+        with (
+            patch.object(helm_handler.boto3, "Session", return_value=session),
+            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
+        ):
+            token = helm_handler.get_eks_token("gco-us-east-1", "us-east-1")
+
+        expected_suffix = base64.urlsafe_b64encode(presigned.encode()).decode().rstrip("=")
+        assert token == f"k8s-aws-v1.{expected_suffix}"
+        assert "=" not in token
+        session.client.assert_called_once_with("sts", region_name="us-east-1")
+        signer_cls.assert_called_once_with(
+            "STS",
+            "us-east-1",
+            "sts",
+            "v4",
+            session.get_credentials.return_value,
+            session.events,
+        )
+        presign = signer.generate_presigned_url.call_args
+        params = presign.args[0]
+        assert params["method"] == "GET"
+        assert params["url"].startswith(
+            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
+        )
+        assert params["headers"] == {"x-k8s-aws-id": "gco-us-east-1"}
+        assert presign.kwargs == {
+            "region_name": "us-east-1",
+            "expires_in": 60,
+            "operation_name": "",
+        }
+
+    def test_kubeconfig_embeds_cluster_endpoint_ca_and_token_in_private_file(self):
+        eks = MagicMock()
+        eks.describe_cluster.return_value = {
+            "cluster": {
+                "endpoint": "https://ABCDEF0123456789.gr7.us-east-1.eks.amazonaws.com",
+                "certificateAuthority": {"data": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCg=="},
+            }
+        }
+        with (
+            patch.object(helm_handler.boto3, "client", return_value=eks) as mock_client,
+            patch.object(helm_handler, "get_eks_token", return_value="k8s-aws-v1.dG9rZW4"),
+        ):
+            path = helm_handler.configure_kubeconfig("gco-us-east-1", "us-east-1")
+
+        try:
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+            kubeconfig = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        finally:
+            os.remove(path)
+
+        mock_client.assert_called_once_with("eks", region_name="us-east-1")
+        eks.describe_cluster.assert_called_once_with(name="gco-us-east-1")
+        assert kubeconfig["apiVersion"] == "v1"
+        assert kubeconfig["kind"] == "Config"
+        assert kubeconfig["current-context"] == "gco-us-east-1"
+        assert kubeconfig["clusters"] == [
+            {
+                "name": "gco-us-east-1",
+                "cluster": {
+                    "server": "https://ABCDEF0123456789.gr7.us-east-1.eks.amazonaws.com",
+                    "certificate-authority-data": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCg==",
+                },
+            }
+        ]
+        assert kubeconfig["contexts"] == [
+            {
+                "name": "gco-us-east-1",
+                "context": {"cluster": "gco-us-east-1", "user": "gco-us-east-1"},
+            }
+        ]
+        assert kubeconfig["users"] == [
+            {"name": "gco-us-east-1", "user": {"token": "k8s-aws-v1.dG9rZW4"}}
+        ]
+
+    def test_kubeconfig_write_failure_removes_partial_credential_file(self):
+        eks = MagicMock()
+        eks.describe_cluster.return_value = {
+            "cluster": {
+                "endpoint": "https://example.test",
+                "certificateAuthority": {"data": "Q0E="},
+            }
+        }
+        created: list[str] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            created.append(path)
+            return fd, path
+
+        with (
+            patch.object(helm_handler.boto3, "client", return_value=eks),
+            patch.object(helm_handler, "get_eks_token", return_value="k8s-aws-v1.dG9rZW4"),
+            patch.object(helm_handler.tempfile, "mkstemp", side_effect=recording_mkstemp),
+            patch.object(helm_handler.yaml, "dump", side_effect=OSError("No space left on device")),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            helm_handler.configure_kubeconfig("gco-us-east-1", "us-east-1")
+
+        assert len(created) == 1
+        assert not os.path.exists(created[0])
+
+
+class TestRunHelmEnvironment:
+    """``run_helm`` layers caller-provided variables over the Lambda helm homes."""
+
+    def test_extra_env_is_merged_into_the_subprocess_environment(self):
+        with patch.object(
+            helm_handler.subprocess, "run", return_value=_completed(0, stdout="v3")
+        ) as mock_run:
+            code, stdout, _ = helm_handler.run_helm(
+                ["version"], "/tmp/kube", env={"HELM_REGISTRY_CONFIG": "/tmp/registry.json"}
+            )
+
+        assert (code, stdout) == (0, "v3")
+        env = mock_run.call_args.kwargs["env"]
+        assert env["HELM_REGISTRY_CONFIG"] == "/tmp/registry.json"
+        assert env["KUBECONFIG"] == "/tmp/kube"
+        assert env["HELM_CACHE_HOME"] == "/tmp/.helm/cache"
+        assert mock_run.call_args.args[0] == ["helm", "version"]
+
+    def test_explicit_command_timeout_overrides_environment_default(self, monkeypatch):
+        monkeypatch.setenv("HELM_CMD_TIMEOUT_SECONDS", "42")
+        with patch.object(helm_handler.subprocess, "run", return_value=_completed(0)) as mock_run:
+            helm_handler.run_helm(["version"], "/tmp/kube")
+            helm_handler.run_helm(["version"], "/tmp/kube", command_timeout_seconds=7)
+
+        assert mock_run.call_args_list[0].kwargs["timeout"] == 42
+        assert mock_run.call_args_list[1].kwargs["timeout"] == 7
+
+
+class TestClearStuckReleaseSecretDeletion:
+    """Secret deletion is per-secret best-effort and reports whether anything cleared."""
+
+    _STUCK = json.dumps({"info": {"status": "pending-upgrade"}})
+
+    def test_failed_secret_listing_clears_nothing(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, self._STUCK, "")),
+            patch.object(
+                helm_handler.subprocess,
+                "run",
+                return_value=_completed(1, stderr="Error from server (Forbidden)"),
+            ) as mock_run,
+        ):
+            assert helm_handler._clear_stuck_release("foo", "ns", "/tmp/kube") is False
+        assert mock_run.call_count == 1
+
+    def test_empty_secret_listing_clears_nothing(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, self._STUCK, "")),
+            patch.object(
+                helm_handler.subprocess, "run", return_value=_completed(0, stdout="  \n")
+            ) as mock_run,
+        ):
+            assert helm_handler._clear_stuck_release("foo", "ns", "/tmp/kube") is False
+        assert mock_run.call_count == 1
+
+    def test_timed_out_and_failed_deletes_do_not_stop_remaining_secrets(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, self._STUCK, "")),
+            patch.object(helm_handler.subprocess, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(
+                    0,
+                    stdout=(
+                        "sh.helm.release.v1.foo.v7 sh.helm.release.v1.foo.v8 "
+                        "sh.helm.release.v1.foo.v9"
+                    ),
+                ),
+                subprocess.TimeoutExpired(cmd=["kubectl"], timeout=15),
+                _completed(1, stderr="Error from server (Conflict)"),
+                _completed(0, stdout='secret "sh.helm.release.v1.foo.v9" deleted'),
+            ]
+            assert helm_handler._clear_stuck_release("foo", "ns", "/tmp/kube") is True
+
+        deleted = [call.args[0][5] for call in mock_run.call_args_list[1:]]
+        assert deleted == [
+            "sh.helm.release.v1.foo.v7",
+            "sh.helm.release.v1.foo.v8",
+            "sh.helm.release.v1.foo.v9",
+        ]
+
+    def test_all_deletes_failing_reports_nothing_cleared(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, self._STUCK, "")),
+            patch.object(helm_handler.subprocess, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0, stdout="sh.helm.release.v1.foo.v7"),
+                _completed(1, stderr="Error from server (Conflict)"),
+            ]
+            assert helm_handler._clear_stuck_release("foo", "ns", "/tmp/kube") is False
+
+    def test_non_object_status_payload_is_treated_as_not_stuck(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, "[1, 2]", "")),
+            patch.object(helm_handler.subprocess, "run") as mock_run,
+        ):
+            assert helm_handler._clear_stuck_release("foo", "ns", "/tmp/kube") is False
+        mock_run.assert_not_called()
+
+
+class TestAddHelmRepo:
+    """Repo registration needs both ``repo add --force-update`` and ``repo update``."""
+
+    def test_add_failure_short_circuits_before_update(self):
+        with patch.object(helm_handler, "run_helm", return_value=(1, "", "bad url")) as mock_run:
+            assert (
+                helm_handler.add_helm_repo("volcano-sh", "https://charts.test", "/tmp/kc") is False
+            )
+        mock_run.assert_called_once()
+        assert mock_run.call_args.args[0] == [
+            "repo",
+            "add",
+            "volcano-sh",
+            "https://charts.test",
+            "--force-update",
+        ]
+
+    def test_update_failure_is_reported(self):
+        with patch.object(helm_handler, "run_helm") as mock_run:
+            mock_run.side_effect = [(0, "", ""), (1, "", "index fetch failed")]
+            assert (
+                helm_handler.add_helm_repo("volcano-sh", "https://charts.test", "/tmp/kc") is False
+            )
+        assert mock_run.call_args_list[1].args[0] == ["repo", "update", "volcano-sh"]
+
+    def test_add_and_update_success(self):
+        with patch.object(helm_handler, "run_helm", return_value=(0, "", "")) as mock_run:
+            assert (
+                helm_handler.add_helm_repo("volcano-sh", "https://charts.test", "/tmp/kc") is True
+            )
+        assert mock_run.call_count == 2
+
+
+class TestInstallChartConfiguration:
+    """Chart config shapes the ``helm upgrade --install`` argv and values file."""
+
+    def _config(self, **overrides):
+        config = {
+            "repo_name": "volcano-sh",
+            "repo_url": "https://volcano-sh.github.io/helm-charts",
+            "chart": "volcano",
+            "version": "1.15.0",
+            "namespace": "volcano-system",
+            "create_namespace": True,
+            "values": {},
+        }
+        config.update(overrides)
+        return config
+
+    def test_value_overrides_are_deep_merged_into_the_values_file(self):
+        config = self._config(values={"controller": {"replicas": 1, "image": "a"}, "keep": True})
+        observed = {}
+
+        def run_helm(args, _kubeconfig):
+            with open(args[args.index("--values") + 1], encoding="utf-8") as values_file:
+                observed["values"] = yaml.safe_load(values_file)
+            return 0, "ok", ""
+
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", side_effect=run_helm),
+        ):
+            ok, _ = helm_handler.install_chart(
+                "volcano", config, "/tmp/kube", {"controller": {"replicas": 3}}
+            )
+
+        assert ok is True
+        assert observed["values"] == {
+            "controller": {"replicas": 3, "image": "a"},
+            "keep": True,
+        }
+        # The caller's config mapping is left untouched by the merge.
+        assert config["values"]["controller"]["replicas"] == 1
+
+    def test_repo_registration_failure_aborts_before_helm_upgrade(self):
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=False),
+            patch.object(helm_handler, "_clear_stuck_release") as mock_clear,
+            patch.object(helm_handler, "run_helm") as mock_run,
+        ):
+            ok, message = helm_handler.install_chart("volcano", self._config(), "/tmp/kube")
+
+        assert ok is False
+        assert message == "Failed to add repo volcano-sh"
+        mock_clear.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_oci_chart_skips_repo_registration_and_uses_full_reference(self):
+        config = self._config(
+            use_oci=True,
+            repo_url="oci://public.ecr.aws/aws-controllers-k8s",
+            chart="s3-chart",
+            version=None,
+            create_namespace=False,
+        )
+        with (
+            patch.object(helm_handler, "add_helm_repo") as mock_add,
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
+        ):
+            ok, _ = helm_handler.install_chart("ack-s3", config, "/tmp/kube")
+
+        assert ok is True
+        mock_add.assert_not_called()
+        args = mock_run.call_args.args[0]
+        assert args[:4] == [
+            "upgrade",
+            "--install",
+            "ack-s3",
+            "oci://public.ecr.aws/aws-controllers-k8s/s3-chart",
+        ]
+        assert "--version" not in args
+        assert "--create-namespace" not in args
+        assert "--values" not in args
+
+    def test_values_file_open_failure_closes_descriptor_and_removes_file(self):
+        config = self._config(values={"apiToken": "sensitive-test-value"})
+        created: list[str] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            created.append(path)
+            return fd, path
+
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler.tempfile, "mkstemp", side_effect=recording_mkstemp),
+            patch.object(helm_handler.os, "fdopen", side_effect=OSError("EMFILE")),
+            patch.object(helm_handler, "run_helm") as mock_run,
+            pytest.raises(OSError, match="EMFILE"),
+        ):
+            helm_handler.install_chart("volcano", config, "/tmp/kube")
+
+        mock_run.assert_not_called()
+        assert len(created) == 1
+        assert not os.path.exists(created[0])
+
+    def test_second_failure_after_clearing_stuck_state_is_reported(self):
+        stuck_err = "another operation (install/upgrade/rollback) is in progress"
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release") as mock_clear,
+            patch.object(helm_handler, "run_helm") as mock_run,
+        ):
+            mock_run.side_effect = [
+                (1, "", stuck_err),
+                (1, "", "Error: UPGRADE FAILED: context deadline exceeded"),
+            ]
+            ok, message = helm_handler.install_chart("volcano", self._config(), "/tmp/kube")
+
+        assert ok is False
+        assert (
+            message == "Failed to install volcano: Error: UPGRADE FAILED: context deadline exceeded"
+        )
+        assert mock_clear.call_count == 2
+
+
+class TestFinalizerStripTimeouts:
+    """Finalizer removal reports bounded-timeout failures and skips unparsable lines."""
+
+    def test_listing_timeout_is_reported(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+        ):
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["clusterqueues.kueue.x-k8s.io"], namespaced=False
+            )
+        assert error == (
+            "Timed out listing clusterqueues.kueue.x-k8s.io instances for finalizer removal"
+        )
+
+    def test_patch_timeout_is_reported_with_the_object(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+            ]
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["clusterqueues.kueue.x-k8s.io"], namespaced=False
+            )
+        assert error == (
+            "Timed out removing finalizers from clusterqueue.kueue.x-k8s.io/gco-cluster-queue"
+        )
+
+    def test_namespaced_lines_without_a_name_are_skipped(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="gco-jobs,\nbare-line\ngco-jobs,default-queue\n"),
+                _completed(0),
+            ]
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["localqueues.kueue.x-k8s.io"], namespaced=True
+            )
+        assert error is None
+        assert mock_run.call_count == 2
+        patch_command = mock_run.call_args_list[1].args[0]
+        assert "default-queue" in patch_command
+
+    def test_already_gone_object_during_patch_is_not_an_error(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                _completed(1, stderr='Error from server (NotFound): "gco-cluster-queue" not found'),
+            ]
+            error = helm_handler._strip_custom_resource_finalizers(
+                "/tmp/kc", ["clusterqueues.kueue.x-k8s.io"], namespaced=False
+            )
+        assert error is None
+
+
+class TestCustomResourceDeleteTimeouts:
+    """Every bounded kubectl step in the pre-uninstall purge fails loudly on timeout."""
+
+    def test_discovery_timeout_blocks_cleanup(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=10),
+        ):
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is False
+        assert message == "Timed out discovering kueue.x-k8s.io custom resources"
+
+    def test_delete_wait_timeout_strips_finalizers_and_retries(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout="clusterqueues.kueue.x-k8s.io\n"),
+                subprocess.TimeoutExpired(cmd=["kubectl"], timeout=55),
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                _completed(0),
+                _completed(0),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is True
+        assert "1 kueue custom resource type" in message
+        assert mock_run.call_count == 6
+
+    def test_retry_timeout_after_finalizer_removal_fails_teardown(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout="clusterqueues.kueue.x-k8s.io\n"),
+                _completed(1, stderr="timed out waiting for the condition"),
+                _completed(0, stdout="clusterqueue.kueue.x-k8s.io/gco-cluster-queue\n"),
+                _completed(0),
+                subprocess.TimeoutExpired(cmd=["kubectl"], timeout=55),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is False
+        assert message == (
+            "Timed out deleting cluster-scoped kueue custom resources even after finalizer removal"
+        )
+
+    def test_retry_failure_after_finalizer_removal_fails_teardown(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="localqueues.kueue.x-k8s.io\n"),
+                _completed(0, stdout=""),
+                _completed(1, stderr="timed out waiting for the condition"),
+                _completed(0, stdout="gco-jobs,default-queue\n"),
+                _completed(0),
+                _completed(1, stderr="Error from server (Forbidden): cannot delete"),
+            ]
+            success, message = helm_handler._delete_chart_custom_resources("kueue", "/tmp/kc")
+        assert success is False
+        assert message == (
+            "Failed to delete namespaced kueue custom resources even after finalizer removal: "
+            "Error from server (Forbidden): cannot delete"
+        )
+
+
+class TestHealthMonitorQuiesceTimeouts:
+    """Scale and wait steps surface timeouts and non-absence wait failures."""
+
+    def test_scale_timeout(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+        ):
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+        assert (success, message) == (False, "Timed out scaling health-monitor deployment to zero")
+
+    def test_wait_timeout(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                subprocess.TimeoutExpired(cmd=["kubectl"], timeout=135),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+        assert (success, message) == (
+            False,
+            "Timed out waiting for health-monitor pods to terminate",
+        )
+
+    def test_wait_failure_other_than_absence_is_fatal(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(1, stderr="error: timed out waiting for the condition on pods/hm-1"),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+        assert success is False
+        assert message == (
+            "Failed waiting for health-monitor pods: "
+            "error: timed out waiting for the condition on pods/hm-1"
+        )
+
+
+class TestRunKubectlFailures:
+    """``run_kubectl`` mirrors ``run_helm``'s timeout contract and stderr logging."""
+
+    def test_timeout_maps_to_typed_failure_tuple(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=120),
+        ):
+            code, stdout, stderr = helm_handler.run_kubectl(["get", "pods"], "/tmp/kc")
+        assert (code, stdout) == (-1, "")
+        assert stderr == "timeout: kubectl command exceeded 120s"
+
+    def test_stderr_is_logged_when_stdout_is_empty(self, caplog):
+        with (
+            patch.object(
+                helm_handler.subprocess,
+                "run",
+                return_value=_completed(1, stdout="", stderr="Error from server (Forbidden)"),
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            code, stdout, stderr = helm_handler.run_kubectl(["get", "pods"], "/tmp/kc")
+
+        assert (code, stdout, stderr) == (1, "", "Error from server (Forbidden)")
+        assert "stderr: Error from server (Forbidden)" in caplog.text
+        assert "stdout:" not in caplog.text
+
+    def test_log_output_false_suppresses_both_streams(self, caplog):
+        with (
+            patch.object(
+                helm_handler.subprocess,
+                "run",
+                return_value=_completed(0, stdout="{}", stderr="warning: deprecated"),
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            helm_handler.run_kubectl(["get", "pods"], "/tmp/kc", log_output=False)
+
+        assert "stdout:" not in caplog.text
+        assert "stderr:" not in caplog.text
+
+
+class TestReleaseConfigurationParsing:
+    """``_release_configurations`` rejects malformed payloads with precise errors."""
+
+    _DEFAULTS = {
+        "charts": {
+            "keda": {"chart": "keda", "version": "2.17.1", "namespace": "keda"},
+            "kueue": {"chart": "kueue", "version": "0.14.0", "namespace": "kueue-system"},
+        }
+    }
+
+    def test_null_charts_and_enabled_charts_default_to_empty(self):
+        with patch.object(helm_handler, "load_charts_config", return_value=self._DEFAULTS):
+            configurations, enabled = helm_handler._release_configurations(
+                {"Charts": None, "EnabledCharts": None}
+            )
+        assert [release for release, _ in configurations] == ["keda", "kueue"]
+        assert enabled == set()
+
+    def test_runtime_only_release_appends_after_charts_yaml_order(self):
+        with patch.object(helm_handler, "load_charts_config", return_value=self._DEFAULTS):
+            configurations, enabled = helm_handler._release_configurations(
+                {
+                    "Charts": {"extra": {"chart": "extra", "version": "1.0.0"}},
+                    "EnabledCharts": ["extra"],
+                }
+            )
+        assert [release for release, _ in configurations] == ["keda", "kueue", "extra"]
+        assert dict(configurations)["extra"] == {"chart": "extra", "version": "1.0.0"}
+        assert enabled == {"extra"}
+
+    @pytest.mark.parametrize(
+        ("charts_config", "event", "message"),
+        [
+            ({"charts": ["keda"]}, {}, "charts.yaml field 'charts' must be a mapping"),
+            (_DEFAULTS, {"Charts": "keda"}, "Charts must be a mapping"),
+            (_DEFAULTS, {"EnabledCharts": "keda"}, "EnabledCharts must be a list"),
+            (_DEFAULTS, {"EnabledCharts": [""]}, "EnabledCharts must be a list"),
+            (_DEFAULTS, {"EnabledCharts": [42]}, "EnabledCharts must be a list"),
+            (
+                {"charts": {"keda": "not-a-mapping"}},
+                {},
+                "charts.yaml contains an invalid release configuration",
+            ),
+            (
+                {"charts": {"": {"chart": "keda"}}},
+                {},
+                "charts.yaml contains an invalid release configuration",
+            ),
+            (_DEFAULTS, {"Charts": {"keda": "bad"}}, "Charts contains an invalid release override"),
+            (_DEFAULTS, {"Charts": {"": {}}}, "Charts contains an invalid release override"),
+        ],
+    )
+    def test_malformed_inputs_are_rejected(self, charts_config, event, message):
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=charts_config),
+            pytest.raises(RuntimeError, match=message),
+        ):
+            helm_handler._release_configurations(event)
+
+    def test_unknown_enabled_releases_are_named_up_to_five(self):
+        unknown = ["u1", "u2", "u3", "u4", "u5", "u6"]
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._DEFAULTS),
+            pytest.raises(
+                RuntimeError, match="EnabledCharts has no chart configuration for"
+            ) as exc,
+        ):
+            helm_handler._release_configurations({"EnabledCharts": ["keda", *unknown]})
+        text = str(exc.value)
+        assert "u1, u2, u3, u4, u5" in text
+        assert "u6" not in text
+
+
+class TestReleaseMetadata:
+    """Every validated release needs an exact chart, version, and namespace."""
+
+    def test_numeric_version_is_stringified(self):
+        assert helm_handler._release_metadata(
+            "demo", {"chart": "demo", "version": 2, "namespace": "demo"}
+        ) == ("demo", "2", "demo")
+
+    def test_namespace_defaults_to_default(self):
+        assert helm_handler._release_metadata("demo", {"chart": "demo", "version": "1.0"}) == (
+            "demo",
+            "1.0",
+            "default",
+        )
+
+    @pytest.mark.parametrize(
+        ("config", "message"),
+        [
+            ({"version": "1.0"}, "has no valid chart name"),
+            ({"chart": "", "version": "1.0"}, "has no valid chart name"),
+            ({"chart": "demo"}, "has no configured chart version"),
+            ({"chart": "demo", "version": ""}, "has no configured chart version"),
+            ({"chart": "demo", "version": "1.0", "namespace": ""}, "has no valid namespace"),
+            ({"chart": "demo", "version": "1.0", "namespace": 7}, "has no valid namespace"),
+        ],
+    )
+    def test_missing_or_invalid_fields_are_rejected(self, config, message):
+        with pytest.raises(RuntimeError, match=f"release 'demo' {message}"):
+            helm_handler._release_metadata("demo", config)
+
+
+class TestPayloadParsingHelpers:
+    """JSON/YAML payload helpers fail with bounded, descriptive errors."""
+
+    @pytest.mark.parametrize(
+        ("output", "message"),
+        [
+            ("not json", "helm status returned invalid JSON: Expecting value"),
+            (None, "helm status returned invalid JSON: the JSON object must be str"),
+            ("[1, 2]", "helm status returned list, expected object"),
+        ],
+    )
+    def test_parse_json_object_rejects_invalid_or_non_object_payloads(self, output, message):
+        with pytest.raises(RuntimeError, match=message):
+            helm_handler._parse_json_object(output, "helm status")
+
+    def test_parse_json_object_returns_mapping(self):
+        assert helm_handler._parse_json_object('{"a": 1}', "x") == {"a": 1}
+
+    def test_flatten_skips_null_documents_and_expands_nested_lists(self):
+        config_map = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}}
+        secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "b"}}
+        documents = [
+            None,
+            {"kind": "List", "items": [config_map, {"kind": "List", "items": [secret]}]},
+        ]
+        assert helm_handler._flatten_resources(documents, "manifest") == [config_map, secret]
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            (["a string document"], "manifest contains a non-object document"),
+            (
+                {"kind": "List", "items": "nope"},
+                "manifest contains kind List without an items list",
+            ),
+        ],
+    )
+    def test_flatten_rejects_non_object_documents_and_malformed_lists(self, value, message):
+        with pytest.raises(RuntimeError, match=message):
+            helm_handler._flatten_resources(value, "manifest")
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            {"kind": "ConfigMap", "metadata": {"name": "a"}},
+            {"apiVersion": "v1", "metadata": {"name": "a"}},
+            {"apiVersion": "v1", "kind": "", "metadata": {"name": "a"}},
+            {"apiVersion": "v1", "kind": "ConfigMap"},
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": "not-a-mapping"},
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": ""}},
+        ],
+        ids=["no-apiVersion", "no-kind", "empty-kind", "no-metadata", "bad-metadata", "empty-name"],
+    )
+    def test_core_identity_requires_api_version_kind_and_name(self, resource):
+        with pytest.raises(RuntimeError, match="object without apiVersion/kind/name"):
+            helm_handler._resource_core_identity(resource, "manifest")
+
+
+class TestIdentityComparisonDetails:
+    """Identity comparison names surplus objects and honours release-namespace defaults."""
+
+    def test_surplus_live_object_is_reported_as_unexpected_only(self):
+        expected = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}}
+        surplus = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "leaked"}}
+        with pytest.raises(
+            RuntimeError, match="rendered 1 resources but kubectl returned 2"
+        ) as exc:
+            helm_handler._compare_resource_identities([expected], [expected, surplus], "r", "ns")
+        text = str(exc.value)
+        assert "unexpected=v1/Secret leaked" in text
+        assert "missing=" not in text
+
+    def test_namespace_less_manifest_object_matches_release_namespace_return(self):
+        expected = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}}
+        live = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "a", "namespace": "demo-system"},
+        }
+        helm_handler._compare_resource_identities([expected], [live], "r", "demo-system")
+
+
+class TestReadinessEdgeCases:
+    """Readiness gates tolerate odd status shapes and report each failure precisely."""
+
+    def test_condition_lookup_returns_none_for_non_list_or_missing_conditions(self):
+        assert helm_handler._condition_status({"status": {"conditions": "bad"}}, "Ready") is None
+        assert (
+            helm_handler._condition_status(
+                {"status": {"conditions": [{"type": "Progressing", "status": "True"}]}},
+                "Available",
+            )
+            is None
+        )
+        assert helm_handler._condition_status({"status": None}, "Ready") is None
+
+    def test_non_mapping_status_is_ignored_for_generic_kinds(self):
+        helm_handler._validate_resource_readiness(
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}, "status": "odd"}
+        )
+
+    def test_non_list_conditions_are_ignored_for_generic_kinds(self):
+        helm_handler._validate_resource_readiness(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": "a"},
+                "status": {"conditions": {"type": "Ready", "status": "False"}},
+            }
+        )
+
+    def _deployment(self, **status):
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "ctl", "namespace": "ns", "generation": 1},
+            "spec": {"replicas": 1},
+            "status": {
+                "observedGeneration": 1,
+                "replicas": 1,
+                "updatedReplicas": 1,
+                "readyReplicas": 1,
+                "availableReplicas": 1,
+                **status,
+            },
+        }
+
+    def test_converged_deployment_without_available_condition_fails(self):
+        with pytest.raises(
+            RuntimeError, match="apps/v1/Deployment ns/ctl does not report Available=True"
+        ):
+            helm_handler._validate_resource_readiness(self._deployment())
+
+    def test_non_integer_desired_replicas_is_invalid(self):
+        deployment = self._deployment(conditions=[{"type": "Available", "status": "True"}])
+        deployment["spec"]["replicas"] = "1"
+        with pytest.raises(RuntimeError, match="invalid desired/status replica data"):
+            helm_handler._validate_resource_readiness(deployment)
+
+    def test_daemonset_with_non_integer_desired_counter_is_invalid(self):
+        daemonset = {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {"name": "agent", "namespace": "ns", "generation": 1},
+            "status": {"observedGeneration": 1, "desiredNumberScheduled": "2"},
+        }
+        with pytest.raises(RuntimeError, match="invalid desiredNumberScheduled"):
+            helm_handler._validate_resource_readiness(daemonset)
+
+
+class TestServiceEndpointQuery:
+    """EndpointSlice discovery skips malformed entries and surfaces query failures."""
+
+    def _query(self, code, stdout="", stderr=""):
+        return patch.object(helm_handler, "run_kubectl", return_value=(code, stdout, stderr))
+
+    def _call(self):
+        return helm_handler._service_has_ready_endpoint(
+            "demo-webhook",
+            "demo-system",
+            "v1/Service demo-system/demo-webhook",
+            "/tmp/kc",
+            time.monotonic() + 60,
+        )
+
+    def test_timed_out_query_is_systemic(self):
+        with (
+            self._query(-1, stderr="timeout: kubectl command exceeded 120s"),
+            pytest.raises(helm_handler._ValidationTimeout, match="EndpointSlice query timed out"),
+        ):
+            self._call()
+
+    def test_failed_query_names_the_service(self):
+        with (
+            self._query(1, stderr="Error from server (Forbidden): endpointslices is forbidden"),
+            pytest.raises(
+                RuntimeError,
+                match=r"demo-system/demo-webhook EndpointSlice query failed: Error from server",
+            ),
+        ):
+            self._call()
+
+    @staticmethod
+    def _malformed_slices():
+        return [
+            "not-a-slice",
+            {
+                "metadata": {"deletionTimestamp": "2026-09-01T00:00:00Z"},
+                "endpoints": [{"conditions": {"ready": True}}],
+            },
+            {"endpoints": "not-a-list"},
+            {"endpoints": ["not-an-endpoint", {"conditions": "not-a-mapping"}]},
+        ]
+
+    def test_malformed_and_terminating_slices_are_skipped(self):
+        payload = {"kind": "EndpointSliceList", "items": self._malformed_slices()}
+        with self._query(0, stdout=json.dumps(payload)):
+            assert self._call() is False
+
+    def test_ready_endpoint_after_malformed_entries_is_found(self):
+        ready_slice = {"endpoints": [{"conditions": {"ready": "True", "terminating": False}}]}
+        payload = {"kind": "EndpointSliceList", "items": [*self._malformed_slices(), ready_slice]}
+        with self._query(0, stdout=json.dumps(payload)):
+            assert self._call() is True
+
+    def test_single_endpoint_slice_object_is_accepted_without_items(self):
+        payload = {
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSlice",
+            "metadata": {"name": "demo-webhook-abc"},
+            "endpoints": [{"conditions": {"ready": True}}],
+        }
+        with self._query(0, stdout=json.dumps(payload)):
+            assert self._call() is True
+
+    def test_non_service_or_selectorless_resources_skip_endpoint_checks(self):
+        with patch.object(helm_handler, "run_kubectl") as mock_kubectl:
+            helm_handler._validate_service_endpoints(
+                {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}},
+                "/tmp/kc",
+                "ns",
+                time.monotonic() + 60,
+            )
+            helm_handler._validate_service_endpoints(
+                {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "a"}, "spec": {}},
+                "/tmp/kc",
+                "ns",
+                time.monotonic() + 60,
+            )
+        mock_kubectl.assert_not_called()
+
+
+class TestValidationFileCleanup:
+    """Validation material removal tolerates only an already-absent path."""
+
+    def test_missing_file_is_ignored(self, tmp_path):
+        helm_handler._remove_validation_file(str(tmp_path / "already-gone.yaml"))
+
+    def test_existing_file_is_removed(self, tmp_path):
+        target = tmp_path / "material.yaml"
+        target.write_text("secret", encoding="utf-8")
+        helm_handler._remove_validation_file(str(target))
+        assert not target.exists()
+
+    def test_directory_removal_error_propagates(self, tmp_path):
+        with pytest.raises(OSError):
+            helm_handler._remove_validation_file(str(tmp_path))
+
+
+class TestGatewayCrdBundleRejections:
+    """Pinned bundle verification rejects every deviation from the recorded inventory."""
+
+    @staticmethod
+    def _crd(name="widgets.example.test"):
+        return {
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": name},
+        }
+
+    @staticmethod
+    def _bundle(body, *, object_count=1, crd_count=1):
+        return helm_handler._PinnedManifestBundle(
+            name="test-gateway-bundle",
+            url="https://example.test/test-gateway-bundle.yaml",
+            size=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+            object_count=object_count,
+            crd_count=crd_count,
+        )
+
+    @staticmethod
+    def _pool(body, status=200):
+        response = MagicMock()
+        response.status = status
+        response.data = body
+        pool = MagicMock()
+        pool.request.return_value = response
+        return pool, response
+
+    def test_non_byte_body_is_rejected_and_connection_released(self):
+        body = yaml.safe_dump(self._crd()).encode("utf-8")
+        bundle = self._bundle(body)
+        pool, response = self._pool("text body, not bytes")
+        with (
+            patch.object(helm_handler.urllib3, "PoolManager", return_value=pool),
+            pytest.raises(RuntimeError, match="returned a non-byte body"),
+            helm_handler._verified_gateway_crd_bundle(bundle),
+        ):
+            pytest.fail("invalid bundle must not be yielded")
+        response.release_conn.assert_called_once_with()
+
+    def test_transport_failure_propagates_without_a_connection_to_release(self):
+        body = yaml.safe_dump(self._crd()).encode("utf-8")
+        bundle = self._bundle(body)
+        pool = MagicMock()
+        pool.request.side_effect = helm_handler.urllib3.exceptions.MaxRetryError(
+            pool, bundle.url, reason="too many redirects"
+        )
+        with (
+            patch.object(helm_handler.urllib3, "PoolManager", return_value=pool),
+            pytest.raises(helm_handler.urllib3.exceptions.MaxRetryError),
+            helm_handler._verified_gateway_crd_bundle(bundle),
+        ):
+            pytest.fail("unreachable bundle must not be yielded")
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"\xff\xfe\xfd not utf-8", b"apiVersion: [unclosed"],
+        ids=["not-utf8", "not-yaml"],
+    )
+    def test_undecodable_body_is_rejected_even_when_hash_matches(self, body):
+        bundle = self._bundle(body)
+        pool, _ = self._pool(body)
+        with (
+            patch.object(helm_handler.urllib3, "PoolManager", return_value=pool),
+            pytest.raises(RuntimeError, match="is not valid UTF-8 YAML"),
+            helm_handler._verified_gateway_crd_bundle(bundle),
+        ):
+            pytest.fail("invalid bundle must not be yielded")
+
+    @pytest.mark.parametrize(
+        ("documents", "object_count", "crd_count", "message"),
+        [
+            ([_crd.__func__()], 2, 1, r"inventory mismatch: objects=1/2, CRDs=1/1"),
+            ([_crd.__func__()], 1, 2, r"inventory mismatch: objects=1/1, CRDs=1/2"),
+            ([_crd.__func__(), _crd.__func__()], 2, 2, "contains duplicate object identities"),
+        ],
+        ids=["object-count", "crd-count", "duplicate"],
+    )
+    def test_inventory_drift_is_rejected(self, documents, object_count, crd_count, message):
+        body = yaml.safe_dump_all(documents).encode("utf-8")
+        bundle = self._bundle(body, object_count=object_count, crd_count=crd_count)
+        pool, _ = self._pool(body)
+        with (
+            patch.object(helm_handler.urllib3, "PoolManager", return_value=pool),
+            pytest.raises(RuntimeError, match=message),
+            helm_handler._verified_gateway_crd_bundle(bundle),
+        ):
+            pytest.fail("invalid bundle must not be yielded")
+
+    def _patched_bundle(self):
+        body = yaml.safe_dump(self._crd()).encode("utf-8")
+        bundle = self._bundle(body)
+
+        @helm_handler.contextlib.contextmanager
+        def verified(_bundle):
+            yield "/tmp/test-gateway-bundle.yaml", [self._crd()]
+
+        return bundle, verified
+
+    def test_apply_failure_names_the_bundle(self):
+        bundle, verified = self._patched_bundle()
+        with (
+            patch.object(helm_handler, "PINNED_GATEWAY_CRD_BUNDLES", (bundle,)),
+            patch.object(helm_handler, "_verified_gateway_crd_bundle", side_effect=verified),
+            patch.object(
+                helm_handler, "run_kubectl", return_value=(1, "", "conflict: field manager")
+            ),
+            pytest.raises(RuntimeError, match="failed to apply test-gateway-bundle: conflict"),
+        ):
+            helm_handler._apply_gateway_crds("/tmp/kc")
+
+    def test_live_validation_timeout_is_systemic(self):
+        bundle, verified = self._patched_bundle()
+        with (
+            patch.object(helm_handler, "PINNED_GATEWAY_CRD_BUNDLES", (bundle,)),
+            patch.object(helm_handler, "_verified_gateway_crd_bundle", side_effect=verified),
+            patch.object(helm_handler, "run_kubectl", return_value=(-1, "", "timeout")),
+            pytest.raises(
+                helm_handler._ValidationTimeout,
+                match="kubectl get timed out for test-gateway-bundle",
+            ),
+        ):
+            helm_handler._validate_gateway_crds("/tmp/kc", time.monotonic() + 60)
+
+    def test_live_validation_retrieval_failure_names_the_bundle(self):
+        bundle, verified = self._patched_bundle()
+        with (
+            patch.object(helm_handler, "PINNED_GATEWAY_CRD_BUNDLES", (bundle,)),
+            patch.object(helm_handler, "_verified_gateway_crd_bundle", side_effect=verified),
+            patch.object(helm_handler, "run_kubectl", return_value=(1, "", "Forbidden")),
+            pytest.raises(
+                RuntimeError, match="kubectl could not retrieve test-gateway-bundle: Forbidden"
+            ),
+        ):
+            helm_handler._validate_gateway_crds("/tmp/kc", time.monotonic() + 60)
+
+
+class TestEnabledReleaseValidationFailures:
+    """Each helm/kubectl step of an enabled-release check fails with its own diagnosis."""
+
+    RELEASE = "demo-release"
+    CHART = "demo-chart"
+    VERSION = "1.2.3"
+    NAMESPACE = "demo-system"
+
+    @staticmethod
+    def _deployment_manifest():
+        return yaml.safe_dump(
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "demo-controller", "namespace": "demo-system"},
+                "spec": {"replicas": 1},
+            }
+        )
+
+    def _helm(self, *, list_result=None, manifest_result=None):
+        default_list = (
+            0,
+            json.dumps(
+                [
+                    {
+                        "name": self.RELEASE,
+                        "namespace": self.NAMESPACE,
+                        "status": "deployed",
+                        "chart": f"{self.CHART}-{self.VERSION}",
+                    }
+                ]
+            ),
+            "",
+        )
+        default_manifest = (0, self._deployment_manifest(), "")
+
+        def _run(args, _kubeconfig, **_kwargs):
+            if args[0] == "status":
+                return 0, json.dumps({"info": {"status": "deployed"}}), ""
+            if args[0] == "list":
+                return list_result or default_list
+            if args[:2] == ["get", "manifest"]:
+                return manifest_result or default_manifest
+            raise AssertionError(f"unexpected helm invocation: {args}")
+
+        return _run
+
+    def _validate(self):
+        return helm_handler._validate_enabled_release(
+            self.RELEASE,
+            self.CHART,
+            self.VERSION,
+            self.NAMESPACE,
+            "/tmp/kubeconfig",
+            time.monotonic() + 60,
+        )
+
+    @pytest.mark.parametrize(
+        ("list_result", "expected", "message"),
+        [
+            ((-1, "", "timeout"), helm_handler._ValidationTimeout, "helm list timed out"),
+            ((1, "", "storage backend unavailable"), RuntimeError, "helm list failed: storage"),
+            ((0, "not json", ""), RuntimeError, "helm list for demo-release returned invalid JSON"),
+            ((0, None, ""), RuntimeError, "helm list for demo-release returned invalid JSON"),
+            ((0, "[]", ""), RuntimeError, "helm list returned 0 entries, expected exactly one"),
+            (
+                (0, "[{}, {}]", ""),
+                RuntimeError,
+                "helm list returned 2 entries, expected exactly one",
+            ),
+            ((0, '{"name": "x"}', ""), RuntimeError, "returned non-list entries"),
+            ((0, "[1]", ""), RuntimeError, "helm list returned 1 entries, expected exactly one"),
+        ],
+        ids=[
+            "timeout",
+            "non-zero",
+            "invalid-json",
+            "none-stdout",
+            "empty",
+            "two-entries",
+            "object",
+            "non-object-entry",
+        ],
+    )
+    def test_helm_list_failures(self, list_result, expected, message):
+        with (
+            patch.object(helm_handler, "run_helm", side_effect=self._helm(list_result=list_result)),
+            patch.object(helm_handler, "run_kubectl") as mock_kubectl,
+            pytest.raises(expected, match=message),
+        ):
+            self._validate()
+        mock_kubectl.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("manifest_result", "expected", "message"),
+        [
+            ((-1, "", "timeout"), helm_handler._ValidationTimeout, "helm get manifest timed out"),
+            ((1, "", "release: not found"), RuntimeError, "helm get manifest failed: release"),
+            ((0, "  \n\n", ""), RuntimeError, "helm get manifest returned empty output"),
+            ((0, "apiVersion: [unclosed", ""), RuntimeError, "helm manifest is invalid YAML"),
+            ((0, "---\n", ""), RuntimeError, "helm get manifest yielded no Kubernetes objects"),
+        ],
+        ids=["timeout", "non-zero", "empty", "invalid-yaml", "no-objects"],
+    )
+    def test_helm_get_manifest_failures(self, manifest_result, expected, message):
+        with (
+            patch.object(
+                helm_handler, "run_helm", side_effect=self._helm(manifest_result=manifest_result)
+            ),
+            patch.object(helm_handler, "run_kubectl") as mock_kubectl,
+            pytest.raises(expected, match=message),
+        ):
+            self._validate()
+        mock_kubectl.assert_not_called()
+
+    def test_kubectl_get_timeout_is_systemic(self):
+        with (
+            patch.object(helm_handler, "run_helm", side_effect=self._helm()),
+            patch.object(helm_handler, "run_kubectl", return_value=(-1, "", "timeout")),
+            pytest.raises(
+                helm_handler._ValidationTimeout,
+                match="kubectl get timed out for release 'demo-release'",
+            ),
+        ):
+            self._validate()
+
+    def test_disabled_release_status_timeout_is_systemic(self):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(-1, "", "timeout")),
+            pytest.raises(
+                helm_handler._ValidationTimeout,
+                match="helm status timed out for disabled release 'demo-release'",
+            ),
+        ):
+            helm_handler._validate_disabled_release(
+                self.RELEASE, self.NAMESPACE, "/tmp/kubeconfig", time.monotonic() + 60
+            )
+
+
+class TestValidateReleasesAggregation:
+    """``validate_releases`` folds Gateway CRD evidence in and bounds its failure summary."""
+
+    LBC = helm_handler.LBC_CHART_NAME
+
+    def _charts(self, names):
+        return {
+            "charts": {
+                name: {"chart": name, "version": "1.0.0", "namespace": f"{name}-ns"}
+                for name in names
+            }
+        }
+
+    def test_lbc_enabled_adds_gateway_crd_evidence_to_resource_counts(self):
+        crd_evidence = [
+            {"bundle": "gateway-api-standard", "object_count": 12, "crd_count": 10, "sha256": "a"},
+            {"bundle": "aws-lbc-gateway", "object_count": 3, "crd_count": 3, "sha256": "b"},
+        ]
+        with (
+            patch.object(
+                helm_handler, "load_charts_config", return_value=self._charts([self.LBC, "keda"])
+            ),
+            patch.object(
+                helm_handler, "_validate_gateway_crds", return_value=crd_evidence
+            ) as mock_crds,
+            patch.object(helm_handler, "_validate_enabled_release", return_value=7),
+            patch.object(helm_handler, "_validate_disabled_release") as mock_disabled,
+        ):
+            evidence = helm_handler.validate_releases(
+                {"EnabledCharts": [self.LBC], "Charts": {}}, "/tmp/kc"
+            )
+
+        mock_crds.assert_called_once()
+        assert mock_crds.call_args.args[0] == "/tmp/kc"
+        mock_disabled.assert_called_once()
+        assert evidence["gateway_crd_bundles"] == crd_evidence
+        assert evidence["expected_resource_count"] == 15 + 7
+        assert evidence["validated_resource_count"] == 15 + 7
+        assert evidence["enabled_release_count"] == 1
+        assert evidence["disabled_release_count"] == 1
+
+    def test_gateway_crd_timeout_propagates_unchanged(self):
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts([self.LBC])),
+            patch.object(
+                helm_handler,
+                "_validate_gateway_crds",
+                side_effect=helm_handler._ValidationTimeout("kubectl get timed out"),
+            ),
+            patch.object(helm_handler, "_validate_enabled_release") as mock_enabled,
+            pytest.raises(helm_handler._ValidationTimeout, match="kubectl get timed out"),
+        ):
+            helm_handler.validate_releases({"EnabledCharts": [self.LBC], "Charts": {}}, "/tmp/kc")
+        mock_enabled.assert_not_called()
+
+    def test_gateway_crd_drift_fails_validation_before_release_checks(self):
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts([self.LBC])),
+            patch.object(
+                helm_handler,
+                "_validate_gateway_crds",
+                side_effect=RuntimeError("gateway-api-standard SHA-256 mismatch"),
+            ),
+            patch.object(helm_handler, "_validate_enabled_release") as mock_enabled,
+            pytest.raises(
+                RuntimeError,
+                match="pinned Gateway CRD validation failed: gateway-api-standard SHA-256 mismatch",
+            ),
+        ):
+            helm_handler.validate_releases({"EnabledCharts": [self.LBC], "Charts": {}}, "/tmp/kc")
+        mock_enabled.assert_not_called()
+
+    def test_failure_summary_shows_eight_releases_and_counts_the_rest(self):
+        names = [f"release-{index}" for index in range(10)]
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts(names)),
+            patch.object(
+                helm_handler,
+                "_validate_enabled_release",
+                side_effect=RuntimeError("helm status is 'failed', expected exactly 'deployed'"),
+            ),
+            pytest.raises(RuntimeError) as exc,
+        ):
+            helm_handler.validate_releases({"EnabledCharts": names, "Charts": {}}, "/tmp/kc")
+
+        text = str(exc.value)
+        assert text.startswith("validated 0/10 releases; ")
+        assert "release-7: helm status is 'failed'" in text
+        assert "release-8" not in text
+        assert text.endswith("... and 2 more failure(s)")
+
+
+class TestStaleWebhookCleanup:
+    """Down webhooks are removed only when their backing Service has no endpoints."""
+
+    def test_removes_only_webhooks_whose_service_has_no_endpoints(self, caplog):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
+            patch.object(helm_handler.subprocess, "run") as mock_run,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_run.side_effect = [
+                # list: a blank line in the middle is skipped
+                _completed(0, stdout="keda-admission\n\ncert-manager-webhook\norphan\nno-slash\n"),
+                # keda-admission: healthy endpoints
+                _completed(0, stdout="keda/keda-admission-webhooks"),
+                _completed(0, stdout="10.0.1.5 10.0.2.6"),
+                # cert-manager-webhook: no endpoints -> deleted
+                _completed(0, stdout="cert-manager/cert-manager-webhook"),
+                _completed(0, stdout=""),
+                _completed(0, stdout='mutatingwebhookconfiguration "cert-manager-webhook" deleted'),
+                # orphan: lookup fails
+                _completed(1, stderr="Error from server (NotFound)"),
+                # no-slash: jsonpath yielded nothing usable
+                _completed(0, stdout=""),
+            ]
+            helm_handler._cleanup_stale_webhooks("/tmp/kc")
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        assert commands[0][:3] == ["kubectl", "get", "mutatingwebhookconfigurations"]
+        assert [command for command in commands if command[1] == "delete"] == [
+            ["kubectl", "delete", "mutatingwebhookconfiguration", "cert-manager-webhook"]
+        ]
+        endpoint_lookups = [command for command in commands if command[2] == "endpoints"]
+        assert [(command[3], command[5]) for command in endpoint_lookups] == [
+            ("keda-admission-webhooks", "keda"),
+            ("cert-manager-webhook", "cert-manager"),
+        ]
+        assert all(
+            call.kwargs["env"]["KUBECONFIG"] == "/tmp/kc" for call in mock_run.call_args_list
+        )
+        assert "Webhook cert-manager-webhook has no ready endpoints" in caplog.text
+        assert "keda-admission has no ready endpoints" not in caplog.text
+
+    def test_listing_failure_aborts_without_touching_webhooks(self, caplog):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
+            patch.object(
+                helm_handler.subprocess,
+                "run",
+                return_value=_completed(1, stderr="Error from server (Forbidden)"),
+            ) as mock_run,
+            caplog.at_level(logging.WARNING),
+        ):
+            helm_handler._cleanup_stale_webhooks("/tmp/kc")
+
+        assert mock_run.call_count == 1
+        assert "Failed to list webhooks: Error from server (Forbidden)" in caplog.text
+
+    def test_unexpected_errors_are_non_fatal(self, caplog):
+        with (
+            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
+            patch.object(
+                helm_handler.subprocess, "run", side_effect=FileNotFoundError("kubectl: not found")
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            helm_handler._cleanup_stale_webhooks("/tmp/kc")
+
+        assert "Webhook cleanup failed (non-fatal): kubectl: not found" in caplog.text
+
+
+class TestHandleTaskDispatch:
+    """Remaining ``handle_task`` actions: quiesce success, overrides, uninstall, unknown."""
+
+    _EVENT = {
+        "Chart": "keda",
+        "ClusterName": "gco-us-east-1",
+        "Region": "us-east-1",
+        "EnabledCharts": ["keda"],
+    }
+
+    def test_quiesce_success_returns_message(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(
+                helm_handler,
+                "quiesce_health_monitor",
+                return_value=(True, "Health monitor quiesced"),
+            ) as mock_quiesce,
+        ):
+            result = helm_handler.handle_task(
+                {"Action": "quiesce_health_monitor", "ClusterName": "c", "Region": "us-east-1"}
+            )
+
+        assert result == {"status": "quiesced", "message": "Health monitor quiesced"}
+        mock_quiesce.assert_called_once_with("/tmp/kc-missing")
+
+    def test_chart_override_is_merged_into_config_and_passed_as_value_overrides(self):
+        captured = {}
+
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            captured.update(config=config, value_overrides=value_overrides)
+            return True, f"Successfully installed {chart_name}"
+
+        override = {"namespace": "keda-custom", "values": {"resources": {"limits": {"cpu": "2"}}}}
+        with (
+            patch.object(
+                helm_handler,
+                "load_charts_config",
+                return_value={
+                    "charts": {
+                        "keda": {
+                            "chart": "keda",
+                            "namespace": "keda",
+                            "values": {"resources": {"requests": {"cpu": "1"}}},
+                        }
+                    }
+                },
+            ),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "install_chart", side_effect=_install),
+            patch.object(helm_handler, "_record_addon_status") as mock_status,
+        ):
+            result = helm_handler.handle_task(
+                {**self._EVENT, "Action": "install_chart", "Charts": {"keda": override}}
+            )
+
+        assert result["status"] == "installed"
+        assert captured["config"]["namespace"] == "keda-custom"
+        assert captured["config"]["values"] == {
+            "resources": {"requests": {"cpu": "1"}, "limits": {"cpu": "2"}}
+        }
+        assert captured["value_overrides"] == override["values"]
+        mock_status.assert_called_once_with("keda", "installed", "Successfully installed keda")
+
+    def test_uninstall_action_success_records_status_and_returns(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(
+                helm_handler,
+                "uninstall_chart",
+                return_value=(True, "Successfully uninstalled keda"),
+            ) as mock_uninstall,
+            patch.object(helm_handler, "install_chart") as mock_install,
+            patch.object(helm_handler, "_record_addon_status") as mock_status,
+        ):
+            result = helm_handler.handle_task({**self._EVENT, "Action": "uninstall_chart"})
+
+        assert result == {
+            "chart": "keda",
+            "status": "uninstalled",
+            "message": "Successfully uninstalled keda",
+        }
+        mock_uninstall.assert_called_once_with("keda", "keda", "/tmp/kc-missing")
+        mock_install.assert_not_called()
+        mock_status.assert_called_once_with("keda", "uninstalled", "Successfully uninstalled keda")
+
+    def test_unknown_action_raises_value_error_after_kubeconfig_cleanup(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "install_chart") as mock_install,
+            patch.object(helm_handler, "uninstall_chart") as mock_uninstall,
+            patch.object(helm_handler.os, "remove") as mock_remove,
+            pytest.raises(ValueError, match="Unknown Action: 'rollback_chart'"),
+        ):
+            helm_handler.handle_task({**self._EVENT, "Action": "rollback_chart"})
+
+        mock_install.assert_not_called()
+        mock_uninstall.assert_not_called()
+        mock_remove.assert_called_once_with("/tmp/kc")
+
+    def test_cluster_and_region_fall_back_to_environment(self, monkeypatch):
+        monkeypatch.setenv("CLUSTER_NAME", "gco-from-env")
+        monkeypatch.setenv("REGION", "eu-west-1")
+        with (
+            patch.object(
+                helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"
+            ) as mock_kubeconfig,
+            patch.object(helm_handler, "install_chart", return_value=(True, "Successfully ok")),
+            patch.object(helm_handler, "_record_addon_status"),
+        ):
+            helm_handler.handle_task(
+                {"Action": "install_chart", "Chart": "keda", "EnabledCharts": ["keda"]}
+            )
+
+        mock_kubeconfig.assert_called_once_with("gco-from-env", "eu-west-1")
+
+
+class TestLegacyCustomResourceHandler:
+    """The CloudFormation custom-resource path converges the whole chart set at once."""
+
+    LBC = helm_handler.LBC_CHART_NAME
+
+    @staticmethod
+    def _event(request_type="Create", **props):
+        return {
+            "RequestType": request_type,
+            "ResponseURL": "https://cloudformation-custom-resource-response.example.test/",
+            "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/gco/0000",
+            "RequestId": "request-1",
+            "LogicalResourceId": "HelmCharts",
+            "ResourceProperties": {"ClusterName": "gco-us-east-1", "Region": "us-east-1", **props},
+        }
+
+    def _charts(self):
+        return {
+            "charts": {
+                "keda": {"enabled": True, "namespace": "keda", "values": {"a": 1}},
+                "volcano": {"enabled": False, "namespace": "volcano-system"},
+                self.LBC: {"enabled": True, "namespace": "kube-system"},
+            }
+        }
+
+    @staticmethod
+    def _response_data(mock_send):
+        call = mock_send.call_args
+        return call.args[2], json.loads(call.args[3]["Results"]), call.args[3], call
+
+    def test_create_uninstalls_disabled_then_installs_enabled_with_gateway_crds(self):
+        order = []
+
+        def _uninstall(chart_name, namespace, kubeconfig):
+            order.append(("uninstall", chart_name, namespace))
+            return True, f"Chart {chart_name} not found (already uninstalled)"
+
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            order.append(("install", chart_name, config["namespace"]))
+            return True, f"Successfully installed {chart_name}"
+
+        def _crds(kubeconfig):
+            order.append(("crds", kubeconfig))
+            return []
+
+        context = MagicMock()
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", side_effect=_uninstall),
+            patch.object(helm_handler, "install_chart", side_effect=_install),
+            patch.object(helm_handler, "_apply_gateway_crds", side_effect=_crds),
+            patch.object(helm_handler.time, "sleep") as mock_sleep,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(self._event("Create"), context)
+
+        assert order == [
+            ("uninstall", "volcano", "volcano-system"),
+            ("install", "keda", "keda"),
+            ("crds", "/tmp/kc-missing"),
+            ("install", self.LBC, "kube-system"),
+        ]
+        mock_sleep.assert_not_called()
+        status, results, data, call = self._response_data(mock_send)
+        assert status == helm_handler.SUCCESS
+        assert results == {
+            "volcano": "uninstalled (disabled): Chart volcano not found (already uninstalled)",
+            "keda": "Successfully installed keda",
+            self.LBC: f"Successfully installed {self.LBC}",
+        }
+        assert data["InstalledCharts"] == f"keda,{self.LBC}"
+        assert data["FailedCharts"] == ""
+        assert call.args[0]["RequestType"] == "Create"
+        assert call.args[1] is context
+        assert call.args[4] == "helm-HelmCharts"
+
+    def test_update_applies_overrides_enabled_list_and_keda_role_arn(self):
+        installs = {}
+        uninstalled = []
+
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            installs[chart_name] = (config, value_overrides)
+            return True, f"Successfully installed {chart_name}"
+
+        def _uninstall(chart_name, namespace, kubeconfig):
+            uninstalled.append(chart_name)
+            return True, f"Chart {chart_name} not found (already uninstalled)"
+
+        role_arn = "arn:aws:iam::123456789012:role/keda-operator"
+        event = self._event(
+            "Update",
+            Charts={
+                "keda": {"values": {"b": 2}},
+                "extra": {"namespace": "extra-system", "values": {"c": 3}},
+            },
+            EnabledCharts=["keda", "extra"],
+            KedaOperatorRoleArn=role_arn,
+        )
+        event["PhysicalResourceId"] = "helm-charts-existing"
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", side_effect=_uninstall),
+            patch.object(helm_handler, "install_chart", side_effect=_install),
+            patch.object(helm_handler, "_apply_gateway_crds") as mock_crds,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(event, MagicMock())
+
+        assert sorted(installs) == ["extra", "keda"]
+        keda_config, keda_overrides = installs["keda"]
+        assert keda_config["values"]["a"] == 1
+        assert keda_config["values"]["b"] == 2
+        annotations = keda_config["values"]["serviceAccount"]["operator"]["annotations"]
+        assert annotations["eks.amazonaws.com/role-arn"] == role_arn
+        assert keda_overrides == {"b": 2}
+        extra_config, extra_overrides = installs["extra"]
+        assert extra_config == {"namespace": "extra-system", "values": {"c": 3}, "enabled": True}
+        assert extra_overrides == {"c": 3}
+        # The enabled list flips the previously-enabled controller off.
+        assert sorted(uninstalled) == [self.LBC, "volcano"]
+        mock_crds.assert_not_called()
+        status, _, _, call = self._response_data(mock_send)
+        assert status == helm_handler.SUCCESS
+        assert call.args[4] == "helm-charts-existing"
+
+    def test_webhook_failure_triggers_cleanup_and_succeeds_on_retry(self, caplog):
+        attempts = {"keda": 0}
+
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            if chart_name != "keda":
+                return True, f"Successfully installed {chart_name}"
+            attempts["keda"] += 1
+            if attempts["keda"] == 1:
+                return False, (
+                    "Failed to install keda: Error: failed calling webhook "
+                    '"validate.keda.sh": no endpoints available'
+                )
+            return True, "Successfully installed keda"
+
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", return_value=(True, "not found")),
+            patch.object(helm_handler, "install_chart", side_effect=_install),
+            patch.object(helm_handler, "_apply_gateway_crds", return_value=[]),
+            patch.object(helm_handler, "_cleanup_stale_webhooks") as mock_cleanup,
+            patch.object(helm_handler.time, "sleep") as mock_sleep,
+            patch.object(helm_handler, "send_response") as mock_send,
+            caplog.at_level(logging.INFO),
+        ):
+            helm_handler.lambda_handler(self._event("Create"), MagicMock())
+
+        mock_cleanup.assert_called_once_with("/tmp/kc-missing")
+        mock_sleep.assert_called_once_with(helm_handler.HELM_INSTALL_RETRY_DELAY_SECONDS)
+        assert attempts["keda"] == 2
+        assert "Retry succeeded for keda" in caplog.text
+        status, results, data, _ = self._response_data(mock_send)
+        assert status == helm_handler.SUCCESS
+        assert results["keda"] == "Successfully installed keda"
+        assert data["FailedCharts"] == ""
+
+    def test_persistent_failure_exhausts_retries_and_reports_uninstall_failures_too(self):
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            if chart_name == "keda":
+                return False, "Failed to install keda: Error: values don't meet the specifications"
+            return True, f"Successfully installed {chart_name}"
+
+        def _uninstall(chart_name, namespace, kubeconfig):
+            return False, f"Failed to uninstall {chart_name}: Forbidden"
+
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", side_effect=_uninstall),
+            patch.object(helm_handler, "install_chart", side_effect=_install) as mock_install,
+            patch.object(helm_handler, "_apply_gateway_crds", return_value=[]),
+            patch.object(helm_handler, "_cleanup_stale_webhooks") as mock_cleanup,
+            patch.object(helm_handler.time, "sleep") as mock_sleep,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(self._event("Create"), MagicMock())
+
+        mock_cleanup.assert_not_called()
+        assert mock_sleep.call_count == helm_handler.HELM_INSTALL_MAX_RETRIES
+        keda_attempts = [call for call in mock_install.call_args_list if call.args[0] == "keda"]
+        assert len(keda_attempts) == 1 + helm_handler.HELM_INSTALL_MAX_RETRIES
+        # The disabled chart is never retried as an install.
+        assert all(call.args[0] != "volcano" for call in mock_install.call_args_list)
+        status, results, data, call = self._response_data(mock_send)
+        assert status == helm_handler.FAILED
+        assert data["FailedCharts"] == "keda,volcano"
+        assert data["InstalledCharts"] == self.LBC
+        assert results["volcano"] == "Failed to uninstall volcano: Forbidden"
+        assert call.args[5] == "Failed charts: keda, volcano"
+
+    def test_delete_uninstalls_enabled_charts_in_reverse_order_and_skips_disabled(self):
+        uninstalled = []
+
+        def _uninstall(chart_name, namespace, kubeconfig):
+            uninstalled.append((chart_name, namespace))
+            return True, f"Successfully uninstalled {chart_name}"
+
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", side_effect=_uninstall),
+            patch.object(helm_handler, "install_chart") as mock_install,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(self._event("Delete"), MagicMock())
+
+        assert uninstalled == [(self.LBC, "kube-system"), ("keda", "keda")]
+        mock_install.assert_not_called()
+        status, results, data, _ = self._response_data(mock_send)
+        assert status == helm_handler.SUCCESS
+        assert results == {
+            self.LBC: f"Successfully uninstalled {self.LBC}",
+            "keda": "Successfully uninstalled keda",
+        }
+        assert data["FailedCharts"] == ""
+
+    def test_unrecognised_request_type_touches_nothing_and_reports_success(self):
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart") as mock_uninstall,
+            patch.object(helm_handler, "install_chart") as mock_install,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(self._event("Read"), MagicMock())
+
+        mock_uninstall.assert_not_called()
+        mock_install.assert_not_called()
+        status, results, data, _ = self._response_data(mock_send)
+        assert status == helm_handler.SUCCESS
+        assert results == {}
+        assert data == {"Results": "{}", "InstalledCharts": "", "FailedCharts": ""}
+
+    def test_unexpected_exception_reports_failed_with_the_error_text(self):
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(
+                helm_handler,
+                "configure_kubeconfig",
+                side_effect=RuntimeError("describe_cluster: cluster not found"),
+            ),
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(self._event("Create"), MagicMock())
+
+        call = mock_send.call_args
+        assert call.args[2] == helm_handler.FAILED
+        assert call.args[3] == {}
+        assert call.args[4] == "helm-HelmCharts"
+        assert call.args[5] == "describe_cluster: cluster not found"
+
+    def test_missing_resource_properties_is_a_failed_response(self):
+        event = self._event("Create")
+        del event["ResourceProperties"]
+        with (
+            patch.object(helm_handler, "configure_kubeconfig") as mock_kubeconfig,
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            helm_handler.lambda_handler(event, MagicMock())
+
+        mock_kubeconfig.assert_not_called()
+        assert mock_send.call_args.args[2] == helm_handler.FAILED
+        assert "ResourceProperties" in mock_send.call_args.args[5]

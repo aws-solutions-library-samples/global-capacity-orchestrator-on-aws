@@ -252,8 +252,6 @@ def _checkpoint_retained_kms_keys(ctx: RunContext) -> list[dict[str, Any]]:
                         previous["scheduled"] = True
                         previous["deletion_date"] = candidate["deletion_date"]
                     continue
-                if not arn:
-                    raise RuntimeError(f"KMS key {key_id} omitted its ARN")
                 refreshed_stack = describe_stack(ctx.session, region, stack_record["stack_id"])
                 if not (
                     refreshed_stack is not None

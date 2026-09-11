@@ -270,7 +270,7 @@ async def test_with_external_url(url: str, secret: str | None = None) -> bool:
             job.status.active = 0
             job.status.succeeded = 1
             job.status.completion_time = datetime(2026, 2, 4, 12, 5, 0, tzinfo=UTC)
-        elif event == WebhookEvent.JOB_FAILED:
+        else:  # WebhookEvent.JOB_FAILED — the last of the three events above
             job.status.conditions = [MagicMock(type="Failed", status="True")]
             job.status.active = 0
             job.status.succeeded = 0

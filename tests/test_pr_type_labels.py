@@ -22,6 +22,7 @@ in reading a body a human filled in by hand.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -170,3 +171,197 @@ def test_unrelated_labels_are_never_removed(script: Any) -> None:
 def test_declaring_nothing_is_a_no_op_not_a_strip(script: Any) -> None:
     """An unfilled template must not silently clear an existing label."""
     assert script.label_plan(["feat", "dependencies"], []) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# The gh boundary and main()
+#
+# ``gh`` is faked at ``subprocess.run`` so nothing here needs a GitHub token or
+# a network. What is worth pinning at this layer is the *shape* of the calls the
+# script makes -- a label change is a write to a real pull request, so the exact
+# argv matters -- and the exit-code policy, which is "never fail the workflow
+# over a label": a body with no box ticked is a no-op, not an error.
+# ---------------------------------------------------------------------------
+
+_FEAT_BODY = "## Type of change\n\n- [x] `feat:` New feature (non-breaking)\n- [ ] `fix:` Bug fix\n"
+
+
+class _FakeGh:
+    """Record every ``gh`` invocation and answer ``pr view`` with a fixed PR."""
+
+    def __init__(self, *, body: str | None, labels: list[str], edit_fails: bool = False) -> None:
+        self.body = body
+        self.labels = labels
+        self.edit_fails = edit_fails
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG002
+        self.calls.append(argv)
+        assert argv[0] == "gh", argv
+        if argv[1:3] == ["pr", "view"]:
+            payload = {"body": self.body, "labels": [{"name": name} for name in self.labels]}
+            return _Completed(0, stdout=json.dumps(payload))
+        if argv[1:3] == ["pr", "edit"]:
+            if self.edit_fails:
+                return _Completed(1, stderr="HTTP 403: Resource not accessible by integration")
+            return _Completed(0)
+        raise AssertionError(f"unexpected gh invocation: {argv}")
+
+    def edits(self) -> list[list[str]]:
+        return [call for call in self.calls if call[1:3] == ["pr", "edit"]]
+
+
+class _Completed:
+    def __init__(self, returncode: int, *, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_fetch_pull_request_reads_body_and_label_names(
+    script: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh = _FakeGh(body=_FEAT_BODY, labels=["dependencies", "fix"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    body, labels = script.fetch_pull_request(42)
+
+    assert body == _FEAT_BODY
+    assert labels == ["dependencies", "fix"]
+    assert gh.calls == [["gh", "pr", "view", "42", "--json", "body,labels"]]
+
+
+def test_fetch_pull_request_tolerates_a_null_label_list(
+    script: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``gh`` emits ``"labels": null`` for a PR with none, not ``[]``."""
+
+    def run(argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG001
+        return _Completed(0, stdout=json.dumps({"body": _FEAT_BODY, "labels": None}))
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+
+    assert script.fetch_pull_request(42) == (_FEAT_BODY, [])
+
+
+def test_a_failing_gh_command_surfaces_its_stderr(
+    script: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stderr excerpt is the only diagnostic a workflow log will show."""
+
+    def run(argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG001
+        return _Completed(1, stderr="gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=r"gh pr view 42 .* failed: gh: Not Found"):
+        script.fetch_pull_request(42)
+
+
+def test_apply_labels_issues_one_edit_with_every_change(
+    script: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One ``gh pr edit``, not one per label -- fewer API calls and atomic."""
+    gh = _FakeGh(body=None, labels=[])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    script.apply_labels(42, ["feat", "docs"], ["fix"])
+
+    assert gh.edits() == [
+        [
+            "gh",
+            "pr",
+            "edit",
+            "42",
+            "--add-label",
+            "feat",
+            "--add-label",
+            "docs",
+            "--remove-label",
+            "fix",
+        ]
+    ]
+
+
+def test_apply_labels_raises_when_the_edit_is_refused(
+    script: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh = _FakeGh(body=None, labels=[], edit_fails=True)
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    with pytest.raises(RuntimeError, match="could not update labels: HTTP 403"):
+        script.apply_labels(42, ["feat"], [])
+
+
+def test_main_leaves_labels_alone_when_nothing_is_ticked(
+    script: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unfilled template is likelier than a request to clear the labels."""
+    gh = _FakeGh(body="## Type of change\n\n- [ ] `feat:` New feature\n", labels=["fix"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    assert script.main(["--pr", "42"]) == 0
+
+    assert gh.edits() == [], "a body with no ticked box must not touch labels"
+    assert "no recognized type checkbox is ticked" in capsys.readouterr().out
+
+
+def test_main_is_a_no_op_when_labels_already_match(
+    script: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _FakeGh(body=_FEAT_BODY, labels=["feat", "dependencies"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    assert script.main(["--pr", "42"]) == 0
+
+    assert gh.edits() == []
+    assert "labels already match; nothing to do" in capsys.readouterr().out
+
+
+def test_main_dry_run_prints_the_plan_without_editing(
+    script: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _FakeGh(body=_FEAT_BODY, labels=["fix", "dependencies"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    assert script.main(["--pr", "42", "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert gh.edits() == []
+    assert "add:    feat" in out
+    assert "remove: fix" in out
+    assert "(dry run: no changes made)" in out
+
+
+def test_main_applies_the_plan_and_leaves_foreign_labels_untouched(
+    script: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only type labels move; ``dependencies`` survives the sync."""
+    gh = _FakeGh(body=_FEAT_BODY, labels=["fix", "dependencies"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+
+    assert script.main(["--pr", "42"]) == 0
+
+    edits = gh.edits()
+    assert len(edits) == 1
+    assert "--add-label" in edits[0] and edits[0][edits[0].index("--add-label") + 1] == "feat"
+    assert "--remove-label" in edits[0] and edits[0][edits[0].index("--remove-label") + 1] == "fix"
+    assert "dependencies" not in edits[0]
+    assert "labels updated" in capsys.readouterr().out
+
+
+def test_main_prints_only_the_side_of_the_plan_that_has_entries(
+    script: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Add-only and remove-only plans must not print an empty other side."""
+    gh = _FakeGh(body=_FEAT_BODY, labels=[])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+    assert script.main(["--pr", "42", "--dry-run"]) == 0
+    add_only = capsys.readouterr().out
+    assert "add:    feat" in add_only and "remove:" not in add_only
+
+    gh = _FakeGh(body="- [x] `fix:` Bug fix\n", labels=["fix", "feat"])
+    monkeypatch.setattr(script.subprocess, "run", gh)
+    assert script.main(["--pr", "42", "--dry-run"]) == 0
+    remove_only = capsys.readouterr().out
+    assert "remove: feat" in remove_only and "add:" not in remove_only

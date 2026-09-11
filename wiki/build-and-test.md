@@ -40,10 +40,10 @@ The unit suite enforces an **exact 100% line + branch coverage floor** —
 shards each run a slice, a combining job merges their coverage, and the final
 report applies the floor. Coverage is measured from the repository root, so
 every authored Python file counts: application packages, Lambda handlers, the
-CDK entry point and repository tooling alike. Files not yet at 100% are listed
-in an explicit, shrinking "coverage ratchet" block in `pyproject.toml`, so what
-is still owed is visible rather than silently excluded. The HTML report published from every `main` run is embedded in this
-site:
+CDK entry point and repository tooling alike. Nothing is excluded except the
+test-suite itself, package markers, generated trees and the byte-identical
+shared Lambda copies, and a test guards that list. The HTML report published
+from every `main` run is embedded in this site:
 
 **[Browse the live coverage report](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/)**
 

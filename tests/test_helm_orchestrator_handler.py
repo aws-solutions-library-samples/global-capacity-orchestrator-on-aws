@@ -456,3 +456,159 @@ class TestOnEvent:
             handler.on_event({"RequestType": "Create", "ResourceProperties": props})
 
         sfn.start_execution.assert_not_called()
+
+    def test_endpoint_group_arn_is_forwarded_when_present(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        endpoint_group = (
+            "arn:aws:globalaccelerator::123456789012:accelerator/a/listener/b/endpoint-group/c"
+        )
+
+        handler.on_event(
+            {
+                "RequestType": "Create",
+                "ResourceProperties": self._props(EndpointGroupArn=endpoint_group),
+            }
+        )
+
+        sent = json.loads(sfn.start_execution.call_args.kwargs["input"])
+        assert sent["EndpointGroupArn"] == endpoint_group
+
+    def test_unconfirmed_rollback_is_surfaced_over_the_persistence_error(self, orchestrator):
+        # If the untracked execution cannot be proven stopped, that is the more
+        # dangerous condition and must be the error CloudFormation sees.
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = [{}, RuntimeError("ssm unavailable")]
+        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        sfn.stop_execution.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "StopExecution"
+        )
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(RuntimeError, match="Could not confirm untracked execution") as info,
+        ):
+            handler.on_event({"RequestType": "Update", "ResourceProperties": self._props()})
+
+        assert isinstance(info.value.__cause__, ClientError)
+
+
+class TestClients:
+    def test_clients_are_built_with_boto3(self):
+        handler = load_lambda_module("helm-orchestrator")
+        built = []
+        with patch.object(handler.boto3, "client", side_effect=lambda name: built.append(name)):
+            handler._sfn()
+            handler._ssm()
+        assert built == ["stepfunctions", "ssm"]
+
+
+class TestExecutionHelpers:
+    def test_execution_arn_rejects_a_non_state_machine_arn(self, orchestrator):
+        handler, _ = orchestrator
+        with pytest.raises(ValueError, match="Invalid Step Functions state machine ARN"):
+            handler._execution_arn("arn:aws:states:us-east-1:123456789012:activity:x", "name")
+
+    def test_started_at_accepts_epoch_numbers(self, orchestrator):
+        handler, _ = orchestrator
+        assert handler._started_at({"startDate": 1_784_000_000.7}) == 1_784_000_000
+        assert handler._started_at({"startDate": 1_784_000_000}) == 1_784_000_000
+
+    def test_start_failures_other_than_a_duplicate_propagate(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.start_execution.side_effect = ClientError(
+            {"Error": {"Code": "StateMachineDoesNotExist"}}, "StartExecution"
+        )
+
+        with pytest.raises(ClientError, match="StateMachineDoesNotExist"):
+            handler._start_or_adopt_execution(
+                sfn,
+                state_machine_arn=_STATE_MACHINE_ARN,
+                execution_input_json="{}",
+                request_id="req-1",
+            )
+        sfn.describe_execution.assert_not_called()
+
+    def test_running_retry_with_different_input_is_refused(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.start_execution.side_effect = ClientError(
+            {"Error": {"Code": "ExecutionAlreadyExists"}}, "StartExecution"
+        )
+        sfn.describe_execution.return_value = {"status": "RUNNING", "input": '{"other":1}'}
+
+        with pytest.raises(RuntimeError, match="non-identical input"):
+            handler._start_or_adopt_execution(
+                sfn,
+                state_machine_arn=_STATE_MACHINE_ARN,
+                execution_input_json='{"mine":1}',
+                request_id="req-1",
+            )
+
+    def test_generation_search_is_bounded(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.start_execution.side_effect = ClientError(
+            {"Error": {"Code": "ExecutionAlreadyExists"}}, "StartExecution"
+        )
+        sfn.describe_execution.return_value = {"status": "SUCCEEDED"}
+
+        with pytest.raises(RuntimeError, match="Exhausted 100 retry-safe execution generations"):
+            handler._start_or_adopt_execution(
+                sfn,
+                state_machine_arn=_STATE_MACHINE_ARN,
+                execution_input_json="{}",
+                request_id="req-1",
+            )
+        assert sfn.start_execution.call_count == 100
+
+    def test_stop_and_wait_polls_then_gives_up(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.describe_execution.return_value = {"status": "RUNNING"}
+        clock = iter([0.0, 0.0, 5.0, 20.0])
+
+        with (
+            patch.object(handler.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(handler.time, "sleep") as sleep,
+            pytest.raises(TimeoutError, match="remained RUNNING after StopExecution"),
+        ):
+            handler._stop_execution_and_wait(sfn, _EXECUTION_ARN)
+
+        sfn.stop_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
+        assert sfn.describe_execution.call_count == 2
+        assert sleep.call_count == 2
+
+
+class TestTeardownFence:
+    def _fence(self, orchestrator):
+        handler, _ = orchestrator
+        return handler._prepare_teardown_fence.real_implementation
+
+    def test_create_tolerates_an_absent_fence(self, orchestrator):
+        ssm = MagicMock()
+        ssm.delete_parameter.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound"}}, "DeleteParameter"
+        )
+        self._fence(orchestrator)(ssm, request_type="Create", fence_name="/gco/f")
+
+    def test_create_surfaces_other_delete_failures(self, orchestrator):
+        ssm = MagicMock()
+        ssm.delete_parameter.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "DeleteParameter"
+        )
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            self._fence(orchestrator)(ssm, request_type="Create", fence_name="/gco/f")
+
+    def test_update_proceeds_when_no_fence_exists(self, orchestrator):
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound"}}, "GetParameter"
+        )
+        self._fence(orchestrator)(ssm, request_type="Update", fence_name="/gco/f")
+
+    def test_update_surfaces_other_read_failures(self, orchestrator):
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException"}}, "GetParameter"
+        )
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            self._fence(orchestrator)(ssm, request_type="Update", fence_name="/gco/f")

@@ -11,11 +11,13 @@ ALB request.
 """
 
 import json
+import logging
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 import urllib3
+from botocore.exceptions import ClientError
 
 from tests._lambda_imports import load_lambda_module
 
@@ -369,6 +371,51 @@ class TestApiGatewayProxyHandler:
         assert "regional API endpoint" in result["body"]
         mock_pool.request.assert_not_called()
 
+    def test_base64_bodies_are_rejected(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+        # An unrelated header exercises the case-insensitive scan past a
+        # non-matching key before the region header is ruled absent.
+        event = self._make_event(method="POST", headers={"Accept": "*/*"}, body="AAAA")
+        event["isBase64Encoded"] = True
+
+        result = handler.lambda_handler(event, None)
+
+        assert result["statusCode"] == 415
+        assert json.loads(result["body"]) == {
+            "error": "Base64-encoded request bodies are not supported"
+        }
+        mock_pool.request.assert_not_called()
+
+    @pytest.mark.parametrize("failure", [KeyError("SECRET_ARN"), RuntimeError("unavailable")])
+    def test_signing_key_failure_is_a_503(self, api_gw_proxy_module, failure):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        with patch.object(handler, "get_secret_token", side_effect=failure):
+            result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 503
+        assert "authentication is temporarily unavailable" in result["body"]
+        mock_pool.request.assert_not_called()
+
+    def test_missing_backend_endpoint_is_a_503(self, api_gw_proxy_module, monkeypatch):
+        handler, _, mock_pool = api_gw_proxy_module
+        monkeypatch.delenv("GLOBAL_ACCELERATOR_ENDPOINT")
+
+        result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 503
+        assert "routing is temporarily unavailable" in result["body"]
+        mock_pool.request.assert_not_called()
+
+    def test_unroutable_path_is_a_503(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        with patch.object(handler, "build_target_url", side_effect=ValueError("bad path")):
+            result = handler.lambda_handler(self._make_event(path="/../etc"), None)
+
+        assert result["statusCode"] == 503
+        mock_pool.request.assert_not_called()
+
 
 # ============================================================================
 # regional-api-proxy handler
@@ -491,3 +538,369 @@ class TestRegionalApiProxyHandler:
         assert forwarded_headers["x-gco-signature-version"] == "v1"
         assert len(forwarded_headers["x-gco-signature"]) == 64
         assert len(forwarded_headers["x-gco-nonce"]) == 32
+
+
+# ============================================================================
+# regional-api-proxy: fail-closed responses and the registry-driven resolver
+# ============================================================================
+
+_REGISTRY_ENV = {
+    "TARGET_REGION": "us-east-1",
+    "REGISTRY_REGION": "us-west-2",
+    "PROJECT_NAME": "gco",
+    "AWS_ACCOUNT_ID": "123456789012",
+    "AWS_URL_SUFFIX": "amazonaws.com",
+}
+_GATEWAY_DNS = "internal-k8s-gcosyste-gcogatew-abc123.us-east-1.elb.amazonaws.com"
+_GATEWAY_ARN = (
+    "arn:aws:elasticloadbalancing:us-east-1:123456789012:"
+    "loadbalancer/app/k8s-gcosyste-gcogatew-abc123/0123456789abcdef"
+)
+
+
+def _gateway_load_balancer(**overrides):
+    load_balancer = {
+        "DNSName": _GATEWAY_DNS,
+        "LoadBalancerArn": _GATEWAY_ARN,
+        "Type": "application",
+        "Scheme": "internal",
+    }
+    load_balancer.update(overrides)
+    return load_balancer
+
+
+def _gateway_tags(**overrides):
+    tags = {"elbv2.k8s.aws/cluster": "gco-us-east-1", "gco.aws/gateway": "gco-system/gco-gateway"}
+    tags.update(overrides)
+    return {
+        "TagDescriptions": [
+            {
+                "ResourceArn": _GATEWAY_ARN,
+                "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
+            }
+        ]
+    }
+
+
+def _elbv2_stub(load_balancers=None, tags=None):
+    elbv2 = MagicMock()
+    elbv2.describe_load_balancers.return_value = {
+        "LoadBalancers": [_gateway_load_balancer()] if load_balancers is None else load_balancers
+    }
+    elbv2.describe_tags.return_value = _gateway_tags() if tags is None else tags
+    return elbv2
+
+
+def _ssm_stub(value=_GATEWAY_DNS):
+    ssm = MagicMock()
+    ssm.get_parameter.return_value = {"Parameter": {"Value": value}}
+    return ssm
+
+
+@pytest.fixture
+def registry_proxy(regional_proxy_module, monkeypatch):
+    """regional-api-proxy in registry mode with per-service AWS stubs.
+
+    Clears ``ALB_ENDPOINT`` (the literal-endpoint compatibility path) so
+    resolution goes through the SSM registry and the ELBv2 ownership check.
+    Returns ``(handler, clients)`` where ``clients`` holds the ``ssm`` and
+    ``elbv2`` stubs that ``boto3.client`` hands back.
+    """
+    handler, mock_sm, _ = regional_proxy_module
+    monkeypatch.delenv("ALB_ENDPOINT")
+    for name, value in _REGISTRY_ENV.items():
+        monkeypatch.setenv(name, value)
+    clients = {"ssm": _ssm_stub(), "elbv2": _elbv2_stub(), "secretsmanager": mock_sm}
+
+    def route(service, **kwargs):
+        if service == "ssm":
+            assert kwargs == {"region_name": "us-west-2"}
+        elif service == "elbv2":
+            assert kwargs == {"region_name": "us-east-1"}
+        return clients[service]
+
+    handler.boto3.client.side_effect = route
+    return handler, clients
+
+
+class TestRegionalApiProxyFailsClosed:
+    def _make_event(self, **overrides):
+        event = {
+            "httpMethod": "GET",
+            "path": "/api/v1/health",
+            "queryStringParameters": None,
+            "headers": {},
+            "body": "",
+        }
+        event.update(overrides)
+        return event
+
+    @pytest.mark.parametrize("failure", [KeyError("SECRET_ARN"), RuntimeError("unavailable")])
+    def test_signing_key_failure_is_a_503(self, regional_proxy_module, failure):
+        handler, _, mock_pool = regional_proxy_module
+
+        with patch.object(handler, "get_secret_token", side_effect=failure):
+            result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"]) == {
+            "error": "Backend authentication is temporarily unavailable"
+        }
+        mock_pool.request.assert_not_called()
+
+    def test_unresolvable_backend_is_a_502_with_the_reason_logged(
+        self, regional_proxy_module, monkeypatch, caplog
+    ):
+        handler, _, mock_pool = regional_proxy_module
+        monkeypatch.setenv("ALB_ENDPOINT", "evil.example.com")
+
+        with caplog.at_level(logging.WARNING):
+            result = handler.lambda_handler(self._make_event(), None)
+
+        assert result["statusCode"] == 502
+        assert json.loads(result["body"]) == {
+            "error": "Regional backend is temporarily unavailable"
+        }
+        assert "Regional backend resolution failed" in caplog.text
+        assert "is invalid" in caplog.text
+        mock_pool.request.assert_not_called()
+
+    def test_base64_bodies_are_rejected(self, regional_proxy_module):
+        handler, _, mock_pool = regional_proxy_module
+
+        result = handler.lambda_handler(
+            self._make_event(httpMethod="POST", body="AAAA", isBase64Encoded=True), None
+        )
+
+        assert result["statusCode"] == 415
+        mock_pool.request.assert_not_called()
+
+
+class TestRegionalEndpointConfiguration:
+    def test_cache_ttl_is_bounded_with_a_sixty_second_default(
+        self, regional_proxy_module, monkeypatch
+    ):
+        handler, _, _ = regional_proxy_module
+        monkeypatch.delenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", raising=False)
+        assert handler._regional_endpoint_cache_ttl() == 60.0
+        monkeypatch.setenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", "soon")
+        assert handler._regional_endpoint_cache_ttl() == 60.0
+        monkeypatch.setenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", "301")
+        assert handler._regional_endpoint_cache_ttl() == 60.0
+        monkeypatch.setenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", "0")
+        assert handler._regional_endpoint_cache_ttl() == 0.0
+        monkeypatch.setenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", "30")
+        assert handler._regional_endpoint_cache_ttl() == 30.0
+
+    @pytest.mark.parametrize("suffix", ["", "   ", "not a dns name", "amazonaws"])
+    def test_unconfigured_url_suffix_is_refused(self, regional_proxy_module, monkeypatch, suffix):
+        handler, _, _ = regional_proxy_module
+        monkeypatch.setenv("AWS_URL_SUFFIX", suffix)
+        with pytest.raises(RuntimeError, match="AWS URL suffix is not configured"):
+            handler._aws_url_suffix()
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            "not a hostname",
+            "evil.example.com",
+            "internal-alb.us-east-1.elb.amazonaws.com.evil.example.com",
+        ],
+    )
+    def test_non_elb_hostnames_are_refused(self, regional_proxy_module, value):
+        handler, _, _ = regional_proxy_module
+        with pytest.raises(RuntimeError, match="registered backend for us-east-1 is invalid"):
+            handler._validated_dns_name(value, region="us-east-1")
+
+    def test_elb_hostname_is_normalised(self, regional_proxy_module):
+        handler, _, _ = regional_proxy_module
+        assert handler._validated_dns_name(f" {_GATEWAY_DNS}. ", region="us-east-1") == _GATEWAY_DNS
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"REGISTRY_REGION": ""},
+            {"REGISTRY_REGION": "US-WEST-2"},
+            {"TARGET_REGION": "nowhere"},
+            {"PROJECT_NAME": ""},
+            {"AWS_ACCOUNT_ID": ""},
+        ],
+    )
+    def test_incomplete_registry_configuration_is_refused(
+        self, registry_proxy, monkeypatch, overrides
+    ):
+        handler, clients = registry_proxy
+        for name, value in overrides.items():
+            monkeypatch.setenv(name, value)
+
+        with pytest.raises(RuntimeError, match="registry is not configured"):
+            handler._resolve_registered_endpoint()
+
+        clients["ssm"].get_parameter.assert_not_called()
+
+
+class TestRegionalEndpointResolution:
+    def test_resolves_verifies_and_caches_the_registered_gateway(self, registry_proxy):
+        handler, clients = registry_proxy
+
+        assert handler._resolve_registered_endpoint() == _GATEWAY_DNS
+        assert handler._resolve_registered_endpoint() == _GATEWAY_DNS
+
+        clients["ssm"].get_parameter.assert_called_once_with(Name="/gco/alb-hostname-us-east-1")
+        clients["elbv2"].describe_tags.assert_called_once_with(ResourceArns=[_GATEWAY_ARN])
+        assert clients["elbv2"].describe_load_balancers.call_count == 1
+
+    def test_zero_ttl_disables_the_cache(self, registry_proxy, monkeypatch):
+        handler, clients = registry_proxy
+        monkeypatch.setenv("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", "0")
+
+        handler._resolve_registered_endpoint()
+        handler._resolve_registered_endpoint()
+
+        assert clients["ssm"].get_parameter.call_count == 2
+
+    def test_expired_cache_entry_is_re_verified(self, registry_proxy):
+        handler, clients = registry_proxy
+        handler._resolve_registered_endpoint()
+        key = ("us-west-2", "us-east-1", "gco", "123456789012")
+        stamp, endpoint = handler._REGIONAL_ENDPOINT_CACHE[key]
+        handler._REGIONAL_ENDPOINT_CACHE[key] = (stamp - 3600, endpoint)
+
+        handler._resolve_registered_endpoint()
+
+        assert clients["ssm"].get_parameter.call_count == 2
+
+    def test_missing_registry_parameter_fails_closed(self, registry_proxy):
+        handler, clients = registry_proxy
+        clients["ssm"].get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound", "Message": "no"}}, "GetParameter"
+        )
+
+        with pytest.raises(RuntimeError, match="could not be verified"):
+            handler._resolve_registered_endpoint()
+
+        clients["elbv2"].describe_load_balancers.assert_not_called()
+
+    def test_ownership_check_follows_pagination(self, registry_proxy):
+        handler, clients = registry_proxy
+        other = _gateway_load_balancer(
+            DNSName="internal-other.us-east-1.elb.amazonaws.com",
+            LoadBalancerArn=_GATEWAY_ARN.replace("gcogatew", "other"),
+        )
+        clients["elbv2"].describe_load_balancers.side_effect = [
+            {"LoadBalancers": [other], "NextMarker": "page2"},
+            {"LoadBalancers": [_gateway_load_balancer()]},
+        ]
+
+        assert handler._resolve_registered_endpoint() == _GATEWAY_DNS
+        calls = clients["elbv2"].describe_load_balancers.call_args_list
+        assert calls[0].kwargs == {}
+        assert calls[1].kwargs == {"Marker": "page2"}
+
+    def test_unknown_load_balancer_is_refused(self, registry_proxy):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_load_balancers.return_value = {"LoadBalancers": []}
+
+        with pytest.raises(RuntimeError, match="does not exist"):
+            handler._resolve_registered_endpoint()
+
+    def test_ownership_scan_is_bounded_to_twenty_pages(self, registry_proxy):
+        # An account with an endless supply of unrelated load balancers must
+        # not turn one proxied request into an unbounded ELBv2 scan.
+        handler, clients = registry_proxy
+        other = _gateway_load_balancer(DNSName="internal-other.us-east-1.elb.amazonaws.com")
+        clients["elbv2"].describe_load_balancers.return_value = {
+            "LoadBalancers": [other],
+            "NextMarker": "more",
+        }
+
+        with pytest.raises(RuntimeError, match="does not exist"):
+            handler._resolve_registered_endpoint()
+
+        assert clients["elbv2"].describe_load_balancers.call_count == 20
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"Type": "network"}, {"Scheme": "internet-facing"}],
+        ids=["nlb", "public"],
+    )
+    def test_only_internal_albs_are_accepted(self, registry_proxy, overrides):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_load_balancers.return_value = {
+            "LoadBalancers": [_gateway_load_balancer(**overrides)]
+        }
+
+        with pytest.raises(RuntimeError, match="not an internal ALB"):
+            handler._resolve_registered_endpoint()
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "not-an-arn",
+            _GATEWAY_ARN.replace(":123456789012:", ":000000000000:"),
+            _GATEWAY_ARN.replace(":us-east-1:", ":eu-west-1:"),
+            _GATEWAY_ARN.replace(":elasticloadbalancing:", ":ec2:"),
+        ],
+        ids=["malformed", "foreign-account", "foreign-region", "wrong-service"],
+    )
+    def test_foreign_ownership_is_refused(self, registry_proxy, arn):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_load_balancers.return_value = {
+            "LoadBalancers": [_gateway_load_balancer(LoadBalancerArn=arn)]
+        }
+
+        with pytest.raises(RuntimeError, match="invalid ownership"):
+            handler._resolve_registered_endpoint()
+
+        clients["elbv2"].describe_tags.assert_not_called()
+
+    def test_eks_cluster_tag_is_an_accepted_alternative(self, registry_proxy):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_tags.return_value = {
+            "TagDescriptions": [
+                {
+                    "ResourceArn": _GATEWAY_ARN,
+                    "Tags": [
+                        {"Key": "eks:eks-cluster-name", "Value": "gco-us-east-1"},
+                        {"Key": "gco.aws/gateway", "Value": "gco-system/gco-gateway"},
+                    ],
+                }
+            ]
+        }
+
+        assert handler._resolve_registered_endpoint() == _GATEWAY_DNS
+
+    def test_alb_from_another_cluster_is_refused(self, registry_proxy):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_tags.return_value = _gateway_tags(
+            **{"elbv2.k8s.aws/cluster": "someone-else-us-east-1"}
+        )
+
+        with pytest.raises(RuntimeError, match="not owned by the GCO cluster"):
+            handler._resolve_registered_endpoint()
+
+    def test_cluster_alb_without_the_gateway_marker_is_refused(self, registry_proxy):
+        handler, clients = registry_proxy
+        clients["elbv2"].describe_tags.return_value = {
+            "TagDescriptions": [
+                {
+                    "ResourceArn": _GATEWAY_ARN,
+                    "Tags": [{"Key": "elbv2.k8s.aws/cluster", "Value": "gco-us-east-1"}],
+                }
+            ]
+        }
+
+        with pytest.raises(RuntimeError, match="not the GCO Gateway"):
+            handler._resolve_registered_endpoint()
+
+    def test_ownership_validation_requires_account_and_project(
+        self, regional_proxy_module, monkeypatch
+    ):
+        handler, _, _ = regional_proxy_module
+        monkeypatch.setenv("AWS_ACCOUNT_ID", "")
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+
+        with pytest.raises(RuntimeError, match="ownership validation is not configured"):
+            handler._validate_regional_endpoint_ownership(_GATEWAY_DNS, "us-east-1")

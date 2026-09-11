@@ -299,3 +299,301 @@ class TestMainDispatch:
         ):
             exit_code = asyncio.run(harness.main())
         assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# The two async flows (test_with_local_server / test_with_external_url)
+#
+# Both construct a real ``WebhookDispatcher`` and drive its private
+# ``_dispatch_event``. Here the dispatcher class is swapped for a fake that
+# records how it was built and hands back canned ``WebhookDeliveryResult``
+# rows, so no port is bound, no DNS is resolved and no HTTP request leaves
+# the process. The local-server flow's hard-coded ``start_local_server(8888)``
+# is replaced too, so nothing listens on 8888 during the run.
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402 - grouped with the harness it serves
+import hmac  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import gco.services.webhook_dispatcher as dispatcher_module  # noqa: E402
+from gco.services.webhook_dispatcher import WebhookDeliveryResult, WebhookEvent  # noqa: E402
+
+
+def _signature(secret: str, body: str) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+
+
+def _result(**overrides: Any) -> WebhookDeliveryResult:
+    base: dict[str, Any] = {
+        "webhook_id": "test-webhook-1",
+        "url": "http://localhost:8888/webhook",
+        "event": "job.completed",
+        "success": True,
+        "status_code": 200,
+        "attempts": 1,
+        "duration_ms": 12.5,
+    }
+    base.update(overrides)
+    return WebhookDeliveryResult(**base)
+
+
+def _install_fake_dispatcher(
+    monkeypatch: pytest.MonkeyPatch,
+    results_for: dict[WebhookEvent, list[WebhookDeliveryResult]],
+    *,
+    deliver_signature: str | None = None,
+    deliver_body: str = '{"event": "job.completed"}',
+) -> list[Any]:
+    """Replace ``WebhookDispatcher`` with a recording fake.
+
+    ``deliver_signature`` simulates the receiver side: when set, every dispatch
+    appends a record to ``harness.received_webhooks`` carrying that signature
+    header, exactly as the live handler would after an HTTP POST landed.
+    """
+    created: list[Any] = []
+
+    class FakeDispatcher:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.dispatched: list[tuple[WebhookEvent, dict[str, Any]]] = []
+            created.append(self)
+
+        async def _dispatch_event(self, event: WebhookEvent, job: Any) -> list[Any]:
+            self.dispatched.append(
+                (
+                    event,
+                    {
+                        "active": job.status.active,
+                        "succeeded": job.status.succeeded,
+                        "failed": job.status.failed,
+                        "completion_time": job.status.completion_time,
+                        "conditions": [c.type for c in job.status.conditions],
+                    },
+                )
+            )
+            if deliver_signature is not None:
+                harness.received_webhooks.append(
+                    {
+                        "path": "/webhook",
+                        "headers": {"X-GCO-Signature": deliver_signature},
+                        "body": deliver_body,
+                        "timestamp": "2026-02-04T12:05:00+00:00",
+                    }
+                )
+            return results_for[event]
+
+    monkeypatch.setattr(dispatcher_module, "WebhookDispatcher", FakeDispatcher)
+    return created
+
+
+class TestLocalServerFlow:
+    def _fake_server(self, monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, list[int]]:
+        ports: list[int] = []
+        server = MagicMock(name="HTTPServer")
+
+        def fake_start(port: int) -> MagicMock:
+            ports.append(port)
+            return server
+
+        monkeypatch.setattr(harness, "start_local_server", fake_start)
+        return server, ports
+
+    def test_successful_delivery_verifies_the_hmac_signature(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        server, ports = self._fake_server(monkeypatch)
+        body = '{"event": "job.completed", "job": {"name": "test-webhook-job"}}'
+        created = _install_fake_dispatcher(
+            monkeypatch,
+            {WebhookEvent.JOB_COMPLETED: [_result()]},
+            deliver_signature=_signature("test-secret-key", body),
+            deliver_body=body,
+        )
+
+        ok = asyncio.run(harness.test_with_local_server())
+
+        assert ok is True
+        assert ports == [8888]
+        server.shutdown.assert_called_once_with()
+
+        (dispatcher,) = created
+        assert dispatcher.kwargs["cluster_id"] == "test-cluster"
+        assert dispatcher.kwargs["region"] == "us-east-1"
+        assert (dispatcher.kwargs["timeout"], dispatcher.kwargs["max_retries"]) == (10, 1)
+        store = dispatcher.kwargs["webhook_store"]
+        assert store.get_webhooks_for_event.return_value == [
+            {
+                "id": "test-webhook-1",
+                "url": "http://localhost:8888/webhook",
+                "events": ["job.completed"],
+                "namespace": "gco-jobs",
+                "secret": "test-secret-key",
+            }
+        ]
+        # The completed mock job was dispatched once for the completed event.
+        assert [event for event, _state in dispatcher.dispatched] == [WebhookEvent.JOB_COMPLETED]
+        assert dispatcher.dispatched[0][1]["succeeded"] == 1
+
+        out = capsys.readouterr().out
+        assert "WEBHOOK DELIVERY TEST - LOCAL SERVER" in out
+        assert "Target URL: http://localhost:8888/webhook" in out
+        assert "✓ SUCCESS" in out
+        assert "  Webhook ID: test-webhook-1" in out
+        assert "  Status Code: 200" in out
+        assert "  Duration: 12.5ms" in out
+        assert "  Error:" not in out
+        assert "✓ Signature verified successfully!" in out
+        assert "TEST COMPLETE" in out
+
+    def test_failed_delivery_and_bad_signature_are_reported(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        server, _ports = self._fake_server(monkeypatch)
+        _install_fake_dispatcher(
+            monkeypatch,
+            {
+                WebhookEvent.JOB_COMPLETED: [
+                    _result(
+                        success=False,
+                        status_code=None,
+                        attempts=2,
+                        error="connection refused",
+                    )
+                ]
+            },
+            deliver_signature="sha256=not-the-right-digest",
+        )
+
+        ok = asyncio.run(harness.test_with_local_server())
+
+        assert ok is False
+        server.shutdown.assert_called_once_with()
+        out = capsys.readouterr().out
+        assert "✗ FAILED" in out
+        assert "  Status Code: None" in out
+        assert "  Attempts: 2" in out
+        assert "  Error: connection refused" in out
+        assert "✗ Signature verification failed!" in out
+        assert "  Received: sha256=not-the-right-digest" in out
+        expected = _signature("test-secret-key", '{"event": "job.completed"}')
+        assert f"  Expected: {expected}" in out
+
+    def test_no_results_and_no_received_webhooks_fails_quietly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        server, _ports = self._fake_server(monkeypatch)
+        _install_fake_dispatcher(monkeypatch, {WebhookEvent.JOB_COMPLETED: []})
+
+        ok = asyncio.run(harness.test_with_local_server())
+
+        assert ok is False
+        assert harness.received_webhooks == []
+        server.shutdown.assert_called_once_with()
+        out = capsys.readouterr().out
+        assert "DELIVERY RESULTS:" in out
+        assert "SIGNATURE VERIFICATION" not in out
+        assert "SUCCESS" not in out and "FAILED" not in out
+
+
+class TestExternalUrlFlow:
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        """The flow pauses one second between events; make that instantaneous."""
+        sleep = AsyncMock(return_value=None)
+        monkeypatch.setattr(harness, "asyncio", SimpleNamespace(sleep=sleep))
+        return sleep
+
+    def test_all_three_events_delivered_with_secret(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        _no_real_sleep: AsyncMock,
+    ) -> None:
+        url = "https://webhook.example.invalid/abc"
+        results = {
+            WebhookEvent.JOB_STARTED: [_result(event="job.started", url=url)],
+            WebhookEvent.JOB_COMPLETED: [_result(event="job.completed", url=url)],
+            WebhookEvent.JOB_FAILED: [_result(event="job.failed", url=url, status_code=202)],
+        }
+        created = _install_fake_dispatcher(monkeypatch, results)
+
+        ok = asyncio.run(harness.test_with_external_url(url, "s3cr3t"))
+
+        assert ok is True
+        (dispatcher,) = created
+        assert dispatcher.kwargs["cluster_id"] == "gco-test-cluster"
+        assert (dispatcher.kwargs["timeout"], dispatcher.kwargs["max_retries"]) == (30, 2)
+        (config,) = dispatcher.kwargs["webhook_store"].get_webhooks_for_event.return_value
+        assert config["url"] == url
+        assert config["namespace"] is None
+        assert config["secret"] == "s3cr3t"
+        assert config["events"] == ["job.completed", "job.failed", "job.started"]
+
+        # The job is reshaped to match each event before it is dispatched.
+        events = [event for event, _state in dispatcher.dispatched]
+        assert events == [
+            WebhookEvent.JOB_STARTED,
+            WebhookEvent.JOB_COMPLETED,
+            WebhookEvent.JOB_FAILED,
+        ]
+        started, completed, failed = (state for _event, state in dispatcher.dispatched)
+        assert started["conditions"] == [] and started["active"] == 1
+        assert started["completion_time"] is None
+        assert completed["conditions"] == ["Complete"] and completed["succeeded"] == 1
+        assert failed["conditions"] == ["Failed"] and failed["failed"] == 1
+        assert failed["completion_time"] is not None
+
+        assert _no_real_sleep.await_count == 3
+        _no_real_sleep.assert_awaited_with(1)
+
+        out = capsys.readouterr().out
+        assert "WEBHOOK DELIVERY TEST - EXTERNAL URL" in out
+        assert "Secret configured: Yes" in out
+        for name in ("job.started", "job.completed", "job.failed"):
+            assert f"Dispatching {name} event..." in out
+        assert out.count("  ✓ Status: 200, Attempts: 1, Duration: 12.5ms") == 2
+        assert "  ✓ Status: 202, Attempts: 1, Duration: 12.5ms" in out
+        assert "ALL WEBHOOKS DELIVERED SUCCESSFULLY!" in out
+        assert f"Check your webhook receiver at: {url}" in out
+        assert "Error:" not in out
+
+    def test_a_single_failure_without_secret_fails_the_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        url = "https://webhook.example.invalid/abc"
+        results = {
+            WebhookEvent.JOB_STARTED: [_result(event="job.started", url=url)],
+            WebhookEvent.JOB_COMPLETED: [
+                _result(
+                    event="job.completed",
+                    url=url,
+                    success=False,
+                    status_code=503,
+                    attempts=2,
+                    error="HTTP 503",
+                )
+            ],
+            WebhookEvent.JOB_FAILED: [_result(event="job.failed", url=url)],
+        }
+        created = _install_fake_dispatcher(monkeypatch, results)
+
+        ok = asyncio.run(harness.test_with_external_url(url))
+
+        assert ok is False
+        (dispatcher,) = created
+        (config,) = dispatcher.kwargs["webhook_store"].get_webhooks_for_event.return_value
+        assert "secret" not in config
+        # Every event is still attempted after the failure.
+        assert len(dispatcher.dispatched) == 3
+
+        out = capsys.readouterr().out
+        assert "Secret configured: No" in out
+        assert "  ✗ Status: 503, Attempts: 2, Duration: 12.5ms" in out
+        assert "    Error: HTTP 503" in out
+        assert "SOME WEBHOOKS FAILED - Check errors above" in out
+        assert "ALL WEBHOOKS DELIVERED SUCCESSFULLY!" not in out

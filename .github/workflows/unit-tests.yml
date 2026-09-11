@@ -162,10 +162,21 @@ jobs:
         #
         # Runs on one shard only: it is a whole-repo policy check, not part of
         # the sharded suite, so repeating it per shard would only add minutes.
+        #
+        # These two suites are carved out of the sharded run
+        # (scripts/split_tests.py DEDICATED_JOB_MODULES), so this is the only
+        # place they execute — and they are what covers
+        # scripts/accelerator_catalog.py. They record coverage into the same
+        # .coverage file the sharded run below appends to (--cov-append), so
+        # the combined floor sees them; without it the catalog module read
+        # 26% in the aggregate and failed the gate.
         if: matrix.shard == 1
         run: |
           python scripts/accelerator_catalog.py validate
-          pytest tests/test_accelerator_catalog.py tests/test_accelerator_pools.py -q
+          pytest tests/test_accelerator_catalog.py tests/test_accelerator_pools.py -q \
+            --cov \
+            --cov-report= \
+            --cov-fail-under=0
       - name: Run pytest with coverage
         # -n auto distributes tests across all available CPU cores via
         # pytest-xdist. The production asset publisher now uses per-asset
@@ -197,6 +208,9 @@ jobs:
         # even when --cov-report= suppresses all reports, so without this every
         # shard fails with "Required test coverage of 100.0% not reached".
         # --cov-report= then leaves just the raw data file to combine.
+        # --cov-append keeps the data the policy step above already wrote on
+        # shard 1 instead of erasing it at start-up; on the other shards no
+        # file exists yet and the flag is a no-op.
         #
         # --durations prints the slowest tests (setup+call+teardown) in every
         # shard log, so a test whose wall time balloons is visible in the run
@@ -225,6 +239,7 @@ jobs:
           echo "shard $SHARD/$SHARDS: ${#SHARD_FILES[@]} test files"
           pytest "${SHARD_FILES[@]}" -q \
             --cov \
+            --cov-append \
             --cov-report= \
             --cov-fail-under=0 \
             --junitxml="report-shard-${SHARD}.xml" \

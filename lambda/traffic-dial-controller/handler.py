@@ -75,8 +75,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-10T23:26:44Z
+# Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/traffic-dial-controller/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/traffic-dial-controller/handler.lambda_handler.png``)
@@ -127,11 +127,6 @@ def _state_parameter_name(project_name: str) -> str:
 def _override_prefix(project_name: str) -> str:
     """SSM path under which per-region override parameters live."""
     return f"/{project_name}/traffic-dial/"
-
-
-def _override_parameter_name(project_name: str, region: str) -> str:
-    """SSM parameter naming a manual per-region dial override."""
-    return f"/{project_name}/traffic-dial/override-{region}"
 
 
 def list_endpoint_groups(ga_client: Any, listener_arn: str) -> dict[str, dict[str, Any]]:

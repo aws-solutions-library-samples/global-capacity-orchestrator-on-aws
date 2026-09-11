@@ -4,6 +4,8 @@
 # pre-check, and lambda_handler (write path, env guard, isolation).
 
 import json
+import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -129,6 +131,7 @@ class TestInstancePoolParsing:
         [
             "not json",
             "{}",
+            '["not-an-object"]',
             '[{"members": ["a.1x", "b.1x", "c.1x"]}]',
             '[{"name": "", "members": ["a.1x", "b.1x", "c.1x"]}]',
             '[{"name": "p"}]',
@@ -362,6 +365,69 @@ class TestSpotPriceSummary:
         ec2 = _fake_ec2()
         ec2.describe_spot_price_history.side_effect = RuntimeError("unavailable")
         assert handler._spot_price_summary(ec2, "g5.xlarge") == (None, None)
+
+    def test_only_the_newest_record_per_az_counts(self, handler):
+        # The API returns newest-first; older duplicates for an AZ and records
+        # without an AZ are ignored rather than skewing the mean or AZ count.
+        ec2 = _fake_ec2()
+        ec2.describe_spot_price_history.return_value = {
+            "SpotPriceHistory": [
+                {"AvailabilityZone": "a", "SpotPrice": "1.0"},
+                {"AvailabilityZone": "a", "SpotPrice": "9.0"},
+                {"SpotPrice": "5.0"},
+            ],
+        }
+        assert handler._spot_price_summary(ec2, "g5.xlarge") == (1.0, 1)
+
+
+class TestDynamoConversions:
+    def test_to_decimal_only_rewrites_floats(self, handler):
+        assert handler._to_decimal(1.5) == Decimal("1.5")
+        assert handler._to_decimal(True) is True
+        assert handler._to_decimal(7) == 7
+        assert handler._to_decimal("g5.xlarge") == "g5.xlarge"
+
+    def test_build_item_omits_absent_probe_values(self, handler):
+        now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        item = handler._build_item(
+            "g5.xlarge",
+            "us-east-1",
+            now,
+            90,
+            {},
+            "single-gpu-24gb",
+            None,
+            None,
+            None,
+            None,
+        )
+        assert item["pk"] == "g5.xlarge#us-east-1"
+        # No score was obtained, so the pool attribution is not recorded either.
+        assert "spot_pool" not in item
+        for absent in (
+            "spot_price",
+            "az_count",
+            "capacity_blocks_available",
+            "capacity_blocks_total",
+            "capacity_blocks_long_available",
+            "capacity_blocks_long_total",
+        ):
+            assert absent not in item
+
+
+class TestErrorCode:
+    def test_reads_the_botocore_shaped_code(self, handler):
+        assert handler._error_code(_ConfigLimitError()) == "MaxConfigLimitExceeded"
+
+    @pytest.mark.parametrize(
+        "response",
+        [None, "not a dict", {"Error": "not a dict"}, {"Error": {"Code": 404}}, {}],
+    )
+    def test_anything_else_is_none(self, handler, response):
+        exc = RuntimeError("boom")
+        if response is not None:
+            exc.response = response  # type: ignore[attr-defined]
+        assert handler._error_code(exc) is None
 
 
 class TestCapacityBlockSummary:
@@ -706,6 +772,25 @@ class TestLambdaHandler:
             for c in ec2.describe_capacity_block_offerings.call_args_list
         }
         assert durations == {24, 672}
+
+    def test_empty_watch_lists_warn_and_poll_nothing(self, handler, monkeypatch, caplog):
+        _set_env(monkeypatch)
+        monkeypatch.setenv("WATCH_INSTANCE_TYPES", "")
+        monkeypatch.setenv("ENABLED_REGIONS", " , ")
+        mock_table = MagicMock()
+        ec2 = _fake_ec2()
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(handler, "boto3", _fake_boto3(mock_table, ec2)),
+        ):
+            result = handler.lambda_handler({}, None)
+        assert "WATCH_INSTANCE_TYPES is empty" in caplog.text
+        assert "ENABLED_REGIONS is empty" in caplog.text
+        assert result["written"] == 0
+        assert result["errors"] == 0
+        assert result["regions_polled"] == []
+        mock_table.put_item.assert_not_called()
+        ec2.get_spot_placement_scores.assert_not_called()
 
     def test_missing_table_name_raises(self, handler, monkeypatch):
         monkeypatch.delenv("CAPACITY_HISTORY_TABLE_NAME", raising=False)

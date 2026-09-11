@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="5264e919978c7063">
+        <meta name="gco-generated-at" content="2026-09-11T00:12:12Z">
+        <meta name="gco-source-commit" content="bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7">
+        <meta name="gco-flow-digest" content="174a6817e4ae466c">
         <title>Helm convergence per-chart decision (EnabledCharts authority: install vs uninstall)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,51 +208,51 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op7175=>operation: 'Step Functions task entrypoint: install or uninstall a single chart.\n\n    Each chart is its own state-machine task, so this performs exactly one\n    helm operation per invocation and raises on failure — retries and ordering\n    are owned by the state machine, not this function. That keeps every\n    invocation comfortably under the Lambda timeout and gives per-chart retry\n    and observability in the Step Functions console.\n\n    Event shape (from the state machine task payload)::\n\n        {\n          "Action": "install_chart" | "uninstall_chart" |\n                    "quiesce_health_monitor" | "validate_releases",\n          "Chart": "<chart name as keyed in charts.yaml>",  # omitted for quiesce/validate\n          "ClusterName": "...", "Region": "...",\n          "EnabledCharts": ["keda", ...],\n          "KedaOperatorRoleArn": "arn:...",   # optional\n          "Charts": { "<name>": { ...overrides... } }  # optional\n        }\n\n    Returns a small status dict on success; raises on failure so the state\n    machine\'s Retry/Catch handles it.\n    '
-op7177=>operation: action = event['Action']
-op7179=>operation: cluster_name = event.get('ClusterName') or os.environ['CLUSTER_NAME']
-op7181=>operation: region = event.get('Region') or os.environ['REGION']
-cond7184=>condition: if action == 'quiesce_health_monitor'
-op7188=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
-op7191=>operation: success, message = quiesce_health_monitor(kubeconfig)
+        <div><textarea id="code" style="width: 100%;" rows="11">op94=>operation: 'Step Functions task entrypoint: install or uninstall a single chart.\n\n    Each chart is its own state-machine task, so this performs exactly one\n    helm operation per invocation and raises on failure — retries and ordering\n    are owned by the state machine, not this function. That keeps every\n    invocation comfortably under the Lambda timeout and gives per-chart retry\n    and observability in the Step Functions console.\n\n    Event shape (from the state machine task payload)::\n\n        {\n          "Action": "install_chart" | "uninstall_chart" |\n                    "quiesce_health_monitor" | "validate_releases",\n          "Chart": "<chart name as keyed in charts.yaml>",  # omitted for quiesce/validate\n          "ClusterName": "...", "Region": "...",\n          "EnabledCharts": ["keda", ...],\n          "KedaOperatorRoleArn": "arn:...",   # optional\n          "Charts": { "<name>": { ...overrides... } }  # optional\n        }\n\n    Returns a small status dict on success; raises on failure so the state\n    machine\'s Retry/Catch handles it.\n    '
+op96=>operation: action = event['Action']
+op98=>operation: cluster_name = event.get('ClusterName') or os.environ['CLUSTER_NAME']
+op100=>operation: region = event.get('Region') or os.environ['REGION']
+cond103=>condition: if action == 'quiesce_health_monitor'
+op107=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
+op110=>operation: success, message = quiesce_health_monitor(kubeconfig)
 if not success:
     raise RuntimeError(f'health-monitor quiesce failed: {message}')
 return {'status': 'quiesced', 'message': message}
-cond7190=>condition: exception raised?
-op7197=>operation: with contextlib.suppress(Exception):
+cond109=>condition: exception raised?
+op116=>operation: with contextlib.suppress(Exception):
     os.remove(kubeconfig)
-cond7203=>condition: if action == 'validate_releases'
-op7208=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
+cond122=>condition: if action == 'validate_releases'
+op127=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
 try:
     evidence = validate_releases(event, kubeconfig)
 finally:
     _remove_validation_file(kubeconfig)
-cond7207=>condition: exception raised?
-cond7210=>condition: except Exception as exc
-op7214=>operation: diagnostic = _bounded_diagnostic(exc)
-sub7216=>subroutine: _record_addon_status('helm-validation', 'failed', diagnostic)
-sub7218=>subroutine: raise RuntimeError(f'helm release validation failed: {diagnostic}') from exc
-op7223=>operation: message = f"validated {evidence['validated_release_count']}/{evidence['expected_release_count']} releases and {evidence['validated_resource_count']}/{evidence['expected_resource_count']} resources"
-sub7225=>subroutine: _record_addon_status('helm-validation', 'validated', message)
-io7230=>inputoutput: output: evidence
-e7228=>end: end function return
-op7236=>operation: chart_name = event['Chart']
-op7238=>operation: enabled_charts = event.get('EnabledCharts') or []
-op7240=>operation: chart_overrides = event.get('Charts') or {}
-op7242=>operation: keda_operator_role_arn = event.get('KedaOperatorRoleArn')
-op7244=>operation: default_config = load_charts_config().get('charts', {})
-op7246=>operation: config = dict(default_config.get(chart_name, {}))
-cond7249=>operation: config = deep_merge(config, chart_overrides[chart_name]) if  chart_name in chart_overrides
-op7259=>operation: is_enabled = chart_name in enabled_charts
-cond7262=>condition: if chart_name == 'keda' and keda_operator_role_arn
-op7266=>operation: keda_values = config.setdefault('values', {})
-op7268=>operation: service_account = keda_values.setdefault('serviceAccount', {})
-op7270=>operation: operator = service_account.setdefault('operator', {})
-op7272=>operation: annotations = operator.setdefault('annotations', {})
-op7274=>operation: annotations['eks.amazonaws.com/role-arn'] = keda_operator_role_arn
-op7279=>operation: namespace = config.get('namespace', 'default')
-op7281=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
-op7284=>operation: disabled_install = action == 'install_chart' and (not is_enabled)
+cond126=>condition: exception raised?
+cond129=>condition: except Exception as exc
+op133=>operation: diagnostic = _bounded_diagnostic(exc)
+sub135=>subroutine: _record_addon_status('helm-validation', 'failed', diagnostic)
+sub137=>subroutine: raise RuntimeError(f'helm release validation failed: {diagnostic}') from exc
+op142=>operation: message = f"validated {evidence['validated_release_count']}/{evidence['expected_release_count']} releases and {evidence['validated_resource_count']}/{evidence['expected_resource_count']} resources"
+sub144=>subroutine: _record_addon_status('helm-validation', 'validated', message)
+io149=>inputoutput: output: evidence
+e147=>end: end function return
+op155=>operation: chart_name = event['Chart']
+op157=>operation: enabled_charts = event.get('EnabledCharts') or []
+op159=>operation: chart_overrides = event.get('Charts') or {}
+op161=>operation: keda_operator_role_arn = event.get('KedaOperatorRoleArn')
+op163=>operation: default_config = load_charts_config().get('charts', {})
+op165=>operation: config = dict(default_config.get(chart_name, {}))
+cond168=>operation: config = deep_merge(config, chart_overrides[chart_name]) if  chart_name in chart_overrides
+op178=>operation: is_enabled = chart_name in enabled_charts
+cond181=>condition: if chart_name == 'keda' and keda_operator_role_arn
+op185=>operation: keda_values = config.setdefault('values', {})
+op187=>operation: service_account = keda_values.setdefault('serviceAccount', {})
+op189=>operation: operator = service_account.setdefault('operator', {})
+op191=>operation: annotations = operator.setdefault('annotations', {})
+op193=>operation: annotations['eks.amazonaws.com/role-arn'] = keda_operator_role_arn
+op198=>operation: namespace = config.get('namespace', 'default')
+op200=>operation: kubeconfig = configure_kubeconfig(cluster_name, region)
+op203=>operation: disabled_install = action == 'install_chart' and (not is_enabled)
 if action == 'install_chart' and is_enabled and (chart_name == LBC_CHART_NAME):
     _apply_gateway_crds(kubeconfig)
 if action == 'uninstall_chart' or disabled_install:
@@ -273,53 +273,53 @@ if action == 'install_chart':
     _record_addon_status(chart_name, 'installed', message)
     return {'chart': chart_name, 'status': 'installed', 'message': message}
 raise ValueError(f'Unknown Action: {action!r}')
-cond7283=>condition: exception raised?
-op7290=>operation: with contextlib.suppress(Exception):
+cond202=>condition: exception raised?
+op209=>operation: with contextlib.suppress(Exception):
     os.remove(kubeconfig)
 
-op7175->op7177
-op7177->op7179
-op7179->op7181
-op7181->cond7184
-cond7184(yes)->op7188
-op7188->op7191
-op7191->cond7190
-cond7190(yes)->op7197
-op7197->cond7203
-cond7203(yes)->op7208
-op7208->cond7207
-cond7207(yes)->cond7210
-cond7210(yes)->op7214
-op7214->sub7216
-sub7216->sub7218
-cond7210(no)->op7223
-op7223->sub7225
-sub7225->io7230
-io7230->e7228
-cond7207(no)->op7223
-cond7203(no)->op7236
-op7236->op7238
-op7238->op7240
-op7240->op7242
-op7242->op7244
-op7244->op7246
-op7246->cond7249
-cond7249->op7259
-op7259->cond7262
-cond7262(yes)->op7266
-op7266->op7268
-op7268->op7270
-op7270->op7272
-op7272->op7274
-op7274->op7279
-op7279->op7281
-op7281->op7284
-op7284->cond7283
-cond7283(yes)->op7290
-cond7283(no)->op7290
-cond7262(no)->op7279
-cond7190(no)->op7197
-cond7184(no)->cond7203
+op94->op96
+op96->op98
+op98->op100
+op100->cond103
+cond103(yes)->op107
+op107->op110
+op110->cond109
+cond109(yes)->op116
+op116->cond122
+cond122(yes)->op127
+op127->cond126
+cond126(yes)->cond129
+cond129(yes)->op133
+op133->sub135
+sub135->sub137
+cond129(no)->op142
+op142->sub144
+sub144->io149
+io149->e147
+cond126(no)->op142
+cond122(no)->op155
+op155->op157
+op157->op159
+op159->op161
+op161->op163
+op163->op165
+op165->cond168
+cond168->op178
+op178->cond181
+cond181(yes)->op185
+op185->op187
+op187->op189
+op189->op191
+op191->op193
+op193->op198
+op198->op200
+op200->op203
+op203->cond202
+cond202(yes)->op209
+cond202(no)->op209
+cond181(no)->op198
+cond109(no)->op116
+cond103(no)->cond122
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -329,17 +329,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-11T00:12:12Z -->
+        <!-- Generated from Git commit: bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-11T00:12:12Z">2026-09-11T00:12:12Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>5264e919978c7063</code>
+            Flow content SHA-256: <code>174a6817e4ae466c</code>
           </p>
           <div id="canvas"></div>
         </div>

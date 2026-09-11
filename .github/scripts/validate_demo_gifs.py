@@ -184,7 +184,11 @@ def _validate_gif(relative_path: Path, policy: GifPolicy) -> tuple[int, tuple[in
         )
     decoded_pixels = width * height * parsed_frame_count
     pixel_budget = policy.max_width * policy.max_height * policy.max_frames
-    if decoded_pixels > pixel_budget:
+    # Defence in depth: each factor has just been bounded by its own ceiling,
+    # so their product cannot exceed the product of the ceilings and this branch
+    # is unreachable today. It stays so that loosening any one check above
+    # cannot silently unbound the total decoder work.
+    if decoded_pixels > pixel_budget:  # pragma: no cover - implied by the three checks above
         raise ValidationError(
             f"{relative_path}: decoded pixel budget {decoded_pixels:,} exceeds {pixel_budget:,}"
         )
