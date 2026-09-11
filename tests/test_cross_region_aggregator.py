@@ -16,14 +16,19 @@ tests running in the same pytest session.
 """
 
 import json
+import logging
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.credentials import Credentials
 
 from tests._lambda_imports import load_lambda_module
 
 handler = load_lambda_module("cross-region-aggregator")
+# The autouse fixture below stubs the name ``_sigv4_headers`` on the module for
+# the transport-focused tests; keep the real function for the signing tests.
+_REAL_SIGV4_HEADERS = handler._sigv4_headers
 
 
 @pytest.fixture(autouse=True)
@@ -591,3 +596,193 @@ class TestLambdaHandler:
             assert result["statusCode"] == 500
             body = json.loads(result["body"])
             assert "error" in body
+
+
+class TestDiscoveryConfiguration:
+    """The bridge list, project name and URL suffix all fail closed."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [None, "not json", "{}", "[]", '["us-east-1", 7]', '["US-EAST-1"]', '["nowhere"]'],
+        ids=["unset", "not-json", "not-a-list", "empty", "non-string", "uppercase", "not-a-region"],
+    )
+    def test_malformed_target_regions_fail_closed(self, monkeypatch, raw):
+        if raw is None:
+            monkeypatch.delenv("TARGET_REGIONS", raising=False)
+        else:
+            monkeypatch.setenv("TARGET_REGIONS", raw)
+        with pytest.raises(RuntimeError, match="not configured|invalid region"):
+            handler._configured_regions()
+
+    def test_duplicate_regions_are_collapsed_in_order(self):
+        with patch.dict(
+            "os.environ", {"TARGET_REGIONS": '["us-west-2", "us-east-1", "us-west-2"]'}
+        ):
+            assert handler._configured_regions() == ["us-west-2", "us-east-1"]
+
+    @pytest.mark.parametrize("suffix", ["", "   ", "not a suffix", "amazonaws"])
+    def test_unconfigured_url_suffix_fails_closed(self, suffix):
+        with (
+            patch.dict("os.environ", {"AWS_URL_SUFFIX": suffix}),
+            pytest.raises(RuntimeError, match="AWS URL suffix is not configured"),
+        ):
+            handler._aws_url_suffix()
+
+    def test_blank_project_name_fails_closed(self):
+        with (
+            patch.dict("os.environ", {"PROJECT_NAME": "   ", "TARGET_REGIONS": '["us-east-1"]'}),
+            patch.object(handler.boto3, "client") as mock_client,
+            pytest.raises(RuntimeError, match="not configured"),
+        ):
+            handler.get_regional_endpoints()
+        mock_client.assert_not_called()
+
+    def test_discovery_failure_falls_back_to_bounded_stale_endpoints(self, caplog):
+        stale = {"us-east-1": "https://stale1.execute-api.us-east-1.amazonaws.com/prod"}
+        handler._cached_endpoints = stale
+        # Past the fresh TTL, inside the stale ceiling.
+        handler._endpoints_cache_time = time.monotonic() - handler._ENDPOINTS_CACHE_TTL - 1
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stacks.side_effect = RuntimeError("cloudformation down")
+
+        with (
+            patch.dict("os.environ", {"PROJECT_NAME": "gco", "TARGET_REGIONS": '["us-east-1"]'}),
+            patch.object(handler.boto3, "client", return_value=mock_cfn),
+            caplog.at_level(logging.WARNING),
+        ):
+            assert handler.get_regional_endpoints() == stale
+
+        assert "Using bounded stale regional API discovery after failures in us-east-1" in (
+            caplog.text
+        )
+
+    def test_stale_endpoints_past_the_ceiling_are_not_used(self):
+        handler._cached_endpoints = {
+            "us-east-1": "https://stale1.execute-api.us-east-1.amazonaws.com/prod"
+        }
+        handler._endpoints_cache_time = time.monotonic() - handler._ENDPOINTS_CACHE_MAX_STALE - 1
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stacks.side_effect = RuntimeError("cloudformation down")
+
+        with (
+            patch.dict("os.environ", {"PROJECT_NAME": "gco", "TARGET_REGIONS": '["us-east-1"]'}),
+            patch.object(handler.boto3, "client", return_value=mock_cfn),
+            pytest.raises(RuntimeError, match="regional API bridges are unavailable"),
+        ):
+            handler.get_regional_endpoints()
+
+
+class TestSigV4Signing:
+    """Real SigV4 signing against the Lambda execution-role credentials."""
+
+    _URL = "https://abc123.execute-api.us-east-1.amazonaws.com/prod/api/v1/jobs?limit=10"
+
+    def _session(self, credentials):
+        session = MagicMock()
+        session.get_credentials.return_value = credentials
+        return session
+
+    def test_signs_with_frozen_credentials(self):
+        credentials = Credentials("AKIAEXAMPLE", "secret", token="session-token")  # nosec B106 - fixture value, not a real credential
+
+        with patch.object(handler.boto3, "Session", return_value=self._session(credentials)):
+            headers = _REAL_SIGV4_HEADERS("us-east-1", "get", self._URL, '{"a": 1}')
+
+        assert headers["Content-Type"] == "application/json"
+        assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/")
+        assert "/us-east-1/execute-api/aws4_request" in headers["Authorization"]
+        assert headers["X-Amz-Security-Token"] == "session-token"  # nosec B105 - fixture value
+        assert "X-Amz-Date" in headers
+
+    def test_signs_with_credentials_that_cannot_be_frozen(self):
+        class StaticCredentials:
+            access_key = "AKIASTATIC"
+            secret_key = "secret"  # nosec B105 - fixture value, not a real credential
+            token = None
+
+        with patch.object(
+            handler.boto3, "Session", return_value=self._session(StaticCredentials())
+        ):
+            headers = _REAL_SIGV4_HEADERS("eu-west-1", "DELETE", self._URL, None)
+
+        assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIASTATIC/")
+        assert "/eu-west-1/execute-api/aws4_request" in headers["Authorization"]
+        assert "X-Amz-Security-Token" not in headers
+
+    def test_missing_credentials_fail_closed(self):
+        with (
+            patch.object(handler.boto3, "Session", return_value=self._session(None)),
+            pytest.raises(RuntimeError, match="credentials are unavailable"),
+        ):
+            _REAL_SIGV4_HEADERS("us-east-1", "GET", self._URL, None)
+
+
+class TestUnexpectedRegionalFailures:
+    """A query that raises (rather than returning ``_error``) is isolated per region."""
+
+    _ENDPOINTS = {
+        "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+        "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
+    }
+
+    def _query(self, region, endpoint, path, method="GET", body=None, query_params=None):
+        if region == "us-west-2":
+            raise RuntimeError("thread blew up")
+        if path == "/api/v1/health":
+            return {"_status": "success", "status": "healthy"}
+        if path == "/api/v1/status":
+            return {"_status": "success", "metrics": {"pods": 1}}
+        if method == "DELETE":
+            return {"_status": "success", "deleted": 2}
+        return {"_status": "success", "jobs": [{"id": "j1", "created_at": "2026-01-01"}]}
+
+    def _patched(self):
+        return (
+            patch.object(handler, "get_regional_endpoints", return_value=self._ENDPOINTS),
+            patch.object(handler, "query_region", side_effect=self._query),
+        )
+
+    def test_aggregate_jobs_records_the_failure(self):
+        endpoints, query = self._patched()
+        with endpoints, query:
+            result = handler.aggregate_jobs()
+        assert result["errors"] == [{"region": "us-west-2", "error": "Regional request failed"}]
+        assert [job["_source_region"] for job in result["jobs"]] == ["us-east-1"]
+
+    def test_aggregate_metrics_records_the_failure(self):
+        endpoints, query = self._patched()
+        with endpoints, query:
+            result = handler.aggregate_metrics()
+        assert result["errors"] == [{"region": "us-west-2", "error": "Regional request failed"}]
+        assert [item["region"] for item in result["regions"]] == ["us-east-1"]
+
+    def test_aggregate_health_marks_the_region_as_errored(self):
+        endpoints, query = self._patched()
+        with endpoints, query:
+            result = handler.aggregate_health()
+        by_region = {item["region"]: item for item in result["regions"]}
+        assert by_region["us-west-2"]["status"] == "error"
+        assert by_region["us-east-1"]["status"] == "healthy"
+
+    def test_bulk_delete_records_the_failure(self):
+        endpoints, query = self._patched()
+        with endpoints, query:
+            result = handler.bulk_delete_jobs(dry_run=False)
+        assert result["errors"] == [{"region": "us-west-2", "error": "Regional request failed"}]
+
+
+class TestHandlerDiscoveryOutage:
+    def test_bridge_discovery_failure_is_a_503(self):
+        with patch.object(
+            handler,
+            "get_regional_endpoints",
+            side_effect=RuntimeError("One or more regional API bridges are unavailable"),
+        ):
+            result = handler.lambda_handler(
+                {"httpMethod": "GET", "path": "/api/v1/global/health"}, None
+            )
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"]) == {
+            "error": "Regional aggregation is temporarily unavailable"
+        }
