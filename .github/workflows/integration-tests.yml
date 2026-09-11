@@ -1582,6 +1582,39 @@ jobs:
           print(text)
           PY
           kubectl apply -f "${RUNNER_TEMP}/network-policies.yaml"
+          # kind is the one place the shipped egress rules do not reach the
+          # API server. On EKS the `kubernetes` Service's endpoints are the
+          # control-plane ENIs on :443, which allow-aws-api-egress already
+          # admits; kind serves it on the node at :6443, and Calico evaluates
+          # egress after kube-proxy's DNAT, so every gco-system pod would be
+          # cut off from the API server the moment enforcement is real. (That
+          # is how the health monitor's first poll came to hang on connect
+          # retries for exactly its startup-probe budget.) A CI-only rule
+          # admits kind's port, read from the live endpoint rather than
+          # assumed.
+          apiserver_port="$(kubectl get endpoints kubernetes \
+            -o jsonpath='{.subsets[0].ports[0].port}')"
+          echo "kind API server port ${apiserver_port} (EKS: 443)"
+          kubectl apply -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: ci-allow-kind-apiserver-egress
+            namespace: gco-system
+            labels:
+              gco.aws/ci-only: "true"
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  - ipBlock:
+                      cidr: "${node_cidr}"
+                ports:
+                  - protocol: TCP
+                    port: ${apiserver_port}
+          EOF
           sed 's|{{NETWORK_POLICY_ENFORCEMENT}}|true|g' \
             lambda/kubectl-applier-simple/manifests/06-network-policy-controller.yaml \
             | kubectl apply -f -
