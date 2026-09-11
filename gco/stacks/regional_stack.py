@@ -41,8 +41,9 @@ Resources Created:
           required regional workload ingress in other partitions
 
     Container Images:
-        - ECR repositories + Docker image builds for health-monitor, manifest-processor,
-          inference-proxy, inference-monitor, queue-processor
+        - Docker image assets (CDK bootstrap asset repository, content-hash
+          tags) for health-monitor, manifest-processor, inference-proxy,
+          inference-monitor, queue-processor, cost-monitor
 
     SQS:
         - Regional job queue + dead letter queue (for gco jobs submit-sqs)
@@ -92,7 +93,6 @@ from aws_cdk import (
     Validations,
 )
 from aws_cdk import aws_ec2 as ec2
-from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_efs as efs
 from aws_cdk import aws_eks as eks_l1  # L1 constructs (CfnPodIdentityAssociation)
@@ -805,7 +805,7 @@ class GCORegionalStack(Stack):
         # Create SQS queue for job ingestion
         self._create_sqs_queue()
 
-        # Create ECR repositories and build Docker images
+        # Build the platform service images as CDK Docker image assets
         self._create_container_images()
 
         # Pre-create the execution role shared by every ``cr.AwsCustomResource``
@@ -1205,17 +1205,16 @@ class GCORegionalStack(Stack):
         return str(reader.get_response_field("Parameter.Value"))
 
     def _create_container_images(self) -> None:
-        """Create ECR repositories and build Docker images for services"""
+        """Build the platform service images as CDK Docker image assets.
 
-        # Create ECR repository for health monitor
-        self.health_monitor_repo = ecr.Repository(
-            self,
-            "HealthMonitorRepo",
-            # repository_name intentionally omitted - let CDK generate unique name
-            removal_policy=RemovalPolicy.DESTROY,  # For dev/test; use RETAIN for production
-            empty_on_delete=True,  # Clean up images on stack deletion
-            image_scan_on_push=True,  # Enable vulnerability scanning on push
-        )
+        Every image is a ``DockerImageAsset``: CDK builds it at synth, pushes
+        it to the bootstrap asset repository under a content-hash tag, and the
+        manifests receive that URI through ``{{*_IMAGE}}`` replacements. The
+        stack creates no ECR repositories of its own — three empty
+        per-service repositories used to be declared here and were never
+        pushed to or referenced; they only added resources to create, scan,
+        and delete on every deploy.
+        """
 
         # All Docker images target AMD64 (x86_64) to match EKS Auto Mode's
         # default system nodepool.
@@ -1232,16 +1231,6 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        # Create ECR repository for manifest processor
-        self.manifest_processor_repo = ecr.Repository(
-            self,
-            "ManifestProcessorRepo",
-            # repository_name intentionally omitted - let CDK generate unique name
-            removal_policy=RemovalPolicy.DESTROY,
-            empty_on_delete=True,
-            image_scan_on_push=True,  # Enable vulnerability scanning on push
-        )
-
         # Build and push manifest processor Docker image
         self.manifest_processor_image = ecr_assets.DockerImageAsset(
             self,
@@ -1254,16 +1243,9 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        # Create and build the inference-only data-plane proxy image. Keeping
-        # this separate from manifest-processor prevents model traffic from
+        # Build the inference-only data-plane proxy image. Keeping this
+        # separate from manifest-processor prevents model traffic from
         # sharing its Kubernetes API/RBAC and queue-worker process surface.
-        self.inference_proxy_repo = ecr.Repository(
-            self,
-            "InferenceProxyRepo",
-            removal_policy=RemovalPolicy.DESTROY,
-            empty_on_delete=True,
-            image_scan_on_push=True,
-        )
         self.inference_proxy_image = ecr_assets.DockerImageAsset(
             self,
             "InferenceProxyImage",
@@ -2579,8 +2561,38 @@ class GCORegionalStack(Stack):
         )
         self._pod_identity_associations.append(inference_proxy_assoc)
 
-        # Shared GCO service account for general platform/job workloads.
-        for namespace in ["gco-system", "gco-jobs", "gco-inference"]:
+        # Inference monitor — reconciles endpoints with the shared platform
+        # role (its IRSA subject is already in that role's trust policy).
+        # Every other platform Deployment gets both credential paths; this one
+        # had only the IRSA annotation.
+        inference_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
+            self,
+            "PodIdentity-inference-monitor",
+            cluster_name=self.cluster.cluster_name,
+            namespace="gco-system",
+            service_account="gco-inference-monitor-sa",
+            role_arn=self.service_account_role.role_arn,
+        )
+        self._pod_identity_associations.append(inference_monitor_assoc)
+
+        # Cost monitor — only when the pipeline deploys here (the role and
+        # 34-cost-monitor.yaml are gated the same way).
+        if self._cost_monitoring_active():
+            cost_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
+                self,
+                "PodIdentity-cost-monitor",
+                cluster_name=self.cluster.cluster_name,
+                namespace="gco-system",
+                service_account="gco-cost-monitor-sa",
+                role_arn=self.cost_monitor_role.role_arn,
+            )
+            self._pod_identity_associations.append(cost_monitor_assoc)
+
+        # Shared GCO service account for user job and inference workloads —
+        # the two namespaces 01-serviceaccounts.yaml actually declares it in.
+        # (A gco-system association used to be created as well; no such
+        # ServiceAccount exists there, so it never bound anything.)
+        for namespace in ["gco-jobs", "gco-inference"]:
             assoc = eks_l1.CfnPodIdentityAssociation(
                 self,
                 f"PodIdentity-gco-sa-{namespace}",

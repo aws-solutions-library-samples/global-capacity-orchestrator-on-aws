@@ -896,8 +896,13 @@ class TestRegionalStackSynthesis:
         assert ga_id in _depends_on("HelmTeardown")
         assert "HelmInstallCharts" in _depends_on(ga_id)
 
-    def test_regional_stack_creates_ecr_repositories(self):
-        """Test that RegionalStack creates ECR repositories."""
+    def test_regional_stack_creates_no_ecr_repositories(self):
+        """Service images are CDK assets; the stack owns no ECR repositories.
+
+        Three empty per-service repositories used to be declared and never
+        pushed to or referenced — pure create/scan/delete churn on every
+        deploy. Every ``{{*_IMAGE}}`` replacement must still be an asset URI.
+        """
 
         from gco.stacks.regional_stack import GCORegionalStack
 
@@ -926,8 +931,109 @@ class TestRegionalStackSynthesis:
             )
 
             template = assertions.Template.from_stack(stack)
-            # Dedicated repositories for health, manifest, and inference proxy services.
-            template.resource_count_is("AWS::ECR::Repository", 3)
+            template.resource_count_is("AWS::ECR::Repository", 0)
+            replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+                "ImageReplacements"
+            ]
+            for token in (
+                "{{COST_MONITOR_IMAGE}}",
+                "{{HEALTH_MONITOR_IMAGE}}",
+                "{{INFERENCE_MONITOR_IMAGE}}",
+                "{{INFERENCE_PROXY_IMAGE}}",
+                "{{MANIFEST_PROCESSOR_IMAGE}}",
+                "{{QUEUE_PROCESSOR_IMAGE}}",
+            ):
+                assert replacements[token] == mock_image.image_uri, token
+
+    def test_every_irsa_service_account_has_a_matching_pod_identity_association(self):
+        """Both credential paths point every platform ServiceAccount at one role.
+
+        The manifests annotate each ``gco-system`` ServiceAccount with an IRSA
+        role placeholder; the stack must also create an EKS Pod Identity
+        association for the same (namespace, account) naming the same role.
+        The inference monitor and cost monitor used to have only the
+        annotation, so the two paths could disagree without any test noticing.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-regional-pod-identity",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        associations = {
+            (props["Namespace"], props["ServiceAccount"]): props["RoleArn"]
+            for props in (
+                resource["Properties"]
+                for resource in resources.values()
+                if resource["Type"] == "AWS::EKS::PodIdentityAssociation"
+            )
+        }
+
+        manifests_dir = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+        )
+        annotated: dict[tuple[str, str], str] = {}
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            # Keep the role placeholders so they can be looked up; stub the rest.
+            text = re.sub(
+                r"\{\{(?!\w+_ROLE_ARN\}\})[A-Z0-9_]+\}\}",
+                "stub",
+                manifest.read_text(encoding="utf-8"),
+            )
+            for document in yaml.safe_load_all(text):
+                if not isinstance(document, dict) or document.get("kind") != "ServiceAccount":
+                    continue
+                metadata = document["metadata"]
+                role_token = (metadata.get("annotations") or {}).get("eks.amazonaws.com/role-arn")
+                if role_token:
+                    annotated[(metadata["namespace"], metadata["name"])] = role_token
+
+        assert set(annotated) == {
+            ("gco-system", "gco-health-monitor-sa"),
+            ("gco-system", "gco-manifest-processor-sa"),
+            ("gco-system", "gco-inference-monitor-sa"),
+            ("gco-system", "gco-inference-proxy-sa"),
+            ("gco-system", "gco-cost-monitor-sa"),
+            ("gco-jobs", "gco-service-account"),
+            ("gco-inference", "gco-service-account"),
+        }
+        for identity, role_token in annotated.items():
+            assert identity in associations, f"no Pod Identity association for {identity}"
+            assert associations[identity] == replacements[role_token], (
+                f"{identity}: IRSA annotation {role_token} and Pod Identity name different roles"
+            )
+        # And no association dangles on a ServiceAccount the manifests never
+        # create (a gco-system/gco-service-account one used to).
+        gco_namespaces = {"gco-system", "gco-jobs", "gco-inference"}
+        dangling = {identity for identity in associations if identity[0] in gco_namespaces} - set(
+            annotated
+        )
+        assert not dangling, f"Pod Identity associations without a ServiceAccount: {dangling}"
 
     def test_regional_stack_creates_efs(self):
         """Test that RegionalStack creates EFS file system."""
