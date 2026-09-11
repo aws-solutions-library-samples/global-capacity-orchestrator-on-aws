@@ -1406,9 +1406,8 @@ def _service_has_ready_endpoint(
 
     payload = _parse_json_object(stdout, f"EndpointSlice query for {display}")
     items = payload.get("items")
+    # A list response is an EndpointSliceList; anything else is a single slice.
     slices = items if isinstance(items, list) else [payload]
-    if not isinstance(slices, list):
-        raise RuntimeError(f"EndpointSlice query for {display} returned invalid items")
     for endpoint_slice in slices:
         if not isinstance(endpoint_slice, dict):
             continue
@@ -1495,29 +1494,29 @@ def _verified_gateway_crd_bundle(
     bundle: _PinnedManifestBundle,
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """Download one pinned bundle, verify exact bytes, and expose a mode-0600 file."""
-    response: Any | None = None
-    body = b""
+    # A failed request leaves nothing to release, so the connection guard
+    # only needs to cover the checks that run once a response exists.
+    response = urllib3.PoolManager().request(
+        "GET",
+        bundle.url,
+        headers={"User-Agent": "gco-helm-installer/1"},
+        timeout=urllib3.Timeout(
+            connect=GATEWAY_CRD_HTTP_CONNECT_TIMEOUT_SECONDS,
+            read=GATEWAY_CRD_HTTP_READ_TIMEOUT_SECONDS,
+        ),
+        retries=urllib3.Retry(
+            total=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
+            connect=0,
+            read=0,
+            redirect=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
+            status=0,
+            other=0,
+            raise_on_redirect=True,
+            raise_on_status=True,
+        ),
+        redirect=True,
+    )
     try:
-        response = urllib3.PoolManager().request(
-            "GET",
-            bundle.url,
-            headers={"User-Agent": "gco-helm-installer/1"},
-            timeout=urllib3.Timeout(
-                connect=GATEWAY_CRD_HTTP_CONNECT_TIMEOUT_SECONDS,
-                read=GATEWAY_CRD_HTTP_READ_TIMEOUT_SECONDS,
-            ),
-            retries=urllib3.Retry(
-                total=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
-                connect=0,
-                read=0,
-                redirect=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
-                status=0,
-                other=0,
-                raise_on_redirect=True,
-                raise_on_status=True,
-            ),
-            redirect=True,
-        )
         if response.status != 200:
             raise RuntimeError(
                 f"{bundle.name} download returned HTTP {response.status}, expected 200"
@@ -1526,8 +1525,7 @@ def _verified_gateway_crd_bundle(
         if not isinstance(body, bytes):
             raise RuntimeError(f"{bundle.name} download returned a non-byte body")
     finally:
-        if response is not None:
-            response.release_conn()
+        response.release_conn()
 
     if len(body) != bundle.size:
         raise RuntimeError(f"{bundle.name} size mismatch: got {len(body)}, expected {bundle.size}")

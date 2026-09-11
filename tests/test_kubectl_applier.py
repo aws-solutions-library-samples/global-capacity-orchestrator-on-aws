@@ -11,7 +11,10 @@ reloads the handler with sys.modules cleanup so each test runs
 against a fresh import.
 """
 
+import base64
+import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -3279,3 +3282,2160 @@ class TestServiceAccountAutomountFlipDiagnostic:
             )
         v1.read_namespaced_service_account.assert_not_called()
         assert caplog.text == ""
+
+
+class TestPlannerPodSpecHelpers:
+    """Malformed pod specs never crash the cross-phase token-projection guard."""
+
+    _MOUNT = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+    def test_pod_spec_path_stops_at_a_non_mapping_node(self, handler_module):
+        """A Deployment whose template is a scalar has no pod spec."""
+        document = {"kind": "Deployment", "spec": {"template": "not-a-mapping"}}
+
+        assert handler_module._planned_pod_spec(document) is None
+
+    def test_pod_spec_is_found_for_each_workload_kind(self, handler_module):
+        pod_spec = {"containers": [{"name": "c"}]}
+        cron_job = {
+            "kind": "CronJob",
+            "spec": {"jobTemplate": {"spec": {"template": {"spec": pod_spec}}}},
+        }
+        scaled_job = {
+            "kind": "ScaledJob",
+            "spec": {"jobTargetRef": {"template": {"spec": pod_spec}}},
+        }
+        pod = {"kind": "Pod", "spec": pod_spec}
+
+        assert handler_module._planned_pod_spec(cron_job) is pod_spec
+        assert handler_module._planned_pod_spec(scaled_job) is pod_spec
+        assert handler_module._planned_pod_spec(pod) is pod_spec
+        assert handler_module._planned_pod_spec({"kind": "ConfigMap", "data": {}}) is None
+
+    def test_projection_check_skips_malformed_volumes_and_containers(self, handler_module):
+        """Garbage entries are skipped; the init container's mount still counts."""
+        pod_spec = {
+            "volumes": [
+                "garbage",
+                {"name": "config", "configMap": {"name": "settings"}},
+                {"name": "certs", "projected": {"sources": [{"secret": {"name": "tls"}}]}},
+                {"projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]}},
+                {
+                    "name": "kubernetes-api-token",
+                    "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]},
+                },
+            ],
+            "containers": "garbage",
+            "initContainers": [
+                "garbage",
+                {
+                    "name": "init",
+                    "volumeMounts": [{"name": "kubernetes-api-token", "mountPath": self._MOUNT}],
+                },
+            ],
+        }
+
+        assert handler_module._pod_spec_projects_service_account_token(pod_spec) is True
+
+    def test_projection_check_requires_a_token_volume_to_mount(self, handler_module):
+        """A projected volume carrying only a Secret is not a token, even when mounted."""
+        pod_spec = {
+            "volumes": [{"name": "certs", "projected": {"sources": [{"secret": {"name": "t"}}]}}],
+            "containers": [
+                {"name": "app", "volumeMounts": [{"name": "certs", "mountPath": self._MOUNT}]}
+            ],
+        }
+
+        assert handler_module._pod_spec_projects_service_account_token(pod_spec) is False
+
+    def test_rbac_subjects_bind_only_namespaced_service_accounts(self, handler_module):
+        """User subjects, garbage entries and namespace-less ClusterRoleBinding
+        subjects never make an account API-bound."""
+        planned = [
+            {
+                "kind": "RoleBinding",
+                "namespace": "gco-system",
+                "document": {
+                    "subjects": [
+                        {"kind": "User", "name": "alice"},
+                        "garbage",
+                        {"kind": "ServiceAccount", "name": "gco-worker-sa"},
+                    ]
+                },
+            },
+            {
+                "kind": "ClusterRoleBinding",
+                "namespace": handler_module._CLUSTER_SCOPE,
+                "document": {"subjects": [{"kind": "ServiceAccount", "name": "gco-unscoped-sa"}]},
+            },
+            {"kind": "ConfigMap", "namespace": "gco-system", "document": {}},
+        ]
+
+        assert handler_module._rbac_bound_service_accounts(planned) == {
+            ("gco-system", "gco-worker-sa")
+        }
+
+    def test_deployment_patch_body_without_spec_is_unchanged(self, handler_module):
+        """HPA ownership with no spec to trim is a plain deep copy."""
+        document = {"metadata": {"annotations": {"gco.aws/hpa-controls-replicas": "true"}}}
+
+        patch_body = handler_module._deployment_patch_body(document)
+
+        assert patch_body == document
+        assert patch_body is not document
+
+
+class TestPlannerInputValidation:
+    """plan_manifests rejects malformed replacements and documents with exact messages."""
+
+    @pytest.mark.parametrize(
+        ("replacements", "message"),
+        [
+            (["{{IMAGE}}", "image"], "ImageReplacements must be a string-to-string mapping"),
+            ({"": "image"}, "ImageReplacements contains an empty or non-string key"),
+            ({7: "image"}, "ImageReplacements contains an empty or non-string key"),
+            ({"{{IMAGE}}": 7}, "ImageReplacements value for '{{IMAGE}}' is not a string"),
+        ],
+        ids=["not-a-mapping", "empty-key", "non-string-key", "non-string-value"],
+    )
+    def test_rejects_malformed_replacements_before_reading_any_file(
+        self, handler_module, tmp_path, replacements, message
+    ):
+        (tmp_path / "10-cm.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
+        )
+
+        with (
+            patch.object(handler_module.os, "listdir", wraps=os.listdir) as listdir,
+            pytest.raises(ValueError, match=re.escape(message)),
+        ):
+            handler_module.plan_manifests(str(tmp_path), replacements)
+
+        listdir.assert_not_called()
+
+    def test_unreadable_manifest_is_a_planning_error(self, handler_module, tmp_path):
+        """A directory carrying the .yaml suffix cannot be read and names itself."""
+        (tmp_path / "10-directory.yaml").mkdir()
+
+        with pytest.raises(ValueError, match=r"10-directory\.yaml: unable to read manifest"):
+            handler_module.plan_manifests(str(tmp_path), {})
+
+    def test_empty_documents_are_ignored(self, handler_module, tmp_path):
+        """Leading and trailing document separators yield no planned resource."""
+        (tmp_path / "10-cm.yaml").write_text(
+            "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  namespace: demo\n---\n"
+        )
+
+        plan = handler_module.plan_manifests(str(tmp_path), {})
+
+        assert [item["name"] for item in plan["phases"]["base"]] == ["a"]
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            (
+                "kind: ConfigMap\nmetadata:\n  name: a\n",
+                "10-invalid.yaml document 1: apiVersion must be a nonempty string",
+            ),
+            (
+                "apiVersion: v1\nkind: '  '\nmetadata:\n  name: a\n",
+                "10-invalid.yaml document 1: kind must be a nonempty string",
+            ),
+            (
+                "apiVersion: v1\nkind: ConfigMap\nmetadata: a-name\n",
+                "10-invalid.yaml document 1: metadata must be a mapping",
+            ),
+            (
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  namespace: 42\n",
+                "10-invalid.yaml document 1: metadata.namespace must be a nonempty string",
+            ),
+        ],
+        ids=["missing-apiVersion", "blank-kind", "scalar-metadata", "numeric-namespace"],
+    )
+    def test_rejects_documents_with_a_broken_identity(
+        self, handler_module, tmp_path, content, message
+    ):
+        (tmp_path / "10-invalid.yaml").write_text(content)
+
+        with pytest.raises(ValueError, match=re.escape(message)):
+            handler_module.plan_manifests(str(tmp_path), {})
+
+    def test_error_report_is_bounded_with_a_hidden_count(self, handler_module, tmp_path):
+        """Only the first 20 errors are spelled out; the rest are counted."""
+        documents = [
+            {"apiVersion": "example.io/v1", "kind": "Mystery", "metadata": {"name": f"m{index}"}}
+            for index in range(handler_module._MAX_PLANNING_FAILURES + 3)
+        ]
+        (tmp_path / "10-mysteries.yaml").write_text(yaml.safe_dump_all(documents))
+
+        with pytest.raises(ValueError) as error:
+            handler_module.plan_manifests(str(tmp_path), {})
+
+        message = str(error.value)
+        assert message.count("unsupported kind 'Mystery'") == handler_module._MAX_PLANNING_FAILURES
+        assert message.endswith("; ... 3 additional error(s)")
+
+
+class TestExactResourceDeletion:
+    """_delete_exact_resources handles cluster-scoped targets and unexpected errors."""
+
+    @staticmethod
+    def _dynamic(handler_module, resource):
+        dynamic_client = MagicMock()
+        dynamic_client.resources.get.return_value = resource
+        return (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=dynamic_client),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        )
+
+    def test_cluster_scoped_targets_are_deleted_without_a_namespace(self, handler_module):
+        resource = MagicMock()
+        dynamic_patch, api_patch, options_patch = self._dynamic(handler_module, resource)
+
+        with dynamic_patch, api_patch, options_patch:
+            result = handler_module._prune_disabled_feature("{{FSX_FILE_SYSTEM_ID}}", False)
+
+        deletes = {
+            entry.kwargs["name"]: sorted(entry.kwargs) for entry in resource.delete.call_args_list
+        }
+        assert deletes["gco-fsx-pv-default"] == ["body", "name"]
+        assert deletes["fsx-sc"] == ["body", "name"]
+        assert deletes["gco-fsx-storage"] == ["body", "name", "namespace"]
+        assert result["failed"] == []
+        assert "v1/PersistentVolume/<cluster>/gco-fsx-pv-default" in result["pruned"]
+        assert "storage.k8s.io/v1/StorageClass/<cluster>/fsx-sc" in result["pruned"]
+
+    def test_unexpected_error_types_are_reported_or_treated_as_absent(self, handler_module, caplog):
+        """Non-Kubernetes exceptions fail the prune unless they still signal 404."""
+
+        class _GoneUpstream(Exception):
+            """Transport-level error that still carries an HTTP 404 status."""
+
+            status = 404
+
+        resource = MagicMock()
+        resource.delete.side_effect = [ValueError("connection reset"), _GoneUpstream("gone")]
+        dynamic_patch, api_patch, options_patch = self._dynamic(handler_module, resource)
+
+        with dynamic_patch, api_patch, options_patch, caplog.at_level(logging.INFO):
+            result = handler_module._delete_exact_resources(
+                (
+                    ("v1", "ConfigMap", "gco-system", "gco-valkey"),
+                    ("v1", "ConfigMap", "gco-jobs", "gco-valkey"),
+                ),
+                "disabled-feature",
+            )
+
+        assert result == {
+            "pruned": [],
+            "failed": ["v1/ConfigMap/gco-system/gco-valkey:connection reset"],
+        }
+        assert "already absent: v1/ConfigMap/gco-jobs/gco-valkey" in caplog.text
+
+
+class TestEksClientPlumbing:
+    """Lazy EKS client, STS presigned token, and default Kubernetes configuration."""
+
+    def test_eks_client_is_created_once_and_cached(self, handler_module):
+        with patch.object(handler_module.boto3, "client") as boto_client:
+            first = handler_module.get_eks_client()
+            second = handler_module.get_eks_client()
+
+        boto_client.assert_called_once_with("eks")
+        assert first is second is boto_client.return_value
+
+    def test_eks_token_wraps_a_presigned_get_caller_identity_url(self, handler_module):
+        """The token is k8s-aws-v1. + unpadded urlsafe base64 of the signed URL,
+        which must carry the cluster name in the x-k8s-aws-id header."""
+        session = MagicMock()
+        session.client.return_value.meta.service_model.service_id = "STS"
+        signer = MagicMock()
+        presigned = (
+            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
+            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
+        )
+        signer.generate_presigned_url.return_value = presigned
+
+        with (
+            patch.object(handler_module.boto3, "Session", return_value=session),
+            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
+        ):
+            token = handler_module.get_eks_token("gco-us-west-2", "us-west-2")
+
+        prefix, _, encoded = token.partition(".")
+        assert prefix == "k8s-aws-v1"
+        assert "=" not in encoded
+        padded = encoded + "=" * (-len(encoded) % 4)
+        assert base64.urlsafe_b64decode(padded).decode("utf-8") == presigned
+        session.client.assert_called_once_with("sts", region_name="us-west-2")
+        signer_cls.assert_called_once_with(
+            "STS",
+            "us-west-2",
+            "sts",
+            "v4",
+            session.get_credentials.return_value,
+            session.events,
+        )
+        params = signer.generate_presigned_url.call_args.args[0]
+        assert params["method"] == "GET"
+        assert params["url"].startswith(
+            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
+        )
+        assert params["headers"] == {"x-k8s-aws-id": "gco-us-west-2"}
+        assert signer.generate_presigned_url.call_args.kwargs == {
+            "region_name": "us-west-2",
+            "expires_in": 60,
+            "operation_name": "",
+        }
+
+    @staticmethod
+    def _cluster(ca_pem: bytes) -> dict:
+        return {
+            "cluster": {
+                "endpoint": "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com",
+                "certificateAuthority": {"data": base64.b64encode(ca_pem).decode("ascii")},
+            }
+        }
+
+    def test_configure_writes_the_ca_bundle_and_installs_the_default_configuration(
+        self, handler_module, tmp_path
+    ):
+        ca_pem = b"-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n"
+        eks = MagicMock()
+        eks.describe_cluster.return_value = self._cluster(ca_pem)
+        ca_path = tmp_path / "eks-ca.crt"
+        fd = os.open(ca_path, os.O_RDWR | os.O_CREAT, 0o600)
+
+        with (
+            patch.object(handler_module, "get_eks_client", return_value=eks),
+            patch.object(handler_module, "get_eks_token", return_value="k8s-aws-v1.tok") as token,
+            patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch("tempfile.mkstemp", return_value=(fd, str(ca_path))) as mkstemp,
+            patch("socket.setdefaulttimeout") as set_timeout,
+        ):
+            handler_module.configure_k8s_client("gco-us-east-1", "us-east-1")
+
+        eks.describe_cluster.assert_called_once_with(name="gco-us-east-1")
+        mkstemp.assert_called_once_with(suffix=".crt")
+        set_timeout.assert_called_once_with(30)
+        token.assert_called_once_with("gco-us-east-1", "us-east-1")
+        assert ca_path.read_bytes() == ca_pem
+        configuration = set_default.call_args.args[0]
+        assert isinstance(configuration, handler_module.client.Configuration)
+        assert configuration.host == "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com"
+        assert configuration.verify_ssl is True
+        assert configuration.connection_pool_maxsize == 1
+        assert configuration.retries == 3
+        assert configuration.ssl_ca_cert == str(ca_path)
+        assert configuration.api_key == {"authorization": "Bearer k8s-aws-v1.tok"}
+
+    def test_configure_closes_the_descriptor_when_the_ca_write_fails(
+        self, handler_module, tmp_path
+    ):
+        eks = MagicMock()
+        eks.describe_cluster.return_value = self._cluster(b"ca")
+        ca_path = tmp_path / "eks-ca.crt"
+        fd = os.open(ca_path, os.O_RDWR | os.O_CREAT, 0o600)
+
+        with (
+            patch.object(handler_module, "get_eks_client", return_value=eks),
+            patch.object(handler_module, "get_eks_token") as token,
+            patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch("tempfile.mkstemp", return_value=(fd, str(ca_path))),
+            patch("socket.setdefaulttimeout"),
+            patch.object(handler_module.os, "fdopen", side_effect=OSError("disk full")),
+            patch.object(handler_module.os, "close", wraps=os.close) as close,
+            pytest.raises(OSError, match="disk full"),
+        ):
+            handler_module.configure_k8s_client("gco-us-east-1", "us-east-1")
+
+        close.assert_called_once_with(fd)
+        token.assert_not_called()
+        set_default.assert_not_called()
+
+
+class TestSendResponse:
+    """The CloudFormation callback PUTs the exact response body and never raises."""
+
+    _EVENT = {
+        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/gco/abc",
+        "RequestId": "req-1",
+        "LogicalResourceId": "KubectlApply",
+        "ResponseURL": "https://cloudformation-custom-resource-response.s3.amazonaws.com/x",
+    }
+
+    def test_puts_the_cloudformation_response_body(self, handler_module):
+        http = MagicMock()
+        context = MagicMock()
+        context.log_stream_name = "2026/09/05/[$LATEST]abc"
+
+        with patch.object(handler_module.urllib3, "PoolManager", return_value=http):
+            handler_module.send_response(
+                self._EVENT, context, "SUCCESS", {"AppliedCount": 3}, "kubectl-KubectlApply"
+            )
+
+        http.request.assert_called_once()
+        method, url = http.request.call_args.args
+        kwargs = http.request.call_args.kwargs
+        assert (method, url) == ("PUT", self._EVENT["ResponseURL"])
+        assert kwargs["headers"] == {"Content-Type": "application/json"}
+        assert kwargs["timeout"] == 10.0
+        assert json.loads(kwargs["body"]) == {
+            "Status": "SUCCESS",
+            "Reason": "See CloudWatch Log Stream: 2026/09/05/[$LATEST]abc",
+            "PhysicalResourceId": "kubectl-KubectlApply",
+            "StackId": self._EVENT["StackId"],
+            "RequestId": "req-1",
+            "LogicalResourceId": "KubectlApply",
+            "Data": {"AppliedCount": 3},
+        }
+
+    def test_explicit_reason_overrides_the_log_stream_pointer(self, handler_module):
+        http = MagicMock()
+
+        with patch.object(handler_module.urllib3, "PoolManager", return_value=http):
+            handler_module.send_response(
+                self._EVENT, MagicMock(), "FAILED", {}, "phys", reason="Deployment/api failed"
+            )
+
+        assert json.loads(http.request.call_args.kwargs["body"])["Reason"] == (
+            "Deployment/api failed"
+        )
+
+    def test_callback_transport_failure_is_logged_not_raised(self, handler_module, caplog):
+        http = MagicMock()
+        http.request.side_effect = handler_module.urllib3.exceptions.MaxRetryError(
+            MagicMock(), self._EVENT["ResponseURL"], reason="timed out"
+        )
+
+        with (
+            patch.object(handler_module.urllib3, "PoolManager", return_value=http),
+            caplog.at_level(logging.ERROR),
+        ):
+            handler_module.send_response(self._EVENT, MagicMock(), "SUCCESS", {}, "phys")
+
+        assert "Failed to send response" in caplog.text
+
+
+class TestRestartDaemonSetFailures:
+    """Non-404 DaemonSet restart errors are recorded as failures."""
+
+    def test_restart_daemonsets_records_non_404_errors(self, handler_module):
+        from kubernetes.client.rest import ApiException
+
+        mock_apps_v1 = MagicMock()
+        mock_apps_v1.patch_namespaced_daemon_set.side_effect = [
+            ApiException(status=500, reason="Internal Server Error"),
+            MagicMock(),
+        ]
+
+        with patch.object(handler_module.client, "AppsV1Api", return_value=mock_apps_v1):
+            result = handler_module.restart_daemonsets(
+                "kube-system", ["efs-csi-node", "fsx-csi-node"]
+            )
+
+        assert result == {"restarted": ["fsx-csi-node"], "failed": ["efs-csi-node"]}
+
+
+class TestWorkloadCredentialVerification:
+    """_verify_workload_credentials inspects live pod specs and ServiceAccounts."""
+
+    _DEPLOYMENTS = (
+        ("gco-system", "health-monitor", "gco-health-monitor-sa"),
+        ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
+        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
+        ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+    )
+
+    @staticmethod
+    def _env(*names):
+        variables = []
+        for name in names:
+            variable = MagicMock()
+            variable.name = name
+            variables.append(variable)
+        return variables
+
+    @staticmethod
+    def _volume(*, projected: bool, audience: str | None = "sts.amazonaws.com"):
+        volume = MagicMock()
+        if not projected:
+            volume.projected = None
+            return volume
+        source = MagicMock()
+        if audience is None:
+            source.service_account_token = None
+        else:
+            source.service_account_token.audience = audience
+        volume.projected.sources = [source]
+        return volume
+
+    @classmethod
+    def _deployment(cls, service_account, *, volumes, env):
+        deployment = MagicMock()
+        spec = deployment.spec.template.spec
+        spec.service_account_name = service_account
+        spec.volumes = volumes
+        if env is None:
+            spec.containers = []
+        else:
+            container = MagicMock()
+            container.env = env
+            spec.containers = [container]
+        return deployment
+
+    @staticmethod
+    def _service_account(annotations):
+        service_account = MagicMock()
+        service_account.metadata.annotations = annotations
+        return service_account
+
+    def _run(self, handler_module, apps_v1, v1):
+        with patch.object(handler_module.client, "CoreV1Api", return_value=v1):
+            return handler_module._verify_workload_credentials(apps_v1)
+
+    def test_fully_configured_workloads_produce_no_warnings(self, handler_module, caplog):
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = lambda name, namespace: self._deployment(
+            next(sa for ns, dep, sa in self._DEPLOYMENTS if (ns, dep) == (namespace, name)),
+            volumes=[
+                self._volume(projected=False),
+                self._volume(projected=True, audience=None),
+                self._volume(projected=True, audience="vault"),
+                self._volume(projected=True),
+            ],
+            env=self._env("AWS_REGION", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"),
+        )
+        v1 = MagicMock()
+        v1.read_namespaced_service_account.return_value = self._service_account(
+            {"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/gco"}
+        )
+
+        with caplog.at_level(logging.INFO):
+            warnings = self._run(handler_module, apps_v1, v1)
+
+        assert warnings == []
+        assert "All workload IAM credential configurations verified" in caplog.text
+        read_sas = {entry.args for entry in v1.read_namespaced_service_account.call_args_list}
+        assert read_sas == {
+            ("gco-health-monitor-sa", "gco-system"),
+            ("gco-manifest-processor-sa", "gco-system"),
+            ("gco-inference-monitor-sa", "gco-system"),
+            ("gco-service-account", "gco-jobs"),
+            ("gco-service-account", "gco-inference"),
+        }
+
+    def test_each_misconfiguration_is_named(self, handler_module, caplog):
+        from kubernetes.client.rest import ApiException
+
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = [
+            self._deployment(
+                "default",
+                volumes=None,
+                env=self._env("AWS_REGION"),
+            ),
+            self._deployment(
+                "gco-manifest-processor-sa",
+                volumes=[self._volume(projected=True, audience="vault")],
+                env=None,
+            ),
+            ApiException(status=404, reason="Not Found"),
+            ApiException(status=503, reason="Service Unavailable"),
+        ]
+        v1 = MagicMock()
+        v1.read_namespaced_service_account.side_effect = [
+            self._service_account(None),
+            self._service_account({"other": "x"}),
+            ApiException(status=404, reason="Not Found"),
+            ApiException(status=403, reason="Forbidden"),
+            self._service_account({"eks.amazonaws.com/role-arn": "arn"}),
+        ]
+
+        with caplog.at_level(logging.WARNING):
+            warnings = self._run(handler_module, apps_v1, v1)
+
+        assert warnings == [
+            "gco-system/health-monitor: uses SA 'default' instead of gco-health-monitor-sa",
+            "gco-system/health-monitor: missing projected service-account token volume for IRSA",
+            "gco-system/health-monitor: missing AWS_ROLE_ARN env var",
+            "gco-system/health-monitor: missing AWS_WEB_IDENTITY_TOKEN_FILE env var",
+            "gco-system/manifest-processor: missing projected service-account token volume "
+            "for IRSA",
+            "gco-system/inference-proxy: deployment not found",
+            "gco-system/inference-monitor: failed to read (503)",
+            "gco-system/gco-health-monitor-sa: missing eks.amazonaws.com/role-arn annotation",
+            "gco-system/gco-manifest-processor-sa: missing eks.amazonaws.com/role-arn annotation",
+            "gco-system/gco-inference-monitor-sa: ServiceAccount not found",
+            "gco-jobs/gco-service-account: failed to read (403)",
+        ]
+        assert caplog.text.count("Credential check:") == len(warnings)
+
+    def test_unexpected_read_error_becomes_a_verification_warning(self, handler_module):
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = ValueError("malformed response")
+        v1 = MagicMock()
+        v1.read_namespaced_service_account.return_value = self._service_account(
+            {"eks.amazonaws.com/role-arn": "arn"}
+        )
+
+        warnings = self._run(handler_module, apps_v1, v1)
+
+        assert warnings == [
+            f"{namespace}/{name}: verification error (malformed response)"
+            for namespace, name, _sa in self._DEPLOYMENTS
+        ]
+
+
+# ── Apply dispatch table ─────────────────────────────────────────────────────
+#
+# One row per kind the apply loop dispatches through a plain create/patch pair:
+# (kind, apiVersion, kubernetes.client factory, create method, patch method,
+# expected create call, expected patch call). PersistentVolume,
+# PersistentVolumeClaim, PriorityClass and StorageClass have bespoke 409
+# handling and dedicated test classes; a lockstep test below proves the table
+# plus those four equal _SUPPORTED_MANIFEST_KINDS exactly.
+
+_APPLY_NAMESPACE = "demo"
+_APPLY_NAME = "obj"
+
+
+def _cluster_typed_calls():
+    return (lambda doc: call(body=doc), lambda doc: call(_APPLY_NAME, body=doc))
+
+
+def _namespaced_typed_calls():
+    return (
+        lambda doc: call(_APPLY_NAMESPACE, body=doc),
+        lambda doc: call(_APPLY_NAME, _APPLY_NAMESPACE, body=doc),
+    )
+
+
+def _cluster_custom_calls(group, version, plural):
+    return (
+        lambda doc: call(group, version, plural, body=doc),
+        lambda doc: call(group, version, plural, _APPLY_NAME, body=doc),
+    )
+
+
+def _namespaced_custom_calls(group, version, plural):
+    return (
+        lambda doc: call(group, version, _APPLY_NAMESPACE, plural, body=doc),
+        lambda doc: call(group, version, _APPLY_NAMESPACE, plural, _APPLY_NAME, body=doc),
+    )
+
+
+_RBAC = "rbac.authorization.k8s.io/v1"
+_RBAC_API = "RbacAuthorizationV1Api"
+_CUSTOM_API = "CustomObjectsApi"
+_CREATE_CLUSTER_CUSTOM = "create_cluster_custom_object"
+_PATCH_CLUSTER_CUSTOM = "patch_cluster_custom_object"
+_CREATE_NAMESPACED_CUSTOM = "create_namespaced_custom_object"
+_PATCH_NAMESPACED_CUSTOM = "patch_namespaced_custom_object"
+
+
+def _typed(kind, api_version, factory, create, patch_method, *, cluster_scoped=False):
+    calls = _cluster_typed_calls() if cluster_scoped else _namespaced_typed_calls()
+    return pytest.param(kind, api_version, factory, create, patch_method, *calls, id=kind)
+
+
+def _cluster_custom(kind, api_version, plural):
+    group, version = api_version.split("/")
+    return pytest.param(
+        kind,
+        api_version,
+        _CUSTOM_API,
+        _CREATE_CLUSTER_CUSTOM,
+        _PATCH_CLUSTER_CUSTOM,
+        *_cluster_custom_calls(group, version, plural),
+        id=kind,
+    )
+
+
+def _namespaced_custom(kind, api_version, plural):
+    group, version = api_version.split("/")
+    return pytest.param(
+        kind,
+        api_version,
+        _CUSTOM_API,
+        _CREATE_NAMESPACED_CUSTOM,
+        _PATCH_NAMESPACED_CUSTOM,
+        *_namespaced_custom_calls(group, version, plural),
+        id=kind,
+    )
+
+
+_APPLY_DISPATCH = [
+    _typed(
+        "Namespace", "v1", "CoreV1Api", "create_namespace", "patch_namespace", cluster_scoped=True
+    ),
+    _typed(
+        "ServiceAccount",
+        "v1",
+        "CoreV1Api",
+        "create_namespaced_service_account",
+        "patch_namespaced_service_account",
+    ),
+    _typed(
+        "ClusterRole",
+        _RBAC,
+        _RBAC_API,
+        "create_cluster_role",
+        "patch_cluster_role",
+        cluster_scoped=True,
+    ),
+    _typed(
+        "ClusterRoleBinding",
+        _RBAC,
+        _RBAC_API,
+        "create_cluster_role_binding",
+        "patch_cluster_role_binding",
+        cluster_scoped=True,
+    ),
+    _typed("Role", _RBAC, _RBAC_API, "create_namespaced_role", "patch_namespaced_role"),
+    _typed(
+        "RoleBinding",
+        _RBAC,
+        _RBAC_API,
+        "create_namespaced_role_binding",
+        "patch_namespaced_role_binding",
+    ),
+    _typed(
+        "Lease",
+        "coordination.k8s.io/v1",
+        "CoordinationV1Api",
+        "create_namespaced_lease",
+        "patch_namespaced_lease",
+    ),
+    _typed(
+        "Deployment",
+        "apps/v1",
+        "AppsV1Api",
+        "create_namespaced_deployment",
+        "patch_namespaced_deployment",
+    ),
+    _typed(
+        "StatefulSet",
+        "apps/v1",
+        "AppsV1Api",
+        "create_namespaced_stateful_set",
+        "patch_namespaced_stateful_set",
+    ),
+    _typed(
+        "DaemonSet",
+        "apps/v1",
+        "AppsV1Api",
+        "create_namespaced_daemon_set",
+        "patch_namespaced_daemon_set",
+    ),
+    _typed("Job", "batch/v1", "BatchV1Api", "create_namespaced_job", "patch_namespaced_job"),
+    _typed(
+        "CronJob",
+        "batch/v1",
+        "BatchV1Api",
+        "create_namespaced_cron_job",
+        "patch_namespaced_cron_job",
+    ),
+    _typed(
+        "HorizontalPodAutoscaler",
+        "autoscaling/v2",
+        "AutoscalingV2Api",
+        "create_namespaced_horizontal_pod_autoscaler",
+        "patch_namespaced_horizontal_pod_autoscaler",
+    ),
+    _typed(
+        "PodDisruptionBudget",
+        "policy/v1",
+        "PolicyV1Api",
+        "create_namespaced_pod_disruption_budget",
+        "patch_namespaced_pod_disruption_budget",
+    ),
+    _typed("Service", "v1", "CoreV1Api", "create_namespaced_service", "patch_namespaced_service"),
+    _typed("Pod", "v1", "CoreV1Api", "create_namespaced_pod", "patch_namespaced_pod"),
+    _typed(
+        "ConfigMap",
+        "v1",
+        "CoreV1Api",
+        "create_namespaced_config_map",
+        "patch_namespaced_config_map",
+    ),
+    _typed("Secret", "v1", "CoreV1Api", "create_namespaced_secret", "patch_namespaced_secret"),
+    _cluster_custom("GatewayClass", "gateway.networking.k8s.io/v1", "gatewayclasses"),
+    _namespaced_custom("Gateway", "gateway.networking.k8s.io/v1", "gateways"),
+    _namespaced_custom("HTTPRoute", "gateway.networking.k8s.io/v1", "httproutes"),
+    _namespaced_custom(
+        "LoadBalancerConfiguration", "gateway.k8s.aws/v1", "loadbalancerconfigurations"
+    ),
+    _namespaced_custom(
+        "TargetGroupConfiguration", "gateway.k8s.aws/v1", "targetgroupconfigurations"
+    ),
+    _cluster_custom("ResourceFlavor", "kueue.x-k8s.io/v1beta1", "resourceflavors"),
+    _cluster_custom("ClusterQueue", "kueue.x-k8s.io/v1beta1", "clusterqueues"),
+    _namespaced_custom("LocalQueue", "kueue.x-k8s.io/v1beta1", "localqueues"),
+    _namespaced_custom("Issuer", "cert-manager.io/v1", "issuers"),
+    _namespaced_custom("Certificate", "cert-manager.io/v1", "certificates"),
+    _cluster_custom("NodePool", "karpenter.sh/v1", "nodepools"),
+    _cluster_custom("EC2NodeClass", "karpenter.k8s.aws/v1", "ec2nodeclasses"),
+    _typed(
+        "APIService",
+        "apiregistration.k8s.io/v1",
+        "ApiregistrationV1Api",
+        "create_api_service",
+        "patch_api_service",
+        cluster_scoped=True,
+    ),
+    _typed(
+        "CustomResourceDefinition",
+        "apiextensions.k8s.io/v1",
+        "ApiextensionsV1Api",
+        "create_custom_resource_definition",
+        "patch_custom_resource_definition",
+        cluster_scoped=True,
+    ),
+    _cluster_custom("DeviceClass", "resource.k8s.io/v1", "deviceclasses"),
+    _cluster_custom(
+        "ClusterTrainingRuntime", "trainer.kubeflow.org/v1alpha1", "clustertrainingruntimes"
+    ),
+    _typed(
+        "NetworkPolicy",
+        "networking.k8s.io/v1",
+        "NetworkingV1Api",
+        "create_namespaced_network_policy",
+        "patch_namespaced_network_policy",
+    ),
+    _typed(
+        "ResourceQuota",
+        "v1",
+        "CoreV1Api",
+        "create_namespaced_resource_quota",
+        "patch_namespaced_resource_quota",
+    ),
+    _typed(
+        "LimitRange",
+        "v1",
+        "CoreV1Api",
+        "create_namespaced_limit_range",
+        "patch_namespaced_limit_range",
+    ),
+    _namespaced_custom("ScaledJob", "keda.sh/v1alpha1", "scaledjobs"),
+    _namespaced_custom("ScaledObject", "keda.sh/v1alpha1", "scaledobjects"),
+    _namespaced_custom("ServiceMonitor", "monitoring.coreos.com/v1", "servicemonitors"),
+    _namespaced_custom("PodMonitor", "monitoring.coreos.com/v1", "podmonitors"),
+]
+
+_APPLY_DISPATCH_PARAMS = (
+    "kind",
+    "api_version",
+    "factory",
+    "create",
+    "patch_method",
+    "create_call",
+    "patch_call",
+)
+
+# Kinds whose 409 handling is bespoke and pinned by their own test classes.
+_BESPOKE_CONFLICT_KINDS = frozenset(
+    {"PersistentVolume", "PersistentVolumeClaim", "PriorityClass", "StorageClass"}
+)
+
+
+def _write_apply_manifest(tmp_path, kind, api_version, handler_module):
+    metadata = {"name": _APPLY_NAME}
+    if kind not in handler_module._CLUSTER_SCOPED_KINDS:
+        metadata["namespace"] = _APPLY_NAMESPACE
+    document = {"apiVersion": api_version, "kind": kind, "metadata": metadata}
+    (tmp_path / "10-obj.yaml").write_text(yaml.safe_dump(document))
+    return document
+
+
+def _apply_base_pass(handler_module, tmp_path):
+    """Run a base apply with the post-apply restarts and credential check stubbed."""
+    restart = {"restarted": [], "failed": []}
+    with (
+        patch.object(handler_module, "configure_k8s_client"),
+        patch.object(handler_module, "restart_deployments", return_value=restart),
+        patch.object(handler_module, "restart_daemonsets", return_value=restart),
+        patch.object(handler_module, "_verify_workload_credentials", return_value=[]),
+    ):
+        return handler_module.apply_manifests("cluster", "us-east-1", str(tmp_path), {})
+
+
+class TestApplyDispatchTable:
+    """Every dispatched kind creates, patches on 409, and fails loudly otherwise."""
+
+    def test_table_and_bespoke_classes_cover_every_supported_kind(self, handler_module):
+        tabled = {param.values[0] for param in _APPLY_DISPATCH}
+
+        assert tabled & _BESPOKE_CONFLICT_KINDS == set()
+        assert tabled | _BESPOKE_CONFLICT_KINDS == set(handler_module._SUPPORTED_MANIFEST_KINDS)
+
+    @pytest.mark.parametrize(_APPLY_DISPATCH_PARAMS, _APPLY_DISPATCH)
+    def test_fresh_object_is_created_once(
+        self,
+        handler_module,
+        tmp_path,
+        kind,
+        api_version,
+        factory,
+        create,
+        patch_method,
+        create_call,
+        patch_call,
+    ):
+        document = _write_apply_manifest(tmp_path, kind, api_version, handler_module)
+
+        with patch("handler.client") as mock_client:
+            result = _apply_base_pass(handler_module, tmp_path)
+            api = getattr(mock_client, factory).return_value
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        assert getattr(api, create).call_args_list == [create_call(document)]
+        getattr(api, patch_method).assert_not_called()
+
+    @pytest.mark.parametrize(_APPLY_DISPATCH_PARAMS, _APPLY_DISPATCH)
+    def test_existing_object_is_patched_on_conflict(
+        self,
+        handler_module,
+        tmp_path,
+        kind,
+        api_version,
+        factory,
+        create,
+        patch_method,
+        create_call,
+        patch_call,
+    ):
+        document = _write_apply_manifest(tmp_path, kind, api_version, handler_module)
+
+        with patch("handler.client") as mock_client:
+            api = getattr(mock_client, factory).return_value
+            getattr(api, create).side_effect = handler_module.ApiException(
+                status=409, reason="Conflict"
+            )
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        assert getattr(api, patch_method).call_args_list == [patch_call(document)]
+
+    @pytest.mark.parametrize(_APPLY_DISPATCH_PARAMS, _APPLY_DISPATCH)
+    def test_non_conflict_create_error_fails_only_that_resource(
+        self,
+        handler_module,
+        tmp_path,
+        kind,
+        api_version,
+        factory,
+        create,
+        patch_method,
+        create_call,
+        patch_call,
+        caplog,
+    ):
+        _write_apply_manifest(tmp_path, kind, api_version, handler_module)
+
+        with patch("handler.client") as mock_client, caplog.at_level(logging.ERROR):
+            api = getattr(mock_client, factory).return_value
+            getattr(api, create).side_effect = handler_module.ApiException(
+                status=403, reason="Forbidden"
+            )
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (0, 1)
+        assert result["Failed"] == f"10-obj.yaml:{kind}/{_APPLY_NAME}"
+        getattr(api, patch_method).assert_not_called()
+        assert f"API error applying {kind}/{_APPLY_NAME}: 403 - Forbidden" in caplog.text
+
+
+class TestStorageClassApply:
+    """StorageClass fields are immutable, so an existing class is left untouched."""
+
+    @staticmethod
+    def _write(tmp_path):
+        (tmp_path / "20-storage-class.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "storage.k8s.io/v1",
+                    "kind": "StorageClass",
+                    "metadata": {"name": "fsx-sc"},
+                    "provisioner": "fsx.csi.aws.com",
+                }
+            )
+        )
+
+    def test_created_cluster_scoped(self, handler_module, tmp_path):
+        self._write(tmp_path)
+
+        with patch("handler.client") as mock_client:
+            result = _apply_base_pass(handler_module, tmp_path)
+            storage = mock_client.StorageV1Api.return_value
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        storage.create_storage_class.assert_called_once()
+        assert storage.create_storage_class.call_args.kwargs["body"]["metadata"] == {
+            "name": "fsx-sc"
+        }
+
+    def test_existing_class_is_skipped_not_patched(self, handler_module, tmp_path, caplog):
+        self._write(tmp_path)
+
+        with patch("handler.client") as mock_client, caplog.at_level(logging.INFO):
+            storage = mock_client.StorageV1Api.return_value
+            storage.create_storage_class.side_effect = handler_module.ApiException(status=409)
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        assert "StorageClass fsx-sc already exists, skipping update" in caplog.text
+        assert [name for name, _a, _k in storage.mock_calls] == ["create_storage_class"]
+
+    def test_non_conflict_error_fails_the_class(self, handler_module, tmp_path):
+        self._write(tmp_path)
+
+        with patch("handler.client") as mock_client:
+            storage = mock_client.StorageV1Api.return_value
+            storage.create_storage_class.side_effect = handler_module.ApiException(status=403)
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (0, 1)
+        assert result["Failed"] == "20-storage-class.yaml:StorageClass/fsx-sc"
+
+
+class TestApplyLoopGuards:
+    """Non-API failures are isolated per file; unknown gates never prune."""
+
+    def test_kind_admitted_by_planning_without_a_dispatch_branch_fails_its_file(
+        self, handler_module, tmp_path, caplog
+    ):
+        """Planner/dispatch drift is a recorded per-file failure, not a crash.
+
+        Reproduces the 2026-08-14 shape (a kind added to
+        _SUPPORTED_MANIFEST_KINDS with no apply branch) by widening the
+        planner's allowlist; the defensive ValueError must be caught by the
+        per-file isolation so the remaining manifests still apply.
+        """
+        (tmp_path / "10-mystery.yaml").write_text(
+            "apiVersion: example.io/v1\nkind: Mystery\nmetadata:\n  name: m\n  namespace: demo\n"
+        )
+        (tmp_path / "20-cm.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: keep\n  namespace: demo\n"
+        )
+        widened = frozenset(handler_module._SUPPORTED_MANIFEST_KINDS | {"Mystery"})
+
+        with (
+            patch.object(handler_module, "_SUPPORTED_MANIFEST_KINDS", widened),
+            patch("handler.client") as mock_client,
+            caplog.at_level(logging.ERROR),
+        ):
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["ExpectedCount"], result["FailedCount"]) == (1, 2, 1)
+        assert result["Failed"] == "10-mystery.yaml"
+        assert "Planner admitted unsupported kind: Mystery" in caplog.text
+        mock_client.CoreV1Api.return_value.create_namespaced_config_map.assert_called_once()
+
+    def test_gate_without_a_prune_inventory_is_skipped_without_pruning(
+        self, handler_module, tmp_path
+    ):
+        (tmp_path / "40-optional.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: optional\n"
+            "data:\n  enabled: '{{OPTIONAL_FEATURE_ENABLED}}'\n"
+        )
+
+        with (
+            patch.object(handler_module, "_prune_disabled_feature") as prune,
+            patch("handler.client"),
+        ):
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        prune.assert_not_called()
+        assert result["AppliedCount"] == 0
+        assert result["Skipped"] == "40-optional.yaml:unreplaced-placeholders"
+        assert result["PrunedCount"] == 0
+
+
+class TestPersistentVolumeDeleteWait:
+    """Recreating a PV polls for its disappearance within a bounded budget."""
+
+    _DOC = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {"name": "gco-fsx-pv-jobs"},
+        "spec": {"csi": {"driver": "fsx.csi.aws.com", "volumeHandle": "fs-new"}},
+    }
+
+    @staticmethod
+    def _existing(handle):
+        existing = MagicMock()
+        existing.spec.csi.volume_handle = handle
+        return existing
+
+    def _run(self, handler_module, tmp_path, *, reads, creates):
+        (tmp_path / "20-pv.yaml").write_text(yaml.safe_dump(self._DOC))
+        with (
+            patch("handler.client") as mock_client,
+            patch.object(handler_module.time, "sleep") as sleep,
+        ):
+            v1 = mock_client.CoreV1Api.return_value
+            v1.create_persistent_volume.side_effect = creates
+            v1.read_persistent_volume.side_effect = reads
+            result = _apply_base_pass(handler_module, tmp_path)
+        return result, v1, sleep
+
+    def test_polls_and_sleeps_until_the_old_volume_is_gone(self, handler_module, tmp_path):
+        result, v1, sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[
+                self._existing("fs-old"),
+                self._existing("fs-old"),
+                handler_module.ApiException(status=404),
+            ],
+            creates=[handler_module.ApiException(status=409), None],
+        )
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        sleep.assert_called_once_with(handler_module.PV_PVC_DELETE_POLL_INTERVAL_SECONDS)
+        assert v1.create_persistent_volume.call_count == 2
+
+    def test_exhausted_wait_budget_still_attempts_the_recreate(self, handler_module, tmp_path):
+        with patch.object(handler_module, "PV_PVC_DELETE_WAIT_SECONDS", 2):
+            result, v1, sleep = self._run(
+                handler_module,
+                tmp_path,
+                reads=[self._existing("fs-old")] * 3,
+                creates=[handler_module.ApiException(status=409), None],
+            )
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        assert sleep.call_count == 2
+        assert v1.read_persistent_volume.call_count == 3
+        assert v1.create_persistent_volume.call_count == 2
+
+    def test_poll_error_other_than_404_fails_the_volume(self, handler_module, tmp_path):
+        result, v1, sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[self._existing("fs-old"), handler_module.ApiException(status=500)],
+            creates=[handler_module.ApiException(status=409), None],
+        )
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (0, 1)
+        assert result["Failed"] == "20-pv.yaml:PersistentVolume/gco-fsx-pv-jobs"
+        sleep.assert_not_called()
+        assert v1.create_persistent_volume.call_count == 1
+
+    def test_non_conflict_create_error_fails_the_volume(self, handler_module, tmp_path):
+        result, v1, _sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[],
+            creates=handler_module.ApiException(status=403),
+        )
+
+        assert result["Failed"] == "20-pv.yaml:PersistentVolume/gco-fsx-pv-jobs"
+        v1.read_persistent_volume.assert_not_called()
+
+
+class TestPersistentVolumeClaimDeleteWait:
+    """Recreating a Lost PVC polls for its disappearance within a bounded budget."""
+
+    _DOC = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "gco-fsx-storage", "namespace": "gco-jobs"},
+        "spec": {"storageClassName": "fsx-sc"},
+    }
+
+    @staticmethod
+    def _existing(phase):
+        existing = MagicMock()
+        existing.status.phase = phase
+        return existing
+
+    def _run(self, handler_module, tmp_path, *, reads, creates):
+        (tmp_path / "21-pvc.yaml").write_text(yaml.safe_dump(self._DOC))
+        with (
+            patch("handler.client") as mock_client,
+            patch.object(handler_module.time, "sleep") as sleep,
+        ):
+            v1 = mock_client.CoreV1Api.return_value
+            v1.create_namespaced_persistent_volume_claim.side_effect = creates
+            v1.read_namespaced_persistent_volume_claim.side_effect = reads
+            result = _apply_base_pass(handler_module, tmp_path)
+        return result, v1, sleep
+
+    def test_polls_and_sleeps_until_the_lost_claim_is_gone(self, handler_module, tmp_path):
+        result, v1, sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[
+                self._existing("Lost"),
+                self._existing("Lost"),
+                handler_module.ApiException(status=404),
+            ],
+            creates=[handler_module.ApiException(status=409), None],
+        )
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        sleep.assert_called_once_with(handler_module.PV_PVC_DELETE_POLL_INTERVAL_SECONDS)
+        assert v1.create_namespaced_persistent_volume_claim.call_count == 2
+
+    def test_exhausted_wait_budget_still_attempts_the_recreate(self, handler_module, tmp_path):
+        with patch.object(handler_module, "PV_PVC_DELETE_WAIT_SECONDS", 2):
+            result, v1, sleep = self._run(
+                handler_module,
+                tmp_path,
+                reads=[self._existing("Lost")] * 3,
+                creates=[handler_module.ApiException(status=409), None],
+            )
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        assert sleep.call_count == 2
+        assert v1.create_namespaced_persistent_volume_claim.call_count == 2
+
+    def test_poll_error_other_than_404_fails_the_claim(self, handler_module, tmp_path):
+        result, v1, sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[self._existing("Lost"), handler_module.ApiException(status=500)],
+            creates=[handler_module.ApiException(status=409), None],
+        )
+
+        assert result["Failed"] == "21-pvc.yaml:PersistentVolumeClaim/gco-fsx-storage"
+        sleep.assert_not_called()
+        assert v1.create_namespaced_persistent_volume_claim.call_count == 1
+
+    def test_non_conflict_create_error_fails_the_claim(self, handler_module, tmp_path):
+        result, v1, _sleep = self._run(
+            handler_module,
+            tmp_path,
+            reads=[],
+            creates=handler_module.ApiException(status=403),
+        )
+
+        assert result["Failed"] == "21-pvc.yaml:PersistentVolumeClaim/gco-fsx-storage"
+        v1.read_namespaced_persistent_volume_claim.assert_not_called()
+
+
+class TestAutomountFlipDiagnosticSkipsUnrelatedPlanItems:
+    """Only workloads in the same namespace running as the account are named."""
+
+    def test_flip_ignores_other_namespaces_accounts_and_non_workloads(self, handler_module, caplog):
+        def planned(kind, namespace, document):
+            return {
+                "apiVersion": "apps/v1",
+                "kind": kind,
+                "namespace": namespace,
+                "name": "x",
+                "sourceFile": "post-helm-x.yaml",
+                "phase": "post-helm",
+                "document": document,
+            }
+
+        worker = {"spec": {"template": {"spec": {"serviceAccountName": "gco-test-sa"}}}}
+        other_account = {"spec": {"template": {"spec": {"serviceAccountName": "other-sa"}}}}
+        plan = {
+            "phases": {
+                "base": [planned("ConfigMap", "gco-system", {"kind": "ConfigMap"})],
+                "post-helm": [
+                    planned("Deployment", "gco-jobs", {"kind": "Deployment", **worker}),
+                    planned("Deployment", "gco-system", {"kind": "Deployment", **other_account}),
+                ],
+            }
+        }
+        v1 = MagicMock()
+        v1.read_namespaced_service_account.return_value.automount_service_account_token = None
+        document = {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "gco-test-sa", "namespace": "gco-system"},
+            "automountServiceAccountToken": False,
+        }
+
+        with caplog.at_level(logging.WARNING):
+            handler_module._log_service_account_automount_flip(
+                v1, document, "gco-system", "gco-test-sa", plan
+            )
+
+        assert "flipped to false" in caplog.text
+        assert "running as it: <none>" in caplog.text
+
+
+class TestGatewayResourceDeletionErrors:
+    """Teardown surfaces API errors with the failing object and polls while present."""
+
+    @staticmethod
+    def _custom_api(handler_module):
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = handler_module.ApiException(
+            status=404, reason="Not Found"
+        )
+        custom_api.get_cluster_custom_object.side_effect = handler_module.ApiException(
+            status=404, reason="Not Found"
+        )
+        return custom_api
+
+    def _patches(self, handler_module, custom_api):
+        return (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(handler_module.client, "CustomObjectsApi", return_value=custom_api),
+            patch.object(handler_module.client, "V1DeleteOptions"),
+        )
+
+    def test_delete_error_other_than_404_names_the_object(self, handler_module):
+        custom_api = self._custom_api(handler_module)
+        custom_api.delete_namespaced_custom_object.side_effect = handler_module.ApiException(
+            status=403, reason="Forbidden"
+        )
+        configure, api, options = self._patches(handler_module, custom_api)
+
+        with (
+            configure,
+            api,
+            options,
+            pytest.raises(
+                RuntimeError, match=r"failed to delete HTTPRoute/gco-system/gco-routes"
+            ) as e,
+        ):
+            handler_module._delete_gateway_resources("cluster", "us-east-1")
+
+        assert "Kubernetes API 403 (Forbidden)" in str(e.value)
+        assert isinstance(e.value.__cause__, handler_module.ApiException)
+
+    def test_poll_error_other_than_404_names_the_object(self, handler_module):
+        custom_api = self._custom_api(handler_module)
+        custom_api.get_namespaced_custom_object.side_effect = handler_module.ApiException(
+            status=500, reason="Internal Server Error"
+        )
+        configure, api, options = self._patches(handler_module, custom_api)
+
+        with (
+            configure,
+            api,
+            options,
+            pytest.raises(
+                RuntimeError, match=r"waiting for HTTPRoute/gco-system/gco-routes deletion"
+            ),
+        ):
+            handler_module._delete_gateway_resources("cluster", "us-east-1")
+
+    def test_still_present_objects_are_polled_after_a_sleep(self, handler_module):
+        custom_api = self._custom_api(handler_module)
+        custom_api.get_namespaced_custom_object.side_effect = [
+            {"metadata": {"deletionTimestamp": "2026-09-05T00:00:00Z"}},
+            handler_module.ApiException(status=404, reason="Not Found"),
+            *[handler_module.ApiException(status=404, reason="Not Found") for _ in range(6)],
+        ]
+        configure, api, options = self._patches(handler_module, custom_api)
+
+        with (
+            configure,
+            api,
+            options,
+            patch.object(handler_module.time, "monotonic", return_value=1000.0),
+            patch.object(handler_module.time, "sleep") as sleep,
+        ):
+            result = handler_module._delete_gateway_resources("cluster", "us-east-1")
+
+        sleep.assert_called_once_with(handler_module._GATEWAY_DELETE_POLL_SECONDS)
+        assert result["DeletedCount"] == 8
+        assert result["Deleted"][0] == "HTTPRoute/gco-system/gco-routes"
+
+
+class TestReadinessHelpers:
+    """Condition, generation and replica helpers tolerate real API status shapes."""
+
+    def test_as_plain_dict_accepts_dynamic_resource_instances(self, handler_module):
+        class _ResourceInstance:
+            def to_dict(self):
+                return {"metadata": {"name": "api"}}
+
+        class _WeirdInstance:
+            """to_dict() misbehaves, but the object is still a mapping of pairs."""
+
+            def to_dict(self):
+                return "not-a-mapping"
+
+            def __iter__(self):
+                return iter([("kind", "Service")])
+
+        assert handler_module._as_plain_dict({"a": 1}) == {"a": 1}
+        assert handler_module._as_plain_dict(_ResourceInstance()) == {"metadata": {"name": "api"}}
+        assert handler_module._as_plain_dict(_WeirdInstance()) == {"kind": "Service"}
+        assert handler_module._as_plain_dict([("items", [])]) == {"items": []}
+
+    def test_as_plain_dict_rejects_non_mappings(self, handler_module):
+        with pytest.raises(TypeError, match="Kubernetes response is not a mapping: int"):
+            handler_module._as_plain_dict(42)
+
+    def test_condition_status_accepts_booleans_and_strings(self, handler_module):
+        assert handler_module._condition_matches({"status": True}, "True") is True
+        assert handler_module._condition_matches({"status": False}, "False") is True
+        assert handler_module._condition_matches({"status": "true"}, "True") is True
+        assert handler_module._condition_matches({"status": "Unknown"}, "True") is False
+
+    def test_conditions_ignore_a_non_list_and_non_mapping_entries(self, handler_module):
+        assert handler_module._conditions({"conditions": "Ready"}) == []
+        assert handler_module._conditions({"conditions": ["x", {"type": "Ready"}]}) == [
+            {"type": "Ready"}
+        ]
+
+    def test_required_condition_reports_the_last_matching_detail(self, handler_module):
+        status = {
+            "conditions": [
+                {"type": "Ready", "status": "False", "reason": "Pending"},
+                {"type": "Ready", "status": "False", "message": "waiting for nodes"},
+            ]
+        }
+
+        assert handler_module._required_condition_failure(status, "Ready") == (
+            "condition Ready is not True (waiting for nodes)"
+        )
+        assert handler_module._required_condition_failure({}, "Ready") == (
+            "condition Ready is missing"
+        )
+
+    def test_generation_must_be_observed(self, handler_module):
+        stale = {"metadata": {"generation": 4}, "status": {"observedGeneration": 3}}
+
+        assert handler_module._generation_failure(stale) == (
+            "generation not observed (generation=4, observedGeneration=3)"
+        )
+        assert handler_module._generation_failure({"metadata": {"generation": True}}) is not None
+        assert (
+            handler_module._generation_failure(
+                {"metadata": {"generation": 2}, "status": {"observedGeneration": 2}}
+            )
+            is None
+        )
+
+    def test_replica_failure_rejects_unavailable_replicas(self, handler_module):
+        status = {
+            "replicas": 2,
+            "updatedReplicas": 2,
+            "readyReplicas": 2,
+            "availableReplicas": 2,
+            "unavailableReplicas": 1,
+        }
+        fields = ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas")
+
+        assert handler_module._replica_failure(status, 2, fields) == "replicas unavailable (1)"
+
+    def test_current_condition_failure_reports_current_stale_and_missing(self, handler_module):
+        conditions = [
+            {"type": "Accepted", "status": "False", "observedGeneration": 2, "reason": "Invalid"},
+            {"type": "Programmed", "status": "True", "observedGeneration": 1},
+        ]
+
+        assert handler_module._current_condition_failure(conditions, "Accepted", 2, "Gateway") == (
+            "Gateway condition Accepted is not True (Invalid)"
+        )
+        assert handler_module._current_condition_failure(
+            conditions, "Programmed", 2, "Gateway"
+        ) == ("Gateway condition Programmed is stale (generation=2, observedGeneration=1)")
+        assert handler_module._current_condition_failure(conditions, "Ready", 2, "Gateway") == (
+            "Gateway condition Ready is missing"
+        )
+
+
+def _gateway_condition(condition_type, generation, status="True"):
+    return {"type": condition_type, "status": status, "observedGeneration": generation}
+
+
+class TestGatewayApiReadiness:
+    """Gateway API objects are ready only with current, listener- and parent-level evidence."""
+
+    _GENERATION = 3
+
+    @classmethod
+    def _gateway(cls, **overrides):
+        generation = cls._GENERATION
+        resource = {
+            "metadata": {
+                "name": "gco-gateway",
+                "namespace": "gco-system",
+                "generation": generation,
+            },
+            "spec": {"listeners": [{"name": "https", "port": 443}, "garbage", {"port": 80}]},
+            "status": {
+                "conditions": [
+                    _gateway_condition("Accepted", generation),
+                    _gateway_condition("Programmed", generation),
+                ],
+                "addresses": [{"type": "Hostname", "value": "k8s-gco-abc.elb.amazonaws.com"}],
+                "listeners": [
+                    {
+                        "name": "https",
+                        "conditions": [
+                            _gateway_condition("Accepted", generation),
+                            _gateway_condition("ResolvedRefs", generation),
+                            _gateway_condition("Programmed", generation),
+                        ],
+                    },
+                    "garbage",
+                ],
+            },
+        }
+        for key, value in overrides.items():
+            resource["status"][key] = value
+        return resource
+
+    @classmethod
+    def _http_route(cls, **overrides):
+        generation = cls._GENERATION
+        parent_ref = {"name": "gco-gateway", "sectionName": "https"}
+        resource = {
+            "metadata": {"name": "gco-routes", "namespace": "gco-system", "generation": generation},
+            "spec": {"parentRefs": [parent_ref, "garbage"]},
+            "status": {
+                "parents": [
+                    {
+                        "parentRef": {
+                            "group": "gateway.networking.k8s.io",
+                            "kind": "Gateway",
+                            "namespace": "gco-system",
+                            "name": "gco-gateway",
+                            "sectionName": "https",
+                        },
+                        "conditions": [
+                            _gateway_condition("Accepted", generation),
+                            _gateway_condition("ResolvedRefs", generation),
+                        ],
+                    },
+                    {"controllerName": "gateway.k8s.aws/alb"},
+                ]
+            },
+        }
+        for key, value in overrides.items():
+            resource["status"][key] = value
+        return resource
+
+    def test_readiness_dispatches_gateway_kinds_and_requires_a_generation(self, handler_module):
+        failure = handler_module._resource_readiness_failure("Gateway", {"metadata": {}})
+
+        assert failure == "invalid metadata.generation (None)"
+
+    def test_gateway_class_requires_a_current_accepted_condition(self, handler_module):
+        accepted = {
+            "metadata": {"generation": 2},
+            "status": {"conditions": [_gateway_condition("Accepted", 2)]},
+        }
+        stale = {
+            "metadata": {"generation": 2},
+            "status": {"conditions": [_gateway_condition("Accepted", 1)]},
+        }
+
+        assert handler_module._gateway_api_readiness_failure("GatewayClass", accepted) is None
+        assert handler_module._gateway_api_readiness_failure("GatewayClass", stale) == (
+            "GatewayClass condition Accepted is stale (generation=2, observedGeneration=1)"
+        )
+
+    def test_fully_programmed_gateway_is_ready(self, handler_module):
+        assert handler_module._gateway_api_readiness_failure("Gateway", self._gateway()) is None
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"conditions": [_gateway_condition("Accepted", 3)]},
+                "Gateway condition Programmed is missing",
+            ),
+            ({"addresses": []}, "Gateway has no address"),
+            (
+                {"addresses": [{"type": "Hostname", "value": "  "}, "garbage"]},
+                "Gateway has no address",
+            ),
+            ({"listeners": {}}, "Gateway listener status is missing"),
+            ({"listeners": [{"name": "http"}]}, "Gateway listener 'https' status is missing"),
+            (
+                {"listeners": [{"name": "https", "conditions": "Ready"}]},
+                "Gateway listener 'https' conditions are missing",
+            ),
+            (
+                {
+                    "listeners": [
+                        {
+                            "name": "https",
+                            "conditions": [
+                                "garbage",
+                                _gateway_condition("Accepted", 3),
+                                _gateway_condition("ResolvedRefs", 3, status="False"),
+                            ],
+                        }
+                    ]
+                },
+                "Gateway listener 'https' condition ResolvedRefs is not True (status is not True)",
+            ),
+        ],
+        ids=[
+            "not-programmed",
+            "no-address",
+            "blank-address",
+            "listener-status-not-a-list",
+            "intended-listener-missing",
+            "listener-conditions-not-a-list",
+            "listener-condition-false",
+        ],
+    )
+    def test_gateway_failures_name_the_missing_evidence(self, handler_module, overrides, message):
+        resource = self._gateway(**overrides)
+
+        assert handler_module._gateway_api_readiness_failure("Gateway", resource) == message
+
+    def test_http_route_with_an_accepted_intended_parent_is_ready(self, handler_module):
+        assert (
+            handler_module._gateway_api_readiness_failure("HTTPRoute", self._http_route()) is None
+        )
+
+    def test_http_route_parent_ref_defaults_fill_group_kind_and_namespace(self, handler_module):
+        """A parentRef omitting group/kind/namespace matches a fully qualified status entry."""
+        route = self._http_route()
+        route["status"]["parents"][0]["parentRef"] = {"name": "gco-gateway", "sectionName": "https"}
+
+        assert handler_module._gateway_api_readiness_failure("HTTPRoute", route) is None
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"parents": None}, "HTTPRoute parent status is missing"),
+            (
+                {"parents": []},
+                "HTTPRoute intended parent ('gateway.networking.k8s.io', 'Gateway', 'gco-system', "
+                "'gco-gateway', 'https') status is missing",
+            ),
+            (
+                {
+                    "parents": [
+                        {
+                            "parentRef": {"name": "gco-gateway", "sectionName": "https"},
+                            "conditions": {"type": "Accepted"},
+                        }
+                    ]
+                },
+                "HTTPRoute intended parent ('gateway.networking.k8s.io', 'Gateway', 'gco-system', "
+                "'gco-gateway', 'https') conditions are missing",
+            ),
+            (
+                {
+                    "parents": [
+                        {
+                            "parentRef": {"name": "gco-gateway", "sectionName": "https"},
+                            "conditions": [
+                                _gateway_condition("Accepted", 3),
+                                {
+                                    "type": "ResolvedRefs",
+                                    "status": "False",
+                                    "observedGeneration": 3,
+                                    "message": "backend Service not found",
+                                },
+                            ],
+                        }
+                    ]
+                },
+                "HTTPRoute parent ('gateway.networking.k8s.io', 'Gateway', 'gco-system', "
+                "'gco-gateway', 'https') condition ResolvedRefs is not True "
+                "(backend Service not found)",
+            ),
+        ],
+        ids=[
+            "parents-not-a-list",
+            "intended-parent-missing",
+            "parent-conditions-not-a-list",
+            "parent-condition-false",
+        ],
+    )
+    def test_http_route_failures_name_the_intended_parent(self, handler_module, overrides, message):
+        resource = self._http_route(**overrides)
+
+        assert handler_module._gateway_api_readiness_failure("HTTPRoute", resource) == message
+
+    def test_non_gateway_kinds_have_no_gateway_readiness_contract(self, handler_module):
+        resource = {"metadata": {"generation": 1}}
+
+        assert handler_module._gateway_api_readiness_failure("ConfigMap", resource) is None
+
+
+class TestResourceReadinessFailures:
+    """Per-kind readiness reasons are actionable and name the offending field."""
+
+    def test_terminating_object_is_never_ready(self, handler_module):
+        resource = {"metadata": {"deletionTimestamp": "2026-09-05T10:00:00Z"}}
+
+        assert handler_module._resource_readiness_failure("ConfigMap", resource) == (
+            "object is terminating since 2026-09-05T10:00:00Z"
+        )
+
+    def test_explicit_false_ready_or_available_condition_fails_any_kind(self, handler_module):
+        resource = {
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Available",
+                        "status": "False",
+                        "message": "MinimumReplicasUnavailable",
+                    }
+                ]
+            }
+        }
+
+        assert handler_module._resource_readiness_failure("Deployment", resource) == (
+            "condition Available is False (MinimumReplicasUnavailable)"
+        )
+
+    @pytest.mark.parametrize(
+        ("kind", "resource", "message"),
+        [
+            (
+                "Deployment",
+                {"metadata": {"generation": 2}, "status": {"observedGeneration": 1}},
+                "generation not observed (generation=2, observedGeneration=1)",
+            ),
+            (
+                "StatefulSet",
+                {
+                    "metadata": {"generation": 1},
+                    "spec": {"replicas": "two"},
+                    "status": {"observedGeneration": 1},
+                },
+                "invalid desired replica count (two)",
+            ),
+            (
+                "DaemonSet",
+                {"metadata": {"generation": 5}, "status": {"observedGeneration": 4}},
+                "generation not observed (generation=5, observedGeneration=4)",
+            ),
+            (
+                "DaemonSet",
+                {"metadata": {"generation": 1}, "status": {"observedGeneration": 1}},
+                "invalid desiredNumberScheduled (None)",
+            ),
+            (
+                "DaemonSet",
+                {
+                    "metadata": {"generation": 1},
+                    "status": {
+                        "observedGeneration": 1,
+                        "desiredNumberScheduled": 2,
+                        "currentNumberScheduled": 2,
+                        "updatedNumberScheduled": 2,
+                        "numberReady": 1,
+                    },
+                },
+                "replicas not converged (numberReady=1, desired=2)",
+            ),
+            (
+                "Job",
+                {"status": {"conditions": [{"type": "Failed", "status": "True"}]}},
+                "condition Failed is True",
+            ),
+            (
+                "Job",
+                {"status": {"conditions": [{"type": "Complete", "status": "False"}]}},
+                "condition Complete is not True (status is not True)",
+            ),
+            (
+                "PersistentVolumeClaim",
+                {"status": {"phase": "Pending"}},
+                "PVC phase is 'Pending', expected 'Bound'",
+            ),
+            (
+                "PersistentVolume",
+                {"status": {"phase": "Released"}},
+                "PV phase is 'Released', expected 'Bound' or 'Available'",
+            ),
+            (
+                "HorizontalPodAutoscaler",
+                {"status": {"conditions": [{"type": "AbleToScale", "status": "True"}]}},
+                "condition ScalingActive is missing",
+            ),
+            (
+                "PodDisruptionBudget",
+                {"metadata": {"generation": 2}, "status": {"observedGeneration": 1}},
+                "generation not observed (generation=2, observedGeneration=1)",
+            ),
+            (
+                "PodDisruptionBudget",
+                {
+                    "metadata": {"generation": 1},
+                    "status": {"observedGeneration": 1, "currentHealthy": 2},
+                },
+                "invalid PDB health (currentHealthy=2, desiredHealthy=None)",
+            ),
+            (
+                "PodDisruptionBudget",
+                {
+                    "metadata": {"generation": 1},
+                    "status": {"observedGeneration": 1, "currentHealthy": 1, "desiredHealthy": 2},
+                },
+                "PDB health below target (currentHealthy=1, desiredHealthy=2)",
+            ),
+            ("Certificate", {"metadata": {}, "status": {}}, "invalid metadata.generation (None)"),
+        ],
+        ids=[
+            "deployment-stale-generation",
+            "statefulset-invalid-replicas",
+            "daemonset-stale-generation",
+            "daemonset-missing-desired",
+            "daemonset-not-converged",
+            "job-failed",
+            "job-incomplete",
+            "pvc-pending",
+            "pv-released",
+            "hpa-missing-condition",
+            "pdb-stale-generation",
+            "pdb-invalid-health",
+            "pdb-below-target",
+            "certificate-no-generation",
+        ],
+    )
+    def test_each_kind_reports_its_unready_reason(self, handler_module, kind, resource, message):
+        assert handler_module._resource_readiness_failure(kind, resource) == message
+
+
+class TestServiceEndpointEvidence:
+    """Selector-backed Services need one ready, nonterminating EndpointSlice endpoint."""
+
+    @staticmethod
+    def _planned(spec, annotations=None):
+        metadata = {"name": "api", "namespace": "gco-system"}
+        if annotations:
+            metadata["annotations"] = annotations
+        return {
+            "namespace": "gco-system",
+            "name": "api",
+            "document": {"apiVersion": "v1", "kind": "Service", "metadata": metadata, "spec": spec},
+        }
+
+    @staticmethod
+    def _dynamic(items):
+        dynamic_client = MagicMock()
+        dynamic_client.resources.get.return_value.get.return_value = {"items": items}
+        return dynamic_client
+
+    def test_selectorless_service_has_no_endpoint_contract(self, handler_module):
+        dynamic_client = MagicMock()
+        planned = self._planned({"type": "ExternalName", "externalName": "example.invalid"})
+
+        assert handler_module._service_endpoint_failure(dynamic_client, {}, planned) is None
+        dynamic_client.resources.get.assert_not_called()
+
+    def test_items_must_be_a_list(self, handler_module):
+        dynamic_client = self._dynamic(None)
+        planned = self._planned({"selector": {"app": "api"}})
+
+        assert handler_module._service_endpoint_failure(dynamic_client, {}, planned) == (
+            "EndpointSlice response does not contain an items list"
+        )
+
+    def test_terminating_slices_and_malformed_entries_are_skipped(self, handler_module):
+        items = [
+            {
+                "metadata": {"deletionTimestamp": "2026-09-05T10:00:00Z"},
+                "endpoints": [{"conditions": {"ready": True}}],
+            },
+            {"metadata": {}, "endpoints": "garbage"},
+            {"metadata": {}, "endpoints": ["garbage", {"conditions": "garbage"}]},
+            {"metadata": {}, "endpoints": [{"conditions": {"ready": False}}]},
+        ]
+        planned = self._planned({"selector": {"app": "api"}})
+
+        failure = handler_module._service_endpoint_failure(self._dynamic(items), {}, planned)
+        assert (
+            failure == "selector-backed Service has no ready, nonterminating EndpointSlice endpoint"
+        )
+
+        items.append({"metadata": {}, "endpoints": [{"conditions": {"ready": True}}]})
+        dynamic_client = self._dynamic(items)
+        assert handler_module._service_endpoint_failure(dynamic_client, {}, planned) is None
+        dynamic_client.resources.get.return_value.get.assert_called_once_with(
+            namespace="gco-system", label_selector="kubernetes.io/service-name=api"
+        )
+
+    def test_certificate_without_a_secret_name_is_not_ready(self, handler_module):
+        dynamic_client = MagicMock()
+
+        failure = handler_module._certificate_secret_failure(
+            dynamic_client, {}, {"namespace": "gco-system"}, {"spec": {"issuerRef": {"name": "x"}}}
+        )
+
+        assert failure == "Certificate spec.secretName is missing"
+        dynamic_client.resources.get.assert_not_called()
+
+
+class TestManifestValidationEdgeCases:
+    """validate_manifests bounds its report and classifies every failure type."""
+
+    def test_certificate_validation_reads_the_issued_secret(self, handler_module, tmp_path):
+        (tmp_path / "post-helm-tls.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "cert-manager.io/v1",
+                    "kind": "Certificate",
+                    "metadata": {"name": "api-tls", "namespace": "gco-system"},
+                    "spec": {"secretName": "api-tls", "issuerRef": {"name": "gco-issuer"}},
+                }
+            )
+        )
+        live_objects = {
+            ("cert-manager.io/v1", "Certificate", "gco-system", "api-tls"): {
+                "metadata": {"generation": 1},
+                "spec": {"secretName": "api-tls"},
+                "status": {"conditions": [_gateway_condition("Ready", 1)]},
+            },
+            ("v1", "Secret", "gco-system", "api-tls"): {
+                "data": {"tls.crt": "Y2VydA==", "tls.key": "a2V5"}
+            },
+        }
+
+        result, dynamic_client = _validate_with_fake_dynamic(handler_module, tmp_path, live_objects)
+
+        assert result["ValidatedCount"] == 1
+        discovered = {entry.kwargs["kind"] for entry in dynamic_client.resources.get.call_args_list}
+        assert discovered == {"Certificate", "Secret"}
+
+    def test_failure_report_is_bounded_and_reuses_discovered_resources(
+        self, handler_module, tmp_path
+    ):
+        count = handler_module._MAX_VALIDATION_FAILURES + 2
+        documents = [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": f"cm-{i}", "namespace": "d"},
+            }
+            for i in range(count)
+        ]
+        (tmp_path / "10-many.yaml").write_text(yaml.safe_dump_all(documents))
+
+        with pytest.raises(RuntimeError) as error:
+            _validate_with_fake_dynamic(handler_module, tmp_path, {})
+
+        message = str(error.value)
+        assert message.startswith(f"Manifest validation failed: validated=0 expected={count};")
+        assert message.count("Kubernetes API error 404") == handler_module._MAX_VALIDATION_FAILURES
+        assert message.endswith("; ... 2 additional failure(s)")
+
+    def test_missing_api_resource_and_unexpected_errors_are_classified(
+        self, handler_module, tmp_path
+    ):
+        documents = [
+            {
+                "apiVersion": "kueue.x-k8s.io/v1beta1",
+                "kind": "ResourceFlavor",
+                "metadata": {"name": "gco-default-flavor"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "odd", "namespace": "d"},
+            },
+        ]
+        (tmp_path / "post-helm-mixed.yaml").write_text(yaml.safe_dump_all(documents))
+        dynamic_client = MagicMock()
+        odd_resource = MagicMock()
+        odd_resource.get.return_value = 42
+        dynamic_client.resources.get.side_effect = [
+            handler_module.ResourceNotFoundError("resourceflavors not registered"),
+            odd_resource,
+        ]
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=dynamic_client),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            pytest.raises(RuntimeError) as error,
+        ):
+            handler_module.validate_manifests("cluster", "us-east-1", str(tmp_path), {})
+
+        message = str(error.value)
+        assert (
+            "kueue.x-k8s.io/v1beta1/ResourceFlavor/<cluster>/gco-default-flavor "
+            "[post-helm:post-helm-mixed.yaml]: object or API resource not found "
+            "(resourceflavors not registered)"
+        ) in message
+        assert (
+            "v1/ConfigMap/d/odd [post-helm:post-helm-mixed.yaml]: validation error "
+            "(Kubernetes response is not a mapping: int)"
+        ) in message
+
+
+class TestPhaseStatusRecording:
+    """Convergence phase status is a best-effort SSM write keyed by project and region."""
+
+    def test_writes_a_json_parameter_when_configured(self, handler_module):
+        ssm = MagicMock()
+
+        with (
+            patch.dict(os.environ, {"PROJECT_NAME": "gco", "REGION": "us-east-1"}),
+            patch.object(handler_module.boto3, "client", return_value=ssm) as boto_client,
+            patch.object(handler_module.time, "time", return_value=1_757_000_000.7),
+        ):
+            handler_module._record_phase_status("base-manifests", "applied", "applied=40 " * 200)
+
+        boto_client.assert_called_once_with("ssm")
+        kwargs = ssm.put_parameter.call_args.kwargs
+        assert kwargs["Name"] == "/gco/addons/us-east-1/base-manifests"
+        assert kwargs["Type"] == "String"
+        assert kwargs["Overwrite"] is True
+        value = json.loads(kwargs["Value"])
+        assert value["phase"] == "base-manifests"
+        assert value["status"] == "applied"
+        assert value["updated_at"] == 1_757_000_000
+        assert len(value["message"]) == 1024
+
+    def test_unconfigured_environment_is_a_noop(self, handler_module):
+        environment = {k: v for k, v in os.environ.items() if k not in ("PROJECT_NAME", "REGION")}
+
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(handler_module.boto3, "client") as boto_client,
+        ):
+            handler_module._record_phase_status("base-manifests", "applied", "ok")
+
+        boto_client.assert_not_called()
+
+    def test_ssm_failures_are_swallowed(self, handler_module):
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = RuntimeError("AccessDeniedException")
+
+        with (
+            patch.dict(os.environ, {"PROJECT_NAME": "gco", "REGION": "us-east-1"}),
+            patch.object(handler_module.boto3, "client", return_value=ssm),
+        ):
+            handler_module._record_phase_status("post-helm-manifests", "failed", "boom")
+
+        ssm.put_parameter.assert_called_once()
+
+
+class TestHandleTaskFailurePaths:
+    """Every task action records a failed phase status before the error escapes."""
+
+    _EVENT = {"ClusterName": "gco-us-east-1", "Region": "us-east-1"}
+
+    def test_gateway_teardown_failure_is_recorded_then_raised(self, handler_module):
+        with (
+            patch.object(
+                handler_module,
+                "_delete_gateway_resources",
+                side_effect=RuntimeError("timed out waiting"),
+            ),
+            patch.object(handler_module, "_record_phase_status") as record,
+            pytest.raises(RuntimeError, match="timed out waiting"),
+        ):
+            handler_module.handle_task({**self._EVENT, "Action": "delete_gateway_resources"})
+
+        record.assert_called_once_with("gateway-teardown", "failed", "timed out waiting")
+
+    def test_unknown_action_is_rejected(self, handler_module):
+        with pytest.raises(ValueError, match="Unsupported task action: reboot"):
+            handler_module.handle_task({**self._EVENT, "Action": "reboot"})
+
+    def test_apply_exception_is_recorded_then_raised(self, handler_module):
+        with (
+            patch.object(
+                handler_module,
+                "apply_manifests",
+                side_effect=ValueError("Manifest planning failed: bad"),
+            ),
+            patch.object(handler_module, "_record_phase_status") as record,
+            pytest.raises(ValueError, match="planning failed"),
+        ):
+            handler_module.handle_task({**self._EVENT, "Action": "apply_manifests"})
+
+        record.assert_called_once_with("base-manifests", "failed", "Manifest planning failed: bad")
+
+    def test_apply_count_mismatch_is_recorded_then_raised(self, handler_module):
+        with (
+            patch.object(
+                handler_module,
+                "apply_manifests",
+                return_value={"AppliedCount": 3, "ExpectedCount": 4, "FailedCount": 0},
+            ),
+            patch.object(handler_module, "_record_phase_status") as record,
+            pytest.raises(RuntimeError, match="apply count mismatch: applied=3 expected=4"),
+        ):
+            handler_module.handle_task(
+                {**self._EVENT, "Action": "apply_manifests", "PostHelm": "true"}
+            )
+
+        record.assert_called_once_with(
+            "post-helm-manifests", "failed", "apply count mismatch: applied=3 expected=4"
+        )
+
+
+class TestLambdaHandlerDelete:
+    """Stack deletion always reports SUCCESS so CloudFormation never gets stuck."""
+
+    @staticmethod
+    def _event(properties):
+        return {
+            "RequestType": "Delete",
+            "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/gco/abc",
+            "RequestId": "req-1",
+            "LogicalResourceId": "KubectlApply",
+            "PhysicalResourceId": "kubectl-KubectlApply",
+            "ResponseURL": "https://example.invalid/response",
+            "ResourceProperties": properties,
+        }
+
+    @pytest.mark.parametrize("skip_deletion", ["true", "false"])
+    def test_delete_reports_deleted_without_touching_the_cluster(
+        self, handler_module, caplog, skip_deletion
+    ):
+        event = self._event(
+            {"ClusterName": "c", "Region": "us-east-1", "SkipDeletionOnStackDelete": skip_deletion}
+        )
+
+        with (
+            patch.object(handler_module, "apply_manifests") as apply,
+            patch.object(handler_module, "send_response") as send,
+            caplog.at_level(logging.INFO),
+        ):
+            handler_module.lambda_handler(event, MagicMock())
+
+        apply.assert_not_called()
+        send.assert_called_once()
+        assert send.call_args.args[2:] == (
+            handler_module.SUCCESS,
+            {"Status": "Deleted"},
+            "kubectl-KubectlApply",
+        )
+        assert ("Skipping deletion" in caplog.text) is (skip_deletion == "true")
+
+    def test_delete_forces_success_when_the_event_is_malformed(self, handler_module):
+        event = self._event({"Region": "us-east-1"})
+
+        with patch.object(handler_module, "send_response") as send:
+            handler_module.lambda_handler(event, MagicMock())
+
+        send.assert_called_once()
+        assert send.call_args.args[2:] == (
+            handler_module.SUCCESS,
+            {"Status": "Forced success on delete"},
+            "kubectl-KubectlApply",
+        )
+
+    def test_unrecognized_request_type_fails_the_resource_without_applying(self, handler_module):
+        """A RequestType other than Create/Update/Delete gets a FAILED callback.
+
+        CloudFormation never sends one, but if it did, staying silent would
+        leave the stack waiting on this resource until its timeout.
+        """
+        event = {**self._event({"ClusterName": "c", "Region": "us-east-1"}), "RequestType": "Read"}
+        context = MagicMock()
+
+        with (
+            patch.object(handler_module, "apply_manifests") as apply,
+            patch.object(handler_module, "send_response") as send,
+        ):
+            handler_module.lambda_handler(event, context)
+
+        apply.assert_not_called()
+        send.assert_called_once_with(
+            event,
+            context,
+            handler_module.FAILED,
+            {},
+            event["PhysicalResourceId"],
+            "Unsupported RequestType: Read",
+        )

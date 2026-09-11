@@ -1745,7 +1745,11 @@ def apply_manifests(
             logger.error(f"Failed to apply {filename}: {e}")
             failed.append(filename)
 
-    if not failed and applied_count != expected_count:
+    # Invariant, not a reachable path: every iteration above either increments
+    # applied_count or appends to failed, so a clean pass always applies exactly
+    # expected_count resources. Kept as a tripwire against future edits to the
+    # loop that break that accounting.
+    if not failed and applied_count != expected_count:  # pragma: no cover - loop invariant
         raise RuntimeError(
             f"Manifest apply count mismatch: expected={expected_count} applied={applied_count}"
         )
@@ -2624,6 +2628,12 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
                 logger.info("Skipping deletion (SkipDeletionOnStackDelete=true)")
             response_data = {"Status": "Deleted"}
             send_response(event, context, SUCCESS, response_data, physical_resource_id)
+
+        else:
+            # CloudFormation only ever sends Create/Update/Delete. Anything else
+            # must still get a FAILED callback: silently returning would leave
+            # the stack waiting on this resource until its timeout.
+            raise ValueError(f"Unsupported RequestType: {request_type}")
 
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
