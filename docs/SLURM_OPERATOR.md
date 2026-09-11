@@ -2,6 +2,23 @@
 
 GCO deploys a ready-to-use Slurm cluster on Kubernetes using the [Slinky Slurm Operator](https://github.com/SlinkyProject/slurm-operator) by SchedMD. Slurm is opt-in — enable it in `cdk.json` to deploy.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Enable Slurm](#enable-slurm)
+- [What Gets Deployed](#what-gets-deployed)
+- [Verify the Cluster](#verify-the-cluster)
+- [Submit Slurm Jobs](#submit-slurm-jobs)
+- [GPU Workloads](#gpu-workloads)
+- [Autoscaling](#autoscaling)
+- [Coexistence with Kueue and YuniKorn](#coexistence-with-kueue-and-yunikorn)
+- [Monitoring](#monitoring)
+- [Security](#security)
+- [Accounting](#accounting)
+- [Customization](#customization)
+- [Configuration Reference](#configuration-reference)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 The Slinky project bridges Slurm and Kubernetes, letting you run `sbatch`, `srun`, and `salloc` inside your EKS cluster.
@@ -29,21 +46,24 @@ Edit `cdk.json`:
 
 Then deploy: `gco stacks deploy-all -y`
 
-This installs three Helm charts:
+One toggle installs two Helm charts (their versions are pinned in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml)):
 
-1. **[cert-manager](https://cert-manager.io/docs/)** (v1.20.1) — TLS certificates (already enabled by default)
-2. **slinky-slurm-operator** (v1.1.0) — Kubernetes operator for Slurm cluster CRDs
-3. **slinky-slurm** (v1.1.0) — a Slurm cluster (`gco-slurm`) in `gco-jobs`
+1. **slinky-slurm-operator** — Kubernetes operator for Slurm cluster CRDs
+2. **slinky-slurm** — a Slurm cluster (`gco-slurm`) in `gco-jobs`
+
+Both need [cert-manager](https://cert-manager.io/docs/) for their webhook certificates; it is already installed by default.
 
 ## What Gets Deployed
 
 The default Slurm cluster (`gco-slurm`) includes:
 
-| Component | Replicas | Image Tag | Resources (req/limit) | Description |
-|-----------|----------|-----------|----------------------|-------------|
-| Controller (slurmctld) | 1 | `25.11-ubuntu24.04` | 500m/1 CPU, 512Mi/1Gi | Head node — schedules jobs, manages state |
-| Workers (slurmd) | 2 | `25.11-ubuntu24.04` | 1/2 CPU, 2Gi/4Gi | Execute Slurm jobs |
-| REST API (slurmrestd) | 1 | `25.11-ubuntu24.04` | 100m/500m CPU, 128Mi/256Mi | HTTP API for programmatic job submission |
+| Component | Replicas | Resources (req/limit) | Description |
+|-----------|----------|----------------------|-------------|
+| Controller (slurmctld) | 1 | 500m/1 CPU, 512Mi/1Gi | Head node — schedules jobs, manages state |
+| Workers (slurmd) | 2 | 1/2 CPU, 2Gi/4Gi | Execute Slurm jobs |
+| REST API (slurmrestd) | 1 | 100m/500m CPU, 128Mi/256Mi | HTTP API for programmatic job submission |
+
+All three run the `ghcr.io/slinkyproject/*` images at the tag pinned in `charts.yaml`.
 
 The `gco-jobs` namespace is created automatically by GCO during stack deployment.
 
@@ -147,7 +167,7 @@ nodesets:
     slurmd:
       image:
         repository: ghcr.io/slinkyproject/slurmd
-        tag: "25.11-ubuntu24.04"
+        tag: "<same tag as nodesets.workers.slurmd.image.tag>"
       resources:
         requests:
           cpu: "4"
@@ -194,12 +214,12 @@ For HPA-based autoscaling, expose Slurm metrics via the Slinky metrics exporter 
 
 ## Coexistence with Kueue and YuniKorn
 
-GCO deploys Slurm alongside [Kueue](https://kueue.sigs.k8s.io/), [Volcano](https://volcano.sh/), and [YuniKorn](https://yunikorn.apache.org/). They operate independently:
+When enabled, Slurm runs alongside [Kueue](https://kueue.sigs.k8s.io/), [Volcano](https://volcano.sh/) and, if enabled, [YuniKorn](https://yunikorn.apache.org/). [Scheduler Coexistence](SCHEDULERS.md#scheduler-coexistence) is the one page that covers how every tool interacts; the Slurm-specific points:
 
 - **Slurm** manages its own worker pods and job queue. Slurm jobs run inside slurmd pods, not as standalone Kubernetes Jobs.
 - **Kueue** manages Kubernetes-native Jobs via admission control. Kueue does not manage Slurm worker pods.
 - **Volcano** schedules pods with `schedulerName: volcano`. Slurm pods use the default scheduler.
-- **YuniKorn** schedules pods without an explicit `schedulerName`. Slurm worker pods are managed by the Slinky operator.
+- **YuniKorn** schedules only pods that explicitly set `schedulerName: yunikorn`. Slurm worker pods are managed by the Slinky operator and use the default scheduler.
 
 **GPU isolation:** By default, Slurm workers don't request GPUs (CPU-only). GPU resources are available to Kueue/Volcano/YuniKorn-managed jobs. If you add GPU NodeSets to Slurm, those GPUs are reserved by the slurmd pods. See [SCHEDULERS.md](SCHEDULERS.md) for the full coexistence guide.
 
@@ -294,9 +314,10 @@ nodesets:
 
 ### Disable the Slurm cluster
 
-```yaml
-slinky-slurm:
-  enabled: false
+The `helm.slurm` toggle in `cdk.json` controls both Slinky charts; `enabled` values in `charts.yaml` are only defaults that cdk.json overrides:
+
+```json
+{ "context": { "helm": { "slurm": { "enabled": false } } } }
 ```
 
 ### cert-manager Compatibility
@@ -307,9 +328,8 @@ webhook certificates. If your cluster already has a compatible cert-manager,
 you may disable the bundled chart, but the external installation must remain
 available or the API workloads fail closed without their TLS Secrets:
 
-```yaml
-cert-manager:
-  enabled: false
+```json
+{ "context": { "helm": { "cert_manager": { "enabled": false } } } }
 ```
 
 Requires cert-manager v1.12+.
@@ -321,7 +341,7 @@ Requires cert-manager v1.12+.
 | Value | Default | Description |
 |-------|---------|-------------|
 | `operator.replicas` | 1 | Operator pod replicas |
-| `operator.image.tag` | v1.1.0 | Operator image version |
+| `operator.image.tag` | pinned in `charts.yaml` | Operator image version |
 | `webhook.enabled` | true | Enable admission webhook |
 | `certManager.enabled` | true | Use cert-manager for TLS |
 | `crds.enabled` | true | Let chart manage CRDs |
@@ -331,12 +351,12 @@ Requires cert-manager v1.12+.
 | Value | Default | Description |
 |-------|---------|-------------|
 | `clusterName` | gco-slurm | Slurm cluster name |
-| `controller.slurmctld.image.tag` | 25.11-ubuntu24.04 | Controller image |
+| `controller.slurmctld.image.tag` | pinned in `charts.yaml` | Controller image |
 | `nodesets.workers.replicas` | 2 | Worker pods per NodeSet |
-| `nodesets.workers.slurmd.image.tag` | 25.11-ubuntu24.04 | Worker image |
+| `nodesets.workers.slurmd.image.tag` | pinned in `charts.yaml` | Worker image |
 | `partitions.all` | enabled, `Default: "YES"` | Default partition spanning all NodeSets |
 | `loginsets.slinky.enabled` | false | Login set (creates NLB — disabled by default) |
-| `restapi.slurmrestd.image.tag` | 25.11-ubuntu24.04 | REST API image |
+| `restapi.slurmrestd.image.tag` | pinned in `charts.yaml` | REST API image |
 | `accounting.enabled` | false | Enable job accounting (MariaDB) |
 
 ## Further Reading

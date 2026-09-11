@@ -2,6 +2,20 @@
 
 GCO includes [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaling) for scaling workloads based on external event sources. KEDA is a mandatory platform component (it cannot be disabled) and powers GCO's built-in SQS queue processor as well as GPU-based inference autoscaling.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [How GCO Uses KEDA](#how-gco-uses-keda)
+- [Key Concepts](#key-concepts)
+- [Run the Safe Scaling Example](#run-the-safe-scaling-example)
+- [Scale Inference on GPU Utilization](#scale-inference-on-gpu-utilization)
+- [Scale Inference to Zero](#scale-inference-to-zero)
+- [Security](#security)
+- [Customization](#customization)
+- [Cleanup](#cleanup)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 KEDA extends Kubernetes with event-driven autoscaling. It can scale Deployments, Jobs, and custom resources from zero to N based on metrics from external systems like SQS, Kafka, [Prometheus](https://prometheus.io/docs/introduction/overview/), CloudWatch, and 60+ other sources.
@@ -230,17 +244,7 @@ This prevents users in other namespaces from creating ScaledObjects that trigger
 
 ## Customization
 
-Edit `lambda/helm-installer/charts.yaml` under `keda`:
-
-```yaml
-keda:
-  enabled: true   # IGNORED — KEDA is a mandatory platform component
-  version: "2.19.0"
-  values:
-    watchNamespace: ""  # Watch all namespaces
-```
-
-KEDA cannot be disabled: it backs the built-in SQS queue processor and is the only metrics bridge for GPU/CloudWatch-driven autoscaling. The `enabled` toggle is retained for chart-config uniformity but is ignored for KEDA — the chart always installs.
+KEDA cannot be disabled: it backs the built-in SQS queue processor and is the only metrics bridge for GPU/CloudWatch-driven autoscaling, so it has no `helm` toggle in `cdk.json` and the chart always installs. Its version and values (such as `watchNamespace`, empty to watch every namespace) are pinned under `keda` in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml).
 
 To disable the built-in SQS consumer while keeping KEDA, edit `cdk.json`:
 

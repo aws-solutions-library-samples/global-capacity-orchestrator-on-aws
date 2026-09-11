@@ -1,6 +1,16 @@
 # Supported Schedulers & Orchestrators
 
-GCO ships with six scheduling and orchestration tools, each designed for different workload patterns. [KEDA](https://keda.sh/), [Volcano](https://volcano.sh/), [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kueue](https://kueue.sigs.k8s.io/), and [cert-manager](https://cert-manager.io/docs/) are enabled by default. Slurm and [YuniKorn](https://yunikorn.apache.org/) are opt-in.
+GCO ships with seven scheduling and orchestration tools, each designed for different workload patterns. [Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [KEDA](https://keda.sh/) and [Kubeflow Trainer](https://github.com/kubeflow/trainer) are enabled by default; Slurm (Slinky) and [YuniKorn](https://yunikorn.apache.org/) are opt-in. ([cert-manager](https://cert-manager.io/docs/) is installed alongside them for the schedulers' webhooks and the platform's API TLS, but it is not a scheduler.) This page is the one place that describes how they coexist; each tool's own guide covers using it.
+
+## Table of Contents
+
+- [Quick Comparison](#quick-comparison)
+- [How They Relate](#how-they-relate)
+- [Choosing the Right Tool](#choosing-the-right-tool)
+- [Combining Tools](#combining-tools)
+- [Scheduler Coexistence](#scheduler-coexistence)
+- [Configuration](#configuration)
+- [Limitations](#limitations)
 
 ## Quick Comparison
 
@@ -9,7 +19,8 @@ GCO ships with six scheduling and orchestration tools, each designed for differe
 | [Volcano](VOLCANO.md) | Batch scheduler | Yes | Gang scheduling, distributed training |
 | [Kueue](KUEUE.md) | Job queue manager | Yes | Resource quotas, fair sharing, priority admission |
 | [KubeRay](KUBERAY.md) | Ray operator | Yes | Distributed computing, hyperparameter tuning, Ray Serve |
-| [KEDA](KEDA.md) | Event-driven autoscaler | Yes | Scale-to-zero, SQS triggers, metric-based scaling |
+| [KEDA](KEDA.md) | Event-driven autoscaler | Yes (mandatory) | Scale-to-zero, SQS triggers, metric-based scaling |
+| [Kubeflow Trainer](DISTRIBUTED_TRAINING.md) | Training operator | Yes | Multi-node PyTorch `TrainJob`s against platform-shipped runtimes |
 | [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC scheduler | Opt-in | sbatch/srun workflows, HPC migration, deterministic scheduling |
 | [YuniKorn](YUNIKORN.md) | App-aware scheduler | Opt-in | Multi-tenant queues, hierarchical quotas, fair sharing |
 
@@ -49,6 +60,7 @@ These tools operate at different layers and can be combined:
 - **Volcano** and **YuniKorn** control *pod scheduling* — decide which node a pod runs on
 - **Slurm** is a separate scheduling layer — manages its own job queue and worker allocation
 - **KubeRay** manages Ray clusters — handles distributed computing lifecycle
+- **Kubeflow Trainer** runs multi-node training as `TrainJob`s — its pods go through whichever pod scheduler applies, and Kueue can gang-admit them
 - **[Karpenter](https://karpenter.sh/)** provisions nodes — all schedulers benefit from automatic node scaling
 
 ## Choosing the Right Tool
@@ -80,7 +92,7 @@ Use **KubeRay**. It manages Ray clusters with autoscaling worker groups.
 
 ### "My team uses Slurm and I want to keep sbatch/srun"
 
-Use **Slurm (Slinky)**. GCO deploys a ready-to-use Slurm cluster by default.
+Use **Slurm (Slinky)**. Enable it (`helm.slurm.enabled` in `cdk.json`) and GCO deploys a ready-to-use Slurm cluster.
 → `examples/slurm-cluster-job.yaml`
 
 ### "I need multi-tenant fair sharing with a web UI"
@@ -102,7 +114,7 @@ Common combinations:
 
 ## Scheduler Coexistence
 
-GCO deploys all six tools simultaneously. This works because they operate at different layers, but you need to understand how they interact to avoid resource conflicts.
+All of these tools can run on one cluster at the same time — the defaults plus whichever you opt into. This works because they operate at different layers, but you need to understand how they interact to avoid resource conflicts.
 
 ### How Pod Routing Works
 
@@ -149,7 +161,7 @@ Since Kueue controls admission and YuniKorn controls scheduling, a Kueue-admitte
 
 ### What to Disable If You Don't Need It
 
-Not every team needs all six tools. Disable what you don't use to reduce complexity:
+Not every team needs all of these tools. Disable what you don't use to reduce complexity:
 
 | If you only need... | Keep enabled | Disable |
 |---------------------|-------------|---------|
@@ -157,23 +169,24 @@ Not every team needs all six tools. Disable what you don't use to reduce complex
 | Gang-scheduled distributed training | Volcano, Kueue | Slurm, YuniKorn |
 | Slurm workflows (sbatch/srun) | Slurm, cert-manager | Volcano, YuniKorn |
 | Ray distributed computing | KubeRay, Kueue | Volcano, Slurm |
+| Multi-node PyTorch training | Kubeflow Trainer, Kueue | Volcano, Slurm, YuniKorn |
 | Event-driven scaling only | KEDA | Volcano, Slurm, YuniKorn |
 
-KEDA and KubeRay are lightweight operators that don't conflict with anything — safe to leave enabled regardless.
+KEDA, KubeRay and Kubeflow Trainer are lightweight operators that don't conflict with anything — safe to leave enabled regardless (KEDA cannot be disabled at all; it backs the SQS queue processor).
 
 ## Configuration
 
 A useful subset of schedulers is enabled by default, but every cluster is different. Experiment to find which tools best suit your workloads and disable the ones you don't need — each enabled chart runs controller pods that consume CPU and memory on your system nodes. Fewer charts means less overhead and faster deploys.
 
-All schedulers are toggled via the `helm` section in `cdk.json`:
+Every optional scheduler is toggled via the `helm` section in `cdk.json` — not by editing `lambda/helm-installer/charts.yaml`, whose `enabled` values are only defaults that cdk.json overrides. KEDA has no toggle (it is always installed):
 
 ```json
 {
   "context": {
     "helm": {
-      "keda": { "enabled": true },
       "volcano": { "enabled": true },
       "kuberay": { "enabled": true },
+      "kubeflow_trainer": { "enabled": true },
       "kueue": { "enabled": true },
       "cert_manager": { "enabled": true },
       "slurm": { "enabled": false },
@@ -183,7 +196,7 @@ All schedulers are toggled via the `helm` section in `cdk.json`:
 }
 ```
 
-Then redeploy: `gco stacks deploy-all -y`
+Then redeploy: `gco stacks deploy-all -y`. To try a scheduler for one run without editing `cdk.json`, pass `--enable slurm,yunikorn` — see [Run-scoped Enablement Overrides](CUSTOMIZATION.md#run-scoped-enablement-overrides). Chart versions and values live in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml); the full chart table is in the [Customization Guide](CUSTOMIZATION.md#helm-chart-configuration).
 
 ## Limitations
 

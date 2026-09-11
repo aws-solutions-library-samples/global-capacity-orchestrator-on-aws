@@ -49,10 +49,10 @@ The mirror has three moving parts: the **source set**, the **copy**, and the **c
 The override creates **no** CloudFormation resources of its own — it is just a value passed to the existing Helm install path. The ECR repositories are created by the copy step, not by CDK.
 
 ```text
-charts.yaml (volcanosh/vc-*:v1.15.0)
+charts.yaml (volcanosh/vc-*:v<tag>)
         │  collect_source_refs()
         ▼
-docker.io/volcanosh/vc-scheduler:v1.15.0   ── copy (all arches) ──▶  <acct>.dkr.ecr.<region>.<url-suffix>/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0
+docker.io/volcanosh/vc-scheduler:v<tag>   ── copy (all arches) ──▶  <acct>.dkr.ecr.<region>.<url-suffix>/gco/dockerhub/volcanosh/vc-scheduler:v<tag>
         ▲                                                                         ▲
         │                                                  Volcano basic.image_registry override points here
         └── upstream (one-time, anonymous)                 so the cluster pulls from ECR, not docker.io
