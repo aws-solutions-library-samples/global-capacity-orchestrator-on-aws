@@ -990,3 +990,38 @@ def test_main_parses_argv_and_runs_the_async_entrypoint(
         "example.model\n"
     )
     assert not (tmp_path / "out").exists()
+
+
+def test_import_puts_the_repository_and_mission_roots_on_sys_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mission.*`` must resolve however the script is launched.
+
+    The module prepends the repository root and ``gco_mcp`` to ``sys.path`` on
+    import, skipping entries already present. Under pytest both are usually on
+    the path before this module loads (the rootdir conftest and earlier MCP
+    suites put them there), so the insertion is only proven by executing the
+    module against a path that lacks them — from a bare interpreter, which is
+    how ``python scripts/capture_scaffold_fixtures.py`` runs.
+    """
+    import importlib.util
+    import sys
+
+    roots = [str(capture._REPO_ROOT), str(capture._REPO_ROOT / "gco_mcp")]
+    monkeypatch.setattr(sys, "path", [entry for entry in sys.path if entry not in roots])
+    assert not any(root in sys.path for root in roots)
+
+    spec = importlib.util.spec_from_file_location(
+        "_gco_capture_scaffold_reimport", capture.__file__
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves the module's postponed annotations through sys.modules.
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    # Inserted at the front, most recent first; a second execution adds nothing.
+    assert sys.path[:2] == [str(capture._REPO_ROOT / "gco_mcp"), str(capture._REPO_ROOT)]
+    spec.loader.exec_module(module)
+    assert sys.path.count(str(capture._REPO_ROOT)) == 1
+    assert sys.path.count(str(capture._REPO_ROOT / "gco_mcp")) == 1

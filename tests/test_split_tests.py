@@ -165,15 +165,39 @@ def test_shard_checkout_contains_diagram_source_history(workflow: dict[str, Any]
 
 
 def test_shard_one_owns_whole_repository_policy_checks(
-    workflow: dict[str, Any],
+    split: Any, workflow: dict[str, Any]
 ) -> None:
-    """The accelerator policy runs once, independently of pytest sharding."""
+    """The accelerator policy runs once, independently of pytest sharding.
+
+    Its two suites are carved out of the shards (``DEDICATED_JOB_MODULES``), so
+    this step is the only place they execute and the only thing that covers
+    ``scripts/accelerator_catalog.py``. It must therefore record coverage, and
+    the sharded run on the same runner must ``--cov-append`` rather than erase
+    that data at start-up — otherwise the combined floor sees the module at a
+    fraction of its real coverage and fails.
+    """
+    steps = _shard_job(workflow)["steps"]
     step = next(
-        item
-        for item in _shard_job(workflow)["steps"]
-        if item.get("name") == "Validate accelerator catalog and NodePools"
+        item for item in steps if item.get("name") == "Validate accelerator catalog and NodePools"
     )
     assert step["if"] == "matrix.shard == 1"
+    policy_lines = [
+        line.strip()
+        for line in step["run"].splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert policy_lines[0] == "python scripts/accelerator_catalog.py validate"
+    policy_pytest = " ".join(policy_lines[1:])
+    for module in split.DEDICATED_JOB_MODULES:
+        if "offline policy step" in split.DEDICATED_JOB_MODULES[module]:
+            assert module in policy_pytest, f"{module} is carved out of the shards but not run here"
+    for flag in ("--cov", "--cov-report=", "--cov-fail-under=0"):
+        assert flag in policy_pytest.split(), f"the policy step must record coverage ({flag})"
+
+    sharded = next(body for body in (s.get("run", "") for s in steps) if "split_tests.py" in body)
+    assert "--cov-append" in sharded.split(), (
+        "the sharded run must append to the policy step's coverage data, not erase it"
+    )
 
 
 def test_shard_artifacts_are_dynamic_and_aggregate_uses_a_glob(
