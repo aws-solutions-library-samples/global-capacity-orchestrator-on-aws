@@ -90,6 +90,10 @@ spec:
               value: "{{COST_REPORT_BUCKET}}"
             - name: COST_REPORT_INTERVAL_MINUTES
               value: "{{COST_REPORT_INTERVAL_MINUTES}}"
+            # Uvicorn drains in-flight report requests for this long after
+            # SIGTERM; the pod grace period covers preStop + this value.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "20"
             - name: OPENCOST_BASE_URL
               value: "http://opencost.monitoring.svc.cluster.local:9003"
             - name: AWS_ROLE_ARN

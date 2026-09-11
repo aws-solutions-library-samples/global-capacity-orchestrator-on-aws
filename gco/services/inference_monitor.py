@@ -35,6 +35,7 @@ import re
 import secrets
 import signal
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -912,6 +913,12 @@ class InferenceMonitor:
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
+        # Monotonic stamp of the last completed loop iteration (leader pass or
+        # standby lease check). Exported as seconds_since_last_pass so a loop
+        # that is wedged — not crashed, which the probes would catch — is
+        # visible; initialised at construction so the gauge exists before the
+        # first iteration and grows if the loop never starts.
+        self._last_loop_completed_at = time.monotonic()
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -947,6 +954,7 @@ class InferenceMonitor:
             except Exception as error:
                 logger.error("Reconciliation error: %s", error, exc_info=True)
                 self._errors_count += 1
+            self._last_loop_completed_at = time.monotonic()
             try:
                 await asyncio.sleep(self.reconcile_interval)
             except Exception as error:
@@ -6046,6 +6054,7 @@ class InferenceMonitor:
             "running": self._running,
             "reconcile_count": self._reconcile_count,
             "errors_count": self._errors_count,
+            "seconds_since_last_pass": time.monotonic() - self._last_loop_completed_at,
         }
 
 

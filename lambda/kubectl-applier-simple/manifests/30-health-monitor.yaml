@@ -93,6 +93,11 @@ spec:
               value: "127.0.0.1"
             - name: PORT
               value: "9000"
+            # Uvicorn drains in-flight requests for this long after SIGTERM;
+            # the sidecar uses the same budget and the pod grace period covers
+            # preStop + this value.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "20"
             - name: CLUSTER_NAME
               value: "{{CLUSTER_NAME}}"
             - name: REGION

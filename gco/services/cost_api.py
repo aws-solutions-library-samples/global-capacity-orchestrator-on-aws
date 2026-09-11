@@ -204,16 +204,37 @@ def create_app() -> FastAPI:
     return app
 
 
-if __name__ == "__main__":
+# The pod manifest gives the kubelet terminationGracePeriodSeconds > preStop +
+# this budget, so Uvicorn can finish in-flight requests before SIGKILL. The
+# same variable drives the TLS sidecar's drain (gco.services.tls_proxy).
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 20
+
+
+def _run_server() -> None:
+    """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — must bind all interfaces inside K8s pod
+    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
     port = int(os.getenv("PORT", "8080"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    graceful_shutdown_seconds = int(
+        os.getenv(
+            "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+            str(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+        )
+    )
+
     logger.info("Starting Cost Monitor API on %s:%d", host, port)
+
     uvicorn.run(
         "gco.services.cost_api:app",
         host=host,
         port=port,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        log_level=log_level,
         reload=False,
+        timeout_graceful_shutdown=graceful_shutdown_seconds,
     )
+
+
+if __name__ == "__main__":
+    _run_server()

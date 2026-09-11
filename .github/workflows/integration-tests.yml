@@ -734,12 +734,12 @@ jobs:
       - name: Functional container test
         # Runs the real reconciliation loop against an unreachable apiserver
         # and DynamoDB and asserts the operational contract: the Prometheus
-        # metrics server on :9090 serves gco_service_info, the deployment
-        # manifest's exact exec-probe command works against the live
-        # shell-less container, the loop survives 20s of failing reconcile
-        # attempts without crashing (leader-election/API errors are caught,
-        # not fatal), and SIGTERM exits 0 within the reconcile interval via
-        # the PID-1 signal handler in main().
+        # metrics server on :9090 — the endpoint the deployment manifest's
+        # startup/liveness/readiness probes hit — serves gco_service_info and
+        # the seconds_since_last_pass staleness gauge, the loop survives 20s
+        # of failing reconcile attempts without crashing (leader-election/API
+        # errors are caught, not fatal), and SIGTERM exits 0 within the
+        # reconcile interval via the PID-1 signal handler in main().
         run: |
           .github/scripts/functional_container_test.sh \
             --image inference-monitor:ci --name inference-monitor-fn --host-port 19090 \
@@ -747,7 +747,7 @@ jobs:
             --kubeconfig "${RUNNER_TEMP}/kubeconfig" \
             --env "AWS_REGION=us-east-1" \
             --probe "/metrics=200=gco_service_info" \
-            --exec-python "import os; assert os.path.exists('/proc/1')" \
+            --probe "/metrics=200=seconds_since_last_pass" \
             --min-uptime 20 \
             --expect-stop-exit 0
 
