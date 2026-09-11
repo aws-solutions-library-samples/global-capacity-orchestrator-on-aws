@@ -72,7 +72,7 @@ script linked beneath it.
 </details>
 
 <details>
-<summary>🤖 Claude Code Autopilot recording — the default engine, ready in one command</summary>
+<summary>🤖 <a href="https://code.claude.com/docs/en/overview">Claude Code</a> Autopilot recording — the default engine, ready in one command</summary>
 
 ![GCO Autopilot with Claude Code](demo/autopilot-claude-code.gif)
 
@@ -81,7 +81,7 @@ script linked beneath it.
 </details>
 
 <details>
-<summary>🤖 OpenAI Codex Autopilot recording — the Codex engine, ready in one command</summary>
+<summary>🤖 <a href="https://developers.openai.com/codex/cli">OpenAI Codex</a> Autopilot recording — the Codex engine, ready in one command</summary>
 
 ![GCO Autopilot with OpenAI Codex](demo/autopilot-codex.gif)
 
