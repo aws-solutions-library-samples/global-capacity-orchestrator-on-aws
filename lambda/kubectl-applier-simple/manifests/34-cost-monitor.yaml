@@ -35,6 +35,10 @@ metadata:
 spec:
   replicas: 1
   revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
   strategy:
     type: Recreate
   selector:

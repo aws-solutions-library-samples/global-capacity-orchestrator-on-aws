@@ -1072,7 +1072,31 @@ def restart_daemonsets(namespace: str, daemonset_names: list[str]) -> dict[str, 
     return {"restarted": restarted, "failed": failed}
 
 
-def _verify_workload_credentials(apps_v1: Any) -> list[str]:
+# Every platform Deployment GCO ships in gco-system, with the dedicated
+# ServiceAccount it must run as: (namespace, deployment, service account).
+# tests/test_platform_workload_contract.py pins this to the manifests, so a new
+# service (or a renamed account) fails a unit test instead of silently escaping
+# the post-apply credential verification below.
+PLATFORM_DEPLOYMENTS: tuple[tuple[str, str, str], ...] = (
+    ("gco-system", "health-monitor", "gco-health-monitor-sa"),
+    ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
+    ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+    ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
+    # Feature-gated (cdk.json cost_monitoring); verified only when planned.
+    ("gco-system", "cost-monitor", "gco-cost-monitor-sa"),
+)
+
+# User-workload accounts the manifests declare outside gco-system.
+WORKLOAD_SERVICE_ACCOUNTS: tuple[tuple[str, str], ...] = (
+    ("gco-jobs", "gco-service-account"),
+    ("gco-inference", "gco-service-account"),
+)
+
+
+def _verify_workload_credentials(
+    apps_v1: Any,
+    planned: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Verify that key GCO deployments have working IAM credential configuration.
 
     Checks that:
@@ -1080,15 +1104,27 @@ def _verify_workload_credentials(apps_v1: Any) -> list[str]:
     2. The projected service-account token volume is mounted
     3. AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE env vars are set
 
+    ``planned`` is the base-phase resource list from ``plan_manifests``. When
+    given, a platform Deployment (and its ServiceAccount) is checked only if
+    this apply planned it, so a feature-gated service that is switched off
+    (cost-monitor) does not surface as "deployment not found".
+
     Returns a list of warning strings (empty = all good).
     """
     warnings: list[str] = []
-    # Each deployment maps to its dedicated service account
+    planned_identities: set[tuple[str, str, str]] | None = None
+    if planned is not None:
+        planned_identities = {
+            (str(item["kind"]), str(item["namespace"]), str(item["name"])) for item in planned
+        }
+
+    def _is_planned(kind: str, namespace: str, name: str) -> bool:
+        return planned_identities is None or (kind, namespace, name) in planned_identities
+
     expected_deployments = [
-        ("gco-system", "health-monitor", "gco-health-monitor-sa"),
-        ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
-        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
-        ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+        (namespace, name, service_account)
+        for namespace, name, service_account in PLATFORM_DEPLOYMENTS
+        if _is_planned("Deployment", namespace, name)
     ]
 
     for namespace, name, expected_sa in expected_deployments:
@@ -1139,18 +1175,15 @@ def _verify_workload_credentials(apps_v1: Any) -> list[str]:
         except Exception as e:
             warnings.append(f"{namespace}/{name}: verification error ({e})")
 
-    # Check that service accounts exist in all required namespaces
+    # Check that service accounts exist in all required namespaces: the
+    # dedicated account of every planned platform Deployment, then the user
+    # workload accounts.
     v1 = client.CoreV1Api()
-    # Platform service SAs in gco-system
-    platform_sas = [
-        ("gco-system", "gco-health-monitor-sa"),
-        ("gco-system", "gco-manifest-processor-sa"),
-        ("gco-system", "gco-inference-monitor-sa"),
-    ]
-    # User workload SAs in their respective namespaces
+    platform_sas = [(namespace, sa_name) for namespace, _name, sa_name in expected_deployments]
     workload_sas = [
-        ("gco-jobs", "gco-service-account"),
-        ("gco-inference", "gco-service-account"),
+        (namespace, sa_name)
+        for namespace, sa_name in WORKLOAD_SERVICE_ACCOUNTS
+        if _is_planned("ServiceAccount", namespace, sa_name)
     ]
     for namespace, sa_name in platform_sas + workload_sas:
         try:
@@ -1839,8 +1872,9 @@ def apply_manifests(
 
     # Verify IAM credentials are available for workloads
     # Check that the projected service-account token volume is configured
-    # on key deployments — if missing, IRSA won't work
-    credential_warnings = _verify_workload_credentials(apps_v1)
+    # on key deployments — if missing, IRSA won't work. Scoped to the
+    # Deployments this pass planned so a gated-off service is not reported.
+    credential_warnings = _verify_workload_credentials(apps_v1, planned_resources)
 
     # Combine the restart results for the return payload.
     all_restarted = (

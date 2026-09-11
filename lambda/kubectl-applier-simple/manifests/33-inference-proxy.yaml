@@ -19,6 +19,10 @@ spec:
   # Keep this token unquoted so the rendered Kubernetes field is an integer.
   replicas: {{INFERENCE_PROXY_MIN_REPLICAS}}
   revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
