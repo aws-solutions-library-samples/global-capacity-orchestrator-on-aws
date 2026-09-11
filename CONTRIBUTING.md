@@ -43,7 +43,7 @@ The container itself ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and e
 
 **Host development path additionally needs:**
 
-- Python 3.14+ (required for the un-parenthesized except-tuple syntax in `gco_mcp/resources/config.py`)
+- Python 3.14+ (the code uses 3.14 syntax such as un-parenthesized `except A, B:` clauses, so older interpreters fail at import)
 - Node.js 24+ (for CDK)
 - kubectl
 - A clean virtualenv (or pipx) for the GCO Python deps — see the warning under [Local Development Environment (Advanced)](#local-development-environment-advanced).
@@ -268,21 +268,7 @@ Follow these guidelines:
 
 ### 3. Test Locally
 
-```bash
-# Synthesize CDK
-cdk synth
-
-# Deploy to dev account
-export AWS_PROFILE=dev
-gco stacks deploy-all -y
-
-# Run tests
-pytest tests/
-
-# Verify deployment
-kubectl get pods -n gco-system
-gco jobs list -r us-east-1
-```
+Run the [Pre-Pull-Request Verification](#pre-pull-request-verification) sequence (Ruff, mypy, the accelerator validator, pytest at the coverage floor) and `cdk synth` if you touched the stacks. Every test in `tests/` is offline and mocked; nothing needs a deployed environment. When a change alters deployed behaviour, [Live Release Validation](#live-release-validation-applicability) is the separate, authorized, local process for exercising it against a real account — a personal `gco stacks deploy-all` is not a substitute for either.
 
 ### 4. Submit Changes
 
@@ -294,8 +280,8 @@ git commit -m "feat: add new feature"
 # Push to remote
 git push origin feature/your-feature-name
 
-# Create pull request
-# Follow your organization's PR process
+# Open a pull request against main; the template asks for the type of
+# change and the verification you ran (see Pre-Pull-Request Verification)
 ```
 
 ## Code Organization
@@ -510,6 +496,7 @@ pytest tests/test_cdk_synthesis_matrix.py
 # documented in Dependency Management above; pip-compile on the host produces
 # a macOS-resolved lockfile that CI rejects)
 docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+  pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
   sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
@@ -528,17 +515,7 @@ Click any badge to land on the workflow page; the Actions UI lists every job.
 
 ### Integration Tests
 
-```bash
-# Deploy to test environment
-export AWS_PROFILE=test
-gco stacks deploy-all -y
-
-# Run tests against deployed environment
-pytest tests/ -v
-
-# Clean up
-gco stacks destroy-all -y
-```
+The `Integration Tests` and `Floci Tests` workflows exercise the containers, kind clusters, Lambda imports and the emulated-AWS layer without AWS credentials; the `tests/` suite does not target a deployed environment. For changes that need a live account, follow [Live Release Validation](#live-release-validation-applicability).
 
 ## Documentation
 
@@ -552,21 +529,15 @@ gco stacks destroy-all -y
 
 ### Documentation Files
 
-- `TENETS.md`: Normative north star and prioritized project decision guidance
-- `README.md`: Overview and quick start
-- `QUICKSTART.md`: Step-by-step setup guide
-- `docs/README.md`: Comprehensive top-level guide index
-- `docs/ARCHITECTURE.md`: Technical architecture
-- `docs/CLI.md`: CLI reference
-- `docs/API.md`: REST API reference
-- `docs/CONCEPTS.md`: Core concepts for new users
-- `docs/CUSTOMIZATION.md`: How to customize
-- `docs/TROUBLESHOOTING.md`: Common issues
-- `docs/RUNBOOKS.md`: Operational runbooks for incident response
-- `docs/adr/`: Architecture Decision Records — the append-only log of significant architectural decisions
-- `wiki/` + `mkdocs.yml`: The orientation wiki published to GitHub Pages (see
-  [Developing the wiki](#developing-the-wiki))
-- `CONTRIBUTING.md`: This file
+Where a change belongs:
+
+- `README.md`: the front door — what GCO is, how to start, and where everything else lives. Keep it short; deep detail goes in a guide it links to.
+- `QUICKSTART.md`: the one install-and-first-job walkthrough. Other files link to it rather than restating install steps.
+- `TENETS.md`: the normative north star and prioritized decision guidance; `docs/adr/`: the append-only log of significant architectural decisions.
+- `docs/README.md`: the index of every guide under `docs/` (a test keeps it exact); each guide owns its topic — CLI reference, REST API, concepts, customization, troubleshooting, runbooks, the per-feature guides.
+- Package `README.md` files (`cli/`, `gco/`, `gco_mcp/`, `lambda/`, `scripts/`, `tests/`, …): what the directory is for and its inventory; several are test-pinned to the directory contents.
+- `wiki/` + `mkdocs.yml`: the orientation wiki published to GitHub Pages (see [Developing the wiki](#developing-the-wiki)); it summarizes and links, never restates.
+- `CONTRIBUTING.md`: this file.
 
 Repository inventories move in pairs and are guarded by tests. When adding or
 removing a top-level `docs/*.md` guide, CLI command module, workflow, production
@@ -737,7 +708,7 @@ git checkout -b release/v1.2.3 main
 python scripts/bump_version.py patch  # or minor/major
 
 # Commit and open the PR (title must stay "Release v1.2.3")
-git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md
+git add VERSION README.md gco/_version.py cli/__init__.py gco_mcp/README.md
 git commit -m "Release v1.2.3"
 git push -u origin release/v1.2.3
 gh pr create --base main --title "Release v1.2.3" \
@@ -853,7 +824,7 @@ Current add-on versions are defined in `gco/stacks/constants.py` and consumed by
 
 ```bash
 # 1. Create manifest file
-cat > lambda/kubectl-applier-simple/manifests/33-my-service.yaml << 'EOF'
+cat > lambda/kubectl-applier-simple/manifests/35-my-service.yaml << 'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -938,10 +909,7 @@ gco jobs logs JOB-NAME -n gco-jobs -r us-east-1
 
 ## Code of Conduct
 
-- Be respectful and professional
-- Welcome newcomers
-- Focus on constructive feedback
-- Collaborate openly
+This project has adopted the [Amazon Open Source Code of Conduct](CODE_OF_CONDUCT.md). Be respectful and professional, welcome newcomers, keep feedback constructive, and collaborate openly.
 
 ---
 
