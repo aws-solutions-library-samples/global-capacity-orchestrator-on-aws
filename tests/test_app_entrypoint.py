@@ -14,9 +14,11 @@ pins the wiring.
 the cloud assembly into a temporary directory of CDK's choosing and read no
 context, so ``app.py``'s ``cdk`` module reference is swapped for a proxy whose
 ``App`` injects an ``outdir`` under ``tmp_path`` and the context the test wants.
-Everything else on the proxy is the real ``aws_cdk``. The Docker image asset is
-the only construct stubbed (no container daemon under pytest), exactly as every
-other regional-stack suite does.
+Everything else on the proxy is the real ``aws_cdk``. Two seams keep the run
+offline — the Docker image asset (no container daemon under pytest, as in every
+other regional-stack suite) and the regional stack's credentialed EC2
+Availability-Zone lookup — and ``boto3.client`` is replaced with a raiser so
+nothing else can reach AWS. See :func:`_run_main`.
 """
 
 from __future__ import annotations
@@ -84,7 +86,21 @@ def _run_main(
     overrides: dict[str, Any],
     account: str | None = None,
 ) -> cdk.App:
-    """Run ``app.main()`` with its assembly written under ``tmp_path``; return the app."""
+    """Run ``app.main()`` with its assembly written under ``tmp_path``; return the app.
+
+    Two seams keep this offline. ``DockerImageAsset`` is stubbed (no container
+    daemon), and ``GCORegionalStack._resolve_unsupported_az_names`` — the one
+    AWS call a *credentialed* synth makes, an EC2 AZ-ID-to-name lookup that the
+    regional stack performs only when ``CDK_DEFAULT_ACCOUNT`` is set — returns
+    an empty list. Without that, setting the variable to exercise
+    account-specific rendering would reach EC2 and fail wherever credentials
+    are absent (which is CI). The exclusion logic behind that lookup is covered
+    by ``tests/test_regional_stack.py``; ``boto3.client`` is replaced with a
+    raiser here so any other attempt to reach AWS during synthesis fails loudly
+    rather than depending on the developer's credentials.
+    """
+    from gco.stacks.regional_stack import GCORegionalStack
+
     monkeypatch.chdir(ROOT)
     if account is None:
         monkeypatch.delenv("CDK_DEFAULT_ACCOUNT", raising=False)
@@ -92,7 +108,15 @@ def _run_main(
         monkeypatch.setenv("CDK_DEFAULT_ACCOUNT", account)
     proxy = _CdkProxy(outdir=tmp_path / "cdk.out", context=_cdk_json_context(overrides))
     monkeypatch.setattr(app_module, "cdk", proxy)
-    with patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker:
+
+    def _no_aws(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(f"synthesis must not construct an AWS client: {args} {kwargs}")
+
+    with (
+        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+        patch.object(GCORegionalStack, "_resolve_unsupported_az_names", return_value=[]),
+        patch("boto3.client", _no_aws),
+    ):
         mock_docker.return_value.image_uri = (
             "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
         )
