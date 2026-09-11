@@ -430,7 +430,9 @@ class TestEnforcementSwitch:
     def test_regional_stack_renders_the_switch_from_config(self):
         source = (Path("gco/stacks/regional_stack.py")).read_text(encoding="utf-8")
         assert '"{{NETWORK_POLICY_ENFORCEMENT}}"' in source
-        assert 'get_eks_cluster_config()["network_policy_enforcement"]' in source
+        # Read like every other eks_cluster key: with the loader's default, so a
+        # partial block (test fakes, hand-written context) still renders "true".
+        assert 'get_eks_cluster_config().get("network_policy_enforcement", True)' in source
 
     def test_kind_ci_applies_the_switch_and_the_policies(self):
         workflow = Path(".github/workflows/integration-tests.yml").read_text(encoding="utf-8")
