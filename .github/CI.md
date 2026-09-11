@@ -584,15 +584,14 @@ Pick an `exp:` date that gives upstream a reasonable window to ship a fix or hav
 
 #### How the measurement works
 
-The job runs the BATS suite under [`bashcov`](https://github.com/infertux/bashcov), which traces Bash through `BASH_XTRACEFD` and writes a SimpleCov resultset describing every *relevant* line it saw and how many times each one ran. Deciding which lines of a shell script are even executable is the hard part — here-documents, `case` arms, line continuations and function headers all have to be classified — so that judgement is left to SimpleCov rather than re-implemented.
+The job runs the BATS suite under [`bashcov`](https://github.com/infertux/bashcov), which traces Bash through `BASH_XTRACEFD` and writes a SimpleCov resultset describing every *relevant* line it saw and how many times each one ran. Deciding which lines of a shell script are even executable is the hard part — here-documents, `case` arms, line continuations and function headers all have to be classified — so that judgement is left to `bashcov`'s lexer rather than re-implemented. `.simplecov` at the repository root decides which files the report may contain: SimpleCov's default profile skips every path under a dot-directory, which would silently drop all of `.github/scripts/` (ten of the tracked scripts) from the report, so that filter is removed there, and the generated and vendored trees the Python side also omits are skipped.
 
-The suite runs **twice**, and that is deliberate. `bashcov` propagates xtrace by *exporting* `SHELLOPTS`, and an exported `SHELLOPTS` carries every option it holds into each child shell — including `nounset`, which bats sets for its own internals. Scripts that never opted into `set -u` then abort on a legitimately-unset variable (measured: `lib_demo.sh: line 274: DIM: unbound variable`), which fails 9 assertions that pass in the same container without `bashcov`. Rather than harden every script against a side effect of the coverage tool, instrumentation is kept off the correctness path:
+The suite runs **twice**: once plain (`bats tests/BATS/`), then traced. Both exit codes gate the job. The traced run is not `bashcov -- bats ...` but `bashcov -- tests/BATS/bashcov_wrapper.sh ...`, because two things about `bashcov`'s own harness made the instrumented run measure a different suite from the plain one:
 
-- **Run BATS suite** — uninstrumented; its exit code gates the job.
-- **Measure shell coverage** — instrumented; its exit code is advisory and a non-zero result is surfaced as a workflow notice. Lines executed are still lines executed, so the measurement stands even when an instrumented assertion aborts early.
-- **Enforce the shell coverage floor** — applies the floor, and exits `2` if the instrumented run produced no usable report, so a broken measurement cannot read as success.
+- `bashcov` switches tracing on in every child Bash by *exporting* `SHELLOPTS`, but each Bash re-exports its **whole** option set, and the `/usr/bin/bats` wrapper on Debian and Ubuntu runs `set -euo pipefail` — so every script under test inherited `nounset`, `errexit` and `pipefail` it never asked for (measured: `lib_demo.sh: line 274: DIM: unbound variable`, and nine assertions that passed without `bashcov`). The wrapper carries `PS4` and `set -o xtrace` through a `BASH_ENV` file instead, which reaches every non-interactive child but switches on tracing alone. Taking `PS4` out of the environment also stopped dash (a `set -x` in a script run under `sh`) from printing `bashcov`'s field markers into a test's `$output`, where the traced assignment forged a malformed record that aborted `bashcov`'s parser and dropped every hit after it.
+- `bashcov` reads its trace from a pipe Ruby created non-blocking, far slower than hundreds of Bash processes fill it; a write into the full pipe fails with `EAGAIN` and Bash does not retry the flush, so hits vanished at random (one probe measured 1, 2 and 5 hits on one line across three identical runs). The wrapper spools the trace to a file and replays it to `bashcov` afterwards.
 
-This also means anything driving a script to 100% has to deal with `nounset` propagation for the lines the instrumented run cannot reach.
+With those fixed, a failure in the traced run that the plain run did not show means instrumentation is leaking into a script again, which is why the traced run's exit code is no longer advisory. The **Enforce the shell coverage floor** step then applies the floor, exiting `2` if the run produced no usable report so a broken measurement cannot read as success.
 
 Ruby comes from `.ruby-version` via `ruby/setup-ruby`, and the gems from the committed `Gemfile.lock` installed with `frozen true` (the Bundler equivalent of `npm ci`). See [Dependabot](#dependabot) for how that graph is watched and [Dependency-scan script](#dependency-scan-script) for the monthly interpreter-currency check.
 
@@ -622,11 +621,11 @@ Needs Ruby and bats. From the repository root:
 
 ```bash
 bundle install
-bundle exec bashcov --root . -- bats tests/BATS/
+bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh tests/BATS/
 python3 .github/scripts/check_bash_coverage.py coverage/
 ```
 
-The HTML report lands in `coverage/index.html`, and CI uploads the same directory as the `bash-coverage-report` artifact.
+The HTML report lands in `coverage/index.html`, and CI uploads the same directory as the `bash-coverage-report` artifact. Measure on Linux: bashcov reads the whole trace through one pipe, and macOS's 512-byte `PIPE_BUF` lets concurrently tracing shells tear each other's records, which aborts the parser. The Ubuntu job is authoritative; a container with `bash`, `bats`, `jq`, `python3` and the pinned Ruby reproduces it exactly.
 
 #### Tests
 

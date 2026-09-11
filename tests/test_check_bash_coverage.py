@@ -404,10 +404,14 @@ def test_main_defaults_the_root_to_the_repository(
     """Without --root the gate measures this repository, using the real ratchet.
 
     Doubles as an end-to-end check that the committed ratchet and the committed
-    inventory agree: a report covering only the single enforced script is enough
-    to pass, and every other script is accounted for by the ratchet.
+    inventory agree: a report covering exactly the enforced scripts is enough to
+    pass, and every other script is accounted for by the ratchet.
     """
-    report = _write_report(tmp_path, _resultset({"/w/demo/gif_to_mp4.sh": _lines(1)}))
+    enforced = set(checker.tracked_shell_scripts(REPO_ROOT)) - set(_declared_ratchet())
+    assert enforced, "at least one script must be enforced for the gate to mean anything"
+    report = _write_report(
+        tmp_path, _resultset({f"/w/{path}": _lines(1) for path in sorted(enforced)})
+    )
     assert checker.main([str(report)]) == 0
     out = capsys.readouterr().out
     assert "on the ratchet" in out

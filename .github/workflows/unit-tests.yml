@@ -380,38 +380,26 @@ jobs:
           bundle config set --local path vendor/bundle
           bundle install --jobs 4 --retry 3
       - name: Run BATS suite
-        # The authoritative correctness gate: an uninstrumented run, whose exit
-        # code fails the job. Deliberately NOT the same invocation as the
-        # coverage run below — see the comment there.
+        # The correctness gate: the suite as a contributor runs it, with no
+        # instrumentation anywhere in the process tree.
         run: bats tests/BATS/
       - name: Measure shell coverage
-        # A second, instrumented run whose exit code is advisory. bashcov
-        # propagates xtrace by *exporting* SHELLOPTS, and an exported SHELLOPTS
-        # carries every option it holds down into each child shell — including
-        # `nounset`, which bats sets for its own internals. Scripts that never
-        # opted into `set -u` then abort on a legitimately-unset variable
-        # (measured: `lib_demo.sh: line 274: DIM: unbound variable`), failing 9
-        # assertions that pass in the same container without bashcov.
+        # The same suite again, traced. bashcov is not run on `bats` directly
+        # but on tests/BATS/bashcov_wrapper.sh, which carries the tracing to
+        # every child through BASH_ENV instead of bashcov's exported SHELLOPTS
+        # (which also carried the nounset/errexit/pipefail that Debian's
+        # /usr/bin/bats wrapper sets into every script under test), and spools
+        # the trace to a file before handing it to bashcov (whose live pipe is
+        # non-blocking and silently dropped records under load). The wrapper's
+        # header has the full account.
         #
-        # So instrumentation is kept off the correctness path: the run above
-        # decides whether the suite passes, and this one only produces the
-        # coverage data. Lines executed are still lines executed, so the
-        # measurement stands even when an instrumented assertion aborts early.
-        #
-        # This is not silent: a bashcov failure is reported here, and if it
-        # produced no usable report the enforcement step below exits 2 rather
-        # than reading a missing report as success.
-        run: |
-          set -uo pipefail
-          if bundle exec bashcov --root . -- bats tests/BATS/; then
-            echo "Instrumented run completed cleanly."
-          else
-            echo "::notice::The instrumented run exited non-zero. Coverage below is" \
-                 "still measured from the lines that did execute; the uninstrumented" \
-                 "run above is what gates this job. Known cause: bats exports" \
-                 "SHELLOPTS with nounset, which bashcov's xtrace propagation carries" \
-                 "into scripts that never opted into set -u."
-          fi
+        # With those two fixed, the instrumented run executes exactly what the
+        # run above executed, so its exit code is a gate too: a failure here
+        # that the plain run did not show means instrumentation is leaking into
+        # a script again, and that is something to fix rather than note.
+        # `.simplecov` at the repository root decides which files the report
+        # may contain.
+        run: bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh tests/BATS/
       - name: Enforce the shell coverage floor
         # Fails when a script outside [tool.bash-coverage] ratchet has uncovered
         # lines, or is missing from the report entirely (a mis-scoped run, or a
@@ -424,6 +412,10 @@ jobs:
           name: bash-coverage-report
           path: coverage/
           retention-days: 7
+          # .resultset.json is the machine-readable report the gate reads (and
+          # pages.yml re-reads for the badge); upload-artifact skips dotfiles
+          # unless told otherwise.
+          include-hidden-files: true
 
   unit-recorder-macos-bash32:
     name: "unit:recorder:macos-bash32"

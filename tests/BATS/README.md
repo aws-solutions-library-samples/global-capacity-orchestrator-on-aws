@@ -53,6 +53,8 @@ bats tests/BATS/ --tap
 
 BATS tests run on every push and PR as the `unit:bats:shell` job in `.github/workflows/unit-tests.yml`. Their focused ShellCheck assertions are optional local checks and skip when `shellcheck` is absent. The authoritative pinned gate is `lint:shellcheck:shell` in `.github/workflows/lint.yml`; it runs ShellCheck 0.11.0 at `style` severity with external sources enabled over every tracked `*.sh` path using NUL-safe Git-index discovery.
 
+The job runs the suite twice: plain, and then traced by [`bashcov`](https://github.com/infertux/bashcov) for the shell line-coverage floor that `.github/scripts/check_bash_coverage.py` enforces. The traced run goes through `bashcov_wrapper.sh` in this directory, which keeps the tracing from changing what the scripts under test see (bashcov's own `SHELLOPTS` propagation would hand every script the `nounset`/`errexit`/`pipefail` that the `bats` entry point sets) and spools the trace to a file so a full pipe cannot drop hits. Both runs must pass. The wrapper is harness, not a subject: `.simplecov` keeps `tests/` out of the report and the checker never lists it. See `.github/CI.md` (Shell coverage gate) for the full account.
+
 ## Adding New Tests
 
 1. Create a new `.bats` file in this directory (e.g., `test_my_script.bats`)

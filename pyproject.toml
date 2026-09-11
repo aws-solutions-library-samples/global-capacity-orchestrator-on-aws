@@ -542,7 +542,6 @@ ratchet = [
     ".github/scripts/dev_alias_live.sh",
     ".github/scripts/functional_container_test.sh",
     ".github/scripts/lib_dependency_scan.sh",
-    ".github/scripts/podman_ci_config.sh",
     ".github/scripts/rie_smoke_test.sh",
     ".github/scripts/run-semgrep.sh",
     ".github/scripts/use-pinned-npm.sh",
