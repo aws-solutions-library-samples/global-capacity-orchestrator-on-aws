@@ -492,51 +492,6 @@ show_missing = true
 [tool.coverage.html]
 directory = "htmlcov"
 
-[tool.bash-coverage]
-# Read by .github/scripts/check_bash_coverage.py, which enforces 100% line
-# coverage on the shell scripts exercised by the BATS suite. The suite runs
-# under bashcov (see the Gemfile) in the unit:bats:shell job; bashcov decides
-# which lines of a script are executable and the checker turns that into a
-# pass/fail gate.
-#
-# A shrink-only ratchet, the same contract the Python side followed until its
-# list emptied: entries are repository-relative paths to tracked *.sh files
-# that are not yet fully covered, they are removed — never added — as suites
-# land, and tests/test_check_bash_coverage.py keeps the list honest (paths
-# exist, are tracked shell scripts, and are sorted and unique). When it is
-# empty, delete it along with these comments.
-#
-# Why the list starts this long. bashcov only sees a script that a BATS suite
-# actually executes under a traced Bash, and today most suites do not:
-#
-#   * seven scripts have no BATS suite at all (the two autopilot boot probes,
-#     functional_container_test.sh, rie_smoke_test.sh, use-pinned-npm.sh,
-#     record_autopilot.sh, preview_wiki.sh);
-#   * the record_demo / record_deploy / record_destroy suites copy the script
-#     into $BATS_TEST_TMPDIR and run the copy, and BATS deletes that directory
-#     before SimpleCov renders the report, so those hits are dropped. These
-#     need a repository-root seam so the suite can run the file in place;
-#   * test_run_semgrep.bats invokes its subject with `sh`, which on Debian is
-#     dash — no BASH_XTRACEFD, so nothing is traceable;
-#   * three suites (setup_cluster_access, aws_cli_examples, curl_sigv4_proxy)
-#     assert on the *text* of their script and never execute it;
-#   * lib_demo.sh (~78%) and setup-dev-alias.sh (23.66%) are executed but not
-#     exhaustively.
-#
-# One more thing to know before driving any of these to 100%: under the
-# instrumented run, 9 assertions that pass normally fail, because bashcov
-# propagates xtrace by exporting SHELLOPTS and an exported SHELLOPTS carries
-# bats's own `nounset` into scripts that never opted into `set -u` (measured:
-# `lib_demo.sh: line 274: DIM: unbound variable`). unit:bats:shell therefore
-# runs the suite twice — uninstrumented for correctness, instrumented for
-# measurement. Closing the last few lines of lib_demo.sh means either making it
-# nounset-clean or teaching those tests to tolerate it.
-#
-# So the gate currently enforces demo/gif_to_mp4.sh, the one script a suite
-# runs end to end. That is deliberately a floor to build on: it locks in what
-# is covered today, and every follow-up removes entries from this list.
-ratchet = []
-
 [tool.bandit]
 # CI runs ``bandit -r .`` so every authored Python file is scanned. bandit
 # treats each entry as a *substring* of the scanned path (as well as a glob),

@@ -655,16 +655,19 @@ report is published to GitHub Pages after each `main` run by `pages.yml`.
 
 Shell scripts get the same treatment from `unit:bats:shell`, which runs the
 BATS suite under `bashcov` and then applies
-`.github/scripts/check_bash_coverage.py`. Scripts not yet fully covered are
-listed in `[tool.bash-coverage] ratchet` in `pyproject.toml` — a shrink-only
-list (the same contract the Python side followed until its list emptied),
-guarded by `tests/test_check_bash_coverage.py`. That list starts long because `bashcov`
-only sees a script a suite actually executes under a traced Bash, and most
-suites either have no subject to run, run a copy in a temporary directory BATS
-deletes before the report is rendered, or only assert on the script's text; see
-[shell coverage gate](../.github/CI.md#shell-coverage-gate) for the breakdown
-and how to run it locally. A script missing from the report entirely fails the
-gate rather than passing it, so a mis-scoped run cannot read as success.
+`.github/scripts/check_bash_coverage.py`: every tracked `*.sh` file outside
+`tests/` must be at 100%, measured in statements (the checker corrects the
+lexer for the lines Bash never traces and for statements that span lines). The
+climb was staged through a shrink-only `[tool.bash-coverage] ratchet` list in
+`pyproject.toml`, the same contract the Python side followed; it emptied and
+was deleted, the checker reads no exclusion list, and the policy tests in
+`tests/test_check_bash_coverage.py` keep the section from returning. A new
+script ships with a suite that executes it — in place, not a copy under
+`$BATS_TEST_TMPDIR`, which BATS deletes before the report is rendered. See
+[shell coverage gate](../.github/CI.md#shell-coverage-gate) for how the
+measurement works and how to run it locally. A script missing from the report
+entirely fails the gate rather than passing it, so a mis-scoped run cannot read
+as success.
 
 An exact floor leaves no headroom, which is the point: any new uncovered line
 or branch fails CI on the pull request that introduced it. Ship new code with

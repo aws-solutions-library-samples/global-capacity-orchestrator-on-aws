@@ -589,7 +589,7 @@ The job runs the BATS suite under [`bashcov`](https://github.com/infertux/bashco
 The suite runs **twice**: once plain (`bats tests/BATS/`), then traced. Both exit codes gate the job. The traced run is not `bashcov -- bats ...` but `bashcov -- tests/BATS/bashcov_wrapper.sh ...`, because two things about `bashcov`'s own harness made the instrumented run measure a different suite from the plain one:
 
 - `bashcov` switches tracing on in every child Bash by *exporting* `SHELLOPTS`, but each Bash re-exports its **whole** option set, and the `/usr/bin/bats` wrapper on Debian and Ubuntu runs `set -euo pipefail` — so every script under test inherited `nounset`, `errexit` and `pipefail` it never asked for (measured: `lib_demo.sh: line 274: DIM: unbound variable`, and nine assertions that passed without `bashcov`). The wrapper carries `PS4` and `set -o xtrace` through a `BASH_ENV` file instead, which reaches every non-interactive child but switches on tracing alone. Taking `PS4` out of the environment also stopped dash (a `set -x` in a script run under `sh`) from printing `bashcov`'s field markers into a test's `$output`, where the traced assignment forged a malformed record that aborted `bashcov`'s parser and dropped every hit after it.
-- `bashcov` reads its trace from a pipe Ruby created non-blocking, far slower than hundreds of Bash processes fill it; a write into the full pipe fails with `EAGAIN` and Bash does not retry the flush, so hits vanished at random (one probe measured 1, 2 and 5 hits on one line across three identical runs). The wrapper spools the trace to a file and replays it to `bashcov` afterwards.
+- `bashcov` reads its trace from a pipe Ruby created non-blocking, far slower than hundreds of Bash processes fill it; a write into the full pipe fails with `EAGAIN` and Bash does not retry the flush, so hits vanished at random (one probe measured 1, 2 and 5 hits on one line across three identical runs). The wrapper clears `O_NONBLOCK` on the shared pipe description, so every writer blocks like an ordinary pipe writer whenever Ruby falls behind. The trace still goes straight into `bashcov`'s pipe rather than through a spool file: `bashcov` resolves each record's path as it arrives, so a fixture the suite created under `$BATS_TEST_TMPDIR` is looked up while it still exists.
 
 With those fixed, a failure in the traced run that the plain run did not show means instrumentation is leaking into a script again, which is why the traced run's exit code is no longer advisory. The **Enforce the shell coverage floor** step then applies the floor, exiting `2` if the run produced no usable report so a broken measurement cannot read as success.
 
@@ -597,23 +597,23 @@ Ruby comes from `.ruby-version` via `ruby/setup-ruby`, and the gems from the com
 
 #### What the checker adds
 
-Two things SimpleCov cannot know about this repository:
+Two corrections to the lexer's judgement, measured from what `set -x` actually prints, and two things SimpleCov cannot know about this repository:
 
-- **Path shape.** Reported paths are absolute; the inventory, the ratchet and every error message are repository-relative. Each reported path is mapped onto the tracked script it refers to by longest path suffix (falling back to a unique basename), and hits from every path that maps to the same script are merged — so a script exercised by several suites is credited with all of them instead of looking like two half-covered files.
-- **The ratchet.** Scripts not yet fully covered are listed in `[tool.bash-coverage] ratchet` in `pyproject.toml`; everything else must be at 100%. The list only ever shrinks, and `tests/test_check_bash_coverage.py` holds its entries to real tracked shell scripts.
+- **Lines Bash never traces.** The lexer works from the text alone and marks two shapes executable that the tracer never reports, so no test could ever cover them: a compound-command terminator carrying only redirections (`done <<< "$rows"`, `} > "$report"` — `set -x` prints simple commands, not the loop the redirection belongs to) and a `case` arm with no body (`*/*) ;;`). `untraceable_lines()` recognises exactly those two shapes and the checker leaves them out of the count, the way SimpleCov leaves out a comment. Anything that carries a command — a pipe after `}`, a `:` in the arm, a process substitution — is still measured.
+- **Statements that span lines.** Bash reports one line per statement, and which physical line it picks depends on the shape: the first line of a `python3 -c "..."` with a multi-line string, the *second* line of a plain backslash chain, the *last* line of `VAR=$(...)` or of a heredoc-in-substitution. The lexer propagates the count across some of these shapes and not others, which left dozens of lines permanently at zero. `statement_spans()` finds every statement that continues across lines and the checker folds each span onto its first line with the highest count seen anywhere in it, splitting a chain where a top-level `||`, `&&` or `|` starts a new command (Bash does report those on their own lines). Coverage is therefore measured in statements: a statement is covered when Bash reported it, wherever it reported it.
+- **Path shape.** Reported paths are absolute; the inventory and every error message are repository-relative. Each reported path is mapped onto the tracked script it refers to by longest path suffix (falling back to a unique basename), and hits from every path that maps to the same script are merged — so a script exercised by several suites is credited with all of them instead of looking like two half-covered files.
+- **The floor.** Every tracked `*.sh` file outside `tests/` must be at 100%. The climb was staged through a shrink-only list of not-yet-covered scripts (`[tool.bash-coverage] ratchet` in `pyproject.toml`); it emptied and was deleted, the checker reads no exclusion list of any kind, and the policy tests in `tests/test_check_bash_coverage.py` keep the section from coming back. A new script is covered, not listed.
 
 The gate fails closed. A tracked script absent from the report entirely is an error, not a pass, because that is what a mis-scoped `bashcov` run — or a suite that never executes its subject — looks like. Exit `2` is reserved for a missing or unparseable report, so "never ran" stays distinguishable from "not covered".
 
-#### Why the ratchet starts long
+#### What it took to trace every script
 
-`bashcov` only sees a script a suite actually executes under a traced Bash, and most suites don't yet:
+`bashcov` only sees a script a suite actually executes under a traced Bash, and when the gate landed most suites did not. The list emptied by changing the suites, not the gate:
 
-- seven scripts have no BATS suite at all;
-- the `record_demo` / `record_deploy` / `record_destroy` suites copy the script into `$BATS_TEST_TMPDIR` and run the copy — BATS deletes that directory before SimpleCov renders the report, so those hits are dropped. These need a repository-root seam so the suite can run the file in place;
-- `test_run_semgrep.bats` invokes its subject with `sh`, which on Debian is dash — no `BASH_XTRACEFD`, nothing to trace;
-- three suites assert on the *text* of their script and never execute it.
-
-Scripts in that state are reported as `n/a`, never as a percentage, so nobody strikes an untested script off the ratchet by misreading `100%`.
+- suites that copied their script into `$BATS_TEST_TMPDIR` and ran the copy (BATS deletes that directory before SimpleCov renders the report, so those hits were dropped) now run the tracked file in place from a fixture checkout, through a repository-root override on the script (`GCO_RECORDING_REPO_ROOT` for the recorders, `GCO_DEV_ALIAS_LIVE_REPO_ROOT` for the dev-alias proof);
+- `test_run_semgrep.bats` runs its POSIX-sh subject under `bash` for the fixture-driven cases — dash has no `BASH_XTRACEFD`, so nothing run under `sh` is traceable — and keeps the `sh` runs for the committed default;
+- the suites that only asserted on their script's *text* now execute it against PATH shims for every external tool (`aws`, `kubectl`, `curl`, `aws-sigv4-proxy`, …) that record their argv;
+- the scripts with no suite at all got one, each driving the script against faked tools and, for `dependency-scan.sh`, a whole faked upstream world answering from a catalog of the pins in the tree under scan.
 
 #### Running it locally
 
@@ -625,11 +625,11 @@ bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh tests/BATS/
 python3 .github/scripts/check_bash_coverage.py coverage/
 ```
 
-The HTML report lands in `coverage/index.html`, and CI uploads the same directory as the `bash-coverage-report` artifact. Measure on Linux: bashcov reads the whole trace through one pipe, and macOS's 512-byte `PIPE_BUF` lets concurrently tracing shells tear each other's records, which aborts the parser. The Ubuntu job is authoritative; a container with `bash`, `bats`, `jq`, `python3` and the pinned Ruby reproduces it exactly.
+The HTML report lands in `coverage/index.html`, and CI uploads the same directory as the `bash-coverage-report` artifact. Measure on Linux: bashcov reads the whole trace through one pipe, and macOS's 512-byte `PIPE_BUF` lets concurrently tracing shells tear each other's records, which aborts the parser. The Ubuntu job is authoritative; a container with the job's apt packages (`bash`, `bats`, `jq`, `python3` with PyYAML, `nodejs`) and the pinned Ruby reproduces it exactly.
 
 #### Tests
 
-`tests/test_check_bash_coverage.py` exercises the whole decision surface against synthetic resultsets — path mapping, hit merging, the ratchet split, and each failure mode — with no Ruby or bats needed, since `evaluate()` and the parsing helpers take plain data. The cases that matter most are the ones where a wrong answer would read as success: a report scoped to the wrong root, a script no suite executes, and a resultset whose shape changed under a gem bump all have to fail closed.
+`tests/test_check_bash_coverage.py` exercises the whole decision surface against synthetic resultsets — path mapping, hit merging, the two lexer corrections, and each failure mode — with no Ruby or bats needed, since `evaluate()` and the parsing helpers take plain data. The cases that matter most are the ones where a wrong answer would read as success: a report scoped to the wrong root, a script no suite executes, and a resultset whose shape changed under a gem bump all have to fail closed. Its policy tests pin the retirement of the ratchet: `[tool.bash-coverage]` must not reappear in `pyproject.toml`, `evaluate()` must take no exclusion list, and every tracked script must be one the gate can fail.
 
 ## Kind config
 

@@ -5,16 +5,18 @@ repository's shell scripts. Two very different things can go wrong with it, so
 this module covers both:
 
 1. **The decision logic.** Every judgement the script makes is exercised
-   directly against synthetic resultsets — path mapping, hit merging, the
-   ratchet split, and each failure mode. The interesting cases are the ones
-   where a wrong answer would read as success: a report scoped to the wrong
-   root, a script no suite executes, or a resultset whose shape changed under a
-   gem bump. All three must fail closed, and each has a test here.
+   directly against synthetic resultsets — path mapping, hit merging, the two
+   lexer corrections, and each failure mode. The interesting cases are the
+   ones where a wrong answer would read as success: a report scoped to the
+   wrong root, a script no suite executes, or a resultset whose shape changed
+   under a gem bump. All three must fail closed, and each has a test here.
 
-2. **The ratchet list itself.** ``[tool.bash-coverage] ratchet`` in
-   ``pyproject.toml`` is the record of which scripts are not yet covered. It is
-   only meaningful while its entries name real, tracked shell scripts, so a
-   renamed or deleted script cannot leave a stale hole in the gate.
+2. **The floor policy.** Until every script reached 100% the climb was staged
+   through ``[tool.bash-coverage] ratchet`` in ``pyproject.toml``, a
+   shrink-only list of not-yet-covered scripts the checker excused. The list
+   emptied and was deleted, and the checker no longer reads any exclusion
+   list. The policy tests at the bottom keep it that way: the section must not
+   come back, and every tracked script must be one the gate can fail.
 
 Neither Ruby nor bats is needed: ``evaluate()`` and the parsing helpers take
 plain data, so the whole decision surface is reachable from Python. The real
@@ -24,6 +26,7 @@ bashcov invocation is covered by the ``unit:bats:shell`` job.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess  # nosec B404 - fixed argv, no shell: builds a throwaway git repo
 import sys
@@ -60,7 +63,7 @@ def _write_report(tmp_path: Path, payload: object, name: str = ".resultset.json"
     return path
 
 
-def _fake_repo(tmp_path: Path, scripts: dict[str, str], ratchet: list[str]) -> Path:
+def _fake_repo(tmp_path: Path, scripts: dict[str, str]) -> Path:
     """Create a throwaway git repo so ``git ls-files`` has something to list."""
     root = tmp_path / "repo"
     root.mkdir()
@@ -68,10 +71,6 @@ def _fake_repo(tmp_path: Path, scripts: dict[str, str], ratchet: list[str]) -> P
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
-    entries = "\n".join(f'    "{item}",' for item in ratchet)
-    (root / "pyproject.toml").write_text(
-        f"[tool.bash-coverage]\nratchet = [\n{entries}\n]\n", encoding="utf-8"
-    )
     for argv in (
         [GIT, "init", "-q", "."],
         [GIT, "config", "user.email", "t@example.com"],
@@ -455,91 +454,67 @@ def test_statement_spans_over_the_committed_scripts_are_sane() -> None:
 def test_evaluate_drops_untraceable_lines_from_the_count() -> None:
     """A redirected `done` at 0 hits must not fail the script it structures."""
     reported = {"/w/a.sh": {1: 1, 2: 0, 3: 1}}
-    failing = checker.evaluate(reported, ["a.sh"], [])
+    failing = checker.evaluate(reported, ["a.sh"])
     assert failing.ok is False
-    passing = checker.evaluate(reported, ["a.sh"], [], {"a.sh": {2}})
+    passing = checker.evaluate(reported, ["a.sh"], {"a.sh": {2}})
     assert passing.ok is True
-    assert passing.enforced[0].total_lines == 2
+    assert passing.scripts[0].total_lines == 2
 
 
 def test_evaluate_folds_multi_line_statements_onto_their_first_line() -> None:
     """A `VAR=$(...)` reported on its last line counts once, as covered."""
     reported = {"/w/a.sh": {1: 0, 2: 0, 3: 1, 4: 1}}
-    failing = checker.evaluate(reported, ["a.sh"], [])
+    failing = checker.evaluate(reported, ["a.sh"])
     assert failing.ok is False
-    passing = checker.evaluate(reported, ["a.sh"], [], spans={"a.sh": [(1, 3)]})
+    passing = checker.evaluate(reported, ["a.sh"], spans={"a.sh": [(1, 3)]})
     assert passing.ok is True
-    assert passing.enforced[0].hits == {1: 1, 4: 1}
+    assert passing.scripts[0].hits == {1: 1, 4: 1}
 
 
-def test_evaluate_passes_a_fully_covered_enforced_script() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 3}}, ["a.sh"], [])
+def test_evaluate_passes_a_fully_covered_script() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 3}}, ["a.sh"])
     assert result.ok is True
     assert result.failures == []
-    assert [record.path for record in result.enforced] == ["a.sh"]
+    assert [record.path for record in result.scripts] == ["a.sh"]
 
 
-def test_evaluate_fails_an_enforced_script_with_uncovered_lines() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 0}}, ["a.sh"], [])
+def test_evaluate_fails_a_script_with_uncovered_lines() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 0}}, ["a.sh"])
     assert result.ok is False
     assert "1/2 lines uncovered" in result.failures[0]
 
 
-def test_evaluate_fails_an_enforced_script_absent_from_the_report() -> None:
+def test_evaluate_fails_a_script_absent_from_the_report() -> None:
     """The fail-closed case: a mis-scoped bashcov run must not read as success."""
-    result = checker.evaluate({}, ["a.sh"], [])
+    result = checker.evaluate({}, ["a.sh"])
     assert result.ok is False
     assert "absent from the bashcov report" in result.failures[0]
 
 
-def test_evaluate_excuses_ratcheted_scripts() -> None:
-    result = checker.evaluate({}, ["a.sh", "b.sh"], ["b.sh"])
-    assert [record.path for record in result.ratcheted] == ["b.sh"]
-    assert [record.path for record in result.enforced] == ["a.sh"]
-    assert result.failures and all("a.sh" in failure for failure in result.failures)
+def test_evaluate_holds_every_script_in_the_inventory_to_the_floor() -> None:
+    """There is no exclusion list: each uncovered or absent script is its own failure."""
+    reported = {"/w/a.sh": {1: 1}, "/w/b.sh": {1: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
+    assert [record.path for record in result.scripts] == ["a.sh", "b.sh", "c.sh"]
+    assert [failure.split(":")[0] for failure in result.failures] == ["b.sh", "c.sh"]
 
 
 def test_evaluate_merges_every_path_that_maps_to_one_script() -> None:
     """Two absolute prefixes for the same file must not read as half-covered."""
     reported = {"/w/a.sh": {1: 1, 2: 0}, "/tmp/fixture/a.sh": {1: 0, 2: 7}}
-    result = checker.evaluate(reported, ["a.sh"], [])
+    result = checker.evaluate(reported, ["a.sh"])
     assert result.ok is True
-    assert result.enforced[0].sources == {"/w/a.sh", "/tmp/fixture/a.sh"}
+    assert result.scripts[0].sources == {"/w/a.sh", "/tmp/fixture/a.sh"}
 
 
 def test_evaluate_collects_paths_that_map_to_nothing() -> None:
-    result = checker.evaluate({"/opt/vendor/x.sh": {1: 1}}, ["a.sh"], ["a.sh"])
+    result = checker.evaluate({"/opt/vendor/x.sh": {1: 1}}, ["a.sh"])
     assert result.unmapped == ["/opt/vendor/x.sh"]
 
 
 # --------------------------------------------------------------------------
-# load_ratchet / tracked_shell_scripts
+# tracked_shell_scripts
 # --------------------------------------------------------------------------
-
-
-def test_load_ratchet_reads_the_section(tmp_path: Path) -> None:
-    path = tmp_path / "pyproject.toml"
-    path.write_text('[tool.bash-coverage]\nratchet = ["a.sh", "b.sh"]\n', encoding="utf-8")
-    assert checker.load_ratchet(path) == ["a.sh", "b.sh"]
-
-
-def test_load_ratchet_defaults_to_empty_when_absent(tmp_path: Path) -> None:
-    """An empty ratchet is the goal state, so its absence must mean "enforce all"."""
-    path = tmp_path / "pyproject.toml"
-    path.write_text("[tool.other]\nkey = 1\n", encoding="utf-8")
-    assert checker.load_ratchet(path) == []
-
-
-def test_load_ratchet_rejects_a_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(checker.ReportError, match="could not read"):
-        checker.load_ratchet(tmp_path / "absent.toml")
-
-
-def test_load_ratchet_rejects_invalid_toml(tmp_path: Path) -> None:
-    path = tmp_path / "pyproject.toml"
-    path.write_text("[tool.bash-coverage\n", encoding="utf-8")
-    with pytest.raises(checker.ReportError, match="not valid TOML"):
-        checker.load_ratchet(path)
 
 
 def test_tracked_shell_scripts_lists_the_repository_and_excludes_the_suite() -> None:
@@ -556,37 +531,49 @@ def test_tracked_shell_scripts_rejects_a_non_repository(tmp_path: Path) -> None:
         checker.tracked_shell_scripts(tmp_path)
 
 
+def test_classify_scripts_rejects_a_tracked_script_it_cannot_read(tmp_path: Path) -> None:
+    """A tracked script missing from the working tree is a broken measurement (exit 2)."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    inventory = checker.tracked_shell_scripts(root)
+    assert inventory == ["a.sh"]
+    (root / "a.sh").unlink()
+    with pytest.raises(checker.ReportError, match="could not read tracked script a.sh"):
+        checker.classify_scripts(root, inventory)
+
+
 # --------------------------------------------------------------------------
 # format_report
 # --------------------------------------------------------------------------
 
 
 def test_format_report_summarises_a_passing_run() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"], [])
-    assert "1/1 enforced scripts at 100%" in checker.format_report(result)
+    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"])
+    assert "1/1 tracked scripts at 100%" in checker.format_report(result)
 
 
-def test_format_report_separates_measured_from_unmeasured_ratchet_entries() -> None:
-    """An unmeasured script must never be printed as a percentage."""
-    reported = {"/w/b.sh": {1: 1, 2: 0}}
-    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"], ["b.sh", "c.sh"])
+def test_format_report_never_renders_an_unmeasured_script_as_a_percentage() -> None:
+    """A script no suite executed is a named failure, not a number."""
+    reported = {"/w/a.sh": {1: 1}, "/w/b.sh": {1: 1, 2: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
     rendered = checker.format_report(result)
-    assert "50.00%  b.sh" in rendered
-    assert "n/a  c.sh (not executed by any suite)" in rendered
-    assert "c.sh" not in rendered.replace("n/a  c.sh (not executed by any suite)", "")
+    assert "1/3 tracked scripts at 100%" in rendered
+    assert "b.sh: 1/2 lines uncovered (50.00%)" in rendered
+    assert "c.sh: absent from the bashcov report" in rendered
+    assert "%" not in rendered.split("c.sh: absent", 1)[1].split("\n", 1)[0]
 
 
 def test_format_report_truncates_a_long_miss_list() -> None:
     hits = dict.fromkeys(range(1, 31), 0)
-    result = checker.evaluate({"/w/a.sh": hits}, ["a.sh"], [])
+    result = checker.evaluate({"/w/a.sh": hits}, ["a.sh"])
     rendered = checker.format_report(result)
     assert "(+10 more)" in rendered
-    assert "ERROR: enforced shell scripts are not fully covered" in rendered
+    assert "ERROR: shell scripts are not fully covered" in rendered
+    assert "ratchet" not in rendered, "the remedy must not point at a list that no longer exists"
 
 
 def test_format_report_notes_unmapped_paths() -> None:
     reported = {f"/opt/vendor/x{index}.sh": {1: 1} for index in range(12)}
-    result = checker.evaluate(reported, ["a.sh"], ["a.sh"])
+    result = checker.evaluate(reported, ["a.sh"])
     rendered = checker.format_report(result)
     assert "12 reported path(s) matched no tracked script" in rendered
 
@@ -599,26 +586,38 @@ def test_format_report_notes_unmapped_paths() -> None:
 def test_main_returns_zero_when_the_floor_holds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
     assert checker.main([str(report), "--root", str(root)]) == 0
-    assert "1/1 enforced scripts at 100%" in capsys.readouterr().out
+    assert "1/1 tracked scripts at 100%" in capsys.readouterr().out
 
 
 def test_main_returns_one_when_a_script_is_uncovered(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(0)}))
     assert checker.main([str(report), "--root", str(root)]) == 1
     assert "1/1 lines uncovered" in capsys.readouterr().out
+
+
+def test_main_returns_one_when_a_tracked_script_is_not_in_the_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A second script the report never mentions fails the run on its own."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n", "lib/b.sh": "echo there\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
+    assert checker.main([str(report), "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "1/2 tracked scripts at 100%" in out
+    assert "lib/b.sh: absent from the bashcov report" in out
 
 
 def test_main_returns_two_when_the_report_is_missing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A distinct exit code so CI can tell "not covered" from "never ran"."""
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     assert checker.main([str(tmp_path / "absent"), "--root", str(root)]) == 2
     assert "ERROR:" in capsys.readouterr().err
 
@@ -626,57 +625,64 @@ def test_main_returns_two_when_the_report_is_missing(
 def test_main_defaults_the_root_to_the_repository(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Without --root the gate measures this repository, using the real ratchet.
+    """Without --root the gate measures this repository, and all of it.
 
-    Doubles as an end-to-end check that the committed ratchet and the committed
-    inventory agree: a report covering exactly the enforced scripts is enough to
-    pass, and every other script is accounted for by the ratchet.
+    A report covering exactly the tracked inventory is enough to pass, and
+    nothing less is: dropping any one script from the report fails the run,
+    which is the property the retired ratchet used to weaken.
     """
-    enforced = set(checker.tracked_shell_scripts(REPO_ROOT)) - set(_declared_ratchet())
-    assert enforced, "at least one script must be enforced for the gate to mean anything"
-    report = _write_report(
-        tmp_path, _resultset({f"/w/{path}": _lines(1) for path in sorted(enforced)})
-    )
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    assert inventory, "the gate is meaningless without tracked scripts"
+    full = {f"/w/{path}": _lines(1) for path in inventory}
+    report = _write_report(tmp_path, _resultset(full))
     assert checker.main([str(report)]) == 0
     out = capsys.readouterr().out
-    assert "on the ratchet" in out
+    assert f"{len(inventory)}/{len(inventory)} tracked scripts at 100%" in out
     assert "ERROR" not in out
 
+    dropped = inventory[-1]
+    partial = {path: lines for path, lines in full.items() if path != f"/w/{dropped}"}
+    report = _write_report(tmp_path, _resultset(partial), name="partial.json")
+    assert checker.main([str(report)]) == 1
+    assert f"{dropped}: absent from the bashcov report" in capsys.readouterr().out
+
 
 # --------------------------------------------------------------------------
-# The ratchet list in pyproject.toml
+# The floor policy: no exclusion list, in the checker or in pyproject.toml
 # --------------------------------------------------------------------------
 
+RETIRED_SECTION = "bash-coverage"
 
-def _declared_ratchet() -> list[str]:
+
+def test_ratchet_section_has_not_been_reintroduced() -> None:
+    """The not-yet-covered list emptied and was deleted; it must not come back.
+
+    The checker ignores pyproject.toml entirely now, so a revived section would
+    excuse nothing — but it would *look* as if it did, and the next person
+    would list their new script there instead of covering it.
+    """
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    entries = data["tool"]["bash-coverage"]["ratchet"]
-    assert isinstance(entries, list)
-    return [str(item) for item in entries]
-
-
-def test_declared_ratchet_names_tracked_shell_scripts() -> None:
-    """A renamed or deleted script must not leave a stale hole in the gate."""
-    inventory = set(checker.tracked_shell_scripts(REPO_ROOT))
-    unknown = [entry for entry in _declared_ratchet() if entry not in inventory]
-    assert not unknown, (
-        f"[tool.bash-coverage] ratchet names paths that are not tracked shell scripts: {unknown}"
+    assert RETIRED_SECTION not in data.get("tool", {}), (
+        f"pyproject.toml carries a [tool.{RETIRED_SECTION}] section again: every tracked "
+        "shell script is at 100%, so cover the new script instead of listing it"
     )
 
 
-def test_declared_ratchet_is_sorted_and_unique() -> None:
-    entries = _declared_ratchet()
-    duplicates = sorted({entry for entry in entries if entries.count(entry) > 1})
-    assert not duplicates, f"bash-coverage ratchet lists duplicates: {duplicates}"
-    assert entries == sorted(entries), "bash-coverage ratchet must stay sorted"
+def test_checker_takes_no_exclusion_list() -> None:
+    """``evaluate`` has no parameter that could excuse a script from the floor."""
+    parameters = set(inspect.signature(checker.evaluate).parameters)
+    assert parameters == {"reported", "inventory", "untraceable", "spans"}, (
+        f"evaluate() grew a parameter: {sorted(parameters)}. A per-script exclusion "
+        "belongs in a test that covers the script, not in the gate"
+    )
+    assert not hasattr(checker, "load_ratchet")
 
 
-def test_declared_ratchet_does_not_cover_every_script() -> None:
-    """An all-inclusive ratchet would make the job green while measuring nothing."""
+def test_every_tracked_script_can_fail_the_gate() -> None:
+    """With an empty report, each tracked script is its own named failure."""
     inventory = checker.tracked_shell_scripts(REPO_ROOT)
-    assert set(_declared_ratchet()) != set(inventory), (
-        "every tracked shell script is ratcheted, so the gate enforces nothing"
-    )
+    result = checker.evaluate({}, inventory)
+    assert [failure.split(":", 1)[0] for failure in result.failures] == inventory
 
 
 def test_script_basenames_are_unique_so_the_fallback_is_safe() -> None:

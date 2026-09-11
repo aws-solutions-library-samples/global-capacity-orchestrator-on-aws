@@ -393,9 +393,9 @@ jobs:
         # but on tests/BATS/bashcov_wrapper.sh, which carries the tracing to
         # every child through BASH_ENV instead of bashcov's exported SHELLOPTS
         # (which also carried the nounset/errexit/pipefail that Debian's
-        # /usr/bin/bats wrapper sets into every script under test), and spools
-        # the trace to a file before handing it to bashcov (whose live pipe is
-        # non-blocking and silently dropped records under load). The wrapper's
+        # /usr/bin/bats wrapper sets into every script under test), and makes
+        # bashcov's pipe blocking (Ruby creates it non-blocking, and a full
+        # non-blocking pipe silently dropped records under load). The wrapper's
         # header has the full account.
         #
         # With those two fixed, the instrumented run executes exactly what the
@@ -406,9 +406,10 @@ jobs:
         # may contain.
         run: bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh tests/BATS/
       - name: Enforce the shell coverage floor
-        # Fails when a script outside [tool.bash-coverage] ratchet has uncovered
-        # lines, or is missing from the report entirely (a mis-scoped run, or a
-        # bashcov run that produced nothing usable).
+        # Fails when any tracked shell script has an uncovered statement or is
+        # missing from the report entirely (a mis-scoped run, or a bashcov run
+        # that produced nothing usable). There is no exclusion list: a new
+        # script needs a suite that executes it in place.
         run: python3 .github/scripts/check_bash_coverage.py coverage/
       - name: Upload shell coverage report
         if: always()

@@ -44,26 +44,29 @@ What this script owns beyond that is everything SimpleCov cannot know about
 *this* repository:
 
 **Path shape.** bashcov reports absolute paths (``/home/runner/work/.../demo/
-lib_demo.sh``), while the inventory, the ratchet and every error message use
+lib_demo.sh``), while the inventory and every error message use
 repository-relative ones. Reported paths are mapped back onto the tracked
 script they refer to by longest path suffix, falling back to a unique basename,
 and hits from every path that maps to the same script are merged — so a script
 exercised by several suites is credited with all of them.
 
-That merging also covers copies of a script, which matters because many BATS
-suites ``cp`` the script under test into ``$BATS_TEST_TMPDIR`` and run it from
-an isolated fake repository. It does not rescue those suites on its own,
+That merging also covers copies of a script, which matters because a BATS
+suite may ``cp`` the script under test into ``$BATS_TEST_TMPDIR`` and run it
+from an isolated fake repository. It does not rescue such a suite on its own,
 though: SimpleCov reads each file when it renders the report, and by then BATS
 has deleted its temporary directories, so the copies are dropped before this
-script ever sees them. Such scripts stay on the ratchet until their suite is
-reworked to run the file in place. The merging is what keeps a *surviving*
-copy, or the same script seen under two different absolute prefixes, from
-being counted as two half-covered files.
+script ever sees them. A suite has to run the tracked file in place for its
+hits to count (the recorders take a repository-root override for exactly
+this). The merging is what keeps a *surviving* copy, or the same script seen
+under two different absolute prefixes, from being counted as two half-covered
+files.
 
-**The ratchet.** Bringing 11k lines of shell to 100% is staged work. Scripts
-that have not got there yet are listed in ``[tool.bash-coverage] ratchet`` in
-``pyproject.toml``; everything else must be fully covered. The list only ever
-shrinks, and ``tests/test_check_bash_coverage.py`` keeps it honest.
+**The floor.** Every tracked script must be fully covered. The climb to 100%
+was staged through a shrink-only list of not-yet-covered scripts
+(``[tool.bash-coverage] ratchet`` in ``pyproject.toml``); it emptied and was
+deleted, and this script reads no exclusion list of any kind — a new script is
+covered, not listed. ``tests/test_check_bash_coverage.py`` keeps the list from
+coming back.
 
 The gate fails closed: a tracked script absent from the report entirely is an
 error, not a pass, because that is what a silently mis-scoped bashcov run or a
@@ -76,8 +79,8 @@ Usage::
 
 Exit codes::
 
-    0  every enforced script is fully covered
-    1  at least one enforced script has uncovered lines or is missing
+    0  every tracked script is fully covered
+    1  at least one tracked script has uncovered lines or is missing
     2  the report could not be found or parsed
 
 The module is importable from the test suite — ``evaluate()`` holds the whole
@@ -91,7 +94,6 @@ import json
 import re
 import subprocess  # nosec B404  # fixed argv, no shell: `git ls-files` only
 import sys
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -305,10 +307,9 @@ class ScriptCoverage:
 
 @dataclass
 class Result:
-    """Outcome of a gate evaluation."""
+    """Outcome of a gate evaluation: one record per tracked script."""
 
-    enforced: list[ScriptCoverage]
-    ratcheted: list[ScriptCoverage]
+    scripts: list[ScriptCoverage]
     failures: list[str]
     unmapped: list[str]
 
@@ -426,11 +427,10 @@ def fold_spans(hits: dict[int, int], spans: list[tuple[int, int]]) -> dict[int, 
 def evaluate(
     reported: dict[str, dict[int, int]],
     inventory: list[str],
-    ratchet: list[str],
     untraceable: dict[str, set[int]] | None = None,
     spans: dict[str, list[tuple[int, int]]] | None = None,
 ) -> Result:
-    """Merge reported coverage onto the inventory and apply the floor.
+    """Merge reported coverage onto the inventory and apply the floor to all of it.
 
     ``untraceable`` maps a tracked script to the line numbers that
     :func:`untraceable_lines` found in it; those lines are dropped from the
@@ -460,12 +460,10 @@ def evaluate(
         if record.hits and path in spans:
             record.hits = fold_spans(record.hits, spans[path])
 
-    ratchet_set = set(ratchet)
-    enforced = [record for path, record in sorted(merged.items()) if path not in ratchet_set]
-    ratcheted = [record for path, record in sorted(merged.items()) if path in ratchet_set]
+    scripts = [record for _, record in sorted(merged.items())]
 
     failures: list[str] = []
-    for record in enforced:
+    for record in scripts:
         if not record.measured:
             failures.append(
                 f"{record.path}: absent from the bashcov report — no BATS suite executed it, "
@@ -480,19 +478,7 @@ def evaluate(
                 f"{record.path}: {len(missed)}/{record.total_lines} lines uncovered "
                 f"({record.percent:.2f}%): {shown}{more}"
             )
-    return Result(enforced=enforced, ratcheted=ratcheted, failures=failures, unmapped=unmapped)
-
-
-def load_ratchet(pyproject: Path) -> list[str]:
-    """Return ``[tool.bash-coverage] ratchet`` from pyproject, or ``[]``."""
-    try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ReportError(f"could not read {pyproject}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise ReportError(f"{pyproject} is not valid TOML: {exc}") from exc
-    section = data.get("tool", {}).get("bash-coverage", {})
-    return [str(item) for item in section.get("ratchet", [])]
+    return Result(scripts=scripts, failures=failures, unmapped=unmapped)
 
 
 def tracked_shell_scripts(root: Path) -> list[str]:
@@ -541,41 +527,25 @@ def classify_scripts(
 def format_report(result: Result) -> str:
     """Render the human-facing summary printed by ``main``."""
     lines: list[str] = []
-    failing = [record for record in result.enforced if record.missed_lines or not record.measured]
-    covered = len(result.enforced) - len(failing)
-    lines.append(
-        f"bash coverage: {covered}/{len(result.enforced)} enforced scripts at 100%, "
-        f"{len(result.ratcheted)} on the ratchet"
-    )
+    failing = [record for record in result.scripts if record.missed_lines or not record.measured]
+    covered = len(result.scripts) - len(failing)
+    lines.append(f"bash coverage: {covered}/{len(result.scripts)} tracked scripts at 100%")
     if result.unmapped:
         lines.append(
             f"note: {len(result.unmapped)} reported path(s) matched no tracked script "
             "and were ignored:"
         )
         lines.extend(f"  {path}" for path in result.unmapped[:10])
-    if result.ratcheted:
-        measured = [record for record in result.ratcheted if record.measured]
-        unmeasured = [record for record in result.ratcheted if not record.measured]
-        lines.append("ratcheted scripts (not yet enforced, lowest coverage first):")
-        for record in sorted(measured, key=lambda item: item.percent):
-            lines.append(
-                f"  {record.percent:6.2f}%  {record.path} "
-                f"({len(record.missed_lines)}/{record.total_lines} uncovered)"
-            )
-        # Deliberately not rendered as 0% or 100%: no suite executed these, so
-        # there is no measurement to report, and printing a number would invite
-        # someone to strike a script off the ratchet that is not tested at all.
-        for record in unmeasured:
-            lines.append(f"     n/a  {record.path} (not executed by any suite)")
     if result.failures:
         lines.append("")
-        lines.append("ERROR: enforced shell scripts are not fully covered:")
+        lines.append("ERROR: shell scripts are not fully covered:")
         lines.extend(f"  {failure}" for failure in result.failures)
         lines.append("")
         lines.append(
-            "Add BATS coverage for the lines above. If this script is new and its "
-            "tests are staged work, add it to [tool.bash-coverage] ratchet in "
-            "pyproject.toml and say so in the PR description."
+            "Add BATS coverage for the lines above. Every tracked *.sh file is held "
+            "to 100%: a new script ships with a suite that executes it, and a script "
+            "absent from the report needs its suite to run the tracked file in place "
+            "rather than a copy."
         )
     return "\n".join(lines)
 
@@ -599,13 +569,12 @@ def main(argv: list[str] | None = None) -> int:
         report = find_report(args.bashcov_output)
         reported = parse_report(report)
         inventory = tracked_shell_scripts(args.root)
-        ratchet = load_ratchet(args.root / "pyproject.toml")
         untraceable, spans = classify_scripts(args.root, inventory)
     except ReportError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    result = evaluate(reported, inventory, ratchet, untraceable, spans)
+    result = evaluate(reported, inventory, untraceable, spans)
     print(format_report(result))
     return 0 if result.ok else 1
 
