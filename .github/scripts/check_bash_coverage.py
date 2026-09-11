@@ -8,8 +8,18 @@ script turns that resultset into a pass/fail gate.
 Deciding which lines of a shell script are even executable is the hard part of
 Bash coverage — here-documents, ``case`` arms, line continuations and function
 headers all have to be classified — so that judgement is deliberately left to
-SimpleCov rather than re-implemented here. What this script owns is everything
-SimpleCov cannot know about *this* repository:
+bashcov's lexer rather than re-implemented here, with one correction. The lexer
+works from the text alone and marks two shapes executable that Bash's tracer
+never reports, so no test could ever cover them: a compound-command terminator
+that carries only redirections (``done <<< "$rows"``, ``} > "$report"`` — the
+redirection belongs to the loop or group, and ``set -x`` prints simple
+commands, not the loop) and a ``case`` arm with no body (``*/*) ;;``). Those
+lines are structure, not statements; ``untraceable_lines()`` recognises exactly
+those two shapes and ``evaluate()`` leaves them out of the count, the way
+SimpleCov leaves out a comment. Anything that carries a command — a pipe into
+``sed`` after ``}``, a ``:`` in the arm, a process substitution — is still
+measured. What this script owns beyond that is everything SimpleCov cannot know
+about *this* repository:
 
 **Path shape.** bashcov reports absolute paths (``/home/runner/work/.../demo/
 lib_demo.sh``), while the inventory, the ratchet and every error message use
@@ -56,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess  # nosec B404  # fixed argv, no shell: `git ls-files` only
 import sys
 import tomllib
@@ -64,6 +75,35 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTSET_NAME = ".resultset.json"
+
+# A redirection and its target word: an optional descriptor, one of the
+# operators Bash has (including here-strings and ``>|``/``>&``), then a single
+# quoted or bare word. Deliberately not a process substitution (``< <(cmd)``):
+# the command inside one is traced on this line, so the line is measurable.
+_REDIRECTION = r"""\d*(?:<<<|>>|<>|>\||[<>]&?|<)\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s()<>|&;]+)"""
+
+# ``done``, ``fi``, ``esac`` or ``}`` followed by nothing but redirections.
+_TERMINATOR_WITH_REDIRECTIONS = re.compile(
+    rf"^\s*(?:done|fi|esac|\}})(?:\s+{_REDIRECTION})+\s*(?:#.*)?$"
+)
+
+# A ``case`` arm whose body is empty: ``pattern) ;;``. A ``:`` or any other
+# command in the arm is a traced statement and keeps the line measurable.
+_EMPTY_CASE_ARM = re.compile(r"^\s*[^)#\s][^)#]*\)\s*;;\s*(?:#.*)?$")
+
+
+def untraceable_lines(source: str) -> set[int]:
+    """Return the 1-based lines of ``source`` that Bash's tracer never reports.
+
+    See the module docstring: compound-command terminators carrying only
+    redirections, and empty ``case`` arms. Both are marked executable by
+    bashcov's lexer, so without this they read as permanently uncovered.
+    """
+    return {
+        number
+        for number, line in enumerate(source.splitlines(), start=1)
+        if _TERMINATOR_WITH_REDIRECTIONS.match(line) or _EMPTY_CASE_ARM.match(line)
+    }
 
 
 class ReportError(Exception):
@@ -206,10 +246,17 @@ def evaluate(
     reported: dict[str, dict[int, int]],
     inventory: list[str],
     ratchet: list[str],
+    untraceable: dict[str, set[int]] | None = None,
 ) -> Result:
-    """Merge reported coverage onto the inventory and apply the floor."""
+    """Merge reported coverage onto the inventory and apply the floor.
+
+    ``untraceable`` maps a tracked script to the line numbers that
+    :func:`untraceable_lines` found in it; those lines are dropped from the
+    script's count whatever the report says about them.
+    """
     merged: dict[str, ScriptCoverage] = {path: ScriptCoverage(path=path) for path in inventory}
     unmapped: list[str] = []
+    untraceable = untraceable or {}
 
     for reported_path, lines in sorted(reported.items()):
         tracked = map_to_tracked(reported_path, inventory)
@@ -218,7 +265,10 @@ def evaluate(
             continue
         record = merged[tracked]
         record.sources.add(reported_path)
+        skipped = untraceable.get(tracked, set())
         for line_number, hits in lines.items():
+            if line_number in skipped:
+                continue
             record.hits[line_number] = max(record.hits.get(line_number, 0), hits)
 
     ratchet_set = set(ratchet)
@@ -273,6 +323,20 @@ def tracked_shell_scripts(root: Path) -> list[str]:
         raise ReportError(f"could not list tracked shell scripts: {exc}") from exc
     paths = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
     return sorted(path for path in paths if not path.startswith("tests/"))
+
+
+def untraceable_lines_by_script(root: Path, inventory: list[str]) -> dict[str, set[int]]:
+    """Run :func:`untraceable_lines` over every tracked script under ``root``."""
+    found: dict[str, set[int]] = {}
+    for path in inventory:
+        try:
+            source = (root / path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(f"could not read tracked script {path}: {exc}") from exc
+        lines = untraceable_lines(source)
+        if lines:
+            found[path] = lines
+    return found
 
 
 def format_report(result: Result) -> str:
@@ -337,11 +401,12 @@ def main(argv: list[str] | None = None) -> int:
         reported = parse_report(report)
         inventory = tracked_shell_scripts(args.root)
         ratchet = load_ratchet(args.root / "pyproject.toml")
+        untraceable = untraceable_lines_by_script(args.root, inventory)
     except ReportError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    result = evaluate(reported, inventory, ratchet)
+    result = evaluate(reported, inventory, ratchet, untraceable)
     print(format_report(result))
     return 0 if result.ok else 1
 

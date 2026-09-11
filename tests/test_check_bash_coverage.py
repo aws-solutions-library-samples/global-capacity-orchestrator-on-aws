@@ -243,8 +243,88 @@ def test_map_to_tracked_returns_none_for_an_unrelated_path() -> None:
 
 
 # --------------------------------------------------------------------------
+# untraceable_lines
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param('  done < "$exclude_file"', id="done-file"),
+        pytest.param('  done <<< "$BUILD_SYSTEM_PINS"', id="done-here-string"),
+        pytest.param('    done < "$NPM_RESULTS" > "$npm_disp"', id="done-in-and-out"),
+        pytest.param('  } > "$report_path"', id="group-out"),
+        pytest.param('    } >> "$GITHUB_OUTPUT"', id="group-append"),
+        pytest.param("  } 2>/dev/null", id="group-stderr-bare-word"),
+        pytest.param("  fi < input.txt  # trailing comment", id="fi-with-comment"),
+        pytest.param("    */*) ;;", id="empty-arm-glob"),
+        pytest.param("    https://github.com/*) ;;", id="empty-arm-url"),
+        pytest.param("        /*) ;;", id="empty-arm-slash"),
+    ],
+)
+def test_untraceable_lines_recognises_terminators_and_empty_arms(line: str) -> None:
+    """The shapes bashcov's lexer marks executable but `set -x` never prints.
+
+    Each is copied from a tracked script; bashcov reports the redirection-only
+    terminators and empty case arms as 0 hits no matter what runs.
+    """
+    assert checker.untraceable_lines(f"echo before\n{line}\necho after\n") == {2}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("  } | sed '/^$/d' | sort -u", id="group-piped-into-a-command"),
+        pytest.param(
+            '  done < <(extract_companion_mcp_packages "$AUTOPILOT_SOURCE")',
+            id="process-substitution",
+        ),
+        pytest.param("    *.gif) : ;;", id="arm-with-null-command"),
+        pytest.param('    docker|finch|podman) RUNTIME="$1"; shift ;;', id="arm-with-body"),
+        pytest.param("  done", id="bare-done"),
+        pytest.param("  }", id="bare-brace"),
+        pytest.param("    ;;", id="bare-terminator"),
+        pytest.param("  echo done < file", id="command-named-like-a-keyword"),
+        pytest.param("  done_flag=1 > out", id="identifier-starting-with-done"),
+    ],
+)
+def test_untraceable_lines_leaves_measurable_lines_alone(line: str) -> None:
+    """A command on the line — piped, substituted or a bare `:` — is traced."""
+    assert checker.untraceable_lines(f"echo before\n{line}\necho after\n") == set()
+
+
+def test_untraceable_lines_matches_the_committed_scripts() -> None:
+    """The real inventory: every match is one of the two shapes and nothing else.
+
+    A regression here would show up in the gate as a permanently uncovered
+    line (too narrow) or a silently excused statement (too wide), so the
+    classification is checked against the actual tree, not only fixtures.
+    """
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    found = checker.untraceable_lines_by_script(REPO_ROOT, inventory)
+    assert found, "the repository is expected to carry redirected loop terminators"
+    for path, numbers in found.items():
+        source = (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
+        for number in numbers:
+            text = source[number - 1].strip()
+            assert text.startswith(("done", "fi", "esac", "}")) or text.endswith(";;"), (
+                f"{path}:{number} classified as untraceable but looks like a statement: {text!r}"
+            )
+
+
+# --------------------------------------------------------------------------
 # evaluate
 # --------------------------------------------------------------------------
+
+
+def test_evaluate_drops_untraceable_lines_from_the_count() -> None:
+    """A redirected `done` at 0 hits must not fail the script it structures."""
+    reported = {"/w/a.sh": {1: 1, 2: 0, 3: 1}}
+    failing = checker.evaluate(reported, ["a.sh"], [])
+    assert failing.ok is False
+    passing = checker.evaluate(reported, ["a.sh"], [], {"a.sh": {2}})
+    assert passing.ok is True
+    assert passing.enforced[0].total_lines == 2
 
 
 def test_evaluate_passes_a_fully_covered_enforced_script() -> None:

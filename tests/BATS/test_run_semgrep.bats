@@ -8,22 +8,29 @@
 # real engine never runs: the stub records the exact argv it was handed (one
 # token per line) and the tests assert on the flags the wrapper built.
 #
+# The script is POSIX sh on purpose (the semgrep container image need not ship
+# bash), so its target interpreter is `sh` — dash on the Debian-family CI
+# runners. The fixture-driven tests run it under `bash` so the coverage gate
+# can trace it (bashcov only sees Bash); the two tests against the committed
+# default suppression file run it under `sh` as well, so the same read loop,
+# `case` and `exec` are proven under the shell it actually ships for.
+#
 # Run:  bats tests/BATS/test_run_semgrep.bats
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCRIPT=".github/scripts/run-semgrep.sh"
+load 'helpers.sh'
+
+SCRIPT="$REPO_ROOT/.github/scripts/run-semgrep.sh"
 
 setup() {
     # Stub `semgrep` that records its argv and exits 0, so the wrapper's
     # `exec semgrep ...` is intercepted without invoking the real engine.
     STUB_BIN="$BATS_TEST_TMPDIR/bin"
-    mkdir -p "$STUB_BIN"
     export SEMGREP_ARGS_OUT="$BATS_TEST_TMPDIR/semgrep_args"
-    cat > "$STUB_BIN/semgrep" <<'STUB'
+    write_stub "$STUB_BIN" semgrep <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" > "$SEMGREP_ARGS_OUT"
 STUB
-    chmod +x "$STUB_BIN/semgrep"
     export PATH="$STUB_BIN:$PATH"
 }
 
@@ -42,7 +49,7 @@ STUB
 
 @test "one --exclude-rule per non-comment, non-blank line" {
     printf '# header comment\n\nrule.one\nrule.two\n' > "$BATS_TEST_TMPDIR/excl.txt"
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run sh "$SCRIPT"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [ "$(grep -ce '--exclude-rule' "$SEMGREP_ARGS_OUT")" -eq 2 ]
     grep -qx 'rule.one' "$SEMGREP_ARGS_OUT"
@@ -51,22 +58,32 @@ STUB
 
 @test "comment and blank lines produce no --exclude-rule flags" {
     printf '# only comments\n\n   \n# another\n' > "$BATS_TEST_TMPDIR/excl.txt"
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run sh "$SCRIPT"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     ! grep -qe '--exclude-rule' "$SEMGREP_ARGS_OUT"
 }
 
 @test "an inline comment after a rule id is stripped to the id" {
     printf 'rule.alpha  # keep only the id\n' > "$BATS_TEST_TMPDIR/excl.txt"
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run sh "$SCRIPT"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [ "$(grep -ce '--exclude-rule' "$SEMGREP_ARGS_OUT")" -eq 1 ]
     grep -qx 'rule.alpha' "$SEMGREP_ARGS_OUT"
     ! grep -q 'keep' "$SEMGREP_ARGS_OUT"
 }
 
+@test "a final rule line without a trailing newline is still applied" {
+    # `read` returns non-zero at EOF even when it filled the variable; the
+    # loop's `|| [ -n "$rule" ]` is what keeps the last line from vanishing.
+    printf 'rule.one\nrule.last' > "$BATS_TEST_TMPDIR/excl.txt"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(grep -ce '--exclude-rule' "$SEMGREP_ARGS_OUT")" -eq 2 ]
+    grep -qx 'rule.last' "$SEMGREP_ARGS_OUT"
+}
+
 @test "a missing suppression file yields no excludes but still runs the scan" {
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/does-not-exist.txt" run sh "$SCRIPT"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/does-not-exist.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"no suppression file"* ]]
     ! grep -qe '--exclude-rule' "$SEMGREP_ARGS_OUT"
@@ -76,6 +93,7 @@ STUB
 # The committed list is empty on purpose: every third-party action is pinned to
 # a commit SHA, so mutable-action-tag has nothing left to flag. Re-suppressing it
 # would mask a real regression, and an all-comment file must still scan cleanly.
+# These two run under `sh` — the interpreter the script ships for.
 @test "the committed default suppression file no longer excludes mutable-action-tag" {
     run sh "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -90,18 +108,27 @@ STUB
     [ "$(tail -1 "$SEMGREP_ARGS_OUT")" = "." ]
 }
 
+@test "the committed default suppression file resolves from the script's own location" {
+    # No SEMGREP_EXCLUDE_RULES_FILE: the wrapper must find .github/config/ from
+    # .github/scripts/, whatever the caller's working directory is.
+    cd "$BATS_TEST_TMPDIR"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"applied rule suppressions from $REPO_ROOT/.github/config/semgrep-excluded-rules.txt"* ]]
+}
+
 # ── Argument assembly ────────────────────────────────────────────────────────
 
 @test "caller-supplied extra args are forwarded to semgrep" {
     printf 'rule.one\n' > "$BATS_TEST_TMPDIR/excl.txt"
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run sh "$SCRIPT" --verbose
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT" --verbose
     [ "$status" -eq 0 ]
     grep -qxe '--verbose' "$SEMGREP_ARGS_OUT"
 }
 
 @test "the assembled command scans the repo with JSON report output" {
     printf 'rule.one\n' > "$BATS_TEST_TMPDIR/excl.txt"
-    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run sh "$SCRIPT"
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/excl.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [ "$(head -1 "$SEMGREP_ARGS_OUT")" = "scan" ]
     grep -qxe '--config' "$SEMGREP_ARGS_OUT"
@@ -110,4 +137,13 @@ STUB
     grep -qxe '-o' "$SEMGREP_ARGS_OUT"
     grep -qx 'semgrep-report.json' "$SEMGREP_ARGS_OUT"
     [ "$(tail -1 "$SEMGREP_ARGS_OUT")" = "." ]
+}
+
+@test "the wrapper exec's semgrep, so its exit status is semgrep's" {
+    write_stub "$STUB_BIN" semgrep <<'STUB'
+#!/bin/sh
+exit 7
+STUB
+    SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/does-not-exist.txt" run bash "$SCRIPT"
+    [ "$status" -eq 7 ]
 }
