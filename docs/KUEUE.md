@@ -2,6 +2,21 @@
 
 GCO includes [Kueue](https://kueue.sigs.k8s.io/) for Kubernetes-native job queueing with resource quotas, fair sharing, and priority scheduling. Kueue is enabled by default.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [Key Concepts](#key-concepts)
+- [Run the Example](#run-the-example)
+- [Priority and Preemption](#priority-and-preemption)
+- [Multi-Team Quotas](#multi-team-quotas)
+- [KubeRay Integration](#kuberay-integration)
+- [Monitoring](#monitoring)
+- [Security](#security)
+- [Customization](#customization)
+- [Cleanup](#cleanup)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 Kueue complements the default kube-scheduler by handling job-level admission control. It doesn't replace the scheduler — it decides *when* jobs are allowed to start based on available quota, then lets kube-scheduler handle pod placement. This makes it the least disruptive scheduler option.
@@ -355,15 +370,13 @@ Only platform admins should be able to create LocalQueues. Regular users only ne
 
 ## Customization
 
-Edit `lambda/helm-installer/charts.yaml` under `kueue`:
+Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml); the `enabled` value there is only a default. Turn the chart on or off in `cdk.json` (the setting there always wins) and redeploy with `gco stacks deploy-all -y`:
 
-```yaml
-kueue:
-  enabled: true   # Set to false to disable
-  version: "0.17.0"
-  values:
-    enablePlainPod: true  # Manage standalone pods (useful for Ray, inference servers)
+```json
+{ "context": { "helm": { "kueue": { "enabled": false } } } }
 ```
+
+Chart values such as `enablePlainPod: true` (manage standalone pods — useful for Ray and inference servers) live under `kueue` in `charts.yaml`. Kueue is installed last because its mutating webhook intercepts Job and Deployment mutations.
 
 ## Cleanup
 

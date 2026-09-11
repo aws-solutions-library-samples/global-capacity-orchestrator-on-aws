@@ -18,10 +18,13 @@ This directory contains example [IAM](https://docs.aws.amazon.com/IAM/latest/Use
 
 Grants complete access to all manifest operations including:
 
-- Submit new manifests (POST)
-- List manifests (GET)
-- Get manifest status (GET)
-- Delete manifests (DELETE)
+- Submit new manifests (`POST /api/v1/manifests`, `POST /api/v1/manifests/validate`)
+- Get manifest status (`GET /api/v1/manifests/{namespace}/{name}`)
+- Delete manifests (`DELETE /api/v1/manifests/{namespace}/{name}`)
+
+The API exposes no list route for manifests (use `gco jobs list`); the
+`GET .../manifests` ARN in the JSON is harmless but grants nothing that
+answers.
 
 **Use case**: Platform administrators, CI/CD pipelines with full deployment permissions
 
@@ -35,8 +38,7 @@ Grants complete access to all manifest operations including:
 
 Grants read-only access to manifest operations:
 
-- List manifests (GET)
-- Get manifest status (GET)
+- Get manifest status (`GET /api/v1/manifests/{namespace}/{name}`)
 
 **Use case**: Monitoring tools, read-only users, audit systems
 
@@ -51,7 +53,6 @@ Grants read-only access to manifest operations:
 Grants access to manifest operations within a specific namespace only:
 
 - Submit manifests to specific namespace
-- List manifests in specific namespace
 - Get manifest status in specific namespace
 - Delete manifests in specific namespace
 
@@ -69,10 +70,16 @@ Grants access to manifest operations within a specific namespace only:
 To find your API Gateway ID and construct the correct ARNs:
 
 ```bash
-# Get API Gateway ID from CloudFormation
+# The API ID is the host prefix of the endpoint URL
+# (https://API_ID.execute-api.REGION.amazonaws.com/prod/).
+# Global API (stack gco-api-gateway, output ApiEndpoint):
+gco stacks outputs gco-api-gateway
+# Regional API (stack gco-regional-api-us-east-1, output RegionalApiEndpoint):
+gco stacks outputs gco-regional-api-us-east-1
+# Or with the AWS CLI:
 aws cloudformation describe-stacks \
-  --stack-name gco-regional-us-east-1 \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayId`].OutputValue' \
+  --stack-name gco-api-gateway \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
   --output text
 
 # Get your AWS Account ID

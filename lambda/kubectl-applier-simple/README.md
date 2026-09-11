@@ -66,14 +66,17 @@ Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, D
 
 ## Build
 
-Requires a build step to package dependencies into `kubectl-applier-simple-build/`:
+Requires a build step to package dependencies into `kubectl-applier-simple-build/`.
+`gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
+in `cli/stacks.py`). By hand, install from the pinned `requirements.txt` for the
+Lambda platform rather than your laptop's:
 
 ```bash
 rm -rf lambda/kubectl-applier-simple-build
 mkdir -p lambda/kubectl-applier-simple-build
-cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple-build/
+cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple/requirements.txt lambda/kubectl-applier-simple-build/
 cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
-pip3 install kubernetes pyyaml urllib3 -t lambda/kubectl-applier-simple-build/
+python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
+  -t lambda/kubectl-applier-simple-build/ --upgrade \
+  --platform manylinux2014_x86_64 --only-binary=:all:
 ```
-
-The GCO CLI handles this automatically during `gco stacks deploy`.

@@ -444,4 +444,4 @@ unhealthy (`kubectl -n gco-system get pods -l app=cost-monitor`).
 `gco queue get <id>` shows the cap and the last observed price. If the
 market simply never clears your cap, cancel and resubmit with a higher cap,
 a different instance type, or a different target region (compare with
-`gco capacity spot-prices -t g5.xlarge`).
+`gco capacity spot-prices -i g5.xlarge -r us-east-1`).

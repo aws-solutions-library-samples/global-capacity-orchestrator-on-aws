@@ -43,7 +43,7 @@ The container itself ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and e
 
 **Host development path additionally needs:**
 
-- Python 3.14+ (required for the un-parenthesized except-tuple syntax in `gco_mcp/resources/config.py`)
+- Python 3.14+ (the code uses 3.14 syntax such as un-parenthesized `except A, B:` clauses, so older interpreters fail at import)
 - Node.js 24+ (for CDK)
 - kubectl
 - A clean virtualenv (or pipx) for the GCO Python deps — see the warning under [Local Development Environment (Advanced)](#local-development-environment-advanced).
@@ -52,27 +52,24 @@ The container itself ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and e
 
 ### Using the Dev Container (Recommended)
 
-The dev container includes all dependencies pre-installed (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI). This avoids "works on my machine" issues and is the supported path for everything from running tests to deploying stacks.
+The dev container includes all dependencies pre-installed (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI). This avoids "works on my machine" issues and is the supported path for everything from running tests to deploying stacks. [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds the image and installs a `gco` shell function that runs the CLI inside it against your checkout — the [Quick Start](QUICKSTART.md#step-1-clone-and-build-the-dev-container) walks through it, including the host-socket pass-through that `gco stacks deploy-all` needs and the Colima/Finch socket notes:
+
+```bash
+./scripts/setup-dev-alias.sh   # builds gco-dev from Dockerfile.dev + installs the `gco` shell function
+source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
+gco stacks list
+```
 
 The image is **multi-arch** — Apple Silicon (`linux/arm64`), Intel/x86_64 hosts, and CI all build natively from the same `Dockerfile.dev` because every baked-in binary (kubectl, AWS CLI v2, Docker static client) is selected by `$TARGETARCH`. Native builds on Apple Silicon take ~2 min; emulated cross-builds (e.g. `--platform linux/amd64` on an arm64 host) take ~7-8 min and are only needed when you specifically want to test the amd64 image.
 
+The function runs the `gco` CLI only. For anything else inside the container — the test-suite, `cdk synth`, an interactive shell — run the image directly:
+
 ```bash
-# Build the container (cached on subsequent runs; ~2 min the first time)
-docker build -f Dockerfile.dev -t gco-dev .
-
-# Run an interactive shell
-docker run -it --rm \
-  -v ~/.aws:/root/.aws:ro \
-  -v $(pwd):/workspace \
-  -w /workspace \
-  gco-dev
-
-# Or run a single command
+# Run tests
 docker run --rm \
-  -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
   -w /workspace \
-  gco-dev gco stacks list
+  gco-dev pytest tests/ -v
 
 # Run CDK commands
 docker run --rm \
@@ -82,59 +79,12 @@ docker run --rm \
   -e CDK_DOCKER=docker \
   gco-dev cdk synth
 
-# Run tests
-docker run --rm \
-  -v $(pwd):/workspace \
-  -w /workspace \
-  gco-dev pytest tests/ -v
-```
-
-**Running `gco stacks deploy-all` from the container.** `cdk deploy`
-invokes Docker to bundle Lambda assets. The dev container ships only the
-Docker CLI (no daemon), so mount the host Docker socket to give it a
-transport to your host daemon:
-
-```bash
-docker run --rm -it \
+# Interactive shell
+docker run -it --rm \
   -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
-  -v /var/run/docker.sock:/var/run/docker.sock \
   -w /workspace \
-  gco-dev gco stacks deploy-all -y
-```
-
-This pattern works on Linux, Docker Desktop for macOS and Windows, and
-Colima for macOS. On Colima the host socket lives at
-`~/.colima/default/docker.sock` (older Colima) or `~/.colima/docker.sock`
-(newer Colima) — adjust the left side of the `-v` flag accordingly or
-symlink the Colima socket to `/var/run/docker.sock`. See
-<https://github.com/abiosoft/colima> for the current default. This is
-host-socket pass-through, not true Docker-in-Docker — do not add
-`--privileged`. The trade-off is that anyone inside the container has
-root-equivalent access to the host Docker daemon through the mounted
-socket, so only use this on trusted hosts.
-
-**Tip**: Create a shell function for convenience. Using a function (rather than an alias that hardcodes `$(pwd)`) means it auto-resolves your GCO clone via `git rev-parse`, so `gco stacks *` and other source-tree-dependent commands work regardless of which subdirectory you call it from. Set `GCO_HOME` in your shell to use it from anywhere on disk:
-
-```bash
-gco-dev() {
-    local project_root="${GCO_HOME:-$(git rev-parse --show-toplevel 2>/dev/null)}"
-    # Check for both Dockerfile.dev *and* the gco/ namespace package
-    # so we don't accidentally bind-mount an unrelated repo that
-    # happens to have a Dockerfile.dev at its root.
-    if [[ -z "$project_root" \
-        || ! -f "$project_root/Dockerfile.dev" \
-        || ! -d "$project_root/gco" ]]; then
-        echo "gco-dev: not inside the GCO repo. cd into your clone, or set GCO_HOME." >&2
-        return 1
-    fi
-    docker run --rm \
-        -v ~/.aws:/root/.aws:ro \
-        -v "$project_root:/workspace" \
-        -w /workspace \
-        gco-dev "$@"
-}
-# Then use: gco-dev gco stacks list
+  gco-dev
 ```
 
 ### Local Development Environment (Advanced)
@@ -143,8 +93,8 @@ Use this path only if you specifically want to develop on your host (e.g., edito
 
 ```bash
 # Clone repository
-git clone <repository-url>
-cd GCO
+git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git
+cd global-capacity-orchestrator-on-aws
 
 # Create a *fresh* virtual environment — do not reuse one that already has
 # AWS CDK, FastAPI, mypy, or other commonly-pinned packages installed.
@@ -318,21 +268,7 @@ Follow these guidelines:
 
 ### 3. Test Locally
 
-```bash
-# Synthesize CDK
-cdk synth
-
-# Deploy to dev account
-export AWS_PROFILE=dev
-gco stacks deploy-all -y
-
-# Run tests
-pytest tests/
-
-# Verify deployment
-kubectl get pods -n gco-system
-gco jobs list -r us-east-1
-```
+Run the [Pre-Pull-Request Verification](#pre-pull-request-verification) sequence (Ruff, mypy, the accelerator validator, pytest at the coverage floor) and `cdk synth` if you touched the stacks. Every test in `tests/` is offline and mocked; nothing needs a deployed environment. When a change alters deployed behaviour, [Live Release Validation](#live-release-validation-applicability) is the separate, authorized, local process for exercising it against a real account — a personal `gco stacks deploy-all` is not a substitute for either.
 
 ### 4. Submit Changes
 
@@ -344,8 +280,8 @@ git commit -m "feat: add new feature"
 # Push to remote
 git push origin feature/your-feature-name
 
-# Create pull request
-# Follow your organization's PR process
+# Open a pull request against main; the template asks for the type of
+# change and the verification you ran (see Pre-Pull-Request Verification)
 ```
 
 ## Code Organization
@@ -560,6 +496,7 @@ pytest tests/test_cdk_synthesis_matrix.py
 # documented in Dependency Management above; pip-compile on the host produces
 # a macOS-resolved lockfile that CI rejects)
 docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
+  pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
   sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
@@ -578,17 +515,7 @@ Click any badge to land on the workflow page; the Actions UI lists every job.
 
 ### Integration Tests
 
-```bash
-# Deploy to test environment
-export AWS_PROFILE=test
-gco stacks deploy-all -y
-
-# Run tests against deployed environment
-pytest tests/ -v
-
-# Clean up
-gco stacks destroy-all -y
-```
+The `Integration Tests` and `Floci Tests` workflows exercise the containers, kind clusters, Lambda imports and the emulated-AWS layer without AWS credentials; the `tests/` suite does not target a deployed environment. For changes that need a live account, follow [Live Release Validation](#live-release-validation-applicability).
 
 ## Documentation
 
@@ -602,21 +529,15 @@ gco stacks destroy-all -y
 
 ### Documentation Files
 
-- `TENETS.md`: Normative north star and prioritized project decision guidance
-- `README.md`: Overview and quick start
-- `QUICKSTART.md`: Step-by-step setup guide
-- `docs/README.md`: Comprehensive top-level guide index
-- `docs/ARCHITECTURE.md`: Technical architecture
-- `docs/CLI.md`: CLI reference
-- `docs/API.md`: REST API reference
-- `docs/CONCEPTS.md`: Core concepts for new users
-- `docs/CUSTOMIZATION.md`: How to customize
-- `docs/TROUBLESHOOTING.md`: Common issues
-- `docs/RUNBOOKS.md`: Operational runbooks for incident response
-- `docs/adr/`: Architecture Decision Records — the append-only log of significant architectural decisions
-- `wiki/` + `mkdocs.yml`: The orientation wiki published to GitHub Pages (see
-  [Developing the wiki](#developing-the-wiki))
-- `CONTRIBUTING.md`: This file
+Where a change belongs:
+
+- `README.md`: the front door — what GCO is, how to start, and where everything else lives. Keep it short; deep detail goes in a guide it links to.
+- `QUICKSTART.md`: the one install-and-first-job walkthrough. Other files link to it rather than restating install steps.
+- `TENETS.md`: the normative north star and prioritized decision guidance; `docs/adr/`: the append-only log of significant architectural decisions.
+- `docs/README.md`: the index of every guide under `docs/` (a test keeps it exact); each guide owns its topic — CLI reference, REST API, concepts, customization, troubleshooting, runbooks, the per-feature guides.
+- Package `README.md` files (`cli/`, `gco/`, `gco_mcp/`, `lambda/`, `scripts/`, `tests/`, …): what the directory is for and its inventory; several are test-pinned to the directory contents.
+- `wiki/` + `mkdocs.yml`: the orientation wiki published to GitHub Pages (see [Developing the wiki](#developing-the-wiki)); it summarizes and links, never restates.
+- `CONTRIBUTING.md`: this file.
 
 Repository inventories move in pairs and are guarded by tests. When adding or
 removing a top-level `docs/*.md` guide, CLI command module, workflow, production
@@ -787,7 +708,7 @@ git checkout -b release/v1.2.3 main
 python scripts/bump_version.py patch  # or minor/major
 
 # Commit and open the PR (title must stay "Release v1.2.3")
-git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md
+git add VERSION README.md gco/_version.py cli/__init__.py gco_mcp/README.md
 git commit -m "Release v1.2.3"
 git push -u origin release/v1.2.3
 gh pr create --base main --title "Release v1.2.3" \
@@ -903,7 +824,7 @@ Current add-on versions are defined in `gco/stacks/constants.py` and consumed by
 
 ```bash
 # 1. Create manifest file
-cat > lambda/kubectl-applier-simple/manifests/33-my-service.yaml << 'EOF'
+cat > lambda/kubectl-applier-simple/manifests/35-my-service.yaml << 'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -988,10 +909,7 @@ gco jobs logs JOB-NAME -n gco-jobs -r us-east-1
 
 ## Code of Conduct
 
-- Be respectful and professional
-- Welcome newcomers
-- Focus on constructive feedback
-- Collaborate openly
+This project has adopted the [Amazon Open Source Code of Conduct](CODE_OF_CONDUCT.md). Be respectful and professional, welcome newcomers, keep feedback constructive, and collaborate openly.
 
 ---
 

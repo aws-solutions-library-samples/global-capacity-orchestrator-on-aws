@@ -2,6 +2,19 @@
 
 GCO includes the [KubeRay Operator](https://ray-project.github.io/kuberay/) for running [Ray](https://www.ray.io/) distributed computing workloads on Kubernetes. [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) is enabled by default.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [Key Concepts](#key-concepts)
+- [Run the Example](#run-the-example)
+- [Distributed Training with Checkpointing](#distributed-training-with-checkpointing)
+- [Autoscaling](#autoscaling)
+- [Security](#security)
+- [Customization](#customization)
+- [Cleanup](#cleanup)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 Ray is a framework for distributed computing that handles training, hyperparameter tuning, reinforcement learning, and model serving. KubeRay manages Ray clusters as Kubernetes custom resources, handling scaling, fault tolerance, and lifecycle management.
@@ -276,15 +289,13 @@ GCO's default network policies add an exact-label rule for the shipped `ray-clus
 
 ## Customization
 
-Edit `lambda/helm-installer/charts.yaml` under `kuberay-operator`:
+Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml); the `enabled` value there is only a default. Turn the chart on or off in `cdk.json` (the setting there always wins) and redeploy with `gco stacks deploy-all -y`:
 
-```yaml
-kuberay-operator:
-  enabled: true   # Set to false to disable
-  version: "1.7.0"
-  values:
-    watchNamespace: ""  # Watch all namespaces (or set to "gco-jobs" to restrict)
+```json
+{ "context": { "helm": { "kuberay": { "enabled": false } } } }
 ```
+
+Chart values such as `watchNamespace` (empty watches every namespace; set `"gco-jobs"` to restrict the operator) live under `kuberay-operator` in `charts.yaml`.
 
 ## Cleanup
 

@@ -135,24 +135,14 @@ holds. Note the cost while a full-topology recording is live: FSx for Lustre
 provisions 1.2 TiB **per configured region**, and Aurora Serverless v2 and Valkey
 Serverless bill until the destroy completes.
 
-The three live recorders fail closed unless all guards are present. Each verifies
-that `HEAD` matches exactly and that no source file differs. Only the six legacy
-recording outputs (`deploy`, `live_demo`, and `destroy`, each `.cast` + `.gif`)
-may be dirty, allowing the complete sequence to be captured before its assets
-are committed. The account guard uses `aws sts get-caller-identity`; reusable
-scripts never hardcode an account. For the live demo, the recorder snapshots
-only the authorized current context into a private mode-`0600` kubeconfig under
-its staging directory. Repository CLI and `kubectl` children inherit that
-single disposable file, so their normal context refreshes cannot rewrite the
-operator's kubeconfig; the snapshot is removed on every handled exit. Use
-`RENDER_EXISTING=1` to iterate GIF speed, size, theme, or font entirely offline
-from an already verified cast.
-
-Each cast is sanitized before GIF rendering: 12-digit account IDs and AWS
-access-key-ID patterns are replaced, then an independent verification pass
-rejects any residual match. Publishable legacy recorders reject
-`SKIP_SANITIZE=1`; that bypass remains only in lower-level helpers for isolated
-local debugging.
+The three live recorders share one fail-closed guard set — exact `HEAD`
+match with a clean tree (only the six recording outputs may be dirty), an STS
+account check, a private mode-`0600` kubeconfig snapshot for the live demo, and
+cast sanitization with an independent verification pass. Those mechanics, the
+`RENDER_EXISTING=1` offline re-render and the output files are documented once in
+[LIVE_DEMO.md → Recording the Demo](LIVE_DEMO.md#recording-the-demo);
+`record_deploy.sh` and `record_destroy.sh` apply the same guards to their own
+casts.
 
 The security workflow fully decodes the five tracked GIFs and enforces reviewed
 size, canvas, and frame-count ceilings. If a deliberate re-recording exceeds a

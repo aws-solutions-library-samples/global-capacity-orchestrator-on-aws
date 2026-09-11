@@ -2,6 +2,22 @@
 
 GCO includes [Volcano](https://volcano.sh/) as a batch scheduler for AI/ML and HPC workloads. Volcano is enabled by default and provides gang scheduling, fair-share queuing, and job lifecycle management purpose-built for compute-intensive jobs.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [Image Source](#image-source)
+- [Key Concepts](#key-concepts)
+- [Run the Example](#run-the-example)
+- [Distributed Training with Checkpointing](#distributed-training-with-checkpointing)
+- [Coexistence with Kueue and Slurm](#coexistence-with-kueue-and-slurm)
+- [Monitoring](#monitoring)
+- [Security](#security)
+- [Scheduler Plugins](#scheduler-plugins)
+- [Customization](#customization)
+- [Cleanup](#cleanup)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 Volcano extends Kubernetes with a `batch.volcano.sh/v1alpha1 Job` CRD and a custom scheduler that integrates with kube-scheduler via plugins. It doesn't replace the default scheduler — it augments it.
@@ -140,7 +156,7 @@ Available actions: `RestartJob`, `AbortJob`, `CompleteJob`, `TerminateJob`. Avai
 
 ### Gang Scheduling Deadlocks
 
-Gang scheduling guarantees all-or-nothing placement, but this can cause deadlocks. If two gang-scheduled jobs each need 4 GPUs but only 6 are available, neither can start — classic resource deadlock.
+Gang scheduling guarantees all-or-nothing placement, but this can cause deadlocks. If two gang-scheduled jobs each need 4 GPUs but only 6 are available, neither can start — classic resource deadlock (the same hazard applies to YuniKorn gang scheduling; see [Limitations](SCHEDULERS.md#limitations)).
 
 Mitigation strategies:
 
@@ -196,7 +212,7 @@ tasks:
 
 ## Coexistence with Kueue and Slurm
 
-GCO deploys Volcano, Kueue, and Slurm simultaneously. They operate at different layers:
+Volcano runs alongside Kueue by default, and alongside Slurm and YuniKorn when those are enabled. [Scheduler Coexistence](SCHEDULERS.md#scheduler-coexistence) is the one page that covers how every tool interacts; the Volcano-specific points:
 
 - **Volcano** is a pod scheduler — it decides *where* and *when* pods run, with gang scheduling guarantees. Volcano jobs use `schedulerName: volcano` and bypass the default kube-scheduler.
 - **Kueue** is an admission controller — it decides *whether* a job is allowed to start based on quota. Kueue manages standard Kubernetes Jobs, not Volcano Jobs.
@@ -303,21 +319,13 @@ The `backfill` action allows smaller jobs to fill gaps while larger gang-schedul
 
 ## Customization
 
-Edit `lambda/helm-installer/charts.yaml` under `volcano`:
+Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml); the `enabled` value there is only a default. Turn the chart on or off in `cdk.json` (the setting there always wins) and redeploy with `gco stacks deploy-all -y`:
 
-```yaml
-volcano:
-  enabled: true   # Set to false to disable
-  version: "1.14.1"
-  values:
-    custom:
-      scheduler_config:
-        actions: "enqueue, allocate, backfill"
-        tiers:
-          - plugins:
-              - name: priority
-              - name: gang
+```json
+{ "context": { "helm": { "volcano": { "enabled": false } } } }
 ```
+
+Scheduler behaviour is tuned through the chart's `values` in `charts.yaml` — for example the `custom.scheduler_config` block that selects the actions (`enqueue, allocate, backfill`) and plugin tiers (`priority`, `gang`, …) described under [Scheduler Plugins](#scheduler-plugins).
 
 ## Cleanup
 

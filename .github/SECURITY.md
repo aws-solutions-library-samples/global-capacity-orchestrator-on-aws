@@ -43,7 +43,7 @@ Out of scope:
 This repository runs the following security checks on every push to `main` and every pull request:
 
 - **Static analysis**: Bandit, Semgrep, CodeQL (Advanced Setup — `security-and-quality` pack, config pinned at `.github/codeql/codeql-config.yml`)
-- **Dependency scanning**: pip-audit, Trivy (filesystem + each published container image), Dependabot
+- **Dependency scanning**: pip-audit (Python), npm audit (every Node.js package), bundler-audit (the Ruby `Gemfile.lock` behind the shell coverage tooling), Trivy (filesystem + each published container image), Dependabot
 - **IaC scanning**: Checkov, KICS, cdk-nag (AWS Solutions + HIPAA + NIST 800-53 + PCI DSS + Serverless packs)
 - **Secret scanning**: Gitleaks, TruffleHog
 - **Weekly CVE re-scan**: Trivy against the latest vulnerability databases

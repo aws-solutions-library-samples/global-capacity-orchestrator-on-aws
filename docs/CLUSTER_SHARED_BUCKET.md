@@ -176,7 +176,7 @@ spec:
       serviceAccountName: gco-service-account
       containers:
       - name: uploader
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         command: ["python", "-c", "import os; print(os.environ['sharedBucketName'])"]
         envFrom:
         - configMapRef:
@@ -224,11 +224,13 @@ Statement 1 — S3 object access:
 Statement 2 — KMS access, scoped to S3:
 
 - `Action`: `kms:Decrypt`, `kms:GenerateDataKey`.
-- `Resource`: the `Cluster_Shared_KMS_Key` ARN (resolvable from the
-  bucket's SSE-KMS configuration).
+- `Resource`: `"*"` — the key lives in the global region and this stack
+  never learns its ARN, so the statement cannot name it.
 - `Condition`: `StringEquals: { kms:ViaService:
-  s3.<global-region>.amazonaws.com }` — the key can be exercised only
-  via the S3 service, not directly.
+  s3.<global-region>.amazonaws.com }` — this is what actually scopes the
+  grant: the key can be exercised only through S3 in the global region,
+  never directly, and S3 only reaches for the key the bucket is encrypted
+  with.
 
 The grant is **role-side**: `Cluster_Shared_Bucket`'s bucket policy
 contains zero `Principal: "*"` Allow statements. Access is always

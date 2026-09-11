@@ -48,7 +48,7 @@ Running GPU workloads at scale on Kubernetes is hard:
 | Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand |
 | Multi-region | Manage multiple clusters separately | One platform across unlimited SDK-known Regions in one partition |
 | Authentication | Configure per-cluster access | IAM-based, works with existing AWS credentials |
-| Job outputs | Lost unless persisted | EFS/FSx available for workloads that mount persistent storage |
+| Job outputs | Lost unless persisted | EFS/FSx and per-region S3 available to every job that mounts or writes them |
 | Inference serving | Deploy and manage per-region | Deploy once across selected Regions; global failover in `aws` |
 | Failover | Manual intervention | Automatic via Global Accelerator in `aws`; explicit regional selection elsewhere |
 
@@ -257,14 +257,16 @@ volumes:
 | Use Case | Recommended |
 |----------|-------------|
 | Job logs and small outputs | EFS |
-| Model checkpoints | EFS |
+| Training checkpoints and model artifacts | the per-region [Regional Shared Bucket](REGIONAL_SHARED_BUCKET.md) (S3, no cross-region egress); EFS for small, frequently rewritten checkpoints |
 | Large dataset training | FSx for Lustre |
 | Distributed training | FSx for Lustre |
 | Cost-sensitive workloads | EFS |
 
+Beyond the two file systems, every deployment also has two always-on S3 buckets — the per-region [Regional Shared Bucket](REGIONAL_SHARED_BUCKET.md) and the cross-region [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — and three optional data services: a [Valkey](CUSTOMIZATION.md#configure-valkey-cache) cache, an [Aurora Serverless v2 pgvector](CUSTOMIZATION.md#configure-aurora-pgvector) database, and the globally replicated [vector store](CUSTOMIZATION.md#configure-the-vector-store) (`gco vector`). The [Customization Guide](CUSTOMIZATION.md) covers enabling and sizing each.
+
 ## Security Model
 
-GCO uses multiple security layers:
+GCO uses multiple security layers. This diagram follows a request from the caller to the pod; the README's [Security Model](../README.md#security-model) enumerates the same design as six controls, adding the two that sit outside the request path — [IRSA / EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) for workload credentials and the backend middleware's freshness and integrity validation:
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
@@ -380,8 +382,10 @@ User (optional in `aws`; required ingress elsewhere) → Regional API Gateway �
 ```json
 // cdk.json
 {
-  "api_gateway": {
-    "regional_api_enabled": true
+  "context": {
+    "api_gateway": {
+      "regional_api_enabled": true
+    }
   }
 }
 ```

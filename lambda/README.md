@@ -35,17 +35,20 @@
 
 ## Build
 
-The `kubectl-applier-simple` Lambda requires a build step to package dependencies:
+The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
+`gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
+in `cli/stacks.py`); this is the equivalent by hand, pinned by the package's
+`requirements.txt` and built for the Lambda platform rather than your laptop's:
 
 ```bash
 rm -rf lambda/kubectl-applier-simple-build
 mkdir -p lambda/kubectl-applier-simple-build
-cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple-build/
+cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple/requirements.txt lambda/kubectl-applier-simple-build/
 cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
-pip3 install kubernetes pyyaml urllib3 -t lambda/kubectl-applier-simple-build/
+python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
+  -t lambda/kubectl-applier-simple-build/ --upgrade \
+  --platform manylinux2014_x86_64 --only-binary=:all:
 ```
-
-The GCO CLI handles this automatically during `gco stacks deploy`.
 
 The inference streaming proxy has a separate production npm graph. CI and CDK staging install it from its committed lockfile with lifecycle scripts disabled:
 
@@ -89,26 +92,11 @@ Analytics stack delete → analytics-cleanup → Studio + EFS dependency drain
 ## Control-Flow Diagrams
 
 Auto-generated flowcharts for each handler live under
-[`diagrams/code_diagrams/lambda/`](../diagrams/code_diagrams/README.md).
-Open the interactive HTML pages for pan/zoom/SVG export; the PNGs
-below are static snapshots embedded for GitHub's web viewer where
-JavaScript can't run.
-
-| Handler | Flowchart |
-|---------|-----------|
-| `analytics-presigned-url` | [HTML](../diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.png) |
-| `analytics-cleanup` | [HTML](../diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.html) · [PNG](../diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.png) |
-| `api-gateway-proxy` | [HTML](../diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png) |
-| `regional-api-proxy` | [HTML](../diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.png) |
-| `cross-region-aggregator` | [HTML](../diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png) |
-| `drift-detection` | [HTML](../diagrams/code_diagrams/lambda/drift-detection/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/drift-detection/handler.lambda_handler.png) |
-| `ga-registration` | [HTML](../diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.png) |
-| `helm-installer` | [HTML](../diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png) |
-| `image-lookup` | [HTML](../diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.png) |
-| `kubectl-applier-simple` | [HTML](../diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png) |
-| `secret-rotation` | [HTML](../diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.png) |
-| `tls-certificate-manager` | [HTML](../diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.png) |
-| `tls-shared.get_backend_http_pool` | [HTML](../diagrams/code_diagrams/lambda/tls-shared/backend_tls.get_backend_http_pool.html) · [PNG](../diagrams/code_diagrams/lambda/tls-shared/backend_tls.get_backend_http_pool.png) |
+`diagrams/code_diagrams/lambda/`. The generated
+[flowchart index](../diagrams/code_diagrams/README.md#lambda) lists every
+charted handler; this README deliberately does not repeat it. Open the
+interactive HTML pages for pan/zoom/SVG export; the PNGs are static snapshots
+for GitHub's web viewer where JavaScript can't run.
 
 Regenerate through the
 [canonical two-commit diagram workflow](../diagrams/README.md#quick-reference)

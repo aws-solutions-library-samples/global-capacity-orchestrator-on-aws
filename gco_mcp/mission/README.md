@@ -24,6 +24,8 @@ user-facing guide — concepts, CLI walkthrough, and worked examples — read
   - [Advisory Sampling](#advisory-sampling)
   - [Criteria Scaffolding](#criteria-scaffolding)
   - [Reporting and Audit](#reporting-and-audit)
+  - [Mission Memory](#mission-memory)
+  - [Swarm Supervision](#swarm-supervision)
   - [Wiring Helpers](#wiring-helpers)
 - [Design Principles](#design-principles)
 - [Related Documentation](#related-documentation)
@@ -114,6 +116,17 @@ structured audit event, so a run is fully reconstructable from its audit trail.
 |--------|-------------|
 | [`embeddings.py`](embeddings.py) | Embeds a directive through the configured [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) embedding model, returning the vector the mission-memory index stores and queries. Every failure raises a typed `EmbeddingError` so callers decide whether to swallow. |
 | [`memory.py`](memory.py) | `MissionMemoryStore` — writes one memory item per completed session and searches the `directive-embedding-index` [DynamoDB vector index](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/VectorSearch.html) for similar past missions. Table and index names resolve lazily from SSM; absent or backfilling infrastructure degrades to a typed "unavailable" error, never a failed mission. |
+
+### Swarm Supervision
+
+A swarm is one orchestrator Mission supervising N child Missions
+(`gco swarm ...`, `GCO_ENABLE_SWARM`).
+
+| Module | Description |
+|--------|-------------|
+| [`swarm.py`](swarm.py) | Pure swarm primitives — `validate_swarm_config` (the swarm-level rails) and `validate_spawn` (the full spawn-admission pipeline: fleet cap, iteration pool, finite child budgets, allowlist exclusions, mutating-tool overlap). No I/O, so the whole admission surface is unit- and property-testable. |
+| [`swarm_runner.py`](swarm_runner.py) | The impure counterpart: `SwarmRunner` owns one orchestrator session's fleet for a drive call, injects the supervisor-only `mission_spawn` / `children_status` / `child_abort` tools through `wrap_dispatcher`, and drives each child's `MissionEngine` to a terminal state under an `asyncio.Semaphore(max_concurrent_children)`. |
+| [`swarm_scaffold.py`](swarm_scaffold.py) | Swarm plan generation — `generate_sampled_plan` asks the sampling backend for a decomposition, with a deterministic fallback; every returned plan is admission-validated end to end so it cannot be rejected at spawn time. |
 
 ### Wiring Helpers
 

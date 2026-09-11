@@ -2,6 +2,22 @@
 
 GCO includes [Apache YuniKorn](https://yunikorn.apache.org/) as a scheduler for multi-tenant AI/ML clusters. YuniKorn is opt-in — enable it in `cdk.json` to deploy.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [What Gets Deployed](#what-gets-deployed)
+- [How It Works](#how-it-works)
+- [Enable YuniKorn](#enable-yunikorn)
+- [Queue Configuration](#queue-configuration)
+- [Submit Jobs to YuniKorn](#submit-jobs-to-yunikorn)
+- [Run the Example](#run-the-example)
+- [Coexistence with Other Schedulers](#coexistence-with-other-schedulers)
+- [Monitoring](#monitoring)
+- [Security](#security)
+- [Customization](#customization)
+- [Cleanup](#cleanup)
+- [Further Reading](#further-reading)
+
 ## Overview
 
 YuniKorn runs as a secondary scheduler alongside the default kube-scheduler. Pods must explicitly set `schedulerName: yunikorn` to be scheduled by YuniKorn — there is no auto-injection. This means YuniKorn coexists cleanly with [Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), and the default scheduler without interfering with system pods or other schedulers.
@@ -78,7 +94,7 @@ kubectl get pods -n yunikorn
 kubectl get svc -n yunikorn
 ```
 
-### 4. Access the Web UI
+### Access the Web UI
 
 ```bash
 kubectl port-forward svc/yunikorn-service -n yunikorn 9889:9889
@@ -307,7 +323,7 @@ curl http://localhost:9889/ws/v1/apps
 
 ## Coexistence with Other Schedulers
 
-GCO deploys YuniKorn alongside Volcano, Kueue, [KEDA](https://keda.sh/), and Slurm. They coexist because they operate at different layers:
+When enabled, YuniKorn runs alongside Volcano, Kueue, [KEDA](https://keda.sh/) and (if enabled) Slurm. [Scheduler Coexistence](SCHEDULERS.md#scheduler-coexistence) is the one page that covers how every tool interacts and how to partition GPU quotas across them; the YuniKorn-specific points:
 
 - **YuniKorn** schedules pods that explicitly set `schedulerName: yunikorn`. It manages its own queue hierarchy and resource accounting. The admission controller is disabled, so no auto-injection occurs.
 - **Volcano** schedules pods that have `schedulerName: volcano`. Volcano jobs are not affected by YuniKorn.
@@ -315,15 +331,9 @@ GCO deploys YuniKorn alongside Volcano, Kueue, [KEDA](https://keda.sh/), and Slu
 - **Slurm** runs its own scheduling inside slurmd pods. Slurm jobs don't interact with YuniKorn.
 - **KEDA** creates Jobs based on external events. Those Jobs use the default scheduler unless explicitly configured otherwise.
 
-**How it works without the admission controller:** Pods without an explicit `schedulerName` use the default kube-scheduler. Only pods that set `schedulerName: yunikorn` (via annotations in the manifest) are handled by YuniKorn. This means:
+**How it works without the admission controller:** pods without an explicit `schedulerName` use the default kube-scheduler; only pods that set `schedulerName: yunikorn` are handled by YuniKorn. The full routing table is in [How Pod Routing Works](SCHEDULERS.md#how-pod-routing-works).
 
-- Standard Kubernetes Jobs → default kube-scheduler
-- Jobs with `schedulerName: yunikorn` → YuniKorn
-- Volcano Jobs → Volcano (explicit `schedulerName: volcano`)
-- Slurm worker pods → default kube-scheduler (managed by Slinky operator)
-- System pods (KEDA, Kueue, [cert-manager](https://cert-manager.io/docs/)) → default kube-scheduler (no interference)
-
-**GPU quota coordination:** If you define GPU quotas in both YuniKorn queues and Kueue ClusterQueues, ensure the total doesn't exceed physical GPU count. See [SCHEDULERS.md](SCHEDULERS.md) for the full coexistence guide.
+**GPU quota coordination:** YuniKorn queue limits and Kueue ClusterQueue quotas are independent; see [GPU Quota Coordination](SCHEDULERS.md#gpu-quota-coordination) for how to partition physical GPUs across them.
 
 ## Monitoring
 
@@ -387,13 +397,13 @@ YuniKorn components communicate within the `yunikorn` namespace. The scheduler n
 
 ## Customization
 
-Edit `lambda/helm-installer/charts.yaml` under `yunikorn`:
+Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml); the `enabled` value there is only a default. Turn the chart on or off in `cdk.json` (the setting there always wins) and redeploy with `gco stacks deploy-all -y`:
 
-```yaml
-yunikorn:
-  enabled: true   # Set to false to disable
-  version: "1.8.0"
+```json
+{ "context": { "helm": { "yunikorn": { "enabled": true } } } }
 ```
+
+The queue hierarchy shown under [Queue Configuration](#queue-configuration) is the chart's `queues.yaml` value in `charts.yaml`.
 
 ## Cleanup
 

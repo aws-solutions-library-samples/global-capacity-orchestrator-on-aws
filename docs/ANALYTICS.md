@@ -506,18 +506,17 @@ see the note at the top of this guide):
 
 ```bash
 cat >> ~/.bashrc <<'BASHRC_EOF'
-export GCO_API_ENDPOINT=https://<API_ID>.execute-api.us-east-2.amazonaws.com
+export GCO_API_GATEWAY_REGION=us-east-2
 export GCO_DEFAULT_REGION=us-east-1
 BASHRC_EOF
 source ~/.bashrc
 ```
 
-Replace `<API_ID>` with the API Gateway ID from
-`aws cloudformation describe-stacks --stack-name gco-api-gateway`
-(or from the `ApiGatewayUrl` output in the AWS console). The
-`GCO_DEFAULT_REGION` should point at the regional region you want
-the CLI to talk to by default — typically the region closest to the
-Studio domain.
+The CLI discovers the API URL itself from the `ApiEndpoint` output of the
+`gco-api-gateway` stack, so `GCO_API_GATEWAY_REGION` only needs to name the
+region that stack lives in (your `deployment_regions.api_gateway`).
+`GCO_DEFAULT_REGION` should point at the regional cluster you want the CLI
+to talk to by default — typically the region closest to the Studio domain.
 
 Verify:
 
@@ -1143,7 +1142,7 @@ spec:
       serviceAccountName: gco-service-account
       containers:
       - name: uploader
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         command: ["python", "-c", "import os; print(os.environ['sharedBucketName'])"]
         envFrom:
         - configMapRef:

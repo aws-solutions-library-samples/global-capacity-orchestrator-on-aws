@@ -10,6 +10,7 @@ Common issues and their solutions.
 - [Deployment Issues](#deployment-issues)
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
+  - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
   - [Lambda or State-Machine Custom Resource Timeout](#lambda-or-state-machine-custom-resource-timeout)
 - [kubectl Access Issues](#kubectl-access-issues)
@@ -18,6 +19,7 @@ Common issues and their solutions.
   - [kubectl Commands Hang](#kubectl-commands-hang)
 - [Pod Issues](#pod-issues)
   - [Pods Stuck in Pending](#pods-stuck-in-pending)
+  - [Pods Stuck in ContainerCreating](#pods-stuck-in-containercreating)
   - [Pods CrashLoopBackOff](#pods-crashloopbackoff)
   - [Service Account Issues](#service-account-issues)
 - [Lambda Issues](#lambda-issues)
@@ -25,9 +27,9 @@ Common issues and their solutions.
   - [Lambda 401 Unauthorized](#lambda-401-unauthorized)
   - [Lambda Out of Memory](#lambda-out-of-memory)
 - [Networking Issues](#networking-issues)
-  - [API Gateway Timeout After Deployment](#api-gateway-timeout-after-deployment)
   - [Pods Can't Reach Internet](#pods-cant-reach-internet)
   - [Can't Access Services](#cant-access-services)
+  - [API Gateway Timeout After Deployment](#api-gateway-timeout-after-deployment)
   - [ALB Not Routing Traffic](#alb-not-routing-traffic)
 - [Performance Issues](#performance-issues)
   - [Slow Pod Startup](#slow-pod-startup)
@@ -263,7 +265,17 @@ Fix the failing chart, manifest, networking, or access entry and redeploy. Do no
 
 **Cause**: Your IAM principal not added to cluster access entries
 
-**Solution**:
+**Solution**: let the CLI do it. `gco stacks access` updates your kubeconfig,
+creates the access entry for the principal you are running as, and associates
+the cluster-admin policy in one step; `gco cluster doctor` tells you whether
+reachability or authentication is the part that is actually missing:
+
+```bash
+gco stacks access -r REGION
+gco cluster doctor --region REGION
+```
+
+The equivalent by hand, if you cannot run the CLI where the credentials live:
 
 ```bash
 # 1. Get your IAM principal ARN

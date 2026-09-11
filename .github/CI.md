@@ -33,18 +33,30 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 
 ```text
 .github/
-├── actions/
-│   └── build-lambda-package/         # Composite action: stage Lambda build dirs
+├── actions/                          # Nine composite actions (see actions/README.md)
+│   ├── build-lambda-package/         #   stage Lambda build dirs
+│   ├── install-trivy/                #   pinned Trivy via setup-trivy
+│   ├── free-disk-space/              #   reclaim runner disk before image builds
+│   └── *-with-retry/                 #   apt, buildx, docker build/pull, image build, artifact upload
 ├── codeql/
 │   └── codeql-config.yml             # Paths + query-filters for Code Scanning
+├── config/                           # Tool configs the workflows point at (see config/README.md)
+│   ├── .checkov.yaml, .kics.yaml, .trivyignore, .gitleaks.toml
+│   ├── .markdownlint-cli2.yaml, .yamllint.yml
+│   ├── .npm-audit-ignore, .pip-audit-ignore
+│   └── semgrep-excluded-rules.txt
 ├── ISSUE_TEMPLATE/
 │   ├── bug_report.md
 │   ├── config.yml                    # Blank-issue + contact links config
 │   └── feature_request.md
 ├── kind/
 │   └── kind-calico.yaml              # Kind cluster config for integration:kind:cluster-e2e
-├── scripts/
-│   └── dependency-scan.sh            # Monthly dependency-drift scanner
+├── oidc_provider/                    # CDK app for the GitHub OIDC role deps-scan assumes
+├── scripts/                          # Helpers the workflows call (inventory in scripts/README.md)
+│   ├── dependency-scan.sh            #   monthly dependency-drift scanner
+│   ├── check_bash_coverage.py        #   shell coverage gate + HTML report
+│   ├── verify_action_pins.py         #   SHA-pin / tag-comment cross-check
+│   └── ...                           #   validators, probes, smoke tests
 ├── workflows/
 │   ├── unit-tests.yml                # Unit Tests workflow
 │   ├── inference-streaming-proxy.yml # Native Node.js streaming-proxy tests
@@ -57,10 +69,12 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 │   ├── release-publish.yml           # Release stage 2: tag + GitHub Release on merge
 │   ├── deps-scan.yml                 # Monthly dependency scan
 │   ├── cve-scan.yml                  # Weekly CVE scan
-│   ├── pages.yml                     # Publish coverage report to GitHub Pages (workflow_run)
+│   ├── pages.yml                     # Publish coverage reports to GitHub Pages (workflow_run)
 │   ├── pr-type-label.yml             # Sync PR type checkbox to release-note label
 │   └── grafana-dashboards.yml        # Real Grafana dashboard provisioning contract
+├── AUTOMATION.md                     # Autopilot (agent) CI contract
 ├── CODEOWNERS
+├── SECURITY.md                       # Vulnerability reporting + scanner inventory
 ├── dependabot.yml
 ├── pull_request_template.md
 ├── release.yml                       # GitHub Release notes categorization
@@ -121,7 +135,7 @@ Two details make that safe rather than lossy:
 All CI workflows share the same safety defaults:
 
 - `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** for the release pair — `release.yml` and `release-publish.yml` share one repository-wide `group: release` with `cancel-in-progress: false`, so releases serialize across both stages and a half-run release is never cancelled mid-flight. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight. The scheduled scans (`cve-scan.yml`, `deps-scan.yml`) keep the standard per-ref group but also set `cancel-in-progress: false` — a scan in flight is never worth cancelling, and scoping the group by ref keeps two manual `workflow_dispatch` runs on different branches from serializing behind each other.
-- `timeout-minutes` on every job (10 min for lint, 15 for unit, 20–30 for integration).
+- `timeout-minutes` on every job, sized to the job: 2 min for path-filter and list jobs, 10 for lint, 15 for unit, 20–30 for integration and image builds, 45 for the Floci release-validation e2e and 60 for the Kind examples smoke run.
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Caching: `actions/setup-python` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache` on `.mypy_cache/`.
 - AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
@@ -180,7 +194,7 @@ Truth is what makes the comment more than a claim: `lint:actions:pinning`
 resolves each `# vX.Y.Z` through `api.github.com/repos/{owner}/{repo}/commits/{tag}`
 — the same endpoint the pins were generated from — and fails when the tag points
 somewhere else. That catches a mistyped or copy-pasted comment *and* a tag the
-publisher has since moved. One request per repository (~15 total), authenticated
+publisher has since moved. One request per distinct action repository, authenticated
 with `github.token`. A lookup that cannot be completed (rate limit, timeout,
 deleted tag) is reported without failing the job: an api.github.com blip must
 not block unrelated pull requests, or people learn to ignore the check.
@@ -233,6 +247,8 @@ A full local run is normally required for changes to deployed CDK/CloudFormation
 ## Composite actions
 
 Shared logic used by multiple jobs. Invoked with `uses: ./.github/actions/<name>`.
+[`actions/README.md`](actions/README.md) documents all nine (inputs, defaults,
+and which jobs use each); the one with the most moving parts is:
 
 - **`actions/build-lambda-package`** — stages `lambda/kubectl-applier-simple-build/`, `lambda/helm-installer-build/`, and the production-only `lambda/inference-streaming-proxy-build/` graph that CDK synth, pytest, and KICS scans expect. Callers must configure Python 3.14 and Node.js from `.nvmrc`; the action installs and verifies the exact npm version from the Lambda `packageManager` pin before its locked install. Used by `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, and `security:kics:iac`.
 
@@ -277,7 +293,7 @@ Two details worth knowing before editing these jobs:
 - **Pins the query pack** to `security-and-quality` so the additional maintainability queries still surface alongside the default security suite.
 - **Filters two rules** that have been reviewed and classified as false positives against this codebase: `py/clear-text-logging-sensitive-data` (we log operational identifiers like ARNs and registry hostnames, not credential values) and `py/incomplete-url-substring-sanitization` (only ever hit by test-file assertions, not access-control code paths). Each exclusion carries an inline comment in the config naming the exact call sites and the reason — audit them when the codebase shape changes.
 
-The scan runs as an Advanced Setup workflow rather than Default Setup so the filters and paths are pinned in git instead of hidden in repo Settings. To swap back to Default Setup: comment out the `security-codeql-python-code-analysis` job in `workflows/security.yml` and re-enable Default Setup in repo Settings → Code security → CodeQL. The config file has no effect under Default Setup.
+The scan runs as an Advanced Setup workflow rather than Default Setup so the filters and paths are pinned in git instead of hidden in repo Settings. To swap back to Default Setup: remove the two `security:codeql:*` jobs from `workflows/security.yml` and re-enable Default Setup in repo Settings → Code security → CodeQL. The config file has no effect under Default Setup.
 
 ## README badges
 
@@ -324,9 +340,15 @@ Ecosystems tracked:
 
 ## Helper scripts
 
+Every file under `scripts/` is inventoried in
+[`scripts/README.md`](scripts/README.md) (a test fails when a script is added
+without a row). The ones the workflows lean on most:
+
 - **`scripts/use-pinned-npm.sh`** — installs (when necessary) and verifies the exact npm release declared by a supplied `package.json` `packageManager` field. Every CI path that invokes npm calls this helper first; the Lambda packaging composite also enforces it internally.
 - **`scripts/dependency-scan.sh`** — backs the `deps-scan` workflow. See [below](#dependency-scan-script) for the full reference.
 - **`scripts/check_pip_audit_ignore.py`** — backs the `security:pip-audit:deps` job. See [below](#pip-audit-ignore-validator) for the full reference.
+- **`scripts/check_bash_coverage.py`** — gates `unit:bats:shell` and renders the published shell coverage report. See [below](#shell-coverage-gate).
+- **`scripts/verify_action_pins.py`** — cross-checks every `uses:` SHA against its `# vX.Y.Z` comment. See [Action pinning](#action-pinning).
 
 ### Dependency-scan script
 
@@ -499,7 +521,7 @@ To turn the check on without introducing long-lived access keys, configure a Git
      issues: write
    steps:
      # ...existing checkout + tooling install steps...
-     - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+     - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c  # v6.2.4
        with:
          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GCODependencyScanRole
          aws-region: us-east-1
@@ -581,7 +603,7 @@ Pick an `exp:` date that gives upstream a reasonable window to ship a fix or hav
 
 ### Shell coverage gate
 
-`scripts/check_bash_coverage.py` gates the `unit:bats:shell` job. Python has an exact 100% line-and-branch floor; this is the same idea for the ~11k lines of shell the repository ships, so a script can't quietly lose its tests.
+`scripts/check_bash_coverage.py` gates the `unit:bats:shell` job. Python has an exact 100% line-and-branch floor; this is the same idea for every tracked shell script the repository ships (`git ls-files '*.sh'` outside `tests/`), so a script can't quietly lose its tests.
 
 #### How the measurement works
 
@@ -640,7 +662,7 @@ SimpleCov's own HTML lands in `coverage/index.html`; it renders the raw line hit
 
 Configuration for the `lint:markdownlint:md` job lives in **`.github/config/.markdownlint-cli2.yaml`**. The same file covers three repository-wired CLI surfaces:
 
-- The **GitHub Actions job** (`lint-markdownlint-md` in `workflows/lint.yml`) via `DavidAnson/markdownlint-cli2-action`.
+- The **GitHub Actions job** (`lint:markdownlint:md` in `workflows/lint.yml`), which runs the same `npm run lint:markdown` from the locked `package-lock.json` graph so CI and local runs execute one dependency set.
 - The **pre-commit hook** (`markdownlint-cli2` in `.pre-commit-config.yaml`).
 - The local **npm command** (`npm run lint:markdown`).
 

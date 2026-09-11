@@ -18,6 +18,7 @@ FastAPI route modules for GCO's in-cluster APIs. Management modules are mounted 
 | `webhooks.py` | `GET /api/v1/webhooks`, `POST /api/v1/webhooks`, `DELETE /api/v1/webhooks/{webhook_id}` | Webhook registration and deletion |
 | `queue.py` | `POST /api/v1/queue/jobs`, `GET /api/v1/queue/jobs`, `GET /api/v1/queue/jobs/{job_id}`, `DELETE /api/v1/queue/jobs/{job_id}`, `GET /api/v1/queue/stats`, `POST /api/v1/queue/poll` | Idempotent global-queue submission, status, cancellation, statistics, and operator-triggered polling |
 | `inference_proxy.py` | `GET\|HEAD\|POST /inference/{endpoint_name}`, `GET\|HEAD\|POST /inference/{endpoint_name}/{upstream_path}` | Authenticated, allowlisted proxy to managed in-cluster inference services |
+| `cost.py` | `GET /api/v1/cost/status`, `GET /api/v1/cost/reports`, `POST /api/v1/cost/reports` | Cost reporting proxied to the internal `cost-monitor` service: OpenCost health, recent report objects, ad-hoc report generation |
 
 ## Route Prefixes
 

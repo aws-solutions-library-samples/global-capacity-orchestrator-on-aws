@@ -37,7 +37,7 @@ Forking is a designed-for path, not an afterthought: *"GCO is designed to be
 taken and run with."*
 [docs/FORKING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/FORKING.md)
 documents the supported migration — a script repoints badges, clone URLs,
-the Pages site (this wiki and the embedded coverage report), and the OIDC
+the Pages site (this wiki and the embedded coverage reports), and the OIDC
 trust-policy subject to your fork, dry-run by default and idempotent, plus
 the manual follow-ups it cannot decide for you.
 

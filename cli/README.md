@@ -28,6 +28,21 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `files.py` | EFS/FSx file listing and download |
 | `nodepools.py` | Nodepool inspection and management |
 | `kubectl_helpers.py` | kubectl command wrappers for direct cluster access |
+| `images.py` | Container image registry management (`gco images`): repositories, tags, lifecycle, replication |
+| `job_policy.py` | Reads the deployed job-validation policy (`GET /api/v1/policy`) and judges manifests against it |
+| `managed_config.py` | Managed deployment-config engine: validated, atomic, audited `cdk.json` edits behind `gco stacks regions/bedrock/eks` |
+| `cost_analytics.py` | Athena-backed Kubernetes cost analytics (`gco costs k8s ...`) |
+| `vector_store.py` | Operator client for the vector store (`gco vector`) |
+| `cluster_tunnel.py` | Shared helpers for reaching a possibly-private EKS API endpoint (`gco cluster tunnel`) |
+| `cluster_doctor.py` | Diagnosis of the three layers of cluster access: reachability, authentication, authorization (`gco cluster doctor`) |
+| `ssm_tunnel.py` | SSM Session Manager tunnel helpers for private EKS endpoints |
+| `ephemeral_bastion.py` | Ephemeral SSM bastion lifecycle (`--via-ssm auto`) |
+| `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |
+| `monitoring_user_mgmt.py` | Grafana user management over the admin HTTP API (`gco monitoring users`) |
+| `_container_runtime.py` | Container runtime detection (Docker, Finch, Podman) shared by image builds and mirroring |
+| `_image_mirror.py` | Shared core that mirrors third-party images into the project ECR (`gco images mirror`, deploy-time auto-mirror, MCP tools) |
+| `_image_reference.py` | Linear-time validation of immutable container image references |
+| `_image_uri.py` | ECR image URI helpers backed by local AWS partition metadata |
 
 ### commands/
 
@@ -71,8 +86,11 @@ GPU capacity checking, region recommendation, and AI-powered advisory.
 |------|-------------|
 | `checker.py` | Spot placement scores, pricing, and availability checks |
 | `advisor.py` | AI-powered capacity recommendations via Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) |
+| `blocks.py` | Capacity Block search primitives: duration math, instance-type normalization, offering pricing, de-dup and sort helpers |
+| `history.py` | DynamoDB-backed time-series store behind `gco capacity history` |
 | `models.py` | Data models for capacity responses |
 | `multi_region.py` | Cross-region capacity aggregation and comparison |
+| `traffic_dial.py` | Manual Global Accelerator traffic-dial controls (`gco capacity traffic-dial show`, `set`, `clear`) |
 
 ## Installation
 
@@ -87,15 +105,12 @@ See [CLI Reference](../docs/CLI.md) for the full command documentation.
 
 ## Control-Flow Diagrams
 
-Auto-generated flowcharts for the most branchy CLI entry points live
-under [`diagrams/code_diagrams/cli/`](../diagrams/code_diagrams/README.md).
-
-| Function | Flowchart |
-|----------|-----------|
-| `JobManager.submit_job` (direct `kubectl apply` path) | [HTML](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html) · [PNG](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png) |
-| `JobManager.submit_job_sqs` (SQS-backed submission) | [HTML](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job_sqs.html) · [PNG](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job_sqs.png) |
-| `srp_authenticate` ([Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) SRP auth for Studio login) | [HTML](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html) · [PNG](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png) |
-| `fetch_studio_url` (`/studio/login` presigned-URL poll) | [HTML](../diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.html) · [PNG](../diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.png) |
+Auto-generated flowcharts for the most branchy CLI entry points (job
+submission, inference deploys, orchestrated stack deploy/destroy, image
+build/push/mirror, Studio login) live under `diagrams/code_diagrams/cli/`.
+The generated [flowchart index](../diagrams/code_diagrams/README.md#cli) is
+the complete, always-current list; this README deliberately does not
+repeat it.
 
 Regenerate through the
 [canonical two-commit diagram workflow](../diagrams/README.md#quick-reference)

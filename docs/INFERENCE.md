@@ -76,9 +76,9 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
 3. For a plain endpoint, the monitor creates or updates a Deployment and
    ClusterIP Service, plus an HPA or [KEDA](https://keda.sh/) ScaledObject when requested. Mooncake
    endpoints add role workloads, internal Services, and a PD proxy.
-4. The shared `/inference` rule on the `gco-system/gco-gateway` HTTPRoute is
-   the only ALB route for inference traffic; the monitor never creates
-   endpoint-specific routes.
+4. The shared `/inference` rule on the `gco-system/gco-routes` HTTPRoute
+   (attached to the `gco-gateway` Gateway) is the only ALB route for inference
+   traffic; the monitor never creates endpoint-specific routes.
 5. API Gateway authenticates the client with IAM over AWS-managed TLS. The
    inference-only Node.js Lambda binds the method, target, body digest,
    timestamp, and nonce into a short-lived HMAC envelope, then uses strict
@@ -266,7 +266,7 @@ seconds before forcing termination. The kind CI job installs pinned Metrics
 Server and requires the HPA to report `ScalingActive=True`, rather than merely
 checking that the API server admitted the object.
 
-The shared `gco-system/gco-gateway` HTTPRoute already owns `/inference/*`; no
+The shared `gco-system/gco-routes` HTTPRoute already owns `/inference/*`; no
 endpoint-specific route, public Service, or ALB target group is created.
 
 ## Supported Frameworks

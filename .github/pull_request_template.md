@@ -9,10 +9,11 @@ Delete any sections that don't apply.
 
 ## Type of change
 
-<!-- Check all that apply. These checkboxes are reviewer-facing only; generated
-release notes are categorized by PR labels, not by the tokens below. Apply a
-corresponding label when relevant: breaking/breaking-change, feat/feature/
-enhancement, fix/bug, docs/documentation, or dependencies. -->
+<!-- Tick the one box that fits (more than one is allowed for a mixed PR).
+The PR Type Label workflow syncs a label of the same name to whatever is
+ticked, and generated release notes are grouped by those labels — so this is
+the changelog entry, not just a note to reviewers. Edit the checkbox to change
+the label; no label needs applying by hand. -->
 
 - [ ] `feat:` New feature (non-breaking)
 - [ ] `fix:` Bug fix (non-breaking)
