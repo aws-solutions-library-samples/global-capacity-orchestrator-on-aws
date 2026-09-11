@@ -79,7 +79,7 @@ Everyone does these four stages in order. By the end you can deploy GCO, submit 
 
 *This stage provisions billable AWS resources.*
 
-- **Read:** the [Quick Start](../QUICKSTART.md) deploy and test-job steps. Note that scheduler and operator Helm charts converge asynchronously and can take 10–30 minutes to become ready after the cluster reports complete.
+- **Read:** the [Quick Start](../QUICKSTART.md) deploy and test-job steps. Note that scheduler and operator Helm charts converge asynchronously and can take 10–30+ minutes to become ready after the cluster reports complete.
 - **Do:** deploy, then submit the starter job and read its logs.
 
   ```bash

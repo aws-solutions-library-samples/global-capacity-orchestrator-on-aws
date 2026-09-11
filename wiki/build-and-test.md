@@ -12,7 +12,8 @@ Six primary workflows run on every push and every pull request that is not a
 draft (draft PRs skip every job until marked ready for review):
 
 - **Unit Tests** — the sharded pytest suite with a combined-coverage gate,
-  plus CDK synth and a 34-combination config matrix, lockfile freshness,
+  plus CDK synth and a config-synthesis matrix over every curated `cdk.json`
+  combination, lockfile freshness,
   BATS, CLI and autopilot smoke checks, and MCP install/launch smoke.
 - **Integration Tests** — per-Dockerfile build and functional container
   contracts, kind-based end-to-end clusters with real NetworkPolicy

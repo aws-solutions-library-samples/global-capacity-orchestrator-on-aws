@@ -74,8 +74,8 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 | Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand |
 | Multi-region ops | Manage clusters separately | One platform across unlimited SDK-known Regions in one partition |
 | Authentication | Configure per-cluster access | IAM-based, uses existing AWS credentials |
-| Job outputs | Lost when pods terminate | Persisted to EFS/FSx storage |
-| Inference serving | Deploy and manage per-region | Deploy once across selected Regions |
+| Job outputs | Lost unless persisted | EFS/FSx and per-region S3 available to every job that mounts or writes them |
+| Inference serving | Deploy and manage per-region | Deploy once across selected Regions; global failover in `aws` |
 | Failover | Manual intervention required | Automatic via [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in `aws`; explicit regional selection elsewhere |
 
 **When to use GCO:**

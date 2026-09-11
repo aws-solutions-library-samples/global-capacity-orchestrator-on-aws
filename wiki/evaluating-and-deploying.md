@@ -48,16 +48,14 @@ stacks via the GCO MCP server.*
 
 The README's
 [sample cost table](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#sample-cost-table)
-breaks down a single-region deployment with default settings:
-
-- **~$210/month fixed platform cost** — the largest items are the EKS
-  cluster (~$73), two NAT gateways (~$65), the internal ALB (~$22), Global
-  Accelerator (~$18 + transfer), and CloudWatch (~$15).
-- **GPU instances dominate** and scale with usage — the table's example
-  g5.xlarge runs ~$734/month on-demand or ~$250/month on spot (us-east-1,
-  June 2025 pricing).
-- Optional services (FSx, Valkey, Aurora, the analytics environment) add
-  cost only when enabled. Multi-region deployments scale linearly.
+breaks down a single-region deployment with default settings: a fixed
+platform cost dominated by the EKS cluster, NAT gateways, the internal ALB,
+Global Accelerator and CloudWatch, with GPU instances the real driver of
+spend — an on-demand instance runs around three times the spot price of
+the same type. Optional services (FSx, Valkey, Aurora, the analytics
+environment) add cost only when enabled, and multi-region deployments scale
+linearly. The table carries its own pricing date; read the numbers there
+rather than here.
 
 ## What you can customize
 
