@@ -42,6 +42,15 @@ freshness = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("verify_inference_streaming_bundle_freshness", freshness)
 _spec.loader.exec_module(freshness)
 
+#: The class the script actually drives. Another test on the same worker may
+#: ``importlib.reload`` ``cli.stacks`` (tests/test_stacks_extended_coverage.py
+#: does so per test), which rebinds ``cli.StackManager`` to a new class
+#: object while the script keeps the one it imported at collection time. Every
+#: patch and every instance in this module therefore targets the script's
+#: binding; patching the module's current binding let the real ``npm ci`` run
+#: against this fixture's made-up versions.
+StackManager = freshness.StackManager
+
 PACKAGE_JSON = {
     "name": "inference-streaming-proxy",
     "dependencies": {"@aws-sdk/client-bedrock-runtime": "3.0.0", "fast-xml-parser": "5.0.0"},
@@ -83,7 +92,7 @@ def _install_fake_builder(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Replace the npm build step with the fake, routed through the real publisher."""
     builds: list[int] = []
 
-    def fake_build(self: stacks.StackManager) -> None:
+    def fake_build(self: StackManager) -> None:
         source_dir, build_dir = stacks._INFERENCE_STREAMING_CDK_ASSET.paths(self.project_root)
         if not source_dir.is_dir():
             return
@@ -96,10 +105,10 @@ def _install_fake_builder(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         )
         builds.append(1 if published else 0)
 
-    assert hasattr(stacks.StackManager, "_build_inference_streaming_proxy_lambda"), (
+    assert hasattr(StackManager, "_build_inference_streaming_proxy_lambda"), (
         "the npm build seam this suite fakes has moved; update the fake and the CI script"
     )
-    monkeypatch.setattr(stacks.StackManager, "_build_inference_streaming_proxy_lambda", fake_build)
+    monkeypatch.setattr(StackManager, "_build_inference_streaming_proxy_lambda", fake_build)
     return builds
 
 
@@ -109,7 +118,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list
     root = tmp_path / "project"
     _write_source(root)
     builds = _install_fake_builder(monkeypatch)
-    manager = object.__new__(stacks.StackManager)
+    manager = object.__new__(StackManager)
     manager.project_root = root
     manager._build_inference_streaming_proxy_lambda()  # initial bundle
     builds.clear()
@@ -177,7 +186,7 @@ def test_transitive_dependency_file_refuses_a_flat_tree(tmp_path: Path) -> None:
 
 def test_assert_fresh_accepts_a_freshly_built_bundle(project) -> None:
     root, _ = project
-    manager = object.__new__(stacks.StackManager)
+    manager = object.__new__(StackManager)
     manager.project_root = root
 
     freshness._assert_fresh(
@@ -191,7 +200,7 @@ def test_assert_fresh_rejects_a_stale_manifest(project) -> None:
     root, _ = project
     build = root / "lambda" / "inference-streaming-proxy-build"
     (build / "index.mjs").write_bytes(b"// changed after the manifest was written\n")
-    manager = object.__new__(stacks.StackManager)
+    manager = object.__new__(StackManager)
     manager.project_root = root
 
     with pytest.raises(AssertionError, match="not source-current"):
@@ -206,7 +215,7 @@ def test_assert_fresh_rejects_a_bundle_that_is_fresh_but_missing_a_package_file(
     source = root / "lambda" / "inference-streaming-proxy"
     build = root / "lambda" / "inference-streaming-proxy-build"
     (build / "package-lock.json").write_text("tampered", encoding="utf-8")
-    manager = object.__new__(stacks.StackManager)
+    manager = object.__new__(StackManager)
     manager.project_root = root
     monkeypatch.setattr(manager, "_inference_streaming_build_is_fresh", lambda s, b: True)
 
@@ -221,7 +230,7 @@ def test_assert_fresh_rejects_a_bundle_missing_a_dependency_marker(
     source = root / "lambda" / "inference-streaming-proxy"
     build = root / "lambda" / "inference-streaming-proxy-build"
     shutil.rmtree(build / "node_modules" / "fast-xml-parser")
-    manager = object.__new__(stacks.StackManager)
+    manager = object.__new__(StackManager)
     manager.project_root = root
     monkeypatch.setattr(manager, "_inference_streaming_build_is_fresh", lambda s, b: True)
 
@@ -259,7 +268,7 @@ def test_main_fails_if_the_handler_damage_is_not_detected(
 ) -> None:
     """A freshness check that accepts changed bytes would make the whole test vacuous."""
     monkeypatch.setattr(
-        stacks.StackManager, "_inference_streaming_build_is_fresh", staticmethod(lambda s, b: True)
+        StackManager, "_inference_streaming_build_is_fresh", staticmethod(lambda s, b: True)
     )
 
     with pytest.raises(AssertionError, match="incorrectly accepted as fresh"):
@@ -271,11 +280,11 @@ def test_main_fails_if_synth_does_not_route_through_the_real_cdk_call(
 ) -> None:
     """The mocked ``_run_cdk`` must be called with the production argv, once."""
 
-    def wrong_synth(self: stacks.StackManager, stack_name=None, quiet=True) -> str:  # noqa: ANN001
+    def wrong_synth(self: StackManager, stack_name=None, quiet=True) -> str:  # noqa: ANN001
         self._ensure_lambda_build()
         return "something else"
 
-    monkeypatch.setattr(stacks.StackManager, "synth", wrong_synth)
+    monkeypatch.setattr(StackManager, "synth", wrong_synth)
 
     with pytest.raises(AssertionError, match="Unexpected mocked synth result"):
         freshness.main()
@@ -285,7 +294,7 @@ def test_main_fails_if_a_deleted_transitive_marker_is_accepted_as_fresh(
     project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After the first repair the check must still see the second damage."""
-    real = stacks.StackManager._inference_streaming_build_is_fresh
+    real = StackManager._inference_streaming_build_is_fresh
     calls = {"n": 0}
 
     def lenient_after_first_repair(source_dir: Path, build_dir: Path) -> bool:
@@ -295,7 +304,7 @@ def test_main_fails_if_a_deleted_transitive_marker_is_accepted_as_fresh(
         return True if calls["n"] == 4 else real(source_dir, build_dir)
 
     monkeypatch.setattr(
-        stacks.StackManager,
+        StackManager,
         "_inference_streaming_build_is_fresh",
         staticmethod(lenient_after_first_repair),
     )
@@ -307,11 +316,11 @@ def test_main_fails_if_a_deleted_transitive_marker_is_accepted_as_fresh(
 def test_main_fails_if_diff_does_not_route_through_the_real_cdk_call(
     project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def wrong_diff(self: stacks.StackManager, stack_name=None) -> str:  # noqa: ANN001
+    def wrong_diff(self: StackManager, stack_name=None) -> str:  # noqa: ANN001
         self._ensure_lambda_build()
         return "something else"
 
-    monkeypatch.setattr(stacks.StackManager, "diff", wrong_diff)
+    monkeypatch.setattr(StackManager, "diff", wrong_diff)
 
     with pytest.raises(AssertionError, match="Unexpected mocked diff result"):
         freshness.main()
