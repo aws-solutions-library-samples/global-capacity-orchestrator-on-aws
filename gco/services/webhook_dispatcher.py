@@ -831,7 +831,10 @@ class WebhookDispatcher:
     async def _initialize_job_cache(self) -> None:
         """Initialize the job state cache with current job states."""
         try:
-            jobs = self.batch_v1.list_job_for_all_namespaces(
+            # Off the event loop: the synchronous client would otherwise stall
+            # every other task for the duration of the list (and its retries).
+            jobs = await asyncio.to_thread(
+                self.batch_v1.list_job_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
             for job in jobs.items:

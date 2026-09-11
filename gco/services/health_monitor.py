@@ -72,6 +72,17 @@ _ALB_SYNC_SSM_CONFIG = Config(
 class HealthMonitor:
     """
     Monitors Kubernetes cluster resource utilization and determines health status
+
+    Every Kubernetes read goes through ``asyncio.to_thread``: the official
+    client is synchronous, and a blocking call inside the poll task stalls the
+    whole event loop — the ``/healthz`` and ``/readyz`` the kubelet probes, and
+    the socket bind uvicorn performs right after the lifespan yields. With an
+    unreachable API server the client's connect timeout and retries add up to
+    minutes, which is exactly the startup-probe budget: the pod was killed for
+    "not starting" while it was really waiting on the API server (seen on kind,
+    where NetworkPolicy blocked the :6443 endpoint). Off the loop, the service
+    keeps serving its probes and its cached status regardless of how the
+    cluster reads are doing.
     """
 
     def __init__(self, cluster_id: str, region: str, thresholds: ResourceThresholds):
@@ -143,9 +154,11 @@ class HealthMonitor:
             # Get pod metrics for active jobs count and pending pods
             active_jobs, pending_pods = await self._get_pod_counts()
 
-            # Calculate cluster-wide utilization
-            cpu_utilization = self._calculate_cpu_utilization(node_metrics)
-            memory_utilization = self._calculate_memory_utilization(node_metrics)
+            # Calculate cluster-wide utilization (each helper lists the nodes)
+            cpu_utilization = await asyncio.to_thread(self._calculate_cpu_utilization, node_metrics)
+            memory_utilization = await asyncio.to_thread(
+                self._calculate_memory_utilization, node_metrics
+            )
             gpu_utilization = await self._calculate_gpu_utilization()
 
             # Calculate resources requested by pending pods
@@ -184,7 +197,8 @@ class HealthMonitor:
                 return self._cached_metrics
 
             # Fetch fresh metrics
-            node_metrics: dict[str, Any] = self.metrics_v1beta1.list_cluster_custom_object(
+            node_metrics: dict[str, Any] = await asyncio.to_thread(
+                self.metrics_v1beta1.list_cluster_custom_object,
                 group="metrics.k8s.io",
                 version="v1beta1",
                 plural="nodes",
@@ -308,7 +322,8 @@ class HealthMonitor:
         """Calculate cluster-wide GPU utilization percentage"""
         try:
             # Get pods with GPU requests
-            pods = self.core_v1.list_pod_for_all_namespaces(
+            pods = await asyncio.to_thread(
+                self.core_v1.list_pod_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
 
@@ -316,7 +331,9 @@ class HealthMonitor:
             total_gpu_capacity = 0
 
             # Get node GPU capacity
-            nodes = self.core_v1.list_node(_request_timeout=self._k8s_timeout)
+            nodes = await asyncio.to_thread(
+                self.core_v1.list_node, _request_timeout=self._k8s_timeout
+            )
             for node in nodes.items:
                 gpu_capacity = node.status.allocatable.get("nvidia.com/gpu", "0")
                 total_gpu_capacity += int(gpu_capacity)
@@ -341,7 +358,8 @@ class HealthMonitor:
         """Get count of active jobs in the cluster"""
         try:
             # Count running pods (excluding system pods)
-            pods = self.core_v1.list_pod_for_all_namespaces(
+            pods = await asyncio.to_thread(
+                self.core_v1.list_pod_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
             active_jobs = 0
@@ -364,7 +382,8 @@ class HealthMonitor:
     async def _get_pod_counts(self) -> tuple[int, int]:
         """Get count of active jobs and pending pods in the cluster"""
         try:
-            pods = self.core_v1.list_pod_for_all_namespaces(
+            pods = await asyncio.to_thread(
+                self.core_v1.list_pod_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
             active_jobs = 0
@@ -389,7 +408,8 @@ class HealthMonitor:
     async def _calculate_pending_requested_resources(self) -> RequestedResources:
         """Calculate total resources requested by pending pods"""
         try:
-            pods = self.core_v1.list_pod_for_all_namespaces(
+            pods = await asyncio.to_thread(
+                self.core_v1.list_pod_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
             total_cpu_millicores = 0.0
