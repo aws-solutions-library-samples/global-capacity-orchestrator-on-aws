@@ -1317,16 +1317,20 @@ jobs:
           docker image rm dind-probe:ci alpine:3.24.1 >/dev/null 2>&1 || true
 
   # --------------------------------------------------------------------------
-  # Kind cluster E2E — verifies the Kubernetes manifests apply cleanly to a
-  # real API server with Calico installed so NetworkPolicy is enforced (not
-  # silently dropped by kindnet). Scope is "manifests apply, resources are
-  # created by the apiserver, NetworkPolicy validates" — not full readiness.
+  # Kind cluster E2E — applies the Kubernetes manifests to a real API server
+  # with Calico installed so NetworkPolicy is enforced (not silently dropped
+  # by kindnet), then proves the parts of the platform that can run without
+  # AWS actually run: the health-monitor and manifest-processor Deployments
+  # roll out to Ready (TLS sidecar + loopback application probes, under the
+  # shipped policies), the inference proxy rolls out and its HPA computes
+  # live metrics, the manifest-processor HPA pair applies when its gate is
+  # on, every PDB has the one-at-a-time shape, and the policies admit and
+  # deny exactly the documented paths (probed both ways).
   #
-  # The service Deployments depend on production-only infrastructure (IRSA
-  # tokens from Pod Identity, Secrets Manager ARNs, cross-region DynamoDB)
-  # that would need substantial stubbing to run Ready in CI. The image-level
-  # "integration:docker:*" jobs above cover module-import correctness; this
-  # job covers the manifest/apiserver path.
+  # The inference monitor and cost monitor need AWS credentials to become
+  # Ready (DynamoDB, S3/OpenCost) and are scaled away after their pods are
+  # admitted; the image-level "integration:docker:*" jobs above cover their
+  # serving contracts, and the live release validation covers them on EKS.
   # --------------------------------------------------------------------------
 
   integration-kind-cluster-e2e:
@@ -1584,73 +1588,122 @@ jobs:
           test "$(kubectl -n kube-system get configmap amazon-vpc-cni \
             -o jsonpath='{.data.enable-network-policy-controller}')" = "true"
       - name: Render and apply deployments
-        # Substitute image placeholders. Pod readiness depends on production
-        # IRSA / Secrets Manager wiring that isn't present in kind, so we
-        # assert "apiserver accepts the manifest + the Deployment object
-        # exists" rather than waiting for pods to go Ready.
+        # Render every platform manifest with a configuration the services
+        # can actually start on. The health monitor and manifest processor
+        # parse their thresholds, policy toggles and worker settings at
+        # startup and refuse malformed values (a typo must not silently
+        # disable a control), so the old blanket "ci-stub" substitution left
+        # both crash-looping — kind only ever proved that pods were created.
+        # Now they must roll out: the rollout step below requires it.
+        #
+        # The inference proxy values go through the same pure renderer the
+        # regional stack uses, with non-default validated inputs. Everything
+        # else is an explicit CI value; tokens not named here (role ARNs,
+        # table names, the Mooncake image) are opaque strings to the process
+        # and fall back to a literal stub. The manifest processor is rendered
+        # with its opt-in CPU HPA switched ON (cdk.json
+        # manifest_processor.autoscaling.enabled), so the Deployment hands
+        # replica ownership to the HPA and 35-manifest-processor-hpa.yaml is
+        # applied alongside it — the gated pair is exercised end to end.
         run: |
           set -euo pipefail
-          # Exercise the same pure replacement renderer used by the regional
-          # stack with non-default validated values; do not duplicate defaults.
-          tls_replacements="$(
-            python3 - <<'PY'
+          python3 - <<'PY' > "${RUNNER_TEMP}/platform-workloads.yaml"
           import json
+          import re
+          import time
+          from pathlib import Path
+
           from gco.inference_proxy_config import compute_inference_proxy_tls_replacements
 
-          configured = {
-              "tls_proxy_cpu_request_millicores": 125,
-              "tls_proxy_cpu_target_utilization_percentage": 85,
-              "min_replicas": 3,
-              "max_replicas": 10,
+          manifests = Path("lambda/kubectl-applier-simple/manifests")
+          values = {
+              # Same pure renderer as GCORegionalStack, non-default inputs.
+              **compute_inference_proxy_tls_replacements(
+                  {
+                      "tls_proxy_cpu_request_millicores": 125,
+                      "tls_proxy_cpu_target_utilization_percentage": 85,
+                      "min_replicas": 3,
+                      "max_replicas": 10,
+                  }
+              ),
+              "{{HEALTH_MONITOR_IMAGE}}": "health-monitor:ci",
+              "{{MANIFEST_PROCESSOR_IMAGE}}": "manifest-processor:ci",
+              "{{INFERENCE_MONITOR_IMAGE}}": "inference-monitor:ci",
+              "{{INFERENCE_PROXY_IMAGE}}": "inference-proxy:ci",
+              "{{COST_MONITOR_IMAGE}}": "cost-monitor:ci",
+              "{{DEPLOYMENT_TIMESTAMP}}": str(int(time.time())),
+              "{{CLUSTER_NAME}}": "gco-ci",
+              "{{REGION}}": "us-east-1",
+              "{{GLOBAL_REGION}}": "us-east-2",
+              "{{DYNAMODB_REGION}}": "us-east-1",
+              "{{PROJECT_NAME}}": "gco",
+              # Health monitor thresholds (integers) and the dispatcher's
+              # namespace filter.
+              "{{CPU_THRESHOLD}}": "80",
+              "{{MEMORY_THRESHOLD}}": "80",
+              "{{GPU_THRESHOLD}}": "60",
+              "{{PENDING_PODS_THRESHOLD}}": "10",
+              "{{PENDING_REQUESTED_CPU_VCPUS}}": "100",
+              "{{PENDING_REQUESTED_MEMORY_GB}}": "200",
+              "{{PENDING_REQUESTED_GPUS}}": "8",
+              "{{MP_ALLOWED_NAMESPACES}}": "gco-jobs",
+              # Manifest processor: sizing, the HPA gate (ON), the validation
+              # policy, and the queue worker (off: no DynamoDB to poll here).
+              "{{MP_REPLICAS}}": "3",
+              "{{MP_CPU_LIMIT}}": "1000m",
+              "{{MP_MEMORY_LIMIT}}": "2Gi",
+              "{{MP_HPA_CONTROLS_REPLICAS}}": "true",
+              "{{MP_HPA_ENABLED}}": "true",
+              "{{MP_HPA_MAX_REPLICAS}}": "6",
+              "{{MP_HPA_CPU_TARGET_UTILIZATION}}": "70",
+              "{{MP_MAX_CPU_PER_MANIFEST}}": "384",
+              "{{MP_MAX_MEMORY_PER_MANIFEST}}": "4096Gi",
+              "{{MP_MAX_GPU_PER_MANIFEST}}": "16",
+              "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
+              "{{MP_MAX_REQUEST_BODY_BYTES}}": "1048576",
+              "{{MP_VALIDATION_ENABLED}}": "true",
+              "{{MP_YAML_MAX_DEPTH}}": "50",
+              "{{MP_ALLOWED_KINDS}}": "Job,CronJob,Deployment,StatefulSet,DaemonSet,Service,ConfigMap,Pod",
+              "{{MP_TRUSTED_REGISTRIES}}": "docker.io,public.ecr.aws",
+              "{{MP_TRUSTED_DOCKERHUB_ORGS}}": "library",
+              "{{MP_BLOCK_PRIVILEGED}}": "true",
+              "{{MP_BLOCK_PRIVILEGE_ESCALATION}}": "true",
+              "{{MP_BLOCK_HOST_NETWORK}}": "true",
+              "{{MP_BLOCK_HOST_PID}}": "true",
+              "{{MP_BLOCK_HOST_IPC}}": "true",
+              "{{MP_BLOCK_HOST_PATH}}": "true",
+              "{{MP_BLOCK_ADDED_CAPABILITIES}}": "true",
+              "{{MP_BLOCK_RUN_AS_ROOT}}": "true",
+              "{{CENTRAL_QUEUE_WORKER_ENABLED}}": "false",
+              "{{CENTRAL_QUEUE_POLL_INTERVAL_SECONDS}}": "10",
+              "{{CENTRAL_QUEUE_BATCH_SIZE}}": "5",
+              "{{CENTRAL_QUEUE_RECONCILE_LIMIT}}": "100",
+              "{{CENTRAL_QUEUE_LEASE_SECONDS}}": "300",
+              "{{CENTRAL_QUEUE_LEASE_RENEWAL_SECONDS}}": "60",
+              "{{QUEUE_TARGET_REGIONS}}": "us-east-1",
+              "{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}": "1048576",
+              "{{COST_REPORT_INTERVAL_MINUTES}}": "60",
+              "{{COST_MONITORING_ENABLED}}": "true",
           }
-          print(json.dumps(compute_inference_proxy_tls_replacements(configured)))
+          rendered = []
+          for name in (
+              "30-health-monitor.yaml",
+              "31-manifest-processor.yaml",
+              "32-inference-monitor.yaml",
+              "33-inference-proxy.yaml",
+              "34-cost-monitor.yaml",
+              "35-manifest-processor-hpa.yaml",
+          ):
+              text = (manifests / name).read_text(encoding="utf-8")
+              for token, value in values.items():
+                  text = text.replace(token, value)
+              # Anything left (role ARNs, table names, the Mooncake image) is an
+              # opaque string to the process; a literal stub is fine.
+              text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "ci-stub", text)
+              rendered.append(text)
+          print("\n---\n".join(rendered))
           PY
-          )"
-          tls_cpu_request="$(
-            jq -r '.["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"]' <<<"$tls_replacements"
-          )"
-          tls_cpu_target="$(
-            jq -r '.["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"]' <<<"$tls_replacements"
-          )"
-          proxy_min_replicas="$(
-            jq -r '.["{{INFERENCE_PROXY_MIN_REPLICAS}}"]' <<<"$tls_replacements"
-          )"
-          proxy_max_replicas="$(
-            jq -r '.["{{INFERENCE_PROXY_MAX_REPLICAS}}"]' <<<"$tls_replacements"
-          )"
-          for manifest in \
-              lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml \
-              lambda/kubectl-applier-simple/manifests/31-manifest-processor.yaml \
-              lambda/kubectl-applier-simple/manifests/32-inference-monitor.yaml \
-              lambda/kubectl-applier-simple/manifests/33-inference-proxy.yaml \
-              lambda/kubectl-applier-simple/manifests/34-cost-monitor.yaml; do
-            case "$manifest" in
-              *30-health-monitor*)     image="health-monitor:ci"; key="HEALTH_MONITOR_IMAGE" ;;
-              *31-manifest-processor*) image="manifest-processor:ci"; key="MANIFEST_PROCESSOR_IMAGE" ;;
-              *32-inference-monitor*)  image="inference-monitor:ci"; key="INFERENCE_MONITOR_IMAGE" ;;
-              *33-inference-proxy*)    image="inference-proxy:ci"; key="INFERENCE_PROXY_IMAGE" ;;
-              *34-cost-monitor*)       image="cost-monitor:ci"; key="COST_MONITOR_IMAGE" ;;
-            esac
-            # Stub out every remaining {{PLACEHOLDER}} with a safe literal.
-            # The manifests already pull IfNotPresent (content-hash tags), which
-            # is also what lets these kind-loaded, never-pushed tags start.
-            sed -e "s|{{${key}}}|${image}|g" \
-                -e "s|{{DEPLOYMENT_TIMESTAMP}}|$(date +%s)|g" \
-                -e 's|{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}|1048576|g' \
-                -e "s|{{INFERENCE_PROXY_TLS_CPU_REQUEST}}|${tls_cpu_request}|g" \
-                -e "s|{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}|${tls_cpu_target}|g" \
-                -e "s|{{INFERENCE_PROXY_MIN_REPLICAS}}|${proxy_min_replicas}|g" \
-                -e "s|{{INFERENCE_PROXY_MAX_REPLICAS}}|${proxy_max_replicas}|g" \
-                -e 's|{{MP_REPLICAS}}|3|g' \
-                -e 's|{{MP_CPU_LIMIT}}|1000m|g' \
-                -e 's|{{MP_MEMORY_LIMIT}}|2Gi|g' \
-                -e 's|{{MP_HPA_CONTROLS_REPLICAS}}|false|g' \
-                -e 's|{{COST_REPORT_INTERVAL_MINUTES}}|60|g' \
-                -e 's|{{COST_MONITORING_ENABLED}}|true|g' \
-                -e "s|{{[A-Z_]*}}|ci-stub|g" \
-                "$manifest" \
-              | kubectl apply -f -
-          done
+          kubectl apply -f "${RUNNER_TEMP}/platform-workloads.yaml"
       - name: Verify apiserver accepted all resources
         run: |
           set -euo pipefail
@@ -1668,6 +1721,25 @@ jobs:
           test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.minReplicas}')" = "3"
           test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.maxReplicas}')" = "10"
           test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.scaleTargetRef.name}')" = "inference-proxy"
+          # The manifest-processor was rendered with autoscaling ON: the
+          # gated HPA exists, its floor is the Deployment's replica count, and
+          # the Deployment handed replica ownership to it.
+          kubectl -n gco-system get hpa manifest-processor-hpa
+          test "$(kubectl -n gco-system get hpa manifest-processor-hpa -o jsonpath='{.spec.minReplicas}')" = "3"
+          test "$(kubectl -n gco-system get hpa manifest-processor-hpa -o jsonpath='{.spec.maxReplicas}')" = "6"
+          test "$(kubectl -n gco-system get hpa manifest-processor-hpa -o jsonpath='{.spec.scaleTargetRef.name}')" = "manifest-processor"
+          mp_target="$(kubectl -n gco-system get hpa manifest-processor-hpa \
+            -o jsonpath='{.spec.metrics[0].containerResource.target.averageUtilization}')"
+          test "$mp_target" = "70"
+          test "$(kubectl -n gco-system get deployment manifest-processor -o jsonpath='{.spec.replicas}')" = "3"
+          mp_owner="$(kubectl -n gco-system get deployment manifest-processor \
+            -o jsonpath='{.metadata.annotations.gco\.aws/hpa-controls-replicas}')"
+          test "$mp_owner" = "true"
+          # Bounded rollouts on every platform Deployment.
+          for deployment in health-monitor manifest-processor inference-monitor inference-proxy cost-monitor; do
+            test "$(kubectl -n gco-system get deployment "$deployment" -o jsonpath='{.spec.minReadySeconds}')" = "10"
+            test "$(kubectl -n gco-system get deployment "$deployment" -o jsonpath='{.spec.revisionHistoryLimit}')" = "3"
+          done
           tls_cpu_request="$(
             kubectl -n gco-system get deployment inference-proxy \
               -o jsonpath='{.spec.template.spec.containers[?(@.name=="api-tls-proxy")].resources.requests.cpu}'
@@ -1703,10 +1775,38 @@ jobs:
           kubectl -n gco-system get pods -o wide
           kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy cost-monitor
           exit 1
+      - name: Wait for health-monitor and manifest-processor rollouts
+        # Both API tiers reach their serving state without AWS: the functional
+        # container jobs prove /readyz=200 with an unreachable apiserver, and
+        # here the apiserver is real. So under Calico enforcement and the
+        # shipped NetworkPolicies, both Deployments must roll out completely —
+        # the TLS sidecar's tcpSocket/HTTPS probes on 8443 and the application's
+        # loopback exec probes all pass, and minReadySeconds is honoured. The
+        # inference monitor and cost monitor are scaled away first: without
+        # AWS credentials they cannot become Ready, and the single Kind node
+        # needs the CPU for the rollouts under test.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-system scale \
+            deployment/inference-monitor \
+            deployment/cost-monitor \
+            --replicas=0
+          for deployment in health-monitor manifest-processor; do
+            if ! kubectl -n gco-system rollout status "deployment/${deployment}" --timeout=4m; then
+              echo "::error::${deployment} did not roll out under NetworkPolicy enforcement"
+              kubectl -n gco-system get pods -l "app=${deployment}" -o wide || true
+              kubectl -n gco-system describe pods -l "app=${deployment}" || true
+              kubectl -n gco-system logs -l "app=${deployment}" --all-containers --tail=100 || true
+              exit 1
+            fi
+          done
+          # The manifest-processor Deployment is HPA-owned: its pods must have
+          # reached the HPA floor, not fewer.
+          test "$(kubectl -n gco-system get deployment manifest-processor -o jsonpath='{.status.readyReplicas}')" = "3"
+          test "$(kubectl -n gco-system get deployment health-monitor -o jsonpath='{.status.readyReplicas}')" = "2"
       - name: Wait for inference proxy TLS rollout
         # HPA resource metrics do not exist until kubelet has started the
-        # containers. The prior gate already proved every other deployment
-        # created pods; scale those non-target fixtures down to release the
+        # containers. Scale the now-proven API tiers down to release the
         # single Kind node's CPU for all three HPA-owned inference replicas.
         # Then require the TLS sidecar and loopback application to pass their
         # independent startup/readiness probes before polling HPA state.
@@ -1715,8 +1815,6 @@ jobs:
           kubectl -n gco-system scale \
             deployment/health-monitor \
             deployment/manifest-processor \
-            deployment/inference-monitor \
-            deployment/cost-monitor \
             --replicas=0
           kubectl -n gco-system rollout status deployment/inference-proxy --timeout=3m
       - name: Verify inference proxy HPA is actively computing replicas
@@ -1765,8 +1863,12 @@ jobs:
           fi
           echo "NetworkPolicies accepted by apiserver: $count"
       - name: Verify PodDisruptionBudgets exist
-        # Assert every PDB shipped by the four deployment manifests. A count
-        # greater than zero can hide a partially applied policy set.
+        # Assert every PDB shipped by the four multi-replica Deployment
+        # manifests, and its shape: maxUnavailable 1, never minAvailable, so
+        # one voluntary disruption at a time whatever the replica count. A
+        # bare count can hide a partially applied policy set; the single
+        # replica cost-monitor deliberately ships none (a PDB on a singleton
+        # would block every node drain).
         run: |
           set -euo pipefail
           for pdb in \
@@ -1775,8 +1877,11 @@ jobs:
               inference-monitor-pdb \
               inference-proxy-pdb; do
             kubectl -n gco-system get pdb "$pdb"
+            test "$(kubectl -n gco-system get pdb "$pdb" -o jsonpath='{.spec.maxUnavailable}')" = "1"
+            test -z "$(kubectl -n gco-system get pdb "$pdb" -o jsonpath='{.spec.minAvailable}')"
           done
-          echo "All expected PodDisruptionBudgets exist"
+          test "$(kubectl -n gco-system get pdb -o name | wc -l | tr -d ' ')" = "4"
+          echo "All expected PodDisruptionBudgets exist with maxUnavailable=1"
       - name: Verify RBAC restricts unauthorized access
         # Use impersonation to verify both sides of the RBAC boundary. Capture
         # output as well as status so an API/transport error cannot masquerade
@@ -1805,86 +1910,144 @@ jobs:
             echo "FAIL: expected an explicit RBAC allow; output=$allowed_output"
             exit 1
           fi
-      - name: Verify NetworkPolicy enforcement blocks cross-namespace traffic
-        # Probe a dedicated HTTP pod whose listener is verified locally first.
-        # This avoids treating an absent Service, an unready application, or a
-        # kubectl error as evidence that Calico enforced the deny policy.
+      - name: Verify NetworkPolicy enforcement (allowed and denied paths)
+        # One HTTP listener per assertion, verified locally before it is
+        # probed, so an absent Service, an unready application, or a kubectl
+        # error is never mistaken for Calico enforcing a deny. Each probe pod
+        # exits 0 on a reachable target and 42 on the expected connection
+        # failure; scheduling, image-pull and kubectl failures produce other
+        # states and fail the step instead of being accepted as a deny.
+        #
+        # The four assertions are the documented posture, both directions:
+        #   1. gco-jobs pod -> gco-system pod on an unlisted port: BLOCKED
+        #      (default-deny ingress in gco-system; the client's egress rules
+        #      do not cover a pod address on 8080 either).
+        #   2. gco-jobs pod -> gco-jobs pod, any port: REACHABLE
+        #      (allow-same-namespace — distributed training depends on it).
+        #   3. default-namespace pod -> gco-jobs pod: BLOCKED
+        #      (default-deny ingress from other namespaces).
+        #   4. default-namespace pod -> a gco-system pod labelled
+        #      app=inference-monitor on 9090: REACHABLE, and on 8080: BLOCKED
+        #      (the source-less allow-metrics-to-inference-monitor rule admits
+        #      exactly the metrics port — this is what lets the kubelet probe
+        #      and Prometheus scrape the real inference monitor).
         run: |
           set -euo pipefail
-          kubectl run netpol-target \
-            --image=busybox:1.38.0 \
-            --namespace=gco-system \
-            --labels=app=netpol-probe \
-            --restart=Never \
-            --command -- sh -c '
-              mkdir -p /www
-              printf "netpol-target-ready\n" > /www/index.html
-              exec httpd -f -p 8080 -h /www
-            '
-          kubectl -n gco-system wait --for=condition=Ready pod/netpol-target --timeout=60s
 
-          target_body=""
-          for _ in $(seq 1 10); do
-            if target_body=$(kubectl -n gco-system exec netpol-target -- \
-              wget -qO- -T 5 http://127.0.0.1:8080); then
-              [ "$target_body" = "netpol-target-ready" ] && break
-            fi
-            sleep 1
-          done
-          if [ "$target_body" != "netpol-target-ready" ]; then
-            echo "FAIL: NetworkPolicy target was not serving the control response"
-            exit 1
-          fi
-
-          target_ip=$(kubectl -n gco-system get pod netpol-target \
-            -o jsonpath='{.status.podIP}')
-          if [ -z "$target_ip" ]; then
-            echo "FAIL: NetworkPolicy target has no pod IP"
-            exit 1
-          fi
-
-          # Exit 42 only for the expected connection failure. Pod scheduling,
-          # image-pull, and kubectl failures produce a different state/status
-          # and therefore fail the assertion instead of being accepted as deny.
-          kubectl run netpol-test \
-            --image=busybox:1.38.0 \
-            --namespace=gco-jobs \
-            --labels=app=netpol-probe-client \
-            --restart=Never \
-            --command -- sh -c "
-              if wget -qO- -T 5 \"http://${target_ip}:8080\"; then
-                echo NETPOL_REACHABLE
-                exit 0
+          # start_target <namespace> <name> <labels> <port> [<port>...]
+          # One busybox httpd per port so a single pod can prove that a
+          # policy admits one port and denies another (a closed port would be
+          # refused instantly and look exactly like a policy deny).
+          start_target() {
+            local namespace="$1" name="$2" labels="$3"
+            shift 3
+            local ports="$*"
+            kubectl run "$name" \
+              --image=busybox:1.38.0 \
+              --namespace="$namespace" \
+              --labels="$labels" \
+              --restart=Never \
+              --command -- sh -c "
+                mkdir -p /www
+                printf 'netpol-target-ready\n' > /www/index.html
+                for port in ${ports}; do httpd -f -p \"\${port}\" -h /www & done
+                wait
+              "
+            kubectl -n "$namespace" wait --for=condition=Ready "pod/${name}" --timeout=120s
+            local port body
+            for port in $ports; do
+              body=""
+              for _ in $(seq 1 10); do
+                if body=$(kubectl -n "$namespace" exec "$name" -- \
+                  wget -qO- -T 5 "http://127.0.0.1:${port}"); then
+                  [ "$body" = "netpol-target-ready" ] && break
+                fi
+                sleep 1
+              done
+              if [ "$body" != "netpol-target-ready" ]; then
+                echo "FAIL: target ${namespace}/${name} was not serving on ${port}"
+                exit 1
               fi
-              echo NETPOL_BLOCKED
-              exit 42
-            "
+            done
+          }
 
-          phase=""
-          for _ in $(seq 1 60); do
-            phase=$(kubectl -n gco-jobs get pod netpol-test \
-              -o jsonpath='{.status.phase}')
-            case "$phase" in
-              Succeeded|Failed) break ;;
-            esac
-            sleep 1
-          done
+          # target_ip <namespace> <name>
+          target_ip() {
+            local ip
+            ip=$(kubectl -n "$1" get pod "$2" -o jsonpath='{.status.podIP}')
+            if [ -z "$ip" ]; then
+              echo "FAIL: target $1/$2 has no pod IP" >&2
+              exit 1
+            fi
+            printf '%s' "$ip"
+          }
 
-          probe_output=$(kubectl -n gco-jobs logs netpol-test 2>&1)
-          exit_code=$(kubectl -n gco-jobs get pod netpol-test \
-            -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
-          printf '%s\n' "$probe_output"
-          if [ "$phase" = "Failed" ] && [ "$exit_code" = "42" ] \
-              && printf '%s\n' "$probe_output" | grep -qx NETPOL_BLOCKED; then
-            echo "PASS: Cross-namespace traffic blocked by NetworkPolicy"
-          else
-            echo "FAIL: NetworkPolicy probe phase=$phase exit=$exit_code"
-            kubectl -n gco-jobs describe pod netpol-test
-            exit 1
-          fi
+          # probe <client-namespace> <client-name> <target-ip> <port> <reachable|blocked> <description>
+          probe() {
+            local namespace="$1" name="$2" ip="$3" port="$4" expect="$5" description="$6"
+            kubectl run "$name" \
+              --image=busybox:1.38.0 \
+              --namespace="$namespace" \
+              --labels=app=netpol-probe-client \
+              --restart=Never \
+              --command -- sh -c "
+                if wget -qO- -T 5 \"http://${ip}:${port}\"; then
+                  echo NETPOL_REACHABLE
+                  exit 0
+                fi
+                echo NETPOL_BLOCKED
+                exit 42
+              "
+            local phase=""
+            for _ in $(seq 1 90); do
+              phase=$(kubectl -n "$namespace" get pod "$name" -o jsonpath='{.status.phase}')
+              case "$phase" in
+                Succeeded|Failed) break ;;
+              esac
+              sleep 1
+            done
+            local output exit_code
+            output=$(kubectl -n "$namespace" logs "$name" 2>&1)
+            exit_code=$(kubectl -n "$namespace" get pod "$name" \
+              -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
+            printf '%s\n' "$output"
+            if [ "$expect" = "blocked" ] && [ "$phase" = "Failed" ] && [ "$exit_code" = "42" ] \
+                && printf '%s\n' "$output" | grep -qx NETPOL_BLOCKED; then
+              echo "PASS (blocked): ${description}"
+            elif [ "$expect" = "reachable" ] && [ "$phase" = "Succeeded" ] && [ "$exit_code" = "0" ] \
+                && printf '%s\n' "$output" | grep -qx NETPOL_REACHABLE; then
+              echo "PASS (reachable): ${description}"
+            else
+              echo "FAIL: ${description} — expected ${expect}, phase=${phase} exit=${exit_code}"
+              kubectl -n "$namespace" describe pod "$name"
+              exit 1
+            fi
+            kubectl -n "$namespace" delete pod "$name" --wait=false
+          }
 
-          kubectl -n gco-jobs delete pod netpol-test --wait=false
-          kubectl -n gco-system delete pod netpol-target --wait=false
+          start_target gco-system netpol-target-system app=netpol-probe 8080
+          start_target gco-jobs netpol-target-jobs app=netpol-probe 8080
+          # Wears the inference monitor's labels so the real rule selects it;
+          # listens on both ports so the deny on 8080 is a policy verdict.
+          start_target gco-system netpol-target-metrics app=inference-monitor,project=gco 9090 8080
+          system_ip=$(target_ip gco-system netpol-target-system)
+          jobs_ip=$(target_ip gco-jobs netpol-target-jobs)
+          metrics_ip=$(target_ip gco-system netpol-target-metrics)
+
+          probe gco-jobs netpol-test-cross-system "$system_ip" 8080 blocked \
+            "gco-jobs -> gco-system:8080 (default-deny ingress, no egress rule)"
+          probe gco-jobs netpol-test-same-namespace "$jobs_ip" 8080 reachable \
+            "gco-jobs -> gco-jobs:8080 (allow-same-namespace)"
+          probe default netpol-test-cross-jobs "$jobs_ip" 8080 blocked \
+            "default -> gco-jobs:8080 (default-deny ingress from other namespaces)"
+          probe default netpol-test-metrics-open "$metrics_ip" 9090 reachable \
+            "default -> inference-monitor:9090 (allow-metrics-to-inference-monitor)"
+          # Same pod, second listener: the rule admits 9090 and nothing else.
+          probe default netpol-test-metrics-closed "$metrics_ip" 8080 blocked \
+            "default -> inference-monitor:8080 (only 9090 is admitted)"
+
+          kubectl -n gco-system delete pod netpol-target-system netpol-target-metrics --wait=false
+          kubectl -n gco-jobs delete pod netpol-target-jobs --wait=false
       - name: Apply ResourceQuotas and LimitRanges
         # Apply governance only after the synthetic NetworkPolicy client exits.
         # Otherwise this LimitRange injects a 100m CPU request into that probe,
