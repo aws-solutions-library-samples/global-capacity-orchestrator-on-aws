@@ -547,9 +547,6 @@ ratchet = [
     "demo/lib_demo.sh",
     "demo/live_demo.sh",
     "demo/record_autopilot.sh",
-    "demo/record_demo.sh",
-    "demo/record_deploy.sh",
-    "demo/record_destroy.sh",
     "scripts/preview_wiki.sh",
     "scripts/setup-dev-alias.sh",
 ]

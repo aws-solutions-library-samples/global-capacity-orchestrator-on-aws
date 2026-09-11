@@ -42,14 +42,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The checkout being recorded: normally the one this script lives in. The BATS
+# suite points GCO_RECORDING_REPO_ROOT at a disposable fixture repository so
+# the tracked recorder runs in place against it; left unset, every path below
+# is the same as before the override existed.
+REPO_ROOT="$(cd "${GCO_RECORDING_REPO_ROOT:-$SCRIPT_DIR/..}" && pwd)"
+DEMO_DIR="${REPO_ROOT}/demo"
 
 # shellcheck source=demo/lib_demo.sh
 source "${SCRIPT_DIR}/lib_demo.sh"
 setup_colors
 
-CAST_FILE="${SCRIPT_DIR}/live_demo.cast"
-GIF_FILE="${SCRIPT_DIR}/live_demo.gif"
+CAST_FILE="${DEMO_DIR}/live_demo.cast"
+GIF_FILE="${DEMO_DIR}/live_demo.gif"
 COLS="${DEMO_COLS:-116}"
 ROWS="${DEMO_ROWS:-36}"
 SPEED="${DEMO_SPEED:-3}"
@@ -144,7 +149,7 @@ case "$RENDER_EXISTING" in
                 "brew install asciinema (macOS) or pip install asciinema"
         fi
         for required_file in live_demo.sh lib_demo.sh; do
-            if [ -f "${SCRIPT_DIR}/${required_file}" ]; then
+            if [ -f "${DEMO_DIR}/${required_file}" ]; then
                 preflight_pass "${required_file} found"
             else
                 preflight_fail "${required_file} not found" "Restore demo/${required_file}"
@@ -237,7 +242,7 @@ case "$RENDER_EXISTING" in
         ;;
 esac
 
-AVAILABLE_MB=$(df -m "${SCRIPT_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
+AVAILABLE_MB=$(df -m "${DEMO_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
 if [ "$AVAILABLE_MB" -gt 100 ]; then
     preflight_pass "Disk space: ${AVAILABLE_MB} MB available"
 else
@@ -257,7 +262,7 @@ fi
 
 acquire_legacy_recording_lock "$REPO_ROOT"
 
-RECORDING_TMP_DIR=$(mktemp -d "${SCRIPT_DIR}/.live-demo-recording.XXXXXX")
+RECORDING_TMP_DIR=$(mktemp -d "${DEMO_DIR}/.live-demo-recording.XXXXXX")
 chmod 700 "$RECORDING_TMP_DIR"
 RAW_CAST_FILE="${RECORDING_TMP_DIR}/live_demo.cast"
 RAW_GIF_FILE="${RECORDING_TMP_DIR}/live_demo.gif"
@@ -305,7 +310,7 @@ export GCO_DEMO_NONINTERACTIVE=1
 export GCO_DEMO_GUARDED_RECORDING=1
 gco() { python3 -m cli.main "$@"; }
 # shellcheck source=demo/live_demo.sh
-source demo/live_demo.sh
+source "${REPO_ROOT}/demo/live_demo.sh"
 WRAPPER_SCRIPT
     chmod +x "$WRAPPER"
 

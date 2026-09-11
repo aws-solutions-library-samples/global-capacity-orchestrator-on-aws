@@ -57,14 +57,19 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The checkout being recorded: normally the one this script lives in. The BATS
+# suite points GCO_RECORDING_REPO_ROOT at a disposable fixture repository so
+# the tracked recorder runs in place against it; left unset, every path below
+# is the same as before the override existed.
+REPO_ROOT="$(cd "${GCO_RECORDING_REPO_ROOT:-$SCRIPT_DIR/..}" && pwd)"
+DEMO_DIR="${REPO_ROOT}/demo"
 
 # shellcheck source=demo/lib_demo.sh
 source "${SCRIPT_DIR}/lib_demo.sh"
 setup_colors
 
-CAST_FILE="${SCRIPT_DIR}/destroy.cast"
-GIF_FILE="${SCRIPT_DIR}/destroy.gif"
+CAST_FILE="${DEMO_DIR}/destroy.cast"
+GIF_FILE="${DEMO_DIR}/destroy.gif"
 
 # Raw recordings, renders, and prior-artifact backups stay in demo/ so every
 # individual rename is same-filesystem atomic. The shared publication helper
@@ -218,7 +223,7 @@ case "$RENDER_EXISTING" in
 esac
 
 # Check disk space
-AVAILABLE_MB=$(df -m "${SCRIPT_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
+AVAILABLE_MB=$(df -m "${DEMO_DIR}" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
 if [ "$AVAILABLE_MB" -gt 100 ]; then
     preflight_pass "Disk space: ${AVAILABLE_MB} MB available"
 else
@@ -243,7 +248,7 @@ acquire_legacy_recording_lock "$REPO_ROOT"
 # Stage every raw output beside the final files so successful `mv` publication
 # cannot cross filesystems. Existing tracked artifacts remain untouched until
 # verification and GIF rendering succeed.
-RECORDING_TMP_DIR=$(mktemp -d "${SCRIPT_DIR}/.destroy-recording.XXXXXX")
+RECORDING_TMP_DIR=$(mktemp -d "${DEMO_DIR}/.destroy-recording.XXXXXX")
 RAW_CAST_FILE="${RECORDING_TMP_DIR}/destroy.cast"
 RAW_GIF_FILE="${RECORDING_TMP_DIR}/destroy.gif"
 WRAPPER="${RECORDING_TMP_DIR}/run.sh"
@@ -309,12 +314,8 @@ fi
 # GIF derived from it. See sanitize_cast() in lib_demo.sh for details.
 
 sanitize_cast "$RAW_CAST_FILE"
-if [ "${SKIP_SANITIZE:-}" = "1" ]; then
-    echo "! Cast sanitization skipped; do not commit or distribute this artifact"
-else
-    verify_cast_sanitized "$RAW_CAST_FILE"
-    echo "✓ Cast sanitized and verified (AWS account/access-key IDs redacted)"
-fi
+verify_cast_sanitized "$RAW_CAST_FILE"
+echo "✓ Cast sanitized and verified (AWS account/access-key IDs redacted)"
 
 # ── Strip tofu-triggering codepoints ────────────────────────────────────────
 # Rewrite the handful of Unicode characters Menlo can't render so agg never

@@ -84,6 +84,37 @@ link_tools() {
     done
 }
 
+# path_without <dir> <tool>...
+#
+# The complement of link_tools: mirrors every executable reachable through the
+# current PATH into <dir> as symlinks, first match winning as in PATH lookup,
+# except the named tools. For a script that runs most of the toolchain (a
+# recorder driving a whole demo, say) an explicit link_tools list is
+# impractical; this proves what the script does when one specific tool is
+# absent while everything else stays exactly as installed. The named tools may
+# also be installed on the machine running the suite — that is the point.
+path_without() {
+    local dir="$1"
+    shift
+    mkdir -p "$dir"
+    python3 - "$dir" "$@" <<'MIRROR'
+import os
+import sys
+
+dest, hidden = sys.argv[1], set(sys.argv[2:])
+seen = set()
+for entry in os.environ.get("PATH", "").split(os.pathsep):
+    if not entry or not os.path.isdir(entry):
+        continue
+    for name in sorted(os.listdir(entry)):
+        if name in hidden or name in seen:
+            continue
+        path = os.path.join(entry, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            os.symlink(path, os.path.join(dest, name))
+            seen.add(name)
+MIRROR
+}
 # init_fixture_repo <dir>
 #
 # Turns <dir> into a git repository with everything in it committed, and
