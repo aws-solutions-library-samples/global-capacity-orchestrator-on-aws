@@ -214,21 +214,31 @@ Each region contains:
 
 - State machine with one task per Helm chart in `charts.yaml` order
 - Each chart task invokes a Docker-based Lambda (kubectl + helm + awscli)
-- Per-chart retry (4 attempts, exponential backoff, 5-min max delay)
-- 14-minute timeout per chart task; 2-hour execution timeout overall
-- Async custom-resource provider polls the execution every 60 seconds
+- Per-chart retry (4 attempts, 30-second initial interval, exponential
+  backoff, 5-min max delay)
+- 16-minute timeout per chart task; 2-hour execution timeout overall
+- The custom-resource provider is fire-and-forget: its `on_event` handler
+  starts the execution and returns, so CloudFormation never waits on Helm.
+  Stack deletion is the exception — a delete-only provider waits on a
+  reverse-order teardown state machine so releases that own webhooks and
+  load balancers are gone before the cluster is
 - Eliminates the old single-Lambda 15-minute ceiling — slow charts
   (cold image pulls) retry independently without failing the deploy
-- Charts installed in dependency order:
+- Charts installed in dependency order (`lambda/helm-installer/charts.yaml`
+  is the source of truth; the toggles live under `helm.<chart>.enabled` in
+  `cdk.json`):
+  - AWS Load Balancer Controller (creates the shared ALB from the Gateway API resources)
   - [KEDA](https://keda.sh/) (mandatory)
   - AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) and Neuron device plugins
   - [Volcano](https://volcano.sh/) and KubeRay
   - [cert-manager](https://cert-manager.io/docs/)
+  - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
   - kube-prometheus-stack when cluster observability is enabled
   - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
     whose [Prometheus](https://prometheus.io/docs/introduction/overview/) Operator CRDs its ServiceMonitor needs)
+  - MLflow when cluster observability is enabled and `cluster_observability.mlflow.enabled` is left on
+  - Kubeflow Trainer
   - [Kueue](https://kueue.sigs.k8s.io/) last, after its dependencies
-  - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
 
 **Function Flow:**
 
@@ -352,8 +362,11 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Application Layer:**
 
-- Health Monitor: 2-10 replicas (HPA)
-- Manifest Processor: 3-20 replicas (HPA)
+- Health Monitor: fixed 2 replicas; Manifest Processor: fixed 3; Inference
+  Monitor: 2; Cost Monitor: 1 (no HPAs — these are control loops, not
+  request-serving tiers)
+- Inference Proxy: 3-10 replicas via the `inference-proxy-hpa`
+  HorizontalPodAutoscaler, the only HPA GCO installs
 - User workload scale is bounded by configured NodePool limits, Kubernetes quotas, AWS service quotas, and available EC2 capacity
 
 **Compute Layer:**
@@ -388,12 +401,14 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 ### Application HA
 
-- **Multiple Replicas**: All services have 2+ replicas
+- **Multiple Replicas**: Every request-path or reconciliation service runs 2+ replicas; the cost monitor is the one single-replica service (a periodic reporter whose restart loses nothing)
 - **Pod Anti-Affinity**: Spreads pods across nodes (preferred scheduling)
-- **Topology Spread Constraints**: Distributes pods across availability zones
+- **Topology Spread Constraints**: Distributes the health monitor, manifest processor and inference proxy across availability zones
 - **Pod Disruption Budgets**: Ensures minimum availability during voluntary disruptions
   - Health Monitor: minAvailable=1
   - Manifest Processor: minAvailable=2
+  - Inference Monitor: minAvailable=1
+  - Inference Proxy: minAvailable=2
 - **Health Checks**: Liveness, readiness, and startup probes
 - **Graceful Shutdown**: preStop hooks allow in-flight requests to complete
 - **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0
@@ -474,7 +489,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Cluster Failure:**
 
-1. Redeploy stack: `cdk deploy gco-REGION`
+1. Redeploy the regional stack: `gco stacks deploy gco-REGION -y`
 2. Manifests automatically reapplied
 3. RTO: under 1 hour
 

@@ -302,7 +302,7 @@ discovering stacks wherever they exist.
 Manage jobs across GCO clusters.
 
 <details>
-<summary>All <code>gco jobs</code> commands (17) — click to expand</summary>
+<summary>All <code>gco jobs</code> commands (18) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1248,7 +1248,7 @@ gco webhooks delete abc12345 -y
 Manage CDK infrastructure stacks.
 
 <details>
-<summary>All <code>gco stacks</code> commands (14) — click to expand</summary>
+<summary>All <code>gco stacks</code> commands (18) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1266,6 +1266,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
 | [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
 | [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
+| [`gco stacks addons`](#gco-stacks-addons) | Inspect and re-converge cluster add-ons (Helm charts) without touching CloudFormation. |
 | [`gco stacks synth`](#gco-stacks-synth) | Synthesize CloudFormation templates without deploying. |
 | [`gco stacks diff`](#gco-stacks-diff) | Show differences between deployed and local stacks. |
 | [`gco stacks outputs`](#gco-stacks-outputs) | Get CloudFormation outputs from a deployed stack (e.g. API URLs, ARNs, secret references that the stack exposes). |
@@ -1790,16 +1791,19 @@ namespace: gco-jobs    # optional, defaults to gco-jobs
 
 steps:
   - name: preprocess
-    manifest: examples/preprocess-job.yaml
+    manifest: examples/dag-step-preprocess.yaml
 
   - name: train
-    manifest: examples/train-job.yaml
+    manifest: examples/dag-step-train.yaml
     depends_on: [preprocess]
 
-  - name: evaluate
-    manifest: examples/evaluate-job.yaml
+  - name: evaluate                      # add as many steps as you need
+    manifest: my-manifests/evaluate-job.yaml
     depends_on: [train]
 ```
+
+The shipped [`examples/pipeline-dag.yaml`](../examples/pipeline-dag.yaml) runs
+the first two steps end to end on the shared EFS volume.
 
 Steps without `depends_on` run first. Steps with dependencies wait until all dependencies succeed. If a step fails, all downstream steps are automatically skipped.
 
@@ -2254,7 +2258,7 @@ gco costs dashboard --via-ssm auto -y
 Check and manage cluster capacity.
 
 <details>
-<summary>All <code>gco capacity</code> commands (16) — click to expand</summary>
+<summary>All <code>gco capacity</code> commands (23) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -2267,6 +2271,9 @@ Check and manage cluster capacity.
 | [`gco capacity reservation-check`](#gco-capacity-reservation-check) | Check reservation availability and Capacity Block offerings for ML workloads. |
 | [`gco capacity find-blocks`](#gco-capacity-find-blocks) | Find Capacity Blocks across regions, durations, and a start-date window in one consolidated, ranked report. |
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
+| [`gco capacity find-reservations`](#gco-capacity-find-reservations) | Find existing On-Demand Capacity Reservations (ODCRs) across regions in one ranked report. |
+| [`gco capacity create-reservation`](#gco-capacity-create-reservation) | Create an On-Demand Capacity Reservation in a specific Availability Zone (charges accrue until cancelled). |
+| [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
 | [`gco capacity instance-info`](#gco-capacity-instance-info) | Describe an instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` — vCPUs/cores/threads, memory, every accelerator class, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
 | [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on by default). |
@@ -3711,7 +3718,7 @@ See [Customization Guide](CUSTOMIZATION.md) for the full registry
 architecture and lifecycle policy options.
 
 <details>
-<summary>All <code>gco images</code> commands (14) — click to expand</summary>
+<summary>All <code>gco images</code> commands (15) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -3728,6 +3735,7 @@ architecture and lifecycle policy options.
 | [`gco images prune`](#gco-images-prune) | Remove untagged images older than 30 days. |
 | [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that are not referenced by any deployed inference endpoint or recent job. |
 | [`gco images lifecycle`](#gco-images-lifecycle) | Lifecycle policy management. |
+| [`gco images mirror`](#gco-images-mirror) | Mirror third-party images (e.g. Volcano's `docker.io` images) into the project ECR. |
 | [`gco images replication`](#gco-images-replication) | Replication management for the project's ECR registry. |
 
 </details>
@@ -5653,16 +5661,18 @@ gco deps scan --report /tmp/dependency-report.md
 
 ### Config File
 
-Create `~/.gco/config.yaml`:
+The CLI looks for `.gco.yaml` or `.gco.json` in the current directory, then
+`~/.gco/config.yaml` or `~/.gco/config.json`; `gco --config PATH` (`-c`)
+points at a file explicitly. Keys mirror the `GCOConfig` fields in
+`cli/config.py`; unknown keys are ignored, so the region *list* still comes
+from `cdk.json` (`deployment_regions`), not from this file:
 
 ```yaml
 default_region: us-east-1
+default_namespace: gco-jobs
 output_format: table
 verbose: false
-regions:
-  - us-east-1
-  - us-west-2
-  - eu-west-1
+use_regional_api: false
 ```
 
 ### cdk.json
@@ -5704,7 +5714,13 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 |----------|-------------|
 | `AWS_REGION` | Default AWS region |
 | `AWS_PROFILE` | AWS credentials profile |
-| `GCO_CONFIG` | Path to config file |
+| `GCO_PROJECT_NAME` | Project name used to derive stack, table and bucket names (default `gco`) |
+| `GCO_DEFAULT_REGION` | Default regional cluster for commands that take `--region` |
+| `GCO_API_GATEWAY_REGION`, `GCO_GLOBAL_REGION`, `GCO_MONITORING_REGION` | Override the corresponding `deployment_regions` entries from `cdk.json` |
+| `GCO_DEFAULT_NAMESPACE` | Default Kubernetes namespace for job commands (default `gco-jobs`) |
+| `GCO_OUTPUT_FORMAT` | `table`, `json` or `yaml`; top-level `-o` wins |
+| `GCO_VERBOSE` | Enable verbose output (`true`/`false`) |
+| `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
 | `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default) or `codex`; top-level `--engine` wins. |

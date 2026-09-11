@@ -9,7 +9,13 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Configuring Deployment Regions](#configuring-deployment-regions)
   - [Environment Variables](#environment-variables)
 - [Running Multiple Deployments in One Account and Region](#running-multiple-deployments-in-one-account-and-region)
+  - [What project_name scopes](#what-project_name-scopes)
+  - [project_name format](#project_name-format)
+  - [Backward compatibility](#backward-compatibility)
 - [Adding Regions](#adding-regions)
+  - [1. Update CDK Configuration](#1-update-cdk-configuration)
+  - [2. Deploy to New Region](#2-deploy-to-new-region)
+  - [3. Verify Regional Routing](#3-verify-regional-routing)
 - [EKS Cluster Configuration](#eks-cluster-configuration)
   - [Endpoint Access Modes](#endpoint-access-modes)
   - [Configuring Endpoint Access](#configuring-endpoint-access)
@@ -20,6 +26,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Adjust GPU Limits](#adjust-gpu-limits)
   - [Configure Spot Instances](#configure-spot-instances)
   - [Add Taints for GPU Nodes](#add-taints-for-gpu-nodes)
+  - [Fractional / Shared GPUs](#fractional--shared-gpus)
 - [Customizing Services](#customizing-services)
   - [Health Monitor](#health-monitor)
   - [Manifest Processor](#manifest-processor)
@@ -28,7 +35,12 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Security Policy Toggles](#security-policy-toggles)
   - [Allowed Resource Kinds](#allowed-resource-kinds)
 - [Adding Kubernetes Manifests](#adding-kubernetes-manifests)
+  - [1. Create Your Manifest](#1-create-your-manifest)
+  - [2. Add Image to CDK Stack](#2-add-image-to-cdk-stack)
+  - [3. Rebuild Lambda Package](#3-rebuild-lambda-package)
+  - [4. Deploy](#4-deploy)
 - [Modifying Network Configuration](#modifying-network-configuration)
+  - [Availability Zone coverage](#availability-zone-coverage)
   - [Change VPC CIDR](#change-vpc-cidr)
   - [Add VPC Endpoints](#add-vpc-endpoints)
   - [Modify Security Groups](#modify-security-groups)
@@ -37,14 +49,17 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [nodepool Limits](#nodepool-limits)
   - [Lambda Configuration](#lambda-configuration)
 - [Workload CloudWatch Metrics](#workload-cloudwatch-metrics)
-- [Enabling Additional Features](#enabling-additional-features)
 - [Helm Chart Configuration](#helm-chart-configuration)
+  - [Get Volcano's docker.io images off the rate-limited path (ECR mirror)](#get-volcanos-dockerio-images-off-the-rate-limited-path-ecr-mirror)
+- [Enabling Additional Features](#enabling-additional-features)
   - [Enable EKS Logging](#enable-eks-logging)
   - [Add CloudWatch Container Insights](#add-cloudwatch-container-insights)
   - [Load Balancer Configuration](#load-balancer-configuration)
   - [Add Prometheus Monitoring](#add-prometheus-monitoring)
+- [Cost Tracking Setup](#cost-tracking-setup)
 - [Run-scoped Enablement Overrides](#run-scoped-enablement-overrides)
 - [FSx for Lustre Configuration](#fsx-for-lustre-configuration)
+  - [Lustre Version Compatibility](#lustre-version-compatibility)
   - [Enable FSx](#enable-fsx)
   - [Configure FSx Storage](#configure-fsx-storage)
   - [Using FSx in Jobs](#using-fsx-in-jobs)
@@ -58,18 +73,49 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Corpus lifecycle and limits](#corpus-lifecycle-and-limits)
 - [Infrastructure Version Constants](#infrastructure-version-constants)
 - [Bedrock Model Selection](#bedrock-model-selection)
+  - [Accepting the Anthropic first-time-use form](#accepting-the-anthropic-first-time-use-form)
+  - [Choosing a different model](#choosing-a-different-model)
+  - [What to check when choosing a model](#what-to-check-when-choosing-a-model)
+  - [Staying current](#staying-current)
 - [CDK-nag Compliance](#cdk-nag-compliance)
   - [Enabled Frameworks](#enabled-frameworks)
   - [Customizing Suppressions](#customizing-suppressions)
   - [Adding New Suppressions](#adding-new-suppressions)
+  - [Disabling Compliance Checks](#disabling-compliance-checks)
 - [Configuration Best Practices](#configuration-best-practices)
+  - [1. Use Configuration Files](#1-use-configuration-files)
+  - [2. Environment-Specific Configuration](#2-environment-specific-configuration)
+  - [3. Version Control](#3-version-control)
+  - [4. Test in Development First](#4-test-in-development-first)
+- [EFA (Elastic Fabric Adapter) Configuration](#efa-elastic-fabric-adapter-configuration)
+  - [Disable EFA](#disable-efa)
+  - [Mooncake Protocol and Device Selection](#mooncake-protocol-and-device-selection)
+  - [Using EFA in Jobs](#using-efa-in-jobs)
+  - [Supported Instance Types](#supported-instance-types)
+  - [NIXL Support](#nixl-support)
+- [AWS Trainium and Inferentia Configuration](#aws-trainium-and-inferentia-configuration)
+  - [How It Works](#how-it-works)
+  - [Supported Instance Types](#supported-instance-types-1)
+  - [Using Neuron in Jobs](#using-neuron-in-jobs)
 - [Troubleshooting Customizations](#troubleshooting-customizations)
+  - [Changes Not Applied](#changes-not-applied)
+  - [Image Build Failures](#image-build-failures)
+  - [Manifest Application Failures](#manifest-application-failures)
+- [Regional API Gateway (Aggregation Bridge and Direct Regional Access)](#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
+  - [Enable Direct Regional Access in the aws Partition](#enable-direct-regional-access-in-the-aws-partition)
+  - [How It Works](#how-it-works-1)
+  - [Using Regional APIs](#using-regional-apis)
+  - [Security Considerations](#security-considerations)
 - [Queue Processor (SQS Consumer)](#queue-processor-sqs-consumer)
   - [Queue Processor Configuration](#configuration)
   - [Disabling the Built-In Consumer](#disabling-the-built-in-consumer)
-  - [How It Works](#how-it-works)
+  - [How It Works](#how-it-works-2)
   - [Security Parity with the REST Path](#security-parity-with-the-rest-path)
 - [Cost Optimization](#cost-optimization)
+  - [Spot vs On-Demand](#spot-vs-on-demand)
+  - [Storage Costs](#storage-costs)
+  - [Scale-to-Zero Savings](#scale-to-zero-savings)
+  - [Sample Monthly Costs](#sample-monthly-costs)
 
 ## Deployment Regions
 
@@ -804,6 +850,41 @@ def validate_manifest(manifest: dict) -> bool:
     return True
 ```
 
+### Adjust Replica Counts
+
+Edit the deployment manifests:
+
+`lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml`:
+
+```yaml
+spec:
+  replicas: 5  # Increase from 2 to 5
+```
+
+Or use Horizontal Pod Autoscaler:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: health-monitor-hpa
+  namespace: gco-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: health-monitor
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
 ## Security Policy Configuration
 
 The shared `job_validation_policy` section in `cdk.json` includes a `manifest_security_policy` object, an `allowed_namespaces` list, and an `allowed_kinds` list that control which Kubernetes manifest patterns are accepted or rejected. The stock namespace allowlist is only `gco-jobs`, matching the deployed namespace-scoped write Role; adding another namespace also requires an intentionally scoped Role/RoleBinding there.
@@ -897,41 +978,6 @@ After changing any security policy or allowed_kinds settings, redeploy the regio
 
 ```bash
 gco stacks deploy gco-us-east-1 -y
-```
-
-### Adjust Replica Counts
-
-Edit the deployment manifests:
-
-`lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml`:
-
-```yaml
-spec:
-  replicas: 5  # Increase from 2 to 5
-```
-
-Or use Horizontal Pod Autoscaler:
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: health-monitor-hpa
-  namespace: gco-system
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: health-monitor
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
 ```
 
 ## Adding Kubernetes Manifests
@@ -1241,13 +1287,9 @@ See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each to
 
 ### Get Volcano's docker.io images off the rate-limited path (ECR mirror)
 
-A few add-on charts pull their images directly from Docker Hub (`docker.io`) — most notably **Volcano** (`volcanosh/vc-*`). On a cold cluster those anonymous pulls are slow and subject to Docker Hub rate limits, which can make Volcano's install time out and retry. GCO can mirror those images into the project's **own ECR** (under the `gco/*` prefix) and point Volcano at the mirror, so the cluster makes fast, same-account ECR pulls with the pull-only node role it already has. This is **on by default** and needs **no Docker Hub credential** — it's a static mirror you refresh when the chart version changes.
-
-> **Why a mirror and not an ECR pull-through cache?** ECR pull-through cache for Docker Hub *requires* a stored Docker Hub credential (anonymous Docker Hub PTC isn't supported), and on EKS Auto Mode the pull-only, service-managed node role complicates cache-miss imports. Mirroring sidesteps both: no credential, and the images are plain `gco/*` ECR repos the nodes can already pull.
-
-When enabled, the regional stack injects one Volcano value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>` — so every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook, which all render from `basic.image_registry`) resolves from ECR. It creates **no** CloudFormation resources; the mirror is populated by `gco stacks deploy` (automatically, see below) or the `gco images mirror` CLI.
-
-**1. Default `cdk.json` config** (on by default; the default `ecr_namespace` of `gco/dockerhub` is fine). To disable, set `enabled` to `false`:
+Volcano's images live on Docker Hub, whose anonymous pull limit can fail a cold
+cluster's chart install. The regional stack can mirror them into the project's
+ECR and point the chart at the copy. It is on by default:
 
 ```json
 {
@@ -1260,33 +1302,21 @@ When enabled, the regional stack injects one Volcano value override — `basic.i
 }
 ```
 
-**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, [Finch](https://runfinch.com/), or [skopeo](https://github.com/podman-container-tools/skopeo)) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
-
-**3. Converge / check.** If Volcano had previously failed, re-converge without touching the cluster:
+`gco stacks deploy <stack>` / `deploy-all` mirrors the pinned images into ECR
+in each region before the Helm install; a mirror that cannot complete aborts
+the deploy before CloudFormation runs. If Volcano had previously failed,
+re-converge without touching the cluster:
 
 ```bash
 gco stacks addons install -r <region>
 gco stacks addons status -r <region>
 ```
 
-**Mirror manually (optional).** To pre-seed a region before enabling, or to re-mirror after a version bump, run the CLI directly:
-
-```bash
-gco images mirror --region us-east-1
-gco images mirror --region us-east-1 --dry-run   # preview only
-```
-
-It reads the image set and pinned tag from `lambda/helm-installer/charts.yaml`, creates the `gco/<...>` ECR repositories if needed, and copies each image preserving the **full multi-arch manifest list** (via `docker buildx imagetools create`, Finch `--all-platforms`, or `skopeo copy --all`, whichever the runtime supports) — so both amd64 and arm64 (Graviton) nodes find a matching image. A plain `docker pull`/`push` would drop every architecture except the build host's, so it is never used.
-
-Notes:
-
-- `ecr_namespace` must start with `gco/` so it inherits the project's `gco/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside `gco/` or an invalid ECR path fails fast.
-- If an enabled mirror can't complete during deploy (no container runtime, network, credentials), the deploy aborts **before** CloudFormation rather than bringing up a cluster whose Volcano images aren't in ECR.
-- It's a **static** mirror: when you bump the Volcano chart `version`/`image_tag_version` in `charts.yaml`, the next `gco stacks deploy` re-mirrors the new tag (or run `gco images mirror` to do it out-of-band).
-- This only changes where images are *pulled from* — Volcano's behavior and versions are unchanged.
-- The mirror is a **general** tool — to mirror another chart's docker.io-only image down the road, see "HOW TO ADD AN IMAGE TO THE MIRROR" in `cli/_image_mirror.py`.
-
-For the full reference — architecture, the multi-arch copy strategy, the MCP tools (`images_mirror_plan` / `images_mirror_status` / `images_mirror`), troubleshooting, and how to add another chart's image — see [Image Mirror](IMAGE_MIRROR.md).
+`ecr_namespace` must start with `gco/` so the copies inherit the project's
+node-pull access, ECR replication and trusted-registry allow-list. For why a
+mirror rather than a pull-through cache, manual `gco images mirror` runs, the
+multi-arch copy strategy, the MCP tools and troubleshooting, see
+[Image Mirror](IMAGE_MIRROR.md).
 
 ## Enabling Additional Features
 
@@ -1342,93 +1372,23 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 
 ## Cost Tracking Setup
 
-GCO includes built-in cost visibility via the `gco costs` CLI commands. These use AWS Cost Explorer to show spend filtered by the `Project: GCO` tag that CDK applies to all resources.
+Two cost surfaces ship with GCO and are configured in two places:
 
-### Activating Cost Allocation Tags
+- **Billing-side attribution** (`gco costs summary`, `regions`, `trend`,
+  `forecast`) reads Cost Explorer filtered by the `Project` tag. Cost Explorer
+  only honours tags that have been activated once per payer account:
+  `gco costs allocation activate` (or the Billing console), then allow ~24
+  hours for data to appear. Details, Organization caveats and the CUR split-cost
+  option: [COST_MONITORING.md → Billing-side attribution](COST_MONITORING.md#billing-side-attribution-tags-and-the-cur).
+- **Kubernetes cost allocation** (`gco costs k8s ...`, `report`, `dashboard`)
+  comes from OpenCost, scheduled Parquet reports on a central bucket and Athena.
+  It is on by default and tuned under `cost_monitoring` in `cdk.json`
+  (`enabled`, `reports.interval_minutes`, retention and Athena lifecycle);
+  disabling `cluster_observability` turns it off with it. The full option
+  table lives in [COST_MONITORING.md → Configuration](COST_MONITORING.md#configuration).
 
-Cost Explorer requires tags to be explicitly activated before they can be used for filtering. This is a one-time setup per AWS account. The CLI handles it:
-
-```bash
-gco costs allocation status                        # check activation state
-gco costs allocation activate                      # Project + aws:eks:cluster-name
-gco costs allocation activate -t Environment -t Owner  # extra keys
-```
-
-Or activate manually in the console:
-
-1. Open the [AWS Billing Console → Cost Allocation Tags](https://us-east-1.console.aws.amazon.com/billing/home#/tags)
-2. Under "User-defined cost allocation tags", search for `Project`
-3. Select the `Project` tag and click "Activate"
-4. Optionally also activate `Environment` and `Owner` for more granular filtering
-5. Wait ~24 hours for the tag data to appear in Cost Explorer
-
-In an AWS Organization, activation (CLI or console) requires the management (payer) account. See [COST_MONITORING.md — Billing-side attribution](COST_MONITORING.md#billing-side-attribution-tags-and-the-cur) for the AWS-generated `aws:eks:cluster-name` tag and split cost allocation data.
-
-### Verifying Cost Tracking
-
-After activation, verify with:
-
-```bash
-# Should show costs filtered by Project:GCO tag
-gco costs summary
-
-# If tags haven't propagated yet, use --all for total account costs
-gco costs summary --all
-```
-
-### Available Cost Commands
-
-```bash
-gco costs summary              # Spend by AWS service
-gco costs regions              # Spend by region
-gco costs trend --days 14      # Daily cost trend with chart
-gco costs workloads            # Real-time running workload estimates
-gco costs forecast             # 30-day cost forecast
-```
-
-See [CLI Reference](CLI.md#costs-commands) for full details.
-
-### Configure Cost Monitoring (OpenCost + Athena)
-
-Separate from Cost Explorer billing data, the cost monitoring pipeline (on by
-default) allocates Kubernetes cost per namespace with [OpenCost](https://opencost.io/), writes
-scheduled [Parquet](https://parquet.apache.org/docs/) reports to a central S3 bucket, and exposes cross-region
-[Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics plus the spot price gate on the central queue. Tune it under
-`cost_monitoring` in `cdk.json`:
-
-```json
-"cost_monitoring": {
-  "enabled": true,
-  "reports": {
-    "interval_minutes": 60,
-    "retention_days": 365,
-    "transition_to_infrequent_access_days": 90
-  },
-  "athena": {
-    "query_results_retention_days": 30
-  }
-}
-```
-
-- `enabled` — master toggle. Requires `cluster_observability.enabled`
-  (OpenCost reads the in-cluster Prometheus); disabling observability turns
-  the cost pipeline off with it.
-- `reports.interval_minutes` — scheduled report cadence (5-1440).
-- `reports.retention_days` / `reports.transition_to_infrequent_access_days` —
-  S3 lifecycle for report objects (transition must be smaller than retention;
-  validated at synth).
-- `athena.query_results_retention_days` — lifecycle for Athena query results.
-
-Redeploy after changing the block (`gco stacks deploy-all`). Full guide:
-[COST_MONITORING.md](COST_MONITORING.md).
-
-```bash
-gco costs k8s namespaces       # Kubernetes cost by namespace (Athena)
-gco costs k8s regions          # Kubernetes cost by region (Athena)
-gco costs k8s top --by cluster # Top spenders
-gco costs report status        # OpenCost + report pipeline health
-gco costs dashboard            # Open the Grafana cost dashboard
-```
+Redeploy after changing the block (`gco stacks deploy-all`). Every command is
+listed in the [CLI Reference](CLI.md#costs-commands).
 
 ## Run-scoped Enablement Overrides
 
@@ -1567,7 +1527,7 @@ spec:
 
 See `examples/fsx-lustre-job.yaml` for a complete example.
 
-### Configure Valkey Cache
+## Configure Valkey Cache
 
 GCO can deploy an ElastiCache Serverless Valkey cache in each regional stack for low-latency key-value storage. Use cases include prompt caching for inference, session state, feature stores, and shared state across pods.
 
@@ -1642,7 +1602,7 @@ For use outside the cluster (scripts, Lambda functions), the endpoint is also st
 
 See `examples/valkey-cache-job.yaml` for a complete working example.
 
-### Configure Aurora pgvector
+## Configure Aurora pgvector
 
 GCO can deploy an Aurora Serverless v2 PostgreSQL cluster with the [pgvector](https://github.com/pgvector/pgvector) extension in each regional stack for vector similarity search. Use cases include RAG (retrieval-augmented generation), semantic search, embedding storage, and similarity queries for AI/ML workloads.
 

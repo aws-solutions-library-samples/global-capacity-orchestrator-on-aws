@@ -12,6 +12,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [Analytics S3 Upload Job](#analytics-s3-upload-job)
   - [Aurora pgvector Job](#aurora-pgvector-job)
   - [Cluster Shared Bucket Upload Job](#cluster-shared-bucket-upload-job)
+  - [Regional Shared Bucket Upload Job](#regional-shared-bucket-upload-job)
   - [DAG Pipeline](#dag-pipeline)
   - [EFA Distributed Training](#efa-distributed-training)
   - [EFS Output Job](#efs-output-job)
@@ -73,6 +74,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [Multi-GPU Training](#multi-gpu-distributed-training) | `multi-gpu-training.yaml` | Jobs | ✅ | — |
 | [Pipeline DAG](#dag-pipeline) | `pipeline-dag.yaml` | Pipeline | — | — |
 | [Ray Cluster](#ray-cluster) | `ray-cluster.yaml` | Distributed | — | — |
+| [Regional Shared Bucket Upload](#regional-shared-bucket-upload-job) | `regional-shared-bucket-upload-job.yaml` | Storage | — | — |
 | [Simple Job](#simple-job) | `simple-job.yaml` | Jobs | — | — |
 | [Slurm](#slurm-cluster-job) | `slurm-cluster-job.yaml` | Scheduler | — | Slurm |
 | [SQS Submission](#sqs-job-submission) | `sqs-job-submission.yaml` | Jobs | Optional | — |

@@ -137,8 +137,8 @@ out to this path and reads `templates_count`, `webhooks_count`,
 
 Every path in this document is relative to one of two hosts.
 
-**Global API Gateway** — the `ApiGatewayUrl` / `ApiEndpoint` CloudFormation
-output of the API Gateway stack. Use it for cross-region aggregation, and for
+**Global API Gateway** — the `ApiEndpoint` CloudFormation output of the
+`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway`). Use it for cross-region aggregation, and for
 workload traffic in the commercial `aws` partition:
 
 ```http
@@ -217,7 +217,7 @@ application integrity, freshness, and replay defense, not encryption.
 
 Set `API_GATEWAY_ENDPOINT` to your API Gateway host, then reuse it in each
 request. Replace the `<API_GATEWAY_ENDPOINT>` placeholder with the host from
-the `ApiGatewayUrl` CloudFormation output (for example
+the `ApiEndpoint` CloudFormation output (for example
 `abc123.execute-api.us-east-1.amazonaws.com`):
 
 ```bash
@@ -2005,7 +2005,7 @@ gco jobs bulk-delete --all-regions --status completed --older-than-days 7 --exec
 All examples below use `awscurl` for SigV4 authentication. Install with `pip install awscurl`.
 
 Set `API_GATEWAY_ENDPOINT` once and reuse it in every request. Replace the
-`<API_GATEWAY_ENDPOINT>` placeholder with the host from the `ApiGatewayUrl`
+`<API_GATEWAY_ENDPOINT>` placeholder with the host from the `ApiEndpoint`
 CloudFormation output (for example `abc123.execute-api.us-east-1.amazonaws.com`):
 
 ```bash
@@ -2031,7 +2031,7 @@ awscurl --service execute-api --region us-east-1 \
           "spec": {
             "containers": [{
               "name": "main",
-              "image": "python:3.11",
+              "image": "python:3.14.7-slim",
               "command": ["python", "-c", "print(\"Hello World\")"]
             }],
             "restartPolicy": "Never"
@@ -2092,7 +2092,7 @@ awscurl --service execute-api --region us-east-1 \
         }
       }
     },
-    "parameters": {"image": "python:3.11"}
+    "parameters": {"image": "python:3.14.7-slim"}
   }'
 
 # Create job from template
