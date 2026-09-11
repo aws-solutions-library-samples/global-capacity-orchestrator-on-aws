@@ -52,7 +52,8 @@ class _CdkProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(cdk, name)
 
-    def App(self) -> cdk.App:  # noqa: N802 - mirrors the class name app.py calls
+    def App(self) -> cdk.App:
+        """Stand in for the ``cdk.App`` class ``main()`` instantiates (hence the name)."""
         app = cdk.App(outdir=str(self._outdir), context=self._context)
         self.apps.append(app)
         return app
