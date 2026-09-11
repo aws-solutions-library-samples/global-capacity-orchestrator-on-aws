@@ -3872,7 +3872,7 @@ class GCORegionalStack(Stack):
         # choice as the literal the controller reads.
         image_replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] = (
             "true"
-            if self.config.get_eks_cluster_config()["network_policy_enforcement"]
+            if self.config.get_eks_cluster_config().get("network_policy_enforcement", True)
             else "false"
         )
 
