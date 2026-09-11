@@ -429,7 +429,7 @@ specs = list(project.get("dependencies", []) or [])
 for group in (project.get("optional-dependencies") or {}).values():
     specs.extend(group or [])
 for spec in specs:
-    m = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;]+)", spec)
+    m = re.search(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;]+)", spec)
     if m:
         print(f"pydep|{re.sub(r'[-_.]+', '-', m.group(1)).lower()}|{m.group(2)}")
 PY
