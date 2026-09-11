@@ -544,8 +544,6 @@ ratchet = [
     ".github/scripts/lib_dependency_scan.sh",
     ".github/scripts/rie_smoke_test.sh",
     ".github/scripts/use-pinned-npm.sh",
-    "demo/lib_demo.sh",
-    "demo/live_demo.sh",
     "demo/record_autopilot.sh",
     "scripts/preview_wiki.sh",
     "scripts/setup-dev-alias.sh",
