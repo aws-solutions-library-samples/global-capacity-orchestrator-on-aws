@@ -44,8 +44,8 @@ from gco.services.leader_lease import (
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T22:15:15Z
-# Generated from Git commit: 14ba13224fdaf5a82bbcee12270092e39a8201ca
+# Generated at (UTC): 2026-09-11T22:27:39Z
+# Generated from Git commit: 5d1a9122b6630246e01cafdaf458d11c2da8b4ae
 # Flowchart(s) generated from this file:
 #   * ``HealthMonitor.get_health_status`` -> ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.png``)
