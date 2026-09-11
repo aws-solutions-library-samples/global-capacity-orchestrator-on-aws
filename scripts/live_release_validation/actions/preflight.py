@@ -7,6 +7,7 @@ import shutil
 from typing import Any
 
 from ..constants import (
+    _CLUSTER_TUNNEL_ACTIONS,
     _HEALTHY_STACK_STATUSES,
 )
 from ..context import (
@@ -56,12 +57,15 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
 
     selected = set(ctx.report.selected_actions)
     session_manager_plugin = None
-    if "inference" in selected:
+    tunnel_actions = sorted(selected & _CLUSTER_TUNNEL_ACTIONS)
+    if tunnel_actions:
         session_manager_plugin = shutil.which("session-manager-plugin")
         if session_manager_plugin is None:
             raise RuntimeError(
-                "The inference action requires the AWS Session Manager plugin before deploy. "
-                "Install session-manager-plugin and ensure it is on PATH, then resume."
+                f"The {', '.join(tunnel_actions)} action(s) reach the private cluster "
+                "endpoint through an SSM tunnel and require the AWS Session Manager plugin "
+                "before deploy. Install session-manager-plugin and ensure it is on PATH, "
+                "then resume."
             )
 
     identity = ctx.session.client("sts", region_name=ctx.config.global_region).get_caller_identity()

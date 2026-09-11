@@ -26,7 +26,9 @@ from .actions import (
     action_destroy,
     action_final_inventory,
     action_inference,
+    action_network_posture,
     action_opencost,
+    action_platform_workloads,
     action_policy,
     action_preflight,
     action_schedulers,
@@ -122,6 +124,22 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Require stable SQS/DLQ and DynamoDB convergence",
             ("topology",),
             action_convergence,
+        ),
+        # The two cluster-facing checks run after every workload action on
+        # purpose: a zero restart count and an intact policy posture mean more
+        # once the services have carried real Job, queue, and inference traffic.
+        ActionDefinition(
+            "platform-workloads",
+            "Require converged, restart-free, drain-safe platform services with the "
+            "configured autoscalers",
+            ("topology",),
+            action_platform_workloads,
+        ),
+        ActionDefinition(
+            "network-posture",
+            "Prove the shipped NetworkPolicies decide traffic on the live cluster",
+            ("topology",),
+            action_network_posture,
         ),
         ActionDefinition(
             "destroy",

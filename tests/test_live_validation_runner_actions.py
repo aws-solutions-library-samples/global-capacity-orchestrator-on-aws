@@ -3748,6 +3748,29 @@ class TestActionPreflight:
 
         ctx.session.client.assert_not_called()
 
+    @pytest.mark.parametrize("action", ["platform-workloads", "network-posture"])
+    def test_every_cluster_facing_action_needs_the_tunnel_plugin(
+        self, tmp_path: Path, action: str
+    ) -> None:
+        """The kubectl checks tunnel through SSM exactly like inference does."""
+        from scripts.live_release_validation.constants import _CLUSTER_TUNNEL_ACTIONS
+        from scripts.live_release_validation.registry import build_action_registry
+
+        assert _CLUSTER_TUNNEL_ACTIONS <= set(build_action_registry())
+        ctx = self._ctx(tmp_path, selected=("preflight", "topology", action))
+
+        with (
+            self._boundaries(plugin=None),
+            pytest.raises(RuntimeError, match=f"The {action} action\\(s\\) reach the private"),
+        ):
+            actions_preflight.action_preflight(ctx)
+
+        ctx.session.client.assert_not_called()
+        with self._boundaries() as boundaries:
+            result = actions_preflight.action_preflight(ctx)
+        assert result["session_manager_plugin"] == "/usr/local/bin/session-manager-plugin"
+        boundaries["which"].assert_called_once_with("session-manager-plugin")
+
     @pytest.mark.parametrize(
         ("identity", "match"),
         [

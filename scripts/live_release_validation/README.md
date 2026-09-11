@@ -59,6 +59,25 @@ skipped with their configuration source unless the run passes
 the `helm_enabled_overrides` context so the deployed chart set, the applier's
 gated manifests, and the probes all resolve enablement identically.
 
+The two cluster-facing actions share their kubectl plumbing in
+`checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
+kubeconfig the `inference` action uses, and a fail-closed JSON read that
+distinguishes "absent" from "the read broke"). `platform-workloads`
+(`actions/platform_workloads.py`, snapshot logic in
+`checks/platform_workloads.py`) polls every Region's `gco-system` Deployments,
+PodDisruptionBudgets, HPAs, and the Auto Mode network-policy switch against the
+Platform Workload Contract in `lambda/kubectl-applier-simple/manifests/README.md`,
+failing immediately on anything waiting cannot heal (a missing object, a
+restarted container, a wrong budget or autoscaler shape). `network-posture`
+(`actions/network_posture.py`, probe matrix in `checks/network_posture.py`)
+starts the two `manifests/netpol-target-job.yaml` listeners and dials them —
+plus the live inference-monitor's metrics port and an AWS-hosted HTTPS
+endpoint — from `manifests/netpol-probe-job.yaml` clients whose exit code
+(`0` answered, `42` nothing answered) is the verdict; every Job is run-labelled,
+deleted before the action returns, and self-expiring should the harness die
+first. Both run after the workload actions on purpose: a zero restart count and
+an intact posture mean more once the services have carried real traffic.
+
 ## How a run executes
 
 `runner.py` resolves the requested actions (expanding dependencies), then for

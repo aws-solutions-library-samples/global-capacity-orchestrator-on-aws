@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # The network-posture action re-names and re-namespaces this Job per probe
+  # and sets PROBE_URL; the file fixes the pod shape and the verdict script.
+  name: gco-live-netpol-probe-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The client dials one URL and exits; whether the cluster-managed policies
+    # let the connection through is the verdict under test.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: network-posture
+spec:
+  backoffLimit: 0
+  # Safety nets for a harness that dies mid-run: a probe that cannot even
+  # start is killed after 10 minutes and garbage-collected 10 minutes later.
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: network-posture
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PROBE_URL
+              value: __PROBE_URL__
+          # Exit 0 when the server answered — any HTTP status counts, because a
+          # 4xx still proves the connection, TLS handshake, and DNS lookup all
+          # went through. Exit 42 when nothing answered: the policy dropped the
+          # connection (or the destination was unreachable). Any other exit code
+          # means the probe itself broke and is never read as a verdict. The
+          # outer timeout bounds a dropped SYN that BusyBox's -T would otherwise
+          # leave to the kernel's connect retries.
+          command:
+            - sh
+            - -c
+            - |
+              output=$(timeout 30 wget -O /dev/null -T 5 "$PROBE_URL" 2>&1)
+              status=$?
+              if [ "$status" -eq 0 ] || printf '%s\n' "$output" | grep -q 'HTTP/'; then
+                echo NETPOL_REACHABLE
+                exit 0
+              fi
+              printf '%s\n' "$output"
+              echo NETPOL_BLOCKED
+              exit 42
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

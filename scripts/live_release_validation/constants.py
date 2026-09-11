@@ -31,6 +31,12 @@ _RUN_JOB_LABEL = "gco.aws/validation-run"
 _PATH_JOB_LABEL = "gco.aws/validation-path"
 
 
+#: Actions that open the private-endpoint kubectl tunnel and therefore need the
+#: AWS Session Manager plugin on PATH; preflight refuses to deploy without it
+#: whenever one of these is selected.
+_CLUSTER_TUNNEL_ACTIONS = frozenset({"inference", "platform-workloads", "network-posture"})
+
+
 _CENTRAL_MANAGED_BY_LABEL = "gco.io/managed-by"
 
 
