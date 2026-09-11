@@ -9,7 +9,9 @@
 # Run:  bats tests/BATS/test_setup_dev_alias.bats
 # -----------------------------------------------------------------------------
 
-SCRIPT="scripts/setup-dev-alias.sh"
+load 'helpers.sh'
+
+SCRIPT="$REPO_ROOT/scripts/setup-dev-alias.sh"
 
 # Make a fake runtime executable on PATH. It answers `<rt> info` with the exit
 # code requested via $3 (so detection can be steered) and `<rt> build` with the
@@ -591,4 +593,35 @@ SHIM
     run env SHELL=/usr/bin/fish bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
     grep -qF '# >>> gco >>>' "$RCFILE"
+}
+
+# -- Install-time notes --------------------------------------------------------
+@test "install on an SELinux-enforcing host labels the bind mounts and says so" {
+    make_shim "$SHIMDIR" docker 0
+    # selinuxenabled exits 0 only on an enforcing host; fake exactly that.
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$SHIMDIR/selinuxenabled"
+    chmod +x "$SHIMDIR/selinuxenabled"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SELinux           : enforcing host detected; bind mounts carry the ',z' shared label"* ]]
+    grep -q -- ':ro,z' "$RCFILE"
+}
+
+@test "install notes an AWS file-path variable that the mount may not cover" {
+    make_shim "$SHIMDIR" docker 0
+    PATH="$SHIMDIR:$PATH" AWS_CONFIG_FILE="$SHIMDIR/elsewhere/config" \
+        run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Note: you have an AWS file-path variable set."* ]]
+    [[ "$output" == *"only readable in the container when it lives under ~/.aws"* ]]
+}
+
+@test "install on a VM-backed runtime explains the missing socket and the host-side builder" {
+    make_shim "$SHIMDIR" finch 0
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (finch has no host socket to share)"* ]]
+    [[ "$output" == *"Note: finch runs containers inside a VM and exposes no host daemon socket"* ]]
+    [[ "$output" == *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
+    [[ "$output" == *"so the pinned aws-cdk-lib / cdk-nag are used."* ]]
 }
