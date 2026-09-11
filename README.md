@@ -408,7 +408,7 @@ The following estimates are for a single-region deployment with default settings
 | NAT Gateways | 2 (high availability) | ~$65 |
 | Application Load Balancer | 1 (shared by all services) | ~$22 |
 | Global Accelerator | 1 accelerator + data transfer | ~$18 + transfer |
-| Lambda functions | ~8 functions, minimal invocations | < $1 (often $0 within free tier) |
+| Lambda functions | 17 functions, minimal invocations | < $1 (often $0 within free tier) |
 | [Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html) | ~10 state transitions per deploy | < $1 |
 | DynamoDB | On-demand, low throughput | ~$5 |
 | SQS | Standard queue, low message volume | < $1 |
@@ -459,7 +459,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
+- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) (on by default with cluster observability), and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
@@ -493,7 +493,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
 - **MLflow experiment tracking** (on by default with observability): an in-cluster [MLflow](https://mlflow.org/) tracking server per region — run artifacts to S3 via a prefix-scoped IAM role, metadata on EBS, reached with `gco monitoring open --service mlflow` — see [MONITORING.md](docs/MONITORING.md#mlflow-experiment-tracking)
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
-- **Multi-region [monitoring](./docs/MONITORING.md)**: CloudWatch dashboards, alarms, and SNS alerts across all regions
+- **Multi-region monitoring**: the `gco-monitoring` stack's cross-region CloudWatch dashboards, alarms, and SNS alerts, complemented by per-cluster Prometheus/Grafana [cluster observability](./docs/MONITORING.md)
 
 ### ML & Analytics Environment
 
@@ -506,7 +506,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 - **Deterministic verdict cascade** with optional advisory LLM sampling (MCP host or Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)). Sampling shapes only the next strategy; it never moves the verdict.
 - **Budget caps** on iterations and wall clock — the engine terminates cleanly when any cap fires. Cost guardrails live out-of-band via AWS Budgets and Cost Anomaly Detection at the account level.
 - **Scripted strategies** opt-in: an AST-validated Python sandbox with bounded duration and memory limits.
-- **CLI + MCP surface**: ten `gco mission` subcommands (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call) and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
+- **CLI + MCP surface**: the `gco mission` command group (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call, and `gco mission memory` for the session-memory index) with matching MCP tools, plus three `mission://sessions/{id}` resource templates.
 
 ## Documentation
 
@@ -558,7 +558,7 @@ embedded.
 | Take GCO into your own repository | [Forking Guide](docs/FORKING.md) |
 | API client examples (Python, curl, AWS CLI) | [Client Examples](docs/client-examples/README.md) |
 | IAM policy templates | [IAM Policies](docs/iam-policies/README.md) |
-| Presentation slides and demo scripts | [Demo Starter Kit](demo/README.md) |
+| Demo walkthroughs, recordings, and re-record scripts | [Demo Starter Kit](demo/README.md) |
 
 ## Project Structure
 
@@ -587,23 +587,29 @@ embedded.
 │   ├── analytics-cleanup/               # Custom resource that deletes Studio user profiles + EFS access points on stack destroy
 │   ├── analytics-presigned-url/         # Generates presigned SageMaker Studio URLs for Cognito-authenticated users
 │   ├── api-gateway-proxy/               # API Gateway → Global Accelerator proxy
+│   ├── capacity-poller/                 # Scheduled EC2 capacity snapshots for the historical-capacity surface
 │   ├── cross-region-aggregator/         # Cross-region job/health aggregation
 │   ├── drift-detection/                 # Scheduled drift checks against deployed CDK stacks
 │   ├── ga-registration/                 # Global Accelerator endpoint registration
 │   ├── helm-installer/                  # Installs Helm charts (schedulers, cert-manager)
 │   │   └── charts.yaml                  # Helm chart configuration (schedulers, cert-manager)
+│   ├── helm-orchestrator/               # Custom-resource provider that starts and polls the Helm-install state machine
 │   ├── image-lookup/                    # Adopt-or-create custom resource for the project's gco/* ECR repositories
 │   ├── inference-streaming-proxy/       # Node.js response-streaming proxy for global and regional inference routes
 │   ├── kubectl-applier-simple/          # Applies K8s manifests during deployment
 │   │   └── manifests/                   # Kubernetes manifests (nodepools, RBAC, services, storage)
 │   ├── proxy-shared/                    # Shared utilities for proxy Lambdas
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
-│   └── secret-rotation/                 # Daily secret rotation
+│   ├── secret-rotation/                 # Daily secret rotation
+│   ├── tls-certificate-manager/         # Private TLS root, regional ACM leaves, and trust publication
+│   ├── tls-shared/                      # Strict private-root TLS client shared by the proxy Lambdas
+│   ├── traffic-dial-controller/         # Health-driven Global Accelerator traffic dials
+│   └── vector-ingest/                   # S3-triggered chunking + Bedrock embeddings for the vector store
 │
 ├── gco_mcp/                             # MCP server for LLM interaction (139 tools default, up to 196 with feature flags)
 ├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
-├── tests/                               # PyTest + BATS test suites (counts tracked via badges)
+├── tests/                               # PyTest + BATS test suites
 └── wiki/                                # GitHub Pages wiki sources (published at aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws)
 ```
 
@@ -627,7 +633,7 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Security
 
-GCO implements defense-in-depth across five layers (see [Security Model](#security-model) above for the diagram):
+GCO implements defense in depth across the six controls in the [Security Model](#security-model) above:
 
 **Authentication and Authorization:**
 
@@ -662,7 +668,7 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
   - [HIPAA Security Rule mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#hipaa-security)
   - [NIST 800-53 Rev 5 mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#nist-800-53-rev-5)
   - [PCI DSS 3.2.1 mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#pci-dss-321)
-  - [Serverless best practices](http://github.com/cdklabs/cdk-nag/blob/main/RULES.md#serverless)
+  - [Serverless best practices](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#serverless)
 - Findings are either fixed or explicitly acknowledged with justification in [`gco/stacks/nag_suppressions.py`](./gco/stacks/nag_suppressions.py).
 - These automated checks are not certifications and do not by themselves establish compliance.
 
