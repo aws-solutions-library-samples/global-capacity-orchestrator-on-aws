@@ -536,11 +536,8 @@ directory = "htmlcov"
 # runs end to end. That is deliberately a floor to build on: it locks in what
 # is covered today, and every follow-up removes entries from this list.
 ratchet = [
-    ".github/scripts/autopilot_claude_code_boot_probe.sh",
-    ".github/scripts/autopilot_codex_boot_probe.sh",
     ".github/scripts/dependency-scan.sh",
     ".github/scripts/lib_dependency_scan.sh",
-    "demo/record_autopilot.sh",
 ]
 
 [tool.bandit]
