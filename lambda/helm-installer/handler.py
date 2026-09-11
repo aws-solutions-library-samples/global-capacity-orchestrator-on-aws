@@ -42,8 +42,8 @@ import urllib3
 import yaml
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-11T00:12:12Z
+# Generated from Git commit: bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png``)
