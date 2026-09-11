@@ -46,7 +46,11 @@ Delete.
   `PhysicalResourceId` and exposes the started `ExecutionArn` as a resource
   attribute (`Data.ExecutionArn`) purely for observability — it does not gate
   resource completion.
-- **Delete**: no-op. Charts are torn down with the cluster.
+- **Delete**: no-op for this resource. Helm releases are uninstalled by the
+  separate, synchronous `HelmTeardownProvider`
+  (`lambda/helm-installer/teardown_provider.py`), which waits on a
+  reverse-order teardown state machine so releases that own webhooks and
+  load balancers are gone before the cluster is.
 
 There is no `isComplete` handler: the resource is considered created as soon as
 the execution has been started, so a slow or failing chart can never block (or

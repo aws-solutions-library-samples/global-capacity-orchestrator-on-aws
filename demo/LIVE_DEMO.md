@@ -21,7 +21,7 @@ Automated feature demonstration for **Global Capacity Orchestrator (GCO)** — *
 
 `live_demo.sh` is a single script designed to be run in a visible terminal during a live presentation. It walks through GCO's core capabilities automatically, with clear narration, pauses, and visually formatted output so the audience can follow along.
 
-The script detects which optional features are enabled (schedulers, FSx, Valkey, Aurora pgvector) and adapts its flow accordingly — it only demos what's actually deployed. See [Feature detection](#feature-detection) for how that decision is made.
+The script detects which optional features are enabled (schedulers, FSx, Valkey, Aurora pgvector, the vector store) and adapts its flow accordingly — it only demos what's actually deployed. See [Feature detection](#feature-detection) for how that decision is made.
 
 ---
 

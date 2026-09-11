@@ -45,13 +45,29 @@ Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `ku
 
 ## Charts (from `charts.yaml`)
 
-| Chart | Namespace | Default |
-|-------|-----------|---------|
-| KEDA | `keda` | Enabled |
-| AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) Device Plugin | `kube-system` | Enabled |
-| Volcano | `volcano-system` | Enabled |
-| KubeRay Operator | `ray-system` | Enabled |
-| Kueue | `kueue-system` | Enabled (OCI) |
+`charts.yaml` is the source of truth for chart identity, version, namespace and
+values; the `enabled` key in it is only a default. Operators toggle charts under
+`helm.<key>.enabled` in `cdk.json` (EFA and Neuron device plugins, Volcano,
+KubeRay, Kubeflow Trainer, cert-manager, Slurm, YuniKorn, Kueue), while
+kube-prometheus-stack, OpenCost and MLflow follow `cluster_observability` and
+`cost_monitoring`. In install order:
+
+| Chart | Namespace | Shipped default |
+|-------|-----------|-----------------|
+| AWS Load Balancer Controller | `kube-system` | Always on (creates the shared ALB from the Gateway API resources) |
+| KEDA | `keda` | Always on (no toggle; the job autoscaler and the inference monitor depend on it) |
+| AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) Device Plugin | `kube-system` | On via `helm.aws_efa_device_plugin` |
+| AWS Neuron Device Plugin | `kube-system` | On via `helm.aws_neuron_device_plugin` (OCI) |
+| Volcano | `volcano-system` | On via `helm.volcano` |
+| KubeRay Operator | `ray-system` | On via `helm.kuberay` |
+| cert-manager | `cert-manager` | On via `helm.cert_manager` |
+| Slinky Slurm operator + cluster | `slurm-operator`, `gco-jobs` | Off; opt in via `helm.slurm` (OCI) |
+| YuniKorn | `yunikorn` | Off; opt in via `helm.yunikorn` |
+| kube-prometheus-stack | `monitoring` | Follows `cluster_observability.enabled` |
+| OpenCost | `monitoring` | Follows `cost_monitoring.enabled` (needs observability) |
+| MLflow | `monitoring` | Follows `cluster_observability.mlflow.enabled` (OCI) |
+| Kubeflow Trainer | `kubeflow-trainer` | On via `helm.kubeflow_trainer` (OCI) |
+| Kueue | `kueue-system` | On via `helm.kueue` (OCI); last, after its dependencies |
 
 ## CloudFormation Properties
 
