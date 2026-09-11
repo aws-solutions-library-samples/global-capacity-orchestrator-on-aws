@@ -36,7 +36,7 @@ Three layers, none of which mask real failures: each configured mirror is health
 | `attempts` | `3` | Total update+install attempts. Set to `1` to disable retries. |
 | `delay` | `15` | Seconds to sleep between attempts. |
 
-**Used by:** `unit-tests.yml` (`unit:bats:shell`), `deps-scan.yml` (system tooling), and `integration-tests.yml` (`integration:dev-alias:podman`, `integration:dev-alias:finch`) — every job that installs Ubuntu packages on a hosted runner. Steps that add a third-party APT repo first (the Finch job) keep that setup in their own step; this action's `update` then indexes the new source before installing from it.
+**Used by:** `unit-tests.yml` (`unit:bats:shell`), `inference-streaming-proxy.yml` (`unit:node:inference-streaming-proxy`, for `lcov`), `deps-scan.yml` (system tooling), and `integration-tests.yml` (`integration:dev-alias:podman`, `integration:dev-alias:finch`) — every job that installs Ubuntu packages on a hosted runner. Steps that add a third-party APT repo first (the Finch job) keep that setup in their own step; this action's `update` then indexes the new source before installing from it.
 
 **Usage:**
 
@@ -93,7 +93,7 @@ source/full-build completion manifest, and rollback-safe rename publication:
 - `lambda/inference-streaming-proxy-build/` — Node.js 24 handler and production AWS SDK clients from the committed lockfile, with lifecycle scripts disabled
 - `lambda/helm-installer-build/` — complete deployable helm-installer Docker context
 
-**Used by:** `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, `security:kics:iac`
+**Used by:** `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:cdk:project-name-scoping`, `unit:pytest:core` (`unit-tests.yml`), `security:kics:iac` (`security.yml`), and `floci:integration`, `floci:e2e:release-validate` (`floci-tests.yml`)
 
 **Prerequisite:** The calling job must set up Python (via
 `actions/setup-python`), install this project's Python package, and set up
@@ -109,7 +109,7 @@ steps:
       node-version-file: ".nvmrc"
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
-      python-version: "3.14"
+      python-version-file: ".python-version"
   - run: pip install -e ".[cdk]"
   - uses: ./.github/actions/build-lambda-package
 ```
@@ -152,7 +152,7 @@ Pulls one or more pinned container images with a retry loop, so a following `doc
 | `attempts` | `3` | Total attempts per image. Set to `1` to disable retries. |
 | `delay` | `15` | Seconds to sleep between attempts. |
 
-**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`), `security.yml` (`security:trufflehog:secrets`), `integration-tests.yml` (`integration:docker:dev-container` — DinD probe base image), and `mooncake-image.yml` — every job that runs or builds from a Docker Hub image it did not itself build.
+**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`), `security.yml` (`security:trufflehog:secrets`, `security:gitleaks:secrets`, `security:checkov:iac`, `security:kics:iac`), `integration-tests.yml` (`integration:docker:dev-container` — DinD probe base image; `integration:kind:cluster-e2e` and `integration:kind:examples-smoke` — kind node image), and `mooncake-image.yml` — every job that runs or builds from a Docker Hub image it did not itself build.
 
 **Usage:**
 
@@ -184,7 +184,7 @@ This action removes large preinstalled toolchains the build never uses (Android 
 - Leaves `/opt/hostedtoolcache` untouched — `actions/setup-python` serves the job's interpreter from there (e.g. `/opt/hostedtoolcache/Python/3.14.x`), so removing it would break the run.
 - Every removal is best-effort (`|| true`), so a missing directory on a future runner-image revision can never fail the job.
 
-**Used by:** `unit:pytest:core`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`. Add it as the first step after `actions/checkout` (before the Python/Node setup and install steps) so the headroom exists for the whole job.
+**Used by:** `unit:pytest:core`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:cdk:project-name-scoping` (`unit-tests.yml`), `integration:kind:cluster-e2e`, `integration:kind:examples-smoke` (`integration-tests.yml`), and `integration:docker:mooncake-image` (`mooncake-image.yml`). Add it as the first step after `actions/checkout` (before the Python/Node setup and install steps) so the headroom exists for the whole job.
 
 **Usage:**
 
@@ -194,7 +194,7 @@ steps:
   - uses: ./.github/actions/free-disk-space
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
-      python-version: "3.14"
+      python-version-file: ".python-version"
 ```
 
 ### `install-trivy`
@@ -215,7 +215,7 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
 | `version` | `v0.74.0` | Trivy version tag. **The default is THE Trivy pin for this repository** — callers pass no version, so bumping the default bumps every workflow at once. Tracked for drift by dependency-scan.sh via `extract_install_trivy_pin`. |
 | `github-token` | `""` | Token forwarded to `setup-trivy` for the install-script checkout (authenticated API limit vs anonymous). Pass `${{ github.token }}`. |
 
-**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml` — all inherit the pin from the `version` default. `setup-trivy` is pinned to its `v0.2.6` release tag in `action.yml`; bump that tag there after reviewing a newer release.
+**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml` — all inherit the pin from the `version` default. `setup-trivy` itself is SHA-pinned in `action.yml` with its release tag in the trailing comment (`verify_action_pins.py` checks the two agree); bump it there after reviewing a newer release.
 
 **Usage:**
 
@@ -270,7 +270,7 @@ Behaviour matches `actions/upload-artifact` for every successful path; the only 
 | `overwrite` | `false` | Whether to overwrite an existing artifact with the same name |
 | `include-hidden-files` | `false` | Whether to include hidden files in the upload |
 
-**Used by:** every workflow that uploads artifacts — `unit-tests.yml`, `integration-tests.yml`, `security.yml`, `cve-scan.yml`. Drop-in replacement for `actions/upload-artifact`.
+**Used by:** every workflow that uploads artifacts — `unit-tests.yml`, `inference-streaming-proxy.yml`, `integration-tests.yml`, `floci-tests.yml`, `security.yml`, `mooncake-image.yml`, `cve-scan.yml`. Drop-in replacement for `actions/upload-artifact`.
 
 **Usage:**
 

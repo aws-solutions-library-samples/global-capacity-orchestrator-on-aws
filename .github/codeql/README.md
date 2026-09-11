@@ -1,10 +1,12 @@
 # CodeQL Configuration
 
-Configuration for CodeQL Code Scanning. Run via the
-`security:codeql:python-code-analysis` job in
-[`workflows/security.yml`](../workflows/security.yml), which uses the
-`github/codeql-action/init` action's `config-file:` input to load this
-config from disk (Advanced Setup).
+Configuration for CodeQL Code Scanning. Loaded by both the
+`security:codeql:python-code-analysis` and
+`security:codeql:javascript-code-analysis` jobs in
+[`workflows/security.yml`](../workflows/security.yml) through the
+`github/codeql-action/init` action's `config-file:` input (Advanced Setup),
+so the Python and JavaScript scans share one reviewable scope and one set
+of query filters.
 
 ## Table of Contents
 
@@ -22,7 +24,9 @@ config from disk (Advanced Setup).
 
 ## What Gets Scanned
 
-Only hand-authored Python runtime code:
+Only hand-authored runtime code — Python for the `gco/`, `cli/`, `gco_mcp/`
+and `scripts/` packages, and both Python and JavaScript under `lambda/` (the
+Node.js inference streaming proxy lives there):
 
 - `gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`
 
@@ -41,7 +45,6 @@ autobuilder raises `NotADirectoryError` on single-file `paths:` entries.
 |------|--------|
 | `py/clear-text-logging-sensitive-data` | False positives on logging registry names, secret ARNs, and one-shot [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) temp passwords (not secret values) |
 | `py/incomplete-url-substring-sanitization` | URL access control is handled by [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) and [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) allowlists, not substring checks |
-| `py/weak-sensitive-data-hashing` | SRP protocol message digest in `cli/analytics_user_mgmt.py::_hash_sha256` — RFC 5054 mandates SHA-256 as the primitive; not a password storage hash (Cognito holds the SRP verifier server-side) |
 
 Each exclusion is documented inline in `codeql-config.yml` with the
 specific call sites and rationale.
@@ -51,4 +54,4 @@ specific call sites and rationale.
 - To scan additional directories: add them to the `paths:` list (directories only — single files crash the Python autobuilder)
 - To exclude a new rule: add an entry to `query-filters:` with `exclude: id:` and document which call sites are covered and why
 - To add a query pack: add it to the `queries:` list
-- To swap this job for GitHub's Default Setup: comment out `security-codeql-python-code-analysis` in `workflows/security.yml` and re-enable Default Setup in repo Settings → Code security → CodeQL. The config file has no effect under Default Setup.
+- To swap these jobs for GitHub's Default Setup: remove the two `security:codeql:*` jobs from `workflows/security.yml` and re-enable Default Setup in repo Settings → Code security → CodeQL. The config file has no effect under Default Setup.

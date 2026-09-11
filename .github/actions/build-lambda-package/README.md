@@ -45,7 +45,7 @@ then performs locked production installs.
     node-version-file: ".nvmrc"
 - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
   with:
-    python-version: "3.14"
+    python-version-file: ".python-version"
 - run: pip install -e ".[cdk]"
 - uses: ./.github/actions/build-lambda-package
 ```

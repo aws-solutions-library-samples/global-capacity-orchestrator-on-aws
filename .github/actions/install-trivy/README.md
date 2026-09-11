@@ -1,7 +1,9 @@
 # Install Trivy Action
 
-This composite action installs and verifies a caller-selected Trivy release
-through the pinned `aquasecurity/setup-trivy` installer.
+This composite action installs and verifies the repository's pinned Trivy
+release through the pinned `aquasecurity/setup-trivy` installer. The `version`
+default in `action.yml` is *the* Trivy pin: callers inherit it rather than
+carrying copies.
 
 ## Table of Contents
 
@@ -14,7 +16,7 @@ through the pinned `aquasecurity/setup-trivy` installer.
 
 | Input | Required | Default | Purpose |
 |---|---:|---|---|
-| `version` | Yes | — | Trivy release tag to install |
+| `version` | No | the repository pin in `action.yml` | Trivy release tag to install; override only for a one-off experiment |
 | `github-token` | No | `""` | Token used by the upstream installer |
 
 ## Behavior
