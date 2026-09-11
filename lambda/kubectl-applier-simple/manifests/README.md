@@ -74,7 +74,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 |------|----------|
 | `00-namespaces.yaml` | `gco-system`, `gco-jobs`, `gco-inference` namespaces |
 | `01-serviceaccounts.yaml` | `gco-service-account` in `gco-jobs` and `gco-inference` ([IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) role-ARN annotation; token automount disabled) |
-| `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege) |
+| `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege); the two pre-created health-monitor election `Lease`s (`gco-health-monitor-alb-sync`, `gco-health-monitor-webhooks`) so the Role grants `get`/`update` on named objects instead of `create` on every Lease |
 | `03-network-policies.yaml` | Default-deny ingress + allow rules for [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html), DNS, HTTPS egress |
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 | `05-priority-classes.yaml` | `gco-platform-critical` `PriorityClass` (value 1000000) — referenced by every platform-service pod spec (30–34 + the post-Helm SQS consumer) so control-plane pods preempt default-priority user workloads under node pressure instead of being starved by them |

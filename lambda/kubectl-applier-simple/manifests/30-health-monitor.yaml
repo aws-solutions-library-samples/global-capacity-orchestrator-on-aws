@@ -116,6 +116,12 @@ spec:
               value: "gco-health-monitor-alb-sync"
             - name: ALB_SYNC_LEASE_DURATION
               value: "90"
+            # Webhook deliverer election: one replica delivers, the other stands
+            # by (gco.services.webhook_dispatcher). Same pre-created Lease pattern.
+            - name: WEBHOOK_LEASE_NAME
+              value: "gco-health-monitor-webhooks"
+            - name: WEBHOOK_LEASE_DURATION
+              value: "90"
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: DYNAMODB_REGION

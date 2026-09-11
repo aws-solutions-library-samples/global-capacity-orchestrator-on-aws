@@ -1532,6 +1532,15 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 3. Sends HTTP POST requests to all matching webhook URLs
 4. Retries failed deliveries with exponential backoff (up to 3 attempts)
 
+The dispatcher runs inside the health-monitor, which has two replicas for
+availability. Only one of them delivers at a time: the replicas elect a
+deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
+`gco-system`, the standby re-checks the Lease every few seconds, and a replica
+that wins it re-seeds its view of current job states before delivering. Each
+transition is therefore delivered at most once; during a failover (bounded by
+the 90-second lease duration) transitions may be dropped, never duplicated, so
+webhook consumers see one POST per event, not one per replica.
+
 ### Webhook Payload Format
 
 All webhook deliveries use the following JSON payload format:

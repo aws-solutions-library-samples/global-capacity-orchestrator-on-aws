@@ -13,6 +13,17 @@ Key Features:
 - Implements retry logic with exponential backoff for failed deliveries
 - Publishes delivery metrics to CloudWatch
 
+Replica model: the health-monitor runs two replicas for availability, but a
+webhook must fire once per job transition, not once per replica. When a
+``LeaseIdentity`` is configured the dispatcher elects a single deliverer
+through the pre-created ``gco-health-monitor-webhooks`` Lease (see
+``gco.services.leader_lease``): only the holder watches and delivers, a
+standby re-checks the Lease every few seconds, and a replica that becomes
+leader re-seeds its job-state cache first so transitions the previous leader
+already delivered are not fired again. Delivery is therefore at-most-once
+across a failover; transitions inside the takeover window (bounded by the
+lease duration) are dropped rather than duplicated.
+
 Webhook Payload Format:
     {
         "event": "job.completed",
@@ -68,6 +79,11 @@ from kubernetes.client.models import V1Job
 from kubernetes.client.rest import ApiException
 from kubernetes.watch import Watch
 
+from gco.services.leader_lease import (
+    LeaseIdentity,
+    lease_duration_from_env,
+    try_acquire_lease,
+)
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -280,6 +296,8 @@ class WebhookDispatcher:
         retry_delay: int = 5,
         namespaces: list[str] | None = None,
         allowed_domains: list[str] | None = None,
+        leader_lease: LeaseIdentity | None = None,
+        standby_poll_seconds: float = 5.0,
     ):
         """Initialize the webhook dispatcher.
 
@@ -292,6 +310,9 @@ class WebhookDispatcher:
             retry_delay: Initial retry delay in seconds (doubles each retry)
             namespaces: Namespaces to watch (None = all non-system namespaces)
             allowed_domains: Optional list of allowed webhook domains for SSRF prevention
+            leader_lease: Lease to hold before watching and delivering; ``None``
+                runs single-replica mode (standalone use and unit tests)
+            standby_poll_seconds: how often a non-leader re-checks the Lease
         """
         self.cluster_id = cluster_id
         self.region = region
@@ -315,9 +336,15 @@ class WebhookDispatcher:
                 raise
 
         self.batch_v1 = client.BatchV1Api()
+        self.coordination_v1 = client.CoordinationV1Api()
 
         # Timeout for Kubernetes API calls (seconds)
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+
+        # Leader election (None = this process is the only deliverer)
+        self._leader_lease = leader_lease
+        self._standby_poll_seconds = standby_poll_seconds
+        self._is_leader = False
 
         # State tracking
         self._job_state_cache = JobStateCache()
@@ -713,12 +740,44 @@ class WebhookDispatcher:
 
         return events
 
+    async def _acquire_leadership(self) -> bool:
+        """Hold (or keep holding) the deliverer Lease; ``True`` means deliver.
+
+        Off the event loop because the Lease read/replace is a blocking
+        Kubernetes round trip. Winning the Lease re-seeds the job-state cache:
+        the new leader must not replay transitions the old one already
+        delivered, and anything that happened while nobody held the Lease is
+        deliberately dropped rather than duplicated.
+        """
+        if self._leader_lease is None:
+            return True
+        held = await asyncio.to_thread(
+            try_acquire_lease,
+            self.coordination_v1,
+            self._leader_lease,
+            label="webhook",
+        )
+        if held and not self._is_leader:
+            logger.info(
+                "Webhook dispatcher %s became the deliverer; re-seeding job state cache",
+                self._leader_lease.holder,
+            )
+            await self._initialize_job_cache()
+        elif not held and self._is_leader:
+            logger.warning("Webhook dispatcher lost the deliverer Lease; standing by")
+        self._is_leader = held
+        return held
+
     async def _watch_jobs(self) -> None:
         """Watch Kubernetes jobs for status changes using thread executor."""
         logger.info(f"Starting job watcher for namespaces: {self.namespaces}")
 
         while self._running:
             try:
+                if not await self._acquire_leadership():
+                    await asyncio.sleep(self._standby_poll_seconds)
+                    continue
+
                 # Run the synchronous watch in a thread executor
                 events = await asyncio.to_thread(self._sync_watch_jobs)
 
@@ -749,8 +808,11 @@ class WebhookDispatcher:
         self._running = True
         logger.info(f"Starting webhook dispatcher for cluster {self.cluster_id}")
 
-        # Initialize job state cache with current jobs
-        await self._initialize_job_cache()
+        if self._leader_lease is None:
+            # Single deliverer: seed the job state cache with current jobs now.
+            # With a Lease the cache is seeded at the moment leadership is won,
+            # so a standby never fires transitions the leader already delivered.
+            await self._initialize_job_cache()
 
         # Start the watch task
         self._watch_task = asyncio.create_task(self._watch_jobs())
@@ -795,6 +857,7 @@ class WebhookDispatcher:
             "deliveries_failed": self._deliveries_failed,
             "cached_jobs": len(self._job_state_cache.job_states),
             "running": self._running,
+            "leader": self._leader_lease is None or self._is_leader,
         }
 
 
@@ -814,6 +877,24 @@ def create_webhook_dispatcher_from_env() -> WebhookDispatcher:
     allowed_domains_str = os.getenv("WEBHOOK_ALLOWED_DOMAINS", "")
     allowed_domains = [d.strip() for d in allowed_domains_str.split(",") if d.strip()]
 
+    # Deliverer election. The Lease is pre-created by 02-rbac.yaml; an empty
+    # WEBHOOK_LEASE_NAME opts out (single-replica or standalone runs).
+    lease_name = os.getenv("WEBHOOK_LEASE_NAME", "gco-health-monitor-webhooks").strip()
+    leader_lease = None
+    if lease_name:
+        leader_lease = LeaseIdentity(
+            name=lease_name,
+            namespace=os.getenv("POD_NAMESPACE", "gco-system"),
+            holder=(
+                os.getenv("POD_NAME")
+                or os.getenv("HOSTNAME")
+                or f"webhook-dispatcher-{os.getpid()}"
+            ),
+            duration_seconds=lease_duration_from_env(
+                os.getenv("WEBHOOK_LEASE_DURATION", "90"), label="WEBHOOK_LEASE_DURATION"
+            ),
+        )
+
     return WebhookDispatcher(
         cluster_id=cluster_id,
         region=region,
@@ -822,6 +903,7 @@ def create_webhook_dispatcher_from_env() -> WebhookDispatcher:
         retry_delay=retry_delay,
         namespaces=namespaces,
         allowed_domains=allowed_domains,
+        leader_lease=leader_lease,
     )
 
 

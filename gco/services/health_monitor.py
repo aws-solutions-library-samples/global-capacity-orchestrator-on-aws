@@ -25,7 +25,7 @@ Usage:
 import asyncio
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 import boto3
@@ -35,6 +35,12 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
+from gco.services.leader_lease import (
+    LEASE_MIN_DURATION_SECONDS,
+    LEASE_REQUEST_TIMEOUT,
+    LeaseIdentity,
+    try_acquire_lease,
+)
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -52,8 +58,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ALB_SYNC_LEASE_MIN_SECONDS = 60
-_ALB_SYNC_K8S_TIMEOUT = (3, 10)
+# Kept as module names for callers/tests that import them; the values live in
+# gco.services.leader_lease so every election shares one floor and timeout.
+_ALB_SYNC_LEASE_MIN_SECONDS = LEASE_MIN_DURATION_SECONDS
+_ALB_SYNC_K8S_TIMEOUT = LEASE_REQUEST_TIMEOUT
 _ALB_SYNC_SSM_CONFIG = Config(
     connect_timeout=3,
     read_timeout=10,
@@ -563,78 +571,23 @@ class HealthMonitor:
     def _try_acquire_alb_sync_lease(self) -> bool:
         """Acquire or renew the single-writer Lease for ALB self-healing.
 
-        ``replace_namespaced_lease`` carries the resourceVersion returned by
-        the read, so Kubernetes rejects a racing writer with HTTP 409. API or
-        RBAC failures return ``False``: losing self-healing is safer than
-        allowing two replicas to mutate the cross-region SSM parameter.
+        Shared election rules live in :mod:`gco.services.leader_lease`:
+        optimistic ``replace`` (a racing writer gets HTTP 409), expired or
+        timestamp-less holders may be replaced, and every API or RBAC failure
+        returns ``False`` — losing self-healing is safer than allowing two
+        replicas to mutate the cross-region SSM parameter.
         """
-        observed_at = datetime.now(UTC)
-
-        try:
-            lease = self.coordination_v1.read_namespaced_lease(
-                self._alb_sync_lease_name,
-                self._alb_sync_lease_namespace,
-                _request_timeout=_ALB_SYNC_K8S_TIMEOUT,
-            )
-            spec = lease.spec
-            current_holder = spec.holder_identity
-            renew_time = spec.renew_time
-            lease_duration = spec.lease_duration_seconds or self._alb_sync_lease_duration
-
-            expired = False
-            if current_holder:
-                if renew_time is None:
-                    # A holder without a renewal timestamp cannot prove it still
-                    # owns the lease. Treat it as expired so the named Lease
-                    # cannot remain wedged indefinitely.
-                    expired = True
-                else:
-                    if renew_time.tzinfo is None:
-                        renew_time = renew_time.replace(tzinfo=UTC)
-                    expired = (observed_at - renew_time).total_seconds() >= lease_duration
-
-            if current_holder not in (None, "", self._alb_sync_holder) and not expired:
-                return False
-
-            acquiring = current_holder != self._alb_sync_holder
-            renewed_at = datetime.now(UTC)
-            if acquiring:
-                spec.holder_identity = self._alb_sync_holder
-                spec.acquire_time = renewed_at
-                spec.lease_transitions = (spec.lease_transitions or 0) + 1
-            spec.lease_duration_seconds = self._alb_sync_lease_duration
-            spec.renew_time = renewed_at
-
-            try:
-                self.coordination_v1.replace_namespaced_lease(
-                    self._alb_sync_lease_name,
-                    self._alb_sync_lease_namespace,
-                    lease,
-                    _request_timeout=_ALB_SYNC_K8S_TIMEOUT,
-                )
-            except ApiException as exc:
-                if exc.status == 409:
-                    logger.debug("Lost ALB-sync Lease race to another health-monitor replica")
-                    return False
-                raise
-
-            if acquiring:
-                logger.info("Acquired ALB-sync leader Lease as %s", self._alb_sync_holder)
-            return True
-
-        except ApiException as exc:
-            if exc.status == 404:
-                logger.warning(
-                    "ALB-sync Lease %s/%s is missing; self-healing is disabled until it is restored",
-                    self._alb_sync_lease_namespace,
-                    self._alb_sync_lease_name,
-                )
-            else:
-                logger.warning("ALB-sync Lease check failed (non-fatal): %s", exc)
-            return False
-        except Exception as exc:
-            logger.warning("ALB-sync Lease check failed (non-fatal): %s", exc)
-            return False
+        return try_acquire_lease(
+            self.coordination_v1,
+            LeaseIdentity(
+                name=self._alb_sync_lease_name,
+                namespace=self._alb_sync_lease_namespace,
+                holder=self._alb_sync_holder,
+                duration_seconds=self._alb_sync_lease_duration,
+            ),
+            label="ALB-sync",
+            request_timeout=_ALB_SYNC_K8S_TIMEOUT,
+        )
 
     async def sync_alb_registration(self) -> None:
         """Run ALB self-healing without blocking FastAPI's event loop."""

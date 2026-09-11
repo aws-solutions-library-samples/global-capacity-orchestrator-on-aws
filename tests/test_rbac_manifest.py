@@ -127,13 +127,19 @@ class TestHealthMonitorRole:
 
         lease_rule = rules[(("coordination.k8s.io",), ("leases",))]
         assert set(lease_rule["verbs"]) == {"get", "update"}
-        assert lease_rule["resourceNames"] == ["gco-health-monitor-alb-sync"]
+        # One named Lease per elected duty: ALB-hostname sync and webhook
+        # delivery. Both are pre-created below so no `create` grant is needed.
+        assert lease_rule["resourceNames"] == [
+            "gco-health-monitor-alb-sync",
+            "gco-health-monitor-webhooks",
+        ]
         assert "create" not in lease_rule["verbs"]
 
-        lease = _find_doc(rbac_docs, "Lease", "gco-health-monitor-alb-sync")
-        assert lease is not None
-        assert lease["metadata"]["namespace"] == "gco-system"
-        assert lease["spec"]["leaseDurationSeconds"] == 90
+        for lease_name in lease_rule["resourceNames"]:
+            lease = _find_doc(rbac_docs, "Lease", lease_name)
+            assert lease is not None, lease_name
+            assert lease["metadata"]["namespace"] == "gco-system"
+            assert lease["spec"]["leaseDurationSeconds"] == 90
 
         binding = _find_doc(rbac_docs, "RoleBinding", "gco-health-monitor-self-healing")
         assert binding["roleRef"]["name"] == "gco-health-monitor-self-healing"

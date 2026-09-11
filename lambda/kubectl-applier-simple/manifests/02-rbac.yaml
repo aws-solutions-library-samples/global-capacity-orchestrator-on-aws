@@ -111,14 +111,27 @@ subjects:
     namespace: gco-system
 
 # ─── Health Monitor: exact self-healing resources ───────────────────
-# Pre-create the election Lease so the service account needs no broad
-# `create leases` permission. Only the named Lease and platform Gateway are
-# readable by the self-healing path; all replicas keep serving health endpoints.
+# Pre-create the election Leases so the service account needs no broad
+# `create leases` permission. Only the named Leases and platform Gateway are
+# readable by the elected paths; all replicas keep serving health endpoints.
+# Two duties, two Leases: the ALB-hostname write to SSM and webhook delivery
+# each run in exactly one of the two health-monitor replicas.
 ---
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
   name: gco-health-monitor-alb-sync
+  namespace: gco-system
+  labels:
+    app: health-monitor
+    project: gco
+spec:
+  leaseDurationSeconds: 90
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: gco-health-monitor-webhooks
   namespace: gco-system
   labels:
     app: health-monitor
@@ -141,7 +154,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    resourceNames: ["gco-health-monitor-alb-sync"]
+    resourceNames: ["gco-health-monitor-alb-sync", "gco-health-monitor-webhooks"]
     verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
