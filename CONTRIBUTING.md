@@ -52,27 +52,24 @@ The container itself ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and e
 
 ### Using the Dev Container (Recommended)
 
-The dev container includes all dependencies pre-installed (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI). This avoids "works on my machine" issues and is the supported path for everything from running tests to deploying stacks.
+The dev container includes all dependencies pre-installed (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI). This avoids "works on my machine" issues and is the supported path for everything from running tests to deploying stacks. [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds the image and installs a `gco` shell function that runs the CLI inside it against your checkout — the [Quick Start](QUICKSTART.md#step-1-clone-and-build-the-dev-container) walks through it, including the host-socket pass-through that `gco stacks deploy-all` needs and the Colima/Finch socket notes:
+
+```bash
+./scripts/setup-dev-alias.sh   # builds gco-dev from Dockerfile.dev + installs the `gco` shell function
+source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
+gco stacks list
+```
 
 The image is **multi-arch** — Apple Silicon (`linux/arm64`), Intel/x86_64 hosts, and CI all build natively from the same `Dockerfile.dev` because every baked-in binary (kubectl, AWS CLI v2, Docker static client) is selected by `$TARGETARCH`. Native builds on Apple Silicon take ~2 min; emulated cross-builds (e.g. `--platform linux/amd64` on an arm64 host) take ~7-8 min and are only needed when you specifically want to test the amd64 image.
 
+The function runs the `gco` CLI only. For anything else inside the container — the test-suite, `cdk synth`, an interactive shell — run the image directly:
+
 ```bash
-# Build the container (cached on subsequent runs; ~2 min the first time)
-docker build -f Dockerfile.dev -t gco-dev .
-
-# Run an interactive shell
-docker run -it --rm \
-  -v ~/.aws:/root/.aws:ro \
-  -v $(pwd):/workspace \
-  -w /workspace \
-  gco-dev
-
-# Or run a single command
+# Run tests
 docker run --rm \
-  -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
   -w /workspace \
-  gco-dev gco stacks list
+  gco-dev pytest tests/ -v
 
 # Run CDK commands
 docker run --rm \
@@ -82,59 +79,12 @@ docker run --rm \
   -e CDK_DOCKER=docker \
   gco-dev cdk synth
 
-# Run tests
-docker run --rm \
-  -v $(pwd):/workspace \
-  -w /workspace \
-  gco-dev pytest tests/ -v
-```
-
-**Running `gco stacks deploy-all` from the container.** `cdk deploy`
-invokes Docker to bundle Lambda assets. The dev container ships only the
-Docker CLI (no daemon), so mount the host Docker socket to give it a
-transport to your host daemon:
-
-```bash
-docker run --rm -it \
+# Interactive shell
+docker run -it --rm \
   -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
-  -v /var/run/docker.sock:/var/run/docker.sock \
   -w /workspace \
-  gco-dev gco stacks deploy-all -y
-```
-
-This pattern works on Linux, Docker Desktop for macOS and Windows, and
-Colima for macOS. On Colima the host socket lives at
-`~/.colima/default/docker.sock` (older Colima) or `~/.colima/docker.sock`
-(newer Colima) — adjust the left side of the `-v` flag accordingly or
-symlink the Colima socket to `/var/run/docker.sock`. See
-<https://github.com/abiosoft/colima> for the current default. This is
-host-socket pass-through, not true Docker-in-Docker — do not add
-`--privileged`. The trade-off is that anyone inside the container has
-root-equivalent access to the host Docker daemon through the mounted
-socket, so only use this on trusted hosts.
-
-**Tip**: Create a shell function for convenience. Using a function (rather than an alias that hardcodes `$(pwd)`) means it auto-resolves your GCO clone via `git rev-parse`, so `gco stacks *` and other source-tree-dependent commands work regardless of which subdirectory you call it from. Set `GCO_HOME` in your shell to use it from anywhere on disk:
-
-```bash
-gco-dev() {
-    local project_root="${GCO_HOME:-$(git rev-parse --show-toplevel 2>/dev/null)}"
-    # Check for both Dockerfile.dev *and* the gco/ namespace package
-    # so we don't accidentally bind-mount an unrelated repo that
-    # happens to have a Dockerfile.dev at its root.
-    if [[ -z "$project_root" \
-        || ! -f "$project_root/Dockerfile.dev" \
-        || ! -d "$project_root/gco" ]]; then
-        echo "gco-dev: not inside the GCO repo. cd into your clone, or set GCO_HOME." >&2
-        return 1
-    fi
-    docker run --rm \
-        -v ~/.aws:/root/.aws:ro \
-        -v "$project_root:/workspace" \
-        -w /workspace \
-        gco-dev "$@"
-}
-# Then use: gco-dev gco stacks list
+  gco-dev
 ```
 
 ### Local Development Environment (Advanced)
@@ -143,8 +93,8 @@ Use this path only if you specifically want to develop on your host (e.g., edito
 
 ```bash
 # Clone repository
-git clone <repository-url>
-cd GCO
+git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git
+cd global-capacity-orchestrator-on-aws
 
 # Create a *fresh* virtual environment — do not reuse one that already has
 # AWS CDK, FastAPI, mypy, or other commonly-pinned packages installed.

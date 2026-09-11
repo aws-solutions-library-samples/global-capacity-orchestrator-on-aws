@@ -2,11 +2,11 @@
 
 Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 
-> **💡 Tip:** GCO includes an [MCP server](gco_mcp/) you can connect to an agent for guided exploration. Ask questions like *"What do I need to deploy?"* or *"Explain the architecture"* and the agent will pull from the docs and source code. See [gco_mcp/README.md](gco_mcp/README.md) for setup.
+> **🐳 Use the dev container.** GCO pins exact versions of a lot of Python packages so CI is reproducible, which makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` errors. The recommended path — and the one this guide follows — is the dev container: [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds it and installs a `gco` shell function, so every command below runs inside the container without a hand-written `docker run …`. Host installs are an advanced path for contributors who develop on their host; see [Installing on your host instead](#installing-on-your-host-instead-advanced).
 >
-> **🤖 Or let an agent drive:** once the `gco` CLI is installed (Step 1–2 below), `gco autopilot` starts [Claude Code](https://code.claude.com/docs/en/overview) by default, while `gco autopilot --engine codex` starts OpenAI Codex. Both use Amazon Bedrock with the GCO MCP server and recommended companion MCPs wired in. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+> **🤖 Or let an agent drive:** once `gco` is installed (Step 1), `gco autopilot` starts [Claude Code](https://code.claude.com/docs/en/overview) and `gco autopilot --engine codex` starts OpenAI Codex, both on Amazon Bedrock with the GCO MCP server and recommended companion MCPs wired in. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
 >
-> **🐳 Use the dev container (recommended).** GCO pins exact versions of a lot of Python packages so CI is reproducible. That makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` / dependency-resolver errors. **The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container)** — it ships Python, Node.js, CDK, kubectl, AWS CLI, and every Python dep at the exact versions CI uses. The host-install path is an **advanced, non-recommended** path kept for contributors who specifically want to develop on their host; if you just want to deploy GCO, skip it.
+> **💡 Tip:** the same [MCP server](gco_mcp/) also plugs into your IDE for guided exploration — *"What do I need to deploy?"*, *"Explain the architecture"*. See [MCP Server](#mcp-server-for-cursor--kiro--llm-integration) below.
 
 ## Table of Contents
 
@@ -20,29 +20,79 @@ Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 - [Step 6: Run a Test Job](#step-6-run-a-test-job)
 - [Step 7: Deploy an Inference Endpoint](#step-7-deploy-an-inference-endpoint-optional)
 - [Next Steps](#next-steps)
+- [MCP Server](#mcp-server-for-cursor--kiro--llm-integration)
 - [Common Issues](#common-issues)
 - [Clean Up](#clean-up)
 
 ## Prerequisites Check
 
-The only host-side requirements for the recommended (container) path are AWS credentials and Docker:
+The only host-side requirements for the recommended (container) path are AWS credentials, Git, and a container runtime:
 
 ```bash
 # Verify AWS CLI is configured (or just have ~/.aws populated to mount in)
 aws --version
 aws sts get-caller-identity
 
-# Verify Docker/Finch is running (Colima also works — see Dockerfile.dev)
-docker --version    # or: finch version
+# Verify your container runtime is running — Docker, Finch or Podman
+# (Colima also works; see the header of Dockerfile.dev for its socket path)
+docker --version    # or: finch version / podman version
 docker info         # confirms the daemon is running
 ```
 
+Everything else — Python 3.14, Node.js 24, CDK, kubectl, the AWS CLI, Docker CLI + Buildx and every GCO Python dependency — ships inside the container at the exact versions CI uses.
+
+## Step 1: Clone and Build the Dev Container
+
+Clone the repository, then run the setup script. It detects your container runtime (Docker, Finch or Podman), builds the `gco-dev` image from `Dockerfile.dev` (cached on later runs; about two minutes the first time), wires the runtime's socket through, and installs a `gco` shell *function* into your shell profile:
+
+```bash
+git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git
+cd global-capacity-orchestrator-on-aws
+
+./scripts/setup-dev-alias.sh   # builds gco-dev from Dockerfile.dev + installs the `gco` shell function
+source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
+```
+
+The image is multi-arch — it builds natively on `linux/amd64` (Intel/x86_64 hosts and CI) and `linux/arm64` (Apple Silicon Macs, Graviton Linux) by selecting the right kubectl / AWS CLI / Docker CLI / Buildx binary via `$TARGETARCH`, with no `--platform` flag. Buildx ships in the image so the `linux/amd64` Lambda asset builds and the multi-arch image mirror that `gco stacks deploy-all` runs succeed on Apple Silicon as well as x86_64.
+
+Why a function and not an alias: it forwards arguments and pipes correctly, attaches a TTY only when one is present, mounts your current directory at `/workspace`, and bakes in the correct socket for the runtime you actually have. Re-run the script whenever you switch runtimes; `--print` previews the function, `--runtime <name>` forces one, `--rc <path>` targets a specific profile, and `--no-build` skips the image build.
+
+> **Security note:** the function shares your host Docker socket with the container so `cdk deploy` can build Lambda assets and mirror images through your host daemon. That is host-socket pass-through, not Docker-in-Docker: anyone with access to the container has root-equivalent access to the host Docker daemon, so only use this on trusted hosts. Finch runs in its own VM with no host socket to share, so the function omits the mount there; everyday commands work as-is and build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+
+## Step 2: Run the GCO CLI
+
+Every `gco` command now runs inside the dev container against your checkout:
+
+```bash
+gco --version
+gco --help
+```
+
 <details>
-<summary>Installing on your host instead? (advanced, non-recommended)</summary>
+<summary>Prefer an interactive shell inside the container?</summary>
 
-> **Advanced, non-recommended.** Host installs frequently hit the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container).
+```bash
+docker run -it --rm \
+  -v ~/.aws:/root/.aws:ro \
+  -v $(pwd):/workspace \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -w /workspace \
+  gco-dev
 
-You'll additionally need:
+# From inside the container
+gco --version
+```
+
+Colima and Finch users: the host Docker socket may live somewhere other than `/var/run/docker.sock` — see the header of [`Dockerfile.dev`](Dockerfile.dev) for the right `-v` flag (Finch has none to mount).
+
+</details>
+
+<details>
+<summary>Installing on your host instead (advanced)</summary>
+
+### Installing on your host instead (advanced)
+
+This path commonly fails with the pinned-version `ResolutionImpossible` / dependency-resolver errors described in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts); it exists for contributors who develop on their host (editor integrations, the Pyright/mypy LSP). You additionally need:
 
 ```bash
 # Python 3.14+ (3.14 used in CI)
@@ -58,147 +108,44 @@ npm ci --ignore-scripts --no-audit --no-fund
 npm exec -- cdk --version
 ```
 
-You should install GCO into a **fresh** virtual environment or via pipx. Mixing it into an existing Python environment will frequently fail dependency resolution because of the project's pinned versions.
-</details>
-
-## Step 1: Clone and Build the Dev Container
-
-> **Recommended path.** This dev-container path is the recommended way to install and run GCO. It avoids the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) above and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The [host-install path](#step-2-run-the-gco-cli) is advanced and non-recommended.
+Then install GCO into a **fresh** isolated environment — never into one that already has CDK, FastAPI, mypy or other commonly pinned packages:
 
 ```bash
-# Clone repository
-git clone <REPOSITORY_URL>
-cd global-capacity-orchestrator-on-aws
-
-# Build the dev container (cached on subsequent runs; ~2 min the first time)
-docker build -f Dockerfile.dev -t gco-dev .
-```
-
-The image bundles Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, and all GCO Python dependencies at the exact versions CI uses. The Dockerfile is multi-arch — it builds natively on both `linux/amd64` (Intel/x86_64 hosts and CI) and `linux/arm64` (Apple Silicon Macs, Graviton Linux, etc.) by selecting the right kubectl / AWS CLI / Docker CLI / Buildx binary via `$TARGETARCH`. No `--platform` flag needed. Buildx ships in the image so the multi-arch image mirror and the `linux/amd64` asset builds that `gco stacks deploy-all` runs succeed on Apple Silicon (arm64) as well as x86_64.
-
-## Step 2: Run the GCO CLI
-
-The `gco` CLI is pre-installed inside the container. The `docker.sock` mount lets `cdk deploy` bundle Lambda assets through your host's Docker daemon.
-
-```bash
-# Drop into an interactive shell with everything wired up
-docker run -it --rm \
-  -v ~/.aws:/root/.aws:ro \
-  -v $(pwd):/workspace \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -w /workspace \
-  gco-dev
-
-# From inside the container
-gco --version
-```
-
-> **Tip:** save yourself some typing with a shell function on the host. We use a function (rather than a plain alias mounting `$(pwd)`) so that the GCO clone is always mounted at `/workspace` no matter where you call it from — `gco stacks *` and other commands that need `cdk.json` / `app.py` / `gco/` at the workspace root will keep working from any subdirectory of the repo, and from anywhere on disk if you `export GCO_HOME=/path/to/your/clone`:
->
-> ```bash
-> gco-dev() {
->     local project_root="${GCO_HOME:-$(git rev-parse --show-toplevel 2>/dev/null)}"
->     # Check for both Dockerfile.dev *and* the gco/ namespace package
->     # so we don't accidentally bind-mount an unrelated repo that
->     # happens to have a Dockerfile.dev at its root.
->     if [[ -z "$project_root" \
->         || ! -f "$project_root/Dockerfile.dev" \
->         || ! -d "$project_root/gco" ]]; then
->         echo "gco-dev: not inside the GCO repo. cd into your clone, or set GCO_HOME." >&2
->         return 1
->     fi
->     docker run --rm \
->         -v ~/.aws:/root/.aws:ro \
->         -v "$project_root:/workspace" \
->         -v /var/run/docker.sock:/var/run/docker.sock \
->         -w /workspace \
->         gco-dev "$@"
-> }
-> # Then run any command directly: gco-dev gco stacks list
-> ```
->
-> **Colima/Finch users:** the host Docker socket may live somewhere other than `/var/run/docker.sock` — see the header of [`Dockerfile.dev`](Dockerfile.dev) for the right `-v` flag.
->
-> **Security note:** mounting `/var/run/docker.sock` gives the container root-equivalent access to your host's Docker daemon. Only use this on trusted hosts.
-
-<details>
-<summary>Installing the CLI on your host instead (advanced, non-recommended)</summary>
-
-> **Advanced, non-recommended.** This path commonly fails with the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container).
-
-If you've decided you really want to install on your host (e.g., you're contributing changes to the CLI itself), use a clean isolated environment.
-
-**Option A: pipx (CLI-only):**
-
-```bash
+# Option A: pipx (CLI only)
 brew install pipx && pipx ensurepath  # macOS
-
 pipx install -e .
 
-gco --version
-```
-
-**Option B: pip in a fresh virtualenv (development):**
-
-```bash
+# Option B: pip in a fresh virtualenv (development)
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -e ".[dev]"
 
 gco --version
 ```
 
-If pip fails with `ResolutionImpossible` or similar resolver errors, this is the pinned-versions issue called out at the top of this guide. Either start from a fresh venv or switch to the dev container — please don't try to relax the pins on your end.
+If pip fails with `ResolutionImpossible` or similar resolver errors, start from a fresh venv or switch to the dev container — please don't try to relax the pins on your end.
+
 </details>
 
 ## First Success Milestone
 
-**This milestone incurs no AWS charges.** It runs entirely on your machine and confirms the `gco` CLI works inside the dev container before you deploy anything billable.
+**This milestone incurs no AWS charges.** It runs entirely on your machine and confirms the `gco` CLI works before you deploy anything billable.
 
-The recommended **Onboarding_Path** from a fresh clone to this milestone is the following sequentially numbered list. Every command needed is in this guide, so no step requires reading application, CLI, or infrastructure source:
+From a fresh clone, the path to this milestone is Step 1 and Step 2 above — clone, run the setup script, reload your shell, then:
 
-1. Clone the repository and enter it (see [Step 1](#step-1-clone-and-build-the-dev-container)):
+```bash
+gco --version
+```
 
-   ```bash
-   git clone <REPOSITORY_URL>
-   cd global-capacity-orchestrator-on-aws
-   ```
+Success looks like the `gco` CLI printing its version and exiting without error:
 
-   Replace `<REPOSITORY_URL>` with the Git URL of this repository (for example the HTTPS or SSH clone URL from your fork or the upstream remote).
+```text
+gco, version <current-version>
+```
 
-2. Build the dev container from `Dockerfile.dev` (see [Step 1](#step-1-clone-and-build-the-dev-container)):
+When you see a `gco, version …` line and no error, your environment is correctly set up and you have reached the First Success Milestone.
 
-   ```bash
-   docker build -f Dockerfile.dev -t gco-dev .
-   ```
-
-3. Run the `gco` CLI inside the container (see [Step 2](#step-2-run-the-gco-cli)):
-
-   ```bash
-   docker run -it --rm \
-     -v ~/.aws:/root/.aws:ro \
-     -v $(pwd):/workspace \
-     -v /var/run/docker.sock:/var/run/docker.sock \
-     -w /workspace \
-     gco-dev
-   ```
-
-4. Verify the install — this is the milestone. From inside the container, run:
-
-   ```bash
-   gco --version
-   ```
-
-   Success looks like the `gco` CLI printing its version and exiting without error:
-
-   ```text
-   gco, version <current-version>
-   ```
-
-   When you see a `gco, version …` line and no error, your environment is correctly set up and you have reached the First Success Milestone.
-
-> **Verification failed?** If `gco --version` does not print a `gco, version …` line — for example you see `command not found`, a Python import error, or a `ResolutionImpossible` / dependency-resolver error — go to [Common Issues](#common-issues) for the fix. The most reliable resolution is to use the [dev container](#step-1-clone-and-build-the-dev-container), which ships every dependency at the exact versions CI uses. You never need to read source code to get past this step.
+> **Verification failed?** If `gco --version` does not print a `gco, version …` line — for example you see `command not found` (reload your shell, or check the profile file the setup script named), a Python import error, or a `ResolutionImpossible` / dependency-resolver error from a host install — go to [Common Issues](#common-issues) for the fix. You never need to read source code to get past this step.
 
 After this milestone, the next checkpoint is the **First Deploy Milestone** in [Step 4](#step-4-deploy-infrastructure). **That step provisions billable AWS resources**, unlike this milestone. Steps labeled *(Optional)* below are not required to reach the First Success Milestone.
 
@@ -217,7 +164,7 @@ gco stacks bootstrap -r us-east-1
 
 > **First Deploy Milestone — this step provisions billable AWS resources.** Unlike the [First Success Milestone](#first-success-milestone), deploying infrastructure creates AWS resources (EKS, VPC, load balancer, API Gateway, Lambda, and more) that incur charges until you [clean up](#clean-up).
 
-Run this from inside the dev container shell you started in [Step 2](#step-2-run-the-gco-cli) (or non-interactively, e.g. `gco-dev gco stacks deploy-all -y` using the alias from Step 2):
+Run this from your shell — the `gco` function from [Step 1](#step-1-clone-and-build-the-dev-container) executes it inside the dev container (or run it from an interactive container shell, see [Step 2](#step-2-run-the-gco-cli)):
 
 ```bash
 # Start Finch VM (if using Finch on the host — Docker Desktop & Colima need no equivalent)
@@ -246,40 +193,27 @@ gco stacks deploy gco-us-east-1 -y
 
 ## Step 5: Configure Cluster Access (Optional)
 
-> **Important:** The default EKS endpoint mode is `PRIVATE`, which means kubectl access from outside the VPC is not available. Most users don't need this — you can submit jobs via SQS (`gco jobs submit-sqs`) or API Gateway (`gco jobs submit`) without kubectl access.
->
-> If you do need direct kubectl access (e.g., for debugging or manual operations), you must first change the endpoint mode to `PUBLIC_AND_PRIVATE` in `cdk.json`:
->
-> ```json
-> "endpoint_access": "PUBLIC_AND_PRIVATE"
-> ```
->
-> Then redeploy the regional stack:
->
-> ```bash
-> gco stacks deploy gco-us-east-1 -y
-> ```
+> **Most users can skip this.** The EKS API endpoint is `PRIVATE` by default, and every job path below works without kubectl: SQS (`gco jobs submit-sqs`), the API Gateway (`gco jobs submit`), and the global queue (`gco queue submit`) all authenticate with your AWS credentials.
 
-Once the endpoint is set to `PUBLIC_AND_PRIVATE`:
+If you do want kubectl — for debugging or manual operations — you need two things, and `gco cluster doctor` tells you which is missing:
 
 ```bash
-# Setup kubectl access
-./scripts/setup-cluster-access.sh gco-us-east-1 us-east-1
+# 1. Authorization: an EKS access entry for your IAM principal (one-shot, after deploy)
+gco stacks access -r us-east-1
+
+# 2. Reachability: reach the private endpoint from your laptop over SSM
+gco cluster tunnel --via-ssm auto -r us-east-1   # holds the tunnel open; prints the kubectl flags
 ```
 
-**What this script does:**
-
-- Configures kubectl access to the cluster
-- Adds your IAM principal to the EKS access entries
-- Verifies all components are running
+The tunnel provisions a self-terminating bastion in the cluster VPC and tears it down on exit. If you would rather expose the endpoint, `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32` edits `cdk.json` and the next `gco stacks deploy` applies it; see [EKS Cluster Configuration](docs/CUSTOMIZATION.md#eks-cluster-configuration) for the trade-offs.
 
 ## Step 6: Run a Test Job
 
-**Via API Gateway (recommended — works with the default PRIVATE endpoint):**
+Submit through SQS — the recommended path: it works with the default `PRIVATE` endpoint, needs no kubectl, and the built-in KEDA-scaled queue processor picks the job up:
 
 ```bash
-# Submit a job via the API Gateway (uses SigV4 auth, no kubectl needed)
-gco jobs submit examples/simple-job.yaml -n gco-jobs
+# Submit a job (uses your AWS credentials, no kubectl needed)
+gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
 
 # Check job status
 gco jobs list --all-regions
@@ -294,24 +228,26 @@ gco jobs delete hello-gco -n gco-jobs -r us-east-1 -y
 **Other submission methods:**
 
 ```bash
-# Via SQS — queues the job for pickup by a KEDA-scaled processor.
-# Via SQS queue (recommended — processed automatically by the built-in queue processor)
-gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
+# Via the API Gateway (SigV4-authenticated REST, also kubectl-free)
+gco jobs submit examples/simple-job.yaml -n gco-jobs
 
-# Via kubectl (requires PUBLIC_AND_PRIVATE endpoint mode — see Step 5)
+# Via the global DynamoDB queue (priority, status tracking, audit trail)
+gco queue submit examples/simple-job.yaml --region us-east-1
+
+# Via kubectl (requires cluster access — see Step 5)
 kubectl apply -f examples/simple-job.yaml
 ```
 
-## Success! 🎉
+See [Core Concepts — Manifest Submission](docs/CONCEPTS.md#manifest-submission) for how the paths differ.
 
-Your GCO cluster is ready. Here are some things to try:
+**Your GCO cluster is ready.** 🎉 Some things to try next:
 
 ```bash
 # Check GPU capacity before submitting GPU jobs
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 
-# Get a region recommendation for your workload
-gco capacity recommend --instance-type g5.xlarge --region us-east-1
+# Get a region recommendation for a GPU workload
+gco capacity recommend-region --gpu
 
 # View costs by region
 gco costs summary
@@ -358,7 +294,9 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 139 tools by default (up to 196 with all flags enabled) spanning the CLI and project-aware resources. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
+GCO includes an MCP server with 139 tools by default (up to 196 with all flags enabled) spanning the CLI and project-aware resources. The recommended install needs no clone: the one-click buttons in the [README](README.md#install-the-mcp-server) add it to Kiro, Cursor or VS Code pinned to the latest release, and [`gco_mcp/README.md`](gco_mcp/README.md#install-with-uv-recommended) has the equivalent `uvx` command for any other client.
+
+To run it from this checkout instead — when developing GCO, or for the clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`) and the stack lifecycle tools — the dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 
 ```jsonc
 // MCP client config file (for example, Cursor's ~/.cursor/mcp.json)
