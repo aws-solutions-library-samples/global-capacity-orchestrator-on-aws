@@ -1116,10 +1116,11 @@ if candidates:
         "https://api.github.com/repos/astral-sh/uv/releases/latest" 2>/dev/null \
         | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
-    *)
-      return
-      ;;
   esac
+  # extract_dockerfile_pins only emits the names above. Should its allowlist
+  # ever grow without a matching arm here, ``latest`` stays empty and the
+  # pin is reported as an incomplete lookup below, rather than skipped in
+  # silence.
 
   if [ -z "$latest" ]; then
     mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}."
@@ -1546,6 +1547,10 @@ echo ""
 echo "=== Checking CI tooling pins ==="
 
 CI_TOOLING_RESULTS="$(mktemp)"
+# The kind-action lockstep check below files its finding under Version
+# Consistency, so that section's results file has to exist already; it is
+# created here, once, and the consistency section appends to it.
+CONSISTENCY_RESULTS="$(mktemp)"
 
 # check_github_tool <display-name> <current-pin> <owner/repo> <ref-url>
 # Records drift when the pinned semver is behind the latest GitHub Release.
@@ -1701,8 +1706,6 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking version consistency ==="
-
-CONSISTENCY_RESULTS="$(mktemp)"
 
 RUFF_PINS="$(extract_ruff_pins pyproject.toml .pre-commit-config.yaml .github/workflows/lint.yml)"
 if [ -n "$RUFF_PINS" ]; then

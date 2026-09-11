@@ -9,8 +9,10 @@
 # Run:  bats tests/BATS/test_dependency_scan.bats
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCRIPT=".github/scripts/dependency-scan.sh"
-LIB=".github/scripts/lib_dependency_scan.sh"
+load 'helpers.sh'
+
+SCRIPT="$REPO_ROOT/.github/scripts/dependency-scan.sh"
+LIB="$REPO_ROOT/.github/scripts/lib_dependency_scan.sh"
 
 setup() {
     source "$LIB"
@@ -3350,4 +3352,268 @@ SHIM
     rm -rf "$shimdir"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# ── published_manifest_digest ────────────────────────────────────────────────
+
+@test "published_manifest_digest: hashes the raw manifest skopeo returns" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/skopeo" <<'SHIM'
+#!/usr/bin/env bash
+printf '{"schemaVersion": 2, "layers": []}'
+SHIM
+    chmod +x "$tmpdir/skopeo"
+    local expected
+    expected="sha256:$(printf '{"schemaVersion": 2, "layers": []}' | sha256sum | awk '{print $1}')"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "public.ecr.aws/example/image:1.0"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+    rm -rf "$tmpdir"
+}
+
+@test "published_manifest_digest: fails when skopeo cannot inspect the tag" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$tmpdir/skopeo"
+    chmod +x "$tmpdir/skopeo"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "public.ecr.aws/example/image:1.0"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "published_manifest_digest: fails closed on an implausible hash" {
+    # A sha256sum that does not produce 64 hex characters is a broken tool,
+    # not a digest; the caller must not mistake it for a moved manifest.
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nprintf "{}"\n' > "$tmpdir/skopeo"
+    printf '#!/usr/bin/env bash\necho "not-a-hash  -"\n' > "$tmpdir/sha256sum"
+    chmod +x "$tmpdir/skopeo" "$tmpdir/sha256sum"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "public.ecr.aws/example/image:1.0"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+# ── Lambda runtime and interpreter release lookups ───────────────────────────
+
+@test "get_latest_lambda_nodejs_runtime: prints the highest NODEJS_<major>_X member, or nothing without aws_cdk" {
+    run get_latest_lambda_nodejs_runtime
+    [ "$status" -eq 0 ]
+    if python3 -c 'import aws_cdk' 2>/dev/null; then
+        [[ "$output" =~ ^NODEJS_[0-9]+_X$ ]]
+    else
+        [ -z "$output" ]
+    fi
+}
+
+make_endoflife_curl() {
+    # make_endoflife_curl <dir> <json> — a curl that answers every URL with <json>.
+    mkdir -p "$1"
+    printf '#!/usr/bin/env bash\nprintf "%%s" "$FAKE_ENDOFLIFE_JSON"\n' > "$1/curl"
+    chmod +x "$1/curl"
+    export FAKE_ENDOFLIFE_JSON="$2"
+}
+
+@test "get_latest_endoflife_cycle: picks the newest shipped, supported cycle" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    make_endoflife_curl "$tmpdir" '[
+        {"cycle": "3.15", "releaseDate": "2999-10-01", "eol": false},
+        {"cycle": "3.14", "releaseDate": "2025-10-07", "eol": "2030-10-31"},
+        {"cycle": "3.13", "releaseDate": "2024-10-07", "eol": "2029-10-31"},
+        {"cycle": "3.8", "releaseDate": "2019-10-14", "eol": "2024-10-07"},
+        {"cycle": "nightly", "releaseDate": "2025-01-01", "eol": false},
+        {"cycle": "3.x", "releaseDate": "2025-01-01", "eol": false}
+    ]'
+    PATH="$tmpdir:$PATH" run get_latest_endoflife_cycle python
+    [ "$status" -eq 0 ]
+    [ "$output" = "3.14" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_endoflife_cycle: empty on an unreachable endpoint or a schema change" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 22\n' > "$tmpdir/curl"
+    chmod +x "$tmpdir/curl"
+    PATH="$tmpdir:$PATH" run get_latest_endoflife_cycle python
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    make_endoflife_curl "$tmpdir" 'not json'
+    PATH="$tmpdir:$PATH" run get_latest_endoflife_cycle python
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_python_release and get_latest_ruby_release query their own products" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/curl" <<'SHIM'
+#!/usr/bin/env bash
+case "${!#}" in
+    *python.json) printf '[{"cycle": "3.14", "releaseDate": "2025-10-07", "eol": false}]' ;;
+    *ruby.json) printf '[{"cycle": "4.0", "releaseDate": "2025-12-25", "eol": false}]' ;;
+esac
+SHIM
+    chmod +x "$tmpdir/curl"
+    PATH="$tmpdir:$PATH" run get_latest_python_release
+    [ "$output" = "3.14" ]
+    PATH="$tmpdir:$PATH" run get_latest_ruby_release
+    [ "$output" = "4.0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "read_ruby_version_pin: reads the series, ignores comments, strips a ruby- prefix" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '# pinned for bashcov\n\n  ruby-4.0.1  \n' > "$tmpdir/.ruby-version"
+    run read_ruby_version_pin "$tmpdir/.ruby-version"
+    [ "$status" -eq 0 ]
+    [ "$output" = "4.0.1" ]
+
+    printf '3.4\n' > "$tmpdir/.ruby-version"
+    run read_ruby_version_pin "$tmpdir/.ruby-version"
+    [ "$output" = "3.4" ]
+
+    printf 'jruby-9.4\n' > "$tmpdir/.ruby-version"
+    run read_ruby_version_pin "$tmpdir/.ruby-version"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    run read_ruby_version_pin "$tmpdir/absent"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "read_ruby_version_pin: the committed .ruby-version is a plain series" {
+    run read_ruby_version_pin "$REPO_ROOT/.ruby-version"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+}
+
+# ── npm graph management and cross-source Node/npm/CDK pins ─────────────────
+
+make_npm_fixture() {
+    # make_npm_fixture <root> — a repository with one managed npm graph at the
+    # root and one unmanaged graph under lambda/.
+    local root="$1"
+    mkdir -p "$root/.github" "$root/lambda/proxy" "$root/node_modules/dep" "$root/lambda/proxy-build" "$root/gco/stacks"
+    cat > "$root/package.json" <<'JSON'
+{"name": "tooling", "packageManager": "npm@11.6.2", "engines": {"node": ">=24"},
+ "devDependencies": {"aws-cdk": "2.1100.0", "markdownlint-cli2": "0.20.0"}}
+JSON
+    printf '{}\n' > "$root/package-lock.json"
+    cat > "$root/lambda/proxy/package.json" <<'JSON'
+{"name": "proxy", "packageManager": "npm@^11", "engines": {"node": "22.x"},
+ "dependencies": {"undici": "^7.0.0", "ws": "8.18.0"}}
+JSON
+    printf '{"name": "ignored"}\n' > "$root/node_modules/dep/package.json"
+    printf '{"name": "ignored"}\n' > "$root/lambda/proxy-build/package.json"
+    cat > "$root/.github/dependabot.yml" <<'YAML'
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: monthly
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+YAML
+    printf 'LAMBDA_NODEJS_RUNTIME = "NODEJS_24_X"\n' > "$root/gco/stacks/constants.py"
+    printf 'v24.20.0\n' > "$root/.nvmrc"
+    printf 'ARG NODE_VERSION=v24.20.0\nARG NPM_VERSION=11.6.2\nARG CDK_VERSION=2.1100.0\n' > "$root/Dockerfile.dev"
+}
+
+@test "check_npm_package_management: reports every way an owned npm graph is unmanaged" {
+    local root
+    root="$(mktemp -d)"
+    make_npm_fixture "$root"
+    run check_npm_package_management "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"lambda/proxy/package.json|missing package-lock.json"* ]]
+    [[ "$output" == *"lambda/proxy/package.json|packageManager must be an exact npm@X.Y.Z pin"* ]]
+    [[ "$output" == *"lambda/proxy/package.json|dependencies.undici must use an exact version pin"* ]]
+    [[ "$output" != *"dependencies.ws"* ]]
+    [[ "$output" == *"lambda/proxy/package.json|missing Dependabot npm entry for /lambda/proxy"* ]]
+    # The root graph is fully managed; generated and vendored trees are skipped.
+    [[ "$output" != *"^package.json|"* ]]
+    [[ "$output" != *"node_modules"* ]]
+    [[ "$output" != *"proxy-build"* ]]
+
+    printf '{not json' > "$root/lambda/proxy/package.json"
+    run check_npm_package_management "$root"
+    [[ "$output" == *"lambda/proxy/package.json|invalid JSON"* ]]
+    rm -rf "$root"
+}
+
+@test "check_npm_package_management: the committed repository is fully managed" {
+    run check_npm_package_management "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_node_major_pins: one line per source that mirrors the Node major" {
+    local root
+    root="$(mktemp -d)"
+    make_npm_fixture "$root"
+    run extract_node_major_pins "$root"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | sort)" = "$(printf '%s\n' \
+        '.nvmrc|24' 'Dockerfile.dev|24' 'gco/stacks/constants.py|24' \
+        'lambda/proxy/package.json|22' 'package.json|24' | sort)" ]
+
+    # Missing sources are simply absent, never an error.
+    rm -f "$root/.nvmrc" "$root/Dockerfile.dev" "$root/gco/stacks/constants.py"
+    run extract_node_major_pins "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *".nvmrc"* ]]
+    [[ "$output" == *"package.json|24"* ]]
+    rm -rf "$root"
+}
+
+@test "extract_node_major_pins: every committed source agrees on one Node major" {
+    run extract_node_major_pins "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gco/stacks/constants.py|"* ]]
+    [[ "$output" == *".nvmrc|"* ]]
+    [[ "$output" == *"Dockerfile.dev|"* ]]
+    [ "$(printf '%s\n' "$output" | cut -d'|' -f2 | sort -u | wc -l | tr -d ' ')" -eq 1 ]
+}
+
+@test "extract_npm_version_pins: every exact packageManager pin plus Dockerfile.dev" {
+    local root
+    root="$(mktemp -d)"
+    make_npm_fixture "$root"
+    run extract_npm_version_pins "$root"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | sort)" = "$(printf '%s\n' 'Dockerfile.dev|11.6.2' 'package.json|11.6.2' | sort)" ]
+
+    rm -f "$root/Dockerfile.dev"
+    run extract_npm_version_pins "$root"
+    [ "$output" = "package.json|11.6.2" ]
+    rm -rf "$root"
+}
+
+@test "extract_cdk_cli_pins: the tooling graph and Dockerfile.dev name the same CDK CLI" {
+    local root
+    root="$(mktemp -d)"
+    make_npm_fixture "$root"
+    run extract_cdk_cli_pins "$root"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | sort)" = "$(printf '%s\n' 'Dockerfile.dev|2.1100.0' 'package.json|2.1100.0' | sort)" ]
+
+    printf '{not json' > "$root/package.json"
+    rm -f "$root/Dockerfile.dev"
+    run extract_cdk_cli_pins "$root"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$root"
 }

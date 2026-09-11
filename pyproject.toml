@@ -535,10 +535,7 @@ directory = "htmlcov"
 # So the gate currently enforces demo/gif_to_mp4.sh, the one script a suite
 # runs end to end. That is deliberately a floor to build on: it locks in what
 # is covered today, and every follow-up removes entries from this list.
-ratchet = [
-    ".github/scripts/dependency-scan.sh",
-    ".github/scripts/lib_dependency_scan.sh",
-]
+ratchet = []
 
 [tool.bandit]
 # CI runs ``bandit -r .`` so every authored Python file is scanned. bandit
