@@ -362,11 +362,17 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Application Layer:**
 
-- Health Monitor: fixed 2 replicas; Manifest Processor: fixed 3; Inference
-  Monitor: 2; Cost Monitor: 1 (no HPAs — these are control loops, not
-  request-serving tiers)
-- Inference Proxy: 3-10 replicas via the `inference-proxy-hpa`
-  HorizontalPodAutoscaler, the only HPA GCO installs
+- Health Monitor: fixed 2 replicas (webhook delivery and ALB sync are
+  leader-elected through Kubernetes Leases, so the second pod is a hot standby);
+  Inference Monitor: 2 (leader + standby); Cost Monitor: 1 — no HPAs, these are
+  control loops, not request-serving tiers
+- Manifest Processor: `cdk.json` `manifest_processor.replicas` (default 3),
+  with an opt-in CPU HorizontalPodAutoscaler (`manifest_processor.autoscaling`,
+  off by default because the API tier is I/O-bound and every replica also runs
+  the central queue worker)
+- Inference Proxy: `inference_proxy.min_replicas`–`max_replicas` (default 3–10)
+  via the `inference-proxy-hpa` HorizontalPodAutoscaler on application CPU and
+  memory plus TLS-sidecar CPU
 - User workload scale is bounded by configured NodePool limits, Kubernetes quotas, AWS service quotas, and available EC2 capacity
 
 **Compute Layer:**
@@ -403,15 +409,11 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - **Multiple Replicas**: Every request-path or reconciliation service runs 2+ replicas; the cost monitor is the one single-replica service (a periodic reporter whose restart loses nothing)
 - **Pod Anti-Affinity**: Spreads pods across nodes (preferred scheduling)
-- **Topology Spread Constraints**: Distributes the health monitor, manifest processor and inference proxy across availability zones
-- **Pod Disruption Budgets**: Ensures minimum availability during voluntary disruptions
-  - Health Monitor: minAvailable=1
-  - Manifest Processor: minAvailable=2
-  - Inference Monitor: minAvailable=1
-  - Inference Proxy: minAvailable=2
-- **Health Checks**: Liveness, readiness, and startup probes
-- **Graceful Shutdown**: preStop hooks allow in-flight requests to complete
-- **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0
+- **Topology Spread Constraints**: Distributes every multi-replica platform service (health monitor, manifest processor, inference monitor, inference proxy) across availability zones and nodes
+- **Pod Disruption Budgets**: `maxUnavailable: 1` on every multi-replica platform Deployment, so one voluntary disruption at a time whatever the replica count (a `minAvailable` budget on an autoscaled Deployment would widen as the HPA scales up); the single-replica cost monitor carries `karpenter.sh/do-not-disrupt` instead
+- **Health Checks**: Startup, liveness, and readiness probes on every container
+- **Graceful Shutdown**: preStop hooks plus a uvicorn drain budget (`GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`) inside `terminationGracePeriodSeconds` let in-flight requests and streams complete
+- **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0, one surge pod, and three retained revisions
 - **Auto-Healing**: Kubernetes restarts failed pods
 
 ### Global HA

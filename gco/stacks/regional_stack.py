@@ -3642,8 +3642,22 @@ class GCORegionalStack(Stack):
                 mp_config.get("max_request_body_bytes", 1_048_576)
             ),
             # Shared pure renderer keeps production and Kind typed values in
-            # lockstep (Quantity string for request, YAML integer for target).
+            # lockstep (Quantity string for request, YAML integers for the HPA
+            # target and the min/max replica bounds).
             **_compute_inference_proxy_tls_replacements(inference_proxy_config),
+            # Manifest-processor sizing is an operator decision made in
+            # cdk.json (validated in ConfigLoader): the fixed replica count and
+            # the application container's limits render verbatim. The optional
+            # CPU HPA (35-manifest-processor-hpa.yaml) is gated by
+            # {{MP_HPA_ENABLED}} below; when it is on, the Deployment carries
+            # gco.aws/hpa-controls-replicas="true" so the applier stops
+            # re-asserting replicas and the HPA's scale value survives.
+            "{{MP_REPLICAS}}": str(mp_config["replicas"]),
+            "{{MP_CPU_LIMIT}}": str(mp_config["resource_limits"]["cpu"]),
+            "{{MP_MEMORY_LIMIT}}": str(mp_config["resource_limits"]["memory"]),
+            "{{MP_HPA_CONTROLS_REPLICAS}}": (
+                "true" if mp_config["autoscaling"]["enabled"] else "false"
+            ),
             # Regional worker for the DynamoDB-backed global queue. Multiple API
             # replicas are safe because JobStore claims are conditional and
             # lease-backed; each replica also reconciles K8s status transitions.
@@ -3740,6 +3754,20 @@ class GCORegionalStack(Stack):
                     ),
                     "{{COST_REPORT_INTERVAL_MINUTES}}": str(
                         _cost_config["reports"]["interval_minutes"]
+                    ),
+                }
+            )
+
+        # Optional manifest-processor CPU autoscaler. When disabled the key is
+        # absent, 35-manifest-processor-hpa.yaml keeps an unreplaced placeholder,
+        # the applier skips it and prunes any HPA a previous deploy created.
+        if mp_config["autoscaling"]["enabled"]:
+            image_replacements.update(
+                {
+                    "{{MP_HPA_ENABLED}}": "true",
+                    "{{MP_HPA_MAX_REPLICAS}}": str(mp_config["autoscaling"]["max_replicas"]),
+                    "{{MP_HPA_CPU_TARGET_UTILIZATION}}": str(
+                        mp_config["autoscaling"]["cpu_target_utilization_percentage"]
                     ),
                 }
             )

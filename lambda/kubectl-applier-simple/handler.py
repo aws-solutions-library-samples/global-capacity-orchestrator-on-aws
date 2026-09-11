@@ -688,6 +688,13 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{QUEUE_PROCESSOR_IMAGE}}", True): (
         ("keda.sh/v1alpha1", "ScaledJob", "gco-system", "sqs-queue-processor"),
     ),
+    # Optional manifest-processor CPU autoscaler (cdk.json
+    # manifest_processor.autoscaling.enabled). Turning it off must also remove
+    # the HPA, otherwise the last scale value would keep fighting the
+    # Deployment's re-asserted replicas.
+    ("{{MP_HPA_ENABLED}}", False): (
+        ("autoscaling/v2", "HorizontalPodAutoscaler", "gco-system", "manifest-processor-hpa"),
+    ),
     ("{{KUEUE_ENABLED}}", True): (
         # Deletion order matters: the LocalQueue references the ClusterQueue,
         # which references the ResourceFlavor.

@@ -35,11 +35,20 @@ def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
     token_re = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
     quantity_tokens = {
         "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
+        "{{MP_CPU_LIMIT}}",
+        "{{MP_MEMORY_LIMIT}}",
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
     }
-    integer_tokens = {"{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"}
+    integer_tokens = {
+        "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+        "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+        "{{INFERENCE_PROXY_MAX_REPLICAS}}",
+        "{{MP_REPLICAS}}",
+        "{{MP_HPA_MAX_REPLICAS}}",
+        "{{MP_HPA_CPU_TARGET_UTILIZATION}}",
+    }
     integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
     replacements: dict[str, str] = {
         "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
@@ -1893,12 +1902,16 @@ class TestInferenceProxyAutoscalingManifest:
             )
             .replace("{{INFERENCE_PROXY_TLS_CPU_REQUEST}}", "100m")
             .replace("{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}", "70")
+            .replace("{{INFERENCE_PROXY_MIN_REPLICAS}}", "3")
+            .replace("{{INFERENCE_PROXY_MAX_REPLICAS}}", "10")
         )
         documents = list(yaml.safe_load_all(content))
         deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
         hpa = next(doc for doc in documents if doc["kind"] == "HorizontalPodAutoscaler")
         pdb = next(doc for doc in documents if doc["kind"] == "PodDisruptionBudget")
 
+        # The create-time replica count is the HPA floor, rendered as an
+        # integer (an unquoted token) from the same cdk.json value.
         assert deployment["spec"]["replicas"] == 3
         assert deployment["metadata"]["annotations"] == {"gco.aws/hpa-controls-replicas": "true"}
         assert hpa["apiVersion"] == "autoscaling/v2"
@@ -1997,6 +2010,8 @@ class TestInferenceProxyAutoscalingManifest:
         [
             "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
             "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+            "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+            "{{INFERENCE_PROXY_MAX_REPLICAS}}",
         ],
     )
     def test_missing_tls_autoscaling_replacement_skips_complete_manifest(
@@ -2015,6 +2030,8 @@ class TestInferenceProxyAutoscalingManifest:
         replacements = dict.fromkeys(token_re.findall(source), "test-value")
         replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] = "100m"
         replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] = "70"
+        replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] = "3"
+        replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] = "10"
         del replacements[missing_token]
 
         plan = handler_module.plan_manifests(str(tmp_path), replacements)
@@ -3149,6 +3166,37 @@ class TestQueueingCustomObjectMapConsistency:
         ]
         pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
         assert pruned == expected
+
+    def test_manifest_processor_hpa_prune_inventory_matches_the_gated_manifest(
+        self, handler_module
+    ) -> None:
+        """Disabling manifest_processor.autoscaling removes exactly the HPA it installed.
+
+        A leftover HPA would keep fighting the Deployment's re-asserted replica
+        count once ``gco.aws/hpa-controls-replicas`` flips back to ``"false"``.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "35-manifest-processor-hpa.yaml"
+        documents = _parse_manifest_documents(gated)
+        assert [doc["kind"] for doc in documents] == ["HorizontalPodAutoscaler"]
+        assert documents[0]["metadata"]["annotations"]["gco.aws/feature-gate"] == "placeholder"
+        expected = {
+            (
+                str(doc.get("apiVersion")),
+                str(doc.get("kind")),
+                str(doc["metadata"]["namespace"]),
+                str(doc["metadata"]["name"]),
+            )
+            for doc in documents
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{MP_HPA_ENABLED}}", False)]
+        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
+        assert pruned == expected
+        # The gate token really is the one the manifest carries: a renamed
+        # placeholder would leave the inventory keyed on a gate that never fires.
+        assert "{{MP_HPA_ENABLED}}" in gated.read_text(encoding="utf-8")
 
 
 class TestServiceAccountAutomountFlipDiagnostic:

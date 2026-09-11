@@ -1569,6 +1569,8 @@ jobs:
           configured = {
               "tls_proxy_cpu_request_millicores": 125,
               "tls_proxy_cpu_target_utilization_percentage": 85,
+              "min_replicas": 3,
+              "max_replicas": 10,
           }
           print(json.dumps(compute_inference_proxy_tls_replacements(configured)))
           PY
@@ -1578,6 +1580,12 @@ jobs:
           )"
           tls_cpu_target="$(
             jq -r '.["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"]' <<<"$tls_replacements"
+          )"
+          proxy_min_replicas="$(
+            jq -r '.["{{INFERENCE_PROXY_MIN_REPLICAS}}"]' <<<"$tls_replacements"
+          )"
+          proxy_max_replicas="$(
+            jq -r '.["{{INFERENCE_PROXY_MAX_REPLICAS}}"]' <<<"$tls_replacements"
           )"
           for manifest in \
               lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml \
@@ -1600,6 +1608,12 @@ jobs:
                 -e 's|{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}|1048576|g' \
                 -e "s|{{INFERENCE_PROXY_TLS_CPU_REQUEST}}|${tls_cpu_request}|g" \
                 -e "s|{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}|${tls_cpu_target}|g" \
+                -e "s|{{INFERENCE_PROXY_MIN_REPLICAS}}|${proxy_min_replicas}|g" \
+                -e "s|{{INFERENCE_PROXY_MAX_REPLICAS}}|${proxy_max_replicas}|g" \
+                -e 's|{{MP_REPLICAS}}|3|g' \
+                -e 's|{{MP_CPU_LIMIT}}|1000m|g' \
+                -e 's|{{MP_MEMORY_LIMIT}}|2Gi|g' \
+                -e 's|{{MP_HPA_CONTROLS_REPLICAS}}|false|g' \
                 -e 's|{{COST_REPORT_INTERVAL_MINUTES}}|60|g' \
                 -e 's|{{COST_MONITORING_ENABLED}}|true|g' \
                 -e "s|{{[A-Z_]*}}|ci-stub|g" \

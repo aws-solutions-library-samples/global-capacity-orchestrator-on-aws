@@ -806,13 +806,15 @@ Configure in `cdk.json`:
 
 Before the threshold, the monitor records the start of the outage. After the threshold, it logs that the authenticated inference proxy will return 503 until the model recovers. When a replica becomes ready, the timer is cleared. Reconciliation never creates endpoint-specific public routes.
 
-#### Inference Proxy TLS Autoscaling
+#### Inference Proxy Autoscaling
 
-Configure the shared inference data plane's `api-tls-proxy` CPU request and
-HPA target in `cdk.json`:
+Configure the shared inference data plane's HPA replica bounds and the
+`api-tls-proxy` CPU request and HPA target in `cdk.json`:
 
 ```json
 "inference_proxy": {
+  "min_replicas": 3,
+  "max_replicas": 10,
   "tls_proxy_cpu_request_millicores": 100,
   "tls_proxy_cpu_target_utilization_percentage": 70
 }
@@ -820,16 +822,19 @@ HPA target in `cdk.json`:
 
 | Setting | Default | Description |
 |---|---|---|
+| `min_replicas` | `3` | Exact integer from 1 through 50. HPA floor and the Deployment's create-time replica count; three keeps one pod per AZ in a three-AZ region |
+| `max_replicas` | `10` | Exact integer from 1 through 100, at least `min_replicas`. HPA ceiling |
 | `tls_proxy_cpu_request_millicores` | `100` | Exact integer from 1 through 250. CDK renders it as a Kubernetes CPU quantity such as `100m`; this request is the TLS sidecar HPA utilization denominator |
 | `tls_proxy_cpu_target_utilization_percentage` | `70` | Exact integer from 1 through 100 used only by the `api-tls-proxy` CPU `ContainerResource` HPA signal |
 
-The section is optional. Omission and JSON `null` use both defaults because AWS
+The section is optional. Omission and JSON `null` use every default because AWS
 CDK normalizes top-level `null` context values to omission; partial objects retain
-the other default. Unknown keys, non-object non-null sections, booleans, floats,
-strings, and out-of-range values fail configuration validation. Redeploy the
-regional stack after changing a value. This tuning does not change the inference
-application CPU or memory, the TLS proxy CPU limit or memory profile, HPA replica
-bounds or behavior, the PodDisruptionBudget, or stream-drain settings.
+the other defaults. Unknown keys, non-object non-null sections, booleans, floats,
+strings, out-of-range values, and `max_replicas` below `min_replicas` fail
+configuration validation. Redeploy the regional stack after changing a value.
+This tuning does not change the inference application CPU or memory, the TLS
+proxy CPU limit or memory profile, HPA scaling behavior, the
+PodDisruptionBudget (always `maxUnavailable: 1`), or stream-drain settings.
 
 #### ALB Architecture
 
@@ -852,38 +857,47 @@ def validate_manifest(manifest: dict) -> bool:
 
 ### Adjust Replica Counts
 
-Edit the deployment manifests:
+The two request-path services are sized from `cdk.json`; redeploy the regional
+stack after changing a value.
 
-`lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml`:
+Manifest processor — fixed replica count, application-container limits, and an
+opt-in CPU autoscaler:
 
-```yaml
-spec:
-  replicas: 5  # Increase from 2 to 5
+```json
+"manifest_processor": {
+  "replicas": 3,
+  "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+  "autoscaling": {
+    "enabled": false,
+    "max_replicas": 6,
+    "cpu_target_utilization_percentage": 70
+  }
+}
 ```
 
-Or use Horizontal Pod Autoscaler:
+| Setting | Default | Description |
+|---|---|---|
+| `replicas` | `3` | Positive integer. Deployment replica count, and the HPA floor when autoscaling is enabled |
+| `resource_limits.cpu` / `.memory` | `1000m` / `2Gi` | Kubernetes quantities rendered verbatim into the `manifest-processor` container's `limits` (requests stay at the manifest's `500m` / `1Gi`, so limits below them are rejected by Kubernetes at apply time) |
+| `autoscaling.enabled` | `false` | Installs `35-manifest-processor-hpa.yaml` and flips the Deployment's `gco.aws/hpa-controls-replicas` annotation to `"true"` so re-applies stop resetting the HPA's scale value. Turning it back off prunes the HPA |
+| `autoscaling.max_replicas` | `6` | Exact integer from 1 through 100, at least `replicas` |
+| `autoscaling.cpu_target_utilization_percentage` | `70` | Exact integer from 1 through 100, `ContainerResource` CPU utilization of the `manifest-processor` container |
 
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: health-monitor-hpa
-  namespace: gco-system
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: health-monitor
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-```
+Autoscaling is off by default on purpose: the API tier's handlers are dominated
+by Kubernetes and DynamoDB round trips, so CPU tracks saturation only loosely,
+and every replica also runs the central queue worker (safe, because job claims
+are conditional DynamoDB writes, but scale-down churns in-flight leases). Turn it
+on when measurements show the application container CPU-bound. The HPA scales up
+by at most two pods per minute and down by one pod per two minutes after a
+ten-minute stabilization window.
+
+Inference proxy — HPA bounds live under `inference_proxy.min_replicas` /
+`max_replicas`; see [Inference Proxy Autoscaling](#inference-proxy-autoscaling).
+
+Health monitor, inference monitor, and cost monitor are control loops: extra
+replicas buy availability (a hot standby behind a Kubernetes `Lease`, or a
+second pod behind the ALB), not throughput, so their counts are fixed in the
+manifests (`30-`, `32-`, `34-`) and there is no HPA for them by design.
 
 ## Security Policy Configuration
 

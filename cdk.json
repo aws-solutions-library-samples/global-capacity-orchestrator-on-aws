@@ -128,19 +128,26 @@
 
     "_comment_workloads": "Job submission, validation, and processing pipelines",
 
-    "_comment_inference_proxy": "Shared authenticated inference data plane. tls_proxy_cpu_request_millicores is the api-tls-proxy CPU request and HPA utilization denominator (exact integer 1-250, default 100; rendered as the Kubernetes quantity 100m). tls_proxy_cpu_target_utilization_percentage is that sidecar's ContainerResource CPU target (exact integer 1-100, default 70). These settings do not change application resources, application HPA signals, replica bounds, behavior, disruption budget, or drain timing. See docs/INFERENCE.md and docs/CUSTOMIZATION.md.",
+    "_comment_inference_proxy": "Shared authenticated inference data plane, the one platform service that autoscales. min_replicas / max_replicas are the HorizontalPodAutoscaler bounds (exact integers, 1-50 and 1-100, max >= min; defaults 3 and 10); min_replicas is also the Deployment's create-time replica count, after which the HPA owns it. tls_proxy_cpu_request_millicores is the api-tls-proxy CPU request and HPA utilization denominator (exact integer 1-250, default 100; rendered as the Kubernetes quantity 100m). tls_proxy_cpu_target_utilization_percentage is that sidecar's ContainerResource CPU target (exact integer 1-100, default 70). These settings do not change application resources, application HPA signals, scaling behavior, the one-at-a-time disruption budget, or drain timing. See docs/INFERENCE.md and docs/CUSTOMIZATION.md.",
     "inference_proxy": {
+      "min_replicas": 3,
+      "max_replicas": 10,
       "tls_proxy_cpu_request_millicores": 100,
       "tls_proxy_cpu_target_utilization_percentage": 70
     },
 
-    "_comment_manifest_processor": "Authenticated API, direct manifest submission, inference proxy, and DynamoDB queue worker. central_queue_worker_enabled activates queued Jobs in each target region. Claims use unique pod owners, fencing generations, deterministic Kubernetes identities, and renewable leases; lease_renewal_seconds must be no more than half lease_seconds. poll_interval_seconds controls pickup cadence; batch_size bounds each pass; reconcile_limit bounds pending/running status checks. max_request_body_bytes is the hard request-size cap (1 MiB default). yaml_max_depth limits YAML nesting. See docs/CUSTOMIZATION.md.",
+    "_comment_manifest_processor": "Authenticated API, direct manifest submission, and DynamoDB queue worker. replicas is the fixed Deployment size (each replica also runs the queue worker; claims are conditional so replicas compete safely). resource_limits are the application container's CPU/memory limits as Kubernetes quantities (at least the manifest's 500m / 1Gi requests). autoscaling is OFF by default: the API tier is I/O-bound, so CPU is a weak saturation signal; set autoscaling.enabled=true to ship a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 6) at cpu_target_utilization_percentage (1-100, default 70) — the HPA then owns the replica count and the applier stops re-asserting it. central_queue_worker_enabled activates queued Jobs in each target region. Claims use unique pod owners, fencing generations, deterministic Kubernetes identities, and renewable leases; lease_renewal_seconds must be no more than half lease_seconds. poll_interval_seconds controls pickup cadence; batch_size bounds each pass; reconcile_limit bounds pending/running status checks. max_request_body_bytes is the hard request-size cap (1 MiB default). yaml_max_depth limits YAML nesting. See docs/CUSTOMIZATION.md.",
     "manifest_processor": {
       "image": "gco/manifest-processor:latest",
       "replicas": 3,
       "resource_limits": {
         "cpu": "1000m",
         "memory": "2Gi"
+      },
+      "autoscaling": {
+        "enabled": false,
+        "max_replicas": 6,
+        "cpu_target_utilization_percentage": 70
       },
       "validation_enabled": true,
       "max_request_body_bytes": 1048576,

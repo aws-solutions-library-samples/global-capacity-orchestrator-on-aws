@@ -97,10 +97,11 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `30-health-monitor.yaml` | `Deployment` + `PodDisruptionBudget` + TLS-only `Service`; the application binds pod loopback and a same-image sidecar hot-reloads the cert-manager leaf on port 8443 |
-| `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + TLS-only `Service`; the application binds pod loopback and a same-image sidecar hot-reloads the cert-manager leaf on port 8443 |
+| `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + TLS-only `Service`; the application binds pod loopback and a same-image sidecar hot-reloads the cert-manager leaf on port 8443. Replica count and application-container limits come from `cdk.json` `manifest_processor.replicas` / `resource_limits`; `gco.aws/hpa-controls-replicas` follows `manifest_processor.autoscaling.enabled` |
 | `32-inference-monitor.yaml` | Leader-elected reconciler `Deployment` (two replicas: leader + hot standby) probed on its :9090 Prometheus endpoint + `PodDisruptionBudget` |
-| `33-inference-proxy.yaml` | Dedicated inference `Deployment` with a hot-reloading TLS proxy sidecar (three replicas on create; HPA owns updates) + per-container application CPU/memory and TLS CPU `HorizontalPodAutoscaler` signals (TLS defaults: `100m` request, 70% target; configurable through `cdk.json` `inference_proxy`) + one-disruption-at-a-time `PodDisruptionBudget` + 15-minute stream-drain lifecycle + TLS-only `Service` |
+| `33-inference-proxy.yaml` | Dedicated inference `Deployment` with a hot-reloading TLS proxy sidecar (created at the HPA floor; HPA owns updates) + per-container application CPU/memory and TLS CPU `HorizontalPodAutoscaler` signals (bounds and TLS defaults from `cdk.json` `inference_proxy`: 3–10 replicas, `100m` request, 70% target) + one-disruption-at-a-time `PodDisruptionBudget` + 15-minute stream-drain lifecycle + TLS-only `Service` |
 | `34-cost-monitor.yaml` | Cost monitor `ServiceAccount` + single-replica `Recreate` `Deployment` + `Service` + three `NetworkPolicy` rules (manifest-processor ingress/egress, [OpenCost](https://opencost.io/) egress) — **skipped and pruned when cost monitoring is disabled** |
+| `35-manifest-processor-hpa.yaml` | Opt-in CPU `HorizontalPodAutoscaler` for the manifest processor (`cdk.json` `manifest_processor.autoscaling`: floor = `replicas`, ceiling = `max_replicas`, target = `cpu_target_utilization_percentage`; slow scale-down so queue workers holding DynamoDB leases are not churned) — **skipped and pruned when autoscaling is disabled (the default)** |
 
 ### NodePools (40–49)
 
@@ -154,7 +155,7 @@ old one cannot quietly drop part of it:
 
 | Property | Contract | Why |
 |----------|----------|-----|
-| Replicas | Fixed per service (`replicas`), except the inference proxy whose HPA owns the count after creation (`gco.aws/hpa-controls-replicas: "true"`); the manifest-processor count comes from `cdk.json` `manifest_processor.replicas` | Control loops gain availability, not throughput, from replicas; only request-path services autoscale |
+| Replicas | Fixed per service (`replicas`), except the inference proxy whose HPA owns the count after creation (`gco.aws/hpa-controls-replicas: "true"`, bounds from `cdk.json` `inference_proxy.min_replicas` / `max_replicas`); the manifest-processor count comes from `cdk.json` `manifest_processor.replicas` and its optional HPA (`35-`) is off by default | Control loops gain availability, not throughput, from replicas; only request-path services autoscale |
 | Rollout | `RollingUpdate` with `maxUnavailable: 0`, `maxSurge: 1`; `revisionHistoryLimit: 3`; `gco.aws/deployment-timestamp` on the pod template so every deploy rolls exactly once (cost-monitor: `Recreate`, one replica, single writer by design) | Zero-unavailability rollouts without a second back-to-back revision |
 | Disruption | `PodDisruptionBudget` with `maxUnavailable: 1` for every multi-replica Deployment | One eviction at a time whatever the replica count; `minAvailable: 2` on a 10-replica HPA target would have allowed eight |
 | Placement | Soft `topologySpreadConstraints` (zone, hostname) plus preferred `podAntiAffinity` for every multi-replica Deployment | Spread across nodes and AZs without blocking scheduling on a small cluster |
@@ -173,10 +174,21 @@ deploy time using values from the CDK stack
 (`gco/stacks/regional_stack.py`). Files with unreplaced `UPPER_SNAKE`
 placeholders are automatically skipped — the mechanism that conditionally
 enables FSx, Valkey, Aurora pgvector, cluster observability, and the queue
-processor. The required inference TLS settings use a quoted CPU-quantity token
-(`{{INFERENCE_PROXY_TLS_CPU_REQUEST}}`) and an unquoted integer HPA token
-(`{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}`); the regional stack always
-supplies both from `cdk.json` defaults or overrides.
+processor. Typed tokens must keep their shape in the YAML: quantity tokens are
+quoted (`{{INFERENCE_PROXY_TLS_CPU_REQUEST}}`, `{{MP_CPU_LIMIT}}`,
+`{{MP_MEMORY_LIMIT}}`) and integer tokens are unquoted
+(`{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}`,
+`{{INFERENCE_PROXY_MIN_REPLICAS}}`, `{{INFERENCE_PROXY_MAX_REPLICAS}}`,
+`{{MP_REPLICAS}}`, `{{MP_HPA_MAX_REPLICAS}}`,
+`{{MP_HPA_CPU_TARGET_UTILIZATION}}`), so `replicas`, `minReplicas`,
+`maxReplicas` and `averageUtilization` land as Kubernetes integers. The regional
+stack always supplies the required ones from `cdk.json` defaults or overrides;
+the `MP_HPA_*` tokens are resolved only when
+`manifest_processor.autoscaling.enabled` is true, which is what gates
+`35-manifest-processor-hpa.yaml`. Both lists live in
+`.github/scripts/validate_k8s_manifests.py` (`_INTEGER_PLACEHOLDER_TOKENS`,
+`_QUANTITY_PLACEHOLDER_TOKENS`) so kubeconform renders them with the right
+type.
 
 Lower- or mixed-case double-brace tokens (e.g. Grafana dashboard legends like
 `{{gpu}}` or `{{Hostname}}`) are **not** placeholders — the handler's skip

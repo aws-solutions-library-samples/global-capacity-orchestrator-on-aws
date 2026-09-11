@@ -95,12 +95,19 @@ class MockConfigLoader:
                 "max_memory_per_manifest": "96Gi",
                 "max_gpu_per_manifest": 8,
             },
+            "autoscaling": {
+                "enabled": False,
+                "max_replicas": 6,
+                "cpu_target_utilization_percentage": 70,
+            },
         }
 
     def get_inference_proxy_config(self):
         return {
             "tls_proxy_cpu_request_millicores": 100,
             "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": 3,
+            "max_replicas": 10,
         }
 
     def get_api_gateway_config(self):
@@ -1236,6 +1243,120 @@ class TestRegionalStackSynthesis:
         assert replacements["{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}"] == "1048576"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] == "100m"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "70"
+        assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "3"
+        assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "10"
+        # Manifest-processor sizing renders verbatim from the validated config;
+        # with autoscaling off the HPA gate stays unresolved so
+        # 35-manifest-processor-hpa.yaml is skipped and pruned.
+        assert replacements["{{MP_REPLICAS}}"] == "3"
+        assert replacements["{{MP_CPU_LIMIT}}"] == "1000m"
+        assert replacements["{{MP_MEMORY_LIMIT}}"] == "2Gi"
+        assert replacements["{{MP_HPA_CONTROLS_REPLICAS}}"] == "false"
+        assert "{{MP_HPA_ENABLED}}" not in replacements
+        assert "{{MP_HPA_MAX_REPLICAS}}" not in replacements
+        assert "{{MP_HPA_CPU_TARGET_UTILIZATION}}" not in replacements
+
+    def test_manifest_processor_autoscaling_gate_renders_hpa_and_ownership(self):
+        """Opting into manifest_processor.autoscaling resolves the HPA gate.
+
+        The same deploy must flip the Deployment's replica ownership
+        annotation to "true": otherwise every re-apply would reset the HPA's
+        scale value back to ``replicas``.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["manifest_processor"] = {
+            **context["manifest_processor"],
+            "replicas": 4,
+            "resource_limits": {"cpu": "1500m", "memory": "3Gi"},
+            "autoscaling": {
+                "enabled": True,
+                "max_replicas": 9,
+                "cpu_target_utilization_percentage": 65,
+            },
+        }
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-manifest-processor-autoscaled",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        assert replacements["{{MP_REPLICAS}}"] == "4"
+        assert replacements["{{MP_CPU_LIMIT}}"] == "1500m"
+        assert replacements["{{MP_MEMORY_LIMIT}}"] == "3Gi"
+        assert replacements["{{MP_HPA_CONTROLS_REPLICAS}}"] == "true"
+        assert replacements["{{MP_HPA_ENABLED}}"] == "true"
+        assert replacements["{{MP_HPA_MAX_REPLICAS}}"] == "9"
+        assert replacements["{{MP_HPA_CPU_TARGET_UTILIZATION}}"] == "65"
+
+        manifests_dir = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+        )
+        rendered: dict[str, str] = {}
+        for filename in ("31-manifest-processor.yaml", "35-manifest-processor-hpa.yaml"):
+            text = (manifests_dir / filename).read_text(encoding="utf-8")
+            for token, value in replacements.items():
+                if isinstance(value, str):
+                    text = text.replace(token, value)
+            rendered[filename] = re.sub(r"\{\{[A-Z0-9_]+\}\}", "test-value", text)
+
+        deployment = next(
+            doc
+            for doc in yaml.safe_load_all(rendered["31-manifest-processor.yaml"])
+            if doc and doc["kind"] == "Deployment"
+        )
+        assert type(deployment["spec"]["replicas"]) is int
+        assert deployment["spec"]["replicas"] == 4
+        assert deployment["metadata"]["annotations"]["gco.aws/hpa-controls-replicas"] == "true"
+        app_container = next(
+            container
+            for container in deployment["spec"]["template"]["spec"]["containers"]
+            if container["name"] == "manifest-processor"
+        )
+        assert app_container["resources"]["limits"] == {"cpu": "1500m", "memory": "3Gi"}
+
+        (hpa,) = [
+            doc for doc in yaml.safe_load_all(rendered["35-manifest-processor-hpa.yaml"]) if doc
+        ]
+        assert hpa["kind"] == "HorizontalPodAutoscaler"
+        assert hpa["metadata"]["annotations"]["gco.aws/feature-gate"] == "true"
+        assert hpa["spec"]["scaleTargetRef"]["name"] == deployment["metadata"]["name"]
+        # Floor == the Deployment's replica count, so enabling the HPA never
+        # shrinks the HA baseline; every bound is a bare integer.
+        assert hpa["spec"]["minReplicas"] == 4
+        assert hpa["spec"]["maxReplicas"] == 9
+        assert type(hpa["spec"]["maxReplicas"]) is int
+        (metric,) = hpa["spec"]["metrics"]
+        assert metric["containerResource"]["container"] == app_container["name"]
+        assert metric["containerResource"]["target"]["averageUtilization"] == 65
 
     def test_non_default_inference_proxy_config_renders_typed_manifest(self):
         """Real config values flow through ImageReplacements into typed YAML."""
@@ -1247,6 +1368,8 @@ class TestRegionalStackSynthesis:
         context["inference_proxy"] = {
             "tls_proxy_cpu_request_millicores": 125,
             "tls_proxy_cpu_target_utilization_percentage": 85,
+            "min_replicas": 2,
+            "max_replicas": 6,
         }
         app = cdk.App(context=context)
         config = ConfigLoader(app)
@@ -1278,6 +1401,8 @@ class TestRegionalStackSynthesis:
         replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] == "125m"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "85"
+        assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "2"
+        assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "6"
 
         manifest = (
             Path(__file__).resolve().parent.parent
@@ -1289,6 +1414,8 @@ class TestRegionalStackSynthesis:
         for token in (
             "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
             "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+            "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+            "{{INFERENCE_PROXY_MAX_REPLICAS}}",
         ):
             manifest = manifest.replace(token, replacements[token])
         manifest = manifest.replace(
@@ -1314,6 +1441,12 @@ class TestRegionalStackSynthesis:
         assert type(request) is str
         assert target == 85
         assert type(target) is int
+        # Replica bounds: the Deployment starts at the HPA floor, and both
+        # bounds land as integers (unquoted tokens in the manifest).
+        assert deployment["spec"]["replicas"] == 2
+        assert hpa["spec"]["minReplicas"] == 2
+        assert hpa["spec"]["maxReplicas"] == 6
+        assert type(hpa["spec"]["maxReplicas"]) is int
 
     def test_regional_stack_creates_lambda_functions(self):
         """Test that RegionalStack creates Lambda functions."""

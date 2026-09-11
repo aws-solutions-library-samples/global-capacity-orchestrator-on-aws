@@ -1,17 +1,27 @@
 # Manifest Processor — validates and applies Kubernetes manifests submitted via API
 # Deployment + PodDisruptionBudget + Service consolidated in one file.
+#
+# Sizing comes from cdk.json manifest_processor (replicas, resource_limits);
+# the optional CPU autoscaler lives in 35-manifest-processor-hpa.yaml. Every
+# replica also runs the central queue worker — DynamoDB conditional claims make
+# that safe, so replicas add API capacity without duplicating work.
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: manifest-processor
   namespace: gco-system
+  annotations:
+    # "true" only when manifest_processor.autoscaling.enabled: the applier then
+    # keeps replicas on create but omits it from update patches so the
+    # HorizontalPodAutoscaler's scale value remains authoritative.
+    gco.aws/hpa-controls-replicas: "{{MP_HPA_CONTROLS_REPLICAS}}"
   labels:
     app: manifest-processor
     component: api
     project: gco
 spec:
-  replicas: 3
+  replicas: {{MP_REPLICAS}}
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -190,8 +200,10 @@ spec:
               cpu: 500m
               memory: 1Gi
             limits:
-              cpu: 1000m
-              memory: 2Gi
+              # Rendered from cdk.json manifest_processor.resource_limits;
+              # quoted because the values are Kubernetes quantity strings.
+              cpu: "{{MP_CPU_LIMIT}}"
+              memory: "{{MP_MEMORY_LIMIT}}"
           startupProbe:
             exec:
               command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]

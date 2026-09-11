@@ -218,11 +218,13 @@ class TestRenderPlaceholders:
 
     def test_manifest_processor_security_policy_env_is_fully_wired(self) -> None:
         raw = (MANIFESTS_DIR / "31-manifest-processor.yaml").read_text(encoding="utf-8")
-        # Only the image token occupies an unquoted YAML scalar. Preserve the
-        # quoted env tokens so this test can assert their exact wiring.
+        # The image and replica tokens occupy unquoted YAML scalars. Preserve
+        # the quoted env tokens so this test can assert their exact wiring.
         docs = list(
             yaml.safe_load_all(
-                raw.replace("{{MANIFEST_PROCESSOR_IMAGE}}", "example.invalid/manifest:test")
+                raw.replace(
+                    "{{MANIFEST_PROCESSOR_IMAGE}}", "example.invalid/manifest:test"
+                ).replace("{{MP_REPLICAS}}", "3")
             )
         )
         deployment = next(doc for doc in docs if doc and doc.get("kind") == "Deployment")
