@@ -640,13 +640,12 @@ load-bearing here: without it coverage's unexecuted-file scan stops at any
 directory that is not a regular package, so a Lambda handler no test imports
 would be invisible and 0% would read as 100%.
 
-Files inside that surface which are not yet at 100% are listed in a delimited
-**coverage ratchet** block inside `[tool.coverage.run] omit`. The list is the
-reviewable record of what is still owed; it only ever shrinks, and
-`tests/test_coverage_ratchet.py` enforces that — entries must name real files,
-must be exact paths rather than globs, and may never cover `gco/`, `cli/` or
-`gco_mcp/`, so the ratchet cannot be used to lower a package that already
-holds 100%. When the block is empty, delete it.
+Every file inside that surface is at 100%. `[tool.coverage.run] omit` may
+exclude only structural files — the test-suite, `__init__.py` markers,
+generated or vendored trees, and the byte-identical shared Lambda copies —
+and `tests/test_coverage_omit_policy.py` enforces that with coverage's own
+matcher, so neither an exact path nor an over-matching glob can quietly excuse
+a source file. A new file is covered, not listed.
 
 The dedicated `unit:node:inference-streaming-proxy` job separately
 requires **exact 100%** lines, functions, and branches over
@@ -657,9 +656,9 @@ report is published to GitHub Pages after each `main` run by `pages.yml`.
 Shell scripts get the same treatment from `unit:bats:shell`, which runs the
 BATS suite under `bashcov` and then applies
 `.github/scripts/check_bash_coverage.py`. Scripts not yet fully covered are
-listed in `[tool.bash-coverage] ratchet` in `pyproject.toml` — the same
-shrink-only contract as the Python ratchet, guarded by
-`tests/test_check_bash_coverage.py`. That list starts long because `bashcov`
+listed in `[tool.bash-coverage] ratchet` in `pyproject.toml` — a shrink-only
+list (the same contract the Python side followed until its list emptied),
+guarded by `tests/test_check_bash_coverage.py`. That list starts long because `bashcov`
 only sees a script a suite actually executes under a traced Bash, and most
 suites either have no subject to run, run a copy in a temporary directory BATS
 deletes before the report is rendered, or only assert on the script's text; see

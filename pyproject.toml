@@ -465,37 +465,9 @@ omit = [
     "lambda/regional-api-proxy/backend_tls.py",
     "lambda/regional-api-proxy/proxy_utils.py",
     "lambda/proxy-shared/backend_tls.py",
-    # ------------------------------------------------------------------
-    # coverage ratchet: BEGIN
-    #
-    # These files are inside the measured surface but are not yet at 100%.
-    # They are omitted so the floor applies to everything else, and they are
-    # removed from this list — never added to it — as tests land. The list is
-    # the visible, reviewable record of what is still owed; when it is empty,
-    # delete it along with these comments.
-    #
-    # Rules (enforced by tests/test_coverage_ratchet.py):
-    #   * every entry is a real file, spelled exactly as coverage reports it;
-    #   * no entry may live under gco/, cli/ or gco_mcp/ — those packages are
-    #     already at 100% and the ratchet must not be used to weaken them;
-    #   * the list stays sorted and free of duplicates.
-    #
-    # Progress is printed by the ``unit:pytest:core`` job, which reports the
-    # omitted files separately so their coverage stays visible while it climbs.
-    # ------------------------------------------------------------------
-    # Spelled "./app.py" deliberately: coverage expands a bare "app.py" into
-    # BOTH the absolutised path and a bare glob, and the glob matches any
-    # app.py at any depth — which silently omitted
-    # .github/oidc_provider/app.py from the gate too. The "./" prefix keeps
-    # this entry pointing at the repository-root CDK entry point only.
-    "./app.py",
-    "diagrams/code_diagrams/_renderer.py",
-    "diagrams/code_diagrams/generate.py",
-    "diagrams/generate.py",
-    "diagrams/infra_diagrams/generate.py",
-    "dockerfiles/build_scratch_rootfs.py",
-    "docs/client-examples/python_boto3_example.py",
-    # coverage ratchet: END
+    # Nothing else. Every authored Python file is at 100%, and
+    # tests/test_coverage_omit_policy.py fails if an entry added here would
+    # excuse a source file — that is how the floor stays a floor.
 ]
 
 [tool.coverage.report]
@@ -527,11 +499,12 @@ directory = "htmlcov"
 # which lines of a script are executable and the checker turns that into a
 # pass/fail gate.
 #
-# Same contract as the Python ratchet in [tool.coverage.run] omit above:
-# entries are repository-relative paths to tracked *.sh files that are not yet
-# fully covered, they are removed — never added — as suites land, and
-# tests/test_check_bash_coverage.py keeps the list honest (paths exist, are
-# tracked shell scripts, and are sorted and unique).
+# A shrink-only ratchet, the same contract the Python side followed until its
+# list emptied: entries are repository-relative paths to tracked *.sh files
+# that are not yet fully covered, they are removed — never added — as suites
+# land, and tests/test_check_bash_coverage.py keeps the list honest (paths
+# exist, are tracked shell scripts, and are sorted and unique). When it is
+# empty, delete it along with these comments.
 #
 # Why the list starts this long. bashcov only sees a script that a BATS suite
 # actually executes under a traced Bash, and today most suites do not:
