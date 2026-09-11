@@ -3756,7 +3756,7 @@ class TestActionPreflight:
         from scripts.live_release_validation.constants import _CLUSTER_TUNNEL_ACTIONS
         from scripts.live_release_validation.registry import build_action_registry
 
-        assert _CLUSTER_TUNNEL_ACTIONS <= set(build_action_registry())
+        assert set(build_action_registry()) >= _CLUSTER_TUNNEL_ACTIONS
         ctx = self._ctx(tmp_path, selected=("preflight", "topology", action))
 
         with (
