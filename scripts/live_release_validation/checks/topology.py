@@ -675,7 +675,11 @@ def _health_warmup_samples(
                 f"{history[-1].get('error')}"
             )
 
-        for attempt in range(len(history) + 1, _HEALTH_WARMUP_ATTEMPTS + 1):
+        # Every iteration ends in `break` (success), `continue` (retryable, with
+        # attempts left) or a raise, so the loop never runs off the end of the
+        # range: the budget check above guarantees at least one attempt, and the
+        # last attempt raises instead of continuing.
+        for attempt in range(len(history) + 1, _HEALTH_WARMUP_ATTEMPTS + 1):  # pragma: no branch
             started = time.monotonic()
             try:
                 payload = ctx.aws_client.call_api(

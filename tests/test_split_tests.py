@@ -15,8 +15,11 @@ exactly the ones other CI jobs own.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
+import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -338,3 +341,206 @@ def test_cdk_output_contract_runs_in_the_synthesizing_job(
     upload = next(step for step in steps if step.get("name") == "Upload cdk.out")
     assert "cdk.out/" in upload["with"]["path"]
     assert "report-cdk-output.xml" in upload["with"]["path"]
+
+
+# ---------------------------------------------------------------------------
+# collect_counts: pytest --collect-only is parsed without ever running tests
+# ---------------------------------------------------------------------------
+
+#: What ``pytest -q --collect-only`` prints: one node id per line, then a
+#: summary line. Parametrized ids count individually; ``some/notes.txt::x`` is
+#: not a Python module and the bare summary line has no ``::`` separator.
+_COLLECT_OUTPUT = """\
+tests/test_a.py::test_one
+tests/test_a.py::test_two[param-1]
+tests/test_a.py::test_two[param-2]
+tests/test_b.py::TestGroup::test_nested
+  tests/test_c.py::test_indented
+notes.txt::not_python
+tests/test_d.py
+
+5 tests collected in 0.12s
+"""
+
+
+def _install_run(
+    monkeypatch: pytest.MonkeyPatch,
+    split: Any,
+    *,
+    returncode: int = 0,
+    stdout: str = _COLLECT_OUTPUT,
+    stderr: str = "",
+) -> list[dict[str, Any]]:
+    """Replace ``subprocess.run`` inside the script and record every invocation."""
+    calls: list[dict[str, Any]] = []
+
+    def _run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(split, "subprocess", types.SimpleNamespace(run=_run))
+    return calls
+
+
+def test_collect_counts_parses_node_ids_per_file(
+    split: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counts follow node ids (so parametrization counts), ignoring non-test lines."""
+    calls = _install_run(monkeypatch, split)
+
+    counts = split.collect_counts()
+
+    assert counts == {"tests/test_a.py": 3, "tests/test_b.py": 1, "tests/test_c.py": 1}
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["args"] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "tests",
+        "-o",
+        "addopts=",
+        "-q",
+        "--collect-only",
+        "--no-header",
+        "-p",
+        "no:cacheprovider",
+        *split.ignore_args(),
+    ]
+    assert call["cwd"] == split.REPO_ROOT == PROJECT_ROOT
+    assert call["capture_output"] is True
+    assert call["text"] is True
+    assert call["check"] is False
+
+
+def test_collect_counts_fails_loudly_when_collection_breaks(
+    split: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A collection error must fail the job, forwarding pytest's own output."""
+    _install_run(
+        monkeypatch,
+        split,
+        returncode=2,
+        stdout="ERROR collecting tests/test_broken.py\n",
+        stderr="ImportError: no module named nothing\n",
+    )
+
+    with pytest.raises(SystemExit, match="pytest collection failed with exit code 2"):
+        split.collect_counts()
+
+    err = capsys.readouterr().err
+    assert "ERROR collecting tests/test_broken.py" in err
+    assert "ImportError: no module named nothing" in err
+
+
+def test_collect_counts_refuses_to_shard_an_empty_collection(
+    split: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero node ids with a clean exit is treated as an error, not an empty shard."""
+    _install_run(monkeypatch, split, stdout="no tests ran in 0.01s\n")
+
+    with pytest.raises(SystemExit, match="produced no test ids; refusing to shard"):
+        split.collect_counts()
+
+
+# ---------------------------------------------------------------------------
+# main: argument handling and the three output modes
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def collected(split: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Stand in for collection so ``main`` never spawns pytest."""
+    counts = dict(_SAMPLE_COUNTS)
+    monkeypatch.setattr(split, "collect_counts", lambda: dict(counts))
+    return counts
+
+
+def test_main_prints_the_requested_shard_one_file_per_line(
+    split: Any, collected: dict[str, int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    expected = split.balance(collected, 3)
+
+    assert split.main(["--of", "3", "--shard", "2"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.splitlines() == expected[1]
+    assert out.endswith("\n")
+
+
+@pytest.mark.parametrize("shard", [1, 2])
+def test_main_shards_together_cover_every_file(
+    split: Any, collected: dict[str, int], capsys: pytest.CaptureFixture[str], shard: int
+) -> None:
+    """The CLI surface agrees with ``balance``: shard N prints group N-1."""
+    assert split.main(["--of", "2", "--shard", str(shard)]) == 0
+    assert capsys.readouterr().out.splitlines() == split.balance(collected, 2)[shard - 1]
+
+
+def test_main_summary_reports_per_shard_totals(
+    split: Any, collected: dict[str, int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert split.main(["--of", "2", "--summary"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    total = sum(collected.values())
+    assert lines[0] == f"{total} tests across {len(collected)} files -> 2 shard(s)"
+    assert len(lines) == 3
+    groups = split.balance(collected, 2)
+    for index, group in enumerate(groups, 1):
+        shard_total = sum(collected[path] for path in group)
+        share = shard_total / total * 100
+        assert lines[index] == (
+            f"  shard {index}: {shard_total:5d} tests ({share:5.1f}%) in {len(group)} files"
+        )
+
+
+def test_main_json_emits_the_whole_partition(
+    split: Any, collected: dict[str, int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert split.main(["--of", "3", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    groups = split.balance(collected, 3)
+    assert payload == {
+        "total_tests": sum(collected.values()),
+        "total_files": len(collected),
+        "shards": [
+            {"shard": index + 1, "tests": sum(collected[p] for p in group), "files": group}
+            for index, group in enumerate(groups)
+        ],
+    }
+
+
+def test_main_json_wins_over_summary(
+    split: Any, collected: dict[str, int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Machine-readable output is never mixed with the human summary."""
+    assert split.main(["--of", "2", "--json", "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["total_files"] == len(collected)
+    assert "shard(s)" not in out
+
+
+def test_main_requires_shard_unless_summary_or_json(split: Any, collected: dict[str, int]) -> None:
+    with pytest.raises(SystemExit, match="--shard is required unless --summary or --json"):
+        split.main(["--of", "2"])
+
+
+@pytest.mark.parametrize("shard", ["0", "3"])
+def test_main_rejects_out_of_range_shard_numbers(
+    split: Any, collected: dict[str, int], shard: str
+) -> None:
+    with pytest.raises(SystemExit, match=r"--shard must be between 1 and 2"):
+        split.main(["--of", "2", "--shard", shard])
+
+
+def test_main_rejects_zero_shards(split: Any, collected: dict[str, int]) -> None:
+    with pytest.raises(SystemExit, match="--of must be at least 1"):
+        split.main(["--of", "0", "--shard", "1"])
+
+
+def test_main_requires_of(split: Any, collected: dict[str, int]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        split.main(["--shard", "1"])
+    assert excinfo.value.code == 2

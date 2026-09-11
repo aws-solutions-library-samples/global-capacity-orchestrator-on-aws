@@ -456,10 +456,11 @@ class InferenceRuntimeMixin:
                 )
                 tls_target: object = None
                 if len(tls_metrics) == 1:
-                    source = tls_metrics[0].get("containerResource")
-                    target_value = source.get("target") if isinstance(source, dict) else None
-                    if isinstance(target_value, dict):
-                        tls_target = target_value.get("averageUtilization")
+                    # matching_tls_metric admitted this metric only after proving
+                    # containerResource.target is a Utilization object.
+                    tls_target = tls_metrics[0]["containerResource"]["target"].get(
+                        "averageUtilization"
+                    )
                 observed.update(
                     {
                         "target_matches": target
