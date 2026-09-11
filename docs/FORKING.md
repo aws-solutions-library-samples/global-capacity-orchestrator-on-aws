@@ -67,8 +67,8 @@ touched. In a clean checkout the tool finds about 155 references across roughly
 |-----------|---------|----------------|
 | Repository URLs | `github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws` | CI badges, issue links, `tree`/`blob` links, `pyproject.toml` project URLs |
 | SSH clone URLs | `git@github.com:aws-solutions-library-samples/...` | The clone commands in `README.md` and `QUICKSTART.md` |
-| GitHub Pages URL | `aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws` | The published site: orientation wiki at the root, coverage report at `/coverage/`, badge JSON at `/coverage-badge.json` (in `mkdocs.yml`, `wiki/*.md`, the README badge, and the wiki guard test) |
-| Percent-encoded Pages URL | `aws-solutions-library-samples.github.io%2Fglobal-capacity...` | The shields.io coverage badge embeds the Pages URL as a query parameter. Missing this leaves the badge reporting upstream's coverage while every other badge reports yours |
+| GitHub Pages URL | `aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws` | The published site: orientation wiki at the root, coverage reports at `/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`, badge JSON at `/python-coverage-badge.json` and its two siblings (in `mkdocs.yml`, `wiki/*.md`, the README badges, and the wiki guard test) |
+| Percent-encoded Pages URL | `aws-solutions-library-samples.github.io%2Fglobal-capacity...` | The three shields.io coverage badges embed the Pages URL as a query parameter. Missing this leaves them reporting upstream's coverage while every other badge reports yours |
 | Bare `owner/repo` slug | `"github_repo": "aws-solutions-library-samples/global-capacity-orchestrator-on-aws"` | Human-readable repository identity used to validate the OIDC subject prefix |
 | Immutable OIDC subject | `repo:aws-solutions-library-samples@109766924/global-capacity-orchestrator-on-aws@1219314144` | Stable GitHub owner/repository IDs in the role trust. The migration replaces this with a fail-closed placeholder because it cannot infer your fork's IDs offline |
 | Bare repository name | `cd global-capacity-orchestrator-on-aws`, `/path/to/global-capacity-orchestrator-on-aws` | Clone directory names and the MCP server setup paths |
@@ -148,13 +148,15 @@ deployed role match, workflows fail at the credential step with
 The project site is published by
 [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) to
 `https://<owner>.github.io/<repo>/`: the orientation wiki (built with MkDocs
-from [`wiki/`](../wiki)) is served at the site root, the HTML coverage report
-at `/coverage/`, and the badge endpoint JSON at `/coverage-badge.json`. Enable
-Pages on your repository — **Settings > Pages**, source **GitHub Actions** —
-or the site and badge 404 even with correct URLs. The migration rewrites the
-wiki's own URLs (`mkdocs.yml` `site_url`/`repo_url`, the nav's coverage link,
-and every GitHub deep link in `wiki/*.md`), so your fork's wiki links to your
-fork's files.
+from [`wiki/`](../wiki)) is served at the site root, the HTML coverage reports
+at `/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`, and the
+badge endpoint JSON at `/python-coverage-badge.json`, `/bash-coverage-badge.json`
+and `/nodejs-coverage-badge.json`. Enable Pages on your repository —
+**Settings > Pages**, source **GitHub Actions** — or the site and badges 404
+even with correct URLs. The migration rewrites the wiki's own URLs
+(`mkdocs.yml` `site_url`/`repo_url`, the nav's coverage-report links, and every
+GitHub deep link in `wiki/*.md`), so your fork's wiki links to your fork's
+files.
 
 ### Replace CODEOWNERS
 

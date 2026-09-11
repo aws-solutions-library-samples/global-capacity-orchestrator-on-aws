@@ -579,8 +579,173 @@ def test_format_report_notes_unmapped_paths() -> None:
 
 
 # --------------------------------------------------------------------------
+# The published report
+# --------------------------------------------------------------------------
+
+_REPORT_SOURCE = (
+    "#!/usr/bin/env bash\n"  # 1 not executable
+    "run() {\n"  # 2 not executable (function header)
+    '  python3 -c "\n'  # 3 statement, spans to line 5
+    "import sys\n"  # 4 continued
+    '" one\n'  # 5 continued
+    "  case $1 in\n"  # 6 statement
+    "    */*) ;;\n"  # 7 untraceable: empty case arm
+    "    *) : ;;\n"  # 8 statement, never run
+    "  esac\n"  # 9 not executable
+    "  echo <b>\n"  # 10 statement (angle brackets must be escaped on the page)
+    '} > "$log"\n'  # 11 untraceable: terminator with only a redirection
+)
+
+
+def _report_fixture() -> tuple[dict[int, int], set[int], list[tuple[int, int]]]:
+    hits = {3: 2, 6: 2, 8: 0, 10: 2}  # the folded map: the span's count sits on line 3
+    return hits, checker.untraceable_lines(_REPORT_SOURCE), checker.statement_spans(_REPORT_SOURCE)
+
+
+def test_line_states_classify_every_physical_line() -> None:
+    hits, untraceable, spans = _report_fixture()
+    assert untraceable == {7, 11}
+    assert spans == [(3, 5)]
+    states = checker.line_states(_REPORT_SOURCE, hits, untraceable, spans)
+    assert [kind for kind, _count, _text in states] == [
+        "none",
+        "none",
+        "covered",
+        "covered continued",
+        "covered continued",
+        "covered",
+        "untraceable",
+        "missed",
+        "none",
+        "covered",
+        "untraceable",
+    ]
+    assert [count for _kind, count, _text in states] == [
+        None, None, 2, None, None, 2, None, 0, None, 2, None
+    ]  # fmt: skip
+    assert states[9][2] == "  echo <b>"
+
+
+def test_line_states_treat_an_unreported_span_as_not_executable() -> None:
+    """A span none of whose lines the report listed is not a statement at all."""
+    states = checker.line_states("x=$(\n  cat\n)\n", {}, set(), [(1, 3)])
+    assert [kind for kind, _count, _text in states] == ["none", "none", "none"]
+
+
+def test_line_states_take_a_missed_statement_through_its_continuation_lines() -> None:
+    states = checker.line_states("x=$(\n  cat\n)\n", {1: 0}, set(), [(1, 3)])
+    assert [kind for kind, _count, _text in states] == [
+        "missed",
+        "missed continued",
+        "missed continued",
+    ]
+
+
+def test_summarize_counts_statements_and_names_the_unmeasured() -> None:
+    reported = {"/w/a.sh": {1: 1, 2: 1}, "/w/b.sh": {1: 1, 2: 0, 3: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
+    summary = checker.summarize(result)
+    assert summary["ok"] is False
+    assert (summary["scripts"], summary["scripts_at_100"]) == (3, 1)
+    assert summary["unmeasured"] == ["c.sh"]
+    assert (summary["statements"], summary["covered"], summary["missed"]) == (5, 3, 2)
+    assert summary["percent"] == 60.0
+    files = summary["files"]
+    assert isinstance(files, list)
+    assert files[1] == {
+        "path": "b.sh",
+        "measured": True,
+        "statements": 3,
+        "covered": 1,
+        "missed": [2, 3],
+        "percent": 33.33,
+    }
+    assert files[2]["measured"] is False
+    assert files[2]["percent"] == 0.0, "an unmeasured script is never rendered as 100%"
+
+
+def test_summarize_a_passing_run() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"])
+    summary = checker.summarize(result)
+    assert summary["ok"] is True
+    assert (summary["scripts_at_100"], summary["percent"]) == (1, 100.0)
+
+
+def test_page_name_flattens_the_path_and_never_starts_with_a_dot() -> None:
+    assert checker._page_name("demo/lib_demo.sh") == "demo__lib_demo.sh.html"
+    assert checker._page_name(".github/scripts/x.sh") == "github__scripts__x.sh.html"
+
+
+def test_write_report_renders_the_corrected_view(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "a.sh").write_text(_REPORT_SOURCE, encoding="utf-8")
+    (root / "b.sh").write_text("echo b\n", encoding="utf-8")
+    inventory = ["b.sh", "lib/a.sh"]
+    untraceable, spans = checker.classify_scripts(root, inventory)
+    # The raw report lists the span's lines separately; evaluate() folds them.
+    reported = {"/w/lib/a.sh": {3: 2, 4: 0, 5: 2, 6: 2, 7: 0, 8: 0, 10: 2, 11: 0}}
+    result = checker.evaluate(reported, inventory, untraceable, spans)
+
+    out = tmp_path / "report"
+    summary = checker.write_report(result, root, untraceable, spans, out)
+
+    assert json.loads((out / "summary.json").read_text(encoding="utf-8")) == summary
+    assert summary["ok"] is False
+    assert summary["unmeasured"] == ["b.sh"]
+    assert (summary["statements"], summary["covered"]) == (4, 3)
+
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "<b>0/2 tracked scripts at 100%</b>" in index
+    assert "3 of 4 statements covered (75.00%)" in index
+    assert 'href="files/lib__a.sh.html"' in index and 'href="files/b__.sh.html"' not in index
+    assert 'href="files/b.sh.html"' in index
+    assert "not executed by any suite" in index
+    assert '<td class="num bad">75.00%</td>' in index
+
+    page = (out / "files" / "lib__a.sh.html").read_text(encoding="utf-8")
+    assert "3 of 4 statements covered (75.00%), 1 missed." in page
+    assert '<tr class="covered"><td class="n">3</td><td class="c">2</td>' in page
+    assert '<tr class="covered continued"><td class="n">4</td><td class="c"></td>' in page
+    assert '<tr class="untraceable"><td class="n">7</td>' in page
+    assert '<tr class="missed"><td class="n">8</td><td class="c">0</td>' in page
+    assert "echo &lt;b&gt;" in page, "source text is escaped"
+    assert "<b>" not in page.split("<table", 1)[1]
+
+    unmeasured = (out / "files" / "b.sh.html").read_text(encoding="utf-8")
+    assert "Not executed by any suite" in unmeasured
+    assert '<tr class="none"><td class="n">1</td><td class="c"></td>' in unmeasured
+    assert "%" not in unmeasured.split("<h1>", 1)[1].split("<table", 1)[0].replace(
+        "not counted", ""
+    ), "an unmeasured script's page shows no percentage"
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+
+
+def test_main_writes_the_report_when_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
+    out = tmp_path / "published"
+    assert checker.main([str(report), "--root", str(root), "--report", str(out)]) == 0
+    assert "1/1 tracked scripts at 100%" in capsys.readouterr().out
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["ok"] is True and summary["percent"] == 100.0
+    assert (out / "index.html").is_file() and (out / "files" / "a.sh.html").is_file()
+
+
+def test_main_writes_the_report_for_a_failing_run_too(tmp_path: Path) -> None:
+    """The artifact must be inspectable precisely when the gate fails."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(0)}))
+    out = tmp_path / "published"
+    assert checker.main([str(report), "--root", str(root), "--report", str(out)]) == 1
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["ok"] is False and summary["missed"] == 1
 
 
 def test_main_returns_zero_when_the_floor_holds(

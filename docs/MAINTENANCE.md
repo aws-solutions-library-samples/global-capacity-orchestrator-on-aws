@@ -650,8 +650,10 @@ a source file. A new file is covered, not listed.
 The dedicated `unit:node:inference-streaming-proxy` job separately
 requires **exact 100%** lines, functions, and branches over
 `lambda/inference-streaming-proxy/index.mjs` from Node.js 24's built-in V8
-coverage (V8 reports no statement metric, so none is claimed). The Python HTML
-report is published to GitHub Pages after each `main` run by `pages.yml`.
+coverage (V8 reports no statement metric, so none is claimed). After each
+`main` run, `pages.yml` publishes the three HTML reports to GitHub Pages at
+`/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`, with the
+README's three coverage badges rendered from the same runs.
 
 Shell scripts get the same treatment from `unit:bats:shell`, which runs the
 BATS suite under `bashcov` and then applies

@@ -13,11 +13,11 @@
 #      not kill your preview loop. Re-run the script — or wait for the
 #      strict build in phase 1 of your next run — for the CI verdict.)
 #
-# The published site also carries the coverage report at /coverage/, merged
-# in by pages.yml at deploy time from the Unit Tests artifact — it is NOT
-# part of the local MkDocs build, so the nav's "Coverage report" entry
-# points at the live site and a locally served /coverage/ 404s. That is
-# expected.
+# The published site also carries the three coverage reports, at
+# /python-coverage/, /bash-coverage/ and /nodejs-coverage/, merged in by
+# pages.yml at deploy time from the test jobs' artifacts — they are NOT part
+# of the local MkDocs build, so the nav's "Coverage reports" entries point
+# at the live site and the locally served paths 404. That is expected.
 #
 # Usage:
 #   ./scripts/preview_wiki.sh                 # strict build, then serve on :8000

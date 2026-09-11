@@ -78,6 +78,9 @@ htmlcov/
 coverage/
 .bundle/
 vendor/bundle/
+# The lcov tracefile the Node test script writes beside the Lambda package
+# (its genhtml rendering lands in coverage/, already ignored above).
+lambda/inference-streaming-proxy/lcov.info
 
 # Kubernetes
 kubeconfig*

@@ -72,9 +72,18 @@ The gate fails closed: a tracked script absent from the report entirely is an
 error, not a pass, because that is what a silently mis-scoped bashcov run or a
 suite that never executes its subject looks like.
 
+**The published report.** SimpleCov's own HTML renders the raw line hits, so
+it shows the two corrected shapes as misses and a lower number than the gate.
+``--report DIR`` writes a statement-level HTML report and a ``summary.json``
+from the corrected data instead; ``unit:bats:shell`` ships it in the
+``bash-coverage-report`` artifact and ``pages.yml`` serves it at
+``/bash-coverage/`` and renders the README badge from the summary, so the
+badge, the report and the gate describe one measurement.
+
 Usage::
 
     python3 .github/scripts/check_bash_coverage.py coverage/
+    python3 .github/scripts/check_bash_coverage.py coverage/ --report coverage/report
     python3 .github/scripts/check_bash_coverage.py coverage/.resultset.json
 
 Exit codes::
@@ -550,6 +559,229 @@ def format_report(result: Result) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# The published report
+#
+# SimpleCov's own HTML report renders the raw line hits, so it shows the
+# untraceable lines and the later lines of multi-line statements as misses
+# and reports a lower number than the gate does. The report published to
+# GitHub Pages (by pages.yml, from the artifact) is rendered here instead,
+# from the same corrected data the verdict comes from, so the badge, the
+# report and the gate cannot tell three different stories.
+# --------------------------------------------------------------------------
+
+SUMMARY_NAME = "summary.json"
+
+_REPORT_CSS = """
+body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2em auto; max-width: 72em; padding: 0 1em; color: #222; }
+h1 { font-size: 1.5em; } h1 code { font-size: 0.9em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.25em 0.6em; border-bottom: 1px solid #ddd; }
+th { background: #f3f3f3; } td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: #1a7f37; } .bad { color: #b42318; } .muted { color: #666; }
+table.source { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+table.source td { border: 0; padding: 0 0.6em; white-space: pre; }
+table.source td.n { text-align: right; color: #888; user-select: none; width: 3em; }
+table.source td.c { text-align: right; color: #666; width: 3em; }
+tr.covered td.s { background: #dafbe1; } tr.missed td.s { background: #ffebe9; }
+tr.continued td.n::after { content: " \\2026"; }
+tr.untraceable td.s { background: #f3f3f3; color: #666; }
+.legend span { display: inline-block; padding: 0 0.5em; margin-right: 0.6em; }
+.legend .covered { background: #dafbe1; } .legend .missed { background: #ffebe9; } .legend .untraceable { background: #f3f3f3; }
+"""
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _page_name(path: str) -> str:
+    """The file page for a script: the path with ``/`` doubled into ``__``.
+
+    A leading dot is dropped so ``.github/scripts/x.sh`` does not become a
+    hidden file on the site. Basenames are unique across the inventory (a test
+    asserts it), so no two scripts share a page.
+    """
+    return path.replace("/", "__").lstrip(".") + ".html"
+
+
+def line_states(
+    source: str,
+    hits: dict[int, int],
+    untraceable: set[int],
+    spans: list[tuple[int, int]],
+) -> list[tuple[str, int | None, str]]:
+    """Classify every physical line of a script for its file page.
+
+    Returns one ``(kind, count, text)`` per line. ``kind`` is ``covered`` or
+    ``missed`` for a measured statement, the same with ``continued`` added for
+    the later physical lines of a multi-line statement (they take their
+    statement's fate — ``hits`` is the folded map, so only the first line
+    carries the count), ``untraceable`` for a line Bash never traces, and
+    ``none`` for a line that is not executable.
+    """
+    continued: dict[int, int] = {}
+    for first, last in spans:
+        if first in hits:  # folded onto its first line, so the statement is measured
+            for line in range(first + 1, last + 1):
+                continued[line] = first
+    states: list[tuple[str, int | None, str]] = []
+    for number, text in enumerate(source.splitlines(), start=1):
+        if number in untraceable:
+            states.append(("untraceable", None, text))
+        elif number in hits:
+            states.append(("covered" if hits[number] else "missed", hits[number], text))
+        elif number in continued:
+            count = hits[continued[number]]
+            states.append((("covered" if count else "missed") + " continued", None, text))
+        else:
+            states.append(("none", None, text))
+    return states
+
+
+def _percent(covered: int, total: int) -> float:
+    return round(100.0 * covered / total, 2) if total else 0.0
+
+
+def summarize(result: Result) -> dict[str, object]:
+    """The machine-readable summary the badge is rendered from."""
+    files = []
+    statements = covered = 0
+    for record in result.scripts:
+        missed = record.missed_lines
+        statements += record.total_lines
+        covered += record.total_lines - len(missed)
+        files.append(
+            {
+                "path": record.path,
+                "measured": record.measured,
+                "statements": record.total_lines,
+                "covered": record.total_lines - len(missed),
+                "missed": missed,
+                "percent": _percent(record.total_lines - len(missed), record.total_lines),
+            }
+        )
+    at_floor = [record for record in result.scripts if record.measured and not record.missed_lines]
+    return {
+        "ok": result.ok,
+        "scripts": len(result.scripts),
+        "scripts_at_100": len(at_floor),
+        "unmeasured": [record.path for record in result.scripts if not record.measured],
+        "statements": statements,
+        "covered": covered,
+        "missed": statements - covered,
+        "percent": _percent(covered, statements),
+        "files": files,
+    }
+
+
+def _file_page(record: ScriptCoverage, states: list[tuple[str, int | None, str]]) -> str:
+    stats: str
+    if not record.measured:
+        stats = '<p class="bad">Not executed by any suite, so its coverage is unknown.</p>'
+    else:
+        missed = len(record.missed_lines)
+        klass = "ok" if not missed else "bad"
+        stats = (
+            f'<p class="{klass}">{record.total_lines - missed} of {record.total_lines} '
+            f"statements covered ({_percent(record.total_lines - missed, record.total_lines):.2f}%)"
+            f"{'' if not missed else f', {missed} missed'}.</p>"
+        )
+    rows = []
+    for number, (kind, count, text) in enumerate(states, start=1):
+        shown = "" if count is None else str(count)
+        rows.append(
+            f'<tr class="{kind}"><td class="n">{number}</td><td class="c">{shown}</td>'
+            f'<td class="s">{_escape(text) or " "}</td></tr>'
+        )
+    legend = (
+        '<p class="legend"><span class="covered">covered</span>'
+        '<span class="missed">missed</span>'
+        '<span class="untraceable">never traced by Bash (not counted)</span>'
+        "A line ending in \u2026 continues the statement above it and shares its fate.</p>"
+    )
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        f"<title>{_escape(record.path)} \u2014 shell coverage</title>"
+        f"<style>{_REPORT_CSS}</style></head><body>\n"
+        f'<p><a href="../index.html">\u2190 all scripts</a></p>\n'
+        f"<h1><code>{_escape(record.path)}</code></h1>\n{stats}\n{legend}\n"
+        '<table class="source">\n' + "\n".join(rows) + "\n</table>\n</body></html>\n"
+    )
+
+
+def _index_page(summary: dict[str, object]) -> str:
+    files = summary["files"]
+    assert isinstance(files, list)
+    rows = []
+    for entry in files:
+        link = f'<a href="files/{_page_name(entry["path"])}">{_escape(entry["path"])}</a>'
+        if not entry["measured"]:
+            rows.append(
+                f"<tr><td>{link}</td>"
+                '<td class="bad" colspan="4">not executed by any suite</td></tr>'
+            )
+            continue
+        klass = "ok" if not entry["missed"] else "bad"
+        rows.append(
+            f"<tr><td>{link}</td>"
+            f'<td class="num">{entry["statements"]}</td>'
+            f'<td class="num">{entry["covered"]}</td>'
+            f'<td class="num">{len(entry["missed"])}</td>'
+            f'<td class="num {klass}">{entry["percent"]:.2f}%</td></tr>'
+        )
+    klass = "ok" if summary["ok"] else "bad"
+    verdict = (
+        f'<p class="{klass}"><b>{summary["scripts_at_100"]}/{summary["scripts"]} tracked scripts '
+        f"at 100%</b> \u2014 {summary['covered']} of {summary['statements']} statements covered "
+        f"({summary['percent']:.2f}%).</p>"
+    )
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        "<title>Shell coverage</title>"
+        f"<style>{_REPORT_CSS}</style></head><body>\n"
+        "<h1>Shell coverage</h1>\n"
+        f"{verdict}\n"
+        '<p class="muted">Every tracked shell script, measured in statements by the '
+        "<code>unit:bats:shell</code> job: BATS runs each script under bashcov, and "
+        "<code>check_bash_coverage.py</code> corrects the raw line hits for the lines Bash "
+        "never traces and for statements that span several lines. This page is that "
+        "corrected view, and the same numbers are what the gate enforces.</p>\n"
+        "<table><thead><tr><th>Script</th><th>Statements</th><th>Covered</th>"
+        "<th>Missed</th><th>Coverage</th></tr></thead>\n<tbody>\n"
+        + "\n".join(rows)
+        + "\n</tbody></table>\n</body></html>\n"
+    )
+
+
+def write_report(
+    result: Result,
+    root: Path,
+    untraceable: dict[str, set[int]],
+    spans: dict[str, list[tuple[int, int]]],
+    out_dir: Path,
+) -> dict[str, object]:
+    """Write ``index.html``, one page per script and ``summary.json`` to ``out_dir``.
+
+    Rendered from the evaluated result, so the numbers agree with the verdict
+    ``main`` prints. Returns the summary that was written.
+    """
+    summary = summarize(result)
+    files_dir = out_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    for record in result.scripts:
+        source = (root / record.path).read_text(encoding="utf-8")
+        states = line_states(
+            source, record.hits, untraceable.get(record.path, set()), spans.get(record.path, [])
+        )
+        (files_dir / _page_name(record.path)).write_text(
+            _file_page(record, states), encoding="utf-8"
+        )
+    (out_dir / "index.html").write_text(_index_page(summary), encoding="utf-8")
+    (out_dir / SUMMARY_NAME).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -563,6 +795,17 @@ def main(argv: list[str] | None = None) -> int:
         default=REPO_ROOT,
         help="Repository root used to build the tracked-script inventory.",
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Also write the statement-level HTML report (index.html, files/*.html) and "
+            f"{SUMMARY_NAME} to DIR — the view pages.yml publishes. Written whatever the "
+            "verdict, so a failing run can be inspected."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -575,6 +818,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     result = evaluate(reported, inventory, untraceable, spans)
+    if args.report is not None:
+        write_report(result, args.root, untraceable, spans, args.report)
     print(format_report(result))
     return 0 if result.ok else 1
 
