@@ -58,6 +58,7 @@ spec:
         # Keep ambient Kubernetes credentials disabled. The worker receives
         # only the two explicitly projected tokens below.
         automountServiceAccountToken: false
+        enableServiceLinks: false
         serviceAccountName: gco-manifest-processor-sa
         priorityClassName: gco-platform-critical
         securityContext:
@@ -70,7 +71,10 @@ spec:
         containers:
         - name: queue-processor
           image: {{QUEUE_PROCESSOR_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -169,7 +173,8 @@ spec:
             readOnly: true
         volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: aws-iam-token
           projected:
             defaultMode: 420

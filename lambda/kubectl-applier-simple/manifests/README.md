@@ -12,6 +12,7 @@ requires a handler change.
 - [Naming Convention](#naming-convention)
 - [File Groups](#file-groups)
 - [Files](#files)
+- [Platform Workload Contract](#platform-workload-contract)
 - [Template Variables](#template-variables)
 - [Adding New Manifests](#adding-new-manifests)
 
@@ -60,7 +61,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 |-------|-------|-------------|
 | `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes |
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
-| `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
+| `30-39` | System services | health-monitor, manifest-processor, inference-monitor, inference-proxy, cost-monitor — every Deployment follows the [platform workload contract](#platform-workload-contract) |
 | `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
 | `50-59` | GPU observability | DCGM exporter |
 | `post-helm-*` | Post-Helm | Resources needing Helm CRDs: cert-manager API workload certificates, Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
@@ -97,8 +98,8 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 |------|----------|
 | `30-health-monitor.yaml` | `Deployment` + `PodDisruptionBudget` + TLS-only `Service`; the application binds pod loopback and a same-image sidecar hot-reloads the cert-manager leaf on port 8443 |
 | `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + TLS-only `Service`; the application binds pod loopback and a same-image sidecar hot-reloads the cert-manager leaf on port 8443 |
-| `32-inference-monitor.yaml` | `Deployment` + `PodDisruptionBudget` |
-| `33-inference-proxy.yaml` | Dedicated inference `Deployment` with a hot-reloading TLS proxy sidecar (three replicas on create; HPA owns updates) + per-container application CPU/memory and TLS CPU `HorizontalPodAutoscaler` signals (TLS defaults: `100m` request, 70% target; configurable through `cdk.json` `inference_proxy`) + two-pod `PodDisruptionBudget` + 15-minute stream-drain lifecycle + TLS-only `Service` |
+| `32-inference-monitor.yaml` | Leader-elected reconciler `Deployment` (two replicas: leader + hot standby) probed on its :9090 Prometheus endpoint + `PodDisruptionBudget` |
+| `33-inference-proxy.yaml` | Dedicated inference `Deployment` with a hot-reloading TLS proxy sidecar (three replicas on create; HPA owns updates) + per-container application CPU/memory and TLS CPU `HorizontalPodAutoscaler` signals (TLS defaults: `100m` request, 70% target; configurable through `cdk.json` `inference_proxy`) + one-disruption-at-a-time `PodDisruptionBudget` + 15-minute stream-drain lifecycle + TLS-only `Service` |
 | `34-cost-monitor.yaml` | Cost monitor `ServiceAccount` + single-replica `Recreate` `Deployment` + `Service` + three `NetworkPolicy` rules (manifest-processor ingress/egress, [OpenCost](https://opencost.io/) egress) — **skipped and pruned when cost monitoring is disabled** |
 
 ### NodePools (40–49)
@@ -143,6 +144,27 @@ here from upgraded clusters.
 | `post-helm-kueue-default-queues.yaml` | Default Kueue topology for `gco-jobs`: `ResourceFlavor` `gco-default-flavor`, `ClusterQueue` `gco-cluster-queue` (quota from the namespace `ResourceQuota` values) and `LocalQueue` `gco-default`, so a Job labelled `kueue.x-k8s.io/queue-name: gco-default` is admitted without hand-applied queue objects — **skipped and pruned when Kueue is disabled** |
 | `post-helm-mlflow-network.yaml` | `NetworkPolicy` pair letting pods labelled `gco.io/mlflow-client` in `gco-jobs` reach the in-cluster MLflow tracking server on port 5000 through the namespace's default-deny posture — **skipped and pruned when MLflow is disabled** |
 | `post-helm-slurm-network.yaml` | `NetworkPolicy` rules that let slurmctld/slurmd/slurmrestd reach each other and let client pods call the Slurm REST API inside zero-trust `gco-jobs` (the Slinky charts ship none) — **skipped and pruned when Slurm is disabled** |
+
+## Platform Workload Contract
+
+The five `gco-system` Deployments (`30`–`34`) and the queue-processor
+`ScaledJob` share one pod shape, pinned by
+`tests/test_platform_workload_contract.py` so a new service or an edit to an
+old one cannot quietly drop part of it:
+
+| Property | Contract | Why |
+|----------|----------|-----|
+| Replicas | Fixed per service (`replicas`), except the inference proxy whose HPA owns the count after creation (`gco.aws/hpa-controls-replicas: "true"`); the manifest-processor count comes from `cdk.json` `manifest_processor.replicas` | Control loops gain availability, not throughput, from replicas; only request-path services autoscale |
+| Rollout | `RollingUpdate` with `maxUnavailable: 0`, `maxSurge: 1`; `revisionHistoryLimit: 3`; `gco.aws/deployment-timestamp` on the pod template so every deploy rolls exactly once (cost-monitor: `Recreate`, one replica, single writer by design) | Zero-unavailability rollouts without a second back-to-back revision |
+| Disruption | `PodDisruptionBudget` with `maxUnavailable: 1` for every multi-replica Deployment | One eviction at a time whatever the replica count; `minAvailable: 2` on a 10-replica HPA target would have allowed eight |
+| Placement | Soft `topologySpreadConstraints` (zone, hostname) plus preferred `podAntiAffinity` for every multi-replica Deployment | Spread across nodes and AZs without blocking scheduling on a small cluster |
+| Images | `imagePullPolicy: IfNotPresent` — CDK publishes each image under a content-hash tag | A cached layer is always the right layer, and a restart never depends on the registry |
+| Probes | `startupProbe` (≥120 s budget), `livenessProbe`, `readinessProbe` on every container; API containers probe their loopback listener through `python -c`, the TLS sidecar through `tcpSocket`/HTTPS, the inference-monitor through its :9090 metrics endpoint | Every container has an honest liveness signal; readiness stays shallow (process up, background task alive) so a dependency blip never turns the whole tier unready behind the ALB |
+| Resources | `requests` and `limits` (CPU + memory) on every container; every `/tmp` emptyDir carries a `sizeLimit` | No unbounded pod can starve a node |
+| Security | `runAsNonRoot` uid/gid 1000, `RuntimeDefault` seccomp, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `automountServiceAccountToken: false` with an explicit projected token for RBAC-bound accounts, `enableServiceLinks: false` | Least privilege, and no Service env-var injection into unrelated pods |
+| Identity | Dedicated ServiceAccount with IRSA annotation plus a Pod Identity association; `AWS_ROLE_ARN` / `AWS_WEB_IDENTITY_TOKEN_FILE` on the credentialed container only (`eks.amazonaws.com/skip-containers` excludes the TLS sidecar) | The sidecar never holds AWS credentials it does not use |
+| Shutdown | `terminationGracePeriodSeconds` > preStop sleep + `GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`; every FastAPI service passes that budget to uvicorn | In-flight requests and streams drain before the kubelet kills the pod |
+| Network | Default-deny ingress in `gco-system`; each workload is selected by exactly the allow rules it needs (`03-network-policies.yaml`, `34-cost-monitor.yaml`) | A workload no policy selects is unreachable, so the contract test requires one |
 
 ## Template Variables
 

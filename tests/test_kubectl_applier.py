@@ -1985,8 +1985,12 @@ class TestInferenceProxyAutoscalingManifest:
             containers["api-tls-proxy"]["lifecycle"]["preStop"]
             == containers["inference-proxy"]["lifecycle"]["preStop"]
         )
-        assert pdb["spec"]["minAvailable"] == 2
-        assert pdb["spec"]["selector"]["matchLabels"] == {"app": "inference-proxy"}
+        # One disruption at a time however far the HPA has scaled the proxy;
+        # minAvailable: 2 would have let 8 of 10 replicas be evicted at once.
+        assert pdb["spec"] == {
+            "maxUnavailable": 1,
+            "selector": {"matchLabels": {"app": "inference-proxy"}},
+        }
 
     @pytest.mark.parametrize(
         "missing_token",

@@ -34,6 +34,7 @@ metadata:
     project: gco
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
   strategy:
     type: Recreate
   selector:
@@ -52,6 +53,7 @@ spec:
       serviceAccountName: gco-cost-monitor-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -63,7 +65,10 @@ spec:
       containers:
         - name: cost-monitor
           image: {{COST_MONITOR_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -12,6 +12,7 @@ metadata:
     project: gco
 spec:
   replicas: 2
+  revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -33,6 +34,7 @@ spec:
       serviceAccountName: gco-health-monitor-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -72,7 +74,10 @@ spec:
       containers:
         - name: health-monitor
           image: {{HEALTH_MONITOR_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -118,6 +123,15 @@ spec:
               value: "{{PROJECT_NAME}}"
             - name: GLOBAL_REGION
               value: "{{GLOBAL_REGION}}"
+            # The webhook dispatcher reads job events for the namespaces the
+            # submission policy admits and looks registrations up in the
+            # project-scoped table; both come from the same placeholders the
+            # manifest processor renders, so a non-default project_name and a
+            # custom namespace policy reach this service too.
+            - name: WEBHOOKS_TABLE_NAME
+              value: "{{WEBHOOKS_TABLE_NAME}}"
+            - name: ALLOWED_NAMESPACES
+              value: "{{MP_ALLOWED_NAMESPACES}}"
             - name: AWS_ROLE_ARN
               value: "{{HEALTH_MONITOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
@@ -191,7 +205,7 @@ spec:
               readOnly: true
         - name: api-tls-proxy
           image: {{HEALTH_MONITOR_IMAGE}}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python", "-m", "gco.services.tls_proxy"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -281,6 +295,9 @@ spec:
                         apiVersion: v1
                         fieldPath: metadata.namespace
 ---
+# maxUnavailable rather than minAvailable: one voluntary disruption at a
+# time whatever the replica count, so a larger replica count (operator-chosen
+# or HPA-driven) never widens the eviction window.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -290,7 +307,7 @@ metadata:
     app: health-monitor
     project: gco
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: health-monitor

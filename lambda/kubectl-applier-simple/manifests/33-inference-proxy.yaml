@@ -16,6 +16,7 @@ metadata:
     project: gco
 spec:
   replicas: 3
+  revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -37,6 +38,7 @@ spec:
       serviceAccountName: gco-inference-proxy-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       # API Gateway response streams can run for 15 minutes. Allow Uvicorn to
       # drain an in-flight stream after this pod stops receiving new traffic.
       terminationGracePeriodSeconds: 930
@@ -78,7 +80,10 @@ spec:
       containers:
         - name: inference-proxy
           image: {{INFERENCE_PROXY_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -154,7 +159,7 @@ spec:
               readOnly: true
         - name: api-tls-proxy
           image: {{INFERENCE_PROXY_IMAGE}}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python", "-m", "gco.services.tls_proxy"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -216,7 +221,8 @@ spec:
               readOnly: true
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: api-tls
           secret:
             secretName: inference-proxy-tls
@@ -299,6 +305,9 @@ spec:
           type: Utilization
           averageUtilization: {{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}
 ---
+# maxUnavailable rather than minAvailable: one voluntary disruption at a
+# time whatever the replica count, so a larger replica count (operator-chosen
+# or HPA-driven) never widens the eviction window.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -308,7 +317,7 @@ metadata:
     app: inference-proxy
     project: gco
 spec:
-  minAvailable: 2
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: inference-proxy

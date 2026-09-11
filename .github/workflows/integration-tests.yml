@@ -1593,8 +1593,8 @@ jobs:
               *34-cost-monitor*)       image="cost-monitor:ci"; key="COST_MONITOR_IMAGE" ;;
             esac
             # Stub out every remaining {{PLACEHOLDER}} with a safe literal.
-            # These tags were loaded into kind rather than pushed to a registry,
-            # so the CI-only render must not retain production's Always policy.
+            # The manifests already pull IfNotPresent (content-hash tags), which
+            # is also what lets these kind-loaded, never-pushed tags start.
             sed -e "s|{{${key}}}|${image}|g" \
                 -e "s|{{DEPLOYMENT_TIMESTAMP}}|$(date +%s)|g" \
                 -e 's|{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}|1048576|g' \
@@ -1603,7 +1603,6 @@ jobs:
                 -e 's|{{COST_REPORT_INTERVAL_MINUTES}}|60|g' \
                 -e 's|{{COST_MONITORING_ENABLED}}|true|g' \
                 -e "s|{{[A-Z_]*}}|ci-stub|g" \
-                -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|g' \
                 "$manifest" \
               | kubectl apply -f -
           done
