@@ -147,7 +147,10 @@ def get_deployment_config() -> tuple[str, str]:
         deployment_regions = context.get("deployment_regions", {})
         api_region = str(deployment_regions.get("api_gateway") or "us-east-2")
         return project_name, api_region
-    except OSError, TypeError, ValueError:
+    except OSError, AttributeError, ValueError:
+        # OSError: no readable cdk.json; ValueError: not JSON; AttributeError:
+        # valid JSON of the wrong shape (a list or scalar where a mapping was
+        # expected has no ``.get``).
         return "gco", "us-east-2"
 
 

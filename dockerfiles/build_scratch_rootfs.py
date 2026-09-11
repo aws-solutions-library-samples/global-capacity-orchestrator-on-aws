@@ -60,6 +60,25 @@ USR_LOCAL = Path("/usr/local")
 APP_TREE = Path("/app/gco")
 DPKG_STATUS = Path("/var/lib/dpkg/status")
 
+# The builder filesystem everything is read from. Every path in this module is
+# written as the absolute builder path (``/etc/ssl/certs``, ``/usr/local``,
+# ...) and staged under ROOTFS at that same path; reads go through ``host()``
+# so the test-suite can point SYSROOT at a synthetic builder tree and run the
+# whole assembly hermetically. In the image build this is ``/`` and ``host()``
+# is the identity.
+SYSROOT = Path("/")
+
+
+def host(path: Path) -> Path:
+    """Where the builder file at absolute ``path`` is read from."""
+    return SYSROOT / path.relative_to("/")
+
+
+def host_glob(directory: Path, pattern: str) -> list[Path]:
+    """Sorted absolute builder paths under ``directory`` matching ``pattern``."""
+    return sorted(Path("/") / match.relative_to(SYSROOT) for match in host(directory).glob(pattern))
+
+
 # Runtime identity baked into the synthesized /etc/passwd. Matches the
 # runAsUser/runAsGroup 1000 enforced by every pod securityContext.
 RUNTIME_USER = "gco"
@@ -123,7 +142,7 @@ def copy_file(source: Path) -> None:
     destination = stage_path(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
-        shutil.copy2(source, destination, follow_symlinks=False)
+        shutil.copy2(host(source), destination, follow_symlinks=False)
 
 
 def replicate_symlink_chain(path: Path) -> Path:
@@ -137,8 +156,8 @@ def replicate_symlink_chain(path: Path) -> Path:
     for _ in range(16):
         destination = stage_path(current)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if current.is_symlink():
-            target = os.readlink(current)
+        if host(current).is_symlink():
+            target = os.readlink(host(current))
             if not destination.is_symlink():
                 destination.symlink_to(target)
             current = Path(os.path.normpath(current.parent / target))
@@ -153,23 +172,23 @@ def seed_binaries() -> list[Path]:
     """Every ELF object whose dependency closure must ship."""
     seeds = [USR_LOCAL / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}"]
     # Stdlib C extensions (drives libsqlite3, liblzma, libffi, libssl, ...).
-    seeds += sorted((USR_LOCAL / "lib").glob("python*/lib-dynload/*.so"))
+    seeds += host_glob(USR_LOCAL / "lib", "python*/lib-dynload/*.so")
     # libpython itself plus every compiled site-packages extension. manylinux
     # policy caps their externals at glibc/libgcc/libstdc++, but the closure
     # is computed from the actual binaries rather than trusting the policy.
-    seeds += sorted((USR_LOCAL / "lib").glob("libpython*.so*"))
-    seeds += sorted((USR_LOCAL / "lib").glob("python*/site-packages/**/*.so*"))
+    seeds += host_glob(USR_LOCAL / "lib", "libpython*.so*")
+    seeds += host_glob(USR_LOCAL / "lib", "python*/site-packages/**/*.so*")
     lib_dir = multiarch_dir()
     for name in FORCED_LIBS:
         forced = lib_dir / name
-        if not forced.exists():
+        if not host(forced).exists():
             fail(f"forced library missing from builder: {forced}")
         seeds.append(forced)
     for name in OPTIONAL_NSS_LIBS:
         optional = lib_dir / name
-        if optional.exists():
+        if host(optional).exists():
             seeds.append(optional)
-    return [seed for seed in seeds if not seed.is_dir()]
+    return [seed for seed in seeds if not host(seed).is_dir()]
 
 
 def resolve_closure(seeds: list[Path]) -> set[Path]:
@@ -257,7 +276,7 @@ def write_dpkg_metadata(packages: set[str]) -> None:
     container scan, which is the opposite of the point.
     """
     paragraphs: dict[str, str] = {}
-    for paragraph in DPKG_STATUS.read_text(encoding="utf-8").split("\n\n"):
+    for paragraph in host(DPKG_STATUS).read_text(encoding="utf-8").split("\n\n"):
         match = re.search(r"^Package:\s*(\S+)", paragraph, re.MULTILINE)
         if match:
             paragraphs[match.group(1)] = paragraph.strip() + "\n"
@@ -268,10 +287,10 @@ def write_dpkg_metadata(packages: set[str]) -> None:
             fail(f"package {package} owns shipped files but has no status paragraph")
         (status_dir / package).write_text(paragraphs[package], encoding="utf-8")
         copyright_file = Path("/usr/share/doc") / package / "copyright"
-        if copyright_file.exists():
+        if host(copyright_file).exists():
             destination = stage_path(copyright_file)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(copyright_file, destination)
+            shutil.copy2(host(copyright_file), destination)
         else:
             fail(f"missing license text for redistributed package: {copyright_file}")
 
@@ -280,26 +299,29 @@ def copy_trust_and_time() -> None:
     """CA trust anchors (TLS to AWS APIs) and zoneinfo."""
     # Dereference the hashed-symlink farm into real files so nothing dangles
     # (the links point into /usr/share/ca-certificates, which does not ship).
-    shutil.copytree("/etc/ssl/certs", stage_path(Path("/etc/ssl/certs")), symlinks=False)
+    certs = Path("/etc/ssl/certs")
+    shutil.copytree(host(certs), stage_path(certs), symlinks=False)
     for config in (Path("/etc/ssl/openssl.cnf"),):
-        if config.exists():
+        if host(config).exists():
             copy_file(config)
     # OpenSSL's compiled-in OPENSSLDIR: replicate its symlinks verbatim; their
     # /etc/ssl targets were materialized above.
     ssl_dir = Path("/usr/lib/ssl")
-    for entry in ssl_dir.iterdir():
+    for child in host(ssl_dir).iterdir():
+        entry = ssl_dir / child.name
         destination = stage_path(entry)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if entry.is_symlink():
-            destination.symlink_to(os.readlink(entry))
-        elif entry.is_file():
+        if child.is_symlink():
+            destination.symlink_to(os.readlink(child))
+        elif child.is_file():
             copy_file(entry)
     stage_path(Path("/etc/ssl/private")).mkdir(mode=0o700, parents=True, exist_ok=True)
     bundle = stage_path(Path("/etc/ssl/certs/ca-certificates.crt"))
     if not bundle.exists() or bundle.stat().st_size == 0:
         fail("CA bundle missing or empty after staging")
 
-    shutil.copytree("/usr/share/zoneinfo", stage_path(Path("/usr/share/zoneinfo")), symlinks=True)
+    zoneinfo = Path("/usr/share/zoneinfo")
+    shutil.copytree(host(zoneinfo), stage_path(zoneinfo), symlinks=True)
     stage_path(Path("/etc/localtime")).symlink_to("/usr/share/zoneinfo/Etc/UTC")
     stage_path(Path("/etc/timezone")).write_text("Etc/UTC\n", encoding="utf-8")
 
@@ -331,7 +353,10 @@ def probe_stdlib_extensions() -> tuple[list[str], dict[str, str]]:
     are exactly the ones the runtime smoke must not demand on scratch.
     """
     modules = sorted(
-        {path.name.split(".")[0] for path in (USR_LOCAL / "lib").glob("python*/lib-dynload/*.so")}
+        {
+            path.name.split(".")[0]
+            for path in host_glob(USR_LOCAL / "lib", "python*/lib-dynload/*.so")
+        }
     )
     if not modules:
         fail("no lib-dynload extensions found; stdlib enumeration broke")
@@ -409,12 +434,12 @@ def write_identity_and_os_metadata() -> None:
     # layers without symlink resolution).
     copy_file(Path("/etc/debian_version"))
     copy_file(Path("/usr/lib/os-release"))
-    shutil.copy2("/usr/lib/os-release", etc / "os-release", follow_symlinks=True)
+    shutil.copy2(host(Path("/usr/lib/os-release")), etc / "os-release", follow_symlinks=True)
 
     # Merged-/usr symlinks. The kernel resolves PT_INTERP
     # (/lib64/ld-linux-*.so.*) through these; without them nothing executes.
     for alias in _MERGED_USR_ALIASES:
-        if Path("/", alias).is_symlink() and (ROOTFS / f"usr/{alias}").exists():
+        if host(Path("/", alias)).is_symlink() and (ROOTFS / f"usr/{alias}").exists():
             (ROOTFS / alias).symlink_to(f"usr/{alias}")
 
     home = stage_path(Path(RUNTIME_HOME))
@@ -433,13 +458,13 @@ def main() -> None:
     # is uninstalled by the Dockerfile, and dropping ensurepip's bundled pip
     # wheel keeps "reinstall the installer" out of reach at runtime too.
     shutil.copytree(
-        USR_LOCAL,
+        host(USR_LOCAL),
         stage_path(USR_LOCAL),
         symlinks=True,
         ignore=shutil.ignore_patterns("ensurepip"),
     )
     # The precompiled application tree (sole content of /app besides cwd).
-    shutil.copytree(APP_TREE, stage_path(APP_TREE), symlinks=True)
+    shutil.copytree(host(APP_TREE), stage_path(APP_TREE), symlinks=True)
 
     closure = resolve_closure(seed_binaries())
     real_files: set[Path] = set()
