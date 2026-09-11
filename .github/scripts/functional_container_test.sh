@@ -32,7 +32,7 @@
 #     [--container-port 8080] [--wait-path /healthz] [--env K=V]... \
 #     [--kubeconfig FILE] [--probe "path=code[=substring]"]... \
 #     [--exec-python "code"]... [--min-uptime N] \
-#     [--expect-stop-exit 0] [--stop-timeout 30]
+#     [--expect-stop-exit 0] [--stop-timeout 30] [--boot-timeout 60]
 # =============================================================================
 
 set -euo pipefail
@@ -46,6 +46,7 @@ KUBECONFIG_FILE=""
 MIN_UPTIME="0"
 EXPECT_STOP_EXIT="0"
 STOP_TIMEOUT="30"
+BOOT_TIMEOUT="60"
 ENVS=()
 PROBES=()
 EXEC_SNIPPETS=()
@@ -64,6 +65,7 @@ while [ $# -gt 0 ]; do
     --min-uptime)       MIN_UPTIME="$2"; shift 2 ;;
     --expect-stop-exit) EXPECT_STOP_EXIT="$2"; shift 2 ;;
     --stop-timeout)     STOP_TIMEOUT="$2"; shift 2 ;;
+    --boot-timeout)     BOOT_TIMEOUT="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -110,14 +112,14 @@ docker run "${run_args[@]}" "${IMAGE}"
 
 # --- 1. Wait for the serving state --------------------------------------
 base_url="http://127.0.0.1:${HOST_PORT}"
-deadline=$((SECONDS + 60))
+deadline=$((SECONDS + BOOT_TIMEOUT))
 while :; do
   code="$(curl -s -o /dev/null -w '%{http_code}' "${base_url}${WAIT_PATH}" || true)"
   [ "${code}" = "200" ] && break
   if [ "$(docker inspect -f '{{.State.Running}}' "${NAME}" 2>/dev/null)" != "true" ]; then
     fail "container exited during startup (last ${WAIT_PATH} code: ${code})"
   fi
-  [ "${SECONDS}" -ge "${deadline}" ] && fail "${WAIT_PATH} never returned 200 within 60s (last: ${code})"
+  [ "${SECONDS}" -ge "${deadline}" ] && fail "${WAIT_PATH} never returned 200 within ${BOOT_TIMEOUT}s (last: ${code})"
   sleep 2
 done
 echo "${NAME}: serving (${WAIT_PATH} -> 200)"

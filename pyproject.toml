@@ -539,12 +539,8 @@ ratchet = [
     ".github/scripts/autopilot_claude_code_boot_probe.sh",
     ".github/scripts/autopilot_codex_boot_probe.sh",
     ".github/scripts/dependency-scan.sh",
-    ".github/scripts/functional_container_test.sh",
     ".github/scripts/lib_dependency_scan.sh",
-    ".github/scripts/rie_smoke_test.sh",
-    ".github/scripts/use-pinned-npm.sh",
     "demo/record_autopilot.sh",
-    "scripts/preview_wiki.sh",
 ]
 
 [tool.bandit]
