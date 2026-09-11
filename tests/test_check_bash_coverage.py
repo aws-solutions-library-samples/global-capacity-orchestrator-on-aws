@@ -5,16 +5,18 @@ repository's shell scripts. Two very different things can go wrong with it, so
 this module covers both:
 
 1. **The decision logic.** Every judgement the script makes is exercised
-   directly against synthetic resultsets — path mapping, hit merging, the
-   ratchet split, and each failure mode. The interesting cases are the ones
-   where a wrong answer would read as success: a report scoped to the wrong
-   root, a script no suite executes, or a resultset whose shape changed under a
-   gem bump. All three must fail closed, and each has a test here.
+   directly against synthetic resultsets — path mapping, hit merging, the two
+   lexer corrections, and each failure mode. The interesting cases are the
+   ones where a wrong answer would read as success: a report scoped to the
+   wrong root, a script no suite executes, or a resultset whose shape changed
+   under a gem bump. All three must fail closed, and each has a test here.
 
-2. **The ratchet list itself.** ``[tool.bash-coverage] ratchet`` in
-   ``pyproject.toml`` is the record of which scripts are not yet covered. It is
-   only meaningful while its entries name real, tracked shell scripts, so a
-   renamed or deleted script cannot leave a stale hole in the gate.
+2. **The floor policy.** Until every script reached 100% the climb was staged
+   through ``[tool.bash-coverage] ratchet`` in ``pyproject.toml``, a
+   shrink-only list of not-yet-covered scripts the checker excused. The list
+   emptied and was deleted, and the checker no longer reads any exclusion
+   list. The policy tests at the bottom keep it that way: the section must not
+   come back, and every tracked script must be one the gate can fail.
 
 Neither Ruby nor bats is needed: ``evaluate()`` and the parsing helpers take
 plain data, so the whole decision surface is reachable from Python. The real
@@ -24,6 +26,7 @@ bashcov invocation is covered by the ``unit:bats:shell`` job.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess  # nosec B404 - fixed argv, no shell: builds a throwaway git repo
 import sys
@@ -60,7 +63,7 @@ def _write_report(tmp_path: Path, payload: object, name: str = ".resultset.json"
     return path
 
 
-def _fake_repo(tmp_path: Path, scripts: dict[str, str], ratchet: list[str]) -> Path:
+def _fake_repo(tmp_path: Path, scripts: dict[str, str]) -> Path:
     """Create a throwaway git repo so ``git ls-files`` has something to list."""
     root = tmp_path / "repo"
     root.mkdir()
@@ -68,10 +71,6 @@ def _fake_repo(tmp_path: Path, scripts: dict[str, str], ratchet: list[str]) -> P
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
-    entries = "\n".join(f'    "{item}",' for item in ratchet)
-    (root / "pyproject.toml").write_text(
-        f"[tool.bash-coverage]\nratchet = [\n{entries}\n]\n", encoding="utf-8"
-    )
     for argv in (
         [GIT, "init", "-q", "."],
         [GIT, "config", "user.email", "t@example.com"],
@@ -243,78 +242,279 @@ def test_map_to_tracked_returns_none_for_an_unrelated_path() -> None:
 
 
 # --------------------------------------------------------------------------
+# untraceable_lines
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param('  done < "$exclude_file"', id="done-file"),
+        pytest.param('  done <<< "$BUILD_SYSTEM_PINS"', id="done-here-string"),
+        pytest.param('    done < "$NPM_RESULTS" > "$npm_disp"', id="done-in-and-out"),
+        pytest.param('  } > "$report_path"', id="group-out"),
+        pytest.param('    } >> "$GITHUB_OUTPUT"', id="group-append"),
+        pytest.param("  } 2>/dev/null", id="group-stderr-bare-word"),
+        pytest.param("  fi < input.txt  # trailing comment", id="fi-with-comment"),
+        pytest.param("    */*) ;;", id="empty-arm-glob"),
+        pytest.param("    https://github.com/*) ;;", id="empty-arm-url"),
+        pytest.param("        /*) ;;", id="empty-arm-slash"),
+    ],
+)
+def test_untraceable_lines_recognises_terminators_and_empty_arms(line: str) -> None:
+    """The shapes bashcov's lexer marks executable but `set -x` never prints.
+
+    Each is copied from a tracked script; bashcov reports the redirection-only
+    terminators and empty case arms as 0 hits no matter what runs.
+    """
+    assert checker.untraceable_lines(f"echo before\n{line}\necho after\n") == {2}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("  } | sed '/^$/d' | sort -u", id="group-piped-into-a-command"),
+        pytest.param(
+            '  done < <(extract_companion_mcp_packages "$AUTOPILOT_SOURCE")',
+            id="process-substitution",
+        ),
+        pytest.param("    *.gif) : ;;", id="arm-with-null-command"),
+        pytest.param('    docker|finch|podman) RUNTIME="$1"; shift ;;', id="arm-with-body"),
+        pytest.param("  done", id="bare-done"),
+        pytest.param("  }", id="bare-brace"),
+        pytest.param("    ;;", id="bare-terminator"),
+        pytest.param("  echo done < file", id="command-named-like-a-keyword"),
+        pytest.param("  done_flag=1 > out", id="identifier-starting-with-done"),
+    ],
+)
+def test_untraceable_lines_leaves_measurable_lines_alone(line: str) -> None:
+    """A command on the line — piped, substituted or a bare `:` — is traced."""
+    assert checker.untraceable_lines(f"echo before\n{line}\necho after\n") == set()
+
+
+def test_untraceable_lines_matches_the_committed_scripts() -> None:
+    """The real inventory: every match is one of the two shapes and nothing else.
+
+    A regression here would show up in the gate as a permanently uncovered
+    line (too narrow) or a silently excused statement (too wide), so the
+    classification is checked against the actual tree, not only fixtures.
+    """
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    found, _spans = checker.classify_scripts(REPO_ROOT, inventory)
+    assert found, "the repository is expected to carry redirected loop terminators"
+    for path, numbers in found.items():
+        source = (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
+        for number in numbers:
+            text = source[number - 1].strip()
+            assert text.startswith(("done", "fi", "esac", "}")) or text.endswith(";;"), (
+                f"{path}:{number} classified as untraceable but looks like a statement: {text!r}"
+            )
+
+
+# --------------------------------------------------------------------------
+# statement_spans
+# --------------------------------------------------------------------------
+#
+# Each expected span was checked against what `bash -x` prints for the shape,
+# with PS4 exposing LINENO: Bash reports the whole statement on ONE of its
+# lines (the first, the second or the last depending on the shape), so the
+# checker folds the span rather than guessing which line that is.
+
+BACKSLASH_CHAIN = """\
+aws eks create-access-entry \\
+  --cluster-name "$CLUSTER_NAME" \\
+  --region "$REGION" \\
+  --principal-arn "$PRINCIPAL_ARN" 2>&1 || echo "   Access entry may already exist"
+echo done
+"""
+
+SUBSTITUTION_ASSIGNMENT = """\
+API_ENDPOINT=$(aws cloudformation describe-stacks \\
+  --stack-name "$STACK_NAME" \\
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \\
+  --output text)
+API_ENDPOINT=${API_ENDPOINT%/}
+"""
+
+HEREDOC_IN_SUBSTITUTION = """\
+MANIFEST_PAYLOAD=$(cat <<'EOF'
+{
+  "manifests": [
+    {"kind": "Job", "spec": {"parallelism": (1)}}
+  ]
+}
+EOF
+)
+echo "$MANIFEST_PAYLOAD" | jq '.'
+"""
+
+MULTILINE_STRING_COMMAND = """\
+python3 -c "
+import re, sys
+m = re.search(r'^VERSION\\s*=\\s*\\"([^\\"]+)\\"', open(sys.argv[1]).read())
+print(m.group(1) if m else '')
+" "$file" 2>/dev/null
+echo after
+"""
+
+BACKGROUND_CHAIN = """\
+aws-sigv4-proxy \\
+  --name execute-api \\
+  --region "$API_REGION" \\
+  --log-level info &
+PROXY_PID=$!
+"""
+
+CONTINUED_LIST = """\
+[ -n "$count" ] \\
+    && [ -n "$PID" ] \\
+    && echo chained
+"""
+
+SUBSHELL_BLOCK = """\
+(
+    cd "$repo_root" || exit 1
+    python3 -c 'import gco'
+)
+"""
+
+ARRAY_ASSIGNMENT = """\
+FORWARDED_ENV_VARS=(
+    AWS_PROFILE
+    AWS_REGION
+)
+echo "${FORWARDED_ENV_VARS[0]}"
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(BACKSLASH_CHAIN, [(1, 3)], id="backslash-chain-split-at-the-fallback"),
+        pytest.param(SUBSTITUTION_ASSIGNMENT, [(1, 4)], id="substitution-assignment"),
+        pytest.param(HEREDOC_IN_SUBSTITUTION, [(1, 8)], id="heredoc-inside-substitution"),
+        pytest.param(
+            MULTILINE_STRING_COMMAND, [(1, 5)], id="multi-line-string-with-escaped-quotes"
+        ),
+        pytest.param(BACKGROUND_CHAIN, [(1, 4)], id="backgrounded-chain"),
+        pytest.param(CONTINUED_LIST, [], id="continued-list-each-element-reported-alone"),
+        pytest.param(SUBSHELL_BLOCK, [], id="subshell-inner-lines-reported-alone"),
+        pytest.param(ARRAY_ASSIGNMENT, [(1, 4)], id="array-assignment"),
+        pytest.param("echo one\necho two\n", [], id="single-line-statements"),
+        pytest.param(
+            "case $x in\n  a) echo a ;;\n  *) ;;\nesac\n", [], id="case-arms-are-not-openers"
+        ),
+        pytest.param(
+            "echo \"it's\" # don't\necho next\n", [], id="apostrophes-in-strings-and-comments"
+        ),
+        pytest.param(
+            "cat <<-EOT\n\tbody\n\tEOT\necho after\n", [(1, 3)], id="dash-heredoc-strips-tabs"
+        ),
+    ],
+)
+def test_statement_spans_follow_bash_statement_boundaries(
+    source: str, expected: list[tuple[int, int]]
+) -> None:
+    assert checker.statement_spans(source) == expected
+
+
+def test_statement_spans_report_an_unterminated_statement_to_the_end() -> None:
+    """A truncated file still yields a well-formed span rather than an error."""
+    assert checker.statement_spans("VAR=$(cat <<EOF\nnever closed\n") == [(1, 2)]
+
+
+def test_fold_spans_credits_the_statement_wherever_bash_reported_it() -> None:
+    hits = {1: 0, 2: 0, 3: 0, 4: 1, 5: 2}  # the assignment reported on its last line
+    assert checker.fold_spans(hits, [(1, 4)]) == {1: 1, 5: 2}
+
+
+def test_fold_spans_leaves_an_unreported_span_absent() -> None:
+    """Lines bashcov itself judged non-executable must not reappear as covered."""
+    assert checker.fold_spans({7: 1}, [(1, 4)]) == {7: 1}
+
+
+def test_statement_spans_over_the_committed_scripts_are_sane() -> None:
+    """Spans never overlap, never run backwards, and cover the known shapes."""
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    _untraceable, spans = checker.classify_scripts(REPO_ROOT, inventory)
+    assert "docs/client-examples/aws_cli_examples.sh" in spans
+    for path, found in spans.items():
+        previous_end = 0
+        for first, last in found:
+            assert first > previous_end, f"{path}: overlapping spans around line {first}"
+            assert last > first, f"{path}: degenerate span {first}-{last}"
+            previous_end = last
+
+
+# --------------------------------------------------------------------------
 # evaluate
 # --------------------------------------------------------------------------
 
 
-def test_evaluate_passes_a_fully_covered_enforced_script() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 3}}, ["a.sh"], [])
+def test_evaluate_drops_untraceable_lines_from_the_count() -> None:
+    """A redirected `done` at 0 hits must not fail the script it structures."""
+    reported = {"/w/a.sh": {1: 1, 2: 0, 3: 1}}
+    failing = checker.evaluate(reported, ["a.sh"])
+    assert failing.ok is False
+    passing = checker.evaluate(reported, ["a.sh"], {"a.sh": {2}})
+    assert passing.ok is True
+    assert passing.scripts[0].total_lines == 2
+
+
+def test_evaluate_folds_multi_line_statements_onto_their_first_line() -> None:
+    """A `VAR=$(...)` reported on its last line counts once, as covered."""
+    reported = {"/w/a.sh": {1: 0, 2: 0, 3: 1, 4: 1}}
+    failing = checker.evaluate(reported, ["a.sh"])
+    assert failing.ok is False
+    passing = checker.evaluate(reported, ["a.sh"], spans={"a.sh": [(1, 3)]})
+    assert passing.ok is True
+    assert passing.scripts[0].hits == {1: 1, 4: 1}
+
+
+def test_evaluate_passes_a_fully_covered_script() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 3}}, ["a.sh"])
     assert result.ok is True
     assert result.failures == []
-    assert [record.path for record in result.enforced] == ["a.sh"]
+    assert [record.path for record in result.scripts] == ["a.sh"]
 
 
-def test_evaluate_fails_an_enforced_script_with_uncovered_lines() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 0}}, ["a.sh"], [])
+def test_evaluate_fails_a_script_with_uncovered_lines() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1, 2: 0}}, ["a.sh"])
     assert result.ok is False
     assert "1/2 lines uncovered" in result.failures[0]
 
 
-def test_evaluate_fails_an_enforced_script_absent_from_the_report() -> None:
+def test_evaluate_fails_a_script_absent_from_the_report() -> None:
     """The fail-closed case: a mis-scoped bashcov run must not read as success."""
-    result = checker.evaluate({}, ["a.sh"], [])
+    result = checker.evaluate({}, ["a.sh"])
     assert result.ok is False
     assert "absent from the bashcov report" in result.failures[0]
 
 
-def test_evaluate_excuses_ratcheted_scripts() -> None:
-    result = checker.evaluate({}, ["a.sh", "b.sh"], ["b.sh"])
-    assert [record.path for record in result.ratcheted] == ["b.sh"]
-    assert [record.path for record in result.enforced] == ["a.sh"]
-    assert result.failures and all("a.sh" in failure for failure in result.failures)
+def test_evaluate_holds_every_script_in_the_inventory_to_the_floor() -> None:
+    """There is no exclusion list: each uncovered or absent script is its own failure."""
+    reported = {"/w/a.sh": {1: 1}, "/w/b.sh": {1: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
+    assert [record.path for record in result.scripts] == ["a.sh", "b.sh", "c.sh"]
+    assert [failure.split(":")[0] for failure in result.failures] == ["b.sh", "c.sh"]
 
 
 def test_evaluate_merges_every_path_that_maps_to_one_script() -> None:
     """Two absolute prefixes for the same file must not read as half-covered."""
     reported = {"/w/a.sh": {1: 1, 2: 0}, "/tmp/fixture/a.sh": {1: 0, 2: 7}}
-    result = checker.evaluate(reported, ["a.sh"], [])
+    result = checker.evaluate(reported, ["a.sh"])
     assert result.ok is True
-    assert result.enforced[0].sources == {"/w/a.sh", "/tmp/fixture/a.sh"}
+    assert result.scripts[0].sources == {"/w/a.sh", "/tmp/fixture/a.sh"}
 
 
 def test_evaluate_collects_paths_that_map_to_nothing() -> None:
-    result = checker.evaluate({"/opt/vendor/x.sh": {1: 1}}, ["a.sh"], ["a.sh"])
+    result = checker.evaluate({"/opt/vendor/x.sh": {1: 1}}, ["a.sh"])
     assert result.unmapped == ["/opt/vendor/x.sh"]
 
 
 # --------------------------------------------------------------------------
-# load_ratchet / tracked_shell_scripts
+# tracked_shell_scripts
 # --------------------------------------------------------------------------
-
-
-def test_load_ratchet_reads_the_section(tmp_path: Path) -> None:
-    path = tmp_path / "pyproject.toml"
-    path.write_text('[tool.bash-coverage]\nratchet = ["a.sh", "b.sh"]\n', encoding="utf-8")
-    assert checker.load_ratchet(path) == ["a.sh", "b.sh"]
-
-
-def test_load_ratchet_defaults_to_empty_when_absent(tmp_path: Path) -> None:
-    """An empty ratchet is the goal state, so its absence must mean "enforce all"."""
-    path = tmp_path / "pyproject.toml"
-    path.write_text("[tool.other]\nkey = 1\n", encoding="utf-8")
-    assert checker.load_ratchet(path) == []
-
-
-def test_load_ratchet_rejects_a_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(checker.ReportError, match="could not read"):
-        checker.load_ratchet(tmp_path / "absent.toml")
-
-
-def test_load_ratchet_rejects_invalid_toml(tmp_path: Path) -> None:
-    path = tmp_path / "pyproject.toml"
-    path.write_text("[tool.bash-coverage\n", encoding="utf-8")
-    with pytest.raises(checker.ReportError, match="not valid TOML"):
-        checker.load_ratchet(path)
 
 
 def test_tracked_shell_scripts_lists_the_repository_and_excludes_the_suite() -> None:
@@ -331,39 +531,193 @@ def test_tracked_shell_scripts_rejects_a_non_repository(tmp_path: Path) -> None:
         checker.tracked_shell_scripts(tmp_path)
 
 
+def test_classify_scripts_rejects_a_tracked_script_it_cannot_read(tmp_path: Path) -> None:
+    """A tracked script missing from the working tree is a broken measurement (exit 2)."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    inventory = checker.tracked_shell_scripts(root)
+    assert inventory == ["a.sh"]
+    (root / "a.sh").unlink()
+    with pytest.raises(checker.ReportError, match="could not read tracked script a.sh"):
+        checker.classify_scripts(root, inventory)
+
+
 # --------------------------------------------------------------------------
 # format_report
 # --------------------------------------------------------------------------
 
 
 def test_format_report_summarises_a_passing_run() -> None:
-    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"], [])
-    assert "1/1 enforced scripts at 100%" in checker.format_report(result)
+    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"])
+    assert "1/1 tracked scripts at 100%" in checker.format_report(result)
 
 
-def test_format_report_separates_measured_from_unmeasured_ratchet_entries() -> None:
-    """An unmeasured script must never be printed as a percentage."""
-    reported = {"/w/b.sh": {1: 1, 2: 0}}
-    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"], ["b.sh", "c.sh"])
+def test_format_report_never_renders_an_unmeasured_script_as_a_percentage() -> None:
+    """A script no suite executed is a named failure, not a number."""
+    reported = {"/w/a.sh": {1: 1}, "/w/b.sh": {1: 1, 2: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
     rendered = checker.format_report(result)
-    assert "50.00%  b.sh" in rendered
-    assert "n/a  c.sh (not executed by any suite)" in rendered
-    assert "c.sh" not in rendered.replace("n/a  c.sh (not executed by any suite)", "")
+    assert "1/3 tracked scripts at 100%" in rendered
+    assert "b.sh: 1/2 lines uncovered (50.00%)" in rendered
+    assert "c.sh: absent from the bashcov report" in rendered
+    assert "%" not in rendered.split("c.sh: absent", 1)[1].split("\n", 1)[0]
 
 
 def test_format_report_truncates_a_long_miss_list() -> None:
     hits = dict.fromkeys(range(1, 31), 0)
-    result = checker.evaluate({"/w/a.sh": hits}, ["a.sh"], [])
+    result = checker.evaluate({"/w/a.sh": hits}, ["a.sh"])
     rendered = checker.format_report(result)
     assert "(+10 more)" in rendered
-    assert "ERROR: enforced shell scripts are not fully covered" in rendered
+    assert "ERROR: shell scripts are not fully covered" in rendered
+    assert "ratchet" not in rendered, "the remedy must not point at a list that no longer exists"
 
 
 def test_format_report_notes_unmapped_paths() -> None:
     reported = {f"/opt/vendor/x{index}.sh": {1: 1} for index in range(12)}
-    result = checker.evaluate(reported, ["a.sh"], ["a.sh"])
+    result = checker.evaluate(reported, ["a.sh"])
     rendered = checker.format_report(result)
     assert "12 reported path(s) matched no tracked script" in rendered
+
+
+# --------------------------------------------------------------------------
+# The published report
+# --------------------------------------------------------------------------
+
+_REPORT_SOURCE = (
+    "#!/usr/bin/env bash\n"  # 1 not executable
+    "run() {\n"  # 2 not executable (function header)
+    '  python3 -c "\n'  # 3 statement, spans to line 5
+    "import sys\n"  # 4 continued
+    '" one\n'  # 5 continued
+    "  case $1 in\n"  # 6 statement
+    "    */*) ;;\n"  # 7 untraceable: empty case arm
+    "    *) : ;;\n"  # 8 statement, never run
+    "  esac\n"  # 9 not executable
+    "  echo <b>\n"  # 10 statement (angle brackets must be escaped on the page)
+    '} > "$log"\n'  # 11 untraceable: terminator with only a redirection
+)
+
+
+def _report_fixture() -> tuple[dict[int, int], set[int], list[tuple[int, int]]]:
+    hits = {3: 2, 6: 2, 8: 0, 10: 2}  # the folded map: the span's count sits on line 3
+    return hits, checker.untraceable_lines(_REPORT_SOURCE), checker.statement_spans(_REPORT_SOURCE)
+
+
+def test_line_states_classify_every_physical_line() -> None:
+    hits, untraceable, spans = _report_fixture()
+    assert untraceable == {7, 11}
+    assert spans == [(3, 5)]
+    states = checker.line_states(_REPORT_SOURCE, hits, untraceable, spans)
+    assert [kind for kind, _count, _text in states] == [
+        "none",
+        "none",
+        "covered",
+        "covered continued",
+        "covered continued",
+        "covered",
+        "untraceable",
+        "missed",
+        "none",
+        "covered",
+        "untraceable",
+    ]
+    assert [count for _kind, count, _text in states] == [
+        None, None, 2, None, None, 2, None, 0, None, 2, None
+    ]  # fmt: skip
+    assert states[9][2] == "  echo <b>"
+
+
+def test_line_states_treat_an_unreported_span_as_not_executable() -> None:
+    """A span none of whose lines the report listed is not a statement at all."""
+    states = checker.line_states("x=$(\n  cat\n)\n", {}, set(), [(1, 3)])
+    assert [kind for kind, _count, _text in states] == ["none", "none", "none"]
+
+
+def test_line_states_take_a_missed_statement_through_its_continuation_lines() -> None:
+    states = checker.line_states("x=$(\n  cat\n)\n", {1: 0}, set(), [(1, 3)])
+    assert [kind for kind, _count, _text in states] == [
+        "missed",
+        "missed continued",
+        "missed continued",
+    ]
+
+
+def test_summarize_counts_statements_and_names_the_unmeasured() -> None:
+    reported = {"/w/a.sh": {1: 1, 2: 1}, "/w/b.sh": {1: 1, 2: 0, 3: 0}}
+    result = checker.evaluate(reported, ["a.sh", "b.sh", "c.sh"])
+    summary = checker.summarize(result)
+    assert summary["ok"] is False
+    assert (summary["scripts"], summary["scripts_at_100"]) == (3, 1)
+    assert summary["unmeasured"] == ["c.sh"]
+    assert (summary["statements"], summary["covered"], summary["missed"]) == (5, 3, 2)
+    assert summary["percent"] == 60.0
+    files = summary["files"]
+    assert isinstance(files, list)
+    assert files[1] == {
+        "path": "b.sh",
+        "measured": True,
+        "statements": 3,
+        "covered": 1,
+        "missed": [2, 3],
+        "percent": 33.33,
+    }
+    assert files[2]["measured"] is False
+    assert files[2]["percent"] == 0.0, "an unmeasured script is never rendered as 100%"
+
+
+def test_summarize_a_passing_run() -> None:
+    result = checker.evaluate({"/w/a.sh": {1: 1}}, ["a.sh"])
+    summary = checker.summarize(result)
+    assert summary["ok"] is True
+    assert (summary["scripts_at_100"], summary["percent"]) == (1, 100.0)
+
+
+def test_page_name_flattens_the_path_and_never_starts_with_a_dot() -> None:
+    assert checker._page_name("demo/lib_demo.sh") == "demo__lib_demo.sh.html"
+    assert checker._page_name(".github/scripts/x.sh") == "github__scripts__x.sh.html"
+
+
+def test_write_report_renders_the_corrected_view(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "a.sh").write_text(_REPORT_SOURCE, encoding="utf-8")
+    (root / "b.sh").write_text("echo b\n", encoding="utf-8")
+    inventory = ["b.sh", "lib/a.sh"]
+    untraceable, spans = checker.classify_scripts(root, inventory)
+    # The raw report lists the span's lines separately; evaluate() folds them.
+    reported = {"/w/lib/a.sh": {3: 2, 4: 0, 5: 2, 6: 2, 7: 0, 8: 0, 10: 2, 11: 0}}
+    result = checker.evaluate(reported, inventory, untraceable, spans)
+
+    out = tmp_path / "report"
+    summary = checker.write_report(result, root, untraceable, spans, out)
+
+    assert json.loads((out / "summary.json").read_text(encoding="utf-8")) == summary
+    assert summary["ok"] is False
+    assert summary["unmeasured"] == ["b.sh"]
+    assert (summary["statements"], summary["covered"]) == (4, 3)
+
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "<b>0/2 tracked scripts at 100%</b>" in index
+    assert "3 of 4 statements covered (75.00%)" in index
+    assert 'href="files/lib__a.sh.html"' in index and 'href="files/b__.sh.html"' not in index
+    assert 'href="files/b.sh.html"' in index
+    assert "not executed by any suite" in index
+    assert '<td class="num bad">75.00%</td>' in index
+
+    page = (out / "files" / "lib__a.sh.html").read_text(encoding="utf-8")
+    assert "3 of 4 statements covered (75.00%), 1 missed." in page
+    assert '<tr class="covered"><td class="n">3</td><td class="c">2</td>' in page
+    assert '<tr class="covered continued"><td class="n">4</td><td class="c"></td>' in page
+    assert '<tr class="untraceable"><td class="n">7</td>' in page
+    assert '<tr class="missed"><td class="n">8</td><td class="c">0</td>' in page
+    assert "echo &lt;b&gt;" in page, "source text is escaped"
+    assert "<b>" not in page.split("<table", 1)[1]
+
+    unmeasured = (out / "files" / "b.sh.html").read_text(encoding="utf-8")
+    assert "Not executed by any suite" in unmeasured
+    assert '<tr class="none"><td class="n">1</td><td class="c"></td>' in unmeasured
+    assert "%" not in unmeasured.split("<h1>", 1)[1].split("<table", 1)[0].replace(
+        "not counted", ""
+    ), "an unmeasured script's page shows no percentage"
 
 
 # --------------------------------------------------------------------------
@@ -371,29 +725,64 @@ def test_format_report_notes_unmapped_paths() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_main_writes_the_report_when_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
+    out = tmp_path / "published"
+    assert checker.main([str(report), "--root", str(root), "--report", str(out)]) == 0
+    assert "1/1 tracked scripts at 100%" in capsys.readouterr().out
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["ok"] is True and summary["percent"] == 100.0
+    assert (out / "index.html").is_file() and (out / "files" / "a.sh.html").is_file()
+
+
+def test_main_writes_the_report_for_a_failing_run_too(tmp_path: Path) -> None:
+    """The artifact must be inspectable precisely when the gate fails."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(0)}))
+    out = tmp_path / "published"
+    assert checker.main([str(report), "--root", str(root), "--report", str(out)]) == 1
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["ok"] is False and summary["missed"] == 1
+
+
 def test_main_returns_zero_when_the_floor_holds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
     assert checker.main([str(report), "--root", str(root)]) == 0
-    assert "1/1 enforced scripts at 100%" in capsys.readouterr().out
+    assert "1/1 tracked scripts at 100%" in capsys.readouterr().out
 
 
 def test_main_returns_one_when_a_script_is_uncovered(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(0)}))
     assert checker.main([str(report), "--root", str(root)]) == 1
     assert "1/1 lines uncovered" in capsys.readouterr().out
+
+
+def test_main_returns_one_when_a_tracked_script_is_not_in_the_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A second script the report never mentions fails the run on its own."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n", "lib/b.sh": "echo there\n"})
+    report = _write_report(tmp_path, _resultset({str(root / "a.sh"): _lines(1)}))
+    assert checker.main([str(report), "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "1/2 tracked scripts at 100%" in out
+    assert "lib/b.sh: absent from the bashcov report" in out
 
 
 def test_main_returns_two_when_the_report_is_missing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A distinct exit code so CI can tell "not covered" from "never ran"."""
-    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"}, [])
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\n"})
     assert checker.main([str(tmp_path / "absent"), "--root", str(root)]) == 2
     assert "ERROR:" in capsys.readouterr().err
 
@@ -401,53 +790,64 @@ def test_main_returns_two_when_the_report_is_missing(
 def test_main_defaults_the_root_to_the_repository(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Without --root the gate measures this repository, using the real ratchet.
+    """Without --root the gate measures this repository, and all of it.
 
-    Doubles as an end-to-end check that the committed ratchet and the committed
-    inventory agree: a report covering only the single enforced script is enough
-    to pass, and every other script is accounted for by the ratchet.
+    A report covering exactly the tracked inventory is enough to pass, and
+    nothing less is: dropping any one script from the report fails the run,
+    which is the property the retired ratchet used to weaken.
     """
-    report = _write_report(tmp_path, _resultset({"/w/demo/gif_to_mp4.sh": _lines(1)}))
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    assert inventory, "the gate is meaningless without tracked scripts"
+    full = {f"/w/{path}": _lines(1) for path in inventory}
+    report = _write_report(tmp_path, _resultset(full))
     assert checker.main([str(report)]) == 0
     out = capsys.readouterr().out
-    assert "on the ratchet" in out
+    assert f"{len(inventory)}/{len(inventory)} tracked scripts at 100%" in out
     assert "ERROR" not in out
 
+    dropped = inventory[-1]
+    partial = {path: lines for path, lines in full.items() if path != f"/w/{dropped}"}
+    report = _write_report(tmp_path, _resultset(partial), name="partial.json")
+    assert checker.main([str(report)]) == 1
+    assert f"{dropped}: absent from the bashcov report" in capsys.readouterr().out
+
 
 # --------------------------------------------------------------------------
-# The ratchet list in pyproject.toml
+# The floor policy: no exclusion list, in the checker or in pyproject.toml
 # --------------------------------------------------------------------------
 
+RETIRED_SECTION = "bash-coverage"
 
-def _declared_ratchet() -> list[str]:
+
+def test_ratchet_section_has_not_been_reintroduced() -> None:
+    """The not-yet-covered list emptied and was deleted; it must not come back.
+
+    The checker ignores pyproject.toml entirely now, so a revived section would
+    excuse nothing — but it would *look* as if it did, and the next person
+    would list their new script there instead of covering it.
+    """
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    entries = data["tool"]["bash-coverage"]["ratchet"]
-    assert isinstance(entries, list)
-    return [str(item) for item in entries]
-
-
-def test_declared_ratchet_names_tracked_shell_scripts() -> None:
-    """A renamed or deleted script must not leave a stale hole in the gate."""
-    inventory = set(checker.tracked_shell_scripts(REPO_ROOT))
-    unknown = [entry for entry in _declared_ratchet() if entry not in inventory]
-    assert not unknown, (
-        f"[tool.bash-coverage] ratchet names paths that are not tracked shell scripts: {unknown}"
+    assert RETIRED_SECTION not in data.get("tool", {}), (
+        f"pyproject.toml carries a [tool.{RETIRED_SECTION}] section again: every tracked "
+        "shell script is at 100%, so cover the new script instead of listing it"
     )
 
 
-def test_declared_ratchet_is_sorted_and_unique() -> None:
-    entries = _declared_ratchet()
-    duplicates = sorted({entry for entry in entries if entries.count(entry) > 1})
-    assert not duplicates, f"bash-coverage ratchet lists duplicates: {duplicates}"
-    assert entries == sorted(entries), "bash-coverage ratchet must stay sorted"
+def test_checker_takes_no_exclusion_list() -> None:
+    """``evaluate`` has no parameter that could excuse a script from the floor."""
+    parameters = set(inspect.signature(checker.evaluate).parameters)
+    assert parameters == {"reported", "inventory", "untraceable", "spans"}, (
+        f"evaluate() grew a parameter: {sorted(parameters)}. A per-script exclusion "
+        "belongs in a test that covers the script, not in the gate"
+    )
+    assert not hasattr(checker, "load_ratchet")
 
 
-def test_declared_ratchet_does_not_cover_every_script() -> None:
-    """An all-inclusive ratchet would make the job green while measuring nothing."""
+def test_every_tracked_script_can_fail_the_gate() -> None:
+    """With an empty report, each tracked script is its own named failure."""
     inventory = checker.tracked_shell_scripts(REPO_ROOT)
-    assert set(_declared_ratchet()) != set(inventory), (
-        "every tracked shell script is ratcheted, so the gate enforces nothing"
-    )
+    result = checker.evaluate({}, inventory)
+    assert [failure.split(":", 1)[0] for failure in result.failures] == inventory
 
 
 def test_script_basenames_are_unique_so_the_fallback_is_safe() -> None:

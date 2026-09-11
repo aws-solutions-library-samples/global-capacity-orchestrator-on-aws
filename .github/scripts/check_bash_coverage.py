@@ -8,44 +8,88 @@ script turns that resultset into a pass/fail gate.
 Deciding which lines of a shell script are even executable is the hard part of
 Bash coverage — here-documents, ``case`` arms, line continuations and function
 headers all have to be classified — so that judgement is deliberately left to
-SimpleCov rather than re-implemented here. What this script owns is everything
-SimpleCov cannot know about *this* repository:
+bashcov's lexer rather than re-implemented here, with two corrections that
+come from measuring what ``set -x`` actually prints:
+
+**Lines Bash never traces.** The lexer works from the text alone and marks two
+shapes executable that the tracer never reports, so no test could ever cover
+them: a compound-command terminator that carries only redirections (``done <<<
+"$rows"``, ``} > "$report"`` — the redirection belongs to the loop or group,
+and ``set -x`` prints simple commands, not the loop) and a ``case`` arm with no
+body (``*/*) ;;``). ``untraceable_lines()`` recognises exactly those two shapes
+and ``evaluate()`` leaves them out of the count, the way SimpleCov leaves out a
+comment. Anything that carries a command — a pipe into ``sed`` after ``}``, a
+``:`` in the arm, a process substitution — is still measured.
+
+**Statements that span lines.** Bash reports one line per statement, and which
+physical line it picks depends on the shape: the first line of ``python3 -c
+"..."`` with a multi-line string, the *second* line of a plain backslash chain
+(``kill_it \\ / one \\ / two`` reports line 2) or of a backgrounded one, and the
+*last* line of ``VAR=$(...)``, of ``VAR="multi\\nline"``, and of the ``cat
+<<'EOF' ... EOF )`` heredoc-in-substitution the client examples build their
+payloads with. The lexer propagates the first line's count across some of these
+shapes and not others (a ``\\"`` inside the string or a ``||`` on the last line
+of a chain defeats its patterns), which left dozens of lines permanently at
+zero. ``statement_spans()`` scans each script for statements that continue
+across lines — a trailing backslash, an unclosed ``(``/``$(``, an open quote,
+a here-document body — and ``evaluate()`` folds every span onto its first line
+with the highest count seen on any of its lines. A statement is covered when
+Bash reported it, wherever it reported it. A chain is split where a list
+operator (``||``, ``&&``, ``|``) starts a new command at the top level, because
+Bash does report those elements on their own lines; the fallback in
+``aws ... 2>&1 || echo "may already exist"`` therefore stays a separately
+measured statement.
+
+What this script owns beyond that is everything SimpleCov cannot know about
+*this* repository:
 
 **Path shape.** bashcov reports absolute paths (``/home/runner/work/.../demo/
-lib_demo.sh``), while the inventory, the ratchet and every error message use
+lib_demo.sh``), while the inventory and every error message use
 repository-relative ones. Reported paths are mapped back onto the tracked
 script they refer to by longest path suffix, falling back to a unique basename,
 and hits from every path that maps to the same script are merged — so a script
 exercised by several suites is credited with all of them.
 
-That merging also covers copies of a script, which matters because many BATS
-suites ``cp`` the script under test into ``$BATS_TEST_TMPDIR`` and run it from
-an isolated fake repository. It does not rescue those suites on its own,
+That merging also covers copies of a script, which matters because a BATS
+suite may ``cp`` the script under test into ``$BATS_TEST_TMPDIR`` and run it
+from an isolated fake repository. It does not rescue such a suite on its own,
 though: SimpleCov reads each file when it renders the report, and by then BATS
 has deleted its temporary directories, so the copies are dropped before this
-script ever sees them. Such scripts stay on the ratchet until their suite is
-reworked to run the file in place. The merging is what keeps a *surviving*
-copy, or the same script seen under two different absolute prefixes, from
-being counted as two half-covered files.
+script ever sees them. A suite has to run the tracked file in place for its
+hits to count (the recorders take a repository-root override for exactly
+this). The merging is what keeps a *surviving* copy, or the same script seen
+under two different absolute prefixes, from being counted as two half-covered
+files.
 
-**The ratchet.** Bringing 11k lines of shell to 100% is staged work. Scripts
-that have not got there yet are listed in ``[tool.bash-coverage] ratchet`` in
-``pyproject.toml``; everything else must be fully covered. The list only ever
-shrinks, and ``tests/test_check_bash_coverage.py`` keeps it honest.
+**The floor.** Every tracked script must be fully covered. The climb to 100%
+was staged through a shrink-only list of not-yet-covered scripts
+(``[tool.bash-coverage] ratchet`` in ``pyproject.toml``); it emptied and was
+deleted, and this script reads no exclusion list of any kind — a new script is
+covered, not listed. ``tests/test_check_bash_coverage.py`` keeps the list from
+coming back.
 
 The gate fails closed: a tracked script absent from the report entirely is an
 error, not a pass, because that is what a silently mis-scoped bashcov run or a
 suite that never executes its subject looks like.
 
+**The published report.** SimpleCov's own HTML renders the raw line hits, so
+it shows the two corrected shapes as misses and a lower number than the gate.
+``--report DIR`` writes a statement-level HTML report and a ``summary.json``
+from the corrected data instead; ``unit:bats:shell`` ships it in the
+``bash-coverage-report`` artifact and ``pages.yml`` serves it at
+``/bash-coverage/`` and renders the README badge from the summary, so the
+badge, the report and the gate describe one measurement.
+
 Usage::
 
     python3 .github/scripts/check_bash_coverage.py coverage/
+    python3 .github/scripts/check_bash_coverage.py coverage/ --report coverage/report
     python3 .github/scripts/check_bash_coverage.py coverage/.resultset.json
 
 Exit codes::
 
-    0  every enforced script is fully covered
-    1  at least one enforced script has uncovered lines or is missing
+    0  every tracked script is fully covered
+    1  at least one tracked script has uncovered lines or is missing
     2  the report could not be found or parsed
 
 The module is importable from the test suite — ``evaluate()`` holds the whole
@@ -56,14 +100,181 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess  # nosec B404  # fixed argv, no shell: `git ls-files` only
 import sys
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTSET_NAME = ".resultset.json"
+
+# A redirection and its target word: an optional descriptor, one of the
+# operators Bash has (including here-strings and ``>|``/``>&``), then a single
+# quoted or bare word. Deliberately not a process substitution (``< <(cmd)``):
+# the command inside one is traced on this line, so the line is measurable.
+_REDIRECTION = r"""\d*(?:<<<|>>|<>|>\||[<>]&?|<)\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s()<>|&;]+)"""
+
+# ``done``, ``fi``, ``esac`` or ``}`` followed by nothing but redirections.
+_TERMINATOR_WITH_REDIRECTIONS = re.compile(
+    rf"^\s*(?:done|fi|esac|\}})(?:\s+{_REDIRECTION})+\s*(?:#.*)?$"
+)
+
+# A ``case`` arm whose body is empty: ``pattern) ;;``. A ``:`` or any other
+# command in the arm is a traced statement and keeps the line measurable.
+_EMPTY_CASE_ARM = re.compile(r"^\s*[^)#\s][^)#]*\)\s*;;\s*(?:#.*)?$")
+
+
+def untraceable_lines(source: str) -> set[int]:
+    """Return the 1-based lines of ``source`` that Bash's tracer never reports.
+
+    See the module docstring: compound-command terminators carrying only
+    redirections, and empty ``case`` arms. Both are marked executable by
+    bashcov's lexer, so without this they read as permanently uncovered.
+    """
+    return {
+        number
+        for number, line in enumerate(source.splitlines(), start=1)
+        if _TERMINATOR_WITH_REDIRECTIONS.match(line) or _EMPTY_CASE_ARM.match(line)
+    }
+
+
+_HEREDOC = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<tag>\w+)(?P=quote)")
+_LIST_OPERATOR = re.compile(r"\|\||&&|\|(?!\|)")
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """Lexer state carried from one physical line to the next.
+
+    ``parens`` is the stack of unclosed parentheses; ``True`` marks one that
+    keeps a statement open across lines — ``$(``, an array's ``=(``, a process
+    substitution's ``<(``/``>(``, an arithmetic ``((`` — while ``False`` marks a
+    subshell ``(``, whose inner commands Bash reports on their own lines and
+    which must therefore not be folded.
+    """
+
+    parens: tuple[bool, ...] = ()
+    quote: str | None = None  # "'" or '"' while inside a quoted string
+    heredoc: str | None = None  # terminator of the here-document being read
+    heredoc_strip: bool = False  # <<- : leading tabs are stripped before comparing
+    continued: bool = False  # the line ended with an escaping backslash
+
+    @property
+    def depth(self) -> int:
+        return sum(1 for spanning in self.parens if spanning)
+
+    def open(self) -> bool:
+        """Whether the statement is still open at the end of a line."""
+        return (
+            self.depth > 0 or self.quote is not None or self.heredoc is not None or self.continued
+        )
+
+
+def _scan_line(line: str, state: _Scan) -> tuple[_Scan, bool]:
+    """Advance ``state`` over one physical line.
+
+    Returns the new state and whether a list operator (``||``, ``&&``, ``|``)
+    appeared at the top level of this line — i.e. outside quotes and outside
+    any parenthesis — which is where Bash starts a new, separately reported
+    command inside a backslash chain.
+    """
+    parens = list(state.parens)
+    quote, heredoc, heredoc_strip = state.quote, state.heredoc, state.heredoc_strip
+    if heredoc is not None:
+        candidate = line.lstrip("\t") if heredoc_strip else line
+        if candidate == heredoc:
+            heredoc = None
+        return _Scan(tuple(parens), quote, heredoc, heredoc_strip, False), False
+
+    pending_heredoc: tuple[str, bool] | None = None
+    list_operator = False
+    continued = False
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\":
+                if index == length - 1:
+                    continued = True  # a backslash-newline inside "..." continues the string
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        # Unquoted.
+        if char == "\\":
+            if index == length - 1:
+                continued = True
+            index += 2
+            continue
+        if char == "#" and (index == 0 or line[index - 1] in " \t;("):
+            break  # comment to end of line
+        if char in "'\"":
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            parens.append(index > 0 and line[index - 1] in "$=<>(")
+        elif char == ")":
+            if parens:
+                parens.pop()  # a `pattern)` case arm has no opener: nothing to pop
+        elif char == "<" and pending_heredoc is None:
+            match = _HEREDOC.match(line, index)
+            if match:
+                pending_heredoc = (match.group("tag"), line[index : index + 3] == "<<-")
+                index = match.end()
+                continue
+        elif char in "|&" and not parens:
+            match = _LIST_OPERATOR.match(line, index)
+            if match:
+                list_operator = True
+                index = match.end()
+                continue
+        index += 1
+
+    if pending_heredoc is not None:
+        heredoc, heredoc_strip = pending_heredoc
+    return _Scan(tuple(parens), quote, heredoc, heredoc_strip, continued), list_operator
+
+
+def statement_spans(source: str) -> list[tuple[int, int]]:
+    """Return ``(first, last)`` line pairs for statements spanning several lines.
+
+    A statement continues onto the next line while a parenthesis, quote or
+    here-document is open or the line ends with a backslash. Inside a
+    backslash chain a line that starts a new top-level list element (``||``,
+    ``&&``, ``|``) begins a new span, since Bash reports that command on its
+    own line. Single-line statements are not returned.
+    """
+    spans: list[tuple[int, int]] = []
+    state = _Scan()
+    start: int | None = None
+    for number, line in enumerate(source.splitlines(), start=1):
+        was_open = state.open()
+        chain_only = was_open and state.depth == 0 and state.quote is None and state.heredoc is None
+        state, list_operator = _scan_line(line, state)
+        if chain_only and list_operator and start is not None:
+            # `cmd \` / `  arg \` / `  arg || fallback`: the fallback is its own statement.
+            if number - 1 > start:
+                spans.append((start, number - 1))
+            start = number
+        elif not was_open:
+            start = number
+        if not state.open():
+            if start is not None and number > start:
+                spans.append((start, number))
+            start = None
+    if start is not None and state.open():
+        spans.append((start, len(source.splitlines())))
+    return spans
 
 
 class ReportError(Exception):
@@ -105,10 +316,9 @@ class ScriptCoverage:
 
 @dataclass
 class Result:
-    """Outcome of a gate evaluation."""
+    """Outcome of a gate evaluation: one record per tracked script."""
 
-    enforced: list[ScriptCoverage]
-    ratcheted: list[ScriptCoverage]
+    scripts: list[ScriptCoverage]
     failures: list[str]
     unmapped: list[str]
 
@@ -202,14 +412,45 @@ def map_to_tracked(reported_path: str, inventory: list[str]) -> str | None:
     return None
 
 
+def fold_spans(hits: dict[int, int], spans: list[tuple[int, int]]) -> dict[int, int]:
+    """Collapse each multi-line statement onto its first line.
+
+    Every line of a span that the report lists is replaced by the span's first
+    line carrying the highest count seen anywhere in the span, so a statement
+    Bash reported on its second or last line counts once, as covered. A span
+    none of whose lines the report mentions stays absent (bashcov judged it
+    non-executable, e.g. a multi-line comment block would never be a span).
+    """
+    folded = dict(hits)
+    for first, last in spans:
+        members = [line for line in range(first, last + 1) if line in folded]
+        if not members:
+            continue
+        best = max(folded[line] for line in members)
+        for line in members:
+            del folded[line]
+        folded[first] = best
+    return folded
+
+
 def evaluate(
     reported: dict[str, dict[int, int]],
     inventory: list[str],
-    ratchet: list[str],
+    untraceable: dict[str, set[int]] | None = None,
+    spans: dict[str, list[tuple[int, int]]] | None = None,
 ) -> Result:
-    """Merge reported coverage onto the inventory and apply the floor."""
+    """Merge reported coverage onto the inventory and apply the floor to all of it.
+
+    ``untraceable`` maps a tracked script to the line numbers that
+    :func:`untraceable_lines` found in it; those lines are dropped from the
+    script's count whatever the report says about them. ``spans`` maps a
+    tracked script to its :func:`statement_spans`, each folded onto its first
+    line by :func:`fold_spans`.
+    """
     merged: dict[str, ScriptCoverage] = {path: ScriptCoverage(path=path) for path in inventory}
     unmapped: list[str] = []
+    untraceable = untraceable or {}
+    spans = spans or {}
 
     for reported_path, lines in sorted(reported.items()):
         tracked = map_to_tracked(reported_path, inventory)
@@ -218,15 +459,20 @@ def evaluate(
             continue
         record = merged[tracked]
         record.sources.add(reported_path)
+        skipped = untraceable.get(tracked, set())
         for line_number, hits in lines.items():
+            if line_number in skipped:
+                continue
             record.hits[line_number] = max(record.hits.get(line_number, 0), hits)
 
-    ratchet_set = set(ratchet)
-    enforced = [record for path, record in sorted(merged.items()) if path not in ratchet_set]
-    ratcheted = [record for path, record in sorted(merged.items()) if path in ratchet_set]
+    for path, record in merged.items():
+        if record.hits and path in spans:
+            record.hits = fold_spans(record.hits, spans[path])
+
+    scripts = [record for _, record in sorted(merged.items())]
 
     failures: list[str] = []
-    for record in enforced:
+    for record in scripts:
         if not record.measured:
             failures.append(
                 f"{record.path}: absent from the bashcov report — no BATS suite executed it, "
@@ -241,19 +487,7 @@ def evaluate(
                 f"{record.path}: {len(missed)}/{record.total_lines} lines uncovered "
                 f"({record.percent:.2f}%): {shown}{more}"
             )
-    return Result(enforced=enforced, ratcheted=ratcheted, failures=failures, unmapped=unmapped)
-
-
-def load_ratchet(pyproject: Path) -> list[str]:
-    """Return ``[tool.bash-coverage] ratchet`` from pyproject, or ``[]``."""
-    try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ReportError(f"could not read {pyproject}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise ReportError(f"{pyproject} is not valid TOML: {exc}") from exc
-    section = data.get("tool", {}).get("bash-coverage", {})
-    return [str(item) for item in section.get("ratchet", [])]
+    return Result(scripts=scripts, failures=failures, unmapped=unmapped)
 
 
 def tracked_shell_scripts(root: Path) -> list[str]:
@@ -275,46 +509,277 @@ def tracked_shell_scripts(root: Path) -> list[str]:
     return sorted(path for path in paths if not path.startswith("tests/"))
 
 
+def classify_scripts(
+    root: Path, inventory: list[str]
+) -> tuple[dict[str, set[int]], dict[str, list[tuple[int, int]]]]:
+    """Run :func:`untraceable_lines` and :func:`statement_spans` over the inventory.
+
+    Returns the two per-script maps :func:`evaluate` takes, each holding only
+    the scripts that have something to report.
+    """
+    untraceable: dict[str, set[int]] = {}
+    spans: dict[str, list[tuple[int, int]]] = {}
+    for path in inventory:
+        try:
+            source = (root / path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(f"could not read tracked script {path}: {exc}") from exc
+        lines = untraceable_lines(source)
+        if lines:
+            untraceable[path] = lines
+        found = statement_spans(source)
+        if found:
+            spans[path] = found
+    return untraceable, spans
+
+
 def format_report(result: Result) -> str:
     """Render the human-facing summary printed by ``main``."""
     lines: list[str] = []
-    failing = [record for record in result.enforced if record.missed_lines or not record.measured]
-    covered = len(result.enforced) - len(failing)
-    lines.append(
-        f"bash coverage: {covered}/{len(result.enforced)} enforced scripts at 100%, "
-        f"{len(result.ratcheted)} on the ratchet"
-    )
+    failing = [record for record in result.scripts if record.missed_lines or not record.measured]
+    covered = len(result.scripts) - len(failing)
+    lines.append(f"bash coverage: {covered}/{len(result.scripts)} tracked scripts at 100%")
     if result.unmapped:
         lines.append(
             f"note: {len(result.unmapped)} reported path(s) matched no tracked script "
             "and were ignored:"
         )
         lines.extend(f"  {path}" for path in result.unmapped[:10])
-    if result.ratcheted:
-        measured = [record for record in result.ratcheted if record.measured]
-        unmeasured = [record for record in result.ratcheted if not record.measured]
-        lines.append("ratcheted scripts (not yet enforced, lowest coverage first):")
-        for record in sorted(measured, key=lambda item: item.percent):
-            lines.append(
-                f"  {record.percent:6.2f}%  {record.path} "
-                f"({len(record.missed_lines)}/{record.total_lines} uncovered)"
-            )
-        # Deliberately not rendered as 0% or 100%: no suite executed these, so
-        # there is no measurement to report, and printing a number would invite
-        # someone to strike a script off the ratchet that is not tested at all.
-        for record in unmeasured:
-            lines.append(f"     n/a  {record.path} (not executed by any suite)")
     if result.failures:
         lines.append("")
-        lines.append("ERROR: enforced shell scripts are not fully covered:")
+        lines.append("ERROR: shell scripts are not fully covered:")
         lines.extend(f"  {failure}" for failure in result.failures)
         lines.append("")
         lines.append(
-            "Add BATS coverage for the lines above. If this script is new and its "
-            "tests are staged work, add it to [tool.bash-coverage] ratchet in "
-            "pyproject.toml and say so in the PR description."
+            "Add BATS coverage for the lines above. Every tracked *.sh file is held "
+            "to 100%: a new script ships with a suite that executes it, and a script "
+            "absent from the report needs its suite to run the tracked file in place "
+            "rather than a copy."
         )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# The published report
+#
+# SimpleCov's own HTML report renders the raw line hits, so it shows the
+# untraceable lines and the later lines of multi-line statements as misses
+# and reports a lower number than the gate does. The report published to
+# GitHub Pages (by pages.yml, from the artifact) is rendered here instead,
+# from the same corrected data the verdict comes from, so the badge, the
+# report and the gate cannot tell three different stories.
+# --------------------------------------------------------------------------
+
+SUMMARY_NAME = "summary.json"
+
+_REPORT_CSS = """
+body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2em auto; max-width: 72em; padding: 0 1em; color: #222; }
+h1 { font-size: 1.5em; } h1 code { font-size: 0.9em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.25em 0.6em; border-bottom: 1px solid #ddd; }
+th { background: #f3f3f3; } td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: #1a7f37; } .bad { color: #b42318; } .muted { color: #666; }
+table.source { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+table.source td { border: 0; padding: 0 0.6em; white-space: pre; }
+table.source td.n { text-align: right; color: #888; user-select: none; width: 3em; }
+table.source td.c { text-align: right; color: #666; width: 3em; }
+tr.covered td.s { background: #dafbe1; } tr.missed td.s { background: #ffebe9; }
+tr.continued td.n::after { content: " \\2026"; }
+tr.untraceable td.s { background: #f3f3f3; color: #666; }
+.legend span { display: inline-block; padding: 0 0.5em; margin-right: 0.6em; }
+.legend .covered { background: #dafbe1; } .legend .missed { background: #ffebe9; } .legend .untraceable { background: #f3f3f3; }
+"""
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _page_name(path: str) -> str:
+    """The file page for a script: the path with ``/`` doubled into ``__``.
+
+    A leading dot is dropped so ``.github/scripts/x.sh`` does not become a
+    hidden file on the site. Basenames are unique across the inventory (a test
+    asserts it), so no two scripts share a page.
+    """
+    return path.replace("/", "__").lstrip(".") + ".html"
+
+
+def line_states(
+    source: str,
+    hits: dict[int, int],
+    untraceable: set[int],
+    spans: list[tuple[int, int]],
+) -> list[tuple[str, int | None, str]]:
+    """Classify every physical line of a script for its file page.
+
+    Returns one ``(kind, count, text)`` per line. ``kind`` is ``covered`` or
+    ``missed`` for a measured statement, the same with ``continued`` added for
+    the later physical lines of a multi-line statement (they take their
+    statement's fate — ``hits`` is the folded map, so only the first line
+    carries the count), ``untraceable`` for a line Bash never traces, and
+    ``none`` for a line that is not executable.
+    """
+    continued: dict[int, int] = {}
+    for first, last in spans:
+        if first in hits:  # folded onto its first line, so the statement is measured
+            for line in range(first + 1, last + 1):
+                continued[line] = first
+    states: list[tuple[str, int | None, str]] = []
+    for number, text in enumerate(source.splitlines(), start=1):
+        if number in untraceable:
+            states.append(("untraceable", None, text))
+        elif number in hits:
+            states.append(("covered" if hits[number] else "missed", hits[number], text))
+        elif number in continued:
+            count = hits[continued[number]]
+            states.append((("covered" if count else "missed") + " continued", None, text))
+        else:
+            states.append(("none", None, text))
+    return states
+
+
+def _percent(covered: int, total: int) -> float:
+    return round(100.0 * covered / total, 2) if total else 0.0
+
+
+def summarize(result: Result) -> dict[str, object]:
+    """The machine-readable summary the badge is rendered from."""
+    files = []
+    statements = covered = 0
+    for record in result.scripts:
+        missed = record.missed_lines
+        statements += record.total_lines
+        covered += record.total_lines - len(missed)
+        files.append(
+            {
+                "path": record.path,
+                "measured": record.measured,
+                "statements": record.total_lines,
+                "covered": record.total_lines - len(missed),
+                "missed": missed,
+                "percent": _percent(record.total_lines - len(missed), record.total_lines),
+            }
+        )
+    at_floor = [record for record in result.scripts if record.measured and not record.missed_lines]
+    return {
+        "ok": result.ok,
+        "scripts": len(result.scripts),
+        "scripts_at_100": len(at_floor),
+        "unmeasured": [record.path for record in result.scripts if not record.measured],
+        "statements": statements,
+        "covered": covered,
+        "missed": statements - covered,
+        "percent": _percent(covered, statements),
+        "files": files,
+    }
+
+
+def _file_page(record: ScriptCoverage, states: list[tuple[str, int | None, str]]) -> str:
+    stats: str
+    if not record.measured:
+        stats = '<p class="bad">Not executed by any suite, so its coverage is unknown.</p>'
+    else:
+        missed = len(record.missed_lines)
+        klass = "ok" if not missed else "bad"
+        stats = (
+            f'<p class="{klass}">{record.total_lines - missed} of {record.total_lines} '
+            f"statements covered ({_percent(record.total_lines - missed, record.total_lines):.2f}%)"
+            f"{'' if not missed else f', {missed} missed'}.</p>"
+        )
+    rows = []
+    for number, (kind, count, text) in enumerate(states, start=1):
+        shown = "" if count is None else str(count)
+        rows.append(
+            f'<tr class="{kind}"><td class="n">{number}</td><td class="c">{shown}</td>'
+            f'<td class="s">{_escape(text) or " "}</td></tr>'
+        )
+    legend = (
+        '<p class="legend"><span class="covered">covered</span>'
+        '<span class="missed">missed</span>'
+        '<span class="untraceable">never traced by Bash (not counted)</span>'
+        "A line ending in \u2026 continues the statement above it and shares its fate.</p>"
+    )
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        f"<title>{_escape(record.path)} \u2014 shell coverage</title>"
+        f"<style>{_REPORT_CSS}</style></head><body>\n"
+        f'<p><a href="../index.html">\u2190 all scripts</a></p>\n'
+        f"<h1><code>{_escape(record.path)}</code></h1>\n{stats}\n{legend}\n"
+        '<table class="source">\n' + "\n".join(rows) + "\n</table>\n</body></html>\n"
+    )
+
+
+def _index_page(summary: dict[str, object]) -> str:
+    files = summary["files"]
+    assert isinstance(files, list)
+    rows = []
+    for entry in files:
+        link = f'<a href="files/{_page_name(entry["path"])}">{_escape(entry["path"])}</a>'
+        if not entry["measured"]:
+            rows.append(
+                f"<tr><td>{link}</td>"
+                '<td class="bad" colspan="4">not executed by any suite</td></tr>'
+            )
+            continue
+        klass = "ok" if not entry["missed"] else "bad"
+        rows.append(
+            f"<tr><td>{link}</td>"
+            f'<td class="num">{entry["statements"]}</td>'
+            f'<td class="num">{entry["covered"]}</td>'
+            f'<td class="num">{len(entry["missed"])}</td>'
+            f'<td class="num {klass}">{entry["percent"]:.2f}%</td></tr>'
+        )
+    klass = "ok" if summary["ok"] else "bad"
+    verdict = (
+        f'<p class="{klass}"><b>{summary["scripts_at_100"]}/{summary["scripts"]} tracked scripts '
+        f"at 100%</b> \u2014 {summary['covered']} of {summary['statements']} statements covered "
+        f"({summary['percent']:.2f}%).</p>"
+    )
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        "<title>Shell coverage</title>"
+        f"<style>{_REPORT_CSS}</style></head><body>\n"
+        "<h1>Shell coverage</h1>\n"
+        f"{verdict}\n"
+        '<p class="muted">Every tracked shell script, measured in statements by the '
+        "<code>unit:bats:shell</code> job: BATS runs each script under bashcov, and "
+        "<code>check_bash_coverage.py</code> corrects the raw line hits for the lines Bash "
+        "never traces and for statements that span several lines. This page is that "
+        "corrected view, and the same numbers are what the gate enforces.</p>\n"
+        "<table><thead><tr><th>Script</th><th>Statements</th><th>Covered</th>"
+        "<th>Missed</th><th>Coverage</th></tr></thead>\n<tbody>\n"
+        + "\n".join(rows)
+        + "\n</tbody></table>\n</body></html>\n"
+    )
+
+
+def write_report(
+    result: Result,
+    root: Path,
+    untraceable: dict[str, set[int]],
+    spans: dict[str, list[tuple[int, int]]],
+    out_dir: Path,
+) -> dict[str, object]:
+    """Write ``index.html``, one page per script and ``summary.json`` to ``out_dir``.
+
+    Rendered from the evaluated result, so the numbers agree with the verdict
+    ``main`` prints. Returns the summary that was written.
+    """
+    summary = summarize(result)
+    files_dir = out_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    for record in result.scripts:
+        source = (root / record.path).read_text(encoding="utf-8")
+        states = line_states(
+            source, record.hits, untraceable.get(record.path, set()), spans.get(record.path, [])
+        )
+        (files_dir / _page_name(record.path)).write_text(
+            _file_page(record, states), encoding="utf-8"
+        )
+    (out_dir / "index.html").write_text(_index_page(summary), encoding="utf-8")
+    (out_dir / SUMMARY_NAME).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -330,18 +795,31 @@ def main(argv: list[str] | None = None) -> int:
         default=REPO_ROOT,
         help="Repository root used to build the tracked-script inventory.",
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Also write the statement-level HTML report (index.html, files/*.html) and "
+            f"{SUMMARY_NAME} to DIR — the view pages.yml publishes. Written whatever the "
+            "verdict, so a failing run can be inspected."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
         report = find_report(args.bashcov_output)
         reported = parse_report(report)
         inventory = tracked_shell_scripts(args.root)
-        ratchet = load_ratchet(args.root / "pyproject.toml")
+        untraceable, spans = classify_scripts(args.root, inventory)
     except ReportError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    result = evaluate(reported, inventory, ratchet)
+    result = evaluate(reported, inventory, untraceable, spans)
+    if args.report is not None:
+        write_report(result, args.root, untraceable, spans, args.report)
     print(format_report(result))
     return 0 if result.ok else 1
 

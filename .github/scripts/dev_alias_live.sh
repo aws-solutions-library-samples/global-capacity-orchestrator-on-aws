@@ -30,7 +30,11 @@
 # as the normal user. This script never calls sudo itself.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The checkout to prove: normally the one this script lives in. The BATS suite
+# points GCO_DEV_ALIAS_LIVE_REPO_ROOT at a disposable fixture (carrying the
+# setup script and answering runtimes on PATH) so the tracked script runs in
+# place without writing its DAG fixture into a real checkout.
+REPO_ROOT="$(cd "${GCO_DEV_ALIAS_LIVE_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}" && pwd)"
 SETUP="$REPO_ROOT/scripts/setup-dev-alias.sh"
 
 RUNTIME=""

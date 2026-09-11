@@ -42,14 +42,18 @@ report applies the floor. Coverage is measured from the repository root, so
 every authored Python file counts: application packages, Lambda handlers, the
 CDK entry point and repository tooling alike. Nothing is excluded except the
 test-suite itself, package markers, generated trees and the byte-identical
-shared Lambda copies, and a test guards that list. The HTML report published
-from every `main` run is embedded in this site:
+shared Lambda copies, and a test guards that list. The shell scripts and the
+Node.js streaming Lambda are held to the same exact floor by their own suites
+(BATS under `bashcov`, and Node's built-in test runner), and the three HTML
+reports published from every `main` run are embedded in this site:
 
-**[Browse the live coverage report](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/)**
+**[Python](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/python-coverage/) ·
+[Bash](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/bash-coverage/) ·
+[Node.js](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/nodejs-coverage/)**
 
-The README's coverage badge reads a JSON endpoint generated from the same
-run, so the badge, the report, and the gate can never tell three different
-stories.
+The README's three coverage badges read JSON endpoints generated from the same
+runs, so for each stack the badge, the report, and the gate can never tell
+three different stories.
 
 ## Quality signals beyond tests
 

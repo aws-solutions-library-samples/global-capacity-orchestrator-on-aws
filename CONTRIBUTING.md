@@ -511,9 +511,9 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready | Sync the declared type-of-change checkbox to its release-note label |
 | `.github/workflows/grafana-dashboards.yml` | Paths-filtered `main`/PR + manual | Provision curated dashboards into the real Grafana image resolved from the pinned chart |
 
-#### Published coverage report and badge
+#### Published coverage reports and badges
 
-After a successful `Unit Tests` push run on the repository's default branch, `pages.yml` downloads that exact run's `pytest-coverage` artifact. It publishes `htmlcov/` and generates `coverage-badge.json` in the same GitHub Pages site. The README's custom shields.io endpoint reads that Pages JSON; test-count and BATS-count endpoint badges are not generated. Pull requests cannot deploy Pages because the workflow requires a successful same-repository default-branch push.
+After a successful `Unit Tests` push run on the repository's default branch, `pages.yml` downloads that exact run's `pytest-coverage` and `bash-coverage-report` artifacts, and the `node-inference-streaming-proxy-coverage` artifact from the `Inference Streaming Proxy` run for the same commit. It publishes the three reports at `/python-coverage/` (coverage.py's `htmlcov/`), `/bash-coverage/` (the statement-level report `check_bash_coverage.py --report` writes) and `/nodejs-coverage/` (genhtml's rendering of Node's lcov tracefile), keeps a redirect at the report's old `/coverage/` address, and renders `python-coverage-badge.json`, `bash-coverage-badge.json` and `nodejs-coverage-badge.json` at the site root with `.github/scripts/render_coverage_badges.py`. The README's three shields.io endpoint badges read those files; test-count and BATS-count endpoint badges are not generated. Pull requests cannot deploy Pages because the workflow requires a successful same-repository default-branch push.
 
 #### Running the pipeline locally
 
@@ -640,7 +640,8 @@ The generator fails if marker-stripped target source differs from that commit.
 
 The [project wiki](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/)
 is a small MkDocs site built from `wiki/*.md` and `mkdocs.yml`, published to
-GitHub Pages by `pages.yml` with the coverage report embedded at `/coverage/`.
+GitHub Pages by `pages.yml` with the three coverage reports embedded at
+`/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`.
 It is an orientation layer: pages **summarize and link** to the authoritative
 docs on GitHub — they must not restate reference detail (flags, config keys,
 procedures), which would rot. Deep-doc links use full
@@ -661,8 +662,9 @@ The script's first phase runs `mkdocs build --strict` — the exact command the
 nav entry without a file fails locally before CI sees it. From the dev
 container, forward the port yourself
 (`docker run -p 8000:8000 ... ./scripts/preview_wiki.sh`); the `gco` shell
-function does not forward ports. The locally served `/coverage/` path 404s by
-design — the coverage report is merged in at deploy time, not built by MkDocs.
+function does not forward ports. The locally served coverage-report paths
+(`/python-coverage/`, `/bash-coverage/`, `/nodejs-coverage/`) 404 by design —
+the reports are merged in at deploy time, not built by MkDocs.
 
 Before pushing wiki changes, also run the wiki's guard tests and markdownlint:
 

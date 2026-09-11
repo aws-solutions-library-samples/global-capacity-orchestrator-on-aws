@@ -17,14 +17,14 @@ for command_name in aws aws-sigv4-proxy curl jq; do
   fi
 done
 
+# Reads one value from the checkout's cdk.json, or prints the fallback when the
+# file is absent (the example was copied out of the checkout) or the key is
+# not set. jq fails on both, and its stderr is silenced because either is
+# an expected condition here, not an error.
 context_value() {
   local jq_filter=$1
   local fallback=$2
-  if [[ -f "${PROJECT_ROOT}/cdk.json" ]]; then
-    jq -er "${jq_filter} // empty" "${PROJECT_ROOT}/cdk.json" 2>/dev/null || printf '%s\n' "$fallback"
-  else
-    printf '%s\n' "$fallback"
-  fi
+  jq -er "${jq_filter} // empty" "${PROJECT_ROOT}/cdk.json" 2>/dev/null || printf '%s\n' "$fallback"
 }
 
 API_REGION=${API_REGION:-$(context_value '.context.deployment_regions.api_gateway' 'us-east-2')}

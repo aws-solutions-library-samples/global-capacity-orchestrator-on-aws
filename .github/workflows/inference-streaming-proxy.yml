@@ -38,21 +38,37 @@ jobs:
         run: bash ../../.github/scripts/use-pinned-npm.sh package.json
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
+      # genhtml (from the lcov package) renders the tracefile the test script
+      # writes into the HTML report pages.yml serves at /nodejs-coverage/.
+      - name: Install lcov (with retry)
+        uses: ./.github/actions/apt-install-with-retry
+        with:
+          packages: lcov
       # The floor itself lives in package.json's `test` script (exact 100% for
       # lines, functions, and branches over index.mjs alone), so it is written
       # once and enforced identically here and on a developer's machine. The
-      # output is teed to a file — with pipefail so the tee never masks a
-      # non-zero node exit — and uploaded below, giving a reviewer the V8
-      # per-file table without re-running the job.
+      # script also writes the lcov tracefile (lcov.info) beside the package.
+      # The console output is teed to a file — with pipefail so the tee never
+      # masks a non-zero node exit — and uploaded below, giving a reviewer the
+      # V8 per-file table without re-running the job.
       - name: Run native Node.js unit tests at an exact 100% V8 coverage floor
         run: |
           set -o pipefail
           npm test 2>&1 | tee node-coverage.txt
-      - name: Upload the V8 coverage output
+      # Rendered here, where the sources the tracefile names are checked out,
+      # so the artifact is complete on its own and pages.yml only copies it.
+      # Branch data is left out of the HTML: lcov 2.0's genhtml does not read
+      # the BRDA records Node writes, and would render an empty column.
+      - name: Render the HTML coverage report from the lcov tracefile
+        run: genhtml lcov.info --output-directory coverage --title "gco-inference-streaming-proxy" --legend
+      - name: Upload the V8 coverage output, tracefile and HTML report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: node-inference-streaming-proxy-coverage
-          path: lambda/inference-streaming-proxy/node-coverage.txt
+          path: |
+            lambda/inference-streaming-proxy/node-coverage.txt
+            lambda/inference-streaming-proxy/lcov.info
+            lambda/inference-streaming-proxy/coverage/
           retention-days: 7
           if-no-files-found: error

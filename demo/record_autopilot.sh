@@ -57,7 +57,12 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The checkout being recorded: normally the one this script lives in. The BATS
+# suite points GCO_RECORDING_REPO_ROOT at a disposable fixture repository so
+# the tracked recorder runs in place against it; left unset, every path below
+# is the same as before the override existed.
+REPO_ROOT="$(cd "${GCO_RECORDING_REPO_ROOT:-$SCRIPT_DIR/..}" && pwd)"
+DEMO_DIR="${REPO_ROOT}/demo"
 
 # shellcheck source=demo/lib_demo.sh
 source "${SCRIPT_DIR}/lib_demo.sh"
@@ -68,12 +73,12 @@ DEMO_MODE="${DEMO_MODE:-live}"
 
 case "$DEMO_ENGINE" in
     claude-code)
-        CAST_FILE="${SCRIPT_DIR}/autopilot-claude-code.cast"
-        GIF_FILE="${SCRIPT_DIR}/autopilot-claude-code.gif"
+        CAST_FILE="${DEMO_DIR}/autopilot-claude-code.cast"
+        GIF_FILE="${DEMO_DIR}/autopilot-claude-code.gif"
         ;;
     codex)
-        CAST_FILE="${SCRIPT_DIR}/autopilot-codex.cast"
-        GIF_FILE="${SCRIPT_DIR}/autopilot-codex.gif"
+        CAST_FILE="${DEMO_DIR}/autopilot-codex.cast"
+        GIF_FILE="${DEMO_DIR}/autopilot-codex.gif"
         ;;
     *) echo "error: DEMO_ENGINE must be 'claude-code' or 'codex', got '$DEMO_ENGINE'" >&2; exit 1 ;;
 esac

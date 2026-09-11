@@ -72,6 +72,15 @@ coverage.json
 coverage.xml
 .pytest_cache/
 htmlcov/
+# bashcov output (the shell coverage report), and the local Bundler install
+# `bundle install --path vendor/bundle` leaves behind — both would otherwise
+# show up as untracked and trip verify_recording_git_state the same way.
+coverage/
+.bundle/
+vendor/bundle/
+# The lcov tracefile the Node test script writes beside the Lambda package
+# (its genhtml rendering lands in coverage/, already ignored above).
+lambda/inference-streaming-proxy/lcov.info
 
 # Kubernetes
 kubeconfig*

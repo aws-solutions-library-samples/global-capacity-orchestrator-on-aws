@@ -63,6 +63,14 @@ the figure describes the production module alone. Without that scope Node also
 counts `support.mjs` in this directory, which would let test-harness lines
 inflate the result. V8 reports no statement metric, so none is claimed.
 
+Besides the per-file table on the console (the `spec` reporter), the script
+writes an lcov tracefile to `lambda/inference-streaming-proxy/lcov.info`
+(ignored by git; editors with coverage gutters can read it). The CI workflow
+renders it with `genhtml` into the HTML report that `pages.yml` publishes at
+`/nodejs-coverage/`, and `.github/scripts/render_coverage_badges.py` computes
+the README's Node.js badge from it (lines and branches together, the way
+coverage.py reports the Python figure).
+
 This dedicated JavaScript gate is separate from the repository-wide Python
 configuration, which enforces its own exact 100% line + branch floor via
 `[tool.coverage.report] fail_under` in `pyproject.toml`.

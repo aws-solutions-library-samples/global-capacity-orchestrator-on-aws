@@ -17,7 +17,9 @@
 # Run:  bats tests/BATS/test_lib_demo.bats
 # ─────────────────────────────────────────────────────────────────────────────
 
-LIB="demo/lib_demo.sh"
+load 'helpers.sh'
+
+LIB="$REPO_ROOT/demo/lib_demo.sh"
 
 setup() {
     # Fresh tmpdir per test so sanitize_cast in-place edits can't cross-pollinate.
@@ -30,7 +32,10 @@ setup() {
 }
 
 teardown() {
-    [ -n "${TEST_TMPDIR:-}" ] && [ -d "$TEST_TMPDIR" ] && rm -rf "$TEST_TMPDIR"
+    # A test may have made part of the tree unwritable, or shadowed rm/cp/mv
+    # with a failing function, to provoke a failure; neither may leak here.
+    [ -n "${TEST_TMPDIR:-}" ] && [ -d "$TEST_TMPDIR" ] && \
+        command chmod -R u+w "$TEST_TMPDIR" && command rm -rf "$TEST_TMPDIR"
 }
 
 # ── File Sanity ──────────────────────────────────────────────────────────────
@@ -135,7 +140,7 @@ teardown() {
     [ -f "$owner_file" ]
     [ "$owner_file" -ef "$lock_file" ]
 
-    run bash -c 'source demo/lib_demo.sh; acquire_legacy_recording_lock "$1"' _ "$repo"
+    run bash -c 'source "$1"; acquire_legacy_recording_lock "$2"' _ "$LIB" "$repo"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Another legacy demo recorder"* ]]
     [ "$owner_file" -ef "$lock_file" ]
@@ -143,7 +148,7 @@ teardown() {
     release_legacy_recording_lock
     [ ! -e "$lock_file" ]
     [ ! -e "$owner_file" ]
-    run bash -c 'source demo/lib_demo.sh; acquire_legacy_recording_lock "$1"; release_legacy_recording_lock' _ "$repo"
+    run bash -c 'source "$1"; acquire_legacy_recording_lock "$2"; release_legacy_recording_lock' _ "$LIB" "$repo"
     [ "$status" -eq 0 ]
 }
 
@@ -765,7 +770,7 @@ FAKE_LN
             run env PATH="$fake_bin:$PATH" REAL_LN="$real_ln" \
                 LOCK_SIGNAL="$signal" LOCK_SIGNAL_PHASE="$phase" \
                 bash -c '
-                    source demo/lib_demo.sh
+                    source "$1"
                     cleanup() {
                         local exit_code="$1"
                         trap - EXIT
@@ -777,8 +782,8 @@ FAKE_LN
                     trap '\''exit 129'\'' HUP
                     trap '\''exit 130'\'' INT
                     trap '\''exit 143'\'' TERM
-                    acquire_legacy_recording_lock "$1"
-                ' _ "$repo"
+                    acquire_legacy_recording_lock "$2"
+                ' _ "$LIB" "$repo"
             [ "$status" -ne 0 ]
             [ ! -e "$lock_file" ]
             [ -z "$(compgen -G "${lock_file}.owner.*" || true)" ]
@@ -948,4 +953,525 @@ FIXTURE
     # The valid list is offered, and no Python traceback leaks into preflight.
     [[ "$output" == *"yunikorn"* ]]
     [[ "$output" != *"Traceback"* ]]
+}
+
+# ── Remaining branches of the shared helpers ─────────────────────────────────
+# Each failure branch a recorder can reach is provoked here with a shell
+# function standing in for the external command (`git`, `aws`, `kubectl`,
+# `mv`, `cp`, `rm`, `sleep`); the library calls them by name, so a function
+# defined in the test shadows the real tool for exactly that test.
+
+@test "cleanup_inference_endpoint is silent when the fallback delete succeeds" {
+    gco() { return 0; }
+    run cleanup_inference_endpoint demo-llm
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "cleanup_inference_endpoint names the endpoint that may still be running" {
+    gco() { return 1; }
+    run cleanup_inference_endpoint demo-llm
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"inference endpoint 'demo-llm' may still be running"* ]]
+    [[ "$output" == *"gco inference delete demo-llm -y"* ]]
+}
+
+@test "report_feature_result prints the claim only for a submitted workload" {
+    run report_feature_result 1 "FSx for Lustre" "FSx throughput demonstrated"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FSx throughput demonstrated"* ]]
+}
+
+@test "report_feature_result degrades to a warning in a live presentation" {
+    unset GCO_DEMO_GUARDED_RECORDING
+    run report_feature_result 0 "FSx for Lustre" "FSx throughput demonstrated"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FSx for Lustre did not run: its workload could not be submitted."* ]]
+    [[ "$output" == *"deploy-all --enable"* ]]
+    [[ "$output" != *"FSx throughput demonstrated"* ]]
+}
+
+@test "report_feature_result fails a guarded recording that would claim an unproven feature" {
+    GCO_DEMO_GUARDED_RECORDING=1
+    export GCO_DEMO_GUARDED_RECORDING
+    run report_feature_result 0 "Valkey" "Valkey caching demonstrated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing to publish a recording that claims an unproven feature."* ]]
+}
+
+@test "pause_for_audience waits for Enter when interactive" {
+    unset GCO_DEMO_NONINTERACTIVE
+    run pause_for_audience <<< ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Press Enter to continue..."* ]]
+}
+
+@test "pause_for_audience only sleeps in non-interactive mode" {
+    GCO_DEMO_NONINTERACTIVE=1
+    export GCO_DEMO_NONINTERACTIVE
+    sleep() { printf 'slept %s\n' "$1"; }
+    run pause_for_audience < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "slept 1" ]
+}
+
+@test "countdown ticks once a second and closes the line" {
+    sleep() { printf '[sleep %s]' "$1"; }
+    run countdown "Provisioning" 3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Provisioning 3..."*"[sleep 1]"*"Provisioning 2..."*"[sleep 1]"*"Provisioning 1..."*"[sleep 1]"*"Provisioning done."* ]]
+}
+
+@test "wait_for_job spins until the Job resource registers, then waits on it" {
+    local calls="$TEST_TMPDIR/kubectl.calls"
+    : > "$calls"
+    sleep() { :; }
+    kubectl() {
+        printf '%s\n' "$*" >> "$calls"
+        case "$1" in
+            get)
+                # The Job is not in the API on the first look, then it is.
+                if [ "$(grep -c '^get job/demo' "$calls")" -lt 2 ]; then return 1; fi
+                ;;
+            wait) return 0 ;;
+        esac
+        return 0
+    }
+    run wait_for_job demo gco-jobs 30
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Waiting for job/demo to register..."* ]]
+    [[ "$output" == *"job/demo completed in"* ]]
+    [ "$(grep -c '^get job/demo -n gco-jobs' "$calls")" -eq 2 ]
+    grep -q '^wait --for=condition=complete job/demo -n gco-jobs --timeout=' "$calls"
+}
+
+@test "verify_recording_git_state is a no-op without an expected SHA" {
+    unset GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$TEST_TMPDIR"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "verify_recording_git_state rejects a short or non-hexadecimal SHA" {
+    GCO_EXPECTED_GIT_SHA=abc123
+    export GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$TEST_TMPDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be a full 40-character hexadecimal SHA"* ]]
+
+    GCO_EXPECTED_GIT_SHA="zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    run verify_recording_git_state "$TEST_TMPDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be a full 40-character hexadecimal SHA"* ]]
+}
+
+@test "verify_recording_git_state rejects a directory that is not a repository" {
+    local plain="$TEST_TMPDIR/plain"
+    mkdir -p "$plain"
+    GCO_EXPECTED_GIT_SHA="0123456789abcdef0123456789abcdef01234567"
+    export GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$plain"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to resolve git HEAD in ${plain}."* ]]
+}
+
+@test "verify_recording_git_state rejects a checkout at a different commit" {
+    local repo="$TEST_TMPDIR/repo"
+    mkdir -p "$repo"
+    printf 'tracked\n' > "$repo/source.txt"
+    init_fixture_repo "$repo" > /dev/null
+    GCO_EXPECTED_GIT_SHA="0123456789abcdef0123456789abcdef01234567"
+    export GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Git HEAD does not match GCO_EXPECTED_GIT_SHA."* ]]
+}
+
+@test "verify_recording_git_state reports a worktree it cannot inspect" {
+    local repo="$TEST_TMPDIR/repo"
+    mkdir -p "$repo"
+    printf 'tracked\n' > "$repo/source.txt"
+    local sha
+    sha="$(init_fixture_repo "$repo")"
+    local real_git
+    real_git="$(command -v git)"
+    git() {
+        case " $* " in
+            *" status "*) return 128 ;;
+        esac
+        "$real_git" "$@"
+    }
+    GCO_EXPECTED_GIT_SHA="$sha"
+    export GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to inspect git worktree state in ${repo}."* ]]
+}
+
+@test "verify_recording_aws_account is a no-op without an expected account" {
+    unset GCO_EXPECTED_ACCOUNT_ID
+    aws() { echo "aws must not be called" >&2; return 97; }
+    run verify_recording_aws_account
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "verify_recording_aws_account rejects an account that is not twelve digits" {
+    GCO_EXPECTED_ACCOUNT_ID=12345
+    export GCO_EXPECTED_ACCOUNT_ID
+    run verify_recording_aws_account
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must contain exactly 12 digits"* ]]
+}
+
+@test "verify_recording_aws_account fails closed when STS cannot answer" {
+    GCO_EXPECTED_ACCOUNT_ID=123456789012
+    export GCO_EXPECTED_ACCOUNT_ID
+    aws() { return 255; }
+    run verify_recording_aws_account
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to resolve the active AWS account through STS."* ]]
+}
+
+@test "verify_recording_aws_account rejects a different active account" {
+    GCO_EXPECTED_ACCOUNT_ID=123456789012
+    export GCO_EXPECTED_ACCOUNT_ID
+    aws() { printf '%s\n' '999988887777'; }
+    run verify_recording_aws_account
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Active AWS account does not match GCO_EXPECTED_ACCOUNT_ID."* ]]
+}
+
+@test "legacy live recording authorization requires the SHA and the account after consent" {
+    GCO_RECORDING_LIVE=1
+    export GCO_RECORDING_LIVE
+    unset GCO_EXPECTED_GIT_SHA GCO_EXPECTED_ACCOUNT_ID
+    run verify_legacy_live_recording_authorization "$TEST_TMPDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"GCO_EXPECTED_GIT_SHA is required for a live legacy recording."* ]]
+
+    GCO_EXPECTED_GIT_SHA="0123456789abcdef0123456789abcdef01234567"
+    export GCO_EXPECTED_GIT_SHA
+    run verify_legacy_live_recording_authorization "$TEST_TMPDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"GCO_EXPECTED_ACCOUNT_ID is required for a live legacy recording."* ]]
+}
+
+@test "recording kube context fails closed when the EKS endpoint cannot be resolved" {
+    aws() { return 254; }
+    kubectl() { echo "kubectl must not be consulted first" >&2; return 97; }
+    run verify_recording_kube_context "gco-us-east-1" "us-east-1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to resolve the expected EKS endpoint for recording."* ]]
+    [[ "$output" != *"kubectl must not be consulted first"* ]]
+}
+
+@test "recording kube context fails closed when kubectl cannot report its server" {
+    aws() { printf '%s\n' 'https://expected.eks.example'; }
+    kubectl() { return 1; }
+    run verify_recording_kube_context "gco-us-east-1" "us-east-1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to resolve the active kubectl server."* ]]
+}
+
+@test "recording kube context rejects an EKS lookup that answers None" {
+    aws() { printf 'None\n'; }
+    kubectl() { printf 'None\n'; }
+    run verify_recording_kube_context "gco-us-east-1" "us-east-1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not match the authorized GCO EKS cluster"* ]]
+}
+
+@test "legacy recorder lock needs a Git repository" {
+    local not_a_repo="$TEST_TMPDIR/plain"
+    mkdir -p "$not_a_repo"
+    run acquire_legacy_recording_lock "$not_a_repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to resolve the Git common directory for recording lock."* ]]
+}
+
+@test "legacy recorder lock rejects a Git common directory that does not exist" {
+    # A relative answer is resolved against the repository, so a bogus one
+    # both exercises that branch and cannot be canonicalized.
+    git() { printf '.git-elsewhere\n'; }
+    run acquire_legacy_recording_lock "$TEST_TMPDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to canonicalize the Git common directory for recording lock."* ]]
+}
+
+@test "legacy recorder lock reports an owner file it cannot create" {
+    local repo="$TEST_TMPDIR/ro-repo"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    chmod 555 "$repo/.git"
+    if : > "$repo/.git/probe" 2>/dev/null; then
+        rm -f "$repo/.git/probe"
+        skip "this user can write to a read-only directory"
+    fi
+
+    run acquire_legacy_recording_lock "$repo"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to create recording lock owner file:"* ]]
+    # The failed acquisition registers nothing for release to touch.
+    acquire_legacy_recording_lock "$repo" || true
+    [ -z "$LEGACY_RECORDING_LOCK_FILE" ]
+    [ -z "$LEGACY_RECORDING_LOCK_OWNER_FILE" ]
+}
+
+@test "legacy recorder lock release reports an owner file it cannot remove" {
+    local repo="$TEST_TMPDIR/lock-repo"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    acquire_legacy_recording_lock "$repo"
+    local lock_file="$LEGACY_RECORDING_LOCK_FILE"
+    local owner_file="$LEGACY_RECORDING_LOCK_OWNER_FILE"
+
+    rm() {
+        local arg
+        for arg in "$@"; do
+            case "$arg" in
+                *.owner.*) return 1 ;;
+            esac
+        done
+        command rm "$@"
+    }
+    run release_legacy_recording_lock
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to remove recording lock owner file: ${owner_file}"* ]]
+    # The shared lock itself was released before the owner-file failure.
+    [ ! -e "$lock_file" ]
+    [ -e "$owner_file" ]
+}
+
+# ── publish_recording_artifacts: refusals, backup and rollback failures ──────
+
+@test "publish_recording_artifacts refuses to nest a second transaction" {
+    local stage="$TEST_TMPDIR/stage"
+    mkdir -p "$stage"
+    printf 'new cast\n' > "$stage/demo.cast"
+    RECORDING_PUBLICATION_IN_PROGRESS=1
+    run publish_recording_artifacts "$stage/demo.cast" "" "$TEST_TMPDIR/demo.cast" "$TEST_TMPDIR/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"A recording publication transaction is already active."* ]]
+}
+
+@test "publish_recording_artifacts refuses a missing staged cast or GIF" {
+    local stage="$TEST_TMPDIR/stage"
+    mkdir -p "$stage"
+    run publish_recording_artifacts "$stage/demo.cast" "" "$TEST_TMPDIR/demo.cast" "$TEST_TMPDIR/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Cannot publish missing staged cast: ${stage}/demo.cast"* ]]
+
+    printf 'new cast\n' > "$stage/demo.cast"
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$TEST_TMPDIR/demo.cast" "$TEST_TMPDIR/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Cannot publish missing staged GIF: ${stage}/demo.gif"* ]]
+}
+
+@test "publish_recording_artifacts refuses a destination that is a directory" {
+    local stage="$TEST_TMPDIR/stage"
+    mkdir -p "$stage" "$TEST_TMPDIR/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    run publish_recording_artifacts "$stage/demo.cast" "" "$TEST_TMPDIR/demo.cast" "$TEST_TMPDIR/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication destinations must be files."* ]]
+}
+
+@test "publish_recording_artifacts leaves the finals alone when a backup cannot be taken" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    cp() { case "${!#}" in */.previous-cast) return 1 ;; esac; command cp "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
+
+    cp() { case "${!#}" in */.previous-gif) return 1 ;; esac; command cp "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
+    # The transaction never opened, so there is nothing for cleanup to roll back.
+    [ "${RECORDING_PUBLICATION_IN_PROGRESS:-0}" -eq 0 ]
+}
+
+@test "publish_recording_artifacts restores the pair when the cast rename fails" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    # The library always calls `mv -f <source> <destination>`; failing on the
+    # staged source leaves rollback's own rename of the restore copy working.
+    mv() { case "${2:-}" in */stage/demo.cast) return 71 ;; esac; command mv "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 71 ]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
+}
+
+@test "publish_recording_artifacts reports a cast rename failure whose rollback also fails" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'new cast\n' > "$stage/demo.cast"
+
+    mv() { case "${2:-}" in */stage/demo.cast) return 71 ;; esac; command mv "$@"; }
+    cp() { case "${!#}" in */.restore-cast) return 1 ;; esac; command cp "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication failed and rollback could not complete."* ]]
+}
+
+@test "publish_recording_artifacts removes half-published finals when there was no previous pair" {
+    # First publication into an empty demo/: rollback has nothing to restore,
+    # so it must delete whatever the failed transaction managed to place.
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    mv() { case "${2:-}" in */stage/demo.gif) return 72 ;; esac; command mv "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 72 ]
+    [ ! -e "$final_dir/demo.cast" ]
+    [ ! -e "$final_dir/demo.gif" ]
+
+    # And when even that deletion fails, the caller hears that rollback failed.
+    printf 'new cast\n' > "$stage/demo.cast"
+    rm() { case "${!#}" in */final/demo.cast|*/final/demo.gif) return 1 ;; esac; command rm "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication failed and rollback could not complete."* ]]
+}
+
+@test "publish_recording_artifacts rolls back when the stale GIF cannot be removed in SKIP_GIF mode" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+
+    rm() { case "${!#}" in */final/demo.gif) return 1 ;; esac; command rm "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
+
+    # With the restore copy failing too, rollback cannot complete.
+    printf 'new cast\n' > "$stage/demo.cast"
+    cp() { case "${!#}" in */.restore-cast) return 1 ;; esac; command cp "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication failed and rollback could not complete."* ]]
+}
+
+@test "verify_enablement_overrides distinguishes a missing python3 from an invalid name" {
+    local tools="$TEST_TMPDIR/tools"
+    path_without "$tools" python3
+    run env PATH="$tools" GCO_DEMO_ENABLE=valkey \
+        bash -c 'source "$1"; verify_enablement_overrides "$2"' _ "$LIB" "$REPO_ROOT"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"python3 is required to validate GCO_DEMO_ENABLE."* ]]
+}
+
+@test "legacy recorder lock release is a no-op when nothing was acquired" {
+    LEGACY_RECORDING_LOCK_FILE=""
+    LEGACY_RECORDING_LOCK_OWNER_FILE=""
+    # bats itself removes its per-test directory with rm once the test is
+    # over, so the fake stays functional and merely records that it ran — in
+    # the per-file directory, which outlives that cleanup.
+    rm() { echo "rm $*" >> "$BATS_FILE_TMPDIR/rm.log"; command rm "$@"; }
+    run release_legacy_recording_lock
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$BATS_FILE_TMPDIR/rm.log" ]
+}
+
+@test "legacy recorder lock release reports a lock it cannot remove" {
+    local repo="$TEST_TMPDIR/lock-repo"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    acquire_legacy_recording_lock "$repo"
+    local lock_file="$LEGACY_RECORDING_LOCK_FILE"
+
+    rm() {
+        local arg
+        for arg in "$@"; do
+            case "$arg" in
+                */gco-legacy-recording.lock) return 1 ;;
+            esac
+        done
+        command rm "$@"
+    }
+    run release_legacy_recording_lock
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to release legacy recording lock: ${lock_file}"* ]]
+    [ -e "$lock_file" ]
+}
+
+@test "rollback_recording_publication is a no-op outside a transaction" {
+    RECORDING_PUBLICATION_IN_PROGRESS=0
+    mv() { echo "mv $*" >> "$BATS_FILE_TMPDIR/tools.log"; command mv "$@"; }
+    cp() { echo "cp $*" >> "$BATS_FILE_TMPDIR/tools.log"; command cp "$@"; }
+    rm() { echo "rm $*" >> "$BATS_FILE_TMPDIR/tools.log"; command rm "$@"; }
+    run rollback_recording_publication
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$BATS_FILE_TMPDIR/tools.log" ]
+}
+
+@test "rollback reports a restore copy that cannot be renamed into place" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    # The GIF publication fails; restoring the cast copies the backup but the
+    # rename of that copy over the final fails.
+    mv() {
+        case "${2:-}" in
+            */stage/demo.gif) return 72 ;;
+            */.restore-cast) return 1 ;;
+        esac
+        command mv "$@"
+    }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication failed and rollback could not complete."* ]]
+    # The backup of the previous cast is still there for a retry.
+    [ "$(cat "$stage/.previous-cast")" = "old cast" ]
+}
+
+@test "rollback restores the cast even when the GIF restore fails" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    mv() { case "${2:-}" in */stage/demo.gif) return 72 ;; esac; command mv "$@"; }
+    cp() { case "${!#}" in */.restore-gif) return 1 ;; esac; command cp "$@"; }
+    run publish_recording_artifacts "$stage/demo.cast" "$stage/demo.gif" "$final_dir/demo.cast" "$final_dir/demo.gif"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording publication failed and rollback could not complete."* ]]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
 }

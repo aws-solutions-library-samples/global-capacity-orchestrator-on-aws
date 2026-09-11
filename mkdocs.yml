@@ -7,9 +7,10 @@
 # an orientation and routing layer ABOVE the reference docs: pages summarize
 # and link to README/docs/package READMEs on GitHub, never restate them
 # (duplicated reference content rots; the deep docs carry the CI freshness
-# guards). The coverage report is NOT built here — pages.yml drops the
-# htmlcov/ tree into site/coverage/ after this build, which is why the nav's
-# "Coverage report" entry is a full external URL rather than a local page.
+# guards). The coverage reports are NOT built here — pages.yml drops the
+# three report trees into site/python-coverage/, site/bash-coverage/ and
+# site/nodejs-coverage/ after this build, which is why the nav's "Coverage
+# reports" entries are full external URLs rather than local pages.
 #
 # Constraints honored by this file (see .kiro spec / tests/test_wiki.py):
 #   - yaml.safe_load-able: no custom YAML tags (guard tests read the nav
@@ -82,7 +83,11 @@ nav:
       - Repo tour: repo-tour.md
       - How we build & test: build-and-test.md
   - Contributing: contributing.md
-  # The coverage report is merged into the Pages artifact by pages.yml at
-  # /coverage/ — outside this MkDocs build — so the nav entry must be the
-  # full external URL (a local path would trip strict link validation).
-  - Coverage report: https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/
+  # The coverage reports are merged into the Pages artifact by pages.yml at
+  # /python-coverage/, /bash-coverage/ and /nodejs-coverage/ — outside this
+  # MkDocs build — so the nav entries must be full external URLs (a local
+  # path would trip strict link validation).
+  - Coverage reports:
+      - Python: https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/python-coverage/
+      - Bash: https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/bash-coverage/
+      - Node.js: https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/nodejs-coverage/

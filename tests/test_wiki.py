@@ -98,14 +98,30 @@ def test_nav_and_wiki_pages_are_one_to_one() -> None:
     )
 
 
-def test_nav_coverage_entry_is_the_canonical_pages_url() -> None:
-    """The coverage report is merged by pages.yml at /coverage/ — the nav's
-    external entry must keep pointing exactly there, on the canonical origin,
-    or the report silently falls out of the site's navigation."""
+#: Where pages.yml merges each stack's coverage report into the site, in nav
+#: order. The three are the nav's only external entries.
+COVERAGE_REPORT_PATHS = ("python-coverage/", "bash-coverage/", "nodejs-coverage/")
+
+
+def test_nav_coverage_entries_are_the_canonical_pages_urls() -> None:
+    """The coverage reports are merged by pages.yml at /python-coverage/,
+    /bash-coverage/ and /nodejs-coverage/ — the nav's external entries must
+    keep pointing exactly there, on the canonical origin, or a report silently
+    falls out of the site's navigation."""
     external = [entry for entry in _load_nav() if entry.startswith("http")]
-    assert external == [f"{PAGES_ORIGIN}coverage/"], (
-        f"expected exactly one external nav entry at {PAGES_ORIGIN}coverage/, got {external}"
+    expected = [f"{PAGES_ORIGIN}{path}" for path in COVERAGE_REPORT_PATHS]
+    assert external == expected, (
+        f"expected exactly the three coverage-report nav entries {expected}, got {external}"
     )
+
+
+def test_pages_workflow_serves_every_coverage_report_the_nav_links() -> None:
+    """The nav promises three report addresses; pages.yml must place a tree at each."""
+    pages = (PROJECT_ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
+    for path in COVERAGE_REPORT_PATHS:
+        assert re.search(rf"^\s*mv \S+ site/{re.escape(path.rstrip('/'))}$", pages, re.M), (
+            f"pages.yml does not move a report into site/{path}"
+        )
 
 
 # =============================================================================

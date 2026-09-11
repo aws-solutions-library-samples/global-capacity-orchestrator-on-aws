@@ -12,7 +12,11 @@
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml"><img src="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/integration-tests.yml/badge.svg?branch=main" alt="Integration Tests"></a>
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/security.yml"><img src="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/security.yml/badge.svg?branch=main" alt="Security"></a>
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml"><img src="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/actions/workflows/lint.yml/badge.svg?branch=main" alt="Linting"></a>
-  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Faws-solutions-library-samples.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fcoverage-badge.json" alt="Coverage"></a>
+</p>
+<p>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/python-coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Faws-solutions-library-samples.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fpython-coverage-badge.json" alt="Python coverage"></a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/bash-coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Faws-solutions-library-samples.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fbash-coverage-badge.json" alt="Bash coverage"></a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/nodejs-coverage/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Faws-solutions-library-samples.github.io%2Fglobal-capacity-orchestrator-on-aws%2Fnodejs-coverage-badge.json" alt="Node.js coverage"></a>
 </p>
 <p>
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/releases/latest"><img src="https://img.shields.io/github/v/release/aws-solutions-library-samples/global-capacity-orchestrator-on-aws?sort=semver&display_name=tag" alt="Latest Release"></a>
@@ -72,7 +76,7 @@ script linked beneath it.
 </details>
 
 <details>
-<summary>🤖 Claude Code Autopilot recording — the default engine, ready in one command</summary>
+<summary>🤖 <a href="https://code.claude.com/docs/en/overview">Claude Code</a> Autopilot recording — the default engine, ready in one command</summary>
 
 ![GCO Autopilot with Claude Code](demo/autopilot-claude-code.gif)
 
@@ -81,7 +85,7 @@ script linked beneath it.
 </details>
 
 <details>
-<summary>🤖 OpenAI Codex Autopilot recording — the Codex engine, ready in one command</summary>
+<summary>🤖 <a href="https://developers.openai.com/codex/cli">OpenAI Codex</a> Autopilot recording — the Codex engine, ready in one command</summary>
 
 ![GCO Autopilot with OpenAI Codex](demo/autopilot-codex.gif)
 
@@ -532,8 +536,11 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 
 **Prefer a website?** The [project wiki](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/)
 is a short orientation site — what GCO is, how it works, what you can run, and
-where to go deeper — published from this repository with the
-[live coverage report](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/coverage/)
+where to go deeper — published from this repository with the live coverage
+reports for
+[Python](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/python-coverage/),
+[Bash](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/bash-coverage/) and
+[Node.js](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/nodejs-coverage/)
 embedded.
 
 **New to GCO?** Start here:

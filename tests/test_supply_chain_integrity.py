@@ -712,29 +712,39 @@ def test_shell_coverage_gate_installs_the_committed_gem_lock() -> None:
     )
     assert "bundle install" in install
 
-    # The correctness gate must stay uninstrumented. bashcov propagates xtrace
-    # by exporting SHELLOPTS, which drags bats's own `nounset` into scripts that
-    # never opted into `set -u` and fails assertions that otherwise pass — so
-    # the suite runs twice and only the clean run decides whether the job fails.
+    # The correctness gate stays uninstrumented: the suite runs once plain, as a
+    # contributor runs it, and once traced. The traced run goes through
+    # tests/BATS/bashcov_wrapper.sh rather than `bashcov -- bats`, because
+    # bashcov's own SHELLOPTS propagation dragged bats's `nounset`/`errexit`/
+    # `pipefail` into scripts that never opted into them; the wrapper carries
+    # tracing through BASH_ENV instead, so both runs execute the same suite and
+    # both exit codes gate the job.
     plain = _workflow_job_step(
         ".github/workflows/unit-tests.yml", "unit-bats-shell", "Run BATS suite"
     )["run"]
     assert "bats tests/BATS/" in plain
     assert "bashcov" not in plain, (
         "the authoritative BATS run must not be instrumented; coverage is measured "
-        "by a separate step whose exit code is advisory"
+        "by the separate traced run"
     )
 
     measure = _workflow_job_step(
         ".github/workflows/unit-tests.yml", "unit-bats-shell", "Measure shell coverage"
     )["run"]
     assert "bundle exec bashcov" in measure
-    assert "bats tests/BATS/" in measure
+    assert "tests/BATS/bashcov_wrapper.sh tests/BATS/" in measure, (
+        "the traced run must go through the wrapper (over the whole suite), not "
+        "`bashcov -- bats`, or instrumentation leaks into the scripts under test"
+    )
+    assert "bashcov -- bats" not in measure
 
     gate = _workflow_job_step(
         ".github/workflows/unit-tests.yml", "unit-bats-shell", "Enforce the shell coverage floor"
     )["run"]
     assert "check_bash_coverage.py" in gate
+    assert "--report coverage/report" in gate, (
+        "the statement-level report pages.yml publishes is written by the gate step"
+    )
 
 
 def test_dependency_scanner_remains_directly_executable() -> None:

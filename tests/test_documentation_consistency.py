@@ -109,7 +109,7 @@ def test_workflow_inventories_are_complete_and_partitioned() -> None:
             ROOT / "CONTRIBUTING.md",
             "#### Primary workflows (run on every push + PR)",
             "#### Satellite workflows",
-            "#### Published coverage report and badge",
+            "#### Published coverage reports and badges",
         ),
     )
     for path, primary_heading, satellite_heading, end_heading in inventories:
