@@ -267,12 +267,12 @@ shards. Nothing about the partition is checked in, so it cannot drift as tests
 are added, renamed, or deleted.
 
 **To change the shard count, edit `matrix.shard` in `unit-pytest-core-shard` and
-nothing else.** Adding `3` to the list yields three shards: `--of` comes from
+nothing else.** Adding `5` to the list yields five shards: `--of` comes from
 `strategy.job-total`, and the combining job discovers shard artifacts by glob, so
 both adapt automatically. `tests/test_split_tests.py` fails if that contract is
 broken — for instance if the shard total were hardcoded a second time, which
-would keep splitting the suite in two while a third of the tests silently stopped
-running.
+would keep splitting the suite by the old count while the newest shard's share
+of the tests silently stopped running.
 
 Two details worth knowing before editing these jobs:
 
