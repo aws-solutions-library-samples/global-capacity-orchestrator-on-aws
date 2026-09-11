@@ -1,0 +1,28 @@
+# Network policy enforcement switch for EKS Auto Mode.
+#
+# Auto Mode ships the network policy agent inside its node networking stack,
+# but the controller that turns NetworkPolicy objects into enforced rules is
+# OFF until this ConfigMap says otherwise (AWS docs: "Use Network Policies with
+# EKS Auto Mode", step 1). Without it every policy in 03-network-policies.yaml
+# is accepted by the API server and enforced by nothing.
+#
+# The value is rendered from cdk.json eks_cluster.network_policy_enforcement
+# (default true). Applying "false" switches the controller back off, which is
+# the operator's escape hatch if a workload needs a rule GCO does not ship —
+# though adding a NetworkPolicy (they are additive) is the intended fix.
+#
+# Both spellings AWS documents are set: the user guide names
+# enable-network-policy-controller, the Auto Mode security best-practices page
+# enable-network-policy. Extra keys are ignored by whichever reader is current.
+# On kind (CI) this ConfigMap is inert; Calico enforces there.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amazon-vpc-cni
+  namespace: kube-system
+  labels:
+    project: gco
+data:
+  enable-network-policy-controller: "{{NETWORK_POLICY_ENFORCEMENT}}"
+  enable-network-policy: "{{NETWORK_POLICY_ENFORCEMENT}}"

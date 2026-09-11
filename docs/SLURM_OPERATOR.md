@@ -277,7 +277,7 @@ For production, enable JWT authentication on slurmrestd by adding `AuthType=auth
 
 ### Network Policies
 
-GCO's default network policies in `gco-jobs` allow egress to AWS APIs and HTTPS. Slurm components communicate on ports 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd), and 6820 (slurmrestd).
+GCO's `gco-jobs` network policies allow all traffic between pods in the namespace, so Slurm components reach each other on 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd), and 6820 (slurmrestd) without extra rules; egress is DNS, HTTPS (AWS APIs), and the in-VPC ranges from `vpc_endpoint_cidrs`. `post-helm-slurm-network.yaml` adds the explicit REST API rules for labelled client pods. See [Network Security](ARCHITECTURE.md#network-security).
 
 ## Accounting
 

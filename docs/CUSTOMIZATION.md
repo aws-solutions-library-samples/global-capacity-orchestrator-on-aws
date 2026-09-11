@@ -21,6 +21,8 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Configuring Endpoint Access](#configuring-endpoint-access)
   - [Developer Access Entries](#developer-access-entries)
   - [Job Submission with Private Endpoints](#job-submission-with-private-endpoints)
+  - [Network Policy Enforcement](#network-policy-enforcement)
+  - [VPC Endpoints](#vpc-endpoints)
 - [Configuring GPU Nodepools](#configuring-gpu-nodepools)
   - [Modify Instance Types](#modify-instance-types)
   - [Adjust GPU Limits](#adjust-gpu-limits)
@@ -549,6 +551,57 @@ kubectl apply -f job.yaml
 
 See [`docs/CLI.md`](CLI.md#gco-cluster-tunnel) for the full `gco cluster tunnel`
 reference.
+
+### Network Policy Enforcement
+
+GCO ships Kubernetes NetworkPolicies for every namespace it owns (default-deny
+ingress in `gco-system` and `gco-jobs`, per-service allow rules, DNS + HTTPS
+egress; see [Network Security](ARCHITECTURE.md#network-security)). On EKS Auto
+Mode those objects are only enforced once the cluster's network policy
+controller is switched on, which the regional stack does through the
+`kube-system/amazon-vpc-cni` ConfigMap it applies
+(`06-network-policy-controller.yaml`):
+
+```json
+"eks_cluster": {
+  "network_policy_enforcement": true
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `network_policy_enforcement` | `true` | Literal JSON boolean. `false` keeps every NetworkPolicy object in place but stops enforcing them — an escape hatch, not a tuning knob: if a workload needs a path GCO does not ship, add a NetworkPolicy (they are additive) instead |
+
+What the defaults allow is spelled out in the manifest header of
+`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`. Job pods
+in `gco-jobs` may reach each other on any port, resolve DNS, use HTTPS to any
+destination, and reach the in-VPC ranges listed under `vpc_endpoint_cidrs` on
+any port; nothing from another namespace may reach them. The kind CI job
+enforces the same rules with Calico and probes both the allowed and the denied
+paths, and the live release validation repeats those probes on a real cluster.
+
+### VPC Endpoints
+
+Each regional VPC gets the two free gateway endpoints by default; PrivateLink
+interface endpoints are opt-in because they bill per AZ-hour:
+
+```json
+"vpc_endpoints": {
+  "gateway": ["s3", "dynamodb"],
+  "interface": []
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `gateway` | `["s3", "dynamodb"]` | Route-table endpoints attached to every subnet. S3 takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC; DynamoDB helps single-region topologies. Free |
+| `interface` | `[]` | PrivateLink endpoints, one ENI per AZ each, with private DNS and a security group admitting HTTPS from the VPC. Supported: `sts`, `ecr.api`, `ecr.dkr`, `logs`, `monitoring`, `sqs`, `ssm`, `secretsmanager`, `kms`, `eks`, `elasticfilesystem`, `bedrock-runtime`. Unknown or duplicate names fail synthesis |
+
+Endpoints change routing, not policy: NetworkPolicy egress rules allow HTTPS by
+port, so job pods keep working whether S3 is reached through the gateway
+endpoint or the NAT gateways. Calls to the global region (the job tables, the
+cluster-shared bucket, the SSM registry) are cross-region and always leave
+through the NAT gateways.
 
 ## Configuring GPU Nodepools
 

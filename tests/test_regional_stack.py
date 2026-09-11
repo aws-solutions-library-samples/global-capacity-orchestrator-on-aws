@@ -122,7 +122,11 @@ class MockConfigLoader:
     def get_eks_cluster_config(self):
         return {
             "endpoint_access": "PRIVATE",
+            "network_policy_enforcement": True,
         }
+
+    def get_vpc_endpoints_config(self):
+        return {"gateway": ["s3", "dynamodb"], "interface": []}
 
     def get_fsx_lustre_config(self, region=None):
         if self._fsx_enabled:
@@ -944,6 +948,131 @@ class TestRegionalStackSynthesis:
                 "{{QUEUE_PROCESSOR_IMAGE}}",
             ):
                 assert replacements[token] == mock_image.image_uri, token
+
+    def test_default_vpc_endpoints_and_network_policy_enforcement(self):
+        """Free S3/DynamoDB gateway endpoints ship by default; enforcement is on.
+
+        The gateway endpoints attach to every route table so both the private
+        (node) and public subnets steer S3/DynamoDB traffic off the NAT
+        gateways; no PrivateLink endpoint (billed per AZ-hour) is created
+        unless asked for.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-vpc-endpoints",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::EC2::VPCEndpoint", 2)
+        endpoints = template.find_resources("AWS::EC2::VPCEndpoint")
+        services = sorted(
+            "".join(
+                part if isinstance(part, str) else "<region>"
+                for part in resource["Properties"]["ServiceName"]["Fn::Join"][1]
+            )
+            for resource in endpoints.values()
+        )
+        assert services == [
+            "com.amazonaws.<region>.dynamodb",
+            "com.amazonaws.<region>.s3",
+        ]
+        for resource in endpoints.values():
+            assert resource["Properties"]["VpcEndpointType"] == "Gateway"
+            # Every route table (public + private, one per AZ) gets the route.
+            assert len(resource["Properties"]["RouteTableIds"]) >= 2
+        assert set(stack.vpc_gateway_endpoints) == {"s3", "dynamodb"}
+        assert stack.vpc_interface_endpoints == {}
+
+        replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+            "ImageReplacements"
+        ]
+        assert replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] == "true"
+
+    def test_interface_vpc_endpoints_and_enforcement_off_are_configurable(self):
+        """Opting into PrivateLink endpoints creates one ENI set per service."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["vpc_endpoints"] = {"gateway": ["s3"], "interface": ["sts", "ecr.api", "ecr.dkr"]}
+        context["eks_cluster"] = {**context["eks_cluster"], "network_policy_enforcement": False}
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-interface-endpoints",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::EC2::VPCEndpoint", 4)
+        by_type: dict[str, int] = {}
+        for resource in template.find_resources("AWS::EC2::VPCEndpoint").values():
+            props = resource["Properties"]
+            by_type[props["VpcEndpointType"]] = by_type.get(props["VpcEndpointType"], 0) + 1
+            if props["VpcEndpointType"] == "Interface":
+                # Private DNS keeps callers on the public hostnames; the
+                # endpoint SG admits HTTPS from the VPC only.
+                assert props["PrivateDnsEnabled"] is True
+                assert props["SecurityGroupIds"]
+                assert props["SubnetIds"]
+        assert by_type == {"Gateway": 1, "Interface": 3}
+        assert set(stack.vpc_interface_endpoints) == {"sts", "ecr.api", "ecr.dkr"}
+        replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+            "ImageReplacements"
+        ]
+        assert replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] == "false"
+
+    def test_endpoint_service_maps_cover_exactly_what_the_loader_accepts(self):
+        """A name ConfigLoader validates must always map to a CDK service."""
+        from gco.config import config_loader
+        from gco.stacks import regional_stack
+
+        assert set(regional_stack._GATEWAY_ENDPOINT_SERVICES) == set(
+            config_loader.VPC_GATEWAY_ENDPOINT_SERVICES
+        )
+        assert set(regional_stack._INTERFACE_ENDPOINT_SERVICES) == set(
+            config_loader.VPC_INTERFACE_ENDPOINT_SERVICES
+        )
 
     def test_every_irsa_service_account_has_a_matching_pod_identity_association(self):
         """Both credential paths point every platform ServiceAccount at one role.

@@ -795,6 +795,108 @@ class TestManifestProcessorSizingConfig:
             ConfigLoader(MockApp(valid_context))
 
 
+class TestNetworkPostureConfig:
+    """eks_cluster.network_policy_enforcement and the vpc_endpoints block."""
+
+    def test_enforcement_defaults_on(self, valid_context):
+        config = ConfigLoader(MockApp(valid_context)).get_eks_cluster_config()
+        assert config["network_policy_enforcement"] is True
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_enforcement_accepts_literal_booleans(self, valid_context, value):
+        valid_context["eks_cluster"] = {"network_policy_enforcement": value}
+        config = ConfigLoader(MockApp(valid_context)).get_eks_cluster_config()
+        assert config["network_policy_enforcement"] is value
+        # The merge keeps the other eks_cluster defaults intact.
+        assert config["endpoint_access"] == "PRIVATE"
+
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+    def test_enforcement_rejects_non_booleans(self, valid_context, value):
+        """The value renders verbatim into the kube-system ConfigMap."""
+        valid_context["eks_cluster"] = {"network_policy_enforcement": value}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"eks_cluster\.network_policy_enforcement must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_vpc_endpoints_default_to_the_free_gateway_endpoints(self, valid_context):
+        valid_context.pop("vpc_endpoints", None)
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config == {"gateway": ["s3", "dynamodb"], "interface": []}
+
+    def test_vpc_endpoints_partial_block_keeps_the_other_default(self, valid_context):
+        valid_context["vpc_endpoints"] = {"interface": ["sts", "ecr.api"]}
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config == {"gateway": ["s3", "dynamodb"], "interface": ["sts", "ecr.api"]}
+
+    def test_vpc_endpoints_returns_copies(self, valid_context):
+        """Callers mutating the result never bleed into the module defaults."""
+        loader = ConfigLoader(MockApp(valid_context))
+        loader.get_vpc_endpoints_config()["gateway"].append("mutated")
+        assert loader.get_vpc_endpoints_config()["gateway"] == ["s3", "dynamodb"]
+
+    def test_every_supported_interface_service_is_accepted(self, valid_context):
+        from gco.config import config_loader as module
+
+        valid_context["vpc_endpoints"] = {
+            "gateway": [],
+            "interface": list(module.VPC_INTERFACE_ENDPOINT_SERVICES),
+        }
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config["gateway"] == []
+        assert config["interface"] == list(module.VPC_INTERFACE_ENDPOINT_SERVICES)
+
+    @pytest.mark.parametrize("value", [True, 1, "s3", ["s3"]])
+    def test_vpc_endpoints_must_be_an_object(self, valid_context, value):
+        valid_context["vpc_endpoints"] = value
+        with pytest.raises(ConfigValidationError, match="vpc_endpoints must be an object"):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_vpc_endpoints_unknown_key_lists_the_allowed_ones(self, valid_context):
+        valid_context["vpc_endpoints"] = {"gateways": ["s3"]}
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        assert "vpc_endpoints contains unknown key(s): gateways" in str(exc_info.value)
+        assert "allowed keys: gateway, interface" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [("gateway", "s3"), ("gateway", [3]), ("interface", {"sts": True}), ("interface", [None])],
+    )
+    def test_vpc_endpoint_lists_must_be_lists_of_strings(self, valid_context, key, value):
+        valid_context["vpc_endpoints"] = {key: value}
+        with pytest.raises(
+            ConfigValidationError, match=rf"vpc_endpoints\.{key} must be a list of strings"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        "key,value,unsupported",
+        [
+            ("gateway", ["s3", "sts"], "sts"),
+            ("interface", ["ecr", "s3"], "ecr, s3"),
+        ],
+    )
+    def test_unsupported_endpoint_services_fail_at_synth(
+        self, valid_context, key, value, unsupported
+    ):
+        """A typo must not silently create nothing (interface endpoints bill)."""
+        valid_context["vpc_endpoints"] = {key: value}
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        message = str(exc_info.value)
+        assert f"vpc_endpoints.{key} contains unsupported service(s): {unsupported}" in message
+        assert "supported:" in message
+
+    def test_duplicate_endpoint_services_are_rejected(self, valid_context):
+        valid_context["vpc_endpoints"] = {"interface": ["sts", "sts"]}
+        with pytest.raises(
+            ConfigValidationError, match=r"vpc_endpoints\.interface lists a service twice"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+
 class TestDefaultValues:
     """Tests for default configuration values."""
 

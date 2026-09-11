@@ -494,6 +494,19 @@ class TestLegacyRemovedResources:
             "nvidia-device-plugin-daemonset",
         ) in handler_module._LEGACY_REMOVED_RESOURCES
 
+    def test_inventory_targets_the_retired_job_namespace_policies(self, handler_module):
+        # The VPC-CIDR-only HTTPS rule and the Ray-only peer rule are strictly
+        # contained by allow-https-egress / allow-vpc-egress /
+        # allow-same-namespace; sweeping them keeps the live set equal to the
+        # shipped set.
+        for name in ("allow-vpc-endpoint-egress", "allow-ray-cluster-internal"):
+            assert (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                "gco-jobs",
+                name,
+            ) in handler_module._LEGACY_REMOVED_RESOURCES
+
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -517,14 +530,19 @@ class TestLegacyRemovedResources:
         ):
             result = handler_module._prune_legacy_removed_resources()
 
-        mock_dynamic.resources.get.assert_called_once_with(api_version="apps/v1", kind="DaemonSet")
-        mock_resource.delete.assert_called_once_with(
-            name="nvidia-device-plugin-daemonset",
-            namespace="kube-system",
-            body=delete_options,
-        )
+        assert mock_dynamic.resources.get.call_args_list == [
+            call(api_version=api_version, kind=kind)
+            for api_version, kind, _ns, _name in handler_module._LEGACY_REMOVED_RESOURCES
+        ]
+        assert mock_resource.delete.call_args_list == [
+            call(name=name, namespace=namespace, body=delete_options)
+            for _api, _kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
+        ]
         assert result == {
-            "pruned": ["apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"],
+            "pruned": [
+                f"{api_version}/{kind}/{namespace}/{name}"
+                for api_version, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
+            ],
             "failed": [],
         }
 

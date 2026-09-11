@@ -75,9 +75,10 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `00-namespaces.yaml` | `gco-system`, `gco-jobs`, `gco-inference` namespaces |
 | `01-serviceaccounts.yaml` | `gco-service-account` in `gco-jobs` and `gco-inference` ([IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) role-ARN annotation; token automount disabled) |
 | `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege); the two pre-created health-monitor election `Lease`s (`gco-health-monitor-alb-sync`, `gco-health-monitor-webhooks`) so the Role grants `get`/`update` on named objects instead of `create` on every Lease |
-| `03-network-policies.yaml` | Default-deny ingress + allow rules for [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html), DNS, HTTPS egress |
+| `03-network-policies.yaml` | The network posture of all three namespaces: default-deny ingress in `gco-system` (each platform Deployment admitted on the one port it serves — 8443 for the [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)-targeted TLS sidecars, 9090 for the inference monitor's metrics) and in `gco-jobs` (with everything allowed between job pods), DNS + HTTPS egress, in-VPC egress for jobs from `vpc_endpoint_cidrs`, and the `gco-inference` proxy-only isolation |
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 | `05-priority-classes.yaml` | `gco-platform-critical` `PriorityClass` (value 1000000) — referenced by every platform-service pod spec (30–34 + the post-Helm SQS consumer) so control-plane pods preempt default-priority user workloads under node pressure instead of being starved by them |
+| `06-network-policy-controller.yaml` | The `kube-system/amazon-vpc-cni` ConfigMap that switches the EKS Auto Mode network policy controller on (rendered from `cdk.json` `eks_cluster.network_policy_enforcement`, default `true`) — without it every NetworkPolicy above is stored and enforced by nothing; inert on kind, where Calico enforces |
 
 ### Storage (20–29)
 
@@ -165,7 +166,7 @@ old one cannot quietly drop part of it:
 | Security | `runAsNonRoot` uid/gid 1000, `RuntimeDefault` seccomp, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `automountServiceAccountToken: false` with an explicit projected token for RBAC-bound accounts, `enableServiceLinks: false` | Least privilege, and no Service env-var injection into unrelated pods |
 | Identity | Dedicated ServiceAccount with IRSA annotation plus a Pod Identity association; `AWS_ROLE_ARN` / `AWS_WEB_IDENTITY_TOKEN_FILE` on the credentialed container only (`eks.amazonaws.com/skip-containers` excludes the TLS sidecar) | The sidecar never holds AWS credentials it does not use |
 | Shutdown | `terminationGracePeriodSeconds` > preStop sleep + `GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`; every FastAPI service passes that budget to uvicorn | In-flight requests and streams drain before the kubelet kills the pod |
-| Network | Default-deny ingress in `gco-system`; each workload is selected by exactly the allow rules it needs (`03-network-policies.yaml`, `34-cost-monitor.yaml`) | A workload no policy selects is unreachable, so the contract test requires one |
+| Network | Default-deny ingress in `gco-system`; each workload is admitted on exactly the port it serves (`03-network-policies.yaml`, `34-cost-monitor.yaml`). Rules on network-probed ports name no source; workloads whose rule names a source (cost-monitor: manifest-processor only) probe over loopback instead | A workload no rule admits is unreachable, and the kubelet probes from the node's host network, which no pod selector can name |
 
 ## Template Variables
 

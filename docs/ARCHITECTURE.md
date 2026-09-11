@@ -328,6 +328,18 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 - Cluster security group controls VPC access
 - Pod security controls and admission-time workload validation enforced
 
+**In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):
+
+| Namespace | Ingress | Egress |
+|-----------|---------|--------|
+| `gco-system` | Default deny. Each platform Deployment is admitted on exactly the port it serves: 8443 (TLS proxy sidecars, targeted by the ALB) for health-monitor, manifest-processor, inference-proxy; 9090 (Prometheus metrics) for inference-monitor; 8080 from the manifest processor only for cost-monitor | DNS, HTTPS (AWS APIs, Kubernetes API), the inference proxy's path to `gco-inference` model pods, the cost monitor's path to OpenCost |
+| `gco-jobs` | Default deny from other namespaces; every pod in the namespace may reach every other pod on any port (distributed training, Ray, Volcano, Slurm, Kubeflow choose their own ports) | DNS, HTTPS to any destination (S3, DynamoDB, ECR, CloudWatch, Bedrock, model hubs, package indexes — GCO's own tables and shared bucket live in the global region, so a VPC-only rule could never carry the platform's traffic), the in-VPC ranges from `vpc_endpoint_cidrs` on any port (Valkey, Aurora, EFS/FSx, VPC endpoints), plus the opt-in MLflow and Slurm client rules |
+| `gco-inference` | Model pods accept traffic only from the authenticated inference proxy and from each other (Mooncake KV-transfer, PD proxy) | DNS, HTTPS (model pulls, AWS APIs), the Mooncake master ports |
+
+Rules on probed ports name the port but no source: the ALB is not a pod and the kubelet probes from the node's host network, which no selector can express. DNS rules likewise allow port 53 to any destination because Auto Mode answers cluster DNS from a per-node service rather than CoreDNS pods. NetworkPolicies are additive, so an operator who needs a path GCO does not ship adds a policy rather than switching enforcement off.
+
+**VPC endpoints** (`cdk.json` `vpc_endpoints`): each regional VPC gets free S3 and DynamoDB gateway endpoints by default, so the platform's largest data path (models, datasets, checkpoints, MLflow artifacts, cost reports) stays inside the VPC and off the NAT gateways' per-GB metering. Interface (PrivateLink) endpoints for STS, ECR, CloudWatch, SQS, SSM, Secrets Manager, KMS, EKS, EFS, and Bedrock are opt-in because they bill per AZ-hour. Cross-region calls to the global region's tables, buckets, and parameters still leave through the NAT gateways.
+
 ### IAM Security
 
 **Principle of Least Privilege:**

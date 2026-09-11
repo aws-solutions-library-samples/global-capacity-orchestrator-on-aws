@@ -314,6 +314,29 @@ def _service_image_asset_excludes(*included_paths: str) -> list[str]:
     ]
 
 
+#: cdk.json ``vpc_endpoints`` service keys → CDK endpoint services. The key
+#: sets are pinned to ``ConfigLoader``'s validation lists by
+#: ``tests/test_regional_stack.py`` so a name the loader accepts always maps.
+_GATEWAY_ENDPOINT_SERVICES: dict[str, ec2.GatewayVpcEndpointAwsService] = {
+    "s3": ec2.GatewayVpcEndpointAwsService.S3,
+    "dynamodb": ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+}
+_INTERFACE_ENDPOINT_SERVICES: dict[str, ec2.InterfaceVpcEndpointAwsService] = {
+    "sts": ec2.InterfaceVpcEndpointAwsService.STS,
+    "ecr.api": ec2.InterfaceVpcEndpointAwsService.ECR,
+    "ecr.dkr": ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+    "logs": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+    "monitoring": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_MONITORING,
+    "sqs": ec2.InterfaceVpcEndpointAwsService.SQS,
+    "ssm": ec2.InterfaceVpcEndpointAwsService.SSM,
+    "secretsmanager": ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+    "kms": ec2.InterfaceVpcEndpointAwsService.KMS,
+    "eks": ec2.InterfaceVpcEndpointAwsService.EKS,
+    "elasticfilesystem": ec2.InterfaceVpcEndpointAwsService.ELASTIC_FILESYSTEM,
+    "bedrock-runtime": ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+}
+
+
 #: CDK context key that force-enables optional Helm charts for one deploy
 #: without editing cdk.json (comma-separated cdk.json helm-block key names,
 #: e.g. ``--context helm_enabled_overrides=yunikorn,slurm``). The live release
@@ -802,6 +825,9 @@ class GCORegionalStack(Stack):
         # Enable VPC Flow Logs for network traffic analysis and security monitoring
         self._create_vpc_flow_logs()
 
+        # Keep AWS API traffic inside the VPC where the operator asked for it
+        self._create_vpc_endpoints()
+
         # Create SQS queue for job ingestion
         self._create_sqs_queue()
 
@@ -956,6 +982,37 @@ class GCORegionalStack(Stack):
             destination=ec2.FlowLogDestination.to_cloud_watch_logs(flow_log_group, flow_log_role),
             traffic_type=ec2.FlowLogTrafficType.ALL,
         )
+
+    def _create_vpc_endpoints(self) -> None:
+        """Create the VPC endpoints selected by ``cdk.json`` ``vpc_endpoints``.
+
+        Gateway endpoints (S3, DynamoDB) are free route-table entries: with
+        them, the platform's largest data path — model and dataset pulls,
+        checkpoints, MLflow artifacts, cost reports — stops flowing through the
+        NAT gateways' per-GB metering and never leaves the VPC. Interface
+        endpoints are PrivateLink ENIs billed per AZ-hour, so they are opt-in;
+        CDK gives each one a security group admitting HTTPS from the VPC CIDR
+        and private DNS, so callers keep using the public service hostnames.
+
+        NetworkPolicy egress is unaffected either way: S3 traffic still
+        resolves to public S3 addresses that the route table steers into the
+        endpoint, which is why 03-network-policies.yaml allows HTTPS by port
+        rather than by destination.
+        """
+        selection = self.config.get_vpc_endpoints_config()
+        self.vpc_gateway_endpoints: dict[str, ec2.GatewayVpcEndpoint] = {}
+        self.vpc_interface_endpoints: dict[str, ec2.InterfaceVpcEndpoint] = {}
+        for service in selection["gateway"]:
+            self.vpc_gateway_endpoints[service] = self.vpc.add_gateway_endpoint(
+                f"VpcEndpoint-{service}",
+                service=_GATEWAY_ENDPOINT_SERVICES[service],
+            )
+        for service in selection["interface"]:
+            self.vpc_interface_endpoints[service] = self.vpc.add_interface_endpoint(
+                f"VpcEndpoint-{service.replace('.', '-')}",
+                service=_INTERFACE_ENDPOINT_SERVICES[service],
+                subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            )
 
     def _apply_nag_suppressions(self) -> None:
         """Apply cdk-nag suppressions for this stack."""
@@ -3796,17 +3853,28 @@ class GCORegionalStack(Stack):
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
 
-        # Add VPC endpoint CIDR replacements for network policy restrictions
-        # Generates a YAML block of ipBlock entries from the vpc_endpoint_cidrs array.
-        # The placeholder {{VPC_ENDPOINT_CIDR_BLOCKS}} sits at 8-space indentation in
-        # the manifest, so the first entry needs no leading indent (the manifest provides
-        # it) and subsequent entries are indented to align.
+        # In-VPC ranges job pods may reach on any port (03-network-policies.yaml
+        # allow-vpc-egress) and the MLflow server admits probes from
+        # (post-helm-mlflow-network.yaml). Generates a YAML block of ipBlock
+        # entries from the vpc_endpoint_cidrs array. The placeholder
+        # {{VPC_ENDPOINT_CIDR_BLOCKS}} sits at 8-space indentation in the
+        # manifest, so the first entry needs no leading indent (the manifest
+        # provides it) and subsequent entries are indented to align.
         vpc_endpoint_cidrs = self.node.try_get_context("vpc_endpoint_cidrs") or ["10.0.0.0/16"]
         cidr_lines = []
         for i, cidr in enumerate(vpc_endpoint_cidrs):
             prefix = "" if i == 0 else "        "
             cidr_lines.append(f'{prefix}- ipBlock:\n            cidr: "{cidr}"')
         image_replacements["{{VPC_ENDPOINT_CIDR_BLOCKS}}"] = "\n".join(cidr_lines)
+
+        # NetworkPolicy enforcement on EKS Auto Mode is a ConfigMap-driven
+        # switch (06-network-policy-controller.yaml); render the operator's
+        # choice as the literal the controller reads.
+        image_replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] = (
+            "true"
+            if self.config.get_eks_cluster_config()["network_policy_enforcement"]
+            else "false"
+        )
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate
         # resource consumption across the namespace, LimitRange caps per-container

@@ -1,7 +1,40 @@
-# Network Policies — zero-trust networking for all GCO namespaces
-# Default-deny ingress in gco-system and gco-jobs, with explicit allow rules
-# for ALB traffic and DNS/HTTPS egress. gco-inference policies are included here
-# alongside the other namespace policies for a single source of truth.
+# Network Policies — the network posture of every GCO namespace.
+#
+# One file, three namespaces, one model:
+#
+#   gco-system    default-deny ingress; each platform workload is admitted on
+#                 exactly the port it serves (the TLS proxy sidecars on 8443
+#                 for the ALB, the inference monitor's :9090 metrics endpoint);
+#                 egress is DNS + HTTPS (AWS APIs, the Kubernetes API) plus the
+#                 proxy's path into gco-inference and the cost monitor's path
+#                 to OpenCost (34-cost-monitor.yaml).
+#   gco-jobs      default-deny ingress from outside the namespace, everything
+#                 allowed between job pods (distributed training, Ray, Volcano,
+#                 Slurm and Kubeflow talk pod-to-pod on framework-chosen
+#                 ports); egress is DNS, HTTPS anywhere (S3, DynamoDB, ECR,
+#                 CloudWatch, Bedrock, Hugging Face, PyPI — the regional NAT
+#                 gateways and S3/DynamoDB gateway endpoints carry it), the
+#                 in-VPC ranges from cdk.json vpc_endpoint_cidrs on any port
+#                 (Valkey, Aurora, EFS/FSx targets, VPC endpoints), the
+#                 namespace itself, and the explicit opt-in rules other
+#                 manifests add (MLflow clients, Slurm REST clients).
+#   gco-inference model pods are isolated to the authenticated proxy and to
+#                 each other; egress is DNS + HTTPS (model pulls, AWS APIs).
+#
+# DNS rules allow port 53 to any destination rather than to kube-system pods:
+# EKS Auto Mode serves cluster DNS from a per-node system service (there are
+# no CoreDNS pods to select), and kind/Calico CoreDNS pods match "anywhere"
+# too, so the same rule holds on both.
+#
+# Ingress rules for probed ports omit `from` on purpose: the ALB's IPs are not
+# pods, and the kubelet's health probes arrive from the node's host network,
+# which no pod or namespace selector can name (see the mlflow-server policy in
+# post-helm-mlflow-network.yaml for the live incident behind this).
+#
+# Enforcement: kind CI installs Calico so these rules are exercised for real;
+# on EKS Auto Mode the built-in network policy controller is switched on by
+# 05-network-policy-controller.yaml (cdk.json
+# eks_cluster.network_policy_enforcement).
 ---
 # Default deny all ingress in gco-system
 apiVersion: networking.k8s.io/v1
@@ -16,7 +49,9 @@ spec:
   policyTypes:
     - Ingress
 ---
-# Default deny all ingress in gco-jobs
+# Default deny all ingress in gco-jobs. Sources inside the namespace are
+# re-admitted by allow-same-namespace below; anything from another namespace
+# (including gco-system) needs an explicit rule.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -29,33 +64,29 @@ spec:
   policyTypes:
     - Ingress
 ---
-# Ray uses dynamically allocated worker/object-manager ports in addition to its
-# well-known GCS, dashboard, and client ports. Permit all protocols only among
-# pods in the shipped ray-cluster; no other gco-jobs pod is selected or admitted.
+# Job pods may talk to each other on every port and protocol. Distributed
+# training frameworks (torchrun/NCCL, Ray, Volcano, Slurm, Kubeflow TrainJob)
+# pick their own ports, often dynamically, so the boundary is the namespace,
+# not a port list. Cross-namespace traffic is still governed by the
+# default-deny above and by the egress rules below.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ray-cluster-internal
+  name: allow-same-namespace
   namespace: gco-jobs
   labels:
     project: gco
 spec:
-  podSelector:
-    matchLabels:
-      ray.io/cluster: ray-cluster
+  podSelector: {}
   policyTypes:
     - Ingress
     - Egress
   ingress:
     - from:
-        - podSelector:
-            matchLabels:
-              ray.io/cluster: ray-cluster
+        - podSelector: {}
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              ray.io/cluster: ray-cluster
+        - podSelector: {}
 ---
 # Allow ALB HTTPS target traffic to reach health-monitor
 apiVersion: networking.k8s.io/v1
@@ -114,7 +145,31 @@ spec:
         - protocol: TCP
           port: 8443
 ---
-# Allow DNS egress in gco-system
+# The inference monitor has no request path; its one listener is the :9090
+# Prometheus endpoint that the gco-inference-monitor PodMonitor scrapes and
+# that its own startup/liveness/readiness probes hit. Without this rule the
+# default-deny above drops both — the scrape silently (an absent target) and
+# the probes fatally. Same shape as the 8443 rules: port only, any source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-to-inference-monitor
+  namespace: gco-system
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-monitor
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9090
+---
+# Allow DNS egress in gco-system (any resolver: Auto Mode node-local CoreDNS
+# is not a pod, see the header)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -127,11 +182,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
@@ -150,11 +201,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
@@ -179,15 +226,38 @@ spec:
         - protocol: TCP
           port: 443
 ---
-# Allow VPC endpoint egress in gco-jobs (image pulls, AWS APIs via VPC endpoints only)
-# CIDR values are substituted by the kubectl-applier Lambda at deploy time
-# from the vpc_endpoint_cidrs configuration in cdk.json.
-# The CIDR placeholder below is replaced with one or more ipBlock entries
-# generated from the vpc_endpoint_cidrs array.
+# Allow HTTPS egress in gco-jobs. Jobs reach AWS APIs (S3, DynamoDB, ECR,
+# CloudWatch, Bedrock), model and dataset hubs and package indexes over 443;
+# GCO's own data lives across regions (the cluster-shared bucket and the job
+# tables sit in the global region), so a VPC-endpoint-only rule could never
+# have carried the platform's own traffic. Non-HTTPS destinations inside the
+# VPC are covered by allow-vpc-egress; anything else is an operator-added rule
+# (NetworkPolicies are additive).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-vpc-endpoint-egress
+  name: allow-https-egress
+  namespace: gco-jobs
+  labels:
+    project: gco
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+# Allow egress from gco-jobs to the in-VPC ranges on any port: the Valkey and
+# Aurora endpoints GCO provisions, EFS/FSx mount targets, VPC endpoints, and
+# peered ranges an operator adds. The placeholder is expanded by the
+# kubectl-applier Lambda into one ipBlock per cdk.json vpc_endpoint_cidrs
+# entry (the same key MLflow's Host-header allow-list is derived from).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-vpc-egress
   namespace: gco-jobs
   labels:
     project: gco
@@ -198,9 +268,6 @@ spec:
   egress:
     - to:
         {{VPC_ENDPOINT_CIDR_BLOCKS}}
-      ports:
-        - protocol: TCP
-          port: 443
 ---
 # Allow DNS egress in gco-inference
 apiVersion: networking.k8s.io/v1
@@ -215,17 +282,13 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
 ---
-# Allow HTTPS egress in gco-inference (image pulls, AWS APIs)
+# Allow HTTPS egress in gco-inference (model pulls, AWS APIs)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -107,26 +107,29 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
+          # Probes run inside the container over loopback, like every other
+          # GCO API container. The pod's only ingress rule admits the manifest
+          # processor, so a network probe would depend on the CNI exempting
+          # the kubelet's node address from that rule — loopback never does.
           startupProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"]
             initialDelaySeconds: 5
             periodSeconds: 5
+            # See 30-health-monitor.yaml: a forked interpreter plus an HTTP
+            # round trip does not fit the 1s kubelet default on a busy node.
             timeoutSeconds: 5
             failureThreshold: 24
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"]
             initialDelaySeconds: 0
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3).read()"]
             initialDelaySeconds: 0
             periodSeconds: 5
             timeoutSeconds: 3

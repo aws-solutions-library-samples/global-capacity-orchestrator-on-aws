@@ -70,6 +70,36 @@ _MANIFEST_PROCESSOR_CONTAINER_REQUESTS: dict[str, str] = {
     "memory": "1Gi",
 }
 
+#: Gateway VPC endpoints ``vpc_endpoints.gateway`` may name. Free, route-table
+#: based, same-region only.
+VPC_GATEWAY_ENDPOINT_SERVICES: tuple[str, ...] = ("s3", "dynamodb")
+
+#: Interface (PrivateLink) endpoints ``vpc_endpoints.interface`` may name,
+#: keyed the way the regional stack maps them onto
+#: ``ec2.InterfaceVpcEndpointAwsService``. Each costs per AZ-hour plus per GB,
+#: so the list is opt-in; together they keep every AWS API call the platform
+#: and its jobs make inside the VPC (the cross-region calls to the global
+#: region's tables and buckets still leave through the NAT gateways).
+VPC_INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
+    "sts",
+    "ecr.api",
+    "ecr.dkr",
+    "logs",
+    "monitoring",
+    "sqs",
+    "ssm",
+    "secretsmanager",
+    "kms",
+    "eks",
+    "elasticfilesystem",
+    "bedrock-runtime",
+)
+
+_VPC_ENDPOINTS_DEFAULTS: dict[str, list[str]] = {
+    "gateway": ["s3", "dynamodb"],
+    "interface": [],
+}
+
 #: CDK context key that force-enables optional infrastructure features for one
 #: deploy without touching cdk.json — the infrastructure sibling of the
 #: ``helm_enabled_overrides`` context handled in ``gco/stacks/regional_stack.py``.
@@ -708,6 +738,75 @@ class ConfigLoader:
                     f"endpoint_access must be one of {valid_access_modes}, "
                     f"got {eks_config['endpoint_access']}"
                 )
+        # The NetworkPolicy enforcement switch renders straight into a
+        # kube-system ConfigMap value, so only a literal JSON boolean is
+        # accepted — a string "false" would be applied verbatim and enable
+        # nothing while reading as disabled.
+        if (
+            "network_policy_enforcement" in eks_config
+            and type(eks_config["network_policy_enforcement"]) is not bool
+        ):
+            raise ConfigValidationError(
+                "eks_cluster.network_policy_enforcement must be a boolean, got "
+                f"{eks_config['network_policy_enforcement']!r}"
+            )
+        self._validate_vpc_endpoints_config()
+
+    def _validate_vpc_endpoints_config(self) -> None:
+        """Validate the optional ``vpc_endpoints`` block.
+
+        ``gateway`` lists the free route-table endpoints (``s3``,
+        ``dynamodb``); ``interface`` lists PrivateLink endpoints by the
+        service key in :data:`VPC_INTERFACE_ENDPOINT_SERVICES`. Interface
+        endpoints bill per AZ-hour, so the list is explicit and unknown names
+        fail at synth instead of silently creating nothing.
+        """
+        raw = self.app.node.try_get_context("vpc_endpoints")
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            raise ConfigValidationError("vpc_endpoints must be an object")
+        unknown = sorted(str(key) for key in raw if key not in _VPC_ENDPOINTS_DEFAULTS)
+        if unknown:
+            raise ConfigValidationError(
+                "vpc_endpoints contains unknown key(s): "
+                + ", ".join(unknown)
+                + "; allowed keys: "
+                + ", ".join(sorted(_VPC_ENDPOINTS_DEFAULTS))
+            )
+        for key, allowed in (
+            ("gateway", VPC_GATEWAY_ENDPOINT_SERVICES),
+            ("interface", VPC_INTERFACE_ENDPOINT_SERVICES),
+        ):
+            if key not in raw:
+                continue
+            value = raw[key]
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ConfigValidationError(f"vpc_endpoints.{key} must be a list of strings")
+            unsupported = sorted(set(value) - set(allowed))
+            if unsupported:
+                raise ConfigValidationError(
+                    f"vpc_endpoints.{key} contains unsupported service(s): "
+                    + ", ".join(unsupported)
+                    + "; supported: "
+                    + ", ".join(sorted(allowed))
+                )
+            if len(set(value)) != len(value):
+                raise ConfigValidationError(f"vpc_endpoints.{key} lists a service twice")
+
+    def get_vpc_endpoints_config(self) -> dict[str, list[str]]:
+        """Return the VPC endpoint selection with defaults merged in.
+
+        Defaults: the two free gateway endpoints (S3 carries the platform's
+        largest data path — models, datasets, checkpoints, MLflow artifacts,
+        cost reports — off the NAT gateways' per-GB metering; DynamoDB serves
+        single-region topologies) and no interface endpoints.
+        """
+        configured = self.app.node.try_get_context("vpc_endpoints") or {}
+        return {
+            "gateway": list(configured.get("gateway", _VPC_ENDPOINTS_DEFAULTS["gateway"])),
+            "interface": list(configured.get("interface", _VPC_ENDPOINTS_DEFAULTS["interface"])),
+        }
 
     def _validate_analytics_environment_config(self) -> None:
         """Validate the optional analytics_environment block in cdk.json.
@@ -1542,6 +1641,9 @@ class ConfigLoader:
               scope defaults to "namespace" and namespaces to ["gco-jobs"];
               scope "cluster" grants AmazonEKSClusterAdminPolicy instead.
               Empty (the default) synthesizes exactly today's entries.
+            - network_policy_enforcement: whether the Auto Mode network policy
+              controller is switched on (default True). False keeps the
+              NetworkPolicy objects but stops enforcing them.
 
         Note:
             PRIVATE endpoint is recommended for production. Job submission still works
@@ -1553,6 +1655,10 @@ class ConfigLoader:
             "endpoint_access": "PRIVATE",
             "public_access_cidrs": [],
             "developer_access": [],
+            # Switches on the Auto Mode network policy controller
+            # (06-network-policy-controller.yaml) so 03-network-policies.yaml
+            # is enforced rather than merely stored.
+            "network_policy_enforcement": True,
         }
         return {**default_config, **(self.app.node.try_get_context("eks_cluster") or {})}
 

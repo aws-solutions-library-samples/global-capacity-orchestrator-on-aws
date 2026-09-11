@@ -58,11 +58,12 @@
     "_comment_kubernetes_version": "EKS minor version. kubectl in Dockerfile.dev should track this within the ±1 minor skew policy (https://kubernetes.io/releases/version-skew-policy/).",
     "kubernetes_version": "1.36",
 
-    "_comment_eks_cluster": "Who can reach AND who can use the EKS API server — three independent layers (run `gco cluster doctor` to check all three). REACHABILITY: endpoint_access PRIVATE = inside the VPC only (production posture; `gco cluster tunnel --via-ssm auto` reaches it from a laptop over SSM); PUBLIC_AND_PRIVATE additionally exposes the endpoint to the internet, restricted to public_access_cidrs when set (empty list = 0.0.0.0/0, loudly warned at synth; prefer `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32`). AUTHENTICATION+AUTHORIZATION: the cluster uses EKS access entries, and by default only platform Lambdas have them — a tunnel alone is not enough. Grant yourself access with `gco stacks access -r <region>` (one-shot, after deploy) or declare principals here under developer_access ([{principal_arn, scope, namespaces}], default scope=namespace + namespaces=[gco-jobs] granting AmazonEKSEditPolicy; scope=cluster grants AmazonEKSClusterAdminPolicy). See docs/CUSTOMIZATION.md (EKS Cluster Configuration).",
+    "_comment_eks_cluster": "Who can reach AND who can use the EKS API server — three independent layers (run `gco cluster doctor` to check all three). REACHABILITY: endpoint_access PRIVATE = inside the VPC only (production posture; `gco cluster tunnel --via-ssm auto` reaches it from a laptop over SSM); PUBLIC_AND_PRIVATE additionally exposes the endpoint to the internet, restricted to public_access_cidrs when set (empty list = 0.0.0.0/0, loudly warned at synth; prefer `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32`). AUTHENTICATION+AUTHORIZATION: the cluster uses EKS access entries, and by default only platform Lambdas have them — a tunnel alone is not enough. Grant yourself access with `gco stacks access -r <region>` (one-shot, after deploy) or declare principals here under developer_access ([{principal_arn, scope, namespaces}], default scope=namespace + namespaces=[gco-jobs] granting AmazonEKSEditPolicy; scope=cluster grants AmazonEKSClusterAdminPolicy). NETWORK ISOLATION: network_policy_enforcement (default true) switches on the EKS Auto Mode network policy controller so the NetworkPolicies GCO ships (default-deny ingress in gco-system and gco-jobs, per-service allow rules, DNS+HTTPS egress) are enforced rather than merely stored; false keeps the objects but disables enforcement. See docs/CUSTOMIZATION.md (EKS Cluster Configuration) and docs/ARCHITECTURE.md (Network Security).",
     "eks_cluster": {
       "endpoint_access": "PRIVATE",
       "public_access_cidrs": [],
-      "developer_access": []
+      "developer_access": [],
+      "network_policy_enforcement": true
     },
 
     "_comment_networking": "Networking, security, and ingress",
@@ -121,10 +122,18 @@
       "per_ip_rate_limit": 100
     },
 
-    "_comment_vpc_endpoint_cidrs": "CIDR blocks allowed to reach VPC endpoints, applied as NetworkPolicy egress rules in the cluster. Defaults to the VPC's own CIDR; widen to include peered VPC ranges if needed.",
+    "_comment_vpc_endpoint_cidrs": "In-VPC address ranges that gco-jobs pods may reach on any port (the allow-vpc-egress NetworkPolicy: Valkey, Aurora, EFS/FSx mount targets, VPC endpoints) and that the MLflow tracking server accepts Host headers and kubelet probes from. Defaults to the VPC's own CIDR; add peered VPC ranges if jobs must reach them. Internet and AWS-API traffic from jobs is governed separately (HTTPS to any destination is allowed).",
     "vpc_endpoint_cidrs": [
       "10.0.0.0/16"
     ],
+    "_comment_vpc_endpoints": "VPC endpoints created in each regional VPC. gateway (free, route-table based): s3 and dynamodb by default — the S3 endpoint takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC. interface (PrivateLink, billed per AZ-hour plus per GB, so opt-in) keeps the remaining AWS API calls private; supported names: sts, ecr.api, ecr.dkr, logs, monitoring, sqs, ssm, secretsmanager, kms, eks, elasticfilesystem, bedrock-runtime. Cross-region calls to the global region's tables, buckets and parameters still leave through the NAT gateways. See docs/CUSTOMIZATION.md (VPC Endpoints).",
+    "vpc_endpoints": {
+      "gateway": [
+        "s3",
+        "dynamodb"
+      ],
+      "interface": []
+    },
 
     "_comment_workloads": "Job submission, validation, and processing pipelines",
 

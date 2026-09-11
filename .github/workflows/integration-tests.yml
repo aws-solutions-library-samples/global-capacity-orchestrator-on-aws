@@ -1539,19 +1539,50 @@ jobs:
       - name: Apply NetworkPolicies (Calico-enforced)
         # The whole point of the Calico CNI install is that kindnet silently
         # accepts NetworkPolicy but does not enforce it. Apply the policies
-        # so the apiserver validates their schema against real CRDs.
+        # so the apiserver validates their schema against real CRDs and the
+        # enforcement probes below exercise them for real.
         #
         # 03-network-policies.yaml contains one list-valued placeholder
         # ({{VPC_ENDPOINT_CIDR_BLOCKS}}) that the production kubectl-applier
-        # expands into a sequence of ipBlock entries at deploy time. For CI
-        # we replace it with an empty list so the apiserver accepts the
-        # object — Calico treats an empty `to:` as "allow nothing", which
-        # is both schema-valid and the strictest possible behavior.
+        # expands into a sequence of ipBlock entries from cdk.json
+        # vpc_endpoint_cidrs — the VPC range containing the nodes. The
+        # faithful CI analogue is kind's own node CIDR (a docker network,
+        # typically 172.18.0.0/16, not the 10.0/16 production default), so it
+        # is derived from the live node address exactly as the examples-smoke
+        # job does for the mlflow policy. Pods live in 192.168.0.0/16 here, so
+        # the in-VPC allow does NOT admit pod-to-pod traffic across namespaces
+        # and the cross-namespace deny probe below stays meaningful.
+        #
+        # 06-network-policy-controller.yaml is the EKS Auto Mode enforcement
+        # switch (a kube-system ConfigMap). It is inert on kind — Calico is
+        # the enforcer here — but applying it proves the rendered object is
+        # valid and lets the manifest inventory checks see every base file.
         run: |
           set -euo pipefail
-          sed 's|{{VPC_ENDPOINT_CIDR_BLOCKS}}|[]|g' \
-            lambda/kubectl-applier-simple/manifests/03-network-policies.yaml \
+          node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+          node_cidr="$(echo "${node_ip}" | awk -F. '{print $1"."$2".0.0/16"}')"
+          echo "kind node ${node_ip} -> in-VPC analogue ${node_cidr}"
+          python3 - "${node_cidr}" <<'PY' > "${RUNNER_TEMP}/network-policies.yaml"
+          import sys
+          from pathlib import Path
+
+          cidr = sys.argv[1]
+          path = Path("lambda/kubectl-applier-simple/manifests/03-network-policies.yaml")
+          text = path.read_text(encoding="utf-8")
+          # Same substitution GCORegionalStack performs: the first ipBlock
+          # entry carries no indent (the manifest supplies it).
+          block = f'- ipBlock:\n            cidr: "{cidr}"'
+          text = text.replace("{{VPC_ENDPOINT_CIDR_BLOCKS}}", block)
+          if "{{" in text:
+              raise SystemExit(f"unsubstituted token(s) remain: {text}")
+          print(text)
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/network-policies.yaml"
+          sed 's|{{NETWORK_POLICY_ENFORCEMENT}}|true|g' \
+            lambda/kubectl-applier-simple/manifests/06-network-policy-controller.yaml \
             | kubectl apply -f -
+          test "$(kubectl -n kube-system get configmap amazon-vpc-cni \
+            -o jsonpath='{.data.enable-network-policy-controller}')" = "true"
       - name: Render and apply deployments
         # Substitute image placeholders. Pod readiness depends on production
         # IRSA / Secrets Manager wiring that isn't present in kind, so we

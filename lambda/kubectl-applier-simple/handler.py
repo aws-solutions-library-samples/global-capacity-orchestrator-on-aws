@@ -765,8 +765,19 @@ _FEATURE_RESOURCE_INVENTORY: dict[
 # and permanently fails DaemonSet convergence (observed live the moment the
 # Slurm NodeSet provisioned the first GPU nodes). The built-in plugin
 # advertises nvidia.com/gpu on its own.
+#
+# allow-vpc-endpoint-egress / allow-ray-cluster-internal (gco-jobs): the
+# pre-v7.7 job-namespace model — HTTPS only to the VPC's own CIDR (there were
+# never VPC endpoints for that traffic to reach, so enforced it cut jobs off
+# from every AWS API) and a Ray-only peer rule. 03-network-policies.yaml now
+# ships allow-https-egress + allow-vpc-egress + allow-same-namespace, which
+# strictly contain both. NetworkPolicies union, so the leftovers would allow
+# nothing new — they are swept so the live policy set stays exactly the
+# shipped, documented one.
 _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("apps/v1", "DaemonSet", "kube-system", "nvidia-device-plugin-daemonset"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
 )
 
 

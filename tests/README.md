@@ -749,7 +749,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_mcp_task_tools.py` | Tests for the read-only MCP observability tools (``task_status`` and ``task_tail``) and the matching ``gco tasks`` CLI surface. |
 | `test_model_bucket_access_logs.py` | Tests for S3 server access logging on the model weights bucket. |
 | `test_models_cli.py` | Tests for cli/models.ModelManager — S3 model weight management. |
-| `test_network_policies_manifest.py` | Tests for the NetworkPolicy manifest at lambda/kubectl-applier-simple/manifests/03-network-policies.yaml. |
+| `test_network_policies_manifest.py` | The network posture pinned to `03-network-policies.yaml`: default-deny ingress in `gco-system`/`gco-jobs`, every platform Deployment admitted on exactly the port it serves by a source-less rule (8443 TLS sidecars, 9090 inference-monitor metrics matching the PodMonitor and probes), DNS on 53 to any resolver in all three namespaces (Auto Mode node-local DNS), `gco-jobs` same-namespace allow + HTTPS-anywhere + in-VPC `vpc_endpoint_cidrs` egress with no other all-pods Egress isolator, the retired VPC-endpoint-only and Ray-only rules gone and in the applier's legacy sweep, the `gco-inference` proxy-only isolation, the `06-network-policy-controller.yaml` enforcement ConfigMap (both documented keys, rendered by the regional stack, applied by kind CI), and the `{{VPC_ENDPOINT_CIDR_BLOCKS}}` substitution replay. |
 | `test_nodepools_extended.py` | Extended tests for cli/nodepools.py. |
 | `test_proxy_utils_extended.py` | Extended tests for lambda/proxy-shared/proxy_utils.py. |
 | `test_python_base_image_consistency.py` | Python base-image pins stay consistent across service containers and the dev image. |
