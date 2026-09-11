@@ -301,7 +301,7 @@ def test_untraceable_lines_matches_the_committed_scripts() -> None:
     classification is checked against the actual tree, not only fixtures.
     """
     inventory = checker.tracked_shell_scripts(REPO_ROOT)
-    found = checker.untraceable_lines_by_script(REPO_ROOT, inventory)
+    found, _spans = checker.classify_scripts(REPO_ROOT, inventory)
     assert found, "the repository is expected to carry redirected loop terminators"
     for path, numbers in found.items():
         source = (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
@@ -310,6 +310,141 @@ def test_untraceable_lines_matches_the_committed_scripts() -> None:
             assert text.startswith(("done", "fi", "esac", "}")) or text.endswith(";;"), (
                 f"{path}:{number} classified as untraceable but looks like a statement: {text!r}"
             )
+
+
+# --------------------------------------------------------------------------
+# statement_spans
+# --------------------------------------------------------------------------
+#
+# Each expected span was checked against what `bash -x` prints for the shape,
+# with PS4 exposing LINENO: Bash reports the whole statement on ONE of its
+# lines (the first, the second or the last depending on the shape), so the
+# checker folds the span rather than guessing which line that is.
+
+BACKSLASH_CHAIN = """\
+aws eks create-access-entry \\
+  --cluster-name "$CLUSTER_NAME" \\
+  --region "$REGION" \\
+  --principal-arn "$PRINCIPAL_ARN" 2>&1 || echo "   Access entry may already exist"
+echo done
+"""
+
+SUBSTITUTION_ASSIGNMENT = """\
+API_ENDPOINT=$(aws cloudformation describe-stacks \\
+  --stack-name "$STACK_NAME" \\
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \\
+  --output text)
+API_ENDPOINT=${API_ENDPOINT%/}
+"""
+
+HEREDOC_IN_SUBSTITUTION = """\
+MANIFEST_PAYLOAD=$(cat <<'EOF'
+{
+  "manifests": [
+    {"kind": "Job", "spec": {"parallelism": (1)}}
+  ]
+}
+EOF
+)
+echo "$MANIFEST_PAYLOAD" | jq '.'
+"""
+
+MULTILINE_STRING_COMMAND = """\
+python3 -c "
+import re, sys
+m = re.search(r'^VERSION\\s*=\\s*\\"([^\\"]+)\\"', open(sys.argv[1]).read())
+print(m.group(1) if m else '')
+" "$file" 2>/dev/null
+echo after
+"""
+
+BACKGROUND_CHAIN = """\
+aws-sigv4-proxy \\
+  --name execute-api \\
+  --region "$API_REGION" \\
+  --log-level info &
+PROXY_PID=$!
+"""
+
+CONTINUED_LIST = """\
+[ -n "$count" ] \\
+    && [ -n "$PID" ] \\
+    && echo chained
+"""
+
+SUBSHELL_BLOCK = """\
+(
+    cd "$repo_root" || exit 1
+    python3 -c 'import gco'
+)
+"""
+
+ARRAY_ASSIGNMENT = """\
+FORWARDED_ENV_VARS=(
+    AWS_PROFILE
+    AWS_REGION
+)
+echo "${FORWARDED_ENV_VARS[0]}"
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(BACKSLASH_CHAIN, [(1, 3)], id="backslash-chain-split-at-the-fallback"),
+        pytest.param(SUBSTITUTION_ASSIGNMENT, [(1, 4)], id="substitution-assignment"),
+        pytest.param(HEREDOC_IN_SUBSTITUTION, [(1, 8)], id="heredoc-inside-substitution"),
+        pytest.param(
+            MULTILINE_STRING_COMMAND, [(1, 5)], id="multi-line-string-with-escaped-quotes"
+        ),
+        pytest.param(BACKGROUND_CHAIN, [(1, 4)], id="backgrounded-chain"),
+        pytest.param(CONTINUED_LIST, [], id="continued-list-each-element-reported-alone"),
+        pytest.param(SUBSHELL_BLOCK, [], id="subshell-inner-lines-reported-alone"),
+        pytest.param(ARRAY_ASSIGNMENT, [(1, 4)], id="array-assignment"),
+        pytest.param("echo one\necho two\n", [], id="single-line-statements"),
+        pytest.param(
+            "case $x in\n  a) echo a ;;\n  *) ;;\nesac\n", [], id="case-arms-are-not-openers"
+        ),
+        pytest.param(
+            "echo \"it's\" # don't\necho next\n", [], id="apostrophes-in-strings-and-comments"
+        ),
+        pytest.param(
+            "cat <<-EOT\n\tbody\n\tEOT\necho after\n", [(1, 3)], id="dash-heredoc-strips-tabs"
+        ),
+    ],
+)
+def test_statement_spans_follow_bash_statement_boundaries(
+    source: str, expected: list[tuple[int, int]]
+) -> None:
+    assert checker.statement_spans(source) == expected
+
+
+def test_statement_spans_report_an_unterminated_statement_to_the_end() -> None:
+    """A truncated file still yields a well-formed span rather than an error."""
+    assert checker.statement_spans("VAR=$(cat <<EOF\nnever closed\n") == [(1, 2)]
+
+
+def test_fold_spans_credits_the_statement_wherever_bash_reported_it() -> None:
+    hits = {1: 0, 2: 0, 3: 0, 4: 1, 5: 2}  # the assignment reported on its last line
+    assert checker.fold_spans(hits, [(1, 4)]) == {1: 1, 5: 2}
+
+
+def test_fold_spans_leaves_an_unreported_span_absent() -> None:
+    """Lines bashcov itself judged non-executable must not reappear as covered."""
+    assert checker.fold_spans({7: 1}, [(1, 4)]) == {7: 1}
+
+
+def test_statement_spans_over_the_committed_scripts_are_sane() -> None:
+    """Spans never overlap, never run backwards, and cover the known shapes."""
+    inventory = checker.tracked_shell_scripts(REPO_ROOT)
+    _untraceable, spans = checker.classify_scripts(REPO_ROOT, inventory)
+    assert "docs/client-examples/aws_cli_examples.sh" in spans
+    for path, found in spans.items():
+        previous_end = 0
+        for first, last in found:
+            assert first > previous_end, f"{path}: overlapping spans around line {first}"
+            assert last > first, f"{path}: degenerate span {first}-{last}"
+            previous_end = last
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +460,16 @@ def test_evaluate_drops_untraceable_lines_from_the_count() -> None:
     passing = checker.evaluate(reported, ["a.sh"], [], {"a.sh": {2}})
     assert passing.ok is True
     assert passing.enforced[0].total_lines == 2
+
+
+def test_evaluate_folds_multi_line_statements_onto_their_first_line() -> None:
+    """A `VAR=$(...)` reported on its last line counts once, as covered."""
+    reported = {"/w/a.sh": {1: 0, 2: 0, 3: 1, 4: 1}}
+    failing = checker.evaluate(reported, ["a.sh"], [])
+    assert failing.ok is False
+    passing = checker.evaluate(reported, ["a.sh"], [], spans={"a.sh": [(1, 3)]})
+    assert passing.ok is True
+    assert passing.enforced[0].hits == {1: 1, 4: 1}
 
 
 def test_evaluate_passes_a_fully_covered_enforced_script() -> None:

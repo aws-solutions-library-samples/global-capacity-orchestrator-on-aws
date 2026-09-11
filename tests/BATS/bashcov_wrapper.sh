@@ -37,23 +37,24 @@
 # is what cut the CI report off at test_run_semgrep.bats). dash never sees
 # the markers now.
 #
-# The trace is also spooled to a file and replayed to bashcov once bats has
-# finished, rather than written straight into bashcov's pipe. Ruby creates
-# that pipe non-blocking, and the flag lives on the open file description
-# every traced Bash inherits. bashcov parses the pipe live, in Ruby, far
-# slower than hundreds of Bash processes fill it, so the pipe is full most of
-# the time — and a write into a full non-blocking pipe fails with EAGAIN
-# instead of waiting. Bash does not retry the failed flush of its xtrace
-# buffer, so the record is silently gone: one probe measured 1, 2 and 5 hits
-# on the same line across three identical runs. A regular file never refuses
-# a write, and the whole suite's stream captured that way was byte-for-byte
-# identical run to run, so bats traces into the spool and `cat` hands bashcov
-# the finished stream afterwards. (Every traced shell shares the spool's one
-# open file description, so concurrent writes land in order without
-# O_APPEND.)
+# The second repair is to the pipe itself. Ruby creates bashcov's pipe
+# non-blocking, and the flag lives on the open file description every traced
+# Bash inherits. bashcov parses the pipe live, in Ruby, far slower than
+# hundreds of Bash processes fill it, so the pipe is full most of the time —
+# and a write into a full non-blocking pipe fails with EAGAIN instead of
+# waiting. Bash does not retry the failed flush of its xtrace buffer, so the
+# record is silently gone: one probe measured 1, 2 and 5 hits on the same
+# line across three identical runs, and the same stream captured to a file
+# was complete every time. Clearing O_NONBLOCK on the shared description
+# (below) makes every writer block like an ordinary pipe writer whenever Ruby
+# falls behind, and the counts became identical run to run. The trace still
+# goes straight into bashcov's pipe rather than through a spool file: bashcov
+# resolves each record's path as it arrives, so a fixture the suite created
+# under $BATS_TEST_TMPDIR is looked up while it still exists and cannot be
+# mistaken for a same-named file in the checkout after bats has removed it.
 #
 # BASH_XTRACEFD is a plain exported variable that Bash honours on import and
-# dash ignores; the children see the spool's descriptor in it.
+# dash ignores; the children keep seeing bashcov's descriptor in it.
 # =============================================================================
 set -euo pipefail
 set +o xtrace # the wrapper's own lines are harness, not measurement
@@ -64,10 +65,8 @@ if [ -z "${PS4:-}" ] || [ -z "${BASH_XTRACEFD:-}" ]; then
 fi
 bashcov_fd="$BASH_XTRACEFD"
 
-# The replay would hit the same EAGAIN: clear O_NONBLOCK on bashcov's pipe
-# (on the shared description, so it stays cleared) and `cat` then blocks like
-# an ordinary pipe writer whenever Ruby falls behind. python3 is already a
-# dependency of the job (the suite's own YAML checks use it).
+# python3 is already a dependency of the job (the suite's own YAML checks use
+# it), and fcntl is the only way to reach the flag from a shell script.
 python3 - "$bashcov_fd" <<'PY'
 import fcntl
 import os
@@ -85,13 +84,7 @@ trap 'rm -rf -- "$scratch"' EXIT
     printf 'set -o xtrace\n'
 } > "$scratch/bash_env"
 
-# Descriptor 9: the only other descriptor the suite relies on is bats's own
-# fd 3, and a fixed number is inherited by every child without ambiguity.
-exec 9>"$scratch/xtrace.spool"
 status=0
-env -u SHELLOPTS -u PS4 BASH_ENV="$scratch/bash_env" BASH_XTRACEFD=9 \
+env -u SHELLOPTS -u PS4 BASH_ENV="$scratch/bash_env" BASH_XTRACEFD="$bashcov_fd" \
     bats "$@" || status=$?
-exec 9>&-
-
-cat -- "$scratch/xtrace.spool" >&"$bashcov_fd"
 exit "$status"

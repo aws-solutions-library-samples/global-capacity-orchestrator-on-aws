@@ -550,10 +550,7 @@ ratchet = [
     "demo/record_demo.sh",
     "demo/record_deploy.sh",
     "demo/record_destroy.sh",
-    "docs/client-examples/aws_cli_examples.sh",
-    "docs/client-examples/curl_sigv4_proxy_example.sh",
     "scripts/preview_wiki.sh",
-    "scripts/setup-cluster-access.sh",
     "scripts/setup-dev-alias.sh",
 ]
 

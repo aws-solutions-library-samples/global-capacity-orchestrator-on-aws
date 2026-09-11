@@ -8,18 +8,40 @@ script turns that resultset into a pass/fail gate.
 Deciding which lines of a shell script are even executable is the hard part of
 Bash coverage — here-documents, ``case`` arms, line continuations and function
 headers all have to be classified — so that judgement is deliberately left to
-bashcov's lexer rather than re-implemented here, with one correction. The lexer
-works from the text alone and marks two shapes executable that Bash's tracer
-never reports, so no test could ever cover them: a compound-command terminator
-that carries only redirections (``done <<< "$rows"``, ``} > "$report"`` — the
-redirection belongs to the loop or group, and ``set -x`` prints simple
-commands, not the loop) and a ``case`` arm with no body (``*/*) ;;``). Those
-lines are structure, not statements; ``untraceable_lines()`` recognises exactly
-those two shapes and ``evaluate()`` leaves them out of the count, the way
-SimpleCov leaves out a comment. Anything that carries a command — a pipe into
-``sed`` after ``}``, a ``:`` in the arm, a process substitution — is still
-measured. What this script owns beyond that is everything SimpleCov cannot know
-about *this* repository:
+bashcov's lexer rather than re-implemented here, with two corrections that
+come from measuring what ``set -x`` actually prints:
+
+**Lines Bash never traces.** The lexer works from the text alone and marks two
+shapes executable that the tracer never reports, so no test could ever cover
+them: a compound-command terminator that carries only redirections (``done <<<
+"$rows"``, ``} > "$report"`` — the redirection belongs to the loop or group,
+and ``set -x`` prints simple commands, not the loop) and a ``case`` arm with no
+body (``*/*) ;;``). ``untraceable_lines()`` recognises exactly those two shapes
+and ``evaluate()`` leaves them out of the count, the way SimpleCov leaves out a
+comment. Anything that carries a command — a pipe into ``sed`` after ``}``, a
+``:`` in the arm, a process substitution — is still measured.
+
+**Statements that span lines.** Bash reports one line per statement, and which
+physical line it picks depends on the shape: the first line of ``python3 -c
+"..."`` with a multi-line string, the *second* line of a plain backslash chain
+(``kill_it \\ / one \\ / two`` reports line 2) or of a backgrounded one, and the
+*last* line of ``VAR=$(...)``, of ``VAR="multi\\nline"``, and of the ``cat
+<<'EOF' ... EOF )`` heredoc-in-substitution the client examples build their
+payloads with. The lexer propagates the first line's count across some of these
+shapes and not others (a ``\\"`` inside the string or a ``||`` on the last line
+of a chain defeats its patterns), which left dozens of lines permanently at
+zero. ``statement_spans()`` scans each script for statements that continue
+across lines — a trailing backslash, an unclosed ``(``/``$(``, an open quote,
+a here-document body — and ``evaluate()`` folds every span onto its first line
+with the highest count seen on any of its lines. A statement is covered when
+Bash reported it, wherever it reported it. A chain is split where a list
+operator (``||``, ``&&``, ``|``) starts a new command at the top level, because
+Bash does report those elements on their own lines; the fallback in
+``aws ... 2>&1 || echo "may already exist"`` therefore stays a separately
+measured statement.
+
+What this script owns beyond that is everything SimpleCov cannot know about
+*this* repository:
 
 **Path shape.** bashcov reports absolute paths (``/home/runner/work/.../demo/
 lib_demo.sh``), while the inventory, the ratchet and every error message use
@@ -104,6 +126,144 @@ def untraceable_lines(source: str) -> set[int]:
         for number, line in enumerate(source.splitlines(), start=1)
         if _TERMINATOR_WITH_REDIRECTIONS.match(line) or _EMPTY_CASE_ARM.match(line)
     }
+
+
+_HEREDOC = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<tag>\w+)(?P=quote)")
+_LIST_OPERATOR = re.compile(r"\|\||&&|\|(?!\|)")
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """Lexer state carried from one physical line to the next.
+
+    ``parens`` is the stack of unclosed parentheses; ``True`` marks one that
+    keeps a statement open across lines — ``$(``, an array's ``=(``, a process
+    substitution's ``<(``/``>(``, an arithmetic ``((`` — while ``False`` marks a
+    subshell ``(``, whose inner commands Bash reports on their own lines and
+    which must therefore not be folded.
+    """
+
+    parens: tuple[bool, ...] = ()
+    quote: str | None = None  # "'" or '"' while inside a quoted string
+    heredoc: str | None = None  # terminator of the here-document being read
+    heredoc_strip: bool = False  # <<- : leading tabs are stripped before comparing
+    continued: bool = False  # the line ended with an escaping backslash
+
+    @property
+    def depth(self) -> int:
+        return sum(1 for spanning in self.parens if spanning)
+
+    def open(self) -> bool:
+        """Whether the statement is still open at the end of a line."""
+        return (
+            self.depth > 0 or self.quote is not None or self.heredoc is not None or self.continued
+        )
+
+
+def _scan_line(line: str, state: _Scan) -> tuple[_Scan, bool]:
+    """Advance ``state`` over one physical line.
+
+    Returns the new state and whether a list operator (``||``, ``&&``, ``|``)
+    appeared at the top level of this line — i.e. outside quotes and outside
+    any parenthesis — which is where Bash starts a new, separately reported
+    command inside a backslash chain.
+    """
+    parens = list(state.parens)
+    quote, heredoc, heredoc_strip = state.quote, state.heredoc, state.heredoc_strip
+    if heredoc is not None:
+        candidate = line.lstrip("\t") if heredoc_strip else line
+        if candidate == heredoc:
+            heredoc = None
+        return _Scan(tuple(parens), quote, heredoc, heredoc_strip, False), False
+
+    pending_heredoc: tuple[str, bool] | None = None
+    list_operator = False
+    continued = False
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\":
+                if index == length - 1:
+                    continued = True  # a backslash-newline inside "..." continues the string
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        # Unquoted.
+        if char == "\\":
+            if index == length - 1:
+                continued = True
+            index += 2
+            continue
+        if char == "#" and (index == 0 or line[index - 1] in " \t;("):
+            break  # comment to end of line
+        if char in "'\"":
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            parens.append(index > 0 and line[index - 1] in "$=<>(")
+        elif char == ")":
+            if parens:
+                parens.pop()  # a `pattern)` case arm has no opener: nothing to pop
+        elif char == "<" and pending_heredoc is None:
+            match = _HEREDOC.match(line, index)
+            if match:
+                pending_heredoc = (match.group("tag"), line[index : index + 3] == "<<-")
+                index = match.end()
+                continue
+        elif char in "|&" and not parens:
+            match = _LIST_OPERATOR.match(line, index)
+            if match:
+                list_operator = True
+                index = match.end()
+                continue
+        index += 1
+
+    if pending_heredoc is not None:
+        heredoc, heredoc_strip = pending_heredoc
+    return _Scan(tuple(parens), quote, heredoc, heredoc_strip, continued), list_operator
+
+
+def statement_spans(source: str) -> list[tuple[int, int]]:
+    """Return ``(first, last)`` line pairs for statements spanning several lines.
+
+    A statement continues onto the next line while a parenthesis, quote or
+    here-document is open or the line ends with a backslash. Inside a
+    backslash chain a line that starts a new top-level list element (``||``,
+    ``&&``, ``|``) begins a new span, since Bash reports that command on its
+    own line. Single-line statements are not returned.
+    """
+    spans: list[tuple[int, int]] = []
+    state = _Scan()
+    start: int | None = None
+    for number, line in enumerate(source.splitlines(), start=1):
+        was_open = state.open()
+        chain_only = was_open and state.depth == 0 and state.quote is None and state.heredoc is None
+        state, list_operator = _scan_line(line, state)
+        if chain_only and list_operator and start is not None:
+            # `cmd \` / `  arg \` / `  arg || fallback`: the fallback is its own statement.
+            if number - 1 > start:
+                spans.append((start, number - 1))
+            start = number
+        elif not was_open:
+            start = number
+        if not state.open():
+            if start is not None and number > start:
+                spans.append((start, number))
+            start = None
+    if start is not None and state.open():
+        spans.append((start, len(source.splitlines())))
+    return spans
 
 
 class ReportError(Exception):
@@ -242,21 +402,46 @@ def map_to_tracked(reported_path: str, inventory: list[str]) -> str | None:
     return None
 
 
+def fold_spans(hits: dict[int, int], spans: list[tuple[int, int]]) -> dict[int, int]:
+    """Collapse each multi-line statement onto its first line.
+
+    Every line of a span that the report lists is replaced by the span's first
+    line carrying the highest count seen anywhere in the span, so a statement
+    Bash reported on its second or last line counts once, as covered. A span
+    none of whose lines the report mentions stays absent (bashcov judged it
+    non-executable, e.g. a multi-line comment block would never be a span).
+    """
+    folded = dict(hits)
+    for first, last in spans:
+        members = [line for line in range(first, last + 1) if line in folded]
+        if not members:
+            continue
+        best = max(folded[line] for line in members)
+        for line in members:
+            del folded[line]
+        folded[first] = best
+    return folded
+
+
 def evaluate(
     reported: dict[str, dict[int, int]],
     inventory: list[str],
     ratchet: list[str],
     untraceable: dict[str, set[int]] | None = None,
+    spans: dict[str, list[tuple[int, int]]] | None = None,
 ) -> Result:
     """Merge reported coverage onto the inventory and apply the floor.
 
     ``untraceable`` maps a tracked script to the line numbers that
     :func:`untraceable_lines` found in it; those lines are dropped from the
-    script's count whatever the report says about them.
+    script's count whatever the report says about them. ``spans`` maps a
+    tracked script to its :func:`statement_spans`, each folded onto its first
+    line by :func:`fold_spans`.
     """
     merged: dict[str, ScriptCoverage] = {path: ScriptCoverage(path=path) for path in inventory}
     unmapped: list[str] = []
     untraceable = untraceable or {}
+    spans = spans or {}
 
     for reported_path, lines in sorted(reported.items()):
         tracked = map_to_tracked(reported_path, inventory)
@@ -270,6 +455,10 @@ def evaluate(
             if line_number in skipped:
                 continue
             record.hits[line_number] = max(record.hits.get(line_number, 0), hits)
+
+    for path, record in merged.items():
+        if record.hits and path in spans:
+            record.hits = fold_spans(record.hits, spans[path])
 
     ratchet_set = set(ratchet)
     enforced = [record for path, record in sorted(merged.items()) if path not in ratchet_set]
@@ -325,9 +514,16 @@ def tracked_shell_scripts(root: Path) -> list[str]:
     return sorted(path for path in paths if not path.startswith("tests/"))
 
 
-def untraceable_lines_by_script(root: Path, inventory: list[str]) -> dict[str, set[int]]:
-    """Run :func:`untraceable_lines` over every tracked script under ``root``."""
-    found: dict[str, set[int]] = {}
+def classify_scripts(
+    root: Path, inventory: list[str]
+) -> tuple[dict[str, set[int]], dict[str, list[tuple[int, int]]]]:
+    """Run :func:`untraceable_lines` and :func:`statement_spans` over the inventory.
+
+    Returns the two per-script maps :func:`evaluate` takes, each holding only
+    the scripts that have something to report.
+    """
+    untraceable: dict[str, set[int]] = {}
+    spans: dict[str, list[tuple[int, int]]] = {}
     for path in inventory:
         try:
             source = (root / path).read_text(encoding="utf-8")
@@ -335,8 +531,11 @@ def untraceable_lines_by_script(root: Path, inventory: list[str]) -> dict[str, s
             raise ReportError(f"could not read tracked script {path}: {exc}") from exc
         lines = untraceable_lines(source)
         if lines:
-            found[path] = lines
-    return found
+            untraceable[path] = lines
+        found = statement_spans(source)
+        if found:
+            spans[path] = found
+    return untraceable, spans
 
 
 def format_report(result: Result) -> str:
@@ -401,12 +600,12 @@ def main(argv: list[str] | None = None) -> int:
         reported = parse_report(report)
         inventory = tracked_shell_scripts(args.root)
         ratchet = load_ratchet(args.root / "pyproject.toml")
-        untraceable = untraceable_lines_by_script(args.root, inventory)
+        untraceable, spans = classify_scripts(args.root, inventory)
     except ReportError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    result = evaluate(reported, inventory, ratchet, untraceable)
+    result = evaluate(reported, inventory, ratchet, untraceable, spans)
     print(format_report(result))
     return 0 if result.ok else 1
 
