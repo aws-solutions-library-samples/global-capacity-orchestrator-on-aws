@@ -146,6 +146,8 @@ spec:
 
 Note: `ttlSecondsAfterFinished` applies to both success and failure. If you need more time to debug failed jobs, increase this value or set `shutdownAfterJobFinishes: false` and clean up manually.
 
+The operator follows a RayJob through the head pod's dashboard API (port 8265) from its own namespace. `gco-jobs` default-denies ingress from other namespaces, so the shipped `allow-kuberay-operator-to-ray-head` NetworkPolicy admits exactly the operator's namespace on that port; a RayJob in another namespace you create needs the same rule (see [Network Security](ARCHITECTURE.md#network-security)).
+
 ### RayService
 
 A long-running serving deployment with automatic scaling and zero-downtime upgrades:

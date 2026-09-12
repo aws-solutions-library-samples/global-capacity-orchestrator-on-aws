@@ -17,7 +17,9 @@
 #                 in-VPC ranges from cdk.json vpc_endpoint_cidrs on any port
 #                 (Valkey, Aurora, EFS/FSx targets, VPC endpoints), the
 #                 namespace itself, and the explicit opt-in rules other
-#                 manifests add (MLflow clients, Slurm REST clients).
+#                 manifests add (MLflow clients, Slurm REST clients, the
+#                 Slinky operator); the KubeRay operator's namespace is
+#                 admitted to Ray head pods on the dashboard port.
 #   gco-inference model pods are isolated to the authenticated proxy and to
 #                 each other; egress is DNS + HTTPS (model pulls, AWS APIs).
 #
@@ -33,8 +35,11 @@
 #
 # Enforcement: kind CI installs Calico so these rules are exercised for real;
 # on EKS Auto Mode the built-in network policy controller is switched on by
-# 05-network-policy-controller.yaml (cdk.json
-# eks_cluster.network_policy_enforcement).
+# 06-network-policy-controller.yaml (cdk.json
+# eks_cluster.network_policy_enforcement). The VPC CNI evaluates egress before
+# kube-proxy's DNAT, so an egress rule reaches a Service's ClusterIP only when
+# the Service's selector matches the rule's podSelector (see the note on
+# allow-inference-proxy-to-inference below); Calico in kind has no such rule.
 ---
 # Default deny all ingress in gco-system
 apiVersion: networking.k8s.io/v1
@@ -268,6 +273,37 @@ spec:
   egress:
     - to:
         {{VPC_ENDPOINT_CIDR_BLOCKS}}
+---
+# The KubeRay operator lives in its own namespace (charts.yaml
+# kuberay-operator.namespace) and drives RayJob and RayService through the Ray
+# head's dashboard API: it polls job status and Serve application health from
+# the operator pod, not through a Kubernetes API call. gco-jobs default-denies
+# ingress from other namespaces, so a RayJob there would be created and never
+# observed to finish. Admit the operator namespace to head pods on the
+# dashboard port only; RayCluster itself needs nothing (the operator manages
+# it through the Kubernetes API) and gco-inference isolates only model pods,
+# so a RayService head there is not affected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kuberay-operator-to-ray-head
+  namespace: gco-jobs
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      ray.io/node-type: head
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ray-system
+      ports:
+        - protocol: TCP
+          port: 8265
 ---
 # Allow DNS egress in gco-inference
 apiVersion: networking.k8s.io/v1

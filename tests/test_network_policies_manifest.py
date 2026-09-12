@@ -345,12 +345,45 @@ class TestJobNamespacePosture:
         assert all_pods_egress == self.EXPECTED_ALL_PODS_EGRESS
 
     def test_no_job_ingress_rule_admits_other_namespaces(self, netpol_docs):
-        """Cross-namespace sources need an operator rule; none ships here."""
+        """Cross-namespace sources need an operator rule.
+
+        The only one shipped here is the KubeRay operator's, pinned below;
+        every other ingress peer must stay inside the namespace.
+        """
         for policy in _policies_in(netpol_docs, "gco-jobs"):
+            if policy["metadata"]["name"] == "allow-kuberay-operator-to-ray-head":
+                continue
             for rule in policy["spec"].get("ingress") or []:
                 for peer in rule.get("from", []):
                     assert "namespaceSelector" not in peer, policy["metadata"]["name"]
                     assert "ipBlock" not in peer, policy["metadata"]["name"]
+
+    def test_the_kuberay_operator_reaches_ray_heads_on_the_dashboard_port_only(self, netpol_docs):
+        """RayJob and RayService are driven through the head's dashboard API.
+
+        The operator polls job status and Serve health from its own pod in the
+        namespace ``charts.yaml`` installs it into, so the default-deny needs
+        exactly that namespace admitted to head pods on 8265 and nothing else.
+        """
+        charts = yaml.safe_load(
+            (MANIFESTS_DIR.parent.parent / "helm-installer" / "charts.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        operator_namespace = charts["charts"]["kuberay-operator"]["namespace"]
+        policy = _find_netpol(netpol_docs, "allow-kuberay-operator-to-ray-head", "gco-jobs")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"ray.io/node-type": "head"}}
+        assert policy["spec"]["policyTypes"] == ["Ingress"]
+        (rule,) = policy["spec"]["ingress"]
+        assert rule["from"] == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": operator_namespace}
+                }
+            }
+        ]
+        assert rule["ports"] == [{"protocol": "TCP", "port": 8265}]
 
     @pytest.mark.parametrize("name", ["allow-vpc-endpoint-egress", "allow-ray-cluster-internal"])
     def test_retired_job_policies_are_gone_and_swept(self, netpol_docs, name):
