@@ -242,9 +242,9 @@
       "source_commit": "4c42b84d53d6cc01cd2b3c7e4011a43f850678b6"
     },
     "lambda/kubectl-applier-simple/handler.py": {
-      "digest": "b600609c1a0654c404b86c5b2c79cf7f682d35bf863107d5c1b22c411ac5bdd4",
-      "generated_at": "2026-09-11T22:15:15Z",
-      "source_commit": "14ba13224fdaf5a82bbcee12270092e39a8201ca"
+      "digest": "6042e14b4583b71fa7d94928c6b2edeebde5a8a9a07ee32b2a1a37210bd627f3",
+      "generated_at": "2026-09-12T12:46:59Z",
+      "source_commit": "d77e920379da4b3fd56a9cf0b58cbd1fc45c1802"
     },
     "lambda/proxy-shared/proxy_utils.py": {
       "digest": "f14c1b41e97d99ae95193ea4b3988cdf61c09c0d6ee20abd5694756eb4f75686",
