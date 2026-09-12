@@ -52,6 +52,7 @@ from scripts.live_release_validation.ownership import ecr as ownership_ecr
 from scripts.live_release_validation.ownership import efs_automatic_backups as ownership_efs_backups
 from scripts.live_release_validation.ownership import log_groups as ownership_log_groups
 from scripts.live_release_validation.ownership import stacks as ownership_stacks
+from scripts.live_release_validation.ownership import vpc_endpoints as ownership_vpc_endpoints
 from tests._live_validation_patching import patch_live_validation_helper
 
 
@@ -5850,6 +5851,173 @@ class TestStripExpiredTableStreams:
         assert inventory == snapshot
 
 
+class TestStripDeletedVpcEndpoints:
+    """``_strip_deleted_vpc_endpoints`` — Tagging API lag on deleted endpoints.
+
+    Pins the live failure from 2026-09-12: the regional stack's S3 and DynamoDB
+    gateway endpoints were deleted with the stack, yet ``final-inventory``
+    still saw both ARNs (stack tags intact) in the Tagging API index and failed
+    the all-zero teardown gate while EC2 already answered NotFound. Acceptance
+    is conditional on EC2 proving the endpoint gone (or terminal); a live
+    endpoint keeps its entry as genuine residue.
+    """
+
+    _ACCOUNT = "123456789012"
+    _REGION = "us-east-1"
+    _ENDPOINT_ID = "vpce-016e7c4e94a8d1de8"
+    _ARN = f"arn:aws:ec2:{_REGION}:{_ACCOUNT}:vpc-endpoint/{_ENDPOINT_ID}"
+    _TAGS = {
+        "aws:cloudformation:stack-name": "gco-live-us-east-1",
+        "aws:cloudformation:logical-id": "GCOVpcVpcEndpoints30B02CDE2",
+    }
+
+    def _inventory(self, *entries: dict[str, object]) -> dict[str, object]:
+        return {
+            "regional": {
+                self._REGION: {"tagged_resources": list(entries), "vpcs": []},
+            }
+        }
+
+    def _ctx(self, *, state: str | None) -> tuple[SimpleNamespace, MagicMock]:
+        """``state=None`` makes EC2 answer NotFound; otherwise the given State."""
+        ec2 = MagicMock()
+        if state is None:
+            ec2.describe_vpc_endpoints.side_effect = ClientError(
+                {"Error": {"Code": "InvalidVpcEndpointId.NotFound", "Message": "gone"}},
+                "DescribeVpcEndpoints",
+            )
+        else:
+            ec2.describe_vpc_endpoints.return_value = {
+                "VpcEndpoints": [{"VpcEndpointId": self._ENDPOINT_ID, "State": state}]
+            }
+        ctx = _context()
+        ctx.session = MagicMock()
+        ctx.session.client.return_value = ec2
+        return ctx, ec2
+
+    def test_not_found_endpoint_is_stripped_with_evidence(self):
+        ctx, ec2 = self._ctx(state=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": dict(self._TAGS)})
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(ctx, inventory)
+        # The only entry in the region was stripped, so the emptied bucket is
+        # popped — the same shape the stream and pending-KMS strips produce.
+        assert self._REGION not in residual["regional"]
+        assert accepted == [
+            {
+                "region": self._REGION,
+                "arn": self._ARN,
+                "endpoint_id": self._ENDPOINT_ID,
+                "endpoint_state": "ABSENT",
+                "authority": "ec2:DescribeVpcEndpoints",
+                "tags": self._TAGS,
+                "note": (
+                    "the Resource Groups Tagging API index lags endpoint deletion; "
+                    "EC2 is the authority for existence"
+                ),
+            }
+        ]
+        ec2.describe_vpc_endpoints.assert_called_once_with(VpcEndpointIds=[self._ENDPOINT_ID])
+        assert ctx.session.client.call_args.kwargs["region_name"] == self._REGION
+
+    @pytest.mark.parametrize("state", ["deleting", "deleted"])
+    def test_terminal_states_are_accepted_with_the_observed_state(self, state):
+        ctx, _ec2 = self._ctx(state=state)
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory({"arn": self._ARN, "tags": {}})
+        )
+        assert self._REGION not in residual["regional"]
+        assert accepted[0]["endpoint_state"] == state
+
+    def test_empty_describe_response_counts_as_absent(self):
+        ctx, ec2 = self._ctx(state="available")
+        ec2.describe_vpc_endpoints.return_value = {"VpcEndpoints": []}
+        _residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory({"arn": self._ARN, "tags": {}})
+        )
+        assert accepted[0]["endpoint_state"] == "ABSENT"
+
+    @pytest.mark.parametrize("state", ["available", "pending", "failed"])
+    def test_live_endpoint_keeps_its_entry(self, state):
+        ctx, _ec2 = self._ctx(state=state)
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_endpoint_without_a_state_is_kept_as_unknown(self):
+        ctx, ec2 = self._ctx(state="available")
+        ec2.describe_vpc_endpoints.return_value = {
+            "VpcEndpoints": [{"VpcEndpointId": self._ENDPOINT_ID}]
+        }
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_non_endpoint_and_foreign_entries_are_untouched(self):
+        ctx, ec2 = self._ctx(state=None)
+        vpc = {"arn": f"arn:aws:ec2:{self._REGION}:{self._ACCOUNT}:vpc/vpc-0d07ab86e0611dda5"}
+        wrong_account = {
+            "arn": f"arn:aws:ec2:{self._REGION}:999999999999:vpc-endpoint/vpce-0aaaaaaaaaaaaaaaa"
+        }
+        wrong_region = {
+            "arn": f"arn:aws:ec2:eu-west-1:{self._ACCOUNT}:vpc-endpoint/vpce-0bbbbbbbbbbbbbbbb"
+        }
+        service = {
+            "arn": f"arn:aws:ec2:{self._REGION}:{self._ACCOUNT}:vpc-endpoint-service/vpce-svc-1"
+        }
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory(vpc, wrong_account, wrong_region, service)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [
+            vpc,
+            wrong_account,
+            wrong_region,
+            service,
+        ]
+        assert accepted == []
+        ec2.describe_vpc_endpoints.assert_not_called()
+
+    def test_region_with_other_resources_keeps_its_bucket(self):
+        ctx, _ec2 = self._ctx(state=None)
+        inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [{"arn": self._ARN, "tags": {}}],
+                    "vpcs": ["vpc-0d07ab86e0611dda5"],
+                }
+            }
+        }
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(ctx, inventory)
+        assert residual["regional"][self._REGION] == {
+            "tagged_resources": [],
+            "vpcs": ["vpc-0d07ab86e0611dda5"],
+        }
+        assert len(accepted) == 1
+
+    def test_unexpected_describe_error_propagates(self):
+        ctx, ec2 = self._ctx(state=None)
+        ec2.describe_vpc_endpoints.side_effect = ClientError(
+            {"Error": {"Code": "UnauthorizedOperation", "Message": "denied"}},
+            "DescribeVpcEndpoints",
+        )
+        with pytest.raises(ClientError):
+            ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+                ctx, self._inventory({"arn": self._ARN})
+            )
+
+    def test_input_inventory_is_not_mutated(self):
+        ctx, _ec2 = self._ctx(state=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": {}})
+        snapshot = json.loads(json.dumps(inventory))
+        ownership_vpc_endpoints._strip_deleted_vpc_endpoints(ctx, inventory)
+        assert inventory == snapshot
+
+
 class TestProjectTargetGroupScanner:
     def test_controller_cluster_tag_owns_orphan_target_group(self):
         client = MagicMock()
@@ -6365,6 +6533,8 @@ class TestActionBaselineCheckpointPurity:
         accepted = result["accepted_expired_dynamodb_streams"]
         assert len(accepted) == 1
         assert accepted[0]["arn"] == stream_arn
+        assert result["accepted_deleted_vpc_endpoints"] == []
+        assert "accepted_deleted_vpc_endpoints" not in ctx.checkpoint.baseline
         # The persisted checkpoint is the pure capture — byte-for-byte what
         # compare_baseline will re-capture against after teardown.
         assert ctx.checkpoint.baseline == self._BASELINE

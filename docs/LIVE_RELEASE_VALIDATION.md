@@ -229,6 +229,8 @@ They are retained because ECR has no conditional repository or tag deletion prim
 
 One further residual class is accepted with evidence in both `baseline` and `final-inventory`: DynamoDB streams of deleted tables. Deleting a table leaves its stream readable (`DISABLED`) for roughly 24 hours, there is no delete API for it, and the Resource Groups Tagging API keeps returning its ARN, so a prior run's correctly destroyed `gco-*` table would otherwise block the next run's clean-account gate. A tagged stream ARN is stripped only after DynamoDB itself confirms the parent table absent (`DescribeTable` → `ResourceNotFoundException`); a live table keeps its stream entry as genuine residue. Every acceptance is reported as `accepted_expired_dynamodb_streams` with the table check and observed stream status.
 
+The same treatment applies to VPC endpoints. The Resource Groups Tagging API is an index that lags deletion by minutes: the regional stack's S3 and DynamoDB gateway endpoints are removed with their stack, yet the index kept returning both ARNs — stack tags intact — when `final-inventory` ran seconds later, while EC2 already reported them not found. A tagged `vpc-endpoint/…` ARN in the expected account and Region is stripped only after `DescribeVpcEndpoints` confirms the endpoint absent or already `deleting`/`deleted`; an endpoint EC2 still reports as `available` (or any other live state) stays as genuine residue. Every acceptance is reported as `accepted_deleted_vpc_endpoints` with the EC2 state observed.
+
 If the local process is killed before cleanup finishes:
 
 1. Do not start a fresh run to adopt or delete the remaining stacks.
