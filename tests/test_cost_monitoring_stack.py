@@ -30,7 +30,9 @@ ACCOUNT = "123456789012"
 MONITORING_REGION = "us-east-2"
 
 
-def _synth(*, cost_monitoring_enabled: bool = True) -> assertions.Template:
+def _synth(
+    *, cost_monitoring_enabled: bool = True, regions: tuple[str, ...] = ("us-east-1", "us-west-2")
+) -> assertions.Template:
     from gco.stacks.monitoring_stack import GCOMonitoringStack
 
     app = cdk.App()
@@ -39,10 +41,7 @@ def _synth(*, cost_monitoring_enabled: bool = True) -> assertions.Template:
         "TestCostMonitoringStack",
         config=MockConfigLoader(cost_monitoring_enabled=cost_monitoring_enabled),
         global_stack=create_mock_global_stack(),
-        regional_stacks=[
-            create_mock_regional_stack("us-east-1"),
-            create_mock_regional_stack("us-west-2"),
-        ],
+        regional_stacks=[create_mock_regional_stack(region) for region in regions],
         api_gateway_stack=create_mock_api_gateway_stack(),
         env=cdk.Environment(account=ACCOUNT, region=MONITORING_REGION),
     )
@@ -201,6 +200,43 @@ class TestCostReportBucket:
         bucket = _cost_report_bucket(template)
         logging = bucket["Properties"]["LoggingConfiguration"]
         assert logging["LogFilePrefix"] == "cost-reports/"
+
+
+class TestNoRegionalCostMonitors:
+    """A monitoring stack synthesized without regional stacks grants nobody.
+
+    A principal-based statement with an empty principal list is invalid
+    CloudFormation, so the stack must omit the two grants entirely rather
+    than render them empty — while the rest of the cost pipeline (bucket,
+    key, published identity) is unaffected.
+    """
+
+    @pytest.fixture(scope="class")
+    def lonely_template(self) -> assertions.Template:
+        return _synth(regions=())
+
+    def test_bucket_and_key_grants_are_omitted(self, lonely_template):
+        sids = {
+            statement.get("Sid")
+            for policy in lonely_template.find_resources("AWS::S3::BucketPolicy").values()
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        }
+        assert "AllowRegionalCostMonitorReports" not in sids
+        assert "DenyInsecureTransport" in sids
+        (key,) = lonely_template.find_resources("AWS::KMS::Key").values()
+        key_sids = set(_statements_by_sid(key["Properties"]["KeyPolicy"]))
+        assert "AllowRegionalCostMonitorsViaS3" not in key_sids
+        assert "AllowS3ServiceEncryptDecrypt" in key_sids
+
+    def test_bucket_identity_is_still_published(self, lonely_template):
+        from gco.stacks.constants import cost_report_ssm_parameter_prefix
+
+        names = {
+            param["Properties"]["Name"]
+            for param in lonely_template.find_resources("AWS::SSM::Parameter").values()
+        }
+        prefix = cost_report_ssm_parameter_prefix("gco-test")
+        assert {f"{prefix}/name", f"{prefix}/arn", f"{prefix}/region"} <= names
 
 
 def _bucket_logical_id(template: assertions.Template) -> str:
