@@ -16,6 +16,14 @@ Report object keys for scheduled windows are **deterministic** — derived only
 from the window bounds — so a rollout overlap or retry can never produce two
 objects for one window: concurrent writers converge on the same key and the
 last write wins with identical content.
+
+The bucket itself is *discovered*, not configured: its CloudFormation-generated
+name is published by the monitoring stack as an SSM parameter in the monitoring
+region (``COST_REPORT_BUCKET_PARAMETER`` / ``COST_REPORT_BUCKET_PARAMETER_REGION``),
+and that stack deploys after the regional stack this service runs in. Until the
+parameter exists the scheduled pass skips and the API answers 503; nothing here
+ever reconstructs a bucket name. ``COST_REPORT_BUCKET`` remains an explicit
+override for kind/CI.
 """
 
 from __future__ import annotations
@@ -24,7 +32,9 @@ import io
 import logging
 import math
 import os
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -77,6 +87,111 @@ class OpenCostUnavailableError(RuntimeError):
 
 class ReportWriteError(RuntimeError):
     """Raised when a generated report cannot be persisted to S3."""
+
+
+class CostReportBucketUnavailableError(RuntimeError):
+    """Raised while the cost report bucket's identity is not yet resolvable.
+
+    Expected on a fresh deploy-all: the regional cost-monitor boots before the
+    monitoring stack publishes the bucket. Callers treat it as "not ready yet"
+    (skip the scheduled pass, answer HTTP 503) rather than as a write failure.
+    """
+
+
+#: How long a resolved bucket name is served before SSM is consulted again.
+#: A monitoring-stack redeploy that replaces the bucket updates the parameter;
+#: one GetParameter per refresh keeps the service converging on it.
+DEFAULT_BUCKET_REFRESH_SECONDS = 900.0
+
+
+class CostReportBucketLocator:
+    """Resolve the cost report bucket name from its published SSM parameter.
+
+    The monitoring stack writes ``/<project>/cost-report-bucket/name`` in the
+    monitoring region; the regional cost-monitor role holds ``ssm:GetParameter``
+    on exactly that parameter. Resolution is lazy and cached: the first
+    successful read is served for ``refresh_seconds``, a refresh that fails
+    keeps serving the last known name (a transient SSM error must not stall
+    report writes), and a read that never succeeded raises
+    :class:`CostReportBucketUnavailableError` so callers can back off.
+    """
+
+    def __init__(
+        self,
+        parameter_name: str,
+        region: str,
+        *,
+        ssm_client: Any | None = None,
+        refresh_seconds: float = DEFAULT_BUCKET_REFRESH_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not parameter_name.strip():
+            raise ValueError("parameter_name must not be empty")
+        if not region.strip():
+            raise ValueError("region must not be empty")
+        self.parameter_name = parameter_name
+        self.region = region
+        self.refresh_seconds = max(float(refresh_seconds), 0.0)
+        self._clock = clock
+        self._ssm = ssm_client or boto3.client(
+            "ssm",
+            region_name=region,
+            config=Config(
+                connect_timeout=5,
+                read_timeout=10,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
+        self._cached: str | None = None
+        self._cached_at: float | None = None
+
+    @property
+    def cached(self) -> str | None:
+        """The last successfully resolved bucket name, or ``None`` before one."""
+        return self._cached
+
+    def resolve(self) -> str:
+        """Return the bucket name, reading SSM when the cache is empty or stale."""
+        now = self._clock()
+        if (
+            self._cached is not None
+            and self._cached_at is not None
+            and now - self._cached_at < self.refresh_seconds
+        ):
+            return self._cached
+        try:
+            response = self._ssm.get_parameter(Name=self.parameter_name)
+        except Exception as exc:  # noqa: BLE001 - absence and transport errors converge
+            if self._cached is not None:
+                logger.warning(
+                    "Refreshing cost report bucket from %s (%s) failed; keeping %s: %s",
+                    self.parameter_name,
+                    self.region,
+                    self._cached,
+                    exc,
+                )
+                self._cached_at = now
+                return self._cached
+            raise CostReportBucketUnavailableError(
+                f"Cost report bucket parameter {self.parameter_name} in {self.region} "
+                f"is not readable yet: {exc}"
+            ) from exc
+        parameter = response.get("Parameter") if isinstance(response, dict) else None
+        value = str((parameter or {}).get("Value") or "").strip()
+        if not value:
+            raise CostReportBucketUnavailableError(
+                f"Cost report bucket parameter {self.parameter_name} in {self.region} is empty"
+            )
+        if value != self._cached:
+            logger.info(
+                "Resolved cost report bucket %s from %s (%s)",
+                value,
+                self.parameter_name,
+                self.region,
+            )
+        self._cached = value
+        self._cached_at = now
+        return value
 
 
 def _compact_ts(moment: datetime) -> str:
@@ -317,21 +432,30 @@ def aligned_window(now: datetime, interval_minutes: int) -> tuple[datetime, date
 
 
 class CostMonitor:
-    """Generates OpenCost allocation reports and persists them to S3."""
+    """Generates OpenCost allocation reports and persists them to S3.
+
+    The destination bucket is either fixed (``bucket``, the kind/CI override)
+    or discovered through a :class:`CostReportBucketLocator`; exactly one of
+    the two must be supplied.
+    """
 
     def __init__(
         self,
         *,
         region: str,
         cluster: str,
-        bucket: str,
         opencost: OpenCostClient,
+        bucket: str | None = None,
+        bucket_locator: CostReportBucketLocator | None = None,
         report_interval_minutes: int = 60,
         s3_client: Any | None = None,
     ) -> None:
+        if (bucket is None) == (bucket_locator is None):
+            raise ValueError("exactly one of bucket or bucket_locator is required")
         self.region = region
         self.cluster = cluster
-        self.bucket = bucket
+        self._bucket = bucket
+        self._bucket_locator = bucket_locator
         self.opencost = opencost
         self.report_interval_minutes = min(max(int(report_interval_minutes), 5), 1_440)
         self._s3 = s3_client or boto3.client(
@@ -344,6 +468,37 @@ class CostMonitor:
         )
         self.last_scheduled_report: dict[str, Any] | None = None
         self.last_error: str | None = None
+
+    # ------------------------------------------------------------------
+    # Bucket identity
+    # ------------------------------------------------------------------
+
+    @property
+    def bucket(self) -> str | None:
+        """The report bucket, or ``None`` until SSM discovery has succeeded."""
+        if self._bucket is not None:
+            return self._bucket
+        assert self._bucket_locator is not None
+        return self._bucket_locator.cached
+
+    @property
+    def bucket_source(self) -> str:
+        """``"environment"`` for a fixed bucket, ``"ssm"`` for discovery."""
+        return "environment" if self._bucket is not None else "ssm"
+
+    @property
+    def bucket_parameter(self) -> str | None:
+        """The SSM parameter discovery reads, or ``None`` for a fixed bucket."""
+        if self._bucket_locator is None:
+            return None
+        return self._bucket_locator.parameter_name
+
+    def _resolve_bucket(self) -> str:
+        """Return the bucket to use now, raising while it is undiscoverable."""
+        if self._bucket is not None:
+            return self._bucket
+        assert self._bucket_locator is not None
+        return self._bucket_locator.resolve()
 
     # ------------------------------------------------------------------
     # Report generation
@@ -370,6 +525,9 @@ class CostMonitor:
         if window_end - window_start < timedelta(minutes=_MIN_WINDOW_MINUTES):
             raise ValueError(f"report windows must span at least {_MIN_WINDOW_MINUTES} minutes")
 
+        # Resolve the destination before querying OpenCost: an undiscoverable
+        # bucket is a "not ready" signal and must not cost an allocation query.
+        bucket = self._resolve_bucket()
         allocations = self.opencost.get_allocation(window_start, window_end)
         rows = allocations_to_rows(
             allocations,
@@ -384,7 +542,7 @@ class CostMonitor:
         )
         payload = rows_to_parquet_bytes(rows)
         try:
-            self._s3.put_object(Bucket=self.bucket, Key=key, Body=payload)
+            self._s3.put_object(Bucket=bucket, Key=key, Body=payload)
         except Exception as exc:  # noqa: BLE001 - boto surfaces many shapes
             raise ReportWriteError(f"Failed to write cost report to S3: {exc}") from exc
 
@@ -402,13 +560,22 @@ class CostMonitor:
 
         Skips (returns ``None``) when that window's object already exists —
         the previous pass, or another replica during a rollout, already
-        persisted it. Failures update ``last_error`` and re-raise so the
-        caller's loop logs and retries on the next tick.
+        persisted it — and when the bucket has not been published yet (the
+        monitoring stack deploys after this region; ``last_error`` records
+        the wait so ``status()`` explains the missing reports). Other failures
+        update ``last_error`` and re-raise so the caller's loop logs and
+        retries on the next tick.
         """
         moment = now or datetime.now(UTC)
         window_start, window_end = aligned_window(moment, self.report_interval_minutes)
         key = scheduled_report_key(self.region, window_start, window_end)
-        if self._object_exists(key):
+        try:
+            bucket = self._resolve_bucket()
+        except CostReportBucketUnavailableError as exc:
+            self.last_error = str(exc)
+            logger.info("Cost report bucket not published yet; skipping scheduled pass: %s", exc)
+            return None
+        if self._object_exists(bucket, key):
             logger.debug("Scheduled cost report already present: %s", key)
             return None
         try:
@@ -426,9 +593,9 @@ class CostMonitor:
         )
         return result
 
-    def _object_exists(self, key: str) -> bool:
+    def _object_exists(self, bucket: str, key: str) -> bool:
         try:
-            self._s3.head_object(Bucket=self.bucket, Key=key)
+            self._s3.head_object(Bucket=bucket, Key=key)
         except Exception:  # noqa: BLE001 - 404 and transport errors both mean "write it"
             return False
         return True
@@ -445,9 +612,10 @@ class CostMonitor:
             else f"{SCHEDULED_PREFIX}/region={self.region}/"
         )
         bounded_limit = min(max(int(limit), 1), 1_000)
+        bucket = self._resolve_bucket()
         paginator = self._s3.get_paginator("list_objects_v2")
         objects: list[dict[str, Any]] = []
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for entry in page.get("Contents", []):
                 objects.append(
                     {
@@ -487,6 +655,8 @@ class CostMonitor:
             "region": self.region,
             "cluster": self.cluster,
             "bucket": self.bucket,
+            "bucket_source": self.bucket_source,
+            "bucket_parameter": self.bucket_parameter,
             "report_interval_minutes": self.report_interval_minutes,
             "opencost_healthy": opencost_healthy,
             "opencost_returning_data": returning_data,
@@ -498,13 +668,27 @@ class CostMonitor:
 
 
 def create_cost_monitor_from_env() -> CostMonitor:
-    """Build a :class:`CostMonitor` from the Deployment's environment."""
-    bucket = os.getenv("COST_REPORT_BUCKET", "")
-    if not bucket:
-        raise RuntimeError("COST_REPORT_BUCKET environment variable is required")
+    """Build a :class:`CostMonitor` from the Deployment's environment.
+
+    ``COST_REPORT_BUCKET`` (explicit name) wins when set; otherwise
+    ``COST_REPORT_BUCKET_PARAMETER`` names the SSM parameter the monitoring
+    stack publishes, read in ``COST_REPORT_BUCKET_PARAMETER_REGION`` (defaults
+    to this region). Discovery is lazy, so constructing the monitor never
+    touches AWS.
+    """
     region = os.getenv("REGION") or os.getenv("AWS_REGION", "")
     if not region:
         raise RuntimeError("REGION environment variable is required")
+    bucket = os.getenv("COST_REPORT_BUCKET", "").strip() or None
+    bucket_locator: CostReportBucketLocator | None = None
+    if bucket is None:
+        parameter_name = os.getenv("COST_REPORT_BUCKET_PARAMETER", "").strip()
+        if not parameter_name:
+            raise RuntimeError(
+                "COST_REPORT_BUCKET or COST_REPORT_BUCKET_PARAMETER environment variable is required"
+            )
+        parameter_region = os.getenv("COST_REPORT_BUCKET_PARAMETER_REGION", "").strip() or region
+        bucket_locator = CostReportBucketLocator(parameter_name, parameter_region)
     cluster = os.getenv("CLUSTER_NAME", f"gco-{region}")
     base_url = os.getenv(
         "OPENCOST_BASE_URL",
@@ -518,6 +702,7 @@ def create_cost_monitor_from_env() -> CostMonitor:
         region=region,
         cluster=cluster,
         bucket=bucket,
+        bucket_locator=bucket_locator,
         opencost=OpenCostClient(base_url),
         report_interval_minutes=interval,
     )

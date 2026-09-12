@@ -13,6 +13,10 @@ The service is cluster-internal (ClusterIP, default-deny ingress except the
 manifest processor): the *authenticated* public surface is the manifest API's
 ``/api/v1/cost/*`` router, which proxies here. A background task writes the
 scheduled interval reports.
+
+The report bucket is discovered from SSM (see :mod:`gco.services.cost_monitor`);
+until the monitoring stack has published it, the report endpoints answer 503
+and ``/internal/status`` shows ``bucket: null`` with the wait in ``last_error``.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from gco.services.cost_monitor import (
     CostMonitor,
+    CostReportBucketUnavailableError,
     OpenCostUnavailableError,
     ReportWriteError,
     create_cost_monitor_from_env,
@@ -157,6 +162,8 @@ async def list_reports(
     monitor = _check_monitor()
     try:
         reports = await asyncio.to_thread(monitor.list_reports, adhoc=adhoc, limit=limit)
+    except CostReportBucketUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surface S3 failures as 502
         raise HTTPException(status_code=502, detail=f"Failed to list reports: {exc}") from exc
     return {
@@ -182,7 +189,7 @@ async def generate_adhoc_report(request: AdhocReportRequest) -> dict[str, Any]:
             adhoc=True,
             include_rows=request.include_rows,
         )
-    except OpenCostUnavailableError as exc:
+    except (CostReportBucketUnavailableError, OpenCostUnavailableError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ReportWriteError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
