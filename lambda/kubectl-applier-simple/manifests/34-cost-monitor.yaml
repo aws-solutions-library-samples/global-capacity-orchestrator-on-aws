@@ -181,7 +181,12 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: 80
+    # Same number as the container port on purpose: the VPC CNI's network
+    # policy enforcement admits Service traffic reliably only when the
+    # Service port equals the container port (EKS network policy
+    # considerations), and the manifest processor reaches this Service
+    # through an egress rule that names port 8080.
+    - port: 8080
       targetPort: http
       protocol: TCP
       name: http
