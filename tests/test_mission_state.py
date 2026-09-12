@@ -21,9 +21,9 @@ argument). Two invariants drive the bulk of these tests:
 
 The remaining tests cover POSIX permission tightening, status-filtered
 listing, and atomic deletion of the session and its sibling
-``.report.json``. A skip-marked placeholder for the DynamoDB backend is
-included so ``pytest -v`` shows the deferred coverage explicitly,
-matching the task-list directive in slice 3.3.
+``.report.json``. The DynamoDB backend's number conversions are pinned
+here; the backend itself runs against the Floci emulator in
+``tests/test_floci_mission_state.py``.
 """
 
 from __future__ import annotations
@@ -268,20 +268,65 @@ def test_delete_session_removes_session_and_report(
 
 
 # ---------------------------------------------------------------------------
-# DynamoDB backend placeholder
+# DynamoDB backend: the wire conversions (the backend itself runs for real in
+# tests/test_floci_mission_state.py against the Floci emulator)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="DynamoDB backend smoke-tested separately")
-def test_dynamodb_backend_smoke() -> None:
-    """Placeholder so the deferred DynamoDB coverage is visible in pytest output.
+def test_dynamodb_item_conversion_round_trips_a_session_with_floats() -> None:
+    """Floats become Decimals on the way in and come back as floats.
 
-    The real ``DynamoDBBackend`` is exercised by an AWS-credentialed
-    smoke test outside this PR's scope. The class still has to import
-    cleanly here so the global stack's CDK wiring can reference its
-    type, which is verified by simply importing the module at the top
-    of this file.
+    The boto3 resource API rejects ``float`` outright, and a session
+    carries floats in criterion targets and observed metrics; the first
+    DynamoDB save of a real session used to fail with ``TypeError: Float
+    types are not supported``. Integral numbers must come back as ``int``
+    (``version`` is compared against an ``int`` schema constant) and
+    booleans must never be mistaken for numbers.
     """
+    from decimal import Decimal
+
+    from mission.state import _from_dynamodb_item, _to_dynamodb_item
+
+    session = _make_session()
+    session["iterations"] = [
+        {"iteration": 1, "observed": {"latency_p95_ms": 312.5, "healthy": True, "errors": 0}}
+    ]
+
+    stored = _to_dynamodb_item(session)
+
+    assert stored["criteria"][0]["target"] == Decimal("250.0")
+    assert isinstance(stored["criteria"][0]["target"], Decimal)
+    assert stored["iterations"][0]["observed"]["latency_p95_ms"] == Decimal("312.5")
+    assert stored["iterations"][0]["observed"]["healthy"] is True
+    assert stored["version"] == SCHEMA_VERSION and isinstance(stored["version"], int)
+    assert stored["use_sampling"] is False
+
+    # What the resource API hands back: through boto3's own (de)serializer,
+    # every number — integral or not — is a Decimal.
+    from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+
+    from_wire = TypeDeserializer().deserialize(TypeSerializer().serialize(stored))
+    assert isinstance(from_wire["version"], Decimal)
+    restored = _from_dynamodb_item(from_wire)
+
+    assert restored == session
+    assert isinstance(restored["version"], int)
+    # Integral numbers come back as int whatever they were written as (250.0
+    # reads as 250, which compares and serializes identically); anything with
+    # a fractional part is a float again — never a Decimal either way.
+    assert type(restored["criteria"][0]["target"]) is int
+    assert type(restored["iterations"][0]["observed"]["latency_p95_ms"]) is float
+    assert isinstance(restored["iterations"][0]["observed"]["errors"], int)
+    assert restored["iterations"][0]["observed"]["healthy"] is True
+    json.dumps(restored)  # a loaded session must serialize like a filesystem one
+
+
+def test_dynamodb_item_conversion_leaves_non_numeric_values_alone() -> None:
+    from mission.state import _from_dynamodb_item, _to_dynamodb_item
+
+    payload = {"text": "unchanged", "none": None, "nested": [{"deep": ("tuple", 1)}]}
+    assert _to_dynamodb_item(payload) == payload
+    assert _from_dynamodb_item(payload) == payload
 
 
 # ---------------------------------------------------------------------------
