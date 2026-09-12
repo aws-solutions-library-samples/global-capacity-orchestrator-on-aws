@@ -4,9 +4,13 @@ Validates through the same authenticated API surface operators use: each
 Region's ``/api/v1/cost/status`` must report a healthy OpenCost that is
 returning allocation data, and an ad-hoc ``/api/v1/cost/reports`` request
 must produce a Parquet object that is then confirmed present in the central
-cost report bucket. Data readiness is polled with a bounded deadline because
-a freshly-deployed Prometheus needs a few scrape cycles before OpenCost can
-answer with non-empty allocations.
+cost report bucket. The bucket the service reports is compared against the
+identity the monitoring stack published to SSM (the bucket carries a
+CloudFormation-generated name; nothing reconstructs it), which also proves
+the runtime discovery the regional cost-monitor performs resolved the same
+bucket the operator surface does. Data readiness is polled with a bounded
+deadline because a freshly-deployed Prometheus needs a few scrape cycles
+before OpenCost can answer with non-empty allocations.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import re
 import time
 from typing import Any
 
-from gco.stacks.constants import COST_REPORT_ADHOC_PREFIX, cost_report_bucket_name
+from gco.stacks.constants import COST_REPORT_ADHOC_PREFIX, cost_report_ssm_parameter_prefix
 
 from ..checks.jobs import _response_json
 from ..context import _job_transport_region
@@ -82,11 +86,29 @@ def _is_exact_bridge_timeout_evidence(status_code: int, response_text: str) -> b
 
 
 def _expected_report_bucket(ctx: RunContext) -> str:
-    return cost_report_bucket_name(
-        ctx.config.project_name,
-        ctx.settings.expected_account,
-        _monitoring_region(ctx),
-    )
+    """The cost bucket the monitoring stack published, read from SSM.
+
+    The bucket's physical name is CloudFormation-generated, so the published
+    ``<prefix>/name`` parameter in the monitoring region is the only
+    authority for it — the same parameter the regional cost-monitor services
+    resolve at runtime. Any failure to read it fails validation: a report
+    whose bucket cannot be matched against the published identity is not
+    evidence.
+    """
+    region = _monitoring_region(ctx)
+    parameter_name = f"{cost_report_ssm_parameter_prefix(ctx.config.project_name)}/name"
+    ssm = ctx.session.client("ssm", region_name=region)
+    try:
+        response = ssm.get_parameter(Name=parameter_name)
+    except Exception as exc:  # noqa: BLE001 - absence and access failures both fail validation
+        raise RuntimeError(
+            f"Cost report bucket parameter {parameter_name} in {region} is not readable: {exc}"
+        ) from exc
+    parameter = response.get("Parameter") if isinstance(response, dict) else None
+    value = str((parameter or {}).get("Value") or "").strip()
+    if not value:
+        raise RuntimeError(f"Cost report bucket parameter {parameter_name} in {region} is empty")
+    return value
 
 
 def _validated_completed_report(

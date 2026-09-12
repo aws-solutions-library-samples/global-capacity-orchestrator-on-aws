@@ -69,6 +69,11 @@ def _response(
     return response
 
 
+#: The cost report bucket as the monitoring stack publishes it (CloudFormation-
+#: generated name); the OpenCost check compares API-reported buckets against it.
+PUBLISHED_COST_REPORT_BUCKET = "gco-live-cost-reports-123456789012-us-east-1"
+
+
 def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
     checkpoint = SimpleNamespace(
         state=state or {},
@@ -103,6 +108,12 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
         job_manager=MagicMock(),
         report=SimpleNamespace(final_inventory={}),
     )
+    # The monitoring stack publishes the CloudFormation-named cost bucket to
+    # SSM; the OpenCost check reads it through the shared client mock. Tests
+    # that replace ``session.client`` install their own service mocks.
+    context.session.client.return_value.get_parameter.return_value = {
+        "Parameter": {"Value": PUBLISHED_COST_REPORT_BUCKET}
+    }
     context.persist = MagicMock()
     context.persist_callback = MagicMock()
     context.prepare_job_submission = MagicMock()
