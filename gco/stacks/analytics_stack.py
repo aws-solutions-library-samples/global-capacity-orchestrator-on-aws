@@ -291,17 +291,22 @@ class GCOAnalyticsStack(Stack):
     def _create_studio_only_bucket(self) -> None:
         """Create ``Studio_Only_Bucket`` for notebook-private scratch + outputs.
 
-        Named ``<project_name>-analytics-studio-<account>-<region>`` so the
-        cdk-nag deny-list assertion
-        (``arn:<partition>:s3:::<project_name>-analytics-studio-*``) stays in
-        lockstep, and two deployments in one account+region do not collide. KMS-encrypted with ``self.kms_key``; every access path goes
-        through the ``SageMaker_Execution_Role`` grant — no other principal
-        is granted access.
+        The physical name is CloudFormation-generated
+        (``<stack>-studioonlybucket…``): S3 bucket names are a global namespace
+        and a deleted name is not reliably reusable, so a fixed
+        project/account/region name would make every destroy-and-redeploy a
+        collision hazard. Nothing needs to reconstruct the name — the only
+        grant is the ``SageMaker_Execution_Role`` grant on the construct's own
+        ARN, and the CLI resolves the bucket from this stack's resources. The
+        job-pod isolation property (``tests/test_analytics_bucket_isolation_
+        property.py``) classifies grants by construct token, so it does not
+        depend on a name prefix either. KMS-encrypted with ``self.kms_key``;
+        every access path goes through the ``SageMaker_Execution_Role`` grant
+        — no other principal is granted access.
         """
         self.studio_only_bucket = s3.Bucket(
             self,
             "StudioOnlyBucket",
-            bucket_name=f"{self.project_name}-analytics-studio-{self.account}-{self.region}",
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.kms_key,
             bucket_key_enabled=True,
@@ -889,8 +894,8 @@ class GCOAnalyticsStack(Stack):
                         "The SageMaker RW grant on Cluster_Shared_Bucket "
                         "uses an <arn>/* object-key wildcard on the literal "
                         "ARN resolved from SSM. The wildcard covers object "
-                        "keys within the single always-on "
-                        "gco-cluster-shared-<account>-<region> bucket."
+                        "keys within the single always-on cluster-shared "
+                        "bucket (CloudFormation-generated name, published via SSM)."
                     ),
                     "appliesTo": [
                         "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",

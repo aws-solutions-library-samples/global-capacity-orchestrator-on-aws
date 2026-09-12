@@ -32,9 +32,7 @@ from typing import Any
 
 from gco.stacks.regional_stack import _compute_kubectl_regional_shared_replacements
 from tests.test_mooncake_regional_bucket_synthesis import (
-    _ACCOUNT,
     _REGION,
-    _expected_bucket_name,
     _regional_bucket_logical_id,
     _regional_template_json,
 )
@@ -146,6 +144,16 @@ class TestRegionalSharedConfigMapAlwaysPresent:
                 f"the regional bucket must not alias the cluster-shared bucket"
             )
 
-    def test_bucket_name_shape_is_account_and_region_scoped(self) -> None:
-        """Sanity-check the physical name the ConfigMap will carry at deploy time."""
-        assert _expected_bucket_name().endswith(f"-{_ACCOUNT}-{_REGION}")
+    def test_bucket_name_is_resolved_at_deploy_time_not_reconstructed(self) -> None:
+        """The ConfigMap carries the CloudFormation-generated name via ``Ref``.
+
+        A fixed ``<project>-regional-shared-<account>-<region>`` name was a
+        collision hazard in S3's global namespace, so the bucket no longer sets
+        one and nothing may reconstruct it: the replacement must be the
+        bucket's own ``Ref`` token, never a literal string.
+        """
+        template = _regional_template_json()
+        replacements = _image_replacements(template)
+        assert not isinstance(replacements["{{REGIONAL_SHARED_BUCKET}}"], str)
+        bucket = template["Resources"][_regional_bucket_logical_id(template)]
+        assert "BucketName" not in bucket["Properties"]

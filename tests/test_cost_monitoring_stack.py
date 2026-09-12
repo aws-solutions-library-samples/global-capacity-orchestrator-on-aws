@@ -3,11 +3,14 @@ Tests for the cost monitoring resources in gco/stacks/monitoring_stack.py.
 
 Synthesizes GCOMonitoringStack (reusing the mock scaffolding from
 tests/test_monitoring_stack.py) and asserts the cost pipeline half of the
-template: the deterministic bucket name shared with the regional grants, KMS
-encryption + insecure-transport deny, the three lifecycle rules driven by
-cdk.json, the Glue database/table with partition projection matching the
-service's write layout, the Athena workgroup with enforced KMS-encrypted
-results, and complete absence of every cost resource when the toggle is off.
+template: a CloudFormation-generated bucket name (never a reconstructable
+one) published through the ``/<project>/cost-report-bucket/*`` SSM contract,
+the principal-based bucket and key policy grants for every regional
+cost-monitor role, KMS encryption + insecure-transport deny, the three
+lifecycle rules driven by cdk.json, the Glue database/table with partition
+projection matching the service's write layout, the Athena workgroup with
+enforced KMS-encrypted results, and complete absence of every cost resource
+when the toggle is off.
 """
 
 from __future__ import annotations
@@ -51,37 +54,120 @@ def template() -> assertions.Template:
     return _synth(cost_monitoring_enabled=True)
 
 
-class TestCostReportBucket:
-    def test_bucket_name_matches_the_deterministic_constant(self, template):
-        from gco.stacks.constants import cost_report_bucket_name
+EXPECTED_COST_MONITOR_ROLE_ARNS = [
+    "arn:aws:iam::123456789012:role/gco-test-us-east-1-CostMonitorRole",
+    "arn:aws:iam::123456789012:role/gco-test-us-west-2-CostMonitorRole",
+]
 
-        expected = cost_report_bucket_name("gco-test", ACCOUNT, MONITORING_REGION)
-        assert expected == f"gco-test-cost-reports-{ACCOUNT}-{MONITORING_REGION}"
-        template.has_resource_properties("AWS::S3::Bucket", {"BucketName": expected})
+
+def _cost_report_bucket(template: assertions.Template) -> dict:
+    """The primary cost bucket: the one KMS bucket that ships access logs."""
+    buckets = template.find_resources("AWS::S3::Bucket")
+    matches = [
+        bucket for bucket in buckets.values() if "LoggingConfiguration" in bucket["Properties"]
+    ]
+    assert len(matches) == 1, f"expected exactly one logged bucket, found {len(matches)}"
+    return matches[0]
+
+
+def _statements_by_sid(policy_document: dict) -> dict[str, dict]:
+    return {
+        statement["Sid"]: statement
+        for statement in policy_document["Statement"]
+        if "Sid" in statement
+    }
+
+
+class TestCostReportBucket:
+    def test_no_bucket_carries_an_explicit_name(self, template):
+        """S3 names are global and deleted names are not reliably reusable.
+
+        Every bucket in the stack must be CloudFormation-named so a
+        destroy-and-redeploy can never collide with its own previous
+        incarnation (the failure mode that motivated dropping the old
+        ``<project>-cost-reports-<account>-<region>`` name).
+        """
+        buckets = template.find_resources("AWS::S3::Bucket")
+        assert len(buckets) == 2
+        for bucket in buckets.values():
+            assert "BucketName" not in bucket["Properties"]
+
+    def test_bucket_identity_is_published_through_ssm(self, template):
+        from gco.stacks.constants import cost_report_ssm_parameter_prefix
+
+        prefix = cost_report_ssm_parameter_prefix("gco-test")
+        assert prefix == "/gco-test/cost-report-bucket"
+        parameters = {
+            param["Properties"]["Name"]: param["Properties"]
+            for param in template.find_resources("AWS::SSM::Parameter").values()
+        }
+        assert {f"{prefix}/name", f"{prefix}/arn", f"{prefix}/region"} <= set(parameters)
+        (bucket_logical_id,) = [
+            logical_id
+            for logical_id, bucket in template.find_resources("AWS::S3::Bucket").items()
+            if "LoggingConfiguration" in bucket["Properties"]
+        ]
+        assert parameters[f"{prefix}/name"]["Value"] == {"Ref": bucket_logical_id}
+        assert parameters[f"{prefix}/arn"]["Value"] == {"Fn::GetAtt": [bucket_logical_id, "Arn"]}
+        assert parameters[f"{prefix}/region"]["Value"] == MONITORING_REGION
+
+    def test_bucket_policy_admits_every_regional_cost_monitor_role(self, template):
+        policies = template.find_resources("AWS::S3::BucketPolicy")
+        grants = [
+            statement
+            for policy in policies.values()
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+            if statement.get("Sid") == "AllowRegionalCostMonitorReports"
+        ]
+        (grant,) = grants
+        assert grant["Effect"] == "Allow"
+        assert sorted(grant["Action"]) == [
+            "s3:GetBucketLocation",
+            "s3:GetObject",
+            "s3:ListBucket",
+            "s3:PutObject",
+        ]
+        assert grant["Principal"] == {"AWS": EXPECTED_COST_MONITOR_ROLE_ARNS}
+        # Bucket + object-key space of this bucket only.
+        resources = grant["Resource"]
+        assert len(resources) == 2
+        assert resources[0] == {"Fn::GetAtt": [_bucket_logical_id(template), "Arn"]}
+        assert resources[1]["Fn::Join"][1][0] == {
+            "Fn::GetAtt": [_bucket_logical_id(template), "Arn"]
+        }
+        assert resources[1]["Fn::Join"][1][1] == "/*"
+
+    def test_bucket_policy_has_no_wildcard_principal_allow(self, template):
+        policies = template.find_resources("AWS::S3::BucketPolicy")
+        for policy in policies.values():
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+                if statement["Effect"] == "Allow":
+                    assert statement["Principal"] != {"AWS": "*"}
+                    assert statement["Principal"] != "*"
+
+    def test_key_policy_admits_the_roles_only_through_s3_in_this_region(self, template):
+        keys = template.find_resources("AWS::KMS::Key")
+        (key,) = keys.values()
+        assert key["Properties"]["EnableKeyRotation"] is True
+        assert key["Properties"]["PendingWindowInDays"] == 7
+        statements = _statements_by_sid(key["Properties"]["KeyPolicy"])
+        grant = statements["AllowRegionalCostMonitorsViaS3"]
+        assert grant["Effect"] == "Allow"
+        assert sorted(grant["Action"]) == ["kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKey"]
+        assert grant["Principal"] == {"AWS": EXPECTED_COST_MONITOR_ROLE_ARNS}
+        via_service = grant["Condition"]["StringEquals"]["kms:ViaService"]
+        # Rendered with the URL-suffix pseudo parameter: s3.<region>.<suffix>.
+        assert via_service["Fn::Join"][1][0] == f"s3.{MONITORING_REGION}."
+        assert "AllowS3ServiceEncryptDecrypt" in statements
 
     def test_bucket_is_kms_encrypted_with_rotating_cmk(self, template):
-        template.has_resource_properties(
-            "AWS::KMS::Key",
-            {
-                "EnableKeyRotation": True,
-                "PendingWindowInDays": 7,
-            },
-        )
-        buckets = template.find_resources(
-            "AWS::S3::Bucket",
-            {"Properties": {"BucketName": f"gco-test-cost-reports-{ACCOUNT}-{MONITORING_REGION}"}},
-        )
-        (bucket,) = buckets.values()
+        bucket = _cost_report_bucket(template)
         sse = bucket["Properties"]["BucketEncryption"]["ServerSideEncryptionConfiguration"]
         assert sse[0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"] == "aws:kms"
         assert sse[0]["BucketKeyEnabled"] is True
 
     def test_lifecycle_rules_carry_the_configured_policy(self, template):
-        buckets = template.find_resources(
-            "AWS::S3::Bucket",
-            {"Properties": {"BucketName": f"gco-test-cost-reports-{ACCOUNT}-{MONITORING_REGION}"}},
-        )
-        (bucket,) = buckets.values()
+        bucket = _cost_report_bucket(template)
         rules = {
             rule["Id"]: rule for rule in bucket["Properties"]["LifecycleConfiguration"]["Rules"]
         }
@@ -112,13 +198,18 @@ class TestCostReportBucket:
         assert "DenyInsecureTransport" in sids
 
     def test_access_logs_bucket_receives_server_access_logs(self, template):
-        buckets = template.find_resources(
-            "AWS::S3::Bucket",
-            {"Properties": {"BucketName": f"gco-test-cost-reports-{ACCOUNT}-{MONITORING_REGION}"}},
-        )
-        (bucket,) = buckets.values()
+        bucket = _cost_report_bucket(template)
         logging = bucket["Properties"]["LoggingConfiguration"]
         assert logging["LogFilePrefix"] == "cost-reports/"
+
+
+def _bucket_logical_id(template: assertions.Template) -> str:
+    (logical_id,) = [
+        logical_id
+        for logical_id, bucket in template.find_resources("AWS::S3::Bucket").items()
+        if "LoggingConfiguration" in bucket["Properties"]
+    ]
+    return logical_id
 
 
 class TestCostAnalytics:
@@ -189,5 +280,6 @@ class TestCostMonitoringDisabled:
         template.resource_count_is("AWS::Athena::WorkGroup", 0)
         template.resource_count_is("AWS::S3::Bucket", 0)
         template.resource_count_is("AWS::KMS::Key", 0)
+        template.resource_count_is("AWS::SSM::Parameter", 0)
         outputs = template.to_json().get("Outputs", {})
         assert "CostReportBucketName" not in outputs

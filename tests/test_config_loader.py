@@ -1814,12 +1814,19 @@ class TestAnalyticsConstants:
         assert not isinstance(STUDIO_PRESIGNED_URL_EXPIRY_SECONDS, bool)
         assert STUDIO_PRESIGNED_URL_EXPIRY_SECONDS > 0
 
-    def test_cluster_shared_bucket_name_prefix(self):
-        """cluster_shared_bucket_name_prefix renders '<project>-cluster-shared' (#139)."""
-        from gco.stacks.constants import cluster_shared_bucket_name_prefix
+    def test_cost_report_ssm_parameter_prefix(self):
+        """cost_report_ssm_parameter_prefix renders '/<project>/cost-report-bucket'."""
+        from gco.stacks.constants import cost_report_ssm_parameter_prefix
 
-        assert cluster_shared_bucket_name_prefix("gco") == "gco-cluster-shared"
-        assert cluster_shared_bucket_name_prefix("acme") == "acme-cluster-shared"
+        assert cost_report_ssm_parameter_prefix("gco") == "/gco/cost-report-bucket"
+        assert cost_report_ssm_parameter_prefix("acme") == "/acme/cost-report-bucket"
+
+    def test_no_bucket_name_helper_survives(self):
+        """Bucket names are CloudFormation-generated; nothing may reconstruct one."""
+        import gco.stacks.constants as constants
+
+        assert not [name for name in dir(constants) if name.endswith("_bucket_name")]
+        assert not [name for name in dir(constants) if name.endswith("_bucket_name_prefix")]
 
     def test_cluster_shared_ssm_parameter_prefix(self):
         """cluster_shared_ssm_parameter_prefix renders '/<project>/cluster-shared-bucket' (#139)."""

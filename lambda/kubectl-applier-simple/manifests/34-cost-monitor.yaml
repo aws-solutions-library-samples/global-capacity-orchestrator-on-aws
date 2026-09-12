@@ -90,8 +90,15 @@ spec:
               value: "{{REGION}}"
             - name: PROJECT_NAME
               value: "{{PROJECT_NAME}}"
-            - name: COST_REPORT_BUCKET
-              value: "{{COST_REPORT_BUCKET}}"
+            # The central cost report bucket has a CloudFormation-generated
+            # name published by the monitoring stack, which deploys after this
+            # region. The service resolves it from this SSM parameter (in the
+            # monitoring region) on every scheduled pass until it exists. An
+            # explicit COST_REPORT_BUCKET, if set, bypasses discovery (kind/CI).
+            - name: COST_REPORT_BUCKET_PARAMETER
+              value: "{{COST_REPORT_BUCKET_PARAMETER}}"
+            - name: COST_REPORT_BUCKET_PARAMETER_REGION
+              value: "{{COST_REPORT_BUCKET_PARAMETER_REGION}}"
             - name: COST_REPORT_INTERVAL_MINUTES
               value: "{{COST_REPORT_INTERVAL_MINUTES}}"
             # Uvicorn drains in-flight report requests for this long after

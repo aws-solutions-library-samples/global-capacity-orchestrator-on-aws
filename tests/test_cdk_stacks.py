@@ -915,6 +915,10 @@ class TestMonitoringStackSynth:
         # attribute when the feature is disabled.
         mock_regional_stack.fsx_file_system = None
         mock_regional_stack.aurora_cluster = None
+        # Admitted by the monitoring stack's cost report bucket/key policies.
+        mock_regional_stack.cost_monitor_role.role_arn = (
+            "arn:aws:iam::123456789012:role/gco-us-east-1-CostMonitorRole"
+        )
         mock_regional_stacks = [mock_regional_stack]
 
         stack = GCOMonitoringStack(

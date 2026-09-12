@@ -86,3 +86,4 @@ it built this way?" questions can be answered from the decision log:
 | [0002](0002-cluster-observability-on-eks-auto-mode.md) | Cluster observability on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) | Accepted |
 | [0003](0003-dedicated-inference-response-streaming-path.md) | Dedicated inference response-streaming path | Accepted |
 | [0004](0004-record-and-sanitize-deployment-lifecycle.md) | Record and sanitize the deployment lifecycle | Accepted |
+| [0005](0005-cloudformation-generated-s3-bucket-names.md) | CloudFormation-generated S3 bucket names | Accepted |

@@ -274,8 +274,9 @@ Changing `project_name` re-scopes all of the following (shown for
 |---|---|
 | CloudFormation stacks | `acme-global`, `acme-api-gateway`, `acme-<region>`, `acme-monitoring` |
 | DynamoDB tables | `acme-jobs`, `acme-job-templates`, `acme-webhooks`, `acme-inference-endpoints`, … |
-| Cluster-shared bucket + SSM | `acme-cluster-shared-<account>-<region>`, `/acme/cluster-shared-bucket/*` |
-| Regional-shared bucket + SSM | `acme-regional-shared-<account>-<region>`, `/acme/regional-shared-bucket/*` |
+| Cluster-shared bucket SSM identity | `/acme/cluster-shared-bucket/*` (the bucket's own name is CloudFormation-generated, e.g. `acme-global-clustersharedbucket…`; see [ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)) |
+| Regional-shared bucket SSM identity | `/acme/regional-shared-bucket/*` (bucket name CloudFormation-generated, `acme-<region>-regionalsharedbucket…`) |
+| Cost report bucket SSM identity | `/acme/cost-report-bucket/*` (bucket name CloudFormation-generated, `acme-monitoring-costreportbucket…`) |
 | SSM registry | `/acme/jobs-table-name`, `/acme/model-bucket-name`, `/acme/alb-hostname-<region>`, … |
 | API Gateway auth secret | `acme/api-gateway-auth-token` |
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
@@ -284,7 +285,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
-| Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
+| Analytics (opt-in) | Studio bucket `acme-analytics-studioonlybucket…` (CloudFormation-generated), SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
 
 The only names intentionally **not** re-scoped are in-cluster Kubernetes object
 names (namespaces such as `gco-jobs` / `gco-system`, service accounts,

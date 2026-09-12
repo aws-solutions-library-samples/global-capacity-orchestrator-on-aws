@@ -136,9 +136,8 @@ from gco.stacks.constants import (
     api_gateway_auth_secret_name,
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
-    cost_report_bucket_name,
+    cost_report_ssm_parameter_prefix,
     parse_k8s_quantity,
-    regional_shared_bucket_name_prefix,
     regional_shared_ssm_parameter_prefix,
 )
 
@@ -2056,7 +2055,7 @@ class GCORegionalStack(Stack):
                 service_account_names=["gco-cost-monitor-sa"],
                 namespaces=["gco-system"],
             )
-            self._grant_cost_report_bucket_to_cost_monitor()
+            self._grant_cost_report_bucket_discovery_to_cost_monitor()
 
         self._create_aws_load_balancer_controller_role()
 
@@ -2797,9 +2796,9 @@ class GCORegionalStack(Stack):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped
-           to ``<shared.arn>`` and ``<shared.arn>/*`` — the bucket-ARN
-           shape uses the ``gco-cluster-shared-*`` prefix that IAM
-           policies scope against.
+           to ``<shared.arn>`` and ``<shared.arn>/*`` — the literal ARN
+           resolved from SSM (the bucket's name is CloudFormation-generated,
+           so no prefix pattern is involved).
         2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by the
            ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` condition —
            ``resources=["*"]`` because the KMS key ARN is not known to this
@@ -2982,11 +2981,15 @@ class GCORegionalStack(Stack):
            delivery work without role-side grants.
         2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
            destination for the primary bucket.
-        3. ``regional_shared_bucket`` — the primary bucket named
-           ``<project_name>-regional-shared-<account>-<region>`` (the prefix
-           from ``regional_shared_bucket_name_prefix(project_name)`` is the
-           stable ARN prefix used by IAM policies and nag assertions).
-           KMS-encrypted with
+        3. ``regional_shared_bucket`` — the primary bucket. Its physical name
+           is CloudFormation-generated (``<stack>-regionalsharedbucket…``):
+           S3 bucket names are a global namespace and a deleted name is not
+           reliably reusable, so a fixed project/account/region name would
+           make every destroy-and-redeploy (and the ``retain`` policy below)
+           a collision hazard. Consumers never reconstruct it — they read the
+           SSM parameters published under
+           ``regional_shared_ssm_parameter_prefix(project_name)`` or the
+           ``gco-regional-shared-bucket`` ConfigMap. KMS-encrypted with
            ``regional_shared_kms_key``, block-public-access on, SSL enforced,
            versioned, destroy-on-teardown.
 
@@ -3091,10 +3094,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Primary general-purpose regional bucket. The name is derived from
-        # ``project_name`` so the bucket and the IAM allow-list assertions
-        # (arn:<partition>:s3:::<project_name>-regional-shared-*) stay in lockstep and
-        # two deployments in the same account+region do not collide.
+        # Primary general-purpose regional bucket. No ``bucket_name``: the
+        # physical name is CloudFormation-generated so a destroy-and-redeploy
+        # (or a retained bucket from an earlier deployment) can never collide
+        # in S3's global namespace; the IAM grants below reference the
+        # construct's ARN token and consumers resolve the name from SSM.
         # `bucket_key_enabled=True` mirrors the central-bucket pattern to
         # reduce per-object KMS request costs.
         project_name = self.config.get_project_name()
@@ -3102,10 +3106,6 @@ class GCORegionalStack(Stack):
         self.regional_shared_bucket = s3.Bucket(
             self,
             "RegionalSharedBucket",
-            bucket_name=(
-                f"{regional_shared_bucket_name_prefix(project_name)}"
-                f"-{self.account}-{self.deployment_region}"
-            ),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.regional_shared_kms_key,
             bucket_key_enabled=True,
@@ -3307,9 +3307,9 @@ class GCORegionalStack(Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": (
                         "The regional bucket RW grant uses an <arn>/* "
-                        "object-key wildcard on the literal "
-                        "gco-regional-shared-<account>-<region> bucket ARN "
-                        "created in this stack. The wildcard covers object "
+                        "object-key wildcard on the literal ARN of the "
+                        "regional-shared bucket created in this stack "
+                        "(CloudFormation-generated name). The wildcard covers object "
                         "keys within a single bucket — this is the standard "
                         "shape for a bucket-scoped RW grant and is what the "
                         "allow-list assertion is written against."
@@ -3321,88 +3321,46 @@ class GCORegionalStack(Stack):
             ],
         )
 
-    def _grant_cost_report_bucket_to_cost_monitor(self) -> None:
-        """Grant the cost-monitor role write access to the cost report bucket.
+    def _cost_report_bucket_parameter_name(self) -> str:
+        """SSM parameter (in the monitoring region) publishing the cost bucket name."""
+        return f"{cost_report_ssm_parameter_prefix(self.config.get_project_name())}/name"
+
+    def _grant_cost_report_bucket_discovery_to_cost_monitor(self) -> None:
+        """Let the cost-monitor role resolve the cost report bucket it writes to.
 
         The bucket lives in ``GCOMonitoringStack`` in the monitoring region,
-        which deploys *after* every regional stack — so no cross-stack
-        reference or SSM read can resolve it here. Its physical name is fully
-        deterministic (``cost_report_bucket_name``), which lets this grant use
-        a literal ARN:
+        which deploys *after* every regional stack, and it carries a
+        CloudFormation-generated physical name — S3 bucket names are a global
+        namespace and a deleted name is not reliably reusable, so nothing
+        reconstructs it from project/account/region any more. That inverts
+        the old grant direction:
 
-        1. S3 object + bucket-level actions (``PutObject``, ``GetObject``,
-           ``ListBucket``, ``GetBucketLocation``) scoped to the literal cost
-           report bucket ARN and its object-key space — and no other bucket.
-           The service writes scheduled/ad-hoc Parquet reports and lists
-           recent report objects for the API surface.
-        2. KMS ``GenerateDataKey`` / ``Decrypt`` / ``DescribeKey`` restricted
-           by ``kms:ViaService`` to S3 in the monitoring region. The bucket's
-           customer-managed key ARN is not knowable from this stack, so the
-           via-service condition provides the scoping — the same pattern the
-           analytics stack uses for the cluster-shared bucket key.
+        1. The monitoring stack publishes the bucket's identity at
+           ``<cost_report_ssm_parameter_prefix>/{name,arn,region}`` and grants
+           every regional cost-monitor role S3 object/bucket actions through
+           the bucket policy and KMS use through the key policy — principal
+           based, so this stack never needs the bucket or key ARN.
+        2. This stack grants the role exactly one permission:
+           ``ssm:GetParameter`` on the ``/name`` parameter, by literal ARN. The
+           service reads it at runtime (``COST_REPORT_BUCKET_PARAMETER`` /
+           ``COST_REPORT_BUCKET_PARAMETER_REGION`` in ``34-cost-monitor.yaml``).
 
-        On a fresh ``deploy-all`` the bucket materializes only after the
-        regional stacks; the cost-monitor service retries its next scheduled
-        write, so the pipeline self-heals without ordering hacks.
+        On a fresh ``deploy-all`` the parameter appears only once monitoring is
+        deployed; the service re-resolves on every scheduled pass, so the
+        pipeline self-heals without ordering hacks. No wildcard remains on the
+        role, so no cdk-nag acknowledgement is needed here.
         """
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         monitoring_region = self.config.get_monitoring_region()
-        bucket_arn = (
-            f"arn:{self.partition}:s3:::"
-            f"{cost_report_bucket_name(self.config.get_project_name(), self.account, monitoring_region)}"
-        )
-
+        parameter_name = self._cost_report_bucket_parameter_name()
         self.cost_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "s3:PutObject",
-                    "s3:GetObject",
-                    "s3:ListBucket",
-                    "s3:GetBucketLocation",
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{monitoring_region}:{self.account}:"
+                    f"parameter{parameter_name}"
                 ],
-                resources=[bucket_arn, f"{bucket_arn}/*"],
             )
-        )
-
-        self.cost_monitor_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "kms:GenerateDataKey",
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                ],
-                resources=["*"],
-                conditions={
-                    "StringEquals": {
-                        "kms:ViaService": f"s3.{monitoring_region}.{self.url_suffix}",
-                    }
-                },
-            )
-        )
-
-        acknowledge_nag_findings(
-            self.cost_monitor_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The cost-monitor S3 grant uses an <arn>/* object-key "
-                        "wildcard on the literal deterministic cost report bucket "
-                        "ARN (one bucket). The KMS statement uses Resource::* "
-                        "because the bucket's customer-managed key is created by "
-                        "the monitoring stack, which deploys after this stack; the "
-                        "kms:ViaService condition restricts use to S3 in the "
-                        "monitoring region."
-                    ),
-                    "appliesTo": [
-                        "Resource::*",
-                        f"Resource::arn:<AWS::Partition>:s3:::{cost_report_bucket_name(self.config.get_project_name(), '<AWS::AccountId>', monitoring_region)}/*",
-                    ],
-                },
-            ],
         )
 
     def _create_kubectl_lambda(self) -> None:
@@ -3816,11 +3774,12 @@ class GCORegionalStack(Stack):
                     "{{COST_MONITORING_ENABLED}}": "true",
                     "{{COST_MONITOR_IMAGE}}": self.cost_monitor_image.image_uri,
                     "{{COST_MONITOR_ROLE_ARN}}": self.cost_monitor_role.role_arn,
-                    "{{COST_REPORT_BUCKET}}": cost_report_bucket_name(
-                        self.config.get_project_name(),
-                        self.account,
-                        self.config.get_monitoring_region(),
-                    ),
+                    # The bucket's CloudFormation-generated name is published by
+                    # the monitoring stack (deployed after this one); the service
+                    # resolves it from SSM at runtime instead of receiving a
+                    # reconstructed name here.
+                    "{{COST_REPORT_BUCKET_PARAMETER}}": self._cost_report_bucket_parameter_name(),
+                    "{{COST_REPORT_BUCKET_PARAMETER_REGION}}": self.config.get_monitoring_region(),
                     "{{COST_REPORT_INTERVAL_MINUTES}}": str(
                         _cost_config["reports"]["interval_minutes"]
                     ),

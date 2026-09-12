@@ -484,7 +484,7 @@ gco inference configure-store my-llm --offload cpu --local-buffer-size 214748364
 
 ### Populating the KV Cache (Cold Tier)
 
-The cold tier auto-targets the always-on general-purpose regional bucket (`gco-regional-shared-<account>-<region>`) and reads/writes under the `mooncake-kv/<endpoint>/` key prefix. You can pre-warm it — upload KV blocks or reusable prompt data your workloads will hit — with a single command:
+The cold tier auto-targets the always-on general-purpose regional bucket (resolved from `/<project>/regional-shared-bucket/name`; the name itself is CloudFormation-generated) and reads/writes under the `mooncake-kv/<endpoint>/` key prefix. You can pre-warm it — upload KV blocks or reusable prompt data your workloads will hit — with a single command:
 
 ```bash
 # Upload a local file or directory into an endpoint's KV-cache cold tier

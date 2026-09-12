@@ -455,6 +455,10 @@ class TestMonitoringStackMethods:
         # skip the section when all regions report None.
         mock_regional_stack.fsx_file_system = None
         mock_regional_stack.aurora_cluster = None
+        # Admitted by the monitoring stack's cost report bucket/key policies.
+        mock_regional_stack.cost_monitor_role.role_arn = (
+            "arn:aws:iam::123456789012:role/gco-us-east-1-CostMonitorRole"
+        )
 
         return mock_global_stack, mock_api_gw_stack, [mock_regional_stack]
 

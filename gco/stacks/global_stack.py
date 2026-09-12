@@ -36,7 +36,6 @@ from constructs import Construct
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
-    cluster_shared_bucket_name_prefix,
     cluster_shared_ssm_parameter_prefix,
 )
 
@@ -2124,13 +2123,16 @@ class GCOGlobalStack(Stack):
            used as ``server_access_logs_bucket`` for the primary bucket. Separate
            from ``model_bucket_access_logs`` so cluster-shared-bucket access logs
            are not commingled with model-bucket logs.
-        2. ``cluster_shared_bucket`` — the primary bucket named
-           ``<project_name>-cluster-shared-<account>-<global-region>`` (the
-           prefix from ``cluster_shared_bucket_name_prefix(project_name)`` is
-           the stable ARN prefix used by IAM policies and nag assertions).
-           KMS-encrypted with
-           ``cluster_shared_kms_key``, block-public-access on, SSL enforced,
-           versioned, destroy-on-teardown.
+        2. ``cluster_shared_bucket`` — the primary bucket. Its physical name
+           is CloudFormation-generated (``<stack>-clustersharedbucket…``): S3
+           bucket names are a global namespace and a deleted name is not
+           reliably reusable, so a fixed project/account/region name would
+           make every destroy-and-redeploy a collision hazard. Consumers never
+           reconstruct it — every regional stack and the analytics stack read
+           the SSM parameters published under
+           ``cluster_shared_ssm_parameter_prefix(project_name)``. KMS-encrypted
+           with ``cluster_shared_kms_key``, block-public-access on, SSL
+           enforced, versioned, destroy-on-teardown.
 
         An explicit ``Deny`` statement for ``aws:SecureTransport=false`` is added
         to the bucket policy independent of ``enforce_ssl=True`` so the deny is
@@ -2172,17 +2174,16 @@ class GCOGlobalStack(Stack):
             ],
         )
 
-        # Primary Cluster_Shared_Bucket. Name is derived from ``project_name``
-        # so the bucket and the IAM allow-list assertion
-        # (arn:aws:s3:::<project_name>-cluster-shared-*) stay in lockstep and
-        # two deployments in the same account+region do not collide.
+        # Primary Cluster_Shared_Bucket. No ``bucket_name``: the physical name
+        # is CloudFormation-generated so a destroy-and-redeploy can never
+        # collide in S3's global namespace (the model bucket has always worked
+        # this way). Downstream grants use the ARN resolved from the SSM
+        # parameters published below, never a reconstructed name.
         # `bucket_key_enabled=True` mirrors the model_bucket pattern to reduce
         # per-object KMS request costs.
-        project_name = self.config.get_project_name()
         self.cluster_shared_bucket = s3.Bucket(
             self,
             "ClusterSharedBucket",
-            bucket_name=f"{cluster_shared_bucket_name_prefix(project_name)}-{self.account}-{self.region}",
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.cluster_shared_kms_key,
             bucket_key_enabled=True,
