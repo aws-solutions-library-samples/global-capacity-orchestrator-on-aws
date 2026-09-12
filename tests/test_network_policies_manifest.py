@@ -363,6 +363,40 @@ class TestJobNamespacePosture:
         handler = (MANIFESTS_DIR.parent / "handler.py").read_text(encoding="utf-8")
         assert f'("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "{name}")' in handler
 
+    def test_the_slinky_operator_is_admitted_to_the_rest_api_from_its_own_namespace(self):
+        """The Slurm operator reconciles NodeSets through slurmrestd.
+
+        It runs in the namespace ``charts.yaml`` installs it into, so the
+        gco-jobs default-deny must carry an ingress rule for exactly that
+        namespace on the REST port; the first live run with enforcement on
+        found every NodeSet reconcile timing out against slurmrestd:6820 and
+        every Slurm job stuck in PENDING. The namespace in the rule must be
+        the one the chart is installed into.
+        """
+        charts = yaml.safe_load(
+            (MANIFESTS_DIR.parent.parent / "helm-installer" / "charts.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        operator_namespace = charts["charts"]["slinky-slurm-operator"]["namespace"]
+        slurm_docs = _stubbed_documents(MANIFESTS_DIR / "post-helm-slurm-network.yaml")
+        policy = _find_netpol(slurm_docs, "allow-slurm-operator-to-restapi", "gco-jobs")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {
+            "matchLabels": {"app.kubernetes.io/part-of": "slurm"}
+        }
+        assert policy["spec"]["policyTypes"] == ["Ingress"]
+        (rule,) = policy["spec"]["ingress"]
+        assert rule["from"] == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": operator_namespace}
+                }
+            }
+        ]
+        assert rule["ports"] == [{"protocol": "TCP", "port": 6820}]
+        assert charts["charts"]["slinky-slurm"]["namespace"] == "gco-jobs"
+
 
 # ─── gco-inference ─────────────────────────────────────────────────
 

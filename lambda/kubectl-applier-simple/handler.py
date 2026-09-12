@@ -706,6 +706,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-to-restapi"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-egress"),
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-operator-to-restapi"),
     ),
     ("{{KUBEFLOW_TRAINER_ENABLED}}", True): (
         ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),

@@ -145,7 +145,7 @@ here from upgraded clusters.
 | `post-helm-kubeflow-trainer-runtimes.yaml` | Kubeflow Trainer `ClusterTrainingRuntime` blueprints (`torch-distributed`), shipped here instead of the chart's kubectl-download hook Job so the bytes are pinned and reviewable — **skipped and pruned when the trainer chart is disabled** (`{{KUBEFLOW_TRAINER_ENABLED}}`) |
 | `post-helm-kueue-default-queues.yaml` | Default Kueue topology for `gco-jobs`: `ResourceFlavor` `gco-default-flavor`, `ClusterQueue` `gco-cluster-queue` (quota from the namespace `ResourceQuota` values) and `LocalQueue` `gco-default`, so a Job labelled `kueue.x-k8s.io/queue-name: gco-default` is admitted without hand-applied queue objects — **skipped and pruned when Kueue is disabled** |
 | `post-helm-mlflow-network.yaml` | `NetworkPolicy` pair letting pods labelled `gco.io/mlflow-client` in `gco-jobs` reach the in-cluster MLflow tracking server on port 5000 through the namespace's default-deny posture — **skipped and pruned when MLflow is disabled** |
-| `post-helm-slurm-network.yaml` | `NetworkPolicy` rules that let slurmctld/slurmd/slurmrestd reach each other and let client pods call the Slurm REST API inside zero-trust `gco-jobs` (the Slinky charts ship none) — **skipped and pruned when Slurm is disabled** |
+| `post-helm-slurm-network.yaml` | `NetworkPolicy` rules that let slurmctld/slurmd/slurmrestd reach each other, let client pods call the Slurm REST API, and admit the Slinky operator's namespace to that API (it reconciles NodeSets through slurmrestd) inside zero-trust `gco-jobs` (the Slinky charts ship none) — **skipped and pruned when Slurm is disabled** |
 
 ## Platform Workload Contract
 
