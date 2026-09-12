@@ -72,8 +72,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-04T04:29:00Z
-# Generated from Git commit: a41926c5b2139d2571c9a9e297a74d70229b3c14
+# Generated at (UTC): 2026-09-12T06:04:03Z
+# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)

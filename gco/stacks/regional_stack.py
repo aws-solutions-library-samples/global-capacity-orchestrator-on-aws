@@ -142,8 +142,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T22:15:15Z
-# Generated from Git commit: 14ba13224fdaf5a82bbcee12270092e39a8201ca
+# Generated at (UTC): 2026-09-12T06:04:03Z
+# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)

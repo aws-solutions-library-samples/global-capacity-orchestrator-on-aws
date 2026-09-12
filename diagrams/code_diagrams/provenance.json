@@ -42,9 +42,9 @@
       "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
     },
     "cli/stacks.py": {
-      "digest": "580215dcb5709015389497b4351aa32beaa9ef2786fa58e3dae9e82b4544403b",
-      "generated_at": "2026-09-08T04:13:50Z",
-      "source_commit": "f3e5b374540636aa07fb57c16ec36a51228dba7f"
+      "digest": "938b969d4d4204d5de8fd08a678ae059cfb99e37f3033416b4a33d1dc35e82ac",
+      "generated_at": "2026-09-12T06:04:03Z",
+      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco/services/api_routes/inference_proxy.py": {
       "digest": "ae18182ce131a19615218376b735358c4daa7b042919b2253b6ef523326d9717",
@@ -112,9 +112,9 @@
       "source_commit": "5d1a9122b6630246e01cafdaf458d11c2da8b4ae"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "035df068e0711692e3735567fc785428763d35bd258006df20e864593918ae7a",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "ed582df2c4b57bf698858f7e3045d7af5b4afade29c64e766ebec17e1d88639a",
+      "generated_at": "2026-09-12T06:04:03Z",
+      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco/stacks/api_gateway_global_stack.py": {
       "digest": "4c8b73858c91de0d903a7c15cd03032dd49f01886e235d65b82fd603b13e542e",
@@ -122,14 +122,14 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/stacks/global_stack.py": {
-      "digest": "82e3991c307647f41e4a976479e7105ebab88cf721977fac9cc97dbb2be5bd7b",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "c368e662aa30046264ae74da79ce6f1f5e87eb4594a77eb1bfa912daf6f6013d",
+      "generated_at": "2026-09-12T06:04:03Z",
+      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco/stacks/monitoring_stack.py": {
-      "digest": "15765e925d5246f42d9e217308e451f8bd92c8254d12606b0d01dbaca51cb6e0",
-      "generated_at": "2026-09-04T04:29:00Z",
-      "source_commit": "a41926c5b2139d2571c9a9e297a74d70229b3c14"
+      "digest": "27363b1ad7a4aeb4072e365a474fbb2d1b5151ab2e8f86f47c6842373d179189",
+      "generated_at": "2026-09-12T06:04:03Z",
+      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco/stacks/regional_api_gateway_stack.py": {
       "digest": "b6cfc8a24e5c5910db198427c66ae673105ff1f1a0efe2f9a64bf2fe5646e8e1",
@@ -137,9 +137,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "628d9fcf37f9cbb5aa64a24191f227f6c9da42d3187aa1f6b775679d37ea2447",
-      "generated_at": "2026-09-11T22:15:15Z",
-      "source_commit": "14ba13224fdaf5a82bbcee12270092e39a8201ca"
+      "digest": "a818a9b3327c22575e76235bae0906c7479904b3392cf61c5d7c30fb686849f6",
+      "generated_at": "2026-09-12T06:04:03Z",
+      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco_mcp/audit.py": {
       "digest": "993f5549cb60bfdcebad9222a2b982d14370481c738d2dfc6282735ef931d331",
