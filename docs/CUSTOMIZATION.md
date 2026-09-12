@@ -573,6 +573,15 @@ controller is switched on, which the regional stack does through the
 |---|---|---|
 | `network_policy_enforcement` | `true` | Literal JSON boolean. `false` keeps every NetworkPolicy object in place but stops enforcing them — an escape hatch, not a tuning knob: if a workload needs a path GCO does not ship, add a NetworkPolicy (they are additive) instead |
 
+When you add an egress rule that must reach a Kubernetes Service through its
+ClusterIP, remember how the VPC CNI enforces egress: the rule's `podSelector`
+admits the selected pods' addresses, and the Service's ClusterIP is admitted
+only when the Service's own `spec.selector` matches that `podSelector` (see
+[Network Security](ARCHITECTURE.md#network-security)). Either select on a
+label the Service selector carries, or admit the address range with an
+`ipBlock`; a rule that names only the pods leaves connections to the Service
+timing out while the pods themselves are healthy.
+
 What the defaults allow is spelled out in the manifest header of
 `lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`. Job pods
 in `gco-jobs` may reach each other on any port, resolve DNS, use HTTPS to any

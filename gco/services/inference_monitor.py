@@ -204,6 +204,23 @@ MOONCAKE_CONFIG_FILE_PATH = f"{MOONCAKE_CONFIG_MOUNT_DIR}/mooncake.json"
 # the intra-namespace allow rules.
 INFERENCE_POD_SELECTOR = {"gco.io/type": "inference"}
 
+
+def _inference_service_selector(app: str, **extra: str) -> dict[str, str]:
+    """The ``spec.selector`` of every ClusterIP Service fronting inference pods.
+
+    The selector carries ``gco.io/type: inference`` next to the per-endpoint
+    ``app`` label, and that is load-bearing under enforced NetworkPolicies on
+    the VPC CNI: its egress probe sees ClusterIP traffic before kube-proxy's
+    DNAT, so the network policy controller admits a Service's ClusterIP only
+    when the Service's own selector matches the policy peer's ``podSelector``
+    (``gco.io/type: inference`` in ``allow-inference-proxy-to-inference`` and
+    ``allow-inference-internal``). With ``app`` alone the pods were admitted
+    and the Service in front of them was not, and the inference proxy's
+    requests timed out against a healthy endpoint.
+    """
+    return {"app": app, **INFERENCE_POD_SELECTOR, **extra}
+
+
 # Names of the intra-namespace allow rules the monitor maintains alongside the
 # default-deny posture in gco-inference. These mirror the manifest names in
 # 03-network-policies.yaml so a failure can point at the same object an operator
@@ -4311,7 +4328,7 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": deploy_name},
+                selector=_inference_service_selector(deploy_name),
                 ports=[client.V1ServicePort(port=port, target_port=port, protocol="TCP")],
                 type="ClusterIP",
             ),
@@ -4443,7 +4460,9 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": proxy_name, "gco.io/role": PD_PROXY_ROLE_LABEL},
+                selector=_inference_service_selector(
+                    proxy_name, **{"gco.io/role": PD_PROXY_ROLE_LABEL}
+                ),
                 ports=[
                     client.V1ServicePort(
                         port=80,
@@ -4499,7 +4518,7 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": name},
+                selector=_inference_service_selector(name),
                 ports=[
                     client.V1ServicePort(
                         port=80,

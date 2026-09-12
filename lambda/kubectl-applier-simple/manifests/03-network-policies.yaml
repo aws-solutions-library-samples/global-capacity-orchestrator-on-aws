@@ -308,6 +308,15 @@ spec:
 # Allow the authenticated inference proxy to reach internal model Services.
 # No other gco-system pod is selected, and model endpoints are never exposed
 # directly through the ALB.
+#
+# The proxy dials the endpoint's ClusterIP Service, and the VPC CNI evaluates
+# egress before kube-proxy's DNAT: the peer podSelector below admits the model
+# pods' addresses, while the Service's ClusterIP is admitted only because the
+# inference monitor puts the same ``gco.io/type: inference`` label in every
+# inference Service's spec.selector (the network policy controller adds a
+# ClusterIP only when the Service selector matches the peer podSelector).
+# Keep the two in step: a Service selected by ``app`` alone is unreachable
+# through this rule even though its pods are.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

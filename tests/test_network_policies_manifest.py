@@ -405,6 +405,47 @@ class TestInferenceNamespacePosture:
             }
         ]
 
+    @pytest.mark.parametrize(
+        ("policy_name", "namespace"),
+        [
+            ("allow-inference-proxy-to-inference", "gco-system"),
+            ("allow-inference-internal", "gco-inference"),
+        ],
+    )
+    def test_inference_service_selectors_satisfy_the_egress_peers(
+        self, netpol_docs, policy_name, namespace
+    ):
+        """The Services the monitor creates are reachable through these rules.
+
+        The VPC CNI evaluates egress before kube-proxy's DNAT, and the network
+        policy controller admits a Service's ClusterIP only when the Service's
+        ``spec.selector`` matches the rule's peer ``podSelector``. Every
+        inference Service selector must therefore carry every label the
+        inference-pod peers select on; the first enforced live run found the
+        proxy timing out against a healthy endpoint when it did not.
+        """
+        from gco.services.inference_monitor import (
+            PD_PROXY_ROLE_LABEL,
+            _inference_service_selector,
+        )
+
+        policy = _find_netpol(netpol_docs, policy_name, namespace)
+        assert policy is not None
+        inference_peers = [
+            peer["podSelector"]["matchLabels"]
+            for rule in policy["spec"]["egress"]
+            for peer in rule["to"]
+            if peer.get("podSelector", {}).get("matchLabels", {}).get("gco.io/type")
+        ]
+        assert inference_peers, "the rule must have an inference-pod peer"
+        for selector in (
+            _inference_service_selector("endpoint"),
+            _inference_service_selector("endpoint-prefill"),
+            _inference_service_selector("endpoint-proxy", **{"gco.io/role": PD_PROXY_ROLE_LABEL}),
+        ):
+            for peer_labels in inference_peers:
+                assert peer_labels.items() <= selector.items(), (peer_labels, selector)
+
 
 # ─── Enforcement switch ────────────────────────────────────────────
 
