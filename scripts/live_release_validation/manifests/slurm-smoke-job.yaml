@@ -50,8 +50,13 @@ spec:
               RESTAPI = "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820"
               API_VER = "v0.0.44"
 
+              # slurmctld loads the HS256 key as the raw file bytes (auth/jwt
+              # mmaps it), and the chart generates it with randAscii, which
+              # may begin or end with a space. Stripping whitespace here
+              # produced tokens slurmctld could not decode on about one
+              # cluster in fifty; use the bytes exactly as they are.
               with open("/etc/slurm-jwt/jwt.key", "rb") as handle:
-                  key = handle.read().strip()
+                  key = handle.read()
 
               def b64(data: bytes) -> bytes:
                   return base64.urlsafe_b64encode(data).rstrip(b"=")

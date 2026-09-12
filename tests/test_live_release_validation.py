@@ -5441,6 +5441,14 @@ class TestSchedulerValidation:
         assert 'gco.aws/slurm-client: "true"' in slurm
         assert "slinky-slurm-auth-jwt" in slurm
         assert "slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820" in slurm
+        # slurmctld mmaps the HS256 key file as-is and the chart generates it
+        # with randAscii, so a key may start or end with a space; a probe that
+        # stripped it signed tokens slurmctld could not decode (live, 2026-09-12).
+        assert 'open("/etc/slurm-jwt/jwt.key", "rb")' in slurm
+        assert ".strip()" not in slurm
+        example = (root / "examples" / "slurm-cluster-job.yaml").read_text(encoding="utf-8")
+        assert 'open("/etc/slurm-jwt/jwt.key", "rb")' in example
+        assert ".strip()" not in example
 
     def test_kueue_probe_queue_exists_in_the_deployed_topology(self) -> None:
         """The queue the probe names must be the queue the applier deploys."""

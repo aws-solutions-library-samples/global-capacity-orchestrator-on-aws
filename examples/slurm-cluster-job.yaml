@@ -59,9 +59,11 @@ spec:
           print(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
           print()
 
-          # Generate JWT token from the mounted secret key
-          with open("/etc/slurm-jwt/jwt.key") as f:
-              key = f.read().strip().encode()
+          # Generate JWT token from the mounted secret key. slurmctld loads
+          # the key as raw file bytes, and the chart-generated key may begin
+          # or end with a space, so never strip or re-encode it.
+          with open("/etc/slurm-jwt/jwt.key", "rb") as f:
+              key = f.read()
 
           def make_jwt(user="slurm", lifespan=600):
               header = base64.urlsafe_b64encode(json.dumps(
