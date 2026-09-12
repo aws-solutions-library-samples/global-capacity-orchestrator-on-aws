@@ -276,6 +276,10 @@ class TestEnforcedCluster:
         assert cross_jobs["exit_code"] == 42
         assert cross_jobs["job"] == f"gco-live-netpol-cross-jobs-{TOKEN}"
         assert cross_jobs["output"] == "NETPOL_BLOCKED\n"
+        # A log without the sampling trace still yields the evidence shape.
+        assert cross_jobs["samples"] == []
+        assert cross_jobs["settled"] is None
+        assert cross_jobs["attach_window_observed"] is False
 
         # Two listeners then six probes, each cleared before creation and
         # deleted afterwards; the record holds every Job before it exists.
@@ -328,10 +332,24 @@ class TestEnforcedCluster:
             entry["name"]: entry["value"]
             for entry in probe["spec"]["template"]["spec"]["containers"][0]["env"]
         }
-        assert env == {"PROBE_URL": "http://10.0.2.7:8080/"}
+        assert env == {
+            "PROBE_URL": "http://10.0.2.7:8080/",
+            # The VPC CNI admits a new pod's traffic until its policies attach,
+            # so a verdict is a steady state: held for 30s, read no earlier than
+            # 45s in, given up on (exit 43) after three minutes of flapping.
+            "PROBE_SETTLE_SECONDS": "30",
+            "PROBE_MIN_OBSERVATION_SECONDS": "45",
+            "PROBE_BUDGET_SECONDS": "180",
+        }
         script = probe["spec"]["template"]["spec"]["containers"][0]["command"][-1]
-        assert 'timeout 30 wget -O /dev/null -T 5 "$PROBE_URL"' in script
+        assert 'timeout 15 wget -O /dev/null -T 5 "$PROBE_URL"' in script
         assert "grep -q 'HTTP/'" in script
+        assert 'echo "NETPOL_SAMPLE t=$((now - start))s $verdict"' in script
+        assert '-ge "$PROBE_SETTLE_SECONDS"' in script
+        assert '-ge "$PROBE_MIN_OBSERVATION_SECONDS"' in script
+        assert '-ge "$PROBE_BUDGET_SECONDS"' in script
+        assert 'echo "NETPOL_UNSETTLED samples=$samples"\n    exit 43' in script
+        assert "NETPOL_SETTLED verdict=$current" in script
         assert "echo NETPOL_REACHABLE\n  exit 0" in script
         assert "echo NETPOL_BLOCKED\nexit 42" in script
         assert probe["spec"]["template"]["spec"]["securityContext"]["runAsNonRoot"] is True
@@ -368,6 +386,84 @@ class TestEnforcedCluster:
         assert https["status"] == "matched"
         assert https["output"] == "NETPOL_REACHABLE (from stderr)"
         assert len(clock.sleeps) == 7
+
+    def test_a_verdict_is_the_steady_state_and_the_attach_window_is_evidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fourth live run's http-egress probe, had it sampled.
+
+        The VPC CNI admitted the pod's first dial before its egress policies
+        were attached; the steady state is the verdict, and the early answer
+        is kept as evidence rather than read as a mismatch.
+        """
+        ctx = _context()
+        cluster = _FakeCluster()
+        probe = f"gco-live-netpol-http-egress-{TOKEN}-pod"
+        cluster.logs[probe] = (
+            "NETPOL_SAMPLE t=0s reachable\n"
+            "NETPOL_SAMPLE t=3s blocked\n"
+            "NETPOL_SETTLED verdict=blocked held=42s samples=7\n"
+            "Connecting to checkip.amazonaws.com (18.0.0.1:80)\n"
+            "wget: download timed out\n"
+            "NETPOL_BLOCKED\n",
+            "",
+        )
+        steady = f"gco-live-netpol-https-egress-{TOKEN}-pod"
+        cluster.logs[steady] = (
+            "NETPOL_SAMPLE t=0s reachable\n"
+            "NETPOL_SETTLED verdict=reachable held=45s samples=21\n"
+            "NETPOL_REACHABLE\n",
+            "",
+        )
+
+        evidence = _run(ctx, cluster, monkeypatch)
+
+        by_name = {item["name"]: item for item in evidence["probes"]}
+        assert by_name["http-egress"]["status"] == "matched"
+        assert by_name["http-egress"]["observed"] == "blocked"
+        assert by_name["http-egress"]["samples"] == ["t=0s reachable", "t=3s blocked"]
+        assert (
+            by_name["http-egress"]["settled"] == "NETPOL_SETTLED verdict=blocked held=42s samples=7"
+        )
+        assert by_name["http-egress"]["attach_window_observed"] is True
+        assert by_name["https-egress"]["samples"] == ["t=0s reachable"]
+        assert by_name["https-egress"]["settled"] == (
+            "NETPOL_SETTLED verdict=reachable held=45s samples=21"
+        )
+        assert by_name["https-egress"]["attach_window_observed"] is False
+        # The tail asked for is long enough to keep a flapping trace's end.
+        logs_call = next(call for call in cluster.calls if call[0] == "logs" and call[1] == probe)
+        assert "--tail=40" in logs_call
+
+    def test_an_unsettled_probe_is_named_with_its_trace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _context()
+        verdicts: dict[str, tuple[str, int | None]] = dict(ENFORCED)
+        verdicts["http-egress"] = ("Failed", 43)
+        cluster = _FakeCluster(verdicts)
+        probe = f"gco-live-netpol-http-egress-{TOKEN}-pod"
+        cluster.logs[probe] = (
+            "NETPOL_SAMPLE t=0s reachable\n"
+            "NETPOL_SAMPLE t=9s blocked\n"
+            "NETPOL_SAMPLE t=30s reachable\n"
+            "NETPOL_UNSETTLED samples=40\n",
+            "",
+        )
+
+        _failure(
+            ctx,
+            cluster,
+            monkeypatch,
+            match=r"http-egress .* expected blocked, observed unsettled \[phase=Failed exit=43\]",
+        )
+
+        probes = ctx.checkpoint.state["network_posture"][REGION]["probes"]
+        unsettled = next(item for item in probes if item["name"] == "http-egress")
+        assert unsettled["status"] == "mismatch"
+        assert unsettled["samples"] == ["t=0s reachable", "t=9s blocked", "t=30s reachable"]
+        assert unsettled["settled"] == "NETPOL_UNSETTLED samples=40"
+        assert unsettled["attach_window_observed"] is True
 
     def test_an_existing_checkpoint_record_is_reused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stale_job = {"namespace": "gco-jobs", "name": "left-over", "deleted": False}
@@ -443,8 +539,11 @@ class TestVerdictMismatches:
             (("Failed", 1), "error"),
             (("Failed", 0), "error"),
             (("Succeeded", 42), "error"),
+            (("Succeeded", 43), "error"),
             (("Failed", None), "error"),
             (("Failed", 42), "blocked"),
+            # The answer flapped for the probe's whole budget: named, never a verdict.
+            (("Failed", 43), "unsettled"),
         ],
     )
     def test_anything_but_the_two_verdict_codes_is_a_probe_error(

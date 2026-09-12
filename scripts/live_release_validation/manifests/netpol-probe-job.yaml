@@ -6,8 +6,9 @@ metadata:
   name: gco-live-netpol-probe-__RUN_TOKEN__
   namespace: gco-jobs
   annotations:
-    # The client dials one URL and exits; whether the cluster-managed policies
-    # let the connection through is the verdict under test.
+    # The client dials one URL until the answer holds steady and exits;
+    # whether the cluster-managed policies let the connection through is the
+    # verdict under test.
     checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed default-deny-ingress NetworkPolicy
   labels:
     app.kubernetes.io/name: gco-live-release-validation
@@ -43,24 +44,70 @@ spec:
           env:
             - name: PROBE_URL
               value: __PROBE_URL__
+            # The VPC CNI attaches a new pod's policies in parallel with the
+            # pod's start and admits everything until they are in place
+            # (standard mode), so one dial at t=0 can read that window instead
+            # of the policy. The probe therefore samples until one verdict has
+            # held for PROBE_SETTLE_SECONDS, after at least
+            # PROBE_MIN_OBSERVATION_SECONDS from its start, and reports that
+            # steady state; a verdict still changing at PROBE_BUDGET_SECONDS is
+            # reported as unsettled and never read as either answer.
+            - name: PROBE_SETTLE_SECONDS
+              value: "30"
+            - name: PROBE_MIN_OBSERVATION_SECONDS
+              value: "45"
+            - name: PROBE_BUDGET_SECONDS
+              value: "180"
           # Exit 0 when the server answered — any HTTP status counts, because a
           # 4xx still proves the connection, TLS handshake, and DNS lookup all
           # went through. Exit 42 when nothing answered: the policy dropped the
-          # connection (or the destination was unreachable). Any other exit code
-          # means the probe itself broke and is never read as a verdict. The
-          # outer timeout bounds a dropped SYN that BusyBox's -T would otherwise
+          # connection (or the destination was unreachable). Exit 43 when the
+          # answer never settled. Any other exit code means the probe itself
+          # broke and is never read as a verdict. Every change of answer is
+          # printed as a NETPOL_SAMPLE line, so an early window that admitted a
+          # later-denied connection stays visible in the evidence. The outer
+          # timeout bounds a dropped SYN that BusyBox's -T would otherwise
           # leave to the kernel's connect retries.
           command:
             - sh
             - -c
             - |
-              output=$(timeout 30 wget -O /dev/null -T 5 "$PROBE_URL" 2>&1)
-              status=$?
-              if [ "$status" -eq 0 ] || printf '%s\n' "$output" | grep -q 'HTTP/'; then
+              start=$(date +%s)
+              current=""
+              since=$start
+              samples=0
+              while :; do
+                output=$(timeout 15 wget -O /dev/null -T 5 "$PROBE_URL" 2>&1)
+                status=$?
+                now=$(date +%s)
+                if [ "$status" -eq 0 ] || printf '%s\n' "$output" | grep -q 'HTTP/'; then
+                  verdict=reachable
+                else
+                  verdict=blocked
+                fi
+                samples=$((samples + 1))
+                if [ "$verdict" != "$current" ]; then
+                  echo "NETPOL_SAMPLE t=$((now - start))s $verdict"
+                  current=$verdict
+                  since=$now
+                  last_output=$output
+                fi
+                if [ $((now - since)) -ge "$PROBE_SETTLE_SECONDS" ] \
+                    && [ $((now - start)) -ge "$PROBE_MIN_OBSERVATION_SECONDS" ]; then
+                  break
+                fi
+                if [ $((now - start)) -ge "$PROBE_BUDGET_SECONDS" ]; then
+                  echo "NETPOL_UNSETTLED samples=$samples"
+                  exit 43
+                fi
+                sleep 2
+              done
+              echo "NETPOL_SETTLED verdict=$current held=$((now - since))s samples=$samples"
+              if [ "$current" = reachable ]; then
                 echo NETPOL_REACHABLE
                 exit 0
               fi
-              printf '%s\n' "$output"
+              printf '%s\n' "$last_output"
               echo NETPOL_BLOCKED
               exit 42
           securityContext:

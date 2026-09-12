@@ -26,6 +26,19 @@ behind ``httpd`` (``manifests/netpol-target-job.yaml``). All of them are
 deleted before the action returns, and each carries ``activeDeadlineSeconds``
 plus a TTL so a harness that dies mid-probe still leaves nothing behind.
 
+A probe's verdict is its steady state, not its first dial. The VPC CNI
+attaches a new pod's policies in parallel with the pod's start and admits
+everything until they are in place (standard mode; Auto Mode's NodeClass
+``networkPolicy: DefaultDeny`` is the strict alternative, which requires a
+policy for every pod on the node), so a client that dials once at start can
+read that window instead of the policy — the fourth live run of this branch
+saw exactly that on the port-80 egress probe. The probe script therefore
+samples until one answer has held for 30 seconds and at least 45 seconds have
+passed, exits 43 if the answer is still changing after three minutes, and
+prints every change of answer; the harness keeps those lines as ``samples``,
+the closing line as ``settled``, and flags ``attach_window_observed`` when the
+first answer differed from the steady state.
+
 When cdk.json turns the controller off (``eks_cluster.network_policy_enforcement:
 false``) the deny verdicts are not promised and those probes are recorded as
 skipped; the reachability probes still have to pass.
@@ -54,11 +67,18 @@ _EGRESS_HOST = "checkip.amazonaws.com"
 _UNPOLICED_NAMESPACE = "default"
 _REACHABLE_EXIT_CODE = 0
 _BLOCKED_EXIT_CODE = 42
+#: The answer kept changing for the probe's whole budget; never a verdict.
+_UNSETTLED_EXIT_CODE = 43
 #: Auto Mode may have to launch a node for the first pod; a probe then still
-#: has the image pull and its own 30-second connection ceiling ahead of it.
+#: has the image pull and its own three-minute sampling budget ahead of it.
 _POD_TIMEOUT_SECONDS = 600
-_LOG_TAIL_LINES = 20
-_LOG_LIMIT = 2_000
+#: One line per change of answer plus the closing lines; an answer that
+#: flapped on every sample for the whole budget prints more, and the tail
+#: keeps the end of that story.
+_LOG_TAIL_LINES = 40
+_LOG_LIMIT = 4_000
+_SAMPLE_PREFIX = "NETPOL_SAMPLE "
+_SETTLED_PREFIXES = ("NETPOL_SETTLED ", "NETPOL_UNSETTLED ")
 
 
 class NetworkPostureValidationError(RuntimeError):
@@ -367,7 +387,32 @@ class NetworkPostureProbe:
             return "reachable"
         if verdict["phase"] == "Failed" and verdict["exit_code"] == _BLOCKED_EXIT_CODE:
             return "blocked"
+        if verdict["phase"] == "Failed" and verdict["exit_code"] == _UNSETTLED_EXIT_CODE:
+            return "unsettled"
         return "error"
+
+    @staticmethod
+    def _trace(output: str) -> dict[str, Any]:
+        """Read the probe script's sampling trace out of its log tail.
+
+        ``samples`` holds every change of answer (``t=0s reachable``,
+        ``t=3s blocked``), ``settled`` the closing line, and
+        ``attach_window_observed`` is true when the first answer differed from
+        the steady state — on the VPC CNI, the standard-mode window between the
+        pod's start and its policies being attached.
+        """
+        samples: list[str] = []
+        settled: str | None = None
+        for line in output.splitlines():
+            if line.startswith(_SAMPLE_PREFIX):
+                samples.append(line.removeprefix(_SAMPLE_PREFIX))
+            elif line.startswith(_SETTLED_PREFIXES):
+                settled = line
+        return {
+            "samples": samples,
+            "settled": settled,
+            "attach_window_observed": len(samples) > 1,
+        }
 
     def run(self) -> dict[str, Any]:
         """Start the listeners, run every probe, delete everything, judge the matrix."""
@@ -422,6 +467,7 @@ class NetworkPostureProbe:
                     {
                         **asdict(spec),
                         **verdict,
+                        **self._trace(verdict["output"]),
                         "job": name,
                         "observed": observed,
                         "status": "matched" if observed == spec.expected else "mismatch",

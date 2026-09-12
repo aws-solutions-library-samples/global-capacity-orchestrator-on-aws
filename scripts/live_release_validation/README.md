@@ -73,10 +73,17 @@ restarted container, a wrong budget or autoscaler shape). `network-posture`
 starts the two `manifests/netpol-target-job.yaml` listeners and dials them —
 plus the live inference-monitor's metrics port and an AWS-hosted HTTPS
 endpoint — from `manifests/netpol-probe-job.yaml` clients whose exit code
-(`0` answered, `42` nothing answered) is the verdict; every Job is run-labelled,
-deleted before the action returns, and self-expiring should the harness die
-first. Both run after the workload actions on purpose: a zero restart count and
-an intact posture mean more once the services have carried real traffic.
+(`0` answered, `42` nothing answered, `43` the answer never settled) is the
+verdict. A client samples until one answer has held for 30 seconds (and at
+least 45 seconds have passed) rather than dialing once: the VPC CNI attaches a
+new pod's policies in parallel with its start and admits everything until they
+are in place, so a first dial can read that window instead of the policy. The
+changes of answer are kept as `samples` evidence, with `attach_window_observed`
+set when the first answer differed from the steady state. Every Job is
+run-labelled, deleted before the action returns, and self-expiring should the
+harness die first. Both run after the workload actions on purpose: a zero
+restart count and an intact posture mean more once the services have carried
+real traffic.
 
 ## How a run executes
 
