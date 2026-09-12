@@ -2537,6 +2537,197 @@ class TestDiagnoseDeployFailure:
         with patch.object(manager, "_get_deploy_region", return_value=None):
             manager._diagnose_deploy_failure("unknown-stack")
 
+    @staticmethod
+    def _rolled_back_create_events(stack_name: str) -> list[dict]:
+        """Newest-first events of a real rolled-back CREATE.
+
+        Mirrors the shape that hid the S3 ``BucketAlreadyExists`` reason from
+        the old first-page-only diagnostics: the terminal ROLLBACK_COMPLETE,
+        then a rollback DELETE_COMPLETE row per resource, then the stack-level
+        ROLLBACK_IN_PROGRESS verdict, then the cascade-cancelled sibling, and
+        only then the resource that actually failed — followed by the create's
+        own "User Initiated" start and, older still, a previous operation.
+        """
+        events: list[dict] = [
+            {
+                "LogicalResourceId": stack_name,
+                "ResourceType": "AWS::CloudFormation::Stack",
+                "ResourceStatus": "ROLLBACK_COMPLETE",
+            }
+        ]
+        for index in range(30):
+            events.append(
+                {
+                    "LogicalResourceId": f"Resource{index}",
+                    "ResourceType": "AWS::IAM::Role",
+                    "ResourceStatus": "DELETE_COMPLETE",
+                }
+            )
+        events.extend(
+            [
+                {
+                    "LogicalResourceId": stack_name,
+                    "ResourceType": "AWS::CloudFormation::Stack",
+                    "ResourceStatus": "ROLLBACK_IN_PROGRESS",
+                    "ResourceStatusReason": (
+                        "The following resource(s) failed to create: "
+                        "[CostReportBucketEA8CCE7A, AutoDeleteHandler]. "
+                        "Rollback requested by user."
+                    ),
+                },
+                {
+                    "LogicalResourceId": "AutoDeleteHandler",
+                    "ResourceType": "AWS::Lambda::Function",
+                    "ResourceStatus": "CREATE_FAILED",
+                    "ResourceStatusReason": "Resource creation cancelled",
+                },
+                {
+                    "LogicalResourceId": "CostReportBucketEA8CCE7A",
+                    "ResourceType": "AWS::S3::Bucket",
+                    "ResourceStatus": "CREATE_FAILED",
+                    "ResourceStatusReason": (
+                        'Resource handler returned message: "The requested bucket name '
+                        'is not available." (HandlerErrorCode: AlreadyExists)'
+                    ),
+                },
+                {
+                    "LogicalResourceId": stack_name,
+                    "ResourceType": "AWS::CloudFormation::Stack",
+                    "ResourceStatus": "CREATE_IN_PROGRESS",
+                    "ResourceStatusReason": "User Initiated",
+                },
+                {
+                    "LogicalResourceId": "OlderResource",
+                    "ResourceType": "AWS::IAM::Role",
+                    "ResourceStatus": "CREATE_FAILED",
+                    "ResourceStatusReason": "from a previous operation; must not be shown",
+                },
+            ]
+        )
+        return events
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        manager = StackManager.__new__(StackManager)
+        manager.config = MagicMock()
+        manager.project_root = Path(".")
+        return manager
+
+    def test_surfaces_the_resource_root_cause_behind_rollback_noise(self, capsys):
+        manager = self._manager()
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stack_events.return_value = {
+            "StackEvents": self._rolled_back_create_events("gco-monitoring")
+        }
+        mock_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "ROLLBACK_COMPLETE"}]}
+        with (
+            patch.object(manager, "_get_deploy_region", return_value="us-east-2"),
+            patch("boto3.client", return_value=mock_cfn),
+        ):
+            manager._diagnose_deploy_failure("gco-monitoring")
+        output = capsys.readouterr().out
+        # The real failure leads, with its resource type and CloudFormation's reason.
+        assert "CostReportBucketEA8CCE7A (AWS::S3::Bucket): CREATE_FAILED" in output
+        assert "The requested bucket name is not available" in output
+        # The stack-level verdict follows (it lists every failed logical id).
+        assert "gco-monitoring (AWS::CloudFormation::Stack): ROLLBACK_IN_PROGRESS" in output
+        assert output.index("CostReportBucketEA8CCE7A") < output.index("ROLLBACK_IN_PROGRESS")
+        # Cascade-cancelled siblings and older operations are noise, not causes.
+        diagnosed = [
+            line.strip() for line in output.splitlines() if line.startswith("    ") and ":" in line
+        ]
+        assert not any(line.startswith("AutoDeleteHandler") for line in diagnosed)
+        assert "Resource creation cancelled" not in output
+        assert "OlderResource" not in output
+        assert "previous operation" not in output
+        assert "Suggested fix" in output
+
+    def test_walks_event_pages_until_the_operation_start(self, capsys):
+        manager = self._manager()
+        events = self._rolled_back_create_events("gco-monitoring")
+        first_page, second_page = events[:20], events[20:]
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stack_events.side_effect = [
+            {"StackEvents": first_page, "NextToken": "page-2"},
+            {"StackEvents": second_page},
+        ]
+        mock_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "ROLLBACK_COMPLETE"}]}
+        with (
+            patch.object(manager, "_get_deploy_region", return_value="us-east-2"),
+            patch("boto3.client", return_value=mock_cfn),
+        ):
+            manager._diagnose_deploy_failure("gco-monitoring")
+        output = capsys.readouterr().out
+        assert "The requested bucket name is not available" in output
+        assert mock_cfn.describe_stack_events.call_count == 2
+        second_call = mock_cfn.describe_stack_events.call_args_list[1]
+        assert second_call.kwargs == {"StackName": "gco-monitoring", "NextToken": "page-2"}
+
+    def test_event_walk_is_bounded_when_no_operation_start_is_found(self):
+        from cli.stacks import StackManager
+
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stack_events.return_value = {
+            "StackEvents": [
+                {"LogicalResourceId": "R", "ResourceStatus": "DELETE_COMPLETE"},
+            ],
+            "NextToken": "again",
+        }
+        events = StackManager._collect_operation_events(mock_cfn, "gco-monitoring")
+        assert len(events) == StackManager._MAX_EVENT_PAGES
+        assert mock_cfn.describe_stack_events.call_count == StackManager._MAX_EVENT_PAGES
+
+    def test_update_rollback_start_does_not_end_the_walk(self):
+        """An update that rolled back starts at UPDATE_IN_PROGRESS, not at its rollback."""
+        from cli.stacks import StackManager
+
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stack_events.return_value = {
+            "StackEvents": [
+                {
+                    "LogicalResourceId": "gco-global",
+                    "ResourceStatus": "UPDATE_ROLLBACK_IN_PROGRESS",
+                    "ResourceStatusReason": "User Initiated",
+                },
+                {
+                    "LogicalResourceId": "Table",
+                    "ResourceStatus": "UPDATE_FAILED",
+                    "ResourceStatusReason": "Throughput exceeds the current limit",
+                },
+                {
+                    "LogicalResourceId": "gco-global",
+                    "ResourceStatus": "UPDATE_IN_PROGRESS",
+                    "ResourceStatusReason": "User Initiated",
+                },
+                {"LogicalResourceId": "Old", "ResourceStatus": "CREATE_FAILED"},
+            ]
+        }
+        events = StackManager._collect_operation_events(mock_cfn, "gco-global")
+        assert [event["LogicalResourceId"] for event in events] == [
+            "gco-global",
+            "Table",
+            "gco-global",
+        ]
+        summary = StackManager._summarize_failure_events(events, "gco-global")
+        assert [event["LogicalResourceId"] for event in summary] == ["Table", "gco-global"]
+        assert summary[1]["ResourceStatus"] == "UPDATE_ROLLBACK_IN_PROGRESS"
+
+    def test_falls_back_to_raw_failed_events_when_only_cascades_remain(self):
+        from cli.stacks import StackManager
+
+        events = [
+            {
+                "LogicalResourceId": "Handler",
+                "ResourceStatus": "CREATE_FAILED",
+                "ResourceStatusReason": "Resource creation cancelled",
+            },
+            {"LogicalResourceId": "Other", "ResourceStatus": "CREATE_COMPLETE"},
+        ]
+        summary = StackManager._summarize_failure_events(events, "gco-global")
+        assert summary == [events[0]]
+        assert StackManager._summarize_failure_events([events[1]], "gco-global") == []
+
 
 class TestSafeRmtree:
     """Tests for _safe_rmtree path validation."""
