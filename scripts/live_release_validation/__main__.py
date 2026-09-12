@@ -107,6 +107,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--destroy-attempts", type=int, default=3)
     parser.add_argument("--destroy-retry-delay-seconds", type=int, default=30)
     parser.add_argument(
+        "--min-free-disk-gib",
+        type=int,
+        default=20,
+        help=(
+            "Free disk space (GiB) preflight requires on the checkout, report directory, "
+            "and home volume before deploy builds container images; 0 disables the check"
+        ),
+    )
+    parser.add_argument(
         "--confirm-kms-key-deletion",
         action="store_true",
         help=(
@@ -182,6 +191,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     ):
         if getattr(args, option) <= 0:
             parser.error(f"--{option.replace('_', '-')} must be positive")
+    if args.min_free_disk_gib < 0:
+        parser.error("--min-free-disk-gib must be zero or positive")
     valid_optional = set(OPTIONAL_SCHEDULERS)
     unknown_schedulers = sorted(set(args.optional_schedulers) - valid_optional - {"all"})
     if unknown_schedulers:
@@ -292,6 +303,7 @@ def _settings_from_args(
         poll_interval_seconds=args.poll_interval_seconds,
         destroy_attempts=args.destroy_attempts,
         destroy_retry_delay_seconds=args.destroy_retry_delay_seconds,
+        min_free_disk_gib=args.min_free_disk_gib,
         confirm_kms_key_deletion=args.confirm_kms_key_deletion,
         resume=args.resume,
         optional_schedulers=(

@@ -31,7 +31,7 @@ guide: how the code is organized and where a new check belongs.
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
 | `ownership/` | Durable proof of what this run created and may therefore destroy. |
-| `cleanup/` | Deletion of exactly those proven-owned resources. |
+| `cleanup/` | Deletion of exactly those proven-owned resources, plus `cleanup/local_images.py`: the best-effort prune of the local CDK asset images (`cdkasset-<hash>` and the bootstrap ECR repository tags) every `deploy` leaves in the host's container store, so successive runs cannot fill the disk. |
 | `protected.py` | The ownership boundary: identity matching that keeps pre-existing account resources untouchable. |
 | `context.py` | Run identity helpers: git SHA/branch, topology profile, Region selection. |
 | `constants.py` | Tags, labels, and tuning constants shared across modules. |

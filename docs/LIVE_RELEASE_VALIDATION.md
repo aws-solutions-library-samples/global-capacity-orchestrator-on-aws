@@ -59,9 +59,9 @@ Actions run in registry order. Selecting an individual action automatically incl
 
 | Action | Depends on | Contract |
 |---|---|---|
-| `preflight` | None | Verify the clean Git checkout, exact AWS account, topology profile, enabled Regions, bootstrap stacks, and project ownership boundary |
+| `preflight` | None | Verify the clean Git checkout, local prerequisites (Session Manager plugin, free disk space), exact AWS account, topology profile, enabled Regions, bootstrap stacks, and project ownership boundary |
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state |
-| `deploy` | `baseline` | Deploy the checked-in GCO topology |
+| `deploy` | `baseline` | Deploy the checked-in GCO topology, then prune the local CDK asset images it built |
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB; require the owned internal ALB to materialize exactly one tagged HTTPS/IP target group for health-monitor, manifest-processor, and inference-proxy, each with HTTPS `/healthz` checks and only port-8443 traffic/health registrations (stale wrong-port draining targets must disappear), recording bounded ELBv2 convergence samples |
 | `inference` | `topology` | Verify the deployed `api-tls-proxy` CPU request and active `ContainerResource` HPA target, then sequentially run vLLM baseline/HPA and TGI baseline/HPA endpoints from separate digest-pinned images and immutable model commits. Require exact framework request/response schemas, authenticated health and model identity (`/v1/models` or `/info`), HPA ownership/stability, and two strong DynamoDB/full-Kubernetes absence observations for every incarnation. |
 | `policy` | `topology` | `GET /api/v1/policy` reports all three admission layers per Region: the front-door caps, the per-container `LimitRange`, and the namespace `ResourceQuota`. Asserted on the response body, because a Kubernetes read failure degrades to HTTP 200 with a per-namespace `status` and is invisible to a transport-level check. Also requires the project's own ECR hostnames in `trusted_registries`, which CDK appends at synth time. |
@@ -87,6 +87,7 @@ Use macOS or Linux with:
 - Python 3.14;
 - Node 24 and the exact npm version declared in `package.json`;
 - Docker available to CDK asset bundling;
+- at least 20 GiB free on the checkout, the report directory, and the home volume (where Docker Desktop and Podman keep their image stores) — `deploy` builds every service image locally and the checkpoint grows to tens of megabytes; `--min-free-disk-gib` adjusts the floor and `0` disables it;
 - AWS CLI plus the Session Manager plugin on `PATH` whenever a cluster-facing action — `inference`, `platform-workloads`, or `network-posture` (so also `--actions all`) — is selected;
 - the repository's pinned CDK CLI and Python CDK dependencies;
 - short-lived AWS credentials for the isolated validation account; and
@@ -102,7 +103,7 @@ python -m pip install ".[cdk]"
 session-manager-plugin --version
 ```
 
-The main `preflight` action performs the same plugin lookup before `deploy` whenever a cluster-facing action is selected, so a missing local tunnel prerequisite cannot strand a newly deployed topology before cluster validation begins.
+The main `preflight` action performs the same plugin lookup before `deploy` whenever a cluster-facing action is selected, so a missing local tunnel prerequisite cannot strand a newly deployed topology before cluster validation begins. It also measures free disk space at the same point: a host that fills up mid-deploy fails an image build and then the checkpoint write, and that second failure aborts the guaranteed cleanup, so the floor is enforced before anything is created. After each `deploy` the harness removes the local `cdkasset-*` images (and their bootstrap ECR repository tags) it just published, plus dangling build layers, and records what it removed in the deploy evidence; images an operator keeps in the local store for other purposes are never touched.
 
 Select local credentials and verify their identity before authorizing a run:
 

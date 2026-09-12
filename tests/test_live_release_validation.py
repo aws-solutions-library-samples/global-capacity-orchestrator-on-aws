@@ -90,6 +90,9 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
         queue_timeout_seconds=30,
         destroy_attempts=1,
         destroy_retry_delay_seconds=0,
+        # Unit tests never measure the real host; the disk floor is exercised
+        # explicitly by the preflight tests that patch ``shutil.disk_usage``.
+        min_free_disk_gib=0,
         confirm_kms_key_deletion=True,
     )
     context = SimpleNamespace(
@@ -2659,6 +2662,10 @@ class TestStrictStackOwnership:
             patch_live_validation_helper("_checkpoint_new_ecr_repositories"),
             patch_live_validation_helper("_checkpoint_new_ecr_images"),
             patch_live_validation_helper("_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper(
+                "prune_local_cdk_asset_images_safely",
+                return_value={"runtime": None, "removed_images": [], "errors": []},
+            ),
         ):
             result = actions_deploy.action_deploy(ctx)
 

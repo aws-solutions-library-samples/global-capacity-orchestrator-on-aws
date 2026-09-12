@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 from typing import Any
 
 from ..constants import (
@@ -22,13 +23,59 @@ from ..inventory import (
     describe_stack,
     discover_enabled_regions,
 )
-from ..models import RunContext
+from ..models import RunContext, RunSettings
 from ..ownership.ecr import (
     _expected_ecr_images,
 )
 from ..ownership.stacks import (
     _reconcile_stack_ownership,
 )
+
+_GIB = float(1024**3)
+
+
+def _nearest_existing(path: Path) -> Path:
+    """Walk up until a path that exists (the report dir may not yet)."""
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate
+
+
+def _check_free_disk(settings: RunSettings) -> dict[str, float]:
+    """Refuse to deploy from a host that cannot absorb this run's disk usage.
+
+    ``deploy`` builds every service image locally before publishing, the
+    checkpoint grows to tens of megabytes, and the container runtime's image
+    store lives under the home volume on macOS. A host that fills up mid-run
+    fails the image build, then fails to persist the checkpoint, and that
+    second failure aborts the guaranteed cleanup too — leaving stacks behind
+    that only a resume can reclaim. Measure the floor before anything is
+    created. Every probed location is reported so the operator sees where
+    the space went; the check fails on the first location below the floor.
+    """
+    floor_gib = float(settings.min_free_disk_gib)
+    probes = {
+        "repo_root": Path(settings.repo_root),
+        "report_dir": Path(settings.report_dir),
+        "home": Path.home(),
+    }
+    observed: dict[str, float] = {}
+    short: list[str] = []
+    for label, path in probes.items():
+        free_gib = shutil.disk_usage(_nearest_existing(path)).free / _GIB
+        observed[label] = round(free_gib, 2)
+        if free_gib < floor_gib:
+            short.append(f"{label} ({path}) has {free_gib:.1f} GiB free")
+    if short:
+        raise RuntimeError(
+            f"Free disk space is below the {floor_gib:g} GiB floor deploy needs for "
+            "container image builds and checkpoint persistence: "
+            + "; ".join(short)
+            + ". Reclaim space (stale container images from earlier runs are the usual "
+            "culprit) or lower --min-free-disk-gib, then rerun."
+        )
+    return observed
 
 
 def action_preflight(ctx: RunContext) -> dict[str, Any]:
@@ -67,6 +114,10 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
                 "before deploy. Install session-manager-plugin and ensure it is on PATH, "
                 "then resume."
             )
+
+    free_disk_gib: dict[str, float] | None = None
+    if "deploy" in selected and settings.min_free_disk_gib > 0:
+        free_disk_gib = _check_free_disk(settings)
 
     identity = ctx.session.client("sts", region_name=ctx.config.global_region).get_caller_identity()
     account = str(identity.get("Account") or "")
@@ -197,6 +248,8 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         "expected_ecr_images": expected_ecr_images,
         "direct_regional_access": direct_regional_access,
         "session_manager_plugin": session_manager_plugin or "not-required",
+        "min_free_disk_gib": settings.min_free_disk_gib,
+        "free_disk_gib": free_disk_gib if free_disk_gib is not None else "not-required",
         "kms_key_deletion_confirmed": settings.confirm_kms_key_deletion,
         "resume": settings.resume,
     }
