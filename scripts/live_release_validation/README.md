@@ -95,7 +95,7 @@ each one in registry order:
 2. Calls the handler with the shared `RunContext`.
 3. Persists the checkpoint and rewrites both reports — pass or fail.
 
-Once runtime construction succeeds, if a deploy was ever attempted the runner runs guaranteed cleanup (`destroy_deployment`) and `final-inventory`, so an interrupted action still tears down and reports. If construction itself fails after loading a deployed checkpoint, no unverified client is allowed to delete: the failure report marks cleanup blocked and prints the exact `--resume` recovery command instead of claiming destruction.
+Once runtime construction succeeds, if a deploy was ever attempted the runner runs guaranteed cleanup (`destroy_deployment`) and `final-inventory`, so an interrupted action still tears down and reports. That post-run inventory is the last look at the account, so it runs even when the `final-inventory` action already passed; in that case the action keeps its own row and duration, the re-check is recorded under `cleanup.final_inventory_recheck` (status, timestamps, duration, and whether it had to stand in for a missing action result), and its scan is the report's `final_inventory`. A failed re-check replaces any passed result — the account is not clean, whatever the action saw earlier. If construction itself fails after loading a deployed checkpoint, no unverified client is allowed to delete: the failure report marks cleanup blocked and prints the exact `--resume` recovery command instead of claiming destruction.
 
 An action handler is just:
 

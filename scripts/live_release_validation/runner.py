@@ -128,6 +128,11 @@ class LiveValidationRunner:
         self._identity_verified = False
         self._received_signal: int | None = None
         self._previous_signal_handlers: dict[int, Any] = {}
+        #: The guaranteed post-run inventory when it ran *after* the
+        #: ``final-inventory`` action had already passed: the action keeps its
+        #: own row and timing, and this scan (the latest look at the account)
+        #: becomes the report's final inventory.
+        self._final_inventory_recheck: ActionResult | None = None
 
     def _install_signal_handlers(self) -> None:
         """Route termination signals through the normal cleanup/report path."""
@@ -279,7 +284,10 @@ class LiveValidationRunner:
         ]
         self.report.baseline = self.checkpoint.baseline
         final_result = self.checkpoint.action_results.get("final-inventory")
-        if final_result is not None and final_result.status == "passed":
+        if self._final_inventory_recheck is not None:
+            # The post-run re-check is the most recent scan of the account.
+            self.report.final_inventory = self._final_inventory_recheck.details
+        elif final_result is not None and final_result.status == "passed":
             self.report.final_inventory = final_result.details
 
     def _write_report(self) -> tuple[Path, Path]:
@@ -370,19 +378,23 @@ class LiveValidationRunner:
             }
             return
 
+        destroy_started_at = utc_now()
+        destroy_started = time.monotonic()
         try:
             details = destroy_deployment(self.context)
             self.report.cleanup = {"completed": True, **details}
             definition = self.registry["destroy"]
             if "destroy" not in self.checkpoint.completed_actions:
-                now = utc_now()
-                result = ActionResult(
+                # The action list never reached destroy (an earlier action
+                # failed, or the scope excluded it): this reconciliation is the
+                # run's teardown, so it is recorded as the destroy result with
+                # the time it actually took.
+                result = ActionResult.passed(
                     name="destroy",
                     description=definition.description,
-                    status="passed",
-                    started_at=now,
-                    ended_at=now,
-                    duration_seconds=0.0,
+                    started_at=destroy_started_at,
+                    started_monotonic=destroy_started,
+                    ended_monotonic=time.monotonic(),
                     details=details,
                 )
                 self.checkpoint.action_results["destroy"] = result
@@ -406,43 +418,72 @@ class LiveValidationRunner:
             }
 
         if self.checkpoint.baseline is not None:
-            try:
-                details = action_final_inventory(self.context)
-                definition = self.registry["final-inventory"]
-                now = utc_now()
-                result = ActionResult(
-                    name="final-inventory",
-                    description=definition.description,
-                    status="passed",
-                    started_at=now,
-                    ended_at=now,
-                    duration_seconds=0.0,
-                    details=details,
-                )
-                self.checkpoint.action_results["final-inventory"] = result
-                if "final-inventory" not in self.checkpoint.completed_actions:
-                    self.checkpoint.completed_actions.append("final-inventory")
-                self._persist_checkpoint(self.checkpoint)
-            except _LiveValidationSignal, KeyboardInterrupt:
-                raise
-            except BaseException as exc:
-                definition = self.registry["final-inventory"]
-                now = utc_now()
-                self.checkpoint.action_results["final-inventory"] = ActionResult(
-                    name="final-inventory",
-                    description=definition.description,
-                    status="failed",
-                    started_at=now,
-                    ended_at=now,
-                    duration_seconds=0.0,
-                    error=f"{type(exc).__name__}: {exc}",
-                    traceback="".join(
-                        traceback.format_exception(type(exc), exc, exc.__traceback__)
-                    ),
-                )
-                if "final-inventory" in self.checkpoint.completed_actions:
-                    self.checkpoint.completed_actions.remove("final-inventory")
-                self._persist_checkpoint(self.checkpoint)
+            self._recheck_final_inventory()
+
+    def _recheck_final_inventory(self) -> None:
+        """Run the final inventory once more after the guaranteed teardown.
+
+        This is the last look at the account, so it always runs when a baseline
+        exists. What it records depends on what the action list already did:
+
+        * If the ``final-inventory`` action never passed (it was skipped after an
+          earlier failure, or excluded from the scope), this scan *is* the run's
+          final inventory and becomes the action result, with the time it took.
+        * If the action already passed, its row and duration stand; the re-check
+          is recorded under ``cleanup.final_inventory_recheck`` and its details
+          become the report's final inventory, being the most recent scan.
+        * A failed re-check is authoritative either way: the account is not
+          clean, so it replaces any passed result and drops the completion.
+
+        Before this method existed the re-check overwrote the action's row with a
+        zero-duration result, so every report claimed its 10-minute inventory took
+        0.000s.
+        """
+        definition = self.registry["final-inventory"]
+        started_at = utc_now()
+        started = time.monotonic()
+        try:
+            details = action_final_inventory(self.context)
+        except _LiveValidationSignal, KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            self.checkpoint.action_results["final-inventory"] = ActionResult.failed(
+                name="final-inventory",
+                description=definition.description,
+                started_at=started_at,
+                started_monotonic=started,
+                ended_monotonic=time.monotonic(),
+                error=exc,
+            )
+            if "final-inventory" in self.checkpoint.completed_actions:
+                self.checkpoint.completed_actions.remove("final-inventory")
+            self._persist_checkpoint(self.checkpoint)
+            return
+
+        recheck = ActionResult.passed(
+            name="final-inventory",
+            description=definition.description,
+            started_at=started_at,
+            started_monotonic=started,
+            ended_monotonic=time.monotonic(),
+            details=details,
+        )
+        previous = self.checkpoint.action_results.get("final-inventory")
+        supersedes = previous is None or previous.status != "passed"
+        if supersedes:
+            self.checkpoint.action_results["final-inventory"] = recheck
+        else:
+            self._final_inventory_recheck = recheck
+        self.report.cleanup["final_inventory_recheck"] = {
+            "status": recheck.status,
+            "started_at": recheck.started_at,
+            "ended_at": recheck.ended_at,
+            "duration_seconds": recheck.duration_seconds,
+            "recorded_as_action_result": supersedes,
+        }
+        if "final-inventory" not in self.checkpoint.completed_actions:
+            self.checkpoint.completed_actions.append("final-inventory")
+        self._persist_checkpoint(self.checkpoint)
 
     def run(self) -> int:
         """Execute selected actions, then report and clean up in all cases."""
