@@ -446,6 +446,10 @@ class LiveValidationRunner:
             details = action_final_inventory(self.context)
         except _LiveValidationSignal, KeyboardInterrupt:
             raise
+        # BaseException on purpose, matching the other cleanup paths in this file:
+        # the interrupts are re-raised above, so this leaves SystemExit from CLI
+        # helpers under the scan. Recording it here keeps it a failed inventory
+        # instead of run()'s outer handler marking a finished teardown incomplete.
         except BaseException as exc:
             self.checkpoint.action_results["final-inventory"] = ActionResult.failed(
                 name="final-inventory",
