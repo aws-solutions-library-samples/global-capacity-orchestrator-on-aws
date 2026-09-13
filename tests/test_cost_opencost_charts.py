@@ -235,10 +235,14 @@ class TestCostMonitorManifest:
         for placeholder in (
             "{{COST_MONITOR_IMAGE}}",
             "{{COST_MONITOR_ROLE_ARN}}",
-            "{{COST_REPORT_BUCKET}}",
+            "{{COST_REPORT_BUCKET_PARAMETER}}",
+            "{{COST_REPORT_BUCKET_PARAMETER_REGION}}",
             "{{COST_REPORT_INTERVAL_MINUTES}}",
         ):
             assert placeholder in manifest_text
+        # The bucket's CloudFormation-generated name is discovered from SSM at
+        # runtime; the manifest must not carry a reconstructed name (ADR-0005).
+        assert "{{COST_REPORT_BUCKET}}" not in manifest_text
 
     def test_manifest_documents_are_well_formed_after_replacement(self, manifest_text):
         rendered = manifest_text
@@ -246,7 +250,8 @@ class TestCostMonitorManifest:
             "{{COST_MONITORING_ENABLED}}": "true",
             "{{COST_MONITOR_IMAGE}}": "123.dkr.ecr.us-east-1.amazonaws.com/x:latest",
             "{{COST_MONITOR_ROLE_ARN}}": "arn:aws:iam::123:role/cost",
-            "{{COST_REPORT_BUCKET}}": "gco-cost-reports-123-us-east-2",
+            "{{COST_REPORT_BUCKET_PARAMETER}}": "/gco/cost-report-bucket/name",
+            "{{COST_REPORT_BUCKET_PARAMETER_REGION}}": "us-east-2",
             "{{COST_REPORT_INTERVAL_MINUTES}}": "60",
             "{{CLUSTER_NAME}}": "gco-us-east-1",
             "{{REGION}}": "us-east-1",

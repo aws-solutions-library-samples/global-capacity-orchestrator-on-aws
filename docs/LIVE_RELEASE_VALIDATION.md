@@ -59,9 +59,9 @@ Actions run in registry order. Selecting an individual action automatically incl
 
 | Action | Depends on | Contract |
 |---|---|---|
-| `preflight` | None | Verify the clean Git checkout, exact AWS account, topology profile, enabled Regions, bootstrap stacks, and project ownership boundary |
+| `preflight` | None | Verify the clean Git checkout, local prerequisites (Session Manager plugin, free disk space), exact AWS account, topology profile, enabled Regions, bootstrap stacks, and project ownership boundary |
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state |
-| `deploy` | `baseline` | Deploy the checked-in GCO topology |
+| `deploy` | `baseline` | Deploy the checked-in GCO topology, then prune the local CDK asset images it built |
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB; require the owned internal ALB to materialize exactly one tagged HTTPS/IP target group for health-monitor, manifest-processor, and inference-proxy, each with HTTPS `/healthz` checks and only port-8443 traffic/health registrations (stale wrong-port draining targets must disappear), recording bounded ELBv2 convergence samples |
 | `inference` | `topology` | Verify the deployed `api-tls-proxy` CPU request and active `ContainerResource` HPA target, then sequentially run vLLM baseline/HPA and TGI baseline/HPA endpoints from separate digest-pinned images and immutable model commits. Require exact framework request/response schemas, authenticated health and model identity (`/v1/models` or `/info`), HPA ownership/stability, and two strong DynamoDB/full-Kubernetes absence observations for every incarnation. |
 | `policy` | `topology` | `GET /api/v1/policy` reports all three admission layers per Region: the front-door caps, the per-container `LimitRange`, and the namespace `ResourceQuota`. Asserted on the response body, because a Kubernetes read failure degrades to HTTP 200 with a per-namespace `status` and is invisible to a transport-level check. Also requires the project's own ECR hostnames in `trusted_registries`, which CDK appends at synth time. |
@@ -71,6 +71,8 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `schedulers` | `topology` | Prove every enabled batch scheduler with a scheduling-gated workload: [Volcano](https://volcano.sh/) and [YuniKorn](https://yunikorn.apache.org/) probes complete only if the named scheduler binds their pods, the [Kueue](https://kueue.sigs.k8s.io/) probe only after admission through the deployed `gco-default` queue, and the Slurm probe submits a real batch job through [slurmrestd](https://slurm.schedmd.com/rest.html) and requires `COMPLETED`. Schedulers disabled in cdk.json are recorded as skipped with their configuration source unless force-enabled with `--optional-schedulers`; KEDA (proved end to end by `sqs`) and KubeRay (chart-level, its workloads are CRDs outside the manifest gateway) carry derived evidence |
 | `opencost` | `topology` | Require every Region's [OpenCost](https://opencost.io/) to be healthy and returning allocation data, then generate an ad-hoc cost report and confirm its [Parquet](https://parquet.apache.org/docs/) object in the cost report bucket (passes with a note when cost monitoring is disabled in cdk.json) |
 | `convergence` | `topology` | Require stable SQS, DLQ, and DynamoDB convergence |
+| `platform-workloads` | `topology` | Through the tunnelled kubectl session, require every Region's `gco-system` services to meet the [Platform Workload Contract](../lambda/kubectl-applier-simple/manifests/README.md): health-monitor, manifest-processor, inference-monitor, inference-proxy (and cost-monitor when cost monitoring is configured) converged at their current generation with every live container at zero restarts after the whole run's traffic; each multi-replica service's PodDisruptionBudget at `maxUnavailable: 1` and currently allowing a disruption; the inference-proxy HPA present, targeting its Deployment, and able to scale, and the manifest-processor HPA present exactly when `manifest_processor.autoscaling.enabled`; and `kube-system/amazon-vpc-cni` carrying the value rendered from `eks_cluster.network_policy_enforcement` |
+| `network-posture` | `topology` | Prove the shipped NetworkPolicies decide traffic on the live cluster: from run-labelled, digest-pinned probe Jobs, same-namespace `gco-jobs` traffic, the inference-monitor's `:9090/metrics`, and HTTPS egress from `gco-jobs` must be reachable, while cross-namespace ingress into `gco-jobs` and `gco-system` and port-80 egress from `gco-jobs` must be blocked. Each probe reports the steady state of its connection (one answer held for 30 seconds, after at least 45 seconds), because the VPC CNI admits a new pod's traffic until its policies attach; the changes of answer it saw are kept as evidence. Deny verdicts are recorded as skipped when cdk.json sets `eks_cluster.network_policy_enforcement: false`; every probe and listener is deleted before the action returns |
 | `destroy` | `deploy` | Remove all exactly run-owned infrastructure in dependency order |
 | `final-inventory` | `destroy` | Prove target-stack absence, accepted retained resources, and exact protected-baseline preservation |
 
@@ -85,7 +87,8 @@ Use macOS or Linux with:
 - Python 3.14;
 - Node 24 and the exact npm version declared in `package.json`;
 - Docker available to CDK asset bundling;
-- AWS CLI plus the Session Manager plugin on `PATH` whenever `inference` (including `--actions all`) is selected;
+- at least 20 GiB free on the checkout, the report directory, and the home volume (where Docker Desktop and Podman keep their image stores) — `deploy` builds every service image locally and the checkpoint grows to tens of megabytes; `--min-free-disk-gib` adjusts the floor and `0` disables it;
+- AWS CLI plus the Session Manager plugin on `PATH` whenever a cluster-facing action — `inference`, `platform-workloads`, or `network-posture` (so also `--actions all`) — is selected;
 - the repository's pinned CDK CLI and Python CDK dependencies;
 - short-lived AWS credentials for the isolated validation account; and
 - healthy CDK bootstrap stacks in every Region targeted by `cdk.json`.
@@ -100,7 +103,7 @@ python -m pip install ".[cdk]"
 session-manager-plugin --version
 ```
 
-The main `preflight` action performs the same plugin lookup before `deploy` whenever inference is selected, so a missing local tunnel prerequisite cannot strand a newly deployed topology before endpoint validation begins.
+The main `preflight` action performs the same plugin lookup before `deploy` whenever a cluster-facing action is selected, so a missing local tunnel prerequisite cannot strand a newly deployed topology before cluster validation begins. It also measures free disk space at the same point: a host that fills up mid-deploy fails an image build and then the checkpoint write, and that second failure aborts the guaranteed cleanup, so the floor is enforced before anything is created. After each `deploy` the harness removes the local `cdkasset-*` images (and their bootstrap ECR repository tags) it just published, plus dangling build layers, and records what it removed in the deploy evidence; images an operator keeps in the local store for other purposes are never touched.
 
 Select local credentials and verify their identity before authorizing a run:
 
@@ -167,7 +170,7 @@ Every initialized run writes these local files under `$REPORT_DIR`:
 - `live-release-validation.md` — human-reviewable identity, action results, cleanup, final inventory, and failures;
 - `live-release-validation.json` — the same evidence in structured form;
 - `checkpoint.json` — resumable destructive authority for this exact local run; and
-- `kubeconfig` — mode-`0600` isolated cluster access used by the `inference` action (never `~/.kube/config`).
+- `kubeconfig` — mode-`0600` isolated cluster access used by the `inference`, `platform-workloads`, and `network-posture` actions (never `~/.kube/config`).
 
 On POSIX systems, the harness creates the dedicated report/checkpoint directory with mode `0700` and every JSON, Markdown, and temporary output with mode `0600`. It never changes permissions on a pre-existing directory: an existing output directory must already be owner-only, owned by the current operator, contain only this harness's checkpoint/report files and optional isolated `kubeconfig`, and not contain symlinks or special files. A custom `--checkpoint` must be a direct child of `--report-dir` and must not use either fixed report filename (`live-release-validation.json` or `live-release-validation.md`); use a new empty private directory for a fresh run.
 
@@ -225,6 +228,8 @@ Two ECR residual classes are accepted and reported after exact identity revalida
 They are retained because ECR has no conditional repository or tag deletion primitive. Deleting after a separate read would create a time-of-check/time-of-use race and could remove content another principal changed. Review and remove accepted ECR residuals manually only under the account's normal ownership and retention procedure.
 
 One further residual class is accepted with evidence in both `baseline` and `final-inventory`: DynamoDB streams of deleted tables. Deleting a table leaves its stream readable (`DISABLED`) for roughly 24 hours, there is no delete API for it, and the Resource Groups Tagging API keeps returning its ARN, so a prior run's correctly destroyed `gco-*` table would otherwise block the next run's clean-account gate. A tagged stream ARN is stripped only after DynamoDB itself confirms the parent table absent (`DescribeTable` → `ResourceNotFoundException`); a live table keeps its stream entry as genuine residue. Every acceptance is reported as `accepted_expired_dynamodb_streams` with the table check and observed stream status.
+
+The same treatment applies to VPC endpoints. The Resource Groups Tagging API is an index that lags deletion by minutes: the regional stack's S3 and DynamoDB gateway endpoints are removed with their stack, yet the index kept returning both ARNs — stack tags intact — when `final-inventory` ran seconds later, while EC2 already reported them not found. A tagged `vpc-endpoint/…` ARN in the expected account and Region is stripped only after `DescribeVpcEndpoints` confirms the endpoint absent or already `deleting`/`deleted`; an endpoint EC2 still reports as `available` (or any other live state) stays as genuine residue. Every acceptance is reported as `accepted_deleted_vpc_endpoints` with the EC2 state observed.
 
 If the local process is killed before cleanup finishes:
 

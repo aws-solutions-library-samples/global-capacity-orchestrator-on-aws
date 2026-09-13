@@ -58,9 +58,11 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     """The proxy Service resolves to proxy pods and to nothing else.
 
     The created Service carries a selector of exactly the ``{name}-proxy`` app
-    label and the proxy role marker. The prefill and decode pods carry a
-    different app label and a different role marker, so neither matches this
-    selector.
+    label, the proxy role marker, and the ``gco.io/type: inference`` marker the
+    NetworkPolicy peers select on (the VPC CNI admits a ClusterIP only when
+    the Service's selector matches the policy's podSelector). The prefill and
+    decode pods carry a different app label and a different role marker, so
+    neither matches this selector.
     """
     from gco.services.inference_monitor import PD_PROXY_ROLE_LABEL
 
@@ -74,6 +76,7 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     selector = service.spec.selector
     assert selector == {
         "app": "my-endpoint-proxy",
+        "gco.io/type": "inference",
         "gco.io/role": PD_PROXY_ROLE_LABEL,
     }
 
@@ -145,6 +148,7 @@ def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
     assert service.spec.type == "ClusterIP"
     assert service.spec.selector == {
         "app": "my-endpoint-proxy",
+        "gco.io/type": "inference",
         "gco.io/role": PD_PROXY_ROLE_LABEL,
     }
 
@@ -159,7 +163,9 @@ def test_role_service_resolves_only_that_role(monitor):
     """A role Service named ``{name}-{role}`` selects only that role's pods.
 
     The proxy addresses prefill and decode through these Services, so each must
-    select exactly its own role's app label and expose the serving port.
+    select exactly its own role's app label (plus the ``gco.io/type: inference``
+    marker every inference pod carries, which the NetworkPolicy peers select
+    on) and expose the serving port.
     """
     monitor._create_role_service("ep", "gco-inference", "prefill", 8000)
 
@@ -167,7 +173,7 @@ def test_role_service_resolves_only_that_role(monitor):
     svc = args[1]
     assert svc.metadata.name == "ep-prefill"
     assert svc.spec.type == "ClusterIP"
-    assert svc.spec.selector == {"app": "ep-prefill"}
+    assert svc.spec.selector == {"app": "ep-prefill", "gco.io/type": "inference"}
     assert svc.spec.ports[0].port == 8000
     assert svc.spec.ports[0].target_port == 8000
 

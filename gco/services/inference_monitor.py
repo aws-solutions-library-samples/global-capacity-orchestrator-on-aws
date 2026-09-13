@@ -35,6 +35,7 @@ import re
 import secrets
 import signal
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -51,8 +52,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T17:12:46Z
-# Generated from Git commit: 014029fc23b3763b4a03447e9e95b4a3fafcc3f3
+# Generated at (UTC): 2026-09-12T09:16:12Z
+# Generated from Git commit: 0e0c4c0e608367283092ad1925b30259ab1785aa
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -202,6 +203,23 @@ MOONCAKE_CONFIG_FILE_PATH = f"{MOONCAKE_CONFIG_MOUNT_DIR}/mooncake.json"
 # legacy single-Deployment endpoints). Used as both the target and the peer of
 # the intra-namespace allow rules.
 INFERENCE_POD_SELECTOR = {"gco.io/type": "inference"}
+
+
+def _inference_service_selector(app: str, **extra: str) -> dict[str, str]:
+    """The ``spec.selector`` of every ClusterIP Service fronting inference pods.
+
+    The selector carries ``gco.io/type: inference`` next to the per-endpoint
+    ``app`` label, and that is load-bearing under enforced NetworkPolicies on
+    the VPC CNI: its egress probe sees ClusterIP traffic before kube-proxy's
+    DNAT, so the network policy controller admits a Service's ClusterIP only
+    when the Service's own selector matches the policy peer's ``podSelector``
+    (``gco.io/type: inference`` in ``allow-inference-proxy-to-inference`` and
+    ``allow-inference-internal``). With ``app`` alone the pods were admitted
+    and the Service in front of them was not, and the inference proxy's
+    requests timed out against a healthy endpoint.
+    """
+    return {"app": app, **INFERENCE_POD_SELECTOR, **extra}
+
 
 # Names of the intra-namespace allow rules the monitor maintains alongside the
 # default-deny posture in gco-inference. These mirror the manifest names in
@@ -912,6 +930,12 @@ class InferenceMonitor:
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
+        # Monotonic stamp of the last completed loop iteration (leader pass or
+        # standby lease check). Exported as seconds_since_last_pass so a loop
+        # that is wedged — not crashed, which the probes would catch — is
+        # visible; initialised at construction so the gauge exists before the
+        # first iteration and grows if the loop never starts.
+        self._last_loop_completed_at = time.monotonic()
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -947,6 +971,7 @@ class InferenceMonitor:
             except Exception as error:
                 logger.error("Reconciliation error: %s", error, exc_info=True)
                 self._errors_count += 1
+            self._last_loop_completed_at = time.monotonic()
             try:
                 await asyncio.sleep(self.reconcile_interval)
             except Exception as error:
@@ -4303,7 +4328,7 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": deploy_name},
+                selector=_inference_service_selector(deploy_name),
                 ports=[client.V1ServicePort(port=port, target_port=port, protocol="TCP")],
                 type="ClusterIP",
             ),
@@ -4435,7 +4460,9 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": proxy_name, "gco.io/role": PD_PROXY_ROLE_LABEL},
+                selector=_inference_service_selector(
+                    proxy_name, **{"gco.io/role": PD_PROXY_ROLE_LABEL}
+                ),
                 ports=[
                     client.V1ServicePort(
                         port=80,
@@ -4491,7 +4518,7 @@ class InferenceMonitor:
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
-                selector={"app": name},
+                selector=_inference_service_selector(name),
                 ports=[
                     client.V1ServicePort(
                         port=80,
@@ -6046,6 +6073,7 @@ class InferenceMonitor:
             "running": self._running,
             "reconcile_count": self._reconcile_count,
             "errors_count": self._errors_count,
+            "seconds_since_last_pass": time.monotonic() - self._last_loop_completed_at,
         }
 
 

@@ -58,6 +58,7 @@ from aws_cdk import aws_kms as kms
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
@@ -67,12 +68,12 @@ from gco.stacks.constants import (
     COST_REPORT_SCHEDULED_PREFIX,
     cost_athena_workgroup_name,
     cost_glue_database_name,
-    cost_report_bucket_name,
+    cost_report_ssm_parameter_prefix,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-04T04:29:00Z
-# Generated from Git commit: a41926c5b2139d2571c9a9e297a74d70229b3c14
+# Generated at (UTC): 2026-09-12T06:04:03Z
+# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
@@ -197,14 +198,21 @@ class GCOMonitoringStack(Stack):
         Three constructs mirror the regional-shared bucket pattern:
 
         1. ``cost_report_kms_key`` — customer-managed KMS key with annual
-           rotation and a 7-day pending window on destroy.
+           rotation and a 7-day pending window on destroy. Its key policy
+           grants every regional cost-monitor role ``GenerateDataKey`` /
+           ``Decrypt`` / ``DescribeKey`` through S3 in this region.
         2. ``cost_report_access_logs_bucket`` — the dedicated S3 access-logs
            destination for the primary bucket.
-        3. ``cost_report_bucket`` — the primary bucket named
-           ``<project>-cost-reports-<account>-<monitoring-region>``. The name
-           is fully deterministic (``cost_report_bucket_name``) because the
-           regional stacks — which deploy *before* this stack — grant their
-           cost-monitor roles write access by literal ARN.
+        3. ``cost_report_bucket`` — the primary bucket. Its physical name is
+           CloudFormation-generated: S3 bucket names are a global namespace
+           and a deleted name is not reliably reusable, so the previous fixed
+           ``<project>-cost-reports-<account>-<region>`` name made every
+           destroy-and-redeploy a collision hazard (and did fail one). The
+           regional stacks deploy *before* this stack, so instead of granting
+           by reconstructed ARN they are granted here, principal based, via
+           the bucket policy; the bucket's identity is published as SSM
+           parameters under ``cost_report_ssm_parameter_prefix`` for the
+           cost-monitor service, the CLI, and release validation to resolve.
 
         Lifecycle policy comes from ``cdk.json`` (``cost_monitoring.reports``):
         report objects transition to STANDARD_IA after
@@ -246,6 +254,31 @@ class GCOMonitoringStack(Stack):
             )
         )
 
+        # Every regional cost-monitor role writes KMS-encrypted objects into
+        # the bucket below. The roles live in other regions and their stacks
+        # deploy first, so the grant direction is inverted relative to the
+        # in-region buckets: this stack resolves each role ARN (a cross-region
+        # reference CDK routes through the same export mechanism the SQS and
+        # cluster widgets already use) and admits it here, scoped to use via
+        # S3 in this region. Nothing in the regional stacks needs the key ARN.
+        cost_monitor_principals = [
+            iam.ArnPrincipal(regional_stack.cost_monitor_role.role_arn)
+            for regional_stack in self.regional_stacks
+        ]
+        if cost_monitor_principals:
+            self.cost_report_kms_key.add_to_resource_policy(
+                iam.PolicyStatement(
+                    sid="AllowRegionalCostMonitorsViaS3",
+                    effect=iam.Effect.ALLOW,
+                    principals=cost_monitor_principals,
+                    actions=["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
+                    resources=["*"],
+                    conditions={
+                        "StringEquals": {"kms:ViaService": f"s3.{self.region}.{self.url_suffix}"}
+                    },
+                )
+            )
+
         # Retention for the access-logs bucket honors the same `s3_access_logs`
         # context field used by the central buckets (default 90 days).
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
@@ -270,10 +303,12 @@ class GCOMonitoringStack(Stack):
             ],
         )
 
+        # No ``bucket_name``: see the S3 bucket naming policy in
+        # ``gco.stacks.constants`` — a CloudFormation-generated name can never
+        # collide with a previous deployment's deleted bucket.
         self.cost_report_bucket = s3.Bucket(
             self,
             "CostReportBucket",
-            bucket_name=cost_report_bucket_name(self.project_name, self.account, self.region),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.cost_report_kms_key,
             bucket_key_enabled=True,
@@ -338,6 +373,61 @@ class GCOMonitoringStack(Stack):
                 ],
                 conditions={"Bool": {"aws:SecureTransport": "false"}},
             )
+        )
+
+        # Principal-based write grant for the regional cost-monitor roles.
+        # Same-account bucket-policy allows are sufficient on their own, so
+        # the regional stacks carry no S3 statement for this bucket at all —
+        # the service writes scheduled/ad-hoc Parquet reports, lists recent
+        # report objects for the API surface, and needs GetBucketLocation for
+        # the cross-region client redirect. Object actions are scoped to this
+        # bucket's key space; nothing here is ``Principal: "*"``.
+        if cost_monitor_principals:
+            self.cost_report_bucket.add_to_resource_policy(
+                iam.PolicyStatement(
+                    sid="AllowRegionalCostMonitorReports",
+                    effect=iam.Effect.ALLOW,
+                    principals=cost_monitor_principals,
+                    actions=[
+                        "s3:PutObject",
+                        "s3:GetObject",
+                        "s3:ListBucket",
+                        "s3:GetBucketLocation",
+                    ],
+                    resources=[
+                        self.cost_report_bucket.bucket_arn,
+                        f"{self.cost_report_bucket.bucket_arn}/*",
+                    ],
+                )
+            )
+
+        # Publish the bucket's identity in this region's parameter store,
+        # mirroring the model, cluster-shared and regional-shared buckets. The
+        # regional cost-monitor services resolve ``<prefix>/name`` at runtime
+        # (their stacks deploy before this one, so the parameter is the
+        # rendezvous point, not a synth-time value); the CLI and release
+        # validation read ``/name`` and ``/arn``.
+        cost_report_prefix = cost_report_ssm_parameter_prefix(self.project_name)
+        ssm.StringParameter(
+            self,
+            "CostReportBucketNameParam",
+            parameter_name=f"{cost_report_prefix}/name",
+            string_value=self.cost_report_bucket.bucket_name,
+            description="Name of the central cost report bucket written by every region.",
+        )
+        ssm.StringParameter(
+            self,
+            "CostReportBucketArnParam",
+            parameter_name=f"{cost_report_prefix}/arn",
+            string_value=self.cost_report_bucket.bucket_arn,
+            description="ARN of the central cost report bucket written by every region.",
+        )
+        ssm.StringParameter(
+            self,
+            "CostReportBucketRegionParam",
+            parameter_name=f"{cost_report_prefix}/region",
+            string_value=self.region,
+            description="Home region of the central cost report bucket.",
         )
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings

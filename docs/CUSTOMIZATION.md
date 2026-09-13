@@ -21,6 +21,8 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Configuring Endpoint Access](#configuring-endpoint-access)
   - [Developer Access Entries](#developer-access-entries)
   - [Job Submission with Private Endpoints](#job-submission-with-private-endpoints)
+  - [Network Policy Enforcement](#network-policy-enforcement)
+  - [VPC Endpoints](#vpc-endpoints)
 - [Configuring GPU Nodepools](#configuring-gpu-nodepools)
   - [Modify Instance Types](#modify-instance-types)
   - [Adjust GPU Limits](#adjust-gpu-limits)
@@ -272,8 +274,9 @@ Changing `project_name` re-scopes all of the following (shown for
 |---|---|
 | CloudFormation stacks | `acme-global`, `acme-api-gateway`, `acme-<region>`, `acme-monitoring` |
 | DynamoDB tables | `acme-jobs`, `acme-job-templates`, `acme-webhooks`, `acme-inference-endpoints`, … |
-| Cluster-shared bucket + SSM | `acme-cluster-shared-<account>-<region>`, `/acme/cluster-shared-bucket/*` |
-| Regional-shared bucket + SSM | `acme-regional-shared-<account>-<region>`, `/acme/regional-shared-bucket/*` |
+| Cluster-shared bucket SSM identity | `/acme/cluster-shared-bucket/*` (the bucket's own name is CloudFormation-generated, e.g. `acme-global-clustersharedbucket…`; see [ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)) |
+| Regional-shared bucket SSM identity | `/acme/regional-shared-bucket/*` (bucket name CloudFormation-generated, `acme-<region>-regionalsharedbucket…`) |
+| Cost report bucket SSM identity | `/acme/cost-report-bucket/*` (bucket name CloudFormation-generated, `acme-monitoring-costreportbucket…`) |
 | SSM registry | `/acme/jobs-table-name`, `/acme/model-bucket-name`, `/acme/alb-hostname-<region>`, … |
 | API Gateway auth secret | `acme/api-gateway-auth-token` |
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
@@ -282,7 +285,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
-| Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
+| Analytics (opt-in) | Studio bucket `acme-analytics-studioonlybucket…` (CloudFormation-generated), SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
 
 The only names intentionally **not** re-scoped are in-cluster Kubernetes object
 names (namespaces such as `gco-jobs` / `gco-system`, service accounts,
@@ -550,6 +553,66 @@ kubectl apply -f job.yaml
 See [`docs/CLI.md`](CLI.md#gco-cluster-tunnel) for the full `gco cluster tunnel`
 reference.
 
+### Network Policy Enforcement
+
+GCO ships Kubernetes NetworkPolicies for every namespace it owns (default-deny
+ingress in `gco-system` and `gco-jobs`, per-service allow rules, DNS + HTTPS
+egress; see [Network Security](ARCHITECTURE.md#network-security)). On EKS Auto
+Mode those objects are only enforced once the cluster's network policy
+controller is switched on, which the regional stack does through the
+`kube-system/amazon-vpc-cni` ConfigMap it applies
+(`06-network-policy-controller.yaml`):
+
+```json
+"eks_cluster": {
+  "network_policy_enforcement": true
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `network_policy_enforcement` | `true` | Literal JSON boolean. `false` keeps every NetworkPolicy object in place but stops enforcing them — an escape hatch, not a tuning knob: if a workload needs a path GCO does not ship, add a NetworkPolicy (they are additive) instead |
+
+When you add an egress rule that must reach a Kubernetes Service through its
+ClusterIP, remember how the VPC CNI enforces egress: the rule's `podSelector`
+admits the selected pods' addresses, and the Service's ClusterIP is admitted
+only when the Service's own `spec.selector` matches that `podSelector` (see
+[Network Security](ARCHITECTURE.md#network-security)). Either select on a
+label the Service selector carries, or admit the address range with an
+`ipBlock`; a rule that names only the pods leaves connections to the Service
+timing out while the pods themselves are healthy.
+
+What the defaults allow is spelled out in the manifest header of
+`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`. Job pods
+in `gco-jobs` may reach each other on any port, resolve DNS, use HTTPS to any
+destination, and reach the in-VPC ranges listed under `vpc_endpoint_cidrs` on
+any port; nothing from another namespace may reach them. The kind CI job
+enforces the same rules with Calico and probes both the allowed and the denied
+paths, and the live release validation repeats those probes on a real cluster.
+
+### VPC Endpoints
+
+Each regional VPC gets the two free gateway endpoints by default; PrivateLink
+interface endpoints are opt-in because they bill per AZ-hour:
+
+```json
+"vpc_endpoints": {
+  "gateway": ["s3", "dynamodb"],
+  "interface": []
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `gateway` | `["s3", "dynamodb"]` | Route-table endpoints attached to every subnet. S3 takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC; DynamoDB helps single-region topologies. Free |
+| `interface` | `[]` | PrivateLink endpoints, one ENI per AZ each, with private DNS and a security group admitting HTTPS from the VPC. Supported: `sts`, `ecr.api`, `ecr.dkr`, `logs`, `monitoring`, `sqs`, `ssm`, `secretsmanager`, `kms`, `eks`, `elasticfilesystem`, `bedrock-runtime`. Unknown or duplicate names fail synthesis |
+
+Endpoints change routing, not policy: NetworkPolicy egress rules allow HTTPS by
+port, so job pods keep working whether S3 is reached through the gateway
+endpoint or the NAT gateways. Calls to the global region (the job tables, the
+cluster-shared bucket, the SSM registry) are cross-region and always leave
+through the NAT gateways.
+
 ## Configuring GPU Nodepools
 
 ### Modify Instance Types
@@ -806,13 +869,15 @@ Configure in `cdk.json`:
 
 Before the threshold, the monitor records the start of the outage. After the threshold, it logs that the authenticated inference proxy will return 503 until the model recovers. When a replica becomes ready, the timer is cleared. Reconciliation never creates endpoint-specific public routes.
 
-#### Inference Proxy TLS Autoscaling
+#### Inference Proxy Autoscaling
 
-Configure the shared inference data plane's `api-tls-proxy` CPU request and
-HPA target in `cdk.json`:
+Configure the shared inference data plane's HPA replica bounds and the
+`api-tls-proxy` CPU request and HPA target in `cdk.json`:
 
 ```json
 "inference_proxy": {
+  "min_replicas": 3,
+  "max_replicas": 10,
   "tls_proxy_cpu_request_millicores": 100,
   "tls_proxy_cpu_target_utilization_percentage": 70
 }
@@ -820,16 +885,19 @@ HPA target in `cdk.json`:
 
 | Setting | Default | Description |
 |---|---|---|
+| `min_replicas` | `3` | Exact integer from 1 through 50. HPA floor and the Deployment's create-time replica count; three keeps one pod per AZ in a three-AZ region |
+| `max_replicas` | `10` | Exact integer from 1 through 100, at least `min_replicas`. HPA ceiling |
 | `tls_proxy_cpu_request_millicores` | `100` | Exact integer from 1 through 250. CDK renders it as a Kubernetes CPU quantity such as `100m`; this request is the TLS sidecar HPA utilization denominator |
 | `tls_proxy_cpu_target_utilization_percentage` | `70` | Exact integer from 1 through 100 used only by the `api-tls-proxy` CPU `ContainerResource` HPA signal |
 
-The section is optional. Omission and JSON `null` use both defaults because AWS
+The section is optional. Omission and JSON `null` use every default because AWS
 CDK normalizes top-level `null` context values to omission; partial objects retain
-the other default. Unknown keys, non-object non-null sections, booleans, floats,
-strings, and out-of-range values fail configuration validation. Redeploy the
-regional stack after changing a value. This tuning does not change the inference
-application CPU or memory, the TLS proxy CPU limit or memory profile, HPA replica
-bounds or behavior, the PodDisruptionBudget, or stream-drain settings.
+the other defaults. Unknown keys, non-object non-null sections, booleans, floats,
+strings, out-of-range values, and `max_replicas` below `min_replicas` fail
+configuration validation. Redeploy the regional stack after changing a value.
+This tuning does not change the inference application CPU or memory, the TLS
+proxy CPU limit or memory profile, HPA scaling behavior, the
+PodDisruptionBudget (always `maxUnavailable: 1`), or stream-drain settings.
 
 #### ALB Architecture
 
@@ -852,38 +920,47 @@ def validate_manifest(manifest: dict) -> bool:
 
 ### Adjust Replica Counts
 
-Edit the deployment manifests:
+The two request-path services are sized from `cdk.json`; redeploy the regional
+stack after changing a value.
 
-`lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml`:
+Manifest processor — fixed replica count, application-container limits, and an
+opt-in CPU autoscaler:
 
-```yaml
-spec:
-  replicas: 5  # Increase from 2 to 5
+```json
+"manifest_processor": {
+  "replicas": 3,
+  "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+  "autoscaling": {
+    "enabled": false,
+    "max_replicas": 6,
+    "cpu_target_utilization_percentage": 70
+  }
+}
 ```
 
-Or use Horizontal Pod Autoscaler:
+| Setting | Default | Description |
+|---|---|---|
+| `replicas` | `3` | Positive integer. Deployment replica count, and the HPA floor when autoscaling is enabled |
+| `resource_limits.cpu` / `.memory` | `1000m` / `2Gi` | Kubernetes quantities rendered verbatim into the `manifest-processor` container's `limits` (requests stay at the manifest's `500m` / `1Gi`, so limits below them are rejected by Kubernetes at apply time) |
+| `autoscaling.enabled` | `false` | Installs `35-manifest-processor-hpa.yaml` and flips the Deployment's `gco.aws/hpa-controls-replicas` annotation to `"true"` so re-applies stop resetting the HPA's scale value. Turning it back off prunes the HPA |
+| `autoscaling.max_replicas` | `6` | Exact integer from 1 through 100, at least `replicas` |
+| `autoscaling.cpu_target_utilization_percentage` | `70` | Exact integer from 1 through 100, `ContainerResource` CPU utilization of the `manifest-processor` container |
 
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: health-monitor-hpa
-  namespace: gco-system
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: health-monitor
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-```
+Autoscaling is off by default on purpose: the API tier's handlers are dominated
+by Kubernetes and DynamoDB round trips, so CPU tracks saturation only loosely,
+and every replica also runs the central queue worker (safe, because job claims
+are conditional DynamoDB writes, but scale-down churns in-flight leases). Turn it
+on when measurements show the application container CPU-bound. The HPA scales up
+by at most two pods per minute and down by one pod per two minutes after a
+ten-minute stabilization window.
+
+Inference proxy — HPA bounds live under `inference_proxy.min_replicas` /
+`max_replicas`; see [Inference Proxy Autoscaling](#inference-proxy-autoscaling).
+
+Health monitor, inference monitor, and cost monitor are control loops: extra
+replicas buy availability (a hot standby behind a Kubernetes `Lease`, or a
+second pod behind the ALB), not throughput, so their counts are fixed in the
+manifests (`30-`, `32-`, `34-`) and there is no HPA for them by design.
 
 ## Security Policy Configuration
 

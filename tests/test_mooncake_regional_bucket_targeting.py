@@ -2,9 +2,9 @@
 Property-based test — a regional upload only ever touches its own region.
 
 ``RegionalBucketManager.upload`` takes a target region and writes local files
-to that region's general-purpose bucket, named
-``gco-regional-shared-<account>-<region>``. The bucket name is never built from
-the account/region in code; it is read back from the *target region's own*
+to that region's general-purpose bucket. The bucket carries a
+CloudFormation-generated name that is never built from the account/region in
+code; it is read back from the *target region's own*
 ``/gco/regional-shared-bucket/name`` parameter so the manager can only ever
 write where that region's stack published its bucket.
 
@@ -14,9 +14,8 @@ own distinctly-named bucket — an upload SHALL:
 
 * read ``/gco/regional-shared-bucket/name`` from the target region and from no
   other region (never the global region's, never a decoy's), and
-* put every object into the target region's
-  ``gco-regional-shared-<account>-<region>`` bucket through an S3 client scoped
-  to that same region — never into any decoy region's bucket.
+* put every object into the target region's published regional bucket
+  through an S3 client scoped to that same region — never into any decoy region's bucket.
 
 The parameter store and S3 are both faked in-process: a small registry maps
 each region to its own bucket name, so a manager that resolved the wrong
@@ -34,16 +33,14 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from cli.models import RegionalBucketManager
-from gco.stacks.constants import (
-    regional_shared_bucket_name_prefix,
-    regional_shared_ssm_parameter_prefix,
-)
+from gco.stacks.constants import regional_shared_ssm_parameter_prefix
 
-# Physical-name prefixes derived from project_name (#139). This CLI test drives
+# The SSM namespace derived from project_name (#139). This CLI test drives
 # RegionalBucketManager with a config whose project_name is "gco", so scope the
-# expected prefixes to "gco".
+# expected prefix to "gco". Bucket names are CloudFormation-generated and only
+# ever learned from SSM, so the fixtures below publish CloudFormation-shaped
+# names rather than reconstructing one.
 _PROJECT_NAME = "gco"
-REGIONAL_SHARED_BUCKET_NAME_PREFIX = regional_shared_bucket_name_prefix(_PROJECT_NAME)
 REGIONAL_SHARED_SSM_PARAMETER_PREFIX = regional_shared_ssm_parameter_prefix(_PROJECT_NAME)
 
 _ACCOUNT = "123456789012"
@@ -65,8 +62,8 @@ _TARGET_REGIONS = st.from_regex(r"[a-z]{2}-[a-z]{4,9}-[1-9]", fullmatch=True).fi
 
 
 def _bucket_for(region: str) -> str:
-    """The canonical regional bucket name a region's stack would publish."""
-    return f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-{_ACCOUNT}-{region}"
+    """A CloudFormation-generated regional bucket name a region's stack would publish."""
+    return f"gco-{region}-regionalsharedbucket3ff19783-{region.replace('-', '')}x1y2z3"
 
 
 @settings(max_examples=60, deadline=None)

@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T00:12:12Z
-# Generated from Git commit: bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7
+# Generated at (UTC): 2026-09-12T12:46:59Z
+# Generated from Git commit: d77e920379da4b3fd56a9cf0b58cbd1fc45c1802
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -688,6 +688,13 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{QUEUE_PROCESSOR_IMAGE}}", True): (
         ("keda.sh/v1alpha1", "ScaledJob", "gco-system", "sqs-queue-processor"),
     ),
+    # Optional manifest-processor CPU autoscaler (cdk.json
+    # manifest_processor.autoscaling.enabled). Turning it off must also remove
+    # the HPA, otherwise the last scale value would keep fighting the
+    # Deployment's re-asserted replicas.
+    ("{{MP_HPA_ENABLED}}", False): (
+        ("autoscaling/v2", "HorizontalPodAutoscaler", "gco-system", "manifest-processor-hpa"),
+    ),
     ("{{KUEUE_ENABLED}}", True): (
         # Deletion order matters: the LocalQueue references the ClusterQueue,
         # which references the ResourceFlavor.
@@ -699,6 +706,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-to-restapi"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-egress"),
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-operator-to-restapi"),
     ),
     ("{{KUBEFLOW_TRAINER_ENABLED}}", True): (
         ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),
@@ -758,8 +766,19 @@ _FEATURE_RESOURCE_INVENTORY: dict[
 # and permanently fails DaemonSet convergence (observed live the moment the
 # Slurm NodeSet provisioned the first GPU nodes). The built-in plugin
 # advertises nvidia.com/gpu on its own.
+#
+# allow-vpc-endpoint-egress / allow-ray-cluster-internal (gco-jobs): the
+# pre-v7.7 job-namespace model — HTTPS only to the VPC's own CIDR (there were
+# never VPC endpoints for that traffic to reach, so enforced it cut jobs off
+# from every AWS API) and a Ray-only peer rule. 03-network-policies.yaml now
+# ships allow-https-egress + allow-vpc-egress + allow-same-namespace, which
+# strictly contain both. NetworkPolicies union, so the leftovers would allow
+# nothing new — they are swept so the live policy set stays exactly the
+# shipped, documented one.
 _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("apps/v1", "DaemonSet", "kube-system", "nvidia-device-plugin-daemonset"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
 )
 
 
@@ -1054,7 +1073,31 @@ def restart_daemonsets(namespace: str, daemonset_names: list[str]) -> dict[str, 
     return {"restarted": restarted, "failed": failed}
 
 
-def _verify_workload_credentials(apps_v1: Any) -> list[str]:
+# Every platform Deployment GCO ships in gco-system, with the dedicated
+# ServiceAccount it must run as: (namespace, deployment, service account).
+# tests/test_platform_workload_contract.py pins this to the manifests, so a new
+# service (or a renamed account) fails a unit test instead of silently escaping
+# the post-apply credential verification below.
+PLATFORM_DEPLOYMENTS: tuple[tuple[str, str, str], ...] = (
+    ("gco-system", "health-monitor", "gco-health-monitor-sa"),
+    ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
+    ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+    ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
+    # Feature-gated (cdk.json cost_monitoring); verified only when planned.
+    ("gco-system", "cost-monitor", "gco-cost-monitor-sa"),
+)
+
+# User-workload accounts the manifests declare outside gco-system.
+WORKLOAD_SERVICE_ACCOUNTS: tuple[tuple[str, str], ...] = (
+    ("gco-jobs", "gco-service-account"),
+    ("gco-inference", "gco-service-account"),
+)
+
+
+def _verify_workload_credentials(
+    apps_v1: Any,
+    planned: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Verify that key GCO deployments have working IAM credential configuration.
 
     Checks that:
@@ -1062,15 +1105,27 @@ def _verify_workload_credentials(apps_v1: Any) -> list[str]:
     2. The projected service-account token volume is mounted
     3. AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE env vars are set
 
+    ``planned`` is the base-phase resource list from ``plan_manifests``. When
+    given, a platform Deployment (and its ServiceAccount) is checked only if
+    this apply planned it, so a feature-gated service that is switched off
+    (cost-monitor) does not surface as "deployment not found".
+
     Returns a list of warning strings (empty = all good).
     """
     warnings: list[str] = []
-    # Each deployment maps to its dedicated service account
+    planned_identities: set[tuple[str, str, str]] | None = None
+    if planned is not None:
+        planned_identities = {
+            (str(item["kind"]), str(item["namespace"]), str(item["name"])) for item in planned
+        }
+
+    def _is_planned(kind: str, namespace: str, name: str) -> bool:
+        return planned_identities is None or (kind, namespace, name) in planned_identities
+
     expected_deployments = [
-        ("gco-system", "health-monitor", "gco-health-monitor-sa"),
-        ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
-        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
-        ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+        (namespace, name, service_account)
+        for namespace, name, service_account in PLATFORM_DEPLOYMENTS
+        if _is_planned("Deployment", namespace, name)
     ]
 
     for namespace, name, expected_sa in expected_deployments:
@@ -1121,18 +1176,15 @@ def _verify_workload_credentials(apps_v1: Any) -> list[str]:
         except Exception as e:
             warnings.append(f"{namespace}/{name}: verification error ({e})")
 
-    # Check that service accounts exist in all required namespaces
+    # Check that service accounts exist in all required namespaces: the
+    # dedicated account of every planned platform Deployment, then the user
+    # workload accounts.
     v1 = client.CoreV1Api()
-    # Platform service SAs in gco-system
-    platform_sas = [
-        ("gco-system", "gco-health-monitor-sa"),
-        ("gco-system", "gco-manifest-processor-sa"),
-        ("gco-system", "gco-inference-monitor-sa"),
-    ]
-    # User workload SAs in their respective namespaces
+    platform_sas = [(namespace, sa_name) for namespace, _name, sa_name in expected_deployments]
     workload_sas = [
-        ("gco-jobs", "gco-service-account"),
-        ("gco-inference", "gco-service-account"),
+        (namespace, sa_name)
+        for namespace, sa_name in WORKLOAD_SERVICE_ACCOUNTS
+        if _is_planned("ServiceAccount", namespace, sa_name)
     ]
     for namespace, sa_name in platform_sas + workload_sas:
         try:
@@ -1821,8 +1873,9 @@ def apply_manifests(
 
     # Verify IAM credentials are available for workloads
     # Check that the projected service-account token volume is configured
-    # on key deployments — if missing, IRSA won't work
-    credential_warnings = _verify_workload_credentials(apps_v1)
+    # on key deployments — if missing, IRSA won't work. Scoped to the
+    # Deployments this pass planned so a gated-off service is not reported.
+    credential_warnings = _verify_workload_credentials(apps_v1, planned_resources)
 
     # Combine the restart results for the return payload.
     all_restarted = (

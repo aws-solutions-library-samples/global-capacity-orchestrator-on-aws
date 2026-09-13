@@ -1,6 +1,11 @@
 # Inference Monitor — reconciliation controller for inference endpoints
 # Polls DynamoDB for desired state and syncs K8s Deployments/Services/Ingress/HPA.
 # Deployment + PodDisruptionBudget consolidated in one file.
+#
+# Replica model: the reconciler is leader-elected through the
+# inference-monitor-leader Lease in gco-inference (see inference_monitor.py),
+# so the second replica is a hot standby that takes over within one lease
+# duration. Adding replicas adds no throughput; two are for availability.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -9,9 +14,20 @@ metadata:
   namespace: gco-system
   labels:
     app: inference-monitor
+    component: controller
     project: gco
 spec:
   replicas: 2
+  revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: inference-monitor
@@ -19,19 +35,61 @@ spec:
     metadata:
       labels:
         app: inference-monitor
+        component: controller
         project: gco
+      annotations:
+        gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
     spec:
       serviceAccountName: gco-inference-monitor-sa
       priorityClassName: gco-platform-critical
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # One reconcile pass may be mid-flight when SIGTERM arrives; the handler
+      # in main() finishes the cycle before exiting, and a pass is bounded by
+      # the Kubernetes/DynamoDB request timeouts (30s each).
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: inference-monitor
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: inference-monitor
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: inference-monitor
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: inference-monitor
+                topologyKey: topology.kubernetes.io/zone
       containers:
         - name: inference-monitor
           image: {{INFERENCE_MONITOR_IMAGE}}
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           ports:
             - name: metrics
               containerPort: 9090
@@ -79,27 +137,38 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          livenessProbe:
-            exec:
-              command:
-                - python
-                - -c
-                - "import os; assert os.path.exists('/proc/1')"
-            initialDelaySeconds: 15
-            periodSeconds: 30
+          # The controller has no request path; the Prometheus endpoint that
+          # start_metrics_server binds on :9090 is the process's one network
+          # surface, so it is the honest liveness signal. A stuck reconcile
+          # loop is visible in the exported seconds_since_last_pass gauge.
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
             timeoutSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
-            exec:
-              command:
-                - python
-                - -c
-                - "import os; assert os.path.exists('/proc/1')"
-            initialDelaySeconds: 10
+            httpGet:
+              path: /metrics
+              port: metrics
             periodSeconds: 15
             timeoutSeconds: 3
+            failureThreshold: 3
           volumeMounts:
             - name: aws-iam-token
               mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+              readOnly: true
+            - name: kubernetes-api-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
       volumes:
         - name: aws-iam-token
@@ -110,8 +179,31 @@ spec:
                   audience: sts.amazonaws.com
                   expirationSeconds: 86400
                   path: token
+        # Explicit, short-lived API token: the ServiceAccount disables
+        # automount, so the reconciler's Kubernetes client is fed by this
+        # projection (same shape as health-monitor and manifest-processor).
+        - name: kubernetes-api-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
       restartPolicy: Always
 ---
+# maxUnavailable rather than minAvailable: one voluntary disruption at a
+# time, whatever the replica count, so the standby can always take the Lease.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -121,7 +213,7 @@ metadata:
     app: inference-monitor
     project: gco
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: inference-monitor

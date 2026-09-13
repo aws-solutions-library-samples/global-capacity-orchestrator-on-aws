@@ -1291,8 +1291,8 @@ def add_sagemaker_suppressions(
                     "policy on the single literal Cluster_Shared_Bucket "
                     "ARN resolved from /gco/cluster-shared-bucket/arn. "
                     "The ``<arn>/*`` object-key wildcard covers every "
-                    "object key inside the single always-on "
-                    "gco-cluster-shared-<account>-<region> bucket, "
+                    "object key inside the single always-on cluster-shared "
+                    "bucket (CloudFormation-generated name, published via SSM), "
                     "identical in shape and intent to the regional stack's "
                     "analogous job-pod grant."
                 ),

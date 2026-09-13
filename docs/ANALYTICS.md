@@ -634,14 +634,14 @@ response = sm.create_training_job(
             "DataSource": {
                 "S3DataSource": {
                     "S3DataType": "S3Prefix",
-                    "S3Uri": "s3://gco-cluster-shared-123456789012-us-east-2/training-data/",
+                    "S3Uri": "s3://gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6/training-data/",
                     "S3DataDistributionType": "FullyReplicated",
                 }
             },
         }
     ],
     OutputDataConfig={
-        "S3OutputPath": "s3://gco-cluster-shared-123456789012-us-east-2/training-output/",
+        "S3OutputPath": "s3://gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6/training-output/",
     },
     ResourceConfig={
         "InstanceType": "ml.p4d.24xlarge",
@@ -973,9 +973,11 @@ The cluster-pod side is asymmetric by design: no cluster pod ever
 gets access to `Studio_Only_Bucket`, because the bucket's purpose is
 notebook-private scratch. IAM is verified by a property-based test,
 which asserts (for all toggle states and all regional regions) that
-regional job-pod IAM statements reference
-`arn:aws:s3:::gco-cluster-shared-*` and never
-`arn:aws:s3:::gco-analytics-studio-*`.
+regional job-pod IAM statements reference only the cluster-shared bucket
+(its ARN resolved from SSM as a deploy-time token) and never the Studio
+bucket. Both buckets carry CloudFormation-generated names
+([ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)), so the
+check keys on construct identity rather than on a name prefix.
 
 ### Accessing `Cluster_Shared_Bucket` from Studio
 
@@ -1122,8 +1124,8 @@ metadata:
   name: gco-cluster-shared-bucket
   namespace: gco-jobs
 data:
-  sharedBucketName: "gco-cluster-shared-123456789012-us-east-2"
-  sharedBucketArn: "arn:aws:s3:::gco-cluster-shared-123456789012-us-east-2"
+  sharedBucketName: "gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6"
+  sharedBucketArn: "arn:aws:s3:::gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6"
   sharedBucketRegion: "us-east-2"
 ```
 

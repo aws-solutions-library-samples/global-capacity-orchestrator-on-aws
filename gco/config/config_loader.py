@@ -33,11 +33,14 @@ import boto3
 from aws_cdk import App
 
 from gco.inference_proxy_config import (
+    INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
+    INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
+from gco.resource_governance import parse_k8s_quantity
 from gco.stacks.constants import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     known_cloudformation_regions,
@@ -47,6 +50,55 @@ from gco.stacks.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: ``manifest_processor.autoscaling`` defaults. Off: the API tier is I/O-bound
+#: (Kubernetes round trips), so CPU is a weak saturation signal; an operator who
+#: has measured a CPU-bound API turns it on and the HPA owns the replica count
+#: between ``manifest_processor.replicas`` and ``max_replicas``.
+_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "max_replicas": 6,
+    "cpu_target_utilization_percentage": 70,
+}
+
+#: The ``manifest-processor`` container's fixed requests in
+#: ``lambda/kubectl-applier-simple/manifests/31-manifest-processor.yaml``;
+#: ``manifest_processor.resource_limits`` may not go below them. Pinned to the
+#: manifest by ``tests/test_config_loader.py``.
+_MANIFEST_PROCESSOR_CONTAINER_REQUESTS: dict[str, str] = {
+    "cpu": "500m",
+    "memory": "1Gi",
+}
+
+#: Gateway VPC endpoints ``vpc_endpoints.gateway`` may name. Free, route-table
+#: based, same-region only.
+VPC_GATEWAY_ENDPOINT_SERVICES: tuple[str, ...] = ("s3", "dynamodb")
+
+#: Interface (PrivateLink) endpoints ``vpc_endpoints.interface`` may name,
+#: keyed the way the regional stack maps them onto
+#: ``ec2.InterfaceVpcEndpointAwsService``. Each costs per AZ-hour plus per GB,
+#: so the list is opt-in; together they keep every AWS API call the platform
+#: and its jobs make inside the VPC (the cross-region calls to the global
+#: region's tables and buckets still leave through the NAT gateways).
+VPC_INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
+    "sts",
+    "ecr.api",
+    "ecr.dkr",
+    "logs",
+    "monitoring",
+    "sqs",
+    "ssm",
+    "secretsmanager",
+    "kms",
+    "eks",
+    "elasticfilesystem",
+    "bedrock-runtime",
+)
+
+_VPC_ENDPOINTS_DEFAULTS: dict[str, list[str]] = {
+    "gateway": ["s3", "dynamodb"],
+    "interface": [],
+}
 
 #: CDK context key that force-enables optional infrastructure features for one
 #: deploy without touching cdk.json — the infrastructure sibling of the
@@ -442,11 +494,13 @@ class ConfigLoader:
             )
 
     def _validate_inference_proxy_config(self) -> None:
-        """Validate the inference TLS proxy CPU request and HPA target."""
+        """Validate the inference proxy TLS CPU request, HPA target and replica bounds."""
         config = self.get_inference_proxy_config()
         ranges = {
             "tls_proxy_cpu_request_millicores": (1, 250),
             "tls_proxy_cpu_target_utilization_percentage": (1, 100),
+            "min_replicas": (1, 50),
+            "max_replicas": (1, 100),
         }
         for field, (minimum, maximum) in ranges.items():
             value = config[field]
@@ -455,6 +509,11 @@ class ConfigLoader:
                     f"inference_proxy.{field} must be an integer between "
                     f"{minimum} and {maximum}, got {value!r}"
                 )
+        if config["max_replicas"] < config["min_replicas"]:
+            raise ConfigValidationError(
+                "inference_proxy.max_replicas must be at least inference_proxy.min_replicas, "
+                f"got {config['max_replicas']} < {config['min_replicas']}"
+            )
 
     def _validate_alb_config(self) -> None:
         """Validate ALB configuration"""
@@ -541,11 +600,70 @@ class ConfigLoader:
                 "job_validation_policy.require_accelerator_toleration must be a boolean"
             )
 
-        # Validate resource limits
+        # Validate resource limits. They render verbatim into the Deployment's
+        # container limits, so they must be non-empty Kubernetes quantities no
+        # smaller than the requests fixed in 31-manifest-processor.yaml —
+        # Kubernetes rejects limit < request, and catching that here fails the
+        # synth instead of the applier halfway through a deploy.
         resource_limits = mp_config["resource_limits"]
         if "cpu" not in resource_limits or "memory" not in resource_limits:
             raise ConfigValidationError(
                 "manifest_processor resource_limits must contain 'cpu' and 'memory'"
+            )
+        for resource, request in _MANIFEST_PROCESSOR_CONTAINER_REQUESTS.items():
+            quantity = resource_limits[resource]
+            try:
+                if not isinstance(quantity, str):
+                    raise ValueError("must be a string")
+                parsed = parse_k8s_quantity(quantity)
+            except ValueError as exc:
+                raise ConfigValidationError(
+                    f"manifest_processor.resource_limits.{resource} must be a Kubernetes "
+                    f"quantity string such as '1000m' or '2Gi', got {quantity!r} ({exc})"
+                ) from exc
+            if parsed < parse_k8s_quantity(request):
+                raise ConfigValidationError(
+                    f"manifest_processor.resource_limits.{resource} must be at least the "
+                    f"container request of {request!r} "
+                    f"(31-manifest-processor.yaml), got {quantity!r}"
+                )
+
+        # Validate the optional CPU autoscaler. Off by default: the API tier is
+        # I/O-bound, so CPU is a weak saturation signal; operators who have
+        # measured otherwise turn it on here and the HPA takes over the count.
+        autoscaling = mp_config.get("autoscaling")
+        if autoscaling is None:
+            autoscaling = {}
+        if not isinstance(autoscaling, dict):
+            raise ConfigValidationError("manifest_processor.autoscaling must be an object")
+        unknown_autoscaling = sorted(
+            str(key) for key in autoscaling if key not in _MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS
+        )
+        if unknown_autoscaling:
+            raise ConfigValidationError(
+                "manifest_processor.autoscaling contains unknown key(s): "
+                + ", ".join(unknown_autoscaling)
+                + "; allowed keys: "
+                + ", ".join(sorted(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS))
+            )
+        merged_autoscaling = {**_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS, **autoscaling}
+        if type(merged_autoscaling["enabled"]) is not bool:
+            raise ConfigValidationError("manifest_processor.autoscaling.enabled must be a boolean")
+        for key, minimum, maximum in (
+            ("max_replicas", 1, 100),
+            ("cpu_target_utilization_percentage", 1, 100),
+        ):
+            value = merged_autoscaling[key]
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ConfigValidationError(
+                    f"manifest_processor.autoscaling.{key} must be an integer between "
+                    f"{minimum} and {maximum}, got {value!r}"
+                )
+        if merged_autoscaling["max_replicas"] < mp_config["replicas"]:
+            raise ConfigValidationError(
+                "manifest_processor.autoscaling.max_replicas must be at least "
+                f"manifest_processor.replicas, got {merged_autoscaling['max_replicas']} "
+                f"< {mp_config['replicas']}"
             )
 
         # Validate allowed namespaces (lives under job_validation_policy).
@@ -620,6 +738,75 @@ class ConfigLoader:
                     f"endpoint_access must be one of {valid_access_modes}, "
                     f"got {eks_config['endpoint_access']}"
                 )
+        # The NetworkPolicy enforcement switch renders straight into a
+        # kube-system ConfigMap value, so only a literal JSON boolean is
+        # accepted — a string "false" would be applied verbatim and enable
+        # nothing while reading as disabled.
+        if (
+            "network_policy_enforcement" in eks_config
+            and type(eks_config["network_policy_enforcement"]) is not bool
+        ):
+            raise ConfigValidationError(
+                "eks_cluster.network_policy_enforcement must be a boolean, got "
+                f"{eks_config['network_policy_enforcement']!r}"
+            )
+        self._validate_vpc_endpoints_config()
+
+    def _validate_vpc_endpoints_config(self) -> None:
+        """Validate the optional ``vpc_endpoints`` block.
+
+        ``gateway`` lists the free route-table endpoints (``s3``,
+        ``dynamodb``); ``interface`` lists PrivateLink endpoints by the
+        service key in :data:`VPC_INTERFACE_ENDPOINT_SERVICES`. Interface
+        endpoints bill per AZ-hour, so the list is explicit and unknown names
+        fail at synth instead of silently creating nothing.
+        """
+        raw = self.app.node.try_get_context("vpc_endpoints")
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            raise ConfigValidationError("vpc_endpoints must be an object")
+        unknown = sorted(str(key) for key in raw if key not in _VPC_ENDPOINTS_DEFAULTS)
+        if unknown:
+            raise ConfigValidationError(
+                "vpc_endpoints contains unknown key(s): "
+                + ", ".join(unknown)
+                + "; allowed keys: "
+                + ", ".join(sorted(_VPC_ENDPOINTS_DEFAULTS))
+            )
+        for key, allowed in (
+            ("gateway", VPC_GATEWAY_ENDPOINT_SERVICES),
+            ("interface", VPC_INTERFACE_ENDPOINT_SERVICES),
+        ):
+            if key not in raw:
+                continue
+            value = raw[key]
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ConfigValidationError(f"vpc_endpoints.{key} must be a list of strings")
+            unsupported = sorted(set(value) - set(allowed))
+            if unsupported:
+                raise ConfigValidationError(
+                    f"vpc_endpoints.{key} contains unsupported service(s): "
+                    + ", ".join(unsupported)
+                    + "; supported: "
+                    + ", ".join(sorted(allowed))
+                )
+            if len(set(value)) != len(value):
+                raise ConfigValidationError(f"vpc_endpoints.{key} lists a service twice")
+
+    def get_vpc_endpoints_config(self) -> dict[str, list[str]]:
+        """Return the VPC endpoint selection with defaults merged in.
+
+        Defaults: the two free gateway endpoints (S3 carries the platform's
+        largest data path — models, datasets, checkpoints, MLflow artifacts,
+        cost reports — off the NAT gateways' per-GB metering; DynamoDB serves
+        single-region topologies) and no interface endpoints.
+        """
+        configured = self.app.node.try_get_context("vpc_endpoints") or {}
+        return {
+            "gateway": list(configured.get("gateway", _VPC_ENDPOINTS_DEFAULTS["gateway"])),
+            "interface": list(configured.get("interface", _VPC_ENDPOINTS_DEFAULTS["interface"])),
+        }
 
     def _validate_analytics_environment_config(self) -> None:
         """Validate the optional analytics_environment block in cdk.json.
@@ -1276,6 +1463,8 @@ class ConfigLoader:
             "tls_proxy_cpu_target_utilization_percentage": (
                 INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT
             ),
+            "min_replicas": INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
+            "max_replicas": INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
         }
         configured = self.app.node.try_get_context("inference_proxy")
         if configured is None:
@@ -1327,6 +1516,7 @@ class ConfigLoader:
             "image": "gco/manifest-processor:latest",  # Placeholder, replaced by ECR image
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+            "autoscaling": dict(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS),
             "validation_enabled": True,
             "max_request_body_bytes": DEFAULT_MAX_REQUEST_BODY_BYTES,
             "central_queue_worker_enabled": True,
@@ -1373,6 +1563,14 @@ class ConfigLoader:
         # so service code keeps its existing attribute layout.
         shared_policy = self.app.node.try_get_context("job_validation_policy") or {}
         merged = {**default_config, **context_config, **shared_policy}
+        # Nested block: a partial ``autoscaling`` object (or JSON null) keeps
+        # the unspecified defaults instead of replacing the whole mapping.
+        # ``_validate_config`` has already rejected anything that is not a
+        # mapping or null.
+        merged["autoscaling"] = {
+            **_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS,
+            **(context_config.get("autoscaling") or {}),
+        }
 
         enabled = merged.get("central_queue_worker_enabled")
         if not isinstance(enabled, bool):
@@ -1443,6 +1641,9 @@ class ConfigLoader:
               scope defaults to "namespace" and namespaces to ["gco-jobs"];
               scope "cluster" grants AmazonEKSClusterAdminPolicy instead.
               Empty (the default) synthesizes exactly today's entries.
+            - network_policy_enforcement: whether the Auto Mode network policy
+              controller is switched on (default True). False keeps the
+              NetworkPolicy objects but stops enforcing them.
 
         Note:
             PRIVATE endpoint is recommended for production. Job submission still works
@@ -1454,6 +1655,10 @@ class ConfigLoader:
             "endpoint_access": "PRIVATE",
             "public_access_cidrs": [],
             "developer_access": [],
+            # Switches on the Auto Mode network policy controller
+            # (06-network-policy-controller.yaml) so 03-network-policies.yaml
+            # is enforced rather than merely stored.
+            "network_policy_enforcement": True,
         }
         return {**default_config, **(self.app.node.try_get_context("eks_cluster") or {})}
 

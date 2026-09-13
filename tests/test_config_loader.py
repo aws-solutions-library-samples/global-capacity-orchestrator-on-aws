@@ -11,8 +11,10 @@ informative message. Companion suite to test_config_loader_validation.py
 which drills into the validation rules themselves.
 """
 
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -506,6 +508,8 @@ class TestInferenceProxyConfig:
     DEFAULTS = {
         "tls_proxy_cpu_request_millicores": 100,
         "tls_proxy_cpu_target_utilization_percentage": 70,
+        "min_replicas": 3,
+        "max_replicas": 10,
     }
 
     def test_omitted_section_uses_defaults(self, valid_context):
@@ -519,17 +523,15 @@ class TestInferenceProxyConfig:
             ({}, DEFAULTS),
             (
                 {"tls_proxy_cpu_request_millicores": 125},
-                {
-                    "tls_proxy_cpu_request_millicores": 125,
-                    "tls_proxy_cpu_target_utilization_percentage": 70,
-                },
+                {**DEFAULTS, "tls_proxy_cpu_request_millicores": 125},
             ),
             (
                 {"tls_proxy_cpu_target_utilization_percentage": 85},
-                {
-                    "tls_proxy_cpu_request_millicores": 100,
-                    "tls_proxy_cpu_target_utilization_percentage": 85,
-                },
+                {**DEFAULTS, "tls_proxy_cpu_target_utilization_percentage": 85},
+            ),
+            (
+                {"min_replicas": 2, "max_replicas": 4},
+                {**DEFAULTS, "min_replicas": 2, "max_replicas": 4},
             ),
         ],
     )
@@ -545,6 +547,8 @@ class TestInferenceProxyConfig:
             ("tls_proxy_cpu_request_millicores", 250),
             ("tls_proxy_cpu_target_utilization_percentage", 1),
             ("tls_proxy_cpu_target_utilization_percentage", 100),
+            ("min_replicas", 1),
+            ("max_replicas", 100),
         ],
     )
     def test_exact_boundaries_are_accepted(self, valid_context, field, value):
@@ -565,6 +569,11 @@ class TestInferenceProxyConfig:
             ("tls_proxy_cpu_target_utilization_percentage", False),
             ("tls_proxy_cpu_target_utilization_percentage", 70.0),
             ("tls_proxy_cpu_target_utilization_percentage", "70"),
+            ("min_replicas", 0),
+            ("min_replicas", 51),
+            ("max_replicas", 0),
+            ("max_replicas", 101),
+            ("max_replicas", "10"),
         ],
     )
     def test_out_of_range_and_non_exact_integers_are_rejected(self, valid_context, field, value):
@@ -592,6 +601,15 @@ class TestInferenceProxyConfig:
         assert "inference_proxy" not in app.node.get_all_context()
         assert ConfigLoader(app).get_inference_proxy_config() == self.DEFAULTS
 
+    def test_max_replicas_below_min_is_rejected(self, valid_context):
+        """The HPA ceiling can never sit under its floor."""
+        valid_context["inference_proxy"] = {"min_replicas": 5, "max_replicas": 4}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"inference_proxy\.max_replicas must be at least inference_proxy\.min_replicas",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
     def test_unknown_key_error_uses_fully_qualified_paths(self, valid_context):
         """Typos identify both the rejected and allowed fully qualified keys."""
         valid_context["inference_proxy"] = {"tls_proxy_cpu_request_millicore": 100}
@@ -602,6 +620,281 @@ class TestInferenceProxyConfig:
         assert "inference_proxy.tls_proxy_cpu_request_millicore" in message
         assert "inference_proxy.tls_proxy_cpu_request_millicores" in message
         assert "inference_proxy.tls_proxy_cpu_target_utilization_percentage" in message
+
+
+class TestManifestProcessorSizingConfig:
+    """manifest_processor.replicas / resource_limits / autoscaling render into the Deployment.
+
+    These keys used to be validated and then ignored (the manifest hardcoded
+    three replicas and 1000m/2Gi). Now they are the source of truth for
+    ``{{MP_REPLICAS}}``, ``{{MP_CPU_LIMIT}}``, ``{{MP_MEMORY_LIMIT}}`` and the
+    optional ``35-manifest-processor-hpa.yaml`` gate, so validation has to
+    catch everything Kubernetes would reject at apply time.
+    """
+
+    AUTOSCALING_DEFAULTS = {
+        "enabled": False,
+        "max_replicas": 6,
+        "cpu_target_utilization_percentage": 70,
+    }
+
+    def test_defaults_when_autoscaling_is_omitted(self, valid_context):
+        """No autoscaling block means off, with the documented bounds."""
+        config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert config["replicas"] == 3
+        assert config["resource_limits"] == {"cpu": "1000m", "memory": "2Gi"}
+        assert config["autoscaling"] == self.AUTOSCALING_DEFAULTS
+
+    @pytest.mark.parametrize(
+        "configured,expected",
+        [
+            (None, AUTOSCALING_DEFAULTS),
+            ({}, AUTOSCALING_DEFAULTS),
+            ({"enabled": True}, {**AUTOSCALING_DEFAULTS, "enabled": True}),
+            ({"max_replicas": 12}, {**AUTOSCALING_DEFAULTS, "max_replicas": 12}),
+            (
+                {"cpu_target_utilization_percentage": 55},
+                {**AUTOSCALING_DEFAULTS, "cpu_target_utilization_percentage": 55},
+            ),
+        ],
+    )
+    def test_null_empty_and_partial_autoscaling_merge_defaults(
+        self, valid_context, configured, expected
+    ):
+        """A nested JSON null or a one-key object keeps every other default."""
+        valid_context["manifest_processor"]["autoscaling"] = configured
+        config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert config["autoscaling"] == expected
+
+    def test_requests_constant_matches_the_manifest(self):
+        """The floor the loader enforces is the request the manifest declares."""
+        import yaml
+
+        from gco.config import config_loader as module
+
+        manifest = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+            / "31-manifest-processor.yaml"
+        ).read_text(encoding="utf-8")
+        manifest = re.sub(r"\{\{[A-Z0-9_]+\}\}", "1", manifest)
+        deployment = next(
+            doc for doc in yaml.safe_load_all(manifest) if doc and doc["kind"] == "Deployment"
+        )
+        container = next(
+            item
+            for item in deployment["spec"]["template"]["spec"]["containers"]
+            if item["name"] == "manifest-processor"
+        )
+        assert container["resources"]["requests"] == module._MANIFEST_PROCESSOR_CONTAINER_REQUESTS
+
+    @pytest.mark.parametrize(
+        "limits",
+        [
+            {"cpu": "500m", "memory": "1Gi"},
+            {"cpu": "2", "memory": "4096Mi"},
+            {"cpu": "1.5", "memory": "3G"},
+        ],
+    )
+    def test_limits_at_or_above_the_requests_are_accepted(self, valid_context, limits):
+        valid_context["manifest_processor"]["resource_limits"] = limits
+        config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert config["resource_limits"] == limits
+
+    @pytest.mark.parametrize(
+        "resource,value,message",
+        [
+            ("cpu", 1000, "must be a Kubernetes quantity string"),
+            ("cpu", "", "must be a Kubernetes quantity string"),
+            ("cpu", "one-core", "must be a Kubernetes quantity string"),
+            ("memory", "2Gib", "must be a Kubernetes quantity string"),
+            ("cpu", "499m", "must be at least the container request of '500m'"),
+            ("memory", "512Mi", "must be at least the container request of '1Gi'"),
+        ],
+    )
+    def test_malformed_or_undersized_limits_are_rejected(
+        self, valid_context, resource, value, message
+    ):
+        """Anything the kubelet would reject fails at synth, not mid-deploy."""
+        valid_context["manifest_processor"]["resource_limits"][resource] = value
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"manifest_processor\.resource_limits\.{resource} {message}",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", [True, 1, "on", []])
+    def test_non_object_autoscaling_is_rejected(self, valid_context, value):
+        valid_context["manifest_processor"]["autoscaling"] = value
+        with pytest.raises(
+            ConfigValidationError, match=r"manifest_processor\.autoscaling must be an object"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_unknown_autoscaling_key_lists_the_allowed_ones(self, valid_context):
+        valid_context["manifest_processor"]["autoscaling"] = {"min_replicas": 2}
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        message = str(exc_info.value)
+        assert "manifest_processor.autoscaling contains unknown key(s): min_replicas" in message
+        assert "cpu_target_utilization_percentage, enabled, max_replicas" in message
+
+    @pytest.mark.parametrize("value", [None, "true", 1, 0])
+    def test_autoscaling_enabled_must_be_a_boolean(self, valid_context, value):
+        valid_context["manifest_processor"]["autoscaling"] = {"enabled": value}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"manifest_processor\.autoscaling\.enabled must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("max_replicas", 0),
+            ("max_replicas", 101),
+            ("max_replicas", "6"),
+            ("max_replicas", 6.0),
+            ("max_replicas", True),
+            ("cpu_target_utilization_percentage", 0),
+            ("cpu_target_utilization_percentage", 101),
+            ("cpu_target_utilization_percentage", "70"),
+        ],
+    )
+    def test_autoscaling_bounds_must_be_exact_integers_in_range(self, valid_context, key, value):
+        valid_context["manifest_processor"]["autoscaling"] = {key: value}
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"manifest_processor\.autoscaling\.{key} must be an integer between 1 and 100",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [("max_replicas", 1), ("max_replicas", 100), ("cpu_target_utilization_percentage", 1)],
+    )
+    def test_autoscaling_boundaries_are_inclusive(self, valid_context, key, value):
+        valid_context["manifest_processor"]["replicas"] = 1
+        valid_context["manifest_processor"]["autoscaling"] = {key: value}
+        config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert config["autoscaling"][key] == value
+
+    def test_autoscaling_ceiling_below_the_replica_floor_is_rejected(self, valid_context):
+        """The HPA floor is ``replicas``; the ceiling can never sit under it."""
+        valid_context["manifest_processor"]["replicas"] = 4
+        valid_context["manifest_processor"]["autoscaling"] = {"max_replicas": 3}
+        with pytest.raises(
+            ConfigValidationError,
+            match=(
+                r"manifest_processor\.autoscaling\.max_replicas must be at least "
+                r"manifest_processor\.replicas, got 3 < 4"
+            ),
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+
+class TestNetworkPostureConfig:
+    """eks_cluster.network_policy_enforcement and the vpc_endpoints block."""
+
+    def test_enforcement_defaults_on(self, valid_context):
+        config = ConfigLoader(MockApp(valid_context)).get_eks_cluster_config()
+        assert config["network_policy_enforcement"] is True
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_enforcement_accepts_literal_booleans(self, valid_context, value):
+        valid_context["eks_cluster"] = {"network_policy_enforcement": value}
+        config = ConfigLoader(MockApp(valid_context)).get_eks_cluster_config()
+        assert config["network_policy_enforcement"] is value
+        # The merge keeps the other eks_cluster defaults intact.
+        assert config["endpoint_access"] == "PRIVATE"
+
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+    def test_enforcement_rejects_non_booleans(self, valid_context, value):
+        """The value renders verbatim into the kube-system ConfigMap."""
+        valid_context["eks_cluster"] = {"network_policy_enforcement": value}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"eks_cluster\.network_policy_enforcement must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_vpc_endpoints_default_to_the_free_gateway_endpoints(self, valid_context):
+        valid_context.pop("vpc_endpoints", None)
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config == {"gateway": ["s3", "dynamodb"], "interface": []}
+
+    def test_vpc_endpoints_partial_block_keeps_the_other_default(self, valid_context):
+        valid_context["vpc_endpoints"] = {"interface": ["sts", "ecr.api"]}
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config == {"gateway": ["s3", "dynamodb"], "interface": ["sts", "ecr.api"]}
+
+    def test_vpc_endpoints_returns_copies(self, valid_context):
+        """Callers mutating the result never bleed into the module defaults."""
+        loader = ConfigLoader(MockApp(valid_context))
+        loader.get_vpc_endpoints_config()["gateway"].append("mutated")
+        assert loader.get_vpc_endpoints_config()["gateway"] == ["s3", "dynamodb"]
+
+    def test_every_supported_interface_service_is_accepted(self, valid_context):
+        from gco.config import config_loader as module
+
+        valid_context["vpc_endpoints"] = {
+            "gateway": [],
+            "interface": list(module.VPC_INTERFACE_ENDPOINT_SERVICES),
+        }
+        config = ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()
+        assert config["gateway"] == []
+        assert config["interface"] == list(module.VPC_INTERFACE_ENDPOINT_SERVICES)
+
+    @pytest.mark.parametrize("value", [True, 1, "s3", ["s3"]])
+    def test_vpc_endpoints_must_be_an_object(self, valid_context, value):
+        valid_context["vpc_endpoints"] = value
+        with pytest.raises(ConfigValidationError, match="vpc_endpoints must be an object"):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_vpc_endpoints_unknown_key_lists_the_allowed_ones(self, valid_context):
+        valid_context["vpc_endpoints"] = {"gateways": ["s3"]}
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        assert "vpc_endpoints contains unknown key(s): gateways" in str(exc_info.value)
+        assert "allowed keys: gateway, interface" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [("gateway", "s3"), ("gateway", [3]), ("interface", {"sts": True}), ("interface", [None])],
+    )
+    def test_vpc_endpoint_lists_must_be_lists_of_strings(self, valid_context, key, value):
+        valid_context["vpc_endpoints"] = {key: value}
+        with pytest.raises(
+            ConfigValidationError, match=rf"vpc_endpoints\.{key} must be a list of strings"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        "key,value,unsupported",
+        [
+            ("gateway", ["s3", "sts"], "sts"),
+            ("interface", ["ecr", "s3"], "ecr, s3"),
+        ],
+    )
+    def test_unsupported_endpoint_services_fail_at_synth(
+        self, valid_context, key, value, unsupported
+    ):
+        """A typo must not silently create nothing (interface endpoints bill)."""
+        valid_context["vpc_endpoints"] = {key: value}
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        message = str(exc_info.value)
+        assert f"vpc_endpoints.{key} contains unsupported service(s): {unsupported}" in message
+        assert "supported:" in message
+
+    def test_duplicate_endpoint_services_are_rejected(self, valid_context):
+        valid_context["vpc_endpoints"] = {"interface": ["sts", "sts"]}
+        with pytest.raises(
+            ConfigValidationError, match=r"vpc_endpoints\.interface lists a service twice"
+        ):
+            ConfigLoader(MockApp(valid_context))
 
 
 class TestDefaultValues:
@@ -1521,12 +1814,19 @@ class TestAnalyticsConstants:
         assert not isinstance(STUDIO_PRESIGNED_URL_EXPIRY_SECONDS, bool)
         assert STUDIO_PRESIGNED_URL_EXPIRY_SECONDS > 0
 
-    def test_cluster_shared_bucket_name_prefix(self):
-        """cluster_shared_bucket_name_prefix renders '<project>-cluster-shared' (#139)."""
-        from gco.stacks.constants import cluster_shared_bucket_name_prefix
+    def test_cost_report_ssm_parameter_prefix(self):
+        """cost_report_ssm_parameter_prefix renders '/<project>/cost-report-bucket'."""
+        from gco.stacks.constants import cost_report_ssm_parameter_prefix
 
-        assert cluster_shared_bucket_name_prefix("gco") == "gco-cluster-shared"
-        assert cluster_shared_bucket_name_prefix("acme") == "acme-cluster-shared"
+        assert cost_report_ssm_parameter_prefix("gco") == "/gco/cost-report-bucket"
+        assert cost_report_ssm_parameter_prefix("acme") == "/acme/cost-report-bucket"
+
+    def test_no_bucket_name_helper_survives(self):
+        """Bucket names are CloudFormation-generated; nothing may reconstruct one."""
+        import gco.stacks.constants as constants
+
+        assert not [name for name in dir(constants) if name.endswith("_bucket_name")]
+        assert not [name for name in dir(constants) if name.endswith("_bucket_name_prefix")]
 
     def test_cluster_shared_ssm_parameter_prefix(self):
         """cluster_shared_ssm_parameter_prefix renders '/<project>/cluster-shared-bucket' (#139)."""

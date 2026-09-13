@@ -2,7 +2,7 @@
 Property-based test — the general-purpose regional bucket is always-on.
 
 The regional stack provisions one general-purpose S3 bucket named
-``gco-regional-shared-<account>-<region>`` per region together with its three
+one CloudFormation-named general-purpose regional bucket per region together with its three
 discovery parameters under ``/gco/regional-shared-bucket`` (``/name``, ``/arn``,
 ``/region``). That bucket is unconditional: there is no ``cdk.json`` context
 key and no feature flag whose value can remove it, and its existence does not
@@ -34,10 +34,7 @@ from aws_cdk import assertions
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from gco.stacks.constants import (
-    regional_shared_bucket_name_prefix,
-    regional_shared_ssm_parameter_prefix,
-)
+from gco.stacks.constants import regional_shared_ssm_parameter_prefix
 from gco.stacks.regional_stack import GCORegionalStack
 
 # Reuse the battle-tested MockConfigLoader + helm-installer patch pattern from
@@ -48,12 +45,14 @@ from gco.stacks.regional_stack import GCORegionalStack
 from tests.test_regional_stack import MockConfigLoader
 from tests.test_regional_stack import TestRegionalStackSynthesis as _RegionalStackSynthesisFixtures
 
-# Physical-name prefixes the regional stack derives from ``project_name`` (#139).
+# The SSM namespace the regional stack derives from ``project_name`` (#139).
 # These tests synth with ``MockConfigLoader`` whose ``get_project_name()``
-# returns ``"gco-test"``, so the expected prefixes are scoped to that name.
+# returns ``"gco-test"``, so the expected prefix is scoped to that name. The
+# bucket itself carries a CloudFormation-generated physical name, so it is
+# identified by its construct logical id rather than by a name prefix.
 _PROJECT_NAME = "gco-test"
-REGIONAL_SHARED_BUCKET_NAME_PREFIX = regional_shared_bucket_name_prefix(_PROJECT_NAME)
 REGIONAL_SHARED_SSM_PARAMETER_PREFIX = regional_shared_ssm_parameter_prefix(_PROJECT_NAME)
+REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX = "RegionalSharedBucket"
 
 _ACCOUNT = "123456789012"
 
@@ -150,9 +149,9 @@ def _regional_shared_surface(
     fsx_enabled: bool,
     toggles: tuple[tuple[str, bool], ...],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return the regional bucket names and parameter names for a config.
+    """Return the regional bucket logical ids and parameter names for a config.
 
-    The result is ``(bucket_names, parameter_names)`` where each element is a
+    The result is ``(bucket_ids, parameter_names)`` where each element is a
     sorted tuple. Synth output is a pure function of the inputs, so caching
     keeps repeated synths of the same ``(region, fsx, toggles)`` out of the
     per-example budget. Returned as tuples so the cache entry is hashable.
@@ -165,21 +164,22 @@ def _regional_shared_surface(
     )
     resources = template.to_json().get("Resources", {})
 
-    bucket_names: list[str] = []
+    bucket_ids: list[str] = []
     parameter_names: list[str] = []
-    for res in resources.values():
+    for logical_id, res in resources.items():
         rtype = res.get("Type")
         props = res.get("Properties", {})
         if rtype == "AWS::S3::Bucket":
-            name = props.get("BucketName")
-            if isinstance(name, str) and name.startswith(f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-"):
-                bucket_names.append(name)
+            # No bucket may carry an explicit name (S3 names are a global
+            # namespace; a deleted name is not reliably reusable).
+            assert "BucketName" not in props, f"{logical_id} sets an explicit BucketName"
+            if logical_id.startswith(REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX):
+                bucket_ids.append(logical_id)
         elif rtype == "AWS::SSM::Parameter":
             name = props.get("Name")
             if isinstance(name, str) and name.startswith(REGIONAL_SHARED_SSM_PARAMETER_PREFIX):
                 parameter_names.append(name)
-
-    return tuple(sorted(bucket_names)), tuple(sorted(parameter_names))
+    return tuple(sorted(bucket_ids)), tuple(sorted(parameter_names))
 
 
 class TestRegionalSharedBucketAlwaysProvisioned:
@@ -220,18 +220,12 @@ class TestRegionalSharedBucketAlwaysProvisioned:
         toggles = tuple(zip(_TOGGLE_KEYS, toggle_values, strict=False))
 
         for region in regions:
-            bucket_names, parameter_names = _regional_shared_surface(region, fsx_enabled, toggles)
+            bucket_ids, parameter_names = _regional_shared_surface(region, fsx_enabled, toggles)
 
-            assert len(bucket_names) == 1, (
+            assert len(bucket_ids) == 1, (
                 f"Region={region!r}, fsx={fsx_enabled}, toggles={dict(toggles)}: "
                 f"expected exactly one general-purpose regional bucket, found "
-                f"{len(bucket_names)}: {list(bucket_names)}"
-            )
-            assert bucket_names[0] == (
-                f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-{_ACCOUNT}-{region}"
-            ), (
-                f"Region={region!r}: the regional bucket name must embed the "
-                f"account and region. Got {bucket_names[0]!r}"
+                f"{len(bucket_ids)}: {list(bucket_ids)}"
             )
 
             expected_params = {

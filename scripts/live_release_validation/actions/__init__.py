@@ -27,7 +27,9 @@ from .destroy import action_destroy, destroy_deployment
 from .final_inventory import action_final_inventory
 from .inference import action_inference
 from .jobs import action_api_lifecycle, action_sqs_lifecycle
+from .network_posture import action_network_posture
 from .opencost import action_opencost
+from .platform_workloads import action_platform_workloads
 from .policy import action_policy
 from .preflight import action_preflight
 from .schedulers import action_schedulers
@@ -42,7 +44,9 @@ __all__ = [
     "action_destroy",
     "action_final_inventory",
     "action_inference",
+    "action_network_posture",
     "action_opencost",
+    "action_platform_workloads",
     "action_policy",
     "action_preflight",
     "action_schedulers",

@@ -21,9 +21,22 @@ one second later. Two replicas crash-looped 11 times each and failed the live
 release validation's topology check, while the identical workload on a less
 crowded node ran fine — so nothing about the image or the code was wrong.
 
-The tests below pin the two properties that make that failure impossible to
-reintroduce silently: every probe declares a timeout, and every startup probe
-keeps a cold-start budget big enough for a slow node.
+It bit again with 3s and 5s. A later live run (2026-09-13) put the
+health-monitor leader on a node whose kernel was burning most of both vCPUs;
+the ``urllib.request`` probes timed out 190 times in 25 minutes, liveness
+restarted the container five times while it answered every request that
+reached it, and the ALB marked the pod unhealthy. A probe is a process that
+competes with the server for the container's CPU quota, so it has to be cheap
+and the liveness budget has to be wide: the exec probes now start the
+interpreter lean (``-I -S``, no site-packages scan) and speak HTTP over a bare
+socket, about a fifth of the work of importing ``urllib.request``, and a
+liveness restart takes a minute of continuous failure rather than 45 seconds.
+
+The tests below pin the properties that make those failures impossible to
+reintroduce silently: every probe declares a timeout, every startup probe
+keeps a cold-start budget big enough for a slow node, every exec probe starts
+lean and gets a generous timeout, and liveness never restarts on less than a
+minute of failure.
 """
 
 import re
@@ -45,7 +58,20 @@ MINIMUM_STARTUP_BUDGET_SECONDS = 120
 
 #: An exec probe pays interpreter startup before it does any work, so it needs
 #: materially more than a socket check.
-MINIMUM_EXEC_TIMEOUT_SECONDS = 3
+MINIMUM_EXEC_TIMEOUT_SECONDS = 5
+
+#: A liveness exec probe on a contended node was measured taking more than 5s
+#: while the server it probed answered everything that reached it.
+MINIMUM_EXEC_LIVENESS_TIMEOUT_SECONDS = 10
+
+#: Seconds of continuous liveness failure (``periodSeconds * failureThreshold``)
+#: before the kubelet restarts a container. A minute catches a stuck process
+#: and rides out a contended node.
+MINIMUM_LIVENESS_RESTART_WINDOW_SECONDS = 60
+
+#: How an exec probe must start the interpreter: isolated (no PYTHON* env, no
+#: user site) and without ``site`` (no site-packages scan) — the cheap start.
+LEAN_INTERPRETER_PREFIX = ("python", "-I", "-S", "-c")
 
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 
@@ -135,6 +161,78 @@ def test_exec_probes_allow_for_interpreter_startup(
         f"{manifest}: {workload}/{container} {kind} is an exec probe with "
         f"timeoutSeconds={timeout}; allow at least {MINIMUM_EXEC_TIMEOUT_SECONDS}s "
         "for interpreter startup plus imports"
+    )
+    if kind == "livenessProbe":
+        assert timeout >= MINIMUM_EXEC_LIVENESS_TIMEOUT_SECONDS, (
+            f"{manifest}: {workload}/{container} liveness is an exec probe with "
+            f"timeoutSeconds={timeout}; a contended node made a healthy server's probe "
+            f"take longer than 5s, so allow at least {MINIMUM_EXEC_LIVENESS_TIMEOUT_SECONDS}s"
+        )
+
+
+@pytest.mark.parametrize("case", [c for c in ALL_PROBES if "exec" in c[4]], ids=_probe_id)
+def test_exec_probes_start_the_interpreter_lean(
+    case: tuple[str, str, str, str, dict[str, Any]],
+) -> None:
+    """An exec probe competes with the server for the container's CPU quota.
+
+    ``-I -S`` skips the site-packages scan and the environment, and a bare
+    socket request avoids ``urllib.request`` and the ~130 modules behind it;
+    together they cut the work per probe about fivefold, which is the margin
+    between a probe that completes on a contended node and one that gets a
+    healthy container killed. The pre-stop sleep is not a probe and may stay
+    plain.
+    """
+    manifest, workload, container, kind, probe = case
+    command = probe["exec"]["command"]
+    assert tuple(command[:4]) == LEAN_INTERPRETER_PREFIX, (
+        f"{manifest}: {workload}/{container} {kind} must start the interpreter lean "
+        f"({' '.join(LEAN_INTERPRETER_PREFIX)}), got {command[:4]}"
+    )
+    source = command[-1]
+    assert "urllib" not in source, (
+        f"{manifest}: {workload}/{container} {kind} imports urllib; use the bare-socket request"
+    )
+    assert "socket.create_connection(('127.0.0.1'," in source, (
+        f"{manifest}: {workload}/{container} {kind} must dial the loopback listener over a socket"
+    )
+    # Every network wait inside the probe is bounded below the probe's own
+    # timeout, so a hung listener is reported as a failure, not as a kubelet
+    # timeout with no output.
+    inner = [int(value) for value in re.findall(r"(?:\),|settimeout\()(\d+)\)", source)]
+    assert inner and all(value < probe["timeoutSeconds"] for value in inner), (
+        f"{manifest}: {workload}/{container} {kind} socket timeouts {inner} must stay below "
+        f"timeoutSeconds={probe['timeoutSeconds']}"
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [c for c in ALL_PROBES if c[3] == "livenessProbe" and "exec" in c[4]],
+    ids=_probe_id,
+)
+def test_exec_liveness_restarts_only_after_a_minute_of_failure(
+    case: tuple[str, str, str, str, dict[str, Any]],
+) -> None:
+    """A liveness probe exists to catch a stuck process, not a slow node.
+
+    ``periodSeconds * failureThreshold`` is the floor of continuous failure
+    before the kubelet restarts the container; three failures 15s apart (45s)
+    was short enough for a contended node to restart a serving container five
+    times in 25 minutes. Exec probes are the exposed kind: the kubelet runs
+    tcpSocket and httpGet checks itself, outside the container's CPU quota.
+    """
+    manifest, workload, container, kind, probe = case
+    period = probe.get("periodSeconds")
+    threshold = probe.get("failureThreshold")
+    assert isinstance(period, int) and isinstance(threshold, int), (
+        f"{manifest}: {workload}/{container} {kind} must set periodSeconds and failureThreshold "
+        "explicitly so its restart window is auditable"
+    )
+    window = period * threshold
+    assert window >= MINIMUM_LIVENESS_RESTART_WINDOW_SECONDS, (
+        f"{manifest}: {workload}/{container} {kind} restarts after {window}s of failure "
+        f"({threshold} x {period}s); allow at least {MINIMUM_LIVENESS_RESTART_WINDOW_SECONDS}s"
     )
 
 

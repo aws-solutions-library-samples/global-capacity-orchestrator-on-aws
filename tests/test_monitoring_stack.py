@@ -128,6 +128,11 @@ def create_mock_regional_stack(
     mock_regional_stack.job_dlq.queue_name = f"gco-test-jobs-dlq-{region}"
     mock_regional_stack.kubectl_lambda_function_name = f"gco-test-kubectl-{region}"
     mock_regional_stack.helm_installer_lambda_function_name = f"gco-test-helm-{region}"
+    # The monitoring stack admits each region's cost-monitor role in the cost
+    # report bucket and key policies (a cross-region ARN token in production).
+    mock_regional_stack.cost_monitor_role.role_arn = (
+        f"arn:aws:iam::123456789012:role/gco-test-{region}-CostMonitorRole"
+    )
 
     # Default: no optional data-service resources provisioned. The
     # monitoring stack widget creators check ``getattr(..., None)`` and

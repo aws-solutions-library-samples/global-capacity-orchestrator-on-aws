@@ -6,6 +6,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from ..cleanup.local_images import prune_local_cdk_asset_images_safely
 from ..constants import (
     _RUN_STACK_TAG,
 )
@@ -129,12 +130,18 @@ def action_deploy(ctx: RunContext) -> dict[str, Any]:
         _checkpoint_new_ecr_repositories(ctx)
         _checkpoint_new_ecr_images(ctx)
         _checkpoint_retained_kms_keys(ctx)
+        # Published asset images have no further local use; reclaim the disk
+        # they occupy so successive runs cannot fill the host (which fails an
+        # image build mid-deploy and then the checkpoint write cleanup needs).
+        local_image_prune = prune_local_cdk_asset_images_safely()
+        ctx.checkpoint.state["local_image_prune"] = local_image_prune
 
     result = {
         "overall_success": overall,
         "successful_stacks": successful,
         "failed_stacks": failed,
         "events": events,
+        "local_image_prune": local_image_prune,
         "owned_stacks": ctx.checkpoint.state.get("owned_stacks", {}),
         "owned_ecr_repositories": ctx.checkpoint.state.get("created_ecr_repositories", []),
         "owned_ecr_images": [],

@@ -574,16 +574,16 @@ class StorageManager:
         """Resolve a primary bucket's physical name and ARN, or ``(None, None)``.
 
         Each family publishes its identity differently, so this routes to the
-        contract that family actually uses rather than reconstructing names:
-        the two shared buckets publish name+ARN to SSM, the model bucket
-        publishes its name, the cost bucket's name is deterministic by design
-        (so regional stacks can grant on it before it exists), and the Studio
-        bucket is CDK-auto-named and only knowable from its stack.
+        contract that family actually uses rather than reconstructing names
+        (every primary bucket is CloudFormation-named): the two shared buckets
+        and the cost bucket publish name+ARN to SSM in their home region, the
+        model bucket publishes its name, and the Studio bucket is only
+        knowable from its stack's resources.
         """
         from gco.services.aws_ssm import get_ssm_parameter_optional
         from gco.stacks.constants import (
             cluster_shared_ssm_parameter_prefix,
-            cost_report_bucket_name,
+            cost_report_ssm_parameter_prefix,
             regional_shared_ssm_parameter_prefix,
         )
 
@@ -604,14 +604,11 @@ class StorageManager:
         if descriptor.id == "model-weights":
             return get_ssm_parameter_optional(f"/{project}/model-bucket-name", region=region), None
         if descriptor.id == "cost-reports":
-            if not account:
-                return None, None
-            # Deterministic by design so regional stacks can grant on it before
-            # the monitoring stack exists. Confirm it is really there rather
-            # than reporting a name that may never have been created.
-            expected = cost_report_bucket_name(project, account, region)
-            resources = self._stack_bucket_resources(f"{project}-monitoring", region)
-            return (expected, None) if expected in resources.values() else (None, None)
+            prefix = cost_report_ssm_parameter_prefix(project)
+            return (
+                get_ssm_parameter_optional(f"{prefix}/name", region=region),
+                get_ssm_parameter_optional(f"{prefix}/arn", region=region),
+            )
         if descriptor.id == "analytics-studio":
             resources = self._stack_bucket_resources(f"{project}-analytics", region)
             return resources.get(descriptor.logical_id_prefix), None
@@ -1816,7 +1813,7 @@ BUCKET_DESCRIPTORS: tuple[BucketDescriptor, ...] = (
         scope="monitoring",
         purpose="Hive-partitioned Parquet cost reports queried through Athena",
         pod_access="none",
-        discovery="Deterministic name <project>-cost-reports-<account>-<monitoring-region>",
+        discovery="SSM /<project>/cost-report-bucket/{name,arn} in the monitoring region",
         removal_policy="destroy",
         logical_id_prefix="CostReportBucket",
         reserved_prefixes=("reports/", "adhoc/", "athena-results/"),

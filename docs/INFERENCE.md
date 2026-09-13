@@ -241,21 +241,23 @@ For each target region, the inference monitor creates:
 This endpoint autoscaler is separate from the shared `inference-proxy` data
 plane. Each regional stack installs the managed EKS Metrics Server add-on that
 feeds per-container resource metrics to the proxy's `autoscaling/v2` HPA. The
-shared Deployment preserves a three-pod high-availability floor and scales to
-ten replicas when the application reaches 70% CPU or 80% memory, or when its
-TLS sidecar reaches the configurable CPU target (70% by default) against its
-configurable request (`100m` by default). Set the exact-integer
-`inference_proxy.tls_proxy_cpu_request_millicores` (1-250) and
-`inference_proxy.tls_proxy_cpu_target_utilization_percentage` (1-100) values in
-`cdk.json`; the request is rendered as a Kubernetes millicore quantity and is
-the utilization denominator. Kubernetes evaluates each `ContainerResource`
-signal independently and uses the largest desired replica count, so TLS
-pressure cannot hide application pressure. TLS memory is not a scale signal
-because established streams remain on their original pod and retained Python
-RSS may not fall when new replicas start. Application resources and signals,
-proxy memory and CPU limit, replica bounds, HPA behavior, disruption budget,
-and drain settings remain fixed. Scale-down retains a 15-minute stabilization
-window. The Deployment's `replicas: 3` seeds only initial creation;
+shared Deployment preserves a high-availability floor of
+`inference_proxy.min_replicas` pods (3 by default, one per AZ) and scales to
+`inference_proxy.max_replicas` (10 by default) when the application reaches 70%
+CPU or 80% memory, or when its TLS sidecar reaches the configurable CPU target
+(70% by default) against its configurable request (`100m` by default). Set the
+exact-integer `inference_proxy.min_replicas` (1-50), `max_replicas` (1-100, at
+least the floor), `tls_proxy_cpu_request_millicores` (1-250) and
+`tls_proxy_cpu_target_utilization_percentage` (1-100) values in `cdk.json`; the
+request is rendered as a Kubernetes millicore quantity and is the utilization
+denominator. Kubernetes evaluates each `ContainerResource` signal independently
+and uses the largest desired replica count, so TLS pressure cannot hide
+application pressure. TLS memory is not a scale signal because established
+streams remain on their original pod and retained Python RSS may not fall when
+new replicas start. Application resources and signals, proxy memory and CPU
+limit, HPA behavior, the `maxUnavailable: 1` disruption budget, and drain
+settings remain fixed. Scale-down retains a 15-minute stabilization window. The
+Deployment's `replicas` (the same floor value) seeds only initial creation;
 kubectl-applier update patches omit that HPA-owned field so reconciliation
 cannot reset a live scale decision.
 
@@ -482,7 +484,7 @@ gco inference configure-store my-llm --offload cpu --local-buffer-size 214748364
 
 ### Populating the KV Cache (Cold Tier)
 
-The cold tier auto-targets the always-on general-purpose regional bucket (`gco-regional-shared-<account>-<region>`) and reads/writes under the `mooncake-kv/<endpoint>/` key prefix. You can pre-warm it — upload KV blocks or reusable prompt data your workloads will hit — with a single command:
+The cold tier auto-targets the always-on general-purpose regional bucket (resolved from `/<project>/regional-shared-bucket/name`; the name itself is CloudFormation-generated) and reads/writes under the `mooncake-kv/<endpoint>/` key prefix. You can pre-warm it — upload KV blocks or reusable prompt data your workloads will hit — with a single command:
 
 ```bash
 # Upload a local file or directory into an endpoint's KV-cache cold tier

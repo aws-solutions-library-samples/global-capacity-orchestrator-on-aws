@@ -50,8 +50,8 @@ from gco.services.template_store import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-06T03:59:12Z
-# Generated from Git commit: d6191ba8fab6dbef25fa4cfef37a9101f6fa24c4
+# Generated at (UTC): 2026-09-11T22:15:15Z
+# Generated from Git commit: 14ba13224fdaf5a82bbcee12270092e39a8201ca
 # Flowchart(s) generated from this file:
 #   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
@@ -487,14 +487,27 @@ def create_app() -> FastAPI:
     return app
 
 
-if __name__ == "__main__":
+# The pod manifest gives the kubelet terminationGracePeriodSeconds > preStop +
+# this budget, so Uvicorn can finish in-flight requests before SIGKILL. The
+# same variable drives the TLS sidecar's drain (gco.services.tls_proxy).
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 50
+
+
+def _run_server() -> None:
+    """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — must bind all interfaces inside K8s pod
+    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
+    graceful_shutdown_seconds = int(
+        os.getenv(
+            "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+            str(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+        )
+    )
 
-    logger.info(f"Starting Manifest API on {host}:{port}")
+    logger.info("Starting Manifest API on %s:%d", host, port)
 
     uvicorn.run(
         "gco.services.manifest_api:app",
@@ -502,4 +515,9 @@ if __name__ == "__main__":
         port=port,
         log_level=log_level,
         reload=False,
+        timeout_graceful_shutdown=graceful_shutdown_seconds,
     )
+
+
+if __name__ == "__main__":
+    _run_server()

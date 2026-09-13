@@ -24,6 +24,9 @@ from ..ownership.ecr import (
 from ..ownership.efs_automatic_backups import (
     _strip_accepted_efs_automatic_backup_recovery_points,
 )
+from ..ownership.vpc_endpoints import (
+    _strip_deleted_vpc_endpoints,
+)
 
 _BASELINE_EFS_ACCEPTANCE_STATE_KEY = "baseline_accepted_efs_automatic_backup_recovery_points"
 
@@ -72,6 +75,10 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         ctx,
         disallowed_inventory,
     )
+    disallowed_inventory, accepted_deleted_vpc_endpoints = _strip_deleted_vpc_endpoints(
+        ctx,
+        disallowed_inventory,
+    )
     if not project_resources_are_absent(disallowed_inventory):
         raise RuntimeError(
             "Fresh baseline contains project resources not owned by this run: "
@@ -88,4 +95,5 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         **baseline,
         "accepted_efs_automatic_backup_recovery_points": accepted_efs_backups,
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
+        "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
     }

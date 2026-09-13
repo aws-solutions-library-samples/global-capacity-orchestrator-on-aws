@@ -15,7 +15,14 @@ metadata:
     component: inference-data-plane
     project: gco
 spec:
-  replicas: 3
+  # Initial replica count == the HPA floor (cdk.json inference_proxy.min_replicas).
+  # Keep this token unquoted so the rendered Kubernetes field is an integer.
+  replicas: {{INFERENCE_PROXY_MIN_REPLICAS}}
+  revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -37,6 +44,7 @@ spec:
       serviceAccountName: gco-inference-proxy-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       # API Gateway response streams can run for 15 minutes. Allow Uvicorn to
       # drain an in-flight stream after this pod stops receiving new traffic.
       terminationGracePeriodSeconds: 930
@@ -78,7 +86,10 @@ spec:
       containers:
         - name: inference-proxy
           image: {{INFERENCE_PROXY_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -121,24 +132,57 @@ spec:
             limits:
               cpu: 1000m
               memory: 1Gi
+          # Probe design and budgets are explained in 30-health-monitor.yaml: the
+          # exec probes fork the interpreter, so they start lean (-I -S, bare
+          # socket) and liveness restarts only after a minute of failures.
           startupProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 24
           livenessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 4
           readinessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/readyz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /readyz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             periodSeconds: 5
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 3
           lifecycle:
             preStop:
@@ -154,7 +198,7 @@ spec:
               readOnly: true
         - name: api-tls-proxy
           image: {{INFERENCE_PROXY_IMAGE}}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python", "-m", "gco.services.tls_proxy"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -216,7 +260,8 @@ spec:
               readOnly: true
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: api-tls
           secret:
             secretName: inference-proxy-tls
@@ -244,9 +289,11 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: inference-proxy
-  # Preserve the existing three-pod HA baseline and scale burst capacity.
-  minReplicas: 3
-  maxReplicas: 10
+  # Bounds come from cdk.json inference_proxy.min_replicas / max_replicas
+  # (defaults 3 / 10: a three-pod HA baseline plus burst headroom).
+  # Keep these tokens unquoted so the rendered Kubernetes fields are integers.
+  minReplicas: {{INFERENCE_PROXY_MIN_REPLICAS}}
+  maxReplicas: {{INFERENCE_PROXY_MAX_REPLICAS}}
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0
@@ -299,6 +346,9 @@ spec:
           type: Utilization
           averageUtilization: {{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}
 ---
+# maxUnavailable rather than minAvailable: one voluntary disruption at a
+# time whatever the replica count, so a larger replica count (operator-chosen
+# or HPA-driven) never widens the eviction window.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -308,7 +358,7 @@ metadata:
     app: inference-proxy
     project: gco
 spec:
-  minAvailable: 2
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: inference-proxy
