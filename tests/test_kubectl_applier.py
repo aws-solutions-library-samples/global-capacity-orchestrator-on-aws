@@ -35,11 +35,20 @@ def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
     token_re = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
     quantity_tokens = {
         "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
+        "{{MP_CPU_LIMIT}}",
+        "{{MP_MEMORY_LIMIT}}",
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
     }
-    integer_tokens = {"{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"}
+    integer_tokens = {
+        "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+        "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+        "{{INFERENCE_PROXY_MAX_REPLICAS}}",
+        "{{MP_REPLICAS}}",
+        "{{MP_HPA_MAX_REPLICAS}}",
+        "{{MP_HPA_CPU_TARGET_UTILIZATION}}",
+    }
     integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
     replacements: dict[str, str] = {
         "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
@@ -485,6 +494,19 @@ class TestLegacyRemovedResources:
             "nvidia-device-plugin-daemonset",
         ) in handler_module._LEGACY_REMOVED_RESOURCES
 
+    def test_inventory_targets_the_retired_job_namespace_policies(self, handler_module):
+        # The VPC-CIDR-only HTTPS rule and the Ray-only peer rule are strictly
+        # contained by allow-https-egress / allow-vpc-egress /
+        # allow-same-namespace; sweeping them keeps the live set equal to the
+        # shipped set.
+        for name in ("allow-vpc-endpoint-egress", "allow-ray-cluster-internal"):
+            assert (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                "gco-jobs",
+                name,
+            ) in handler_module._LEGACY_REMOVED_RESOURCES
+
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -508,14 +530,19 @@ class TestLegacyRemovedResources:
         ):
             result = handler_module._prune_legacy_removed_resources()
 
-        mock_dynamic.resources.get.assert_called_once_with(api_version="apps/v1", kind="DaemonSet")
-        mock_resource.delete.assert_called_once_with(
-            name="nvidia-device-plugin-daemonset",
-            namespace="kube-system",
-            body=delete_options,
-        )
+        assert mock_dynamic.resources.get.call_args_list == [
+            call(api_version=api_version, kind=kind)
+            for api_version, kind, _ns, _name in handler_module._LEGACY_REMOVED_RESOURCES
+        ]
+        assert mock_resource.delete.call_args_list == [
+            call(name=name, namespace=namespace, body=delete_options)
+            for _api, _kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
+        ]
         assert result == {
-            "pruned": ["apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"],
+            "pruned": [
+                f"{api_version}/{kind}/{namespace}/{name}"
+                for api_version, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
+            ],
             "failed": [],
         }
 
@@ -1406,7 +1433,9 @@ class TestMainPassRestartsAddonControllers:
             patch("handler.client") as mock_client,
             patch.object(handler_module, "restart_deployments") as mock_restart_deploy,
             patch.object(handler_module, "restart_daemonsets") as mock_restart_ds,
-            patch.object(handler_module, "_verify_workload_credentials", return_value=[]),
+            patch.object(
+                handler_module, "_verify_workload_credentials", return_value=[]
+            ) as mock_verify,
         ):
             mock_client.CoreV1Api.return_value = MagicMock()
             mock_client.AppsV1Api.return_value = MagicMock()
@@ -1425,6 +1454,12 @@ class TestMainPassRestartsAddonControllers:
         }
         assert not any(namespace == "gco-system" for namespace, _names in deploy_calls)
         assert ("kube-system", ("efs-csi-controller", "fsx-csi-controller")) in deploy_calls
+        # The credential check is scoped to what this pass planned, so a
+        # feature-gated platform Deployment that is switched off is not
+        # reported as missing.
+        mock_verify.assert_called_once()
+        _apps_v1, planned = mock_verify.call_args.args
+        assert [(item["kind"], item["name"]) for item in planned] == [("Namespace", "demo")]
 
     def test_main_pass_restarts_csi_and_cloudwatch_daemonsets(self, handler_module, tmp_path):
         """efs-csi-node, fsx-csi-node, and cloudwatch-agent DaemonSets are restarted."""
@@ -1893,12 +1928,16 @@ class TestInferenceProxyAutoscalingManifest:
             )
             .replace("{{INFERENCE_PROXY_TLS_CPU_REQUEST}}", "100m")
             .replace("{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}", "70")
+            .replace("{{INFERENCE_PROXY_MIN_REPLICAS}}", "3")
+            .replace("{{INFERENCE_PROXY_MAX_REPLICAS}}", "10")
         )
         documents = list(yaml.safe_load_all(content))
         deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
         hpa = next(doc for doc in documents if doc["kind"] == "HorizontalPodAutoscaler")
         pdb = next(doc for doc in documents if doc["kind"] == "PodDisruptionBudget")
 
+        # The create-time replica count is the HPA floor, rendered as an
+        # integer (an unquoted token) from the same cdk.json value.
         assert deployment["spec"]["replicas"] == 3
         assert deployment["metadata"]["annotations"] == {"gco.aws/hpa-controls-replicas": "true"}
         assert hpa["apiVersion"] == "autoscaling/v2"
@@ -1985,14 +2024,20 @@ class TestInferenceProxyAutoscalingManifest:
             containers["api-tls-proxy"]["lifecycle"]["preStop"]
             == containers["inference-proxy"]["lifecycle"]["preStop"]
         )
-        assert pdb["spec"]["minAvailable"] == 2
-        assert pdb["spec"]["selector"]["matchLabels"] == {"app": "inference-proxy"}
+        # One disruption at a time however far the HPA has scaled the proxy;
+        # minAvailable: 2 would have let 8 of 10 replicas be evicted at once.
+        assert pdb["spec"] == {
+            "maxUnavailable": 1,
+            "selector": {"matchLabels": {"app": "inference-proxy"}},
+        }
 
     @pytest.mark.parametrize(
         "missing_token",
         [
             "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
             "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+            "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+            "{{INFERENCE_PROXY_MAX_REPLICAS}}",
         ],
     )
     def test_missing_tls_autoscaling_replacement_skips_complete_manifest(
@@ -2011,6 +2056,8 @@ class TestInferenceProxyAutoscalingManifest:
         replacements = dict.fromkeys(token_re.findall(source), "test-value")
         replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] = "100m"
         replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] = "70"
+        replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] = "3"
+        replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] = "10"
         del replacements[missing_token]
 
         plan = handler_module.plan_manifests(str(tmp_path), replacements)
@@ -3146,6 +3193,37 @@ class TestQueueingCustomObjectMapConsistency:
         pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
         assert pruned == expected
 
+    def test_manifest_processor_hpa_prune_inventory_matches_the_gated_manifest(
+        self, handler_module
+    ) -> None:
+        """Disabling manifest_processor.autoscaling removes exactly the HPA it installed.
+
+        A leftover HPA would keep fighting the Deployment's re-asserted replica
+        count once ``gco.aws/hpa-controls-replicas`` flips back to ``"false"``.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "35-manifest-processor-hpa.yaml"
+        documents = _parse_manifest_documents(gated)
+        assert [doc["kind"] for doc in documents] == ["HorizontalPodAutoscaler"]
+        assert documents[0]["metadata"]["annotations"]["gco.aws/feature-gate"] == "placeholder"
+        expected = {
+            (
+                str(doc.get("apiVersion")),
+                str(doc.get("kind")),
+                str(doc["metadata"]["namespace"]),
+                str(doc["metadata"]["name"]),
+            )
+            for doc in documents
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{MP_HPA_ENABLED}}", False)]
+        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
+        assert pruned == expected
+        # The gate token really is the one the manifest carries: a renamed
+        # placeholder would leave the inventory keyed on a gate that never fires.
+        assert "{{MP_HPA_ENABLED}}" in gated.read_text(encoding="utf-8")
+
 
 class TestServiceAccountAutomountFlipDiagnostic:
     """Base-pass diagnostic for clusters created by an older release.
@@ -3744,9 +3822,22 @@ class TestWorkloadCredentialVerification:
     _DEPLOYMENTS = (
         ("gco-system", "health-monitor", "gco-health-monitor-sa"),
         ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
-        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
         ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
+        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
+        ("gco-system", "cost-monitor", "gco-cost-monitor-sa"),
     )
+
+    def test_platform_inventory_is_the_module_constant(self, handler_module):
+        """The list this class drives is the one the handler exports.
+
+        tests/test_platform_workload_contract.py pins PLATFORM_DEPLOYMENTS to
+        the shipped manifests; this keeps the fixtures here in lockstep.
+        """
+        assert handler_module.PLATFORM_DEPLOYMENTS == self._DEPLOYMENTS
+        assert handler_module.WORKLOAD_SERVICE_ACCOUNTS == (
+            ("gco-jobs", "gco-service-account"),
+            ("gco-inference", "gco-service-account"),
+        )
 
     @staticmethod
     def _env(*names):
@@ -3791,11 +3882,19 @@ class TestWorkloadCredentialVerification:
         service_account.metadata.annotations = annotations
         return service_account
 
-    def _run(self, handler_module, apps_v1, v1):
+    def _run(self, handler_module, apps_v1, v1, planned=None):
         with patch.object(handler_module.client, "CoreV1Api", return_value=v1):
-            return handler_module._verify_workload_credentials(apps_v1)
+            return handler_module._verify_workload_credentials(apps_v1, planned)
 
-    def test_fully_configured_workloads_produce_no_warnings(self, handler_module, caplog):
+    @staticmethod
+    def _planned(*identities):
+        """Base-phase plan entries for (kind, namespace, name) triples."""
+        return [
+            {"apiVersion": "v1", "kind": kind, "namespace": namespace, "name": name}
+            for kind, namespace, name in identities
+        ]
+
+    def _healthy_apps(self):
         apps_v1 = MagicMock()
         apps_v1.read_namespaced_deployment.side_effect = lambda name, namespace: self._deployment(
             next(sa for ns, dep, sa in self._DEPLOYMENTS if (ns, dep) == (namespace, name)),
@@ -3807,6 +3906,10 @@ class TestWorkloadCredentialVerification:
             ],
             env=self._env("AWS_REGION", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"),
         )
+        return apps_v1
+
+    def test_fully_configured_workloads_produce_no_warnings(self, handler_module, caplog):
+        apps_v1 = self._healthy_apps()
         v1 = MagicMock()
         v1.read_namespaced_service_account.return_value = self._service_account(
             {"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/gco"}
@@ -3817,14 +3920,59 @@ class TestWorkloadCredentialVerification:
 
         assert warnings == []
         assert "All workload IAM credential configurations verified" in caplog.text
+        # Without a plan every platform Deployment is inspected, and every
+        # dedicated account (inference-proxy's and cost-monitor's included).
+        read_deployments = {
+            entry.args for entry in apps_v1.read_namespaced_deployment.call_args_list
+        }
+        assert read_deployments == {(name, ns) for ns, name, _sa in self._DEPLOYMENTS}
         read_sas = {entry.args for entry in v1.read_namespaced_service_account.call_args_list}
-        assert read_sas == {
-            ("gco-health-monitor-sa", "gco-system"),
-            ("gco-manifest-processor-sa", "gco-system"),
-            ("gco-inference-monitor-sa", "gco-system"),
+        assert read_sas == {(sa, ns) for ns, _name, sa in self._DEPLOYMENTS} | {
             ("gco-service-account", "gco-jobs"),
             ("gco-service-account", "gco-inference"),
         }
+
+    def test_plan_scopes_the_check_to_planned_workloads(self, handler_module, caplog):
+        """A gated-off cost-monitor is neither read nor reported as missing."""
+        apps_v1 = self._healthy_apps()
+        v1 = MagicMock()
+        v1.read_namespaced_service_account.return_value = self._service_account(
+            {"eks.amazonaws.com/role-arn": "arn"}
+        )
+        planned = self._planned(
+            *(("Deployment", ns, name) for ns, name, _sa in self._DEPLOYMENTS[:-1]),
+            ("ServiceAccount", "gco-jobs", "gco-service-account"),
+            ("Namespace", "cluster", "gco-system"),
+        )
+
+        with caplog.at_level(logging.INFO):
+            warnings = self._run(handler_module, apps_v1, v1, planned)
+
+        assert warnings == []
+        read_deployments = {
+            entry.args for entry in apps_v1.read_namespaced_deployment.call_args_list
+        }
+        assert ("cost-monitor", "gco-system") not in read_deployments
+        assert len(read_deployments) == len(self._DEPLOYMENTS) - 1
+        read_sas = {entry.args for entry in v1.read_namespaced_service_account.call_args_list}
+        assert ("gco-cost-monitor-sa", "gco-system") not in read_sas
+        # Only the planned workload account is read; the unplanned namespace
+        # (gco-inference here) is left alone.
+        assert ("gco-service-account", "gco-jobs") in read_sas
+        assert ("gco-service-account", "gco-inference") not in read_sas
+
+    def test_empty_plan_checks_nothing(self, handler_module, caplog):
+        """A pass that planned no platform workloads has nothing to verify."""
+        apps_v1 = MagicMock()
+        v1 = MagicMock()
+
+        with caplog.at_level(logging.INFO):
+            warnings = self._run(handler_module, apps_v1, v1, planned=[])
+
+        assert warnings == []
+        apps_v1.read_namespaced_deployment.assert_not_called()
+        v1.read_namespaced_service_account.assert_not_called()
+        assert "All workload IAM credential configurations verified" in caplog.text
 
     def test_each_misconfiguration_is_named(self, handler_module, caplog):
         from kubernetes.client.rest import ApiException
@@ -3841,14 +3989,21 @@ class TestWorkloadCredentialVerification:
                 volumes=[self._volume(projected=True, audience="vault")],
                 env=None,
             ),
-            ApiException(status=404, reason="Not Found"),
             ApiException(status=503, reason="Service Unavailable"),
+            ApiException(status=404, reason="Not Found"),
+            self._deployment(
+                "gco-cost-monitor-sa",
+                volumes=[self._volume(projected=True)],
+                env=self._env("AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"),
+            ),
         ]
         v1 = MagicMock()
         v1.read_namespaced_service_account.side_effect = [
             self._service_account(None),
             self._service_account({"other": "x"}),
             ApiException(status=404, reason="Not Found"),
+            self._service_account({"eks.amazonaws.com/role-arn": "arn"}),
+            self._service_account({"eks.amazonaws.com/role-arn": "arn"}),
             ApiException(status=403, reason="Forbidden"),
             self._service_account({"eks.amazonaws.com/role-arn": "arn"}),
         ]
@@ -3863,8 +4018,8 @@ class TestWorkloadCredentialVerification:
             "gco-system/health-monitor: missing AWS_WEB_IDENTITY_TOKEN_FILE env var",
             "gco-system/manifest-processor: missing projected service-account token volume "
             "for IRSA",
-            "gco-system/inference-proxy: deployment not found",
             "gco-system/inference-monitor: failed to read (503)",
+            "gco-system/inference-proxy: deployment not found",
             "gco-system/gco-health-monitor-sa: missing eks.amazonaws.com/role-arn annotation",
             "gco-system/gco-manifest-processor-sa: missing eks.amazonaws.com/role-arn annotation",
             "gco-system/gco-inference-monitor-sa: ServiceAccount not found",

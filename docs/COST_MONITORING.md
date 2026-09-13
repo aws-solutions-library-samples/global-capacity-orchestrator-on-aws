@@ -188,10 +188,18 @@ captured when `--opencost-url http://localhost:9091` is passed) — see
 
 ## Cost reports in S3
 
-The monitoring stack owns one central bucket:
+The monitoring stack owns one central bucket. Its physical name is
+CloudFormation-generated (S3 bucket names are a global namespace and a deleted
+name is not reliably reusable — see
+[ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)), so nothing
+reconstructs it: the stack publishes `/<project>/cost-report-bucket/{name,arn,region}`
+in the monitoring Region, the per-Region cost-monitor services resolve `/name`
+at runtime (retrying until the monitoring stack has deployed), and
+`gco storage s3-inventory` reads the same parameters. Access is granted to each
+Region's cost-monitor role through the bucket policy and the KMS key policy.
 
 ```text
-s3://<project>-cost-reports-<account>-<monitoring-region>/
+s3://<cost-report-bucket>/                # name from /<project>/cost-report-bucket/name
 ├── reports/                          # scheduled reports (the Athena table)
 │   └── region=us-east-1/
 │       └── date=2026-07-26/

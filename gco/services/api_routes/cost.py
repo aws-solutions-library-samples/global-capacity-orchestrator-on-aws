@@ -30,7 +30,10 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/api/v1/cost", tags=["Cost"])
 logger = logging.getLogger(__name__)
 
-_DEFAULT_COST_MONITOR_URL = "http://cost-monitor.gco-system.svc.cluster.local"
+# The Service listens on the container port (8080) rather than 80: the VPC
+# CNI's network policy enforcement wants Service port == container port, and
+# the manifest processor's egress rule names 8080.
+_DEFAULT_COST_MONITOR_URL = "http://cost-monitor.gco-system.svc.cluster.local:8080"
 _PROXY_TIMEOUT_SECONDS = 30.0
 _REPORT_TIMEOUT_SECONDS = 120.0
 

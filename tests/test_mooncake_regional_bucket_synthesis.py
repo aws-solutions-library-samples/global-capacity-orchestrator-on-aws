@@ -1,7 +1,7 @@
 """Synthesis checks for the always-on general-purpose regional bucket.
 
 The regional stack provisions one general-purpose S3 bucket named
-``gco-regional-shared-<account>-<region>`` per region, publishes three
+one CloudFormation-named general-purpose regional bucket per region, publishes three
 discovery parameters under ``/gco/regional-shared-bucket`` (``/name``,
 ``/arn``, ``/region``), and grants the in-region pod role
 (``gco-service-account``) read/write on that bucket plus use of its KMS key —
@@ -33,10 +33,7 @@ from unittest.mock import MagicMock, patch
 import aws_cdk as cdk
 from aws_cdk import assertions
 
-from gco.stacks.constants import (
-    regional_shared_bucket_name_prefix,
-    regional_shared_ssm_parameter_prefix,
-)
+from gco.stacks.constants import regional_shared_ssm_parameter_prefix
 from gco.stacks.regional_stack import GCORegionalStack
 
 # Reuse the MockConfigLoader + helm-installer patch helpers from the regional
@@ -47,7 +44,9 @@ from tests.test_regional_stack import TestRegionalStackSynthesis as _RegionalSta
 # Physical-name prefixes the regional stack derives from ``project_name`` (#139).
 # MockConfigLoader.get_project_name() returns "gco-test", so scope to that name.
 _PROJECT_NAME = "gco-test"
-REGIONAL_SHARED_BUCKET_NAME_PREFIX = regional_shared_bucket_name_prefix(_PROJECT_NAME)
+#: The bucket has a CloudFormation-generated physical name; the construct
+#: logical id is how the template identifies it.
+REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX = "RegionalSharedBucket"
 REGIONAL_SHARED_SSM_PARAMETER_PREFIX = regional_shared_ssm_parameter_prefix(_PROJECT_NAME)
 
 _ACCOUNT = "123456789012"
@@ -105,21 +104,22 @@ def _regional_template_json() -> dict[str, Any]:
         return assertions.Template.from_stack(stack).to_json()
 
 
-def _expected_bucket_name() -> str:
-    return f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-{_ACCOUNT}-{_REGION}"
-
-
 def _regional_bucket_logical_id(template: dict[str, Any]) -> str:
-    """Logical ID of the single general-purpose regional bucket."""
+    """Logical ID of the single general-purpose regional bucket.
+
+    The bucket carries a CloudFormation-generated physical name (a fixed
+    project/account/region name is a collision hazard in S3's global
+    namespace), so the construct logical id is the only stable handle.
+    """
     resources = template.get("Resources", {})
     matches = [
         logical_id
         for logical_id, res in resources.items()
         if res.get("Type") == "AWS::S3::Bucket"
-        and res.get("Properties", {}).get("BucketName") == _expected_bucket_name()
+        and logical_id.startswith(REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX)
     ]
     assert len(matches) == 1, (
-        f"expected exactly one bucket named {_expected_bucket_name()!r}, "
+        f"expected exactly one {REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX}* bucket, "
         f"found logical IDs: {matches}"
     )
     return matches[0]
@@ -199,21 +199,26 @@ class TestRegionalSharedBucketSynthesis:
     """
 
     def test_exactly_one_general_purpose_regional_bucket(self) -> None:
-        """One and only one bucket carries the regional-shared name prefix."""
+        """One and only one regional-shared bucket, and no bucket names itself."""
         template = _regional_template_json()
         resources = template.get("Resources", {})
-
-        named_regional = [
-            res["Properties"]["BucketName"]
-            for res in resources.values()
+        buckets = {
+            logical_id: res
+            for logical_id, res in resources.items()
             if res.get("Type") == "AWS::S3::Bucket"
-            and isinstance(res.get("Properties", {}).get("BucketName"), str)
-            and res["Properties"]["BucketName"].startswith(f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-")
+        }
+        regional = [
+            logical_id
+            for logical_id in buckets
+            if logical_id.startswith(REGIONAL_SHARED_BUCKET_LOGICAL_PREFIX)
         ]
-
-        assert named_regional == [_expected_bucket_name()], (
-            f"expected exactly one bucket named {_expected_bucket_name()!r}, found {named_regional}"
-        )
+        assert len(regional) == 1, f"expected exactly one regional-shared bucket, found {regional}"
+        # S3 bucket names are a global namespace and a deleted name is not
+        # reliably reusable, so every bucket is CloudFormation-named.
+        explicitly_named = [
+            logical_id for logical_id, res in buckets.items() if "BucketName" in res["Properties"]
+        ]
+        assert explicitly_named == [], f"buckets with explicit names: {explicitly_named}"
 
     def test_regional_bucket_uses_kms_encryption(self) -> None:
         """The regional bucket is encrypted server-side with a KMS key."""

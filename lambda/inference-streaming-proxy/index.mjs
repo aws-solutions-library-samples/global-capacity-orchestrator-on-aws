@@ -1030,6 +1030,7 @@ async function forwardRequest({
   responseStream,
   responseState,
   signal,
+  resignHeaders = null,
 }, operations = FORWARD_OPERATIONS) {
   const maxAttempts = RETRYABLE_METHODS.has(method) ? MAX_RETRIES : 1;
   const deadline = monotonicMilliseconds() + Math.max(timeoutMs, 0);
@@ -1042,6 +1043,13 @@ async function forwardRequest({
       break;
     }
     attemptsMade = attempt + 1;
+    if (attempt > 0 && resignHeaders !== null) {
+      // The backend's HMAC envelope is single-use: its nonce is remembered
+      // for the signature window and a replay is refused with 403. A retry
+      // that re-sent the first attempt's envelope turned every retryable
+      // 5xx into a terminal 403, so each attempt signs afresh.
+      headers = { ...headers, ...resignHeaders() };
+    }
 
     let resource;
     try {
@@ -1251,10 +1259,9 @@ async function streamingHandler(
     }
 
     const requestHeaders = sanitizeRequestHeaders(incomingHeaders);
-    Object.assign(
-      requestHeaders,
-      buildSignedHeaders(signingKey, method, target.requestTarget, bodyBuffer),
-    );
+    const signAttempt = () =>
+      buildSignedHeaders(signingKey, method, target.requestTarget, bodyBuffer);
+    Object.assign(requestHeaders, signAttempt());
     const timeoutMs = requestBudgetMilliseconds(context);
     if (timeoutMs <= 0) {
       throw new PublicError(504, "Gateway timeout");
@@ -1272,6 +1279,7 @@ async function streamingHandler(
       responseStream,
       responseState,
       signal: downstreamAbort.signal,
+      resignHeaders: signAttempt,
     });
   } catch (error) {
     if (

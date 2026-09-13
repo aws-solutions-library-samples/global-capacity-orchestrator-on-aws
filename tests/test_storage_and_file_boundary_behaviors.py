@@ -174,6 +174,13 @@ def test_inventory_record_reports_resolution_failure() -> None:
 
 
 def test_primary_bucket_resolution_handles_missing_account_and_unknown_descriptor() -> None:
+    """The cost bucket resolves through SSM alone; an unknown family resolves to nothing.
+
+    The cost bucket used to be reconstructed from the account id, so a missing
+    account short-circuited it. Its name is CloudFormation-generated now and
+    published to SSM, which the resolver must consult whether or not the
+    account is known — and an unpublished parameter reads as "not deployed".
+    """
     manager = _storage_manager()
     cost = next(item for item in BUCKET_DESCRIPTORS if item.id == "cost-reports")
     unknown = BucketDescriptor(
@@ -187,11 +194,18 @@ def test_primary_bucket_resolution_handles_missing_account_and_unknown_descripto
         logical_id_prefix="Unknown",
     )
 
-    assert manager._resolve_primary_bucket(cost, "us-east-1", None) == (None, None)
-    assert manager._resolve_primary_bucket(unknown, "us-east-1", "123456789012") == (
-        None,
-        None,
-    )
+    with patch("gco.services.aws_ssm.get_ssm_parameter_optional", return_value=None) as ssm:
+        assert manager._resolve_primary_bucket(cost, "us-east-1", None) == (None, None)
+        assert manager._resolve_primary_bucket(unknown, "us-east-1", "123456789012") == (
+            None,
+            None,
+        )
+
+    assert [call.args[0] for call in ssm.call_args_list] == [
+        "/gco/cost-report-bucket/name",
+        "/gco/cost-report-bucket/arn",
+    ]
+    assert all(call.kwargs == {"region": "us-east-1"} for call in ssm.call_args_list)
 
 
 def test_stack_bucket_resource_sweep_skips_missing_physical_and_unknown_logical_ids() -> None:

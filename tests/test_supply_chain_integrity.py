@@ -434,17 +434,21 @@ def test_kind_node_and_probe_images_are_prepulled_before_use() -> None:
     probe_index = next(
         i
         for i, step in enumerate(cluster_steps)
-        if step.get("name") == "Verify NetworkPolicy enforcement blocks cross-namespace traffic"
+        if step.get("name") == "Verify NetworkPolicy enforcement (allowed and denied paths)"
     )
     assert kind_index < load_index < probe_index
     assert "kind load docker-image busybox:1.38.0 --name gco-ci" in cluster_steps[load_index]["run"]
+    # The enforcement step launches its targets and probe clients through two
+    # helper functions (one `kubectl run` each); the governance step runs one
+    # dry-run pod. Every launch must use the pre-pulled pinned image.
     consumers = {
-        "Verify NetworkPolicy enforcement blocks cross-namespace traffic": 2,
+        "Verify NetworkPolicy enforcement (allowed and denied paths)": 2,
         "Apply ResourceQuotas and LimitRanges": 1,
     }
     for step_name, expected_count in consumers.items():
         run = next(step["run"] for step in cluster_steps if step.get("name") == step_name)
         assert run.count("--image=busybox:1.38.0") == expected_count, step_name
+        assert len(re.findall(r"kubectl (?:-n \S+ )?run ", run)) == expected_count, step_name
 
 
 def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None:

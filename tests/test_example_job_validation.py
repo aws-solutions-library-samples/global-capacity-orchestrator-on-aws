@@ -201,6 +201,8 @@ class TestActionRegistry:
                 "schedulers",
                 "opencost",
                 "convergence",
+                "platform-workloads",
+                "network-posture",
             }
         )
 

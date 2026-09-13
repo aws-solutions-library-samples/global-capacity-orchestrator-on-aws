@@ -185,6 +185,9 @@ _DESTROY_CLEANUP_OWNERS = {
 _STUCK_STACK_PRECHECK_OWNERS = {
     "TestCheckAndFixStuckStack",
     "TestStrictDeployStackOwnership",
+    # Floci layer: drives the real pre-check against a rolled-back stack in
+    # the local emulator, so the no-op stub would defeat the module.
+    "TestStuckStackRecoveryOverTheWire",
 }
 
 

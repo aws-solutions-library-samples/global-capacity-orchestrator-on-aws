@@ -406,17 +406,21 @@ and callers may override it per-request.
 """
 
 
-def cluster_shared_bucket_name_prefix(project_name: str) -> str:
-    """Name prefix for the always-on ``Cluster_Shared_Bucket`` in ``GCOGlobalStack``.
-
-    Derived from ``project_name``. The full bucket name is
-    ``<project_name>-cluster-shared-<account>-<global-region>``. The prefix is
-    what IAM policies and cdk-nag allow-list assertions scope against, so both
-    the bucket and the assertions must be built from the same ``project_name``.
-    For ``project_name="gco"`` this renders ``gco-cluster-shared`` — identical
-    to the pre-#139 literal.
-    """
-    return f"{project_name}-cluster-shared"
+# ---------------------------------------------------------------------------
+# S3 bucket naming policy
+# ---------------------------------------------------------------------------
+# No GCO stack sets an explicit ``bucket_name``. S3 bucket names live in one
+# global namespace and S3 does not guarantee a deleted name becomes reusable
+# promptly — a validation cycle hit ``BucketAlreadyExists`` on a
+# project/account/region name three days after its previous incarnation was
+# deleted. CloudFormation-generated names (``<stack>-<construct>-<random>``)
+# are unique per stack instance, so destroy-and-redeploy, retained buckets
+# from earlier deployments, and parallel deployments in one account can never
+# collide. The owning stack publishes each bucket's identity (``name``,
+# ``arn``, ``region``) as SSM parameters under a ``project_name``-derived
+# prefix; every consumer resolves the bucket from that contract and nothing
+# reconstructs a bucket name. ``tests/test_bucket_naming_contract.py``
+# enforces the policy on the stack sources.
 
 
 def cluster_shared_ssm_parameter_prefix(project_name: str) -> str:
@@ -427,39 +431,24 @@ def cluster_shared_ssm_parameter_prefix(project_name: str) -> str:
     ``<prefix>/region`` under this path; ``GCORegionalStack`` (always) and
     ``GCOAnalyticsStack`` (when enabled) read them back via
     ``cr.AwsCustomResource`` against the global region. Treat the full paths as
-    the contract. For ``project_name="gco"`` this renders
+    the contract — the bucket's physical name is CloudFormation-generated and
+    is only knowable through them. For ``project_name="gco"`` this renders
     ``/gco/cluster-shared-bucket``.
     """
     return f"/{project_name}/cluster-shared-bucket"
-
-
-def regional_shared_bucket_name_prefix(project_name: str) -> str:
-    """Name prefix for the always-on general-purpose regional bucket.
-
-    Derived from ``project_name``. The full bucket name is
-    ``<project_name>-regional-shared-<account>-<region>``. Each
-    ``GCORegionalStack`` provisions exactly one such bucket per region,
-    unconditionally — there is no ``cdk.json`` toggle and no feature flag
-    gating its existence. It is general purpose (usable by any in-region
-    workload) and is in addition to the always-on central buckets owned by
-    ``GCOGlobalStack`` (the model bucket and the cluster-shared bucket). The
-    prefix is what IAM policies and cdk-nag allow-list assertions scope
-    against. For ``project_name="gco"`` this renders ``gco-regional-shared`` —
-    identical to the pre-#139 literal.
-    """
-    return f"{project_name}-regional-shared"
 
 
 def regional_shared_ssm_parameter_prefix(project_name: str) -> str:
     """SSM parameter namespace for the regional general-purpose bucket metadata.
 
     Derived from ``project_name`` (``/<project_name>/regional-shared-bucket``).
-    Each ``GCORegionalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
-    ``<prefix>/region`` under this path **in its own region's** parameter
-    store, exactly as the model bucket and cluster-shared bucket publish
-    theirs. In-region workloads (and the regional upload surface) read them
-    back to resolve the always-on regional bucket without hardcoding
-    account/region into the name.
+    Each ``GCORegionalStack`` provisions exactly one general-purpose bucket per
+    region, unconditionally (no ``cdk.json`` toggle gates its existence), and
+    writes ``<prefix>/name``, ``<prefix>/arn``, and ``<prefix>/region`` under
+    this path **in its own region's** parameter store, exactly as the model
+    bucket and cluster-shared bucket publish theirs. In-region workloads (and
+    the regional upload surface) read them back to resolve the bucket — its
+    physical name is CloudFormation-generated and never reconstructed.
 
     The per-region inference monitor builds the same path at runtime from its
     injected ``PROJECT_NAME`` environment variable rather than importing this
@@ -473,23 +462,25 @@ MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"
 """Object-key prefix for Mooncake cold-tier KV objects in the regional bucket.
 
 The per-region inference monitor resolves an endpoint's cold-tier object-store
-URI to ``s3://gco-regional-shared-<account>-<region>/mooncake-kv/<endpoint>/``,
-and the ``gco inference populate-kv`` upload surface writes under the same
-prefix, so operator-supplied warm-up objects land exactly where an endpoint's
-pods read them. This is the shared contract between the two sides; the monitor
-keeps a local copy of this value so it needs no CDK imports at runtime, so keep
-the two in lockstep if the prefix ever changes.
+URI to ``s3://<regional-shared-bucket>/mooncake-kv/<endpoint>/`` (the bucket
+name comes from that region's ``/<project>/regional-shared-bucket/name``
+parameter), and the ``gco inference populate-kv`` upload surface writes under
+the same prefix, so operator-supplied warm-up objects land exactly where an
+endpoint's pods read them. This is the shared contract between the two sides;
+the monitor keeps a local copy of this value so it needs no CDK imports at
+runtime, so keep the two in lockstep if the prefix ever changes.
 """
 
 # ---------------------------------------------------------------------------
 # Cost Monitoring Constants
 # ---------------------------------------------------------------------------
 # Shared contract between the monitoring stack (which owns the cost report
-# bucket, Glue database/table, and Athena workgroup), the regional stacks
-# (which grant the cost-monitor service write access by deterministic ARN),
-# the cost-monitor service (which writes Parquet reports), and the CLI (which
-# queries Athena). Everything below is derived from ``project_name`` so two
-# deployments in one account never collide.
+# bucket, Glue database/table, and Athena workgroup and grants the regional
+# cost-monitor roles through the bucket and key policies), the regional stacks
+# (which let the cost-monitor role read the published bucket identity), the
+# cost-monitor service (which resolves the bucket from SSM and writes Parquet
+# reports), and the CLI (which queries Athena). Everything below is derived
+# from ``project_name`` so two deployments in one account never collide.
 
 COST_REPORT_SCHEDULED_PREFIX = "reports"
 """Object-key prefix for scheduled cost allocation reports.
@@ -511,30 +502,32 @@ COST_ATHENA_RESULTS_PREFIX = "athena-results"
 """Object-key prefix for Athena query results inside the cost report bucket."""
 
 
-def cost_report_bucket_name_prefix(project_name: str) -> str:
-    """Name prefix for the cost report bucket in ``GCOMonitoringStack``.
+def cost_report_ssm_parameter_prefix(project_name: str) -> str:
+    """SSM parameter namespace for the cost report bucket identity.
 
-    Derived from ``project_name``. The full bucket name is
-    ``<project_name>-cost-reports-<account>-<monitoring-region>`` — fully
-    deterministic at synth time, which lets every regional stack grant its
-    cost-monitor role write access by literal ARN without a cross-region
-    SSM read (and without inverting the regional-before-monitoring deploy
-    order). The prefix is what IAM policies and cdk-nag allow-list
-    assertions scope against.
+    Derived from ``project_name`` (``/<project_name>/cost-report-bucket``).
+    ``GCOMonitoringStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
+    ``<prefix>/region`` under this path **in the monitoring region's**
+    parameter store — the same publish-then-resolve contract the model,
+    cluster-shared, and regional-shared buckets use. The bucket's physical
+    name is CloudFormation-generated (see the S3 bucket naming policy above),
+    so these parameters are the only way to learn it:
+
+    * the per-region cost-monitor service reads ``<prefix>/name`` at runtime
+      (``COST_REPORT_BUCKET_PARAMETER`` / ``COST_REPORT_BUCKET_PARAMETER_REGION``
+      injected by ``GCORegionalStack``). The monitoring stack deploys *after*
+      the regional stacks, so on a fresh deploy-all the parameter does not
+      exist yet when the service first boots; it retries on every scheduled
+      pass until it does;
+    * the regional cost-monitor role is granted ``ssm:GetParameter`` on the
+      ``/name`` parameter by literal ARN, while S3 and KMS access come from
+      the monitoring stack's bucket and key policies (principal based);
+    * ``gco storage`` and release validation read ``<prefix>/name`` and
+      ``<prefix>/arn`` instead of reconstructing a name.
+
+    For ``project_name="gco"`` this renders ``/gco/cost-report-bucket``.
     """
-    return f"{project_name}-cost-reports"
-
-
-def cost_report_bucket_name(project_name: str, account: str, monitoring_region: str) -> str:
-    """Deterministic physical name of the cost report bucket.
-
-    Single source of truth shared by the monitoring stack (which creates the
-    bucket), the regional stacks (which inject the name into the cost-monitor
-    service environment and grant S3 access by literal ARN), and the CLI
-    (which resolves the bucket for Athena result downloads and report
-    listings).
-    """
-    return f"{cost_report_bucket_name_prefix(project_name)}-{account}-{monitoring_region}"
+    return f"/{project_name}/cost-report-bucket"
 
 
 def cost_glue_database_name(project_name: str) -> str:

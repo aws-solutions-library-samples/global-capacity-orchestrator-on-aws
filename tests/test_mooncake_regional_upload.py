@@ -2,7 +2,7 @@
 Tests for ``RegionalBucketManager`` bucket resolution and upload error paths.
 
 ``RegionalBucketManager`` (in ``cli/models.py``) uploads local files to a
-region's general-purpose ``gco-regional-shared-<account>-<region>`` bucket. It
+region's general-purpose regional bucket (CloudFormation-generated name). It
 must resolve the bucket name from the *target* region's own
 ``/gco/regional-shared-bucket/name`` SSM parameter — never the global region's
 or another region's — write every object only to that bucket, fail without

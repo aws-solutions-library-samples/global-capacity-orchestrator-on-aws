@@ -2117,6 +2117,7 @@ class TestMainArgumentValidation:
             (["--protected-stack", "1bad"], "Invalid --protected-stack name: '1bad'"),
             (["--max-workers", "0"], "--max-workers must be positive"),
             (["--destroy-retry-delay-seconds", "-5"], "--destroy-retry-delay-seconds must be"),
+            (["--min-free-disk-gib", "-1"], "--min-free-disk-gib must be zero or positive"),
             (["--optional-schedulers", "bogus"], "--optional-schedulers accepts yunikorn, slurm"),
             (["--optional-schedulers", "all,slurm"], "'all' cannot be combined"),
             (["--inference-gpu-count", "-1"], "--inference-gpu-count must be non-negative"),
@@ -2205,6 +2206,15 @@ class TestMainSettings:
         assert settings.checkpoint_path == settings.report_dir / "checkpoint.json"
         assert settings.run_id.endswith("-" + _SHA[:12])
         assert settings.resume is False
+        assert settings.min_free_disk_gib == 20
+
+    def test_min_free_disk_floor_is_threaded_into_settings(self, tmp_path: Path) -> None:
+        root = _fake_repo(tmp_path)
+        settings = self._settings(
+            tmp_path,
+            _cli_argv("--repo-root", str(root), "--min-free-disk-gib", "0", actions="preflight"),
+        )
+        assert settings.min_free_disk_gib == 0
 
     def test_explicit_paths_resume_and_all_schedulers(self, tmp_path: Path) -> None:
         root = _fake_repo(tmp_path)
@@ -2629,6 +2639,15 @@ class TestActionConvergence:
             actions_convergence.action_convergence(ctx)
 
 
+#: Evidence the local image prune returns; the deploy record carries it verbatim.
+_PRUNE_EVIDENCE = {
+    "runtime": "podman",
+    "removed_images": ["docker.io/library/cdkasset-abc:latest"],
+    "dangling_pruned": True,
+    "errors": [],
+}
+
+
 class TestActionDeploy:
     _STACK_ID = "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-live-global/stack-uuid"
     _CHANGE_SET_ID = (
@@ -2670,6 +2689,10 @@ class TestActionDeploy:
             patch_live_validation_helper("_record_prepared_stack_identity") as record_prepared,
             patch_live_validation_helper("_record_ecr_repository_creation") as record_repository,
             patch_live_validation_helper("_authorize_owned_stack") as authorize,
+            patch_live_validation_helper(
+                "prune_local_cdk_asset_images_safely",
+                return_value=dict(_PRUNE_EVIDENCE),
+            ) as prune,
         ):
             yield {
                 "reconcile": reconcile,
@@ -2680,6 +2703,7 @@ class TestActionDeploy:
                 "record_prepared": record_prepared,
                 "record_repository": record_repository,
                 "authorize": authorize,
+                "prune": prune,
             }
 
     def test_deploy_requires_a_baseline(self) -> None:
@@ -2794,6 +2818,24 @@ class TestActionDeploy:
 
         ownership["record_identity"].assert_not_called()
         ownership["reconcile"].assert_called_once_with(ctx)
+
+    def test_deploy_record_carries_the_local_image_prune_evidence(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager.deploy_orchestrated.return_value = (True, ["gco-live-global"], [])
+        with self._ownership() as ownership:
+            result = actions_deploy.action_deploy(ctx)
+        ownership["prune"].assert_called_once_with()
+        assert result["local_image_prune"] == _PRUNE_EVIDENCE
+        assert ctx.checkpoint.state["local_image_prune"] == _PRUNE_EVIDENCE
+        assert ctx.checkpoint.state["deploy_result"]["local_image_prune"] == _PRUNE_EVIDENCE
+
+    def test_local_images_are_pruned_even_when_orchestration_raises(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager.deploy_orchestrated.side_effect = RuntimeError("cdk exploded")
+        with self._ownership() as ownership, pytest.raises(RuntimeError, match="cdk exploded"):
+            actions_deploy.action_deploy(ctx)
+        ownership["prune"].assert_called_once_with()
+        assert ctx.checkpoint.state["local_image_prune"] == _PRUNE_EVIDENCE
 
     @pytest.mark.parametrize(
         ("failed", "match"),
@@ -3116,6 +3158,9 @@ class TestActionFinalInventory:
             patch_live_validation_helper(
                 "_strip_expired_table_streams", return_value=(inventory, [{"arn": "stream"}])
             ),
+            patch_live_validation_helper(
+                "_strip_deleted_vpc_endpoints", return_value=(inventory, [{"arn": "vpce"}])
+            ),
             patch_live_validation_helper("summarize_project_resources", return_value={"total": 0}),
             patch_live_validation_helper("project_resources_are_absent", return_value=absent),
         ):
@@ -3146,6 +3191,7 @@ class TestActionFinalInventory:
         assert result["accepted_retained_ecr"] == [{"repository": "accepted"}]
         assert result["accepted_pending_kms_keys"] == [{"key": "pending"}]
         assert result["accepted_expired_dynamodb_streams"] == [{"arn": "stream"}]
+        assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
         assert ctx.report.final_inventory is result
         assert ctx.checkpoint.state["final_inventory"] == result
@@ -3747,6 +3793,100 @@ class TestActionPreflight:
             actions_preflight.action_preflight(ctx)
 
         ctx.session.client.assert_not_called()
+
+    @pytest.mark.parametrize("action", ["platform-workloads", "network-posture"])
+    def test_every_cluster_facing_action_needs_the_tunnel_plugin(
+        self, tmp_path: Path, action: str
+    ) -> None:
+        """The kubectl checks tunnel through SSM exactly like inference does."""
+        from scripts.live_release_validation.constants import _CLUSTER_TUNNEL_ACTIONS
+        from scripts.live_release_validation.registry import build_action_registry
+
+        assert set(build_action_registry()) >= _CLUSTER_TUNNEL_ACTIONS
+        ctx = self._ctx(tmp_path, selected=("preflight", "topology", action))
+
+        with (
+            self._boundaries(plugin=None),
+            pytest.raises(RuntimeError, match=f"The {action} action\\(s\\) reach the private"),
+        ):
+            actions_preflight.action_preflight(ctx)
+
+        ctx.session.client.assert_not_called()
+        with self._boundaries() as boundaries:
+            result = actions_preflight.action_preflight(ctx)
+        assert result["session_manager_plugin"] == "/usr/local/bin/session-manager-plugin"
+        boundaries["which"].assert_called_once_with("session-manager-plugin")
+
+    @staticmethod
+    def _disk_usage(free_by_path: dict[str, int]) -> Callable[[Any], Any]:
+        """``shutil.disk_usage`` stand-in keyed by the probed path's last component."""
+
+        def usage(path: Any) -> SimpleNamespace:
+            free = free_by_path.get(Path(path).name, free_by_path.get("*", 100 * 1024**3))
+            return SimpleNamespace(total=500 * 1024**3, used=0, free=free)
+
+        return usage
+
+    def test_deploy_refuses_a_host_below_the_free_disk_floor(self, tmp_path: Path) -> None:
+        """ENOSPC mid-deploy fails the image build and then the checkpoint write
+        that guaranteed cleanup needs; the floor is measured before anything exists."""
+        ctx = self._ctx(tmp_path)
+        ctx.settings.min_free_disk_gib = 20
+        ctx.settings.report_dir = tmp_path / "reports" / "run-123"
+        ctx.settings.report_dir.mkdir(parents=True)
+        usage = self._disk_usage({"run-123": 3 * 1024**3})
+        with (
+            self._boundaries(),
+            patch.object(actions_preflight.shutil, "disk_usage", side_effect=usage),
+            pytest.raises(RuntimeError, match="below the 20 GiB floor.*report_dir.*3.0 GiB free"),
+        ):
+            actions_preflight.action_preflight(ctx)
+        # Fails before the first AWS call, like the other local prerequisites.
+        ctx.session.client.assert_not_called()
+
+    def test_free_disk_is_measured_at_the_nearest_existing_ancestor(self, tmp_path: Path) -> None:
+        ctx = self._ctx(tmp_path)
+        ctx.settings.min_free_disk_gib = 20
+        ctx.settings.report_dir = tmp_path / "not-created-yet" / "run-123"
+        probed: list[Path] = []
+
+        def usage(path: Any) -> SimpleNamespace:
+            probed.append(Path(path))
+            return SimpleNamespace(total=500 * 1024**3, used=0, free=64 * 1024**3)
+
+        with (
+            self._boundaries(),
+            patch.object(actions_preflight.shutil, "disk_usage", side_effect=usage),
+        ):
+            result = actions_preflight.action_preflight(ctx)
+        assert tmp_path in probed  # the report dir collapsed to its existing ancestor
+        assert all(path.exists() for path in probed)
+        assert result["min_free_disk_gib"] == 20
+        assert result["free_disk_gib"] == {"repo_root": 64.0, "report_dir": 64.0, "home": 64.0}
+
+    def test_free_disk_floor_is_skipped_without_deploy_or_when_disabled(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = self._ctx(tmp_path, selected=("preflight", "baseline"))
+        ctx.settings.min_free_disk_gib = 20
+        with (
+            self._boundaries(),
+            patch.object(actions_preflight.shutil, "disk_usage") as disk_usage,
+        ):
+            result = actions_preflight.action_preflight(ctx)
+        disk_usage.assert_not_called()
+        assert result["free_disk_gib"] == "not-required"
+
+        ctx = self._ctx(tmp_path)
+        ctx.settings.min_free_disk_gib = 0
+        with (
+            self._boundaries(),
+            patch.object(actions_preflight.shutil, "disk_usage") as disk_usage,
+        ):
+            result = actions_preflight.action_preflight(ctx)
+        disk_usage.assert_not_called()
+        assert result["free_disk_gib"] == "not-required"
+        assert result["min_free_disk_gib"] == 0
 
     @pytest.mark.parametrize(
         ("identity", "match"),

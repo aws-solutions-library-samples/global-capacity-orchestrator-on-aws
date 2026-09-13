@@ -27,7 +27,7 @@ bucket, and the `Regional_Shared_KMS_Key` that encrypts it are all owned by
 the region's own `GCORegionalStack`; no other stack creates, destroys, or
 mutates them.
 
-Bucket name pattern: `gco-regional-shared-<account>-<region>`.
+Bucket name: CloudFormation-generated (`gco-<region>-regionalsharedbucket<hash>-<suffix>`). S3 bucket names are a global namespace and a deleted name is not reliably reusable — a fixed name would also make the `retain` removal policy below collide with the next deployment — so the name is never reconstructed; resolve it from the SSM parameters or ConfigMap below ([ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)).
 
 Every regional cluster automatically:
 
@@ -52,7 +52,7 @@ only in where they live, and that difference is the whole decision:
 
 | | `Regional_Shared_Bucket` | `Cluster_Shared_Bucket` |
 |---|---|---|
-| Name | `gco-regional-shared-<account>-<region>` | `gco-cluster-shared-<account>-<global-region>` |
+| Name | CloudFormation-generated, published at `/gco/regional-shared-bucket/name` | CloudFormation-generated, published at `/gco/cluster-shared-bucket/name` |
 | Owning stack | `GCORegionalStack` (one per region) | `GCOGlobalStack` (exactly one) |
 | Location | the cluster's **own** region | the global region (default `us-east-2`) |
 | Region crossing | never | every call, unless the cluster happens to run in the global region |
@@ -124,8 +124,8 @@ its own region** under the `/gco/regional-shared-bucket/` namespace:
 
 | Name | Type | Value |
 |------|------|-------|
-| `/gco/regional-shared-bucket/name` | `String` | Bucket name (`gco-regional-shared-<account>-<region>`) |
-| `/gco/regional-shared-bucket/arn` | `String` | Bucket ARN (`arn:aws:s3:::gco-regional-shared-<account>-<region>`) |
+| `/gco/regional-shared-bucket/name` | `String` | Bucket name (CloudFormation-generated, e.g. `gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6`) |
+| `/gco/regional-shared-bucket/arn` | `String` | Bucket ARN (`arn:aws:s3:::<bucket name>`) |
 | `/gco/regional-shared-bucket/region` | `String` | The bucket's home region (equal to the deploying region) |
 
 These parameters are:
@@ -173,8 +173,8 @@ metadata:
   name: gco-regional-shared-bucket
   namespace: gco-jobs
 data:
-  regionalBucketName: "gco-regional-shared-123456789012-us-east-1"
-  regionalBucketArn: "arn:aws:s3:::gco-regional-shared-123456789012-us-east-1"
+  regionalBucketName: "gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6"
+  regionalBucketArn: "arn:aws:s3:::gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6"
   regionalBucketRegion: "us-east-1"
 ```
 

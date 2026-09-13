@@ -34,6 +34,9 @@ from ..ownership.kms import (
 from ..ownership.stacks import (
     _verify_target_stack_absence,
 )
+from ..ownership.vpc_endpoints import (
+    _strip_deleted_vpc_endpoints,
+)
 
 
 def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
@@ -83,6 +86,10 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         ctx,
         residual_inventory,
     )
+    residual_inventory, accepted_deleted_vpc_endpoints = _strip_deleted_vpc_endpoints(
+        ctx,
+        residual_inventory,
+    )
     summary = summarize_project_resources(residual_inventory)
     result = {
         "summary": summary,
@@ -95,6 +102,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         "accepted_pending_kms_keys": accepted_pending_kms,
         "accepted_efs_automatic_backup_recovery_points": accepted_efs_backups,
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
+        "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "residual_project_resources": residual_inventory,
     }
     ctx.report.final_inventory = result

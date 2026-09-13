@@ -409,6 +409,7 @@ def test_split_endpoint_materializes_roles_proxy_service_and_role_keyed_status()
     assert proxy_service.spec.type == "ClusterIP"
     assert proxy_service.spec.selector == {
         "app": "chat-proxy",
+        "gco.io/type": "inference",
         "gco.io/role": "proxy",
     }
     assert networking.ingresses == {}

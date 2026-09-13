@@ -26,7 +26,7 @@ analytics environment is enabled. The bucket, its access-logs bucket, and
 the `Cluster_Shared_KMS_Key` that encrypts it are all owned by
 `GCOGlobalStack`; no other stack creates, destroys, or mutates them.
 
-Bucket name pattern: `gco-cluster-shared-<account>-<global-region>`.
+Bucket name: CloudFormation-generated (`gco-global-clustersharedbucket<hash>-<suffix>`). S3 bucket names are a global namespace and a deleted name is not reliably reusable, so the name is never reconstructed — resolve it from the SSM parameters or ConfigMap below ([ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)).
 Default global region: `us-east-2` (from `cdk.json::deployment_regions.global`).
 
 Every regional cluster automatically:
@@ -95,8 +95,8 @@ global region under the `/gco/cluster-shared-bucket/` namespace:
 
 | Name | Type | Value |
 |------|------|-------|
-| `/gco/cluster-shared-bucket/name` | `String` | Bucket name (`gco-cluster-shared-<account>-<global-region>`) |
-| `/gco/cluster-shared-bucket/arn` | `String` | Bucket ARN (`arn:aws:s3:::gco-cluster-shared-<account>-<global-region>`) |
+| `/gco/cluster-shared-bucket/name` | `String` | Bucket name (CloudFormation-generated, e.g. `gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6`) |
+| `/gco/cluster-shared-bucket/arn` | `String` | Bucket ARN (`arn:aws:s3:::<bucket name>`) |
 | `/gco/cluster-shared-bucket/region` | `String` | The bucket's home region (same as `deployment_regions.global`, default `us-east-2`) |
 
 These parameters are:
@@ -139,8 +139,8 @@ metadata:
   name: gco-cluster-shared-bucket
   namespace: gco-jobs
 data:
-  sharedBucketName: "gco-cluster-shared-123456789012-us-east-2"
-  sharedBucketArn: "arn:aws:s3:::gco-cluster-shared-123456789012-us-east-2"
+  sharedBucketName: "gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6"
+  sharedBucketArn: "arn:aws:s3:::gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6"
   sharedBucketRegion: "us-east-2"
 ```
 
@@ -340,9 +340,9 @@ data migration is required, and no running jobs are affected.
 
 `gco-global`:
 
-- A new `Cluster_Shared_Bucket` appears (`gco-cluster-shared-<account>-<global-region>`).
-- A new access-logs bucket appears
-  (`gco-cluster-shared-access-logs-<account>-<global-region>`).
+- A new `Cluster_Shared_Bucket` appears (CloudFormation-generated name, published at `/gco/cluster-shared-bucket/name`).
+- A new access-logs bucket appears (also CloudFormation-generated,
+  `gco-global-clustersharedaccesslogsbucket…`).
 - A new `Cluster_Shared_KMS_Key` is created with rotation enabled.
 - Three new SSM parameters are published under
   `/gco/cluster-shared-bucket/`.

@@ -146,6 +146,8 @@ spec:
 
 Note: `ttlSecondsAfterFinished` applies to both success and failure. If you need more time to debug failed jobs, increase this value or set `shutdownAfterJobFinishes: false` and clean up manually.
 
+The operator follows a RayJob through the head pod's dashboard API (port 8265) from its own namespace. `gco-jobs` default-denies ingress from other namespaces, so the shipped `allow-kuberay-operator-to-ray-head` NetworkPolicy admits exactly the operator's namespace on that port; a RayJob in another namespace you create needs the same rule (see [Network Security](ARCHITECTURE.md#network-security)).
+
 ### RayService
 
 A long-running serving deployment with automatic scaling and zero-downtime upgrades:
@@ -285,7 +287,7 @@ securityContext:
     drop: ["ALL"]
 ```
 
-GCO's default network policies add an exact-label rule for the shipped `ray-cluster`: ingress and egress are allowed only between pods carrying `ray.io/cluster: ray-cluster`. Ray allocates additional worker and object-manager ports dynamically, so this peer-scoped rule intentionally does not restrict ports; it does not admit unrelated `gco-jobs` pods. If you change `metadata.name`, add an equivalent peer-scoped policy for the new `ray.io/cluster` label.
+GCO's `gco-jobs` network policies allow every pod in the namespace to reach every other pod on any port and protocol (`allow-same-namespace` in `lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`), so Ray's dynamically allocated worker and object-manager ports need no per-cluster rule and renaming the cluster needs no policy change. Ingress from other namespaces stays denied by default; egress is DNS, HTTPS, and the in-VPC ranges from `vpc_endpoint_cidrs`. See [Network Security](ARCHITECTURE.md#network-security).
 
 ## Customization
 

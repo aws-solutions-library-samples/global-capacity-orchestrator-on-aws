@@ -30,6 +30,10 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
+from gco.inference_proxy_config import (
+    INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
+    INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
+)
 from tests.test_config_loader import MockApp
 
 _BASE_CONTEXT: dict[str, Any] = json.loads(
@@ -140,8 +144,33 @@ class TestInferenceProxyProperties:
     @given(
         request=st.integers(min_value=1, max_value=250),
         target=st.integers(min_value=1, max_value=100),
+        floor=st.integers(min_value=1, max_value=50),
+        ceiling=st.integers(min_value=1, max_value=100),
     )
-    def test_in_range_values_merge_losslessly(self, request: int, target: int) -> None:
+    def test_in_range_values_merge_losslessly(
+        self, request: int, target: int, floor: int, ceiling: int
+    ) -> None:
+        configured = {
+            "tls_proxy_cpu_request_millicores": request,
+            "tls_proxy_cpu_target_utilization_percentage": target,
+            # Both replica bounds are in range; order them so the pair is valid.
+            "min_replicas": min(floor, ceiling),
+            "max_replicas": max(floor, ceiling),
+        }
+        merged = ConfigLoader(
+            MockApp(_context_with("inference_proxy", configured))
+        ).get_inference_proxy_config()
+        assert merged == configured
+
+    @settings(max_examples=40, deadline=None)
+    @given(
+        request=st.integers(min_value=1, max_value=250),
+        target=st.integers(min_value=1, max_value=100),
+    )
+    def test_omitted_replica_bounds_take_the_shipped_defaults(
+        self, request: int, target: int
+    ) -> None:
+        """A cdk.json that predates the replica knobs keeps the 3-10 HPA range."""
         configured = {
             "tls_proxy_cpu_request_millicores": request,
             "tls_proxy_cpu_target_utilization_percentage": target,
@@ -149,7 +178,23 @@ class TestInferenceProxyProperties:
         merged = ConfigLoader(
             MockApp(_context_with("inference_proxy", configured))
         ).get_inference_proxy_config()
-        assert merged == configured
+        assert merged == {
+            **configured,
+            "min_replicas": INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
+            "max_replicas": INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
+        }
+
+    @settings(max_examples=40, deadline=None)
+    @given(
+        floor=st.integers(min_value=2, max_value=50),
+        shortfall=st.integers(min_value=1, max_value=49),
+    )
+    def test_replica_ceiling_below_the_floor_is_rejected(self, floor: int, shortfall: int) -> None:
+        ceiling = max(1, floor - shortfall)
+        assert ceiling < floor
+        context = _context_with("inference_proxy", {"min_replicas": floor, "max_replicas": ceiling})
+        with pytest.raises(ConfigValidationError, match="max_replicas must be at least"):
+            ConfigLoader(MockApp(context))
 
     @settings(max_examples=50, deadline=None)
     @given(

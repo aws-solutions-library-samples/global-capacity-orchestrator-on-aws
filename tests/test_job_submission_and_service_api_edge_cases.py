@@ -1877,6 +1877,15 @@ def _bare_dispatcher() -> Any:
     dispatcher._running = False
     dispatcher._job_state_cache = MagicMock()
     dispatcher.batch_v1 = MagicMock()
+    dispatcher.coordination_v1 = MagicMock()
+    dispatcher._k8s_timeout = 7
+    # Mirror the constructor's leader-election state. Without these the watch
+    # loop's ``_acquire_leadership`` raises AttributeError, the broad handler
+    # logs it and sleeps, and ``_watch_jobs`` spins forever — the tests below
+    # only terminate because the loop reaches ``_process_job_event``.
+    dispatcher._leader_lease = None
+    dispatcher._standby_poll_seconds = 0
+    dispatcher._is_leader = False
     return dispatcher
 
 

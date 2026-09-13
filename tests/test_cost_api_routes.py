@@ -63,7 +63,7 @@ class TestCostStatusRoute:
         assert result.status_code == 200
         assert result.json()["opencost_healthy"] is True
         url = instance.get.call_args.args[0]
-        assert url == ("http://cost-monitor.gco-system.svc.cluster.local/internal/status")
+        assert url == "http://cost-monitor.gco-system.svc.cluster.local:8080/internal/status"
 
     def test_connection_failure_maps_to_503_with_guidance(self, client):
         context, _ = _async_client_returning(error=httpx.ConnectError("refused"))

@@ -630,26 +630,52 @@ CONFIGS.extend(
                 },
             },
         ),
-        # Inference TLS sidecar autoscaling has a real render path and no IAM
-        # effect. Vary both exact-integer knobs through full-app synthesis.
+        # Inference proxy autoscaling has a real render path and no IAM
+        # effect. Vary every exact-integer knob (TLS sidecar CPU request and
+        # target, HPA replica floor and ceiling) through full-app synthesis.
         (
             "inference-proxy-tls-autoscaling-tuned",
             {
                 "inference_proxy": {
                     "tls_proxy_cpu_request_millicores": 200,
                     "tls_proxy_cpu_target_utilization_percentage": 60,
+                    "min_replicas": 2,
+                    "max_replicas": 6,
                 }
             },
         ),
-        # Manifest-processor service shape (replica count + request-body
-        # cap) and a tightened job-validation policy flow into the regional
-        # stack's container env and the queue processor.
+        # Network posture knobs. Interface VPC endpoints are opt-in (billed per
+        # AZ-hour) and add PrivateLink ENIs plus security groups to the
+        # regional VPC; the gateway list is narrowed at the same time so the
+        # non-default branch of both lists synthesizes. Switching the Auto
+        # Mode network policy controller off flips the value the
+        # 06-network-policy-controller.yaml ConfigMap renders.
+        (
+            "vpc-interface-endpoints-enforcement-off",
+            {
+                "vpc_endpoints": {
+                    "gateway": ["s3"],
+                    "interface": ["sts", "ecr.api", "ecr.dkr", "logs", "sqs"],
+                },
+                "eks_cluster": {"network_policy_enforcement": False},
+            },
+        ),
+        # Manifest-processor service shape (replica count, container limits,
+        # request-body cap, the opt-in CPU HPA) and a tightened job-validation
+        # policy flow into the regional stack's container env, the optional
+        # 35-manifest-processor-hpa.yaml gate, and the queue processor.
         (
             "manifest-processor-tuned",
             {
                 "manifest_processor": {
                     "replicas": 5,
+                    "resource_limits": {"cpu": "2", "memory": "3Gi"},
                     "max_request_body_bytes": 524288,
+                    "autoscaling": {
+                        "enabled": True,
+                        "max_replicas": 12,
+                        "cpu_target_utilization_percentage": 65,
+                    },
                 },
                 "job_validation_policy": {
                     "resource_quotas": {"max_gpu_per_manifest": 8},

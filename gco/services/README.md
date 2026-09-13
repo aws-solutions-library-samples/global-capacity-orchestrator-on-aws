@@ -19,6 +19,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `inference_api.py` | Dedicated authenticated inference-proxy FastAPI app exposing `/`, `/healthz`, `/readyz`, `/inference/*`, and Prometheus `/metrics`. |
 | `inference_monitor.py` | Reconciles inference endpoint desired state from DynamoDB with Kubernetes Deployments and Services. |
 | `inference_store.py` | DynamoDB-backed persistence for inference endpoint specifications and per-region status. |
+| `leader_lease.py` | Kubernetes `coordination.k8s.io` Lease acquisition shared by the health monitor's ALB sync and webhook delivery leaders. |
 | `manifest_api.py` | Authenticated control-plane FastAPI app for manifests, jobs, policy, queues, templates, webhooks, and costs. |
 | `manifest_processor.py` | Validates and applies Kubernetes manifests with namespace, resource, placement, and security policy enforcement. |
 | `metrics_publisher.py` | Publishes GCO health and workload metrics to CloudWatch. |

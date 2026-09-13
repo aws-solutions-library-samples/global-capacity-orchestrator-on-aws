@@ -281,7 +281,7 @@ rules:
 
 ### Network Policies
 
-Distributed Volcano jobs need inter-pod communication (e.g., master↔worker on custom ports). GCO's default network policies allow intra-namespace traffic in `gco-jobs`. If you add stricter policies, ensure Volcano task pods can communicate on the ports your training framework uses (e.g., 23456 for PyTorch distributed, 2222 for MPI).
+Distributed Volcano jobs need inter-pod communication (e.g., master↔worker on custom ports). GCO's `gco-jobs` network policies allow all traffic between pods in the namespace (`allow-same-namespace`), deny ingress from other namespaces, and allow egress to DNS, HTTPS, and the in-VPC ranges from `vpc_endpoint_cidrs`. If you add stricter policies, ensure Volcano task pods can still communicate on the ports your training framework uses (e.g., 23456 for PyTorch distributed, 2222 for MPI). See [Network Security](ARCHITECTURE.md#network-security).
 
 ## Scheduler Plugins
 

@@ -119,7 +119,7 @@ jobs:
       # failures in the suite rather than only those in the first shard to break.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     # Several tests import Lambda handler modules that construct boto3
     # clients at module scope (lambda/api-gateway-proxy/proxy_utils.py,
     # lambda/cross-region-aggregator/handler.py). boto3 requires a region

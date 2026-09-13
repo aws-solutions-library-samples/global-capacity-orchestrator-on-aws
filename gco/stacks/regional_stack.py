@@ -41,8 +41,9 @@ Resources Created:
           required regional workload ingress in other partitions
 
     Container Images:
-        - ECR repositories + Docker image builds for health-monitor, manifest-processor,
-          inference-proxy, inference-monitor, queue-processor
+        - Docker image assets (CDK bootstrap asset repository, content-hash
+          tags) for health-monitor, manifest-processor, inference-proxy,
+          inference-monitor, queue-processor, cost-monitor
 
     SQS:
         - Regional job queue + dead letter queue (for gco jobs submit-sqs)
@@ -92,7 +93,6 @@ from aws_cdk import (
     Validations,
 )
 from aws_cdk import aws_ec2 as ec2
-from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_efs as efs
 from aws_cdk import aws_eks as eks_l1  # L1 constructs (CfnPodIdentityAssociation)
@@ -136,15 +136,14 @@ from gco.stacks.constants import (
     api_gateway_auth_secret_name,
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
-    cost_report_bucket_name,
+    cost_report_ssm_parameter_prefix,
     parse_k8s_quantity,
-    regional_shared_bucket_name_prefix,
     regional_shared_ssm_parameter_prefix,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-05T22:58:10Z
-# Generated from Git commit: 745b3fa3a9af9380bfe2797a5d9716fe8ce3a557
+# Generated at (UTC): 2026-09-12T06:04:03Z
+# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -312,6 +311,29 @@ def _service_image_asset_excludes(*included_paths: str) -> list[str]:
     return list(_SERVICE_IMAGE_COMMON_EXCLUDES) + [
         path for path in _SERVICE_IMAGE_BUILD_INPUTS if path not in included
     ]
+
+
+#: cdk.json ``vpc_endpoints`` service keys → CDK endpoint services. The key
+#: sets are pinned to ``ConfigLoader``'s validation lists by
+#: ``tests/test_regional_stack.py`` so a name the loader accepts always maps.
+_GATEWAY_ENDPOINT_SERVICES: dict[str, ec2.GatewayVpcEndpointAwsService] = {
+    "s3": ec2.GatewayVpcEndpointAwsService.S3,
+    "dynamodb": ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+}
+_INTERFACE_ENDPOINT_SERVICES: dict[str, ec2.InterfaceVpcEndpointAwsService] = {
+    "sts": ec2.InterfaceVpcEndpointAwsService.STS,
+    "ecr.api": ec2.InterfaceVpcEndpointAwsService.ECR,
+    "ecr.dkr": ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+    "logs": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+    "monitoring": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_MONITORING,
+    "sqs": ec2.InterfaceVpcEndpointAwsService.SQS,
+    "ssm": ec2.InterfaceVpcEndpointAwsService.SSM,
+    "secretsmanager": ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+    "kms": ec2.InterfaceVpcEndpointAwsService.KMS,
+    "eks": ec2.InterfaceVpcEndpointAwsService.EKS,
+    "elasticfilesystem": ec2.InterfaceVpcEndpointAwsService.ELASTIC_FILESYSTEM,
+    "bedrock-runtime": ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+}
 
 
 #: CDK context key that force-enables optional Helm charts for one deploy
@@ -802,10 +824,13 @@ class GCORegionalStack(Stack):
         # Enable VPC Flow Logs for network traffic analysis and security monitoring
         self._create_vpc_flow_logs()
 
+        # Keep AWS API traffic inside the VPC where the operator asked for it
+        self._create_vpc_endpoints()
+
         # Create SQS queue for job ingestion
         self._create_sqs_queue()
 
-        # Create ECR repositories and build Docker images
+        # Build the platform service images as CDK Docker image assets
         self._create_container_images()
 
         # Pre-create the execution role shared by every ``cr.AwsCustomResource``
@@ -956,6 +981,37 @@ class GCORegionalStack(Stack):
             destination=ec2.FlowLogDestination.to_cloud_watch_logs(flow_log_group, flow_log_role),
             traffic_type=ec2.FlowLogTrafficType.ALL,
         )
+
+    def _create_vpc_endpoints(self) -> None:
+        """Create the VPC endpoints selected by ``cdk.json`` ``vpc_endpoints``.
+
+        Gateway endpoints (S3, DynamoDB) are free route-table entries: with
+        them, the platform's largest data path — model and dataset pulls,
+        checkpoints, MLflow artifacts, cost reports — stops flowing through the
+        NAT gateways' per-GB metering and never leaves the VPC. Interface
+        endpoints are PrivateLink ENIs billed per AZ-hour, so they are opt-in;
+        CDK gives each one a security group admitting HTTPS from the VPC CIDR
+        and private DNS, so callers keep using the public service hostnames.
+
+        NetworkPolicy egress is unaffected either way: S3 traffic still
+        resolves to public S3 addresses that the route table steers into the
+        endpoint, which is why 03-network-policies.yaml allows HTTPS by port
+        rather than by destination.
+        """
+        selection = self.config.get_vpc_endpoints_config()
+        self.vpc_gateway_endpoints: dict[str, ec2.GatewayVpcEndpoint] = {}
+        self.vpc_interface_endpoints: dict[str, ec2.InterfaceVpcEndpoint] = {}
+        for service in selection["gateway"]:
+            self.vpc_gateway_endpoints[service] = self.vpc.add_gateway_endpoint(
+                f"VpcEndpoint-{service}",
+                service=_GATEWAY_ENDPOINT_SERVICES[service],
+            )
+        for service in selection["interface"]:
+            self.vpc_interface_endpoints[service] = self.vpc.add_interface_endpoint(
+                f"VpcEndpoint-{service.replace('.', '-')}",
+                service=_INTERFACE_ENDPOINT_SERVICES[service],
+                subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            )
 
     def _apply_nag_suppressions(self) -> None:
         """Apply cdk-nag suppressions for this stack."""
@@ -1205,17 +1261,16 @@ class GCORegionalStack(Stack):
         return str(reader.get_response_field("Parameter.Value"))
 
     def _create_container_images(self) -> None:
-        """Create ECR repositories and build Docker images for services"""
+        """Build the platform service images as CDK Docker image assets.
 
-        # Create ECR repository for health monitor
-        self.health_monitor_repo = ecr.Repository(
-            self,
-            "HealthMonitorRepo",
-            # repository_name intentionally omitted - let CDK generate unique name
-            removal_policy=RemovalPolicy.DESTROY,  # For dev/test; use RETAIN for production
-            empty_on_delete=True,  # Clean up images on stack deletion
-            image_scan_on_push=True,  # Enable vulnerability scanning on push
-        )
+        Every image is a ``DockerImageAsset``: CDK builds it at synth, pushes
+        it to the bootstrap asset repository under a content-hash tag, and the
+        manifests receive that URI through ``{{*_IMAGE}}`` replacements. The
+        stack creates no ECR repositories of its own — three empty
+        per-service repositories used to be declared here and were never
+        pushed to or referenced; they only added resources to create, scan,
+        and delete on every deploy.
+        """
 
         # All Docker images target AMD64 (x86_64) to match EKS Auto Mode's
         # default system nodepool.
@@ -1232,16 +1287,6 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        # Create ECR repository for manifest processor
-        self.manifest_processor_repo = ecr.Repository(
-            self,
-            "ManifestProcessorRepo",
-            # repository_name intentionally omitted - let CDK generate unique name
-            removal_policy=RemovalPolicy.DESTROY,
-            empty_on_delete=True,
-            image_scan_on_push=True,  # Enable vulnerability scanning on push
-        )
-
         # Build and push manifest processor Docker image
         self.manifest_processor_image = ecr_assets.DockerImageAsset(
             self,
@@ -1254,16 +1299,9 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        # Create and build the inference-only data-plane proxy image. Keeping
-        # this separate from manifest-processor prevents model traffic from
+        # Build the inference-only data-plane proxy image. Keeping this
+        # separate from manifest-processor prevents model traffic from
         # sharing its Kubernetes API/RBAC and queue-worker process surface.
-        self.inference_proxy_repo = ecr.Repository(
-            self,
-            "InferenceProxyRepo",
-            removal_policy=RemovalPolicy.DESTROY,
-            empty_on_delete=True,
-            image_scan_on_push=True,
-        )
         self.inference_proxy_image = ecr_assets.DockerImageAsset(
             self,
             "InferenceProxyImage",
@@ -2017,7 +2055,7 @@ class GCORegionalStack(Stack):
                 service_account_names=["gco-cost-monitor-sa"],
                 namespaces=["gco-system"],
             )
-            self._grant_cost_report_bucket_to_cost_monitor()
+            self._grant_cost_report_bucket_discovery_to_cost_monitor()
 
         self._create_aws_load_balancer_controller_role()
 
@@ -2579,8 +2617,38 @@ class GCORegionalStack(Stack):
         )
         self._pod_identity_associations.append(inference_proxy_assoc)
 
-        # Shared GCO service account for general platform/job workloads.
-        for namespace in ["gco-system", "gco-jobs", "gco-inference"]:
+        # Inference monitor — reconciles endpoints with the shared platform
+        # role (its IRSA subject is already in that role's trust policy).
+        # Every other platform Deployment gets both credential paths; this one
+        # had only the IRSA annotation.
+        inference_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
+            self,
+            "PodIdentity-inference-monitor",
+            cluster_name=self.cluster.cluster_name,
+            namespace="gco-system",
+            service_account="gco-inference-monitor-sa",
+            role_arn=self.service_account_role.role_arn,
+        )
+        self._pod_identity_associations.append(inference_monitor_assoc)
+
+        # Cost monitor — only when the pipeline deploys here (the role and
+        # 34-cost-monitor.yaml are gated the same way).
+        if self._cost_monitoring_active():
+            cost_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
+                self,
+                "PodIdentity-cost-monitor",
+                cluster_name=self.cluster.cluster_name,
+                namespace="gco-system",
+                service_account="gco-cost-monitor-sa",
+                role_arn=self.cost_monitor_role.role_arn,
+            )
+            self._pod_identity_associations.append(cost_monitor_assoc)
+
+        # Shared GCO service account for user job and inference workloads —
+        # the two namespaces 01-serviceaccounts.yaml actually declares it in.
+        # (A gco-system association used to be created as well; no such
+        # ServiceAccount exists there, so it never bound anything.)
+        for namespace in ["gco-jobs", "gco-inference"]:
             assoc = eks_l1.CfnPodIdentityAssociation(
                 self,
                 f"PodIdentity-gco-sa-{namespace}",
@@ -2728,9 +2796,9 @@ class GCORegionalStack(Stack):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped
-           to ``<shared.arn>`` and ``<shared.arn>/*`` — the bucket-ARN
-           shape uses the ``gco-cluster-shared-*`` prefix that IAM
-           policies scope against.
+           to ``<shared.arn>`` and ``<shared.arn>/*`` — the literal ARN
+           resolved from SSM (the bucket's name is CloudFormation-generated,
+           so no prefix pattern is involved).
         2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by the
            ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` condition —
            ``resources=["*"]`` because the KMS key ARN is not known to this
@@ -2913,11 +2981,15 @@ class GCORegionalStack(Stack):
            delivery work without role-side grants.
         2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
            destination for the primary bucket.
-        3. ``regional_shared_bucket`` — the primary bucket named
-           ``<project_name>-regional-shared-<account>-<region>`` (the prefix
-           from ``regional_shared_bucket_name_prefix(project_name)`` is the
-           stable ARN prefix used by IAM policies and nag assertions).
-           KMS-encrypted with
+        3. ``regional_shared_bucket`` — the primary bucket. Its physical name
+           is CloudFormation-generated (``<stack>-regionalsharedbucket…``):
+           S3 bucket names are a global namespace and a deleted name is not
+           reliably reusable, so a fixed project/account/region name would
+           make every destroy-and-redeploy (and the ``retain`` policy below)
+           a collision hazard. Consumers never reconstruct it — they read the
+           SSM parameters published under
+           ``regional_shared_ssm_parameter_prefix(project_name)`` or the
+           ``gco-regional-shared-bucket`` ConfigMap. KMS-encrypted with
            ``regional_shared_kms_key``, block-public-access on, SSL enforced,
            versioned, destroy-on-teardown.
 
@@ -3022,10 +3094,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Primary general-purpose regional bucket. The name is derived from
-        # ``project_name`` so the bucket and the IAM allow-list assertions
-        # (arn:<partition>:s3:::<project_name>-regional-shared-*) stay in lockstep and
-        # two deployments in the same account+region do not collide.
+        # Primary general-purpose regional bucket. No ``bucket_name``: the
+        # physical name is CloudFormation-generated so a destroy-and-redeploy
+        # (or a retained bucket from an earlier deployment) can never collide
+        # in S3's global namespace; the IAM grants below reference the
+        # construct's ARN token and consumers resolve the name from SSM.
         # `bucket_key_enabled=True` mirrors the central-bucket pattern to
         # reduce per-object KMS request costs.
         project_name = self.config.get_project_name()
@@ -3033,10 +3106,6 @@ class GCORegionalStack(Stack):
         self.regional_shared_bucket = s3.Bucket(
             self,
             "RegionalSharedBucket",
-            bucket_name=(
-                f"{regional_shared_bucket_name_prefix(project_name)}"
-                f"-{self.account}-{self.deployment_region}"
-            ),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.regional_shared_kms_key,
             bucket_key_enabled=True,
@@ -3238,9 +3307,9 @@ class GCORegionalStack(Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": (
                         "The regional bucket RW grant uses an <arn>/* "
-                        "object-key wildcard on the literal "
-                        "gco-regional-shared-<account>-<region> bucket ARN "
-                        "created in this stack. The wildcard covers object "
+                        "object-key wildcard on the literal ARN of the "
+                        "regional-shared bucket created in this stack "
+                        "(CloudFormation-generated name). The wildcard covers object "
                         "keys within a single bucket — this is the standard "
                         "shape for a bucket-scoped RW grant and is what the "
                         "allow-list assertion is written against."
@@ -3252,88 +3321,46 @@ class GCORegionalStack(Stack):
             ],
         )
 
-    def _grant_cost_report_bucket_to_cost_monitor(self) -> None:
-        """Grant the cost-monitor role write access to the cost report bucket.
+    def _cost_report_bucket_parameter_name(self) -> str:
+        """SSM parameter (in the monitoring region) publishing the cost bucket name."""
+        return f"{cost_report_ssm_parameter_prefix(self.config.get_project_name())}/name"
+
+    def _grant_cost_report_bucket_discovery_to_cost_monitor(self) -> None:
+        """Let the cost-monitor role resolve the cost report bucket it writes to.
 
         The bucket lives in ``GCOMonitoringStack`` in the monitoring region,
-        which deploys *after* every regional stack — so no cross-stack
-        reference or SSM read can resolve it here. Its physical name is fully
-        deterministic (``cost_report_bucket_name``), which lets this grant use
-        a literal ARN:
+        which deploys *after* every regional stack, and it carries a
+        CloudFormation-generated physical name — S3 bucket names are a global
+        namespace and a deleted name is not reliably reusable, so nothing
+        reconstructs it from project/account/region any more. That inverts
+        the old grant direction:
 
-        1. S3 object + bucket-level actions (``PutObject``, ``GetObject``,
-           ``ListBucket``, ``GetBucketLocation``) scoped to the literal cost
-           report bucket ARN and its object-key space — and no other bucket.
-           The service writes scheduled/ad-hoc Parquet reports and lists
-           recent report objects for the API surface.
-        2. KMS ``GenerateDataKey`` / ``Decrypt`` / ``DescribeKey`` restricted
-           by ``kms:ViaService`` to S3 in the monitoring region. The bucket's
-           customer-managed key ARN is not knowable from this stack, so the
-           via-service condition provides the scoping — the same pattern the
-           analytics stack uses for the cluster-shared bucket key.
+        1. The monitoring stack publishes the bucket's identity at
+           ``<cost_report_ssm_parameter_prefix>/{name,arn,region}`` and grants
+           every regional cost-monitor role S3 object/bucket actions through
+           the bucket policy and KMS use through the key policy — principal
+           based, so this stack never needs the bucket or key ARN.
+        2. This stack grants the role exactly one permission:
+           ``ssm:GetParameter`` on the ``/name`` parameter, by literal ARN. The
+           service reads it at runtime (``COST_REPORT_BUCKET_PARAMETER`` /
+           ``COST_REPORT_BUCKET_PARAMETER_REGION`` in ``34-cost-monitor.yaml``).
 
-        On a fresh ``deploy-all`` the bucket materializes only after the
-        regional stacks; the cost-monitor service retries its next scheduled
-        write, so the pipeline self-heals without ordering hacks.
+        On a fresh ``deploy-all`` the parameter appears only once monitoring is
+        deployed; the service re-resolves on every scheduled pass, so the
+        pipeline self-heals without ordering hacks. No wildcard remains on the
+        role, so no cdk-nag acknowledgement is needed here.
         """
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         monitoring_region = self.config.get_monitoring_region()
-        bucket_arn = (
-            f"arn:{self.partition}:s3:::"
-            f"{cost_report_bucket_name(self.config.get_project_name(), self.account, monitoring_region)}"
-        )
-
+        parameter_name = self._cost_report_bucket_parameter_name()
         self.cost_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "s3:PutObject",
-                    "s3:GetObject",
-                    "s3:ListBucket",
-                    "s3:GetBucketLocation",
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{monitoring_region}:{self.account}:"
+                    f"parameter{parameter_name}"
                 ],
-                resources=[bucket_arn, f"{bucket_arn}/*"],
             )
-        )
-
-        self.cost_monitor_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "kms:GenerateDataKey",
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                ],
-                resources=["*"],
-                conditions={
-                    "StringEquals": {
-                        "kms:ViaService": f"s3.{monitoring_region}.{self.url_suffix}",
-                    }
-                },
-            )
-        )
-
-        acknowledge_nag_findings(
-            self.cost_monitor_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The cost-monitor S3 grant uses an <arn>/* object-key "
-                        "wildcard on the literal deterministic cost report bucket "
-                        "ARN (one bucket). The KMS statement uses Resource::* "
-                        "because the bucket's customer-managed key is created by "
-                        "the monitoring stack, which deploys after this stack; the "
-                        "kms:ViaService condition restricts use to S3 in the "
-                        "monitoring region."
-                    ),
-                    "appliesTo": [
-                        "Resource::*",
-                        f"Resource::arn:<AWS::Partition>:s3:::{cost_report_bucket_name(self.config.get_project_name(), '<AWS::AccountId>', monitoring_region)}/*",
-                    ],
-                },
-            ],
         )
 
     def _create_kubectl_lambda(self) -> None:
@@ -3642,8 +3669,22 @@ class GCORegionalStack(Stack):
                 mp_config.get("max_request_body_bytes", 1_048_576)
             ),
             # Shared pure renderer keeps production and Kind typed values in
-            # lockstep (Quantity string for request, YAML integer for target).
+            # lockstep (Quantity string for request, YAML integers for the HPA
+            # target and the min/max replica bounds).
             **_compute_inference_proxy_tls_replacements(inference_proxy_config),
+            # Manifest-processor sizing is an operator decision made in
+            # cdk.json (validated in ConfigLoader): the fixed replica count and
+            # the application container's limits render verbatim. The optional
+            # CPU HPA (35-manifest-processor-hpa.yaml) is gated by
+            # {{MP_HPA_ENABLED}} below; when it is on, the Deployment carries
+            # gco.aws/hpa-controls-replicas="true" so the applier stops
+            # re-asserting replicas and the HPA's scale value survives.
+            "{{MP_REPLICAS}}": str(mp_config["replicas"]),
+            "{{MP_CPU_LIMIT}}": str(mp_config["resource_limits"]["cpu"]),
+            "{{MP_MEMORY_LIMIT}}": str(mp_config["resource_limits"]["memory"]),
+            "{{MP_HPA_CONTROLS_REPLICAS}}": (
+                "true" if mp_config["autoscaling"]["enabled"] else "false"
+            ),
             # Regional worker for the DynamoDB-backed global queue. Multiple API
             # replicas are safe because JobStore claims are conditional and
             # lease-backed; each replica also reconciles K8s status transitions.
@@ -3733,13 +3774,28 @@ class GCORegionalStack(Stack):
                     "{{COST_MONITORING_ENABLED}}": "true",
                     "{{COST_MONITOR_IMAGE}}": self.cost_monitor_image.image_uri,
                     "{{COST_MONITOR_ROLE_ARN}}": self.cost_monitor_role.role_arn,
-                    "{{COST_REPORT_BUCKET}}": cost_report_bucket_name(
-                        self.config.get_project_name(),
-                        self.account,
-                        self.config.get_monitoring_region(),
-                    ),
+                    # The bucket's CloudFormation-generated name is published by
+                    # the monitoring stack (deployed after this one); the service
+                    # resolves it from SSM at runtime instead of receiving a
+                    # reconstructed name here.
+                    "{{COST_REPORT_BUCKET_PARAMETER}}": self._cost_report_bucket_parameter_name(),
+                    "{{COST_REPORT_BUCKET_PARAMETER_REGION}}": self.config.get_monitoring_region(),
                     "{{COST_REPORT_INTERVAL_MINUTES}}": str(
                         _cost_config["reports"]["interval_minutes"]
+                    ),
+                }
+            )
+
+        # Optional manifest-processor CPU autoscaler. When disabled the key is
+        # absent, 35-manifest-processor-hpa.yaml keeps an unreplaced placeholder,
+        # the applier skips it and prunes any HPA a previous deploy created.
+        if mp_config["autoscaling"]["enabled"]:
+            image_replacements.update(
+                {
+                    "{{MP_HPA_ENABLED}}": "true",
+                    "{{MP_HPA_MAX_REPLICAS}}": str(mp_config["autoscaling"]["max_replicas"]),
+                    "{{MP_HPA_CPU_TARGET_UTILIZATION}}": str(
+                        mp_config["autoscaling"]["cpu_target_utilization_percentage"]
                     ),
                 }
             )
@@ -3756,17 +3812,28 @@ class GCORegionalStack(Stack):
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
 
-        # Add VPC endpoint CIDR replacements for network policy restrictions
-        # Generates a YAML block of ipBlock entries from the vpc_endpoint_cidrs array.
-        # The placeholder {{VPC_ENDPOINT_CIDR_BLOCKS}} sits at 8-space indentation in
-        # the manifest, so the first entry needs no leading indent (the manifest provides
-        # it) and subsequent entries are indented to align.
+        # In-VPC ranges job pods may reach on any port (03-network-policies.yaml
+        # allow-vpc-egress) and the MLflow server admits probes from
+        # (post-helm-mlflow-network.yaml). Generates a YAML block of ipBlock
+        # entries from the vpc_endpoint_cidrs array. The placeholder
+        # {{VPC_ENDPOINT_CIDR_BLOCKS}} sits at 8-space indentation in the
+        # manifest, so the first entry needs no leading indent (the manifest
+        # provides it) and subsequent entries are indented to align.
         vpc_endpoint_cidrs = self.node.try_get_context("vpc_endpoint_cidrs") or ["10.0.0.0/16"]
         cidr_lines = []
         for i, cidr in enumerate(vpc_endpoint_cidrs):
             prefix = "" if i == 0 else "        "
             cidr_lines.append(f'{prefix}- ipBlock:\n            cidr: "{cidr}"')
         image_replacements["{{VPC_ENDPOINT_CIDR_BLOCKS}}"] = "\n".join(cidr_lines)
+
+        # NetworkPolicy enforcement on EKS Auto Mode is a ConfigMap-driven
+        # switch (06-network-policy-controller.yaml); render the operator's
+        # choice as the literal the controller reads.
+        image_replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] = (
+            "true"
+            if self.config.get_eks_cluster_config().get("network_policy_enforcement", True)
+            else "false"
+        )
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate
         # resource consumption across the namespace, LimitRange caps per-container

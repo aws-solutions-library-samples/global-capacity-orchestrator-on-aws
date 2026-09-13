@@ -75,9 +75,9 @@ def models_upload(config: Any, local_path: Any, name: Any) -> None:
 def models_upload_regional(config: Any, local_path: Any, region: Any, prefix: Any) -> None:
     """Upload local files or a directory to a region's regional bucket.
 
-    Objects are written to that region's general-purpose
-    gco-regional-shared-<account>-<region> bucket, resolved from the target
-    region's own SSM parameter. The bucket is general purpose and usable by
+    Objects are written to that region's general-purpose regional bucket,
+    resolved from the target region's own /<project>/regional-shared-bucket/name
+    SSM parameter (the bucket's name is CloudFormation-generated). The bucket is general purpose and usable by
     any in-region workload.
 
     Examples:

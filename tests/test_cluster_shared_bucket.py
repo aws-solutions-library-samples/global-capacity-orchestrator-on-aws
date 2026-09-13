@@ -110,37 +110,18 @@ def _synth(app: cdk.App, construct_id: str = "test-global-stack") -> assertions.
     return assertions.Template.from_stack(stack)
 
 
-def _bucket_name_starts_with_cluster_shared(bucket_name: Any) -> bool:
-    """Return True if the CFN ``BucketName`` value resolves to a name starting with
-    ``gco-test-cluster-shared-``.
-
-    CDK serializes the bucket name as ``Fn::Join["", ["gco-test-cluster-shared-",
-    {"Ref": "AWS::AccountId"}, "-", {"Ref": "AWS::Region"}]]``, so we inspect
-    the Join parts rather than comparing to a literal string.
-    """
-    if isinstance(bucket_name, str):
-        return bucket_name.startswith("gco-test-cluster-shared-")
-    if isinstance(bucket_name, dict) and "Fn::Join" in bucket_name:
-        parts = bucket_name["Fn::Join"][1]
-        if parts and isinstance(parts[0], str):
-            return parts[0].startswith("gco-test-cluster-shared-")
-    return False
-
-
 def _find_cluster_shared_bucket(template: assertions.Template) -> tuple[str, Mapping[str, Any]]:
     """Return ``(logical_id, resource)`` for the primary ``Cluster_Shared_Bucket``.
 
-    Identified by the ``gco-test-cluster-shared-`` ``BucketName`` prefix (the
-    stable ARN prefix contract for this bucket).
+    The bucket carries a CloudFormation-generated physical name (S3 bucket
+    names are a global namespace and a deleted name is not reliably reusable,
+    so nothing may pin one), so it is identified by its construct logical id
+    ``ClusterSharedBucket<hash>`` — never by a name prefix.
     """
     buckets = template.find_resources("AWS::S3::Bucket")
-    matches = [
-        (lid, res)
-        for lid, res in buckets.items()
-        if _bucket_name_starts_with_cluster_shared(res.get("Properties", {}).get("BucketName"))
-    ]
+    matches = [(lid, res) for lid, res in buckets.items() if lid.startswith("ClusterSharedBucket")]
     assert len(matches) == 1, (
-        f"Expected exactly one bucket named gco-test-cluster-shared-*, found {len(matches)}"
+        f"Expected exactly one ClusterSharedBucket* bucket, found {len(matches)}"
     )
     return matches[0]
 
@@ -216,10 +197,16 @@ class TestClusterSharedBucket:
     (regional job-pod roles unconditionally, SageMaker execution role when
     analytics is enabled)."""
 
-    def test_exactly_one_cluster_shared_named_bucket(self):
-        """Exactly one bucket has BucketName prefix ``gco-test-cluster-shared-``."""
+    def test_exactly_one_cluster_shared_bucket_and_no_explicit_names(self):
+        """Exactly one cluster-shared bucket, and no bucket pins a physical name."""
         template = _synth(cdk.App())
         _find_cluster_shared_bucket(template)  # raises if zero or >1
+        named = [
+            lid
+            for lid, res in template.find_resources("AWS::S3::Bucket").items()
+            if "BucketName" in res.get("Properties", {})
+        ]
+        assert named == [], f"buckets with explicit BucketName (S3 reuse hazard): {named}"
 
     def test_primary_bucket_is_kms_encrypted_with_cluster_shared_key(self):
         """Primary bucket's ``BucketEncryption`` references the cluster-shared KMS key via ``Fn::GetAtt``."""

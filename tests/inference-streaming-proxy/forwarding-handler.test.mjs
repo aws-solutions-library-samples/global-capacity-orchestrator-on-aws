@@ -486,6 +486,64 @@ test("forwardRequest retries connection errors and retryable GET responses", asy
   assert.equal(deadlineOps.streamCalls[0].resource, deadlineResponse);
 });
 
+test("forwardRequest signs every retry afresh instead of replaying the first envelope", async () => {
+  // The backend remembers each nonce for the signature window and answers a
+  // replay with 403, so a retry that re-sent attempt one's envelope turned a
+  // retryable 504 into a terminal 403 (observed live). Each attempt must sign
+  // again; the unsigned request headers travel unchanged.
+  let signed = 0;
+  const resignHeaders = () => {
+    signed += 1;
+    return {
+      "x-gco-signature": `sig-${signed}`,
+      "x-gco-nonce": `nonce-${signed}`,
+      "x-gco-timestamp": `${1_000 + signed}`,
+    };
+  };
+  const operations = queuedOperations([
+    fakeResource(504),
+    codedError("ECONNRESET"),
+    fakeResource(200),
+  ]);
+  await __test.forwardRequest(
+    forwardingArguments({
+      headers: {
+        accept: "application/json",
+        "x-gco-signature": "sig-0",
+        "x-gco-nonce": "nonce-0",
+        "x-gco-timestamp": "1000",
+      },
+      resignHeaders,
+    }),
+    operations,
+  );
+  assert.equal(operations.openCalls.length, 3);
+  assert.deepEqual(
+    operations.openCalls.map((call) => call.headers["x-gco-nonce"]),
+    ["nonce-0", "nonce-1", "nonce-2"],
+  );
+  assert.deepEqual(
+    operations.openCalls.map((call) => call.headers["x-gco-signature"]),
+    ["sig-0", "sig-1", "sig-2"],
+  );
+  assert.ok(
+    operations.openCalls.every((call) => call.headers.accept === "application/json"),
+  );
+  assert.equal(signed, 2, "the first attempt uses the envelope it was given");
+
+  // Without a signer the retry re-sends the same headers (the seam the
+  // pure forwarding tests rely on).
+  const unsigned = queuedOperations([fakeResource(503), fakeResource(200)]);
+  await __test.forwardRequest(
+    forwardingArguments({ headers: { "x-gco-nonce": "fixed" } }),
+    unsigned,
+  );
+  assert.deepEqual(
+    unsigned.openCalls.map((call) => call.headers["x-gco-nonce"]),
+    ["fixed", "fixed"],
+  );
+});
+
 test("forwardRequest maps terminal transport failures without unsafe retries", async (t) => {
   await t.test("downstream abort", async () => {
     const failure = new __test.DownstreamAbortError();

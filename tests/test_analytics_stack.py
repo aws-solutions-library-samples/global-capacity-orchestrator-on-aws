@@ -429,18 +429,13 @@ class TestStudioOnlyBucket:
     ) -> tuple[str, Mapping[str, Any]]:
         """Return ``(logical_id, resource)`` for ``Studio_Only_Bucket``.
 
-        The bucket name is emitted as a literal string on this stack because
-        ``_synth_analytics`` fixes ``account`` and ``region`` in the
-        ``cdk.Environment`` — so the template carries
-        ``gco-test-analytics-studio-123456789012-us-east-2`` verbatim.
+        The bucket carries a CloudFormation-generated physical name (a fixed
+        project/account/region name is a collision hazard in S3's global
+        namespace), so the construct logical id ``StudioOnlyBucket<hash>`` is
+        the handle — never a name prefix.
         """
         buckets = template.find_resources("AWS::S3::Bucket")
-        matches = [
-            (lid, res)
-            for lid, res in buckets.items()
-            if isinstance(res["Properties"].get("BucketName"), str)
-            and res["Properties"]["BucketName"].startswith("gco-test-analytics-studio-")
-        ]
+        matches = [(lid, res) for lid, res in buckets.items() if lid.startswith("StudioOnlyBucket")]
         assert len(matches) == 1, f"expected exactly one Studio_Only_Bucket, got {len(matches)}"
         return matches[0]
 
@@ -465,14 +460,18 @@ class TestStudioOnlyBucket:
         )
         return matches[0]
 
-    def test_studio_only_bucket_name_prefix(self) -> None:
-        """Bucket name starts with ``gco-test-analytics-studio-``."""
+    def test_no_bucket_pins_a_physical_name(self) -> None:
+        """Every bucket is CloudFormation-named: S3 names are a global namespace and
+        a deleted name is not reliably reusable, so a destroy-and-redeploy of a
+        fixed ``<project>-analytics-studio-<account>-<region>`` name could collide."""
         template = _synth_analytics()
-        _, bucket = self._find_studio_only_bucket(template)
-        name = bucket["Properties"].get("BucketName")
-        assert isinstance(name, str) and name.startswith("gco-test-analytics-studio-"), (
-            f"expected BucketName to start with gco-test-analytics-studio-, got {name!r}"
-        )
+        self._find_studio_only_bucket(template)
+        named = [
+            lid
+            for lid, res in template.find_resources("AWS::S3::Bucket").items()
+            if "BucketName" in res["Properties"]
+        ]
+        assert named == [], f"buckets with explicit BucketName: {named}"
 
     def test_studio_only_bucket_is_kms_encrypted_with_analytics_key(self) -> None:
         """``BucketEncryption`` references ``Analytics_KMS_Key`` via

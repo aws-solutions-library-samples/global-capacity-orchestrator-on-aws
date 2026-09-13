@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 
 class TestResourceQuotaTemplateVars:
@@ -57,6 +58,13 @@ class TestResourceQuotaTemplateVars:
             # tests/test_trusted_registries_augmentation.py.
             "{{MP_TRUSTED_REGISTRIES}}": "docker.io,public.ecr.aws,123456789012.dkr.ecr.us-east-2.amazonaws.com",
             "{{MP_TRUSTED_DOCKERHUB_ORGS}}": "nvidia,pytorch",
+            # Sizing (cdk.json manifest_processor.replicas / resource_limits /
+            # autoscaling) renders into the Deployment itself, not env vars.
+            "{{MP_REPLICAS}}": "4",
+            "{{MP_CPU_LIMIT}}": "1500m",
+            "{{MP_MEMORY_LIMIT}}": "3Gi",
+            "{{MP_HPA_CONTROLS_REPLICAS}}": "false",
+            "{{MANIFEST_PROCESSOR_IMAGE}}": "example.invalid/manifest-processor:test",
         }
         for key, value in replacements.items():
             content = content.replace(key, value)
@@ -67,6 +75,11 @@ class TestResourceQuotaTemplateVars:
         assert 'value: "8"' in content
         # And no unreplaced MP_ placeholders
         assert "{{MP_" not in content
+        deployment = next(doc for doc in yaml.safe_load_all(content) if doc["kind"] == "Deployment")
+        assert deployment["spec"]["replicas"] == 4
+        assert deployment["metadata"]["annotations"] == {"gco.aws/hpa-controls-replicas": "false"}
+        application = deployment["spec"]["template"]["spec"]["containers"][0]
+        assert application["resources"]["limits"] == {"cpu": "1500m", "memory": "3Gi"}
 
     def test_queue_processor_quotas_replaced(self):
         """Simulates the kubectl-applier replacement and verifies env vars are set."""

@@ -145,6 +145,11 @@ _STRUCTURAL_STUBS: dict[str, str] = {
 _INTEGER_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
     {
         "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+        "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+        "{{INFERENCE_PROXY_MAX_REPLICAS}}",
+        "{{MP_REPLICAS}}",
+        "{{MP_HPA_MAX_REPLICAS}}",
+        "{{MP_HPA_CPU_TARGET_UTILIZATION}}",
         "{{QP_POLLING_INTERVAL}}",
         "{{QP_SUCCESSFUL_JOBS_HISTORY}}",
         "{{QP_FAILED_JOBS_HISTORY}}",
@@ -160,6 +165,8 @@ _INTEGER_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
 _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
     {
         "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
+        "{{MP_CPU_LIMIT}}",
+        "{{MP_MEMORY_LIMIT}}",
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",

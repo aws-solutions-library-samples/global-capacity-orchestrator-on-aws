@@ -31,7 +31,7 @@ guide: how the code is organized and where a new check belongs.
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
 | `ownership/` | Durable proof of what this run created and may therefore destroy. |
-| `cleanup/` | Deletion of exactly those proven-owned resources. |
+| `cleanup/` | Deletion of exactly those proven-owned resources, plus `cleanup/local_images.py`: the best-effort prune of the local CDK asset images (`cdkasset-<hash>` and the bootstrap ECR repository tags) every `deploy` leaves in the host's container store, so successive runs cannot fill the disk. |
 | `protected.py` | The ownership boundary: identity matching that keeps pre-existing account resources untouchable. |
 | `context.py` | Run identity helpers: git SHA/branch, topology profile, Region selection. |
 | `constants.py` | Tags, labels, and tuning constants shared across modules. |
@@ -58,6 +58,32 @@ skipped with their configuration source unless the run passes
 `--optional-schedulers` — which the runner threads to every CDK invocation as
 the `helm_enabled_overrides` context so the deployed chart set, the applier's
 gated manifests, and the probes all resolve enablement identically.
+
+The two cluster-facing actions share their kubectl plumbing in
+`checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
+kubeconfig the `inference` action uses, and a fail-closed JSON read that
+distinguishes "absent" from "the read broke"). `platform-workloads`
+(`actions/platform_workloads.py`, snapshot logic in
+`checks/platform_workloads.py`) polls every Region's `gco-system` Deployments,
+PodDisruptionBudgets, HPAs, and the Auto Mode network-policy switch against the
+Platform Workload Contract in `lambda/kubectl-applier-simple/manifests/README.md`,
+failing immediately on anything waiting cannot heal (a missing object, a
+restarted container, a wrong budget or autoscaler shape). `network-posture`
+(`actions/network_posture.py`, probe matrix in `checks/network_posture.py`)
+starts the two `manifests/netpol-target-job.yaml` listeners and dials them —
+plus the live inference-monitor's metrics port and an AWS-hosted HTTPS
+endpoint — from `manifests/netpol-probe-job.yaml` clients whose exit code
+(`0` answered, `42` nothing answered, `43` the answer never settled) is the
+verdict. A client samples until one answer has held for 30 seconds (and at
+least 45 seconds have passed) rather than dialing once: the VPC CNI attaches a
+new pod's policies in parallel with its start and admits everything until they
+are in place, so a first dial can read that window instead of the policy. The
+changes of answer are kept as `samples` evidence, with `attach_window_observed`
+set when the first answer differed from the steady state. Every Job is
+run-labelled, deleted before the action returns, and self-expiring should the
+harness die first. Both run after the workload actions on purpose: a zero
+restart count and an intact posture mean more once the services have carried
+real traffic.
 
 ## How a run executes
 

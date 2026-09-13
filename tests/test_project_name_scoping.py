@@ -304,12 +304,14 @@ class TestBackwardCompatibility:
 
     def test_default_gco_renders_legacy_names(self) -> None:
         blob = "\n".join(_collision_prone_names(_synth("gco")))
+        # S3 buckets are deliberately absent from this list: their physical
+        # names are CloudFormation-generated (ADR-0005), so they carry no
+        # project-derived name to preserve — only their SSM identity paths do.
         expected = [
-            "gco-cluster-shared-",
             "/gco/cluster-shared-bucket/name",
+            "/gco/cost-report-bucket/name",
             "gco-jobs",
             "gco-inference-endpoints",
-            "gco-regional-shared-",
             "/gco/regional-shared-bucket/name",
             "gco/api-gateway-auth-token",
             "gco-api-gateway-waf",
@@ -318,7 +320,6 @@ class TestBackwardCompatibility:
             "gco-global-api-endpoint",
             "gco-auth-secret-arn",
             "gco-waf-webacl-arn",
-            "gco-analytics-studio-",
             "AmazonSageMaker-gco-analytics-exec-",
             "gco-studio-",
             "gco-spark-",

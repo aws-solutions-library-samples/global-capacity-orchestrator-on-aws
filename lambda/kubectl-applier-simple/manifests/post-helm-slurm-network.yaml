@@ -96,3 +96,35 @@ spec:
       ports:
         - protocol: TCP
           port: 6820
+---
+# The Slinky operator lives in its own namespace (charts.yaml
+# slinky-slurm-operator.namespace) and reconciles NodeSets through the Slurm
+# REST API: it reads node and reservation state and drains workers before
+# their pods go away. gco-jobs default-denies ingress from other namespaces,
+# so without this rule every NodeSet reconcile fails with an i/o timeout on
+# slurmrestd:6820, the workers never converge, and every submitted job stays
+# PENDING — observed on the first live run with enforcement on. The operator
+# namespace is admitted on the REST port only; it holds nothing but the
+# operator and its webhook, both installed by GCO.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-slurm-operator-to-restapi
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: slurm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: slurm-operator
+      ports:
+        - protocol: TCP
+          port: 6820

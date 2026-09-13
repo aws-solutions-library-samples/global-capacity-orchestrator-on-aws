@@ -110,6 +110,13 @@ class RunSettings:
     destroy_retry_delay_seconds: int = 30
     confirm_kms_key_deletion: bool = False
     resume: bool = False
+    #: Free-space floor (GiB) preflight enforces on the checkout, the report
+    #: directory, and the home volume before ``deploy`` builds container
+    #: images. A host that runs out of space mid-deploy fails the image
+    #: build, then fails to persist the checkpoint, which also aborts the
+    #: guaranteed cleanup — so the floor is checked before anything is
+    #: created. ``0`` disables the check.
+    min_free_disk_gib: int = 20
     #: Off-by-default schedulers force-enabled for this run's deploy (threaded
     #: to CDK as the ``helm_enabled_overrides`` context; see the ``schedulers``
     #: action). Part of the resume identity: a resumed run must deploy and

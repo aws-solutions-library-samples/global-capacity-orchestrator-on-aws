@@ -197,12 +197,19 @@ class MockConfigLoader:
                 "max_memory_per_manifest": "32Gi",
                 "max_gpu_per_manifest": 4,
             },
+            "autoscaling": {
+                "enabled": False,
+                "max_replicas": 6,
+                "cpu_target_utilization_percentage": 70,
+            },
         }
 
     def get_inference_proxy_config(self):
         return {
             "tls_proxy_cpu_request_millicores": 100,
             "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": 3,
+            "max_replicas": 10,
         }
 
     def get_api_gateway_config(self):
@@ -908,6 +915,10 @@ class TestMonitoringStackSynth:
         # attribute when the feature is disabled.
         mock_regional_stack.fsx_file_system = None
         mock_regional_stack.aurora_cluster = None
+        # Admitted by the monitoring stack's cost report bucket/key policies.
+        mock_regional_stack.cost_monitor_role.role_arn = (
+            "arn:aws:iam::123456789012:role/gco-us-east-1-CostMonitorRole"
+        )
         mock_regional_stacks = [mock_regional_stack]
 
         stack = GCOMonitoringStack(
@@ -1013,6 +1024,8 @@ class TestConfigIntegration:
         assert config.get_inference_proxy_config() == {
             "tls_proxy_cpu_request_millicores": 100,
             "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": 3,
+            "max_replicas": 10,
         }
         assert config.get_api_gateway_config() is not None
         assert config.get_backend_tls_config() is not None

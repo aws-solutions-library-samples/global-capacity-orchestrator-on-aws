@@ -73,8 +73,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-08T04:13:50Z
-# Generated from Git commit: f3e5b374540636aa07fb57c16ec36a51228dba7f
+# Generated at (UTC): 2026-09-12T06:04:03Z
+# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -1175,10 +1175,104 @@ class StackManager:
         waiter.wait(StackName=stack_id, WaiterConfig={"Delay": 10, "MaxAttempts": 60})
         print(f"  Stack {stack_name} cleaned up, will recreate on deploy")
 
+    #: Resource statuses that carry the *cause* of a failed stack operation.
+    _ROOT_CAUSE_STATUSES = frozenset(
+        {"CREATE_FAILED", "UPDATE_FAILED", "DELETE_FAILED", "IMPORT_FAILED"}
+    )
+    #: Reasons CloudFormation attaches to resources it merely abandoned because
+    #: a sibling failed first; they are noise next to the real failure.
+    _CASCADE_REASON_MARKERS = ("Resource creation cancelled", "Resource update cancelled")
+    #: Pagination ceiling for the operation-event walk (100 events per page).
+    _MAX_EVENT_PAGES = 10
+    #: How many root-cause events to print before truncating.
+    _MAX_DIAGNOSED_EVENTS = 5
+
+    @classmethod
+    def _collect_operation_events(cls, cfn: Any, stack_name: str) -> list[dict[str, Any]]:
+        """Return the newest-first events of the stack's most recent operation.
+
+        ``describe_stack_events`` pages newest first and a rolled-back create
+        of a large stack buries the one ``CREATE_FAILED`` that explains
+        everything under dozens of ``DELETE_COMPLETE`` rollback rows — the
+        first page alone is not enough. Walk pages until the stack-level
+        ``*_IN_PROGRESS`` event CloudFormation records as "User Initiated"
+        (the operation's start), bounded by ``_MAX_EVENT_PAGES``.
+        """
+        collected: list[dict[str, Any]] = []
+        token: str | None = None
+        for _ in range(cls._MAX_EVENT_PAGES):
+            kwargs: dict[str, Any] = {"StackName": stack_name}
+            if token:
+                kwargs["NextToken"] = token
+            response = cfn.describe_stack_events(**kwargs)
+            for event in response.get("StackEvents", []):
+                collected.append(event)
+                status = str(event.get("ResourceStatus") or "")
+                if (
+                    event.get("LogicalResourceId") == stack_name
+                    and status.endswith("_IN_PROGRESS")
+                    and not status.startswith("ROLLBACK")
+                    and not status.startswith("UPDATE_ROLLBACK")
+                    and "User Initiated" in str(event.get("ResourceStatusReason") or "")
+                ):
+                    return collected
+            token_value = response.get("NextToken")
+            token = token_value if isinstance(token_value, str) and token_value else None
+            if not token:
+                break
+        return collected
+
+    @classmethod
+    def _summarize_failure_events(
+        cls, events: list[dict[str, Any]], stack_name: str
+    ) -> list[dict[str, Any]]:
+        """Pick the events worth showing: resource root causes, then the stack verdict.
+
+        Root causes are resource-level ``*_FAILED`` events whose reason is not
+        a cascade marker; they are printed oldest first so the first failure —
+        the one that triggered the rollback — leads. The stack-level
+        ``ROLLBACK_IN_PROGRESS``/``*_FAILED`` event follows because its reason
+        lists every failed logical id. When no root cause survives the filter
+        (the event window was exhausted), fall back to any failed/rollback
+        events so the operator still sees CloudFormation's own words.
+        """
+        root_causes = [
+            event
+            for event in reversed(events)
+            if str(event.get("ResourceStatus") or "") in cls._ROOT_CAUSE_STATUSES
+            and event.get("LogicalResourceId") != stack_name
+            and not any(
+                marker in str(event.get("ResourceStatusReason") or "")
+                for marker in cls._CASCADE_REASON_MARKERS
+            )
+        ]
+        stack_verdicts = [
+            event
+            for event in events
+            if event.get("LogicalResourceId") == stack_name
+            and (
+                "ROLLBACK" in str(event.get("ResourceStatus") or "")
+                or "FAILED" in str(event.get("ResourceStatus") or "")
+            )
+            and event.get("ResourceStatusReason")
+        ]
+        selected = root_causes[: cls._MAX_DIAGNOSED_EVENTS] + stack_verdicts[:1]
+        if selected:
+            return selected
+        return [
+            event
+            for event in events
+            if "FAILED" in str(event.get("ResourceStatus") or "")
+            or "ROLLBACK" in str(event.get("ResourceStatus") or "")
+        ][: cls._MAX_DIAGNOSED_EVENTS]
+
     def _diagnose_deploy_failure(self, stack_name: str) -> None:
         """Fetch CloudFormation events after a failed deploy and print diagnostics.
 
-        Gives users actionable information instead of just the CDK error message.
+        Gives users actionable information instead of just the CDK error
+        message: the resource-level reason that actually failed (an S3
+        ``BucketAlreadyExists``, an IAM propagation error, ...) rather than
+        the stack's bare ``ROLLBACK_COMPLETE``.
         """
         import boto3
 
@@ -1189,25 +1283,18 @@ class StackManager:
         try:
             cfn = boto3.client("cloudformation", region_name=region)
 
-            # Get recent events
-            response = cfn.describe_stack_events(StackName=stack_name)
-            events = response.get("StackEvents", [])
-
-            # Filter to failed events
-            failed = [
-                e
-                for e in events[:20]
-                if "FAILED" in e.get("ResourceStatus", "")
-                or "ROLLBACK" in e.get("ResourceStatus", "")
-            ]
+            events = self._collect_operation_events(cfn, stack_name)
+            failed = self._summarize_failure_events(events, stack_name)
 
             if failed:
                 print(f"\n  CloudFormation failure details for {stack_name}:")
-                for event in failed[:5]:
+                for event in failed:
                     resource = event.get("LogicalResourceId", "unknown")
+                    resource_type = event.get("ResourceType")
                     status = event.get("ResourceStatus", "unknown")
                     reason = event.get("ResourceStatusReason", "no reason given")
-                    print(f"    {resource}: {status}")
+                    label = f"{resource} ({resource_type})" if resource_type else str(resource)
+                    print(f"    {label}: {status}")
                     print(f"      {reason}")
 
             # Check stack status for actionable advice

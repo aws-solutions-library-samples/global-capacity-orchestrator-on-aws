@@ -147,11 +147,17 @@ def test_workflow_shard_matrix_is_a_contiguous_range(workflow: dict[str, Any]) -
     )
 
 
-def test_workflow_uses_three_nonempty_shards(workflow: dict[str, Any]) -> None:
-    """The pre-v7 matrix has exactly three dynamic cells."""
+def test_workflow_uses_four_nonempty_shards(workflow: dict[str, Any]) -> None:
+    """The matrix has exactly four dynamic cells.
+
+    Three shards ran about eight minutes each once the suite passed 5,400
+    tests; four keeps every cell under the runner's twenty-minute budget with
+    headroom, at the cost of one more setup. Changing this number is the
+    whole change — ``--of`` and the artifact glob follow the matrix.
+    """
     job = _shard_job(workflow)
     assert job["strategy"]["fail-fast"] is False
-    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3]
+    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
 
 
 def test_shard_checkout_contains_diagram_source_history(workflow: dict[str, Any]) -> None:

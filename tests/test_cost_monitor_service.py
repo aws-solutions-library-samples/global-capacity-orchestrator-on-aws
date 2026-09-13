@@ -4,9 +4,11 @@ Tests for gco/services/cost_monitor.py — the cost-monitor service core.
 Covers the OpenCost allocation client (transport failures, non-200s,
 malformed bodies), allocation-row normalization, real Parquet
 serialization via pyarrow, deterministic scheduled report keys, aligned
-window math, the CostMonitor orchestrator (generate/skip/list/status), and
-the environment factory. S3 and httpx are mocked; pyarrow runs for real so
-the Parquet contract with the Glue table is exercised, not simulated.
+window math, the CostMonitor orchestrator (generate/skip/list/status), the
+SSM-backed bucket locator (lazy resolution, TTL refresh, stale-cache
+fallback, not-yet-published handling), and the environment factory. S3, SSM
+and httpx are mocked; pyarrow runs for real so the Parquet contract with the
+Glue table is exercised, not simulated.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from gco.services.cost_monitor import (
     ALLOCATION_REPORT_FIELDS,
     SCHEDULED_PREFIX,
     CostMonitor,
+    CostReportBucketLocator,
+    CostReportBucketUnavailableError,
     OpenCostClient,
     OpenCostUnavailableError,
     ReportWriteError,
@@ -443,6 +447,173 @@ class TestCostMonitorStatus:
         monitor.opencost.get_allocation.assert_not_called()
 
 
+PARAMETER_NAME = "/gco/cost-report-bucket/name"
+PUBLISHED_BUCKET = "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f"
+
+
+def _ssm_returning(value: str | None) -> MagicMock:
+    ssm = MagicMock()
+    ssm.get_parameter.return_value = (
+        {"Parameter": {"Name": PARAMETER_NAME, "Value": value}} if value is not None else {}
+    )
+    return ssm
+
+
+class TestCostReportBucketLocator:
+    def test_rejects_empty_identity(self):
+        with pytest.raises(ValueError, match="parameter_name"):
+            CostReportBucketLocator(" ", "us-east-2", ssm_client=MagicMock())
+        with pytest.raises(ValueError, match="region"):
+            CostReportBucketLocator(PARAMETER_NAME, "", ssm_client=MagicMock())
+
+    def test_builds_a_regional_ssm_client_by_default(self):
+        with patch("gco.services.cost_monitor.boto3.client") as client:
+            locator = CostReportBucketLocator(PARAMETER_NAME, "us-east-2")
+        assert client.call_args.args == ("ssm",)
+        assert client.call_args.kwargs["region_name"] == "us-east-2"
+        assert locator.cached is None
+
+    def test_resolves_lazily_and_caches_within_the_refresh_window(self):
+        clock = MagicMock(side_effect=[100.0, 200.0])
+        ssm = _ssm_returning(PUBLISHED_BUCKET)
+        locator = CostReportBucketLocator(
+            PARAMETER_NAME, "us-east-2", ssm_client=ssm, refresh_seconds=900, clock=clock
+        )
+        assert locator.cached is None
+        assert locator.resolve() == PUBLISHED_BUCKET
+        assert locator.resolve() == PUBLISHED_BUCKET
+        ssm.get_parameter.assert_called_once_with(Name=PARAMETER_NAME)
+        assert locator.cached == PUBLISHED_BUCKET
+
+    def test_refreshes_once_the_cache_is_stale(self):
+        clock = MagicMock(side_effect=[100.0, 1_100.0])
+        ssm = _ssm_returning(PUBLISHED_BUCKET)
+        locator = CostReportBucketLocator(
+            PARAMETER_NAME, "us-east-2", ssm_client=ssm, refresh_seconds=900, clock=clock
+        )
+        locator.resolve()
+        ssm.get_parameter.return_value = {"Parameter": {"Value": "replacement-bucket"}}
+        assert locator.resolve() == "replacement-bucket"
+        assert ssm.get_parameter.call_count == 2
+
+    def test_unpublished_parameter_is_reported_as_unavailable(self):
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = RuntimeError("ParameterNotFound")
+        locator = CostReportBucketLocator(PARAMETER_NAME, "us-east-2", ssm_client=ssm)
+        with pytest.raises(CostReportBucketUnavailableError, match="not readable yet"):
+            locator.resolve()
+        assert locator.cached is None
+
+    def test_failed_refresh_keeps_serving_the_last_known_name(self):
+        clock = MagicMock(side_effect=[0.0, 5_000.0, 5_001.0])
+        ssm = _ssm_returning(PUBLISHED_BUCKET)
+        locator = CostReportBucketLocator(
+            PARAMETER_NAME, "us-east-2", ssm_client=ssm, refresh_seconds=900, clock=clock
+        )
+        assert locator.resolve() == PUBLISHED_BUCKET
+        ssm.get_parameter.side_effect = RuntimeError("throttled")
+        assert locator.resolve() == PUBLISHED_BUCKET
+        # The failed refresh re-arms the window: the next call is served from cache.
+        assert locator.resolve() == PUBLISHED_BUCKET
+        assert ssm.get_parameter.call_count == 2
+
+    @pytest.mark.parametrize(
+        "payload", [{}, {"Parameter": {}}, {"Parameter": {"Value": "  "}}, None]
+    )
+    def test_empty_values_are_unavailable(self, payload):
+        ssm = MagicMock()
+        ssm.get_parameter.return_value = payload
+        locator = CostReportBucketLocator(PARAMETER_NAME, "us-east-2", ssm_client=ssm)
+        with pytest.raises(CostReportBucketUnavailableError, match="is empty"):
+            locator.resolve()
+
+    def test_zero_refresh_window_reads_every_time(self):
+        clock = MagicMock(side_effect=[1.0, 1.0, 1.0])
+        ssm = _ssm_returning(PUBLISHED_BUCKET)
+        locator = CostReportBucketLocator(
+            PARAMETER_NAME, "us-east-2", ssm_client=ssm, refresh_seconds=-5, clock=clock
+        )
+        assert locator.refresh_seconds == 0.0
+        locator.resolve()
+        locator.resolve()
+        assert ssm.get_parameter.call_count == 2
+
+
+class TestCostMonitorBucketDiscovery:
+    def _discovering_monitor(self, ssm: MagicMock) -> CostMonitor:
+        return CostMonitor(
+            region="us-east-1",
+            cluster="gco-us-east-1",
+            bucket_locator=CostReportBucketLocator(PARAMETER_NAME, "us-east-2", ssm_client=ssm),
+            opencost=MagicMock(spec=OpenCostClient),
+            s3_client=MagicMock(),
+        )
+
+    def test_requires_exactly_one_bucket_source(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            CostMonitor(
+                region="us-east-1",
+                cluster="c",
+                opencost=MagicMock(spec=OpenCostClient),
+                s3_client=MagicMock(),
+            )
+        with pytest.raises(ValueError, match="exactly one"):
+            CostMonitor(
+                region="us-east-1",
+                cluster="c",
+                bucket="fixed",
+                bucket_locator=CostReportBucketLocator("/p", "us-east-2", ssm_client=MagicMock()),
+                opencost=MagicMock(spec=OpenCostClient),
+                s3_client=MagicMock(),
+            )
+
+    def test_fixed_bucket_reports_its_source(self):
+        monitor = _monitor()
+        assert monitor.bucket_source == "environment"
+        assert monitor.bucket_parameter is None
+        assert monitor.status()["bucket_source"] == "environment"
+
+    def test_scheduled_pass_waits_for_publication_without_touching_opencost(self):
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = RuntimeError("ParameterNotFound")
+        monitor = self._discovering_monitor(ssm)
+        assert monitor.bucket is None
+        assert monitor.bucket_source == "ssm"
+        assert monitor.bucket_parameter == PARAMETER_NAME
+        assert monitor.run_scheduled_once(datetime(2026, 7, 26, 10, 25, tzinfo=UTC)) is None
+        assert "not readable yet" in str(monitor.last_error)
+        monitor.opencost.get_allocation.assert_not_called()
+        monitor._s3.head_object.assert_not_called()
+        status = monitor.status()
+        assert status["bucket"] is None
+        assert status["bucket_parameter"] == PARAMETER_NAME
+
+    def test_scheduled_pass_writes_once_the_bucket_is_published(self):
+        monitor = self._discovering_monitor(_ssm_returning(PUBLISHED_BUCKET))
+        monitor._s3.head_object.side_effect = RuntimeError("404")
+        monitor.opencost.get_allocation.return_value = {"gco-jobs": _allocation(2.0)}
+        result = monitor.run_scheduled_once(datetime(2026, 7, 26, 10, 25, tzinfo=UTC))
+        assert result is not None
+        assert monitor._s3.put_object.call_args.kwargs["Bucket"] == PUBLISHED_BUCKET
+        assert monitor.bucket == PUBLISHED_BUCKET
+        assert monitor.last_error is None
+
+    def test_generate_report_fails_fast_while_unpublished(self):
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = RuntimeError("ParameterNotFound")
+        monitor = self._discovering_monitor(ssm)
+        with pytest.raises(CostReportBucketUnavailableError):
+            monitor.generate_report(WINDOW_START, WINDOW_END, adhoc=True)
+        monitor.opencost.get_allocation.assert_not_called()
+
+    def test_list_reports_resolves_the_published_bucket(self):
+        monitor = self._discovering_monitor(_ssm_returning(PUBLISHED_BUCKET))
+        paginator = monitor._s3.get_paginator.return_value
+        paginator.paginate.return_value = [{"Contents": []}]
+        assert monitor.list_reports() == []
+        assert paginator.paginate.call_args.kwargs["Bucket"] == PUBLISHED_BUCKET
+
+
 class TestCreateFromEnv:
     def test_builds_from_environment(self, monkeypatch):
         monkeypatch.setenv("COST_REPORT_BUCKET", "bucket-x")
@@ -453,14 +624,53 @@ class TestCreateFromEnv:
         with patch("gco.services.cost_monitor.boto3.client"):
             monitor = create_cost_monitor_from_env()
         assert monitor.bucket == "bucket-x"
+        assert monitor.bucket_source == "environment"
         assert monitor.region == "us-west-2"
         assert monitor.cluster == "gco-us-west-2"
         assert monitor.report_interval_minutes == 30
         assert monitor.opencost.base_url == "http://opencost.monitoring.svc:9003"
 
-    def test_requires_bucket_and_region(self, monkeypatch):
+    def test_discovers_the_bucket_from_the_published_parameter(self, monkeypatch):
         monkeypatch.delenv("COST_REPORT_BUCKET", raising=False)
-        with pytest.raises(RuntimeError, match="COST_REPORT_BUCKET"):
+        monkeypatch.setenv("COST_REPORT_BUCKET_PARAMETER", PARAMETER_NAME)
+        monkeypatch.setenv("COST_REPORT_BUCKET_PARAMETER_REGION", "us-east-2")
+        monkeypatch.setenv("REGION", "us-west-2")
+        with patch("gco.services.cost_monitor.boto3.client") as client:
+            monitor = create_cost_monitor_from_env()
+        # Construction never touches AWS: the parameter is read lazily.
+        assert monitor.bucket is None
+        assert monitor.bucket_source == "ssm"
+        assert monitor.bucket_parameter == PARAMETER_NAME
+        ssm_calls = [call for call in client.call_args_list if call.args == ("ssm",)]
+        assert ssm_calls and ssm_calls[0].kwargs["region_name"] == "us-east-2"
+        client.return_value.get_parameter.assert_not_called()
+
+    def test_parameter_region_defaults_to_the_service_region(self, monkeypatch):
+        monkeypatch.delenv("COST_REPORT_BUCKET", raising=False)
+        monkeypatch.delenv("COST_REPORT_BUCKET_PARAMETER_REGION", raising=False)
+        monkeypatch.setenv("COST_REPORT_BUCKET_PARAMETER", PARAMETER_NAME)
+        monkeypatch.setenv("REGION", "us-west-2")
+        with patch("gco.services.cost_monitor.boto3.client") as client:
+            create_cost_monitor_from_env()
+        ssm_calls = [call for call in client.call_args_list if call.args == ("ssm",)]
+        assert ssm_calls[0].kwargs["region_name"] == "us-west-2"
+
+    def test_explicit_bucket_overrides_discovery(self, monkeypatch):
+        monkeypatch.setenv("COST_REPORT_BUCKET", "bucket-x")
+        monkeypatch.setenv("COST_REPORT_BUCKET_PARAMETER", PARAMETER_NAME)
+        monkeypatch.setenv("REGION", "us-west-2")
+        with patch("gco.services.cost_monitor.boto3.client"):
+            monitor = create_cost_monitor_from_env()
+        assert monitor.bucket == "bucket-x"
+        assert monitor.bucket_parameter is None
+
+    def test_requires_a_bucket_source_and_region(self, monkeypatch):
+        monkeypatch.setenv("REGION", "us-west-2")
+        monkeypatch.delenv("COST_REPORT_BUCKET", raising=False)
+        monkeypatch.delenv("COST_REPORT_BUCKET_PARAMETER", raising=False)
+        with pytest.raises(
+            RuntimeError, match="COST_REPORT_BUCKET or COST_REPORT_BUCKET_PARAMETER"
+        ):
             create_cost_monitor_from_env()
         monkeypatch.setenv("COST_REPORT_BUCKET", "bucket-x")
         monkeypatch.delenv("REGION", raising=False)

@@ -1309,7 +1309,7 @@ gco costs report status -r us-east-1
   "service": "cost-monitor",
   "region": "us-east-1",
   "cluster": "gco-us-east-1",
-  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "report_interval_minutes": 60,
   "opencost_healthy": true,
   "opencost_returning_data": true,
@@ -1348,7 +1348,7 @@ gco costs report list -r us-east-1 --limit 50
 {
   "timestamp": "2026-07-26T10:42:00+00:00",
   "region": "us-east-1",
-  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "count": 1,
   "reports": [
     {
@@ -1389,7 +1389,7 @@ gco costs report generate -r us-east-1 --window-hours 48
 {
   "timestamp": "2026-07-26T10:42:05+00:00",
   "region": "us-east-1",
-  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "report": {
     "s3_key": "adhoc/region=us-east-1/date=2026-07-26/allocation-20260725T104200Z-20260726T104200Z-1a2b3c4d.parquet",
     "row_count": 9,
@@ -1531,6 +1531,15 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 2. Queries matching webhooks from DynamoDB based on event type and namespace
 3. Sends HTTP POST requests to all matching webhook URLs
 4. Retries failed deliveries with exponential backoff (up to 3 attempts)
+
+The dispatcher runs inside the health-monitor, which has two replicas for
+availability. Only one of them delivers at a time: the replicas elect a
+deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
+`gco-system`, the standby re-checks the Lease every few seconds, and a replica
+that wins it re-seeds its view of current job states before delivering. Each
+transition is therefore delivered at most once; during a failover (bounded by
+the 90-second lease duration) transitions may be dropped, never duplicated, so
+webhook consumers see one POST per event, not one per replica.
 
 ### Webhook Payload Format
 

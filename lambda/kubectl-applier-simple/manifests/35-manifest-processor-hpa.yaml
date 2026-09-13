@@ -1,0 +1,57 @@
+# Manifest Processor — optional CPU HorizontalPodAutoscaler.
+#
+# Off by default. cdk.json manifest_processor.autoscaling.enabled resolves
+# {{MP_HPA_ENABLED}}; when it is unset this whole file is skipped and the
+# applier prunes any HPA an earlier deploy created (see
+# _FEATURE_RESOURCE_INVENTORY in handler.py). The Deployment in
+# 31-manifest-processor.yaml carries gco.aws/hpa-controls-replicas="true" in
+# the same deploy, so the HPA's scale value is never overwritten by re-applies.
+#
+# Why CPU, and why off: the API tier's handlers are dominated by Kubernetes
+# and DynamoDB round trips, so CPU tracks saturation only loosely. Turn this
+# on when measurements show the application container CPU-bound; the floor is
+# manifest_processor.replicas so the HA baseline never shrinks.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: manifest-processor-hpa
+  namespace: gco-system
+  labels:
+    app: manifest-processor
+    component: api
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{MP_HPA_ENABLED}}"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: manifest-processor
+  minReplicas: {{MP_REPLICAS}}
+  maxReplicas: {{MP_HPA_MAX_REPLICAS}}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    # Each replica runs the central queue worker with in-flight DynamoDB
+    # leases; scale down slowly so a burst never churns workers mid-claim.
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: manifest-processor
+        target:
+          type: Utilization
+          averageUtilization: {{MP_HPA_CPU_TARGET_UTILIZATION}}

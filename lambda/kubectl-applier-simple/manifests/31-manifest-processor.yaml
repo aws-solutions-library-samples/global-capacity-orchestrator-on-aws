@@ -1,17 +1,32 @@
 # Manifest Processor — validates and applies Kubernetes manifests submitted via API
 # Deployment + PodDisruptionBudget + Service consolidated in one file.
+#
+# Sizing comes from cdk.json manifest_processor (replicas, resource_limits);
+# the optional CPU autoscaler lives in 35-manifest-processor-hpa.yaml. Every
+# replica also runs the central queue worker — DynamoDB conditional claims make
+# that safe, so replicas add API capacity without duplicating work.
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: manifest-processor
   namespace: gco-system
+  annotations:
+    # "true" only when manifest_processor.autoscaling.enabled: the applier then
+    # keeps replicas on create but omits it from update patches so the
+    # HorizontalPodAutoscaler's scale value remains authoritative.
+    gco.aws/hpa-controls-replicas: "{{MP_HPA_CONTROLS_REPLICAS}}"
   labels:
     app: manifest-processor
     component: api
     project: gco
 spec:
-  replicas: 3
+  replicas: {{MP_REPLICAS}}
+  revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -33,6 +48,7 @@ spec:
       serviceAccountName: gco-manifest-processor-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 75
       securityContext:
         runAsNonRoot: true
@@ -72,7 +88,10 @@ spec:
       containers:
         - name: manifest-processor
           image: {{MANIFEST_PROCESSOR_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -88,6 +107,11 @@ spec:
               value: "127.0.0.1"
             - name: PORT
               value: "9000"
+            # Uvicorn drains in-flight requests for this long after SIGTERM;
+            # the sidecar uses the same budget and the pod grace period covers
+            # preStop + this value.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "50"
             - name: CLUSTER_NAME
               value: "{{CLUSTER_NAME}}"
             - name: REGION
@@ -102,20 +126,6 @@ spec:
               value: "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
-            - name: CPU_THRESHOLD
-              value: "{{CPU_THRESHOLD}}"
-            - name: MEMORY_THRESHOLD
-              value: "{{MEMORY_THRESHOLD}}"
-            - name: GPU_THRESHOLD
-              value: "{{GPU_THRESHOLD}}"
-            - name: PENDING_PODS_THRESHOLD
-              value: "{{PENDING_PODS_THRESHOLD}}"
-            - name: PENDING_REQUESTED_CPU_VCPUS
-              value: "{{PENDING_REQUESTED_CPU_VCPUS}}"
-            - name: PENDING_REQUESTED_MEMORY_GB
-              value: "{{PENDING_REQUESTED_MEMORY_GB}}"
-            - name: PENDING_REQUESTED_GPUS
-              value: "{{PENDING_REQUESTED_GPUS}}"
             - name: TEMPLATES_TABLE_NAME
               value: "{{TEMPLATES_TABLE_NAME}}"
             - name: WEBHOOKS_TABLE_NAME
@@ -194,28 +204,63 @@ spec:
               cpu: 500m
               memory: 1Gi
             limits:
-              cpu: 1000m
-              memory: 2Gi
+              # Rendered from cdk.json manifest_processor.resource_limits;
+              # quoted because the values are Kubernetes quantity strings.
+              cpu: "{{MP_CPU_LIMIT}}"
+              memory: "{{MP_MEMORY_LIMIT}}"
+          # Probe design and budgets are explained in 30-health-monitor.yaml: the
+          # exec probes fork the interpreter, so they start lean (-I -S, bare
+          # socket) and liveness restarts only after a minute of failures.
           startupProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 24
           livenessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 4
           readinessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/readyz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /readyz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 5
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 3
           lifecycle:
             preStop:
@@ -234,7 +279,7 @@ spec:
               readOnly: true
         - name: api-tls-proxy
           image: {{MANIFEST_PROCESSOR_IMAGE}}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python", "-m", "gco.services.tls_proxy"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -294,7 +339,8 @@ spec:
               readOnly: true
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: api-tls
           secret:
             secretName: manifest-processor-tls
@@ -326,6 +372,9 @@ spec:
                         apiVersion: v1
                         fieldPath: metadata.namespace
 ---
+# maxUnavailable rather than minAvailable: one voluntary disruption at a
+# time whatever the replica count, so a larger replica count (operator-chosen
+# or HPA-driven) never widens the eviction window.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -335,7 +384,7 @@ metadata:
     app: manifest-processor
     project: gco
 spec:
-  minAvailable: 2
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: manifest-processor

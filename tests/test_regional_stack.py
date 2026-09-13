@@ -95,12 +95,19 @@ class MockConfigLoader:
                 "max_memory_per_manifest": "96Gi",
                 "max_gpu_per_manifest": 8,
             },
+            "autoscaling": {
+                "enabled": False,
+                "max_replicas": 6,
+                "cpu_target_utilization_percentage": 70,
+            },
         }
 
     def get_inference_proxy_config(self):
         return {
             "tls_proxy_cpu_request_millicores": 100,
             "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": 3,
+            "max_replicas": 10,
         }
 
     def get_api_gateway_config(self):
@@ -115,7 +122,11 @@ class MockConfigLoader:
     def get_eks_cluster_config(self):
         return {
             "endpoint_access": "PRIVATE",
+            "network_policy_enforcement": True,
         }
+
+    def get_vpc_endpoints_config(self):
+        return {"gateway": ["s3", "dynamodb"], "interface": []}
 
     def get_fsx_lustre_config(self, region=None):
         if self._fsx_enabled:
@@ -444,6 +455,10 @@ class TestMonitoringStackMethods:
         # skip the section when all regions report None.
         mock_regional_stack.fsx_file_system = None
         mock_regional_stack.aurora_cluster = None
+        # Admitted by the monitoring stack's cost report bucket/key policies.
+        mock_regional_stack.cost_monitor_role.role_arn = (
+            "arn:aws:iam::123456789012:role/gco-us-east-1-CostMonitorRole"
+        )
 
         return mock_global_stack, mock_api_gw_stack, [mock_regional_stack]
 
@@ -889,8 +904,13 @@ class TestRegionalStackSynthesis:
         assert ga_id in _depends_on("HelmTeardown")
         assert "HelmInstallCharts" in _depends_on(ga_id)
 
-    def test_regional_stack_creates_ecr_repositories(self):
-        """Test that RegionalStack creates ECR repositories."""
+    def test_regional_stack_creates_no_ecr_repositories(self):
+        """Service images are CDK assets; the stack owns no ECR repositories.
+
+        Three empty per-service repositories used to be declared and never
+        pushed to or referenced — pure create/scan/delete churn on every
+        deploy. Every ``{{*_IMAGE}}`` replacement must still be an asset URI.
+        """
 
         from gco.stacks.regional_stack import GCORegionalStack
 
@@ -919,8 +939,234 @@ class TestRegionalStackSynthesis:
             )
 
             template = assertions.Template.from_stack(stack)
-            # Dedicated repositories for health, manifest, and inference proxy services.
-            template.resource_count_is("AWS::ECR::Repository", 3)
+            template.resource_count_is("AWS::ECR::Repository", 0)
+            replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+                "ImageReplacements"
+            ]
+            for token in (
+                "{{COST_MONITOR_IMAGE}}",
+                "{{HEALTH_MONITOR_IMAGE}}",
+                "{{INFERENCE_MONITOR_IMAGE}}",
+                "{{INFERENCE_PROXY_IMAGE}}",
+                "{{MANIFEST_PROCESSOR_IMAGE}}",
+                "{{QUEUE_PROCESSOR_IMAGE}}",
+            ):
+                assert replacements[token] == mock_image.image_uri, token
+
+    def test_default_vpc_endpoints_and_network_policy_enforcement(self):
+        """Free S3/DynamoDB gateway endpoints ship by default; enforcement is on.
+
+        The gateway endpoints attach to every route table so both the private
+        (node) and public subnets steer S3/DynamoDB traffic off the NAT
+        gateways; no PrivateLink endpoint (billed per AZ-hour) is created
+        unless asked for.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-vpc-endpoints",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::EC2::VPCEndpoint", 2)
+        endpoints = template.find_resources("AWS::EC2::VPCEndpoint")
+        services = sorted(
+            "".join(
+                part if isinstance(part, str) else "<region>"
+                for part in resource["Properties"]["ServiceName"]["Fn::Join"][1]
+            )
+            for resource in endpoints.values()
+        )
+        assert services == [
+            "com.amazonaws.<region>.dynamodb",
+            "com.amazonaws.<region>.s3",
+        ]
+        for resource in endpoints.values():
+            assert resource["Properties"]["VpcEndpointType"] == "Gateway"
+            # Every route table (public + private, one per AZ) gets the route.
+            assert len(resource["Properties"]["RouteTableIds"]) >= 2
+        assert set(stack.vpc_gateway_endpoints) == {"s3", "dynamodb"}
+        assert stack.vpc_interface_endpoints == {}
+
+        replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+            "ImageReplacements"
+        ]
+        assert replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] == "true"
+
+    def test_interface_vpc_endpoints_and_enforcement_off_are_configurable(self):
+        """Opting into PrivateLink endpoints creates one ENI set per service."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["vpc_endpoints"] = {"gateway": ["s3"], "interface": ["sts", "ecr.api", "ecr.dkr"]}
+        context["eks_cluster"] = {**context["eks_cluster"], "network_policy_enforcement": False}
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-interface-endpoints",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::EC2::VPCEndpoint", 4)
+        by_type: dict[str, int] = {}
+        for resource in template.find_resources("AWS::EC2::VPCEndpoint").values():
+            props = resource["Properties"]
+            by_type[props["VpcEndpointType"]] = by_type.get(props["VpcEndpointType"], 0) + 1
+            if props["VpcEndpointType"] == "Interface":
+                # Private DNS keeps callers on the public hostnames; the
+                # endpoint SG admits HTTPS from the VPC only.
+                assert props["PrivateDnsEnabled"] is True
+                assert props["SecurityGroupIds"]
+                assert props["SubnetIds"]
+        assert by_type == {"Gateway": 1, "Interface": 3}
+        assert set(stack.vpc_interface_endpoints) == {"sts", "ecr.api", "ecr.dkr"}
+        replacements = template.to_json()["Resources"]["HelmInstallCharts"]["Properties"][
+            "ImageReplacements"
+        ]
+        assert replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] == "false"
+
+    def test_endpoint_service_maps_cover_exactly_what_the_loader_accepts(self):
+        """A name ConfigLoader validates must always map to a CDK service."""
+        from gco.config import config_loader
+        from gco.stacks import regional_stack
+
+        assert set(regional_stack._GATEWAY_ENDPOINT_SERVICES) == set(
+            config_loader.VPC_GATEWAY_ENDPOINT_SERVICES
+        )
+        assert set(regional_stack._INTERFACE_ENDPOINT_SERVICES) == set(
+            config_loader.VPC_INTERFACE_ENDPOINT_SERVICES
+        )
+
+    def test_every_irsa_service_account_has_a_matching_pod_identity_association(self):
+        """Both credential paths point every platform ServiceAccount at one role.
+
+        The manifests annotate each ``gco-system`` ServiceAccount with an IRSA
+        role placeholder; the stack must also create an EKS Pod Identity
+        association for the same (namespace, account) naming the same role.
+        The inference monitor and cost monitor used to have only the
+        annotation, so the two paths could disagree without any test noticing.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-regional-pod-identity",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        associations = {
+            (props["Namespace"], props["ServiceAccount"]): props["RoleArn"]
+            for props in (
+                resource["Properties"]
+                for resource in resources.values()
+                if resource["Type"] == "AWS::EKS::PodIdentityAssociation"
+            )
+        }
+
+        manifests_dir = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+        )
+        annotated: dict[tuple[str, str], str] = {}
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            # Keep the role placeholders so they can be looked up; stub the rest.
+            text = re.sub(
+                r"\{\{(?!\w+_ROLE_ARN\}\})[A-Z0-9_]+\}\}",
+                "stub",
+                manifest.read_text(encoding="utf-8"),
+            )
+            for document in yaml.safe_load_all(text):
+                if not isinstance(document, dict) or document.get("kind") != "ServiceAccount":
+                    continue
+                metadata = document["metadata"]
+                role_token = (metadata.get("annotations") or {}).get("eks.amazonaws.com/role-arn")
+                if role_token:
+                    annotated[(metadata["namespace"], metadata["name"])] = role_token
+
+        assert set(annotated) == {
+            ("gco-system", "gco-health-monitor-sa"),
+            ("gco-system", "gco-manifest-processor-sa"),
+            ("gco-system", "gco-inference-monitor-sa"),
+            ("gco-system", "gco-inference-proxy-sa"),
+            ("gco-system", "gco-cost-monitor-sa"),
+            ("gco-jobs", "gco-service-account"),
+            ("gco-inference", "gco-service-account"),
+        }
+        for identity, role_token in annotated.items():
+            assert identity in associations, f"no Pod Identity association for {identity}"
+            assert associations[identity] == replacements[role_token], (
+                f"{identity}: IRSA annotation {role_token} and Pod Identity name different roles"
+            )
+        # And no association dangles on a ServiceAccount the manifests never
+        # create (a gco-system/gco-service-account one used to).
+        gco_namespaces = {"gco-system", "gco-jobs", "gco-inference"}
+        dangling = {identity for identity in associations if identity[0] in gco_namespaces} - set(
+            annotated
+        )
+        assert not dangling, f"Pod Identity associations without a ServiceAccount: {dangling}"
 
     def test_regional_stack_creates_efs(self):
         """Test that RegionalStack creates EFS file system."""
@@ -1236,6 +1482,120 @@ class TestRegionalStackSynthesis:
         assert replacements["{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}"] == "1048576"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] == "100m"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "70"
+        assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "3"
+        assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "10"
+        # Manifest-processor sizing renders verbatim from the validated config;
+        # with autoscaling off the HPA gate stays unresolved so
+        # 35-manifest-processor-hpa.yaml is skipped and pruned.
+        assert replacements["{{MP_REPLICAS}}"] == "3"
+        assert replacements["{{MP_CPU_LIMIT}}"] == "1000m"
+        assert replacements["{{MP_MEMORY_LIMIT}}"] == "2Gi"
+        assert replacements["{{MP_HPA_CONTROLS_REPLICAS}}"] == "false"
+        assert "{{MP_HPA_ENABLED}}" not in replacements
+        assert "{{MP_HPA_MAX_REPLICAS}}" not in replacements
+        assert "{{MP_HPA_CPU_TARGET_UTILIZATION}}" not in replacements
+
+    def test_manifest_processor_autoscaling_gate_renders_hpa_and_ownership(self):
+        """Opting into manifest_processor.autoscaling resolves the HPA gate.
+
+        The same deploy must flip the Deployment's replica ownership
+        annotation to "true": otherwise every re-apply would reset the HPA's
+        scale value back to ``replicas``.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["manifest_processor"] = {
+            **context["manifest_processor"],
+            "replicas": 4,
+            "resource_limits": {"cpu": "1500m", "memory": "3Gi"},
+            "autoscaling": {
+                "enabled": True,
+                "max_replicas": 9,
+                "cpu_target_utilization_percentage": 65,
+            },
+        }
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-manifest-processor-autoscaled",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        assert replacements["{{MP_REPLICAS}}"] == "4"
+        assert replacements["{{MP_CPU_LIMIT}}"] == "1500m"
+        assert replacements["{{MP_MEMORY_LIMIT}}"] == "3Gi"
+        assert replacements["{{MP_HPA_CONTROLS_REPLICAS}}"] == "true"
+        assert replacements["{{MP_HPA_ENABLED}}"] == "true"
+        assert replacements["{{MP_HPA_MAX_REPLICAS}}"] == "9"
+        assert replacements["{{MP_HPA_CPU_TARGET_UTILIZATION}}"] == "65"
+
+        manifests_dir = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+        )
+        rendered: dict[str, str] = {}
+        for filename in ("31-manifest-processor.yaml", "35-manifest-processor-hpa.yaml"):
+            text = (manifests_dir / filename).read_text(encoding="utf-8")
+            for token, value in replacements.items():
+                if isinstance(value, str):
+                    text = text.replace(token, value)
+            rendered[filename] = re.sub(r"\{\{[A-Z0-9_]+\}\}", "test-value", text)
+
+        deployment = next(
+            doc
+            for doc in yaml.safe_load_all(rendered["31-manifest-processor.yaml"])
+            if doc and doc["kind"] == "Deployment"
+        )
+        assert type(deployment["spec"]["replicas"]) is int
+        assert deployment["spec"]["replicas"] == 4
+        assert deployment["metadata"]["annotations"]["gco.aws/hpa-controls-replicas"] == "true"
+        app_container = next(
+            container
+            for container in deployment["spec"]["template"]["spec"]["containers"]
+            if container["name"] == "manifest-processor"
+        )
+        assert app_container["resources"]["limits"] == {"cpu": "1500m", "memory": "3Gi"}
+
+        (hpa,) = [
+            doc for doc in yaml.safe_load_all(rendered["35-manifest-processor-hpa.yaml"]) if doc
+        ]
+        assert hpa["kind"] == "HorizontalPodAutoscaler"
+        assert hpa["metadata"]["annotations"]["gco.aws/feature-gate"] == "true"
+        assert hpa["spec"]["scaleTargetRef"]["name"] == deployment["metadata"]["name"]
+        # Floor == the Deployment's replica count, so enabling the HPA never
+        # shrinks the HA baseline; every bound is a bare integer.
+        assert hpa["spec"]["minReplicas"] == 4
+        assert hpa["spec"]["maxReplicas"] == 9
+        assert type(hpa["spec"]["maxReplicas"]) is int
+        (metric,) = hpa["spec"]["metrics"]
+        assert metric["containerResource"]["container"] == app_container["name"]
+        assert metric["containerResource"]["target"]["averageUtilization"] == 65
 
     def test_non_default_inference_proxy_config_renders_typed_manifest(self):
         """Real config values flow through ImageReplacements into typed YAML."""
@@ -1247,6 +1607,8 @@ class TestRegionalStackSynthesis:
         context["inference_proxy"] = {
             "tls_proxy_cpu_request_millicores": 125,
             "tls_proxy_cpu_target_utilization_percentage": 85,
+            "min_replicas": 2,
+            "max_replicas": 6,
         }
         app = cdk.App(context=context)
         config = ConfigLoader(app)
@@ -1278,6 +1640,8 @@ class TestRegionalStackSynthesis:
         replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_REQUEST}}"] == "125m"
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "85"
+        assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "2"
+        assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "6"
 
         manifest = (
             Path(__file__).resolve().parent.parent
@@ -1289,6 +1653,8 @@ class TestRegionalStackSynthesis:
         for token in (
             "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}",
             "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}",
+            "{{INFERENCE_PROXY_MIN_REPLICAS}}",
+            "{{INFERENCE_PROXY_MAX_REPLICAS}}",
         ):
             manifest = manifest.replace(token, replacements[token])
         manifest = manifest.replace(
@@ -1314,6 +1680,12 @@ class TestRegionalStackSynthesis:
         assert type(request) is str
         assert target == 85
         assert type(target) is int
+        # Replica bounds: the Deployment starts at the HPA floor, and both
+        # bounds land as integers (unquoted tokens in the manifest).
+        assert deployment["spec"]["replicas"] == 2
+        assert hpa["spec"]["minReplicas"] == 2
+        assert hpa["spec"]["maxReplicas"] == 6
+        assert type(hpa["spec"]["maxReplicas"]) is int
 
     def test_regional_stack_creates_lambda_functions(self):
         """Test that RegionalStack creates Lambda functions."""

@@ -75,11 +75,47 @@ def test_endpoint_spec_serializes_model_source_and_autoscaling() -> None:
             "tls_proxy_cpu_request_millicores": 100,
             "tls_proxy_cpu_target_utilization_percentage": True,
         },
+        {
+            "tls_proxy_cpu_request_millicores": 100,
+            "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": "3",
+        },
+        {
+            "tls_proxy_cpu_request_millicores": 100,
+            "tls_proxy_cpu_target_utilization_percentage": 70,
+            "max_replicas": 10.0,
+        },
     ],
 )
 def test_inference_proxy_replacements_reject_non_plain_integers(config: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must be integers"):
         compute_inference_proxy_tls_replacements(config)
+
+
+def test_inference_proxy_replacements_render_replica_bounds_as_integers() -> None:
+    """Bounds default to the module constants and render as bare integers."""
+    rendered = compute_inference_proxy_tls_replacements(
+        {
+            "tls_proxy_cpu_request_millicores": 100,
+            "tls_proxy_cpu_target_utilization_percentage": 70,
+        }
+    )
+    assert rendered == {
+        "{{INFERENCE_PROXY_TLS_CPU_REQUEST}}": "100m",
+        "{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}": "70",
+        "{{INFERENCE_PROXY_MIN_REPLICAS}}": "3",
+        "{{INFERENCE_PROXY_MAX_REPLICAS}}": "10",
+    }
+    sized = compute_inference_proxy_tls_replacements(
+        {
+            "tls_proxy_cpu_request_millicores": 100,
+            "tls_proxy_cpu_target_utilization_percentage": 70,
+            "min_replicas": 2,
+            "max_replicas": 4,
+        }
+    )
+    assert sized["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "2"
+    assert sized["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "4"
 
 
 @pytest.mark.asyncio

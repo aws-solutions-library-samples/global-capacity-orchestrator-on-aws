@@ -55,8 +55,26 @@ def _context(*, cdk_context: dict | None = None) -> SimpleNamespace:
         aws_client=MagicMock(),
     )
     context.session.get_partition_for_region.return_value = "aws"
+    # The monitoring stack publishes the CloudFormation-named bucket to SSM in
+    # the monitoring region; the shared client mock answers both SSM and S3.
+    context.session.client.return_value = _aws_clients()
     context.persist_callback = MagicMock()
     return context
+
+
+PUBLISHED_BUCKET = "gco-live-cost-reports-123456789012-us-east-2"
+COST_BUCKET_PARAMETER = "/gco-live/cost-report-bucket/name"
+
+
+def _aws_clients(*, published_bucket: str | None = PUBLISHED_BUCKET) -> MagicMock:
+    """One mock standing in for the SSM and S3 clients ``ctx.session`` hands out."""
+    client = MagicMock()
+    client.get_parameter.return_value = (
+        {"Parameter": {"Name": COST_BUCKET_PARAMETER, "Value": published_bucket}}
+        if published_bucket is not None
+        else {}
+    )
+    return client
 
 
 def _healthy_status(region: str = "us-east-1") -> dict:
@@ -242,7 +260,7 @@ class TestAdhocReportEvidence:
 class TestReportObjectProof:
     def test_present_object_returns_size_evidence(self):
         ctx = _context()
-        s3 = MagicMock()
+        s3 = _aws_clients()
         s3.head_object.return_value = {"ContentLength": 2048}
         ctx.session.client.return_value = s3
         evidence = checks_opencost._verify_report_object(ctx, _completed_report())
@@ -266,7 +284,7 @@ class TestReportObjectProof:
 
     def test_absent_object_fails_validation(self):
         ctx = _context()
-        s3 = MagicMock()
+        s3 = _aws_clients()
         s3.head_object.side_effect = RuntimeError("404 Not Found")
         ctx.session.client.return_value = s3
         with pytest.raises(RuntimeError, match="not readable"):
@@ -274,11 +292,44 @@ class TestReportObjectProof:
 
     def test_empty_object_fails_validation(self):
         ctx = _context()
-        s3 = MagicMock()
+        s3 = _aws_clients()
         s3.head_object.return_value = {"ContentLength": 0}
         ctx.session.client.return_value = s3
         with pytest.raises(RuntimeError, match="empty"):
             checks_opencost._verify_report_object(ctx, _completed_report())
+
+
+class TestExpectedBucketFromSsm:
+    def test_reads_the_published_name_from_the_monitoring_region(self):
+        ctx = _context()
+        assert checks_opencost._expected_report_bucket(ctx) == PUBLISHED_BUCKET
+        call = ctx.session.client.call_args
+        assert call.args == ("ssm",)
+        assert call.kwargs["region_name"] == "us-east-2"
+        ctx.session.client.return_value.get_parameter.assert_called_once_with(
+            Name=COST_BUCKET_PARAMETER
+        )
+
+    def test_unreadable_parameter_fails_validation(self):
+        ctx = _context()
+        ctx.session.client.return_value.get_parameter.side_effect = RuntimeError(
+            "ParameterNotFound"
+        )
+        with pytest.raises(RuntimeError, match="not readable"):
+            checks_opencost._expected_report_bucket(ctx)
+
+    @pytest.mark.parametrize("payload", [{}, {"Parameter": {"Value": " "}}, "garbage"])
+    def test_empty_parameter_fails_validation(self, payload):
+        ctx = _context()
+        ctx.session.client.return_value.get_parameter.return_value = payload
+        with pytest.raises(RuntimeError, match="is empty"):
+            checks_opencost._expected_report_bucket(ctx)
+
+    def test_report_naming_a_different_bucket_is_rejected(self):
+        ctx = _context()
+        ctx.session.client.return_value = _aws_clients(published_bucket="some-other-bucket")
+        with pytest.raises(RuntimeError, match="unexpected bucket"):
+            checks_opencost._validated_completed_report(ctx, _completed_report(), "us-east-1")
 
 
 class TestActionEvidence:
@@ -288,7 +339,7 @@ class TestActionEvidence:
             _response(200, _healthy_status()),
             _response(201, _report_payload()),
         ]
-        s3 = MagicMock()
+        s3 = _aws_clients()
         s3.head_object.return_value = {"ContentLength": 2048}
         ctx.session.client.return_value = s3
 

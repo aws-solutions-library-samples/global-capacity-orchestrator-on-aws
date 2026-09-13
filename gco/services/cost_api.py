@@ -13,6 +13,10 @@ The service is cluster-internal (ClusterIP, default-deny ingress except the
 manifest processor): the *authenticated* public surface is the manifest API's
 ``/api/v1/cost/*`` router, which proxies here. A background task writes the
 scheduled interval reports.
+
+The report bucket is discovered from SSM (see :mod:`gco.services.cost_monitor`);
+until the monitoring stack has published it, the report endpoints answer 503
+and ``/internal/status`` shows ``bucket: null`` with the wait in ``last_error``.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from gco.services.cost_monitor import (
     CostMonitor,
+    CostReportBucketUnavailableError,
     OpenCostUnavailableError,
     ReportWriteError,
     create_cost_monitor_from_env,
@@ -157,6 +162,8 @@ async def list_reports(
     monitor = _check_monitor()
     try:
         reports = await asyncio.to_thread(monitor.list_reports, adhoc=adhoc, limit=limit)
+    except CostReportBucketUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surface S3 failures as 502
         raise HTTPException(status_code=502, detail=f"Failed to list reports: {exc}") from exc
     return {
@@ -182,7 +189,7 @@ async def generate_adhoc_report(request: AdhocReportRequest) -> dict[str, Any]:
             adhoc=True,
             include_rows=request.include_rows,
         )
-    except OpenCostUnavailableError as exc:
+    except (CostReportBucketUnavailableError, OpenCostUnavailableError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ReportWriteError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -204,16 +211,37 @@ def create_app() -> FastAPI:
     return app
 
 
-if __name__ == "__main__":
+# The pod manifest gives the kubelet terminationGracePeriodSeconds > preStop +
+# this budget, so Uvicorn can finish in-flight requests before SIGKILL. The
+# same variable drives the TLS sidecar's drain (gco.services.tls_proxy).
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 20
+
+
+def _run_server() -> None:
+    """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — must bind all interfaces inside K8s pod
+    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
     port = int(os.getenv("PORT", "8080"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    graceful_shutdown_seconds = int(
+        os.getenv(
+            "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+            str(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+        )
+    )
+
     logger.info("Starting Cost Monitor API on %s:%d", host, port)
+
     uvicorn.run(
         "gco.services.cost_api:app",
         host=host,
         port=port,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        log_level=log_level,
         reload=False,
+        timeout_graceful_shutdown=graceful_shutdown_seconds,
     )
+
+
+if __name__ == "__main__":
+    _run_server()

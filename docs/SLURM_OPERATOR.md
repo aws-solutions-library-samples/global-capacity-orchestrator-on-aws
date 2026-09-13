@@ -113,9 +113,12 @@ kubectl logs job/slurm-test -n gco-jobs -f
 The gco-jobs namespace default-denies pod-to-pod traffic, so Slurm
 connectivity is label-gated by the cluster-managed policies applied with the
 Slurm toggle (`post-helm-slurm-network.yaml`): Slinky's own pods
-(`app.kubernetes.io/part-of: slurm`) may talk to each other, and any pod
+(`app.kubernetes.io/part-of: slurm`) may talk to each other, any pod
 labeled `gco.aws/slurm-client: "true"` — like the example job — may reach the
-REST API on port 6820. A job pod without that label cannot reach slurmrestd.
+REST API on port 6820, and the operator's namespace (`slurm-operator`) may
+reach the same port, because the operator reconciles NodeSets through
+slurmrestd and workers never converge without it. A job pod without the
+client label cannot reach slurmrestd.
 
 ### Interactive access via the controller pod
 
@@ -277,7 +280,7 @@ For production, enable JWT authentication on slurmrestd by adding `AuthType=auth
 
 ### Network Policies
 
-GCO's default network policies in `gco-jobs` allow egress to AWS APIs and HTTPS. Slurm components communicate on ports 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd), and 6820 (slurmrestd).
+GCO's `gco-jobs` network policies allow all traffic between pods in the namespace, so Slurm components reach each other on 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd), and 6820 (slurmrestd) without extra rules; egress is DNS, HTTPS (AWS APIs), and the in-VPC ranges from `vpc_endpoint_cidrs`. `post-helm-slurm-network.yaml` adds the explicit REST API rules for labelled client pods. See [Network Security](ARCHITECTURE.md#network-security).
 
 ## Accounting
 

@@ -35,29 +35,39 @@ from cli.storage import BUCKET_DESCRIPTORS, StorageManager
 
 _ACCOUNT = "123456789012"
 
+#: Every primary bucket is CloudFormation-named; the owning stack publishes the
+#: identity to SSM and the inventory only ever reads it back.
 _SSM_VALUES = {
-    "/gco/cluster-shared-bucket/name": "gco-cluster-shared-123456789012-us-east-2",
-    "/gco/cluster-shared-bucket/arn": "arn:aws:s3:::gco-cluster-shared-123456789012-us-east-2",
-    "/gco/regional-shared-bucket/name": "gco-regional-shared-123456789012-us-east-1",
-    "/gco/regional-shared-bucket/arn": "arn:aws:s3:::gco-regional-shared-123456789012-us-east-1",
-    "/gco/model-bucket-name": "gco-models-123456789012-us-east-2",
+    "/gco/cluster-shared-bucket/name": "gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6",
+    "/gco/cluster-shared-bucket/arn": (
+        "arn:aws:s3:::gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6"
+    ),
+    "/gco/regional-shared-bucket/name": "gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6",
+    "/gco/regional-shared-bucket/arn": (
+        "arn:aws:s3:::gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6"
+    ),
+    "/gco/model-bucket-name": "gco-global-modelweightsbucket1891ed1b-svazihoxdslb",
+    "/gco/cost-report-bucket/name": "gco-monitoring-costreportbucketea8cce7a-9f8e7d6c5b4a",
+    "/gco/cost-report-bucket/arn": (
+        "arn:aws:s3:::gco-monitoring-costreportbucketea8cce7a-9f8e7d6c5b4a"
+    ),
 }
 
 #: logical-id prefix -> physical name, per (stack, region). The analytics stack is
 #: deliberately absent: it is opt-in and normally not deployed.
 _STACK_SWEEPS = {
     ("gco-global", "us-east-2"): {
-        "ClusterSharedBucket": "gco-cluster-shared-123456789012-us-east-2",
+        "ClusterSharedBucket": "gco-global-clustersharedbucket1a2b3c4d-x1y2z3w4v5u6",
         "ClusterSharedAccessLogsBucket": "gco-global-clustersharedaccesslogs-abc123",
-        "ModelWeightsBucket": "gco-models-123456789012-us-east-2",
+        "ModelWeightsBucket": "gco-global-modelweightsbucket1891ed1b-svazihoxdslb",
         "ModelWeightsAccessLogsBucket": "gco-global-modelweightsaccesslogs-def456",
     },
     ("gco-us-east-1", "us-east-1"): {
-        "RegionalSharedBucket": "gco-regional-shared-123456789012-us-east-1",
+        "RegionalSharedBucket": "gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6",
         "RegionalSharedAccessLogsBucket": "gco-us-east-1-regionalshared-ghi789",
     },
     ("gco-monitoring", "us-east-2"): {
-        "CostReportBucket": "gco-cost-reports-123456789012-us-east-2",
+        "CostReportBucket": "gco-monitoring-costreportbucketea8cce7a-9f8e7d6c5b4a",
         "CostReportAccessLogsBucket": "gco-monitoring-costreportaccesslogs-jkl012",
     },
 }
@@ -75,13 +85,19 @@ def _config(regional: list[str] | None = None) -> GCOConfig:
     return config
 
 
-def _inventory(regional: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
+def _inventory(
+    regional: list[str] | None = None,
+    *,
+    ssm_values: dict[str, str] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Build an inventory with every AWS call stubbed."""
     regions = regional or ["us-east-1"]
+    published = _SSM_VALUES if ssm_values is None else ssm_values
     with (
         patch(
             "gco.services.aws_ssm.get_ssm_parameter_optional",
-            side_effect=lambda name, region=None: _SSM_VALUES.get(name),
+            side_effect=lambda name, region=None: published.get(name),
         ),
         patch.object(StorageManager, "_account_id", return_value=_ACCOUNT),
         patch.object(StorageManager, "_configured_regional_regions", return_value=regions),
@@ -127,7 +143,7 @@ class TestInventoryCompleteness:
         regions = ["us-east-1", "us-west-2"]
         sweeps = dict(_STACK_SWEEPS)
         sweeps[("gco-us-west-2", "us-west-2")] = {
-            "RegionalSharedBucket": "gco-regional-shared-123456789012-us-west-2",
+            "RegionalSharedBucket": "gco-us-west-2-regionalsharedbucket3ff19783-q9w8e7r6t5y4",
             "RegionalSharedAccessLogsBucket": "gco-us-west-2-regionalshared-zzz",
         }
         with patch.dict(_STACK_SWEEPS, sweeps, clear=False):
@@ -144,8 +160,8 @@ class TestPodAccessAnswer:
         """This is the field a caller reads to decide where checkpoints go."""
         inventory = _inventory()
         assert inventory["summary"]["pod_writable"] == [
-            "gco-cluster-shared-123456789012-us-east-2",
-            "gco-regional-shared-123456789012-us-east-1",
+            _SSM_VALUES["/gco/cluster-shared-bucket/name"],
+            _SSM_VALUES["/gco/regional-shared-bucket/name"],
         ]
 
     def test_access_log_buckets_are_never_pod_accessible(self) -> None:
@@ -175,6 +191,20 @@ class TestPhysicalIdentityResolution:
         assert entry["bucket"] == _SSM_VALUES["/gco/cluster-shared-bucket/name"]
         assert entry["arn"] == _SSM_VALUES["/gco/cluster-shared-bucket/arn"]
         assert entry["s3_uri"] == f"s3://{entry['bucket']}/"
+
+    def test_cost_bucket_takes_name_and_arn_from_the_monitoring_region_ssm(self) -> None:
+        """Nothing reconstructs the cost bucket name; the published identity is it."""
+        inventory = _inventory()
+        entry = next(item for item in inventory["buckets"] if item["id"] == "cost-reports")
+        assert entry["bucket"] == _SSM_VALUES["/gco/cost-report-bucket/name"]
+        assert entry["arn"] == _SSM_VALUES["/gco/cost-report-bucket/arn"]
+        assert entry["status"] == "deployed"
+
+    def test_unpublished_cost_bucket_is_reported_as_not_deployed(self) -> None:
+        values = {k: v for k, v in _SSM_VALUES.items() if not k.startswith("/gco/cost-report")}
+        inventory = _inventory(ssm_values=values)
+        entry = next(item for item in inventory["buckets"] if item["id"] == "cost-reports")
+        assert entry["status"] == "not-deployed"
 
     def test_access_log_names_come_from_cloudformation(self) -> None:
         """They are CDK-auto-named, so only the stack knows them."""

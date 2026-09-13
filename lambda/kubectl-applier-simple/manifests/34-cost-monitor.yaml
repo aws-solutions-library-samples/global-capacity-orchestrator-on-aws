@@ -34,6 +34,11 @@ metadata:
     project: gco
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  # A new pod counts as available only after staying Ready this long, so a
+  # container that passes its readiness probe and then crashes cannot let
+  # the rollout retire a healthy old pod.
+  minReadySeconds: 10
   strategy:
     type: Recreate
   selector:
@@ -52,6 +57,7 @@ spec:
       serviceAccountName: gco-cost-monitor-sa
       priorityClassName: gco-platform-critical
       automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -63,7 +69,10 @@ spec:
       containers:
         - name: cost-monitor
           image: {{COST_MONITOR_IMAGE}}
-          imagePullPolicy: Always
+          # CDK publishes every service image under a content-hash tag, so a
+          # cached layer is always the right layer; IfNotPresent lets a pod
+          # restart even while the registry is unreachable.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -81,10 +90,21 @@ spec:
               value: "{{REGION}}"
             - name: PROJECT_NAME
               value: "{{PROJECT_NAME}}"
-            - name: COST_REPORT_BUCKET
-              value: "{{COST_REPORT_BUCKET}}"
+            # The central cost report bucket has a CloudFormation-generated
+            # name published by the monitoring stack, which deploys after this
+            # region. The service resolves it from this SSM parameter (in the
+            # monitoring region) on every scheduled pass until it exists. An
+            # explicit COST_REPORT_BUCKET, if set, bypasses discovery (kind/CI).
+            - name: COST_REPORT_BUCKET_PARAMETER
+              value: "{{COST_REPORT_BUCKET_PARAMETER}}"
+            - name: COST_REPORT_BUCKET_PARAMETER_REGION
+              value: "{{COST_REPORT_BUCKET_PARAMETER_REGION}}"
             - name: COST_REPORT_INTERVAL_MINUTES
               value: "{{COST_REPORT_INTERVAL_MINUTES}}"
+            # Uvicorn drains in-flight report requests for this long after
+            # SIGTERM; the pod grace period covers preStop + this value.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "20"
             - name: OPENCOST_BASE_URL
               value: "http://opencost.monitoring.svc.cluster.local:9003"
             - name: AWS_ROLE_ARN
@@ -98,29 +118,63 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
+          # Probes run inside the container over loopback, like every other
+          # GCO API container. The pod's only ingress rule admits the manifest
+          # processor, so a network probe would depend on the CNI exempting
+          # the kubelet's node address from that rule — loopback never does.
           startupProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',8080),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 5
+            # See 30-health-monitor.yaml: the probe forks the interpreter, so it
+            # starts lean and gets the same 10s the liveness probe gets; a busy
+            # node must not turn a healthy server into a restart.
+            timeoutSeconds: 10
             failureThreshold: 24
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',8080),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 4
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',8080),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /readyz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 5
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 3
           lifecycle:
             preStop:
@@ -158,7 +212,12 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: 80
+    # Same number as the container port on purpose: the VPC CNI's network
+    # policy enforcement admits Service traffic reliably only when the
+    # Service port equals the container port (EKS network policy
+    # considerations), and the manifest processor reaches this Service
+    # through an egress rule that names port 8080.
+    - port: 8080
       targetPort: http
       protocol: TCP
       name: http

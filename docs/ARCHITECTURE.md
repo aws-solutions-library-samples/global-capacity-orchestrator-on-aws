@@ -328,6 +328,22 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 - Cluster security group controls VPC access
 - Pod security controls and admission-time workload validation enforced
 
+**In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):
+
+| Namespace | Ingress | Egress |
+|-----------|---------|--------|
+| `gco-system` | Default deny. Each platform Deployment is admitted on exactly the port it serves: 8443 (TLS proxy sidecars, targeted by the ALB) for health-monitor, manifest-processor, inference-proxy; 9090 (Prometheus metrics) for inference-monitor; 8080 from the manifest processor only for cost-monitor | DNS, HTTPS (AWS APIs, Kubernetes API), the inference proxy's path to `gco-inference` model pods, the cost monitor's path to OpenCost |
+| `gco-jobs` | Default deny from other namespaces; every pod in the namespace may reach every other pod on any port (distributed training, Ray, Volcano, Slurm, Kubeflow choose their own ports). Two operators are admitted from their own namespaces on one port each, because they drive their workloads through an in-pod API rather than the Kubernetes API: KubeRay to Ray head pods on the dashboard port (8265, RayJob status and RayService health) and, with Slurm enabled, Slinky to slurmrestd (6820, NodeSet reconciliation) | DNS, HTTPS to any destination (S3, DynamoDB, ECR, CloudWatch, Bedrock, model hubs, package indexes — GCO's own tables and shared bucket live in the global region, so a VPC-only rule could never carry the platform's traffic), the in-VPC ranges from `vpc_endpoint_cidrs` on any port (Valkey, Aurora, EFS/FSx, VPC endpoints), plus the opt-in MLflow and Slurm client rules |
+| `gco-inference` | Model pods accept traffic only from the authenticated inference proxy and from each other (Mooncake KV-transfer, PD proxy) | DNS, HTTPS (model pulls, AWS APIs), the Mooncake master ports |
+
+Rules on probed ports name the port but no source: the ALB is not a pod and the kubelet probes from the node's host network, which no selector can express. DNS rules likewise allow port 53 to any destination because Auto Mode answers cluster DNS from a per-node service rather than CoreDNS pods. NetworkPolicies are additive, so an operator who needs a path GCO does not ship adds a policy rather than switching enforcement off.
+
+One VPC CNI property shapes how egress rules and Services are written. The agent evaluates a pod's egress before kube-proxy translates a ClusterIP to a pod address, so an egress rule whose peers are pods admits the pods' addresses but not the ClusterIP in front of them; the network policy controller adds a Service's ClusterIP only when that Service's `spec.selector` matches the rule's `podSelector` (headless Services resolve to pod addresses and need nothing). Every ClusterIP Service GCO's inference monitor creates therefore carries `gco.io/type: inference` in its selector — the label the `allow-inference-proxy-to-inference` and `allow-inference-internal` peers select on — and a new egress rule that must reach a Service through its ClusterIP has to name a `podSelector` the Service's own selector satisfies (or admit the address range). Endpoints created before this label existed keep their old selector; re-deploying the endpoint refreshes it. The first live run with enforcement on found this the hard way: a healthy model pod answered the kubelet while the inference proxy's requests to its Service timed out.
+
+A second property concerns timing. The VPC CNI attaches a new pod's policies in parallel with the pod's start and admits all of its traffic until they are in place (the agent's standard mode), so a pod's very first connections can go through paths its policies deny a moment later; the window is normally a few seconds. Auto Mode's NodeClass `networkPolicy: DefaultDeny` is the strict alternative, in which a new pod is denied everything until its policies attach, and it requires a policy for every pod the node runs — GCO does not set it. The live release validation's `network-posture` probes read their verdicts from the steady state rather than the first dial for this reason, and record the window when they see it.
+
+**VPC endpoints** (`cdk.json` `vpc_endpoints`): each regional VPC gets free S3 and DynamoDB gateway endpoints by default, so the platform's largest data path (models, datasets, checkpoints, MLflow artifacts, cost reports) stays inside the VPC and off the NAT gateways' per-GB metering. Interface (PrivateLink) endpoints for STS, ECR, CloudWatch, SQS, SSM, Secrets Manager, KMS, EKS, EFS, and Bedrock are opt-in because they bill per AZ-hour. Cross-region calls to the global region's tables, buckets, and parameters still leave through the NAT gateways.
+
 ### IAM Security
 
 **Principle of Least Privilege:**
@@ -362,11 +378,17 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Application Layer:**
 
-- Health Monitor: fixed 2 replicas; Manifest Processor: fixed 3; Inference
-  Monitor: 2; Cost Monitor: 1 (no HPAs — these are control loops, not
-  request-serving tiers)
-- Inference Proxy: 3-10 replicas via the `inference-proxy-hpa`
-  HorizontalPodAutoscaler, the only HPA GCO installs
+- Health Monitor: fixed 2 replicas (webhook delivery and ALB sync are
+  leader-elected through Kubernetes Leases, so the second pod is a hot standby);
+  Inference Monitor: 2 (leader + standby); Cost Monitor: 1 — no HPAs, these are
+  control loops, not request-serving tiers
+- Manifest Processor: `cdk.json` `manifest_processor.replicas` (default 3),
+  with an opt-in CPU HorizontalPodAutoscaler (`manifest_processor.autoscaling`,
+  off by default because the API tier is I/O-bound and every replica also runs
+  the central queue worker)
+- Inference Proxy: `inference_proxy.min_replicas`–`max_replicas` (default 3–10)
+  via the `inference-proxy-hpa` HorizontalPodAutoscaler on application CPU and
+  memory plus TLS-sidecar CPU
 - User workload scale is bounded by configured NodePool limits, Kubernetes quotas, AWS service quotas, and available EC2 capacity
 
 **Compute Layer:**
@@ -403,15 +425,11 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - **Multiple Replicas**: Every request-path or reconciliation service runs 2+ replicas; the cost monitor is the one single-replica service (a periodic reporter whose restart loses nothing)
 - **Pod Anti-Affinity**: Spreads pods across nodes (preferred scheduling)
-- **Topology Spread Constraints**: Distributes the health monitor, manifest processor and inference proxy across availability zones
-- **Pod Disruption Budgets**: Ensures minimum availability during voluntary disruptions
-  - Health Monitor: minAvailable=1
-  - Manifest Processor: minAvailable=2
-  - Inference Monitor: minAvailable=1
-  - Inference Proxy: minAvailable=2
-- **Health Checks**: Liveness, readiness, and startup probes
-- **Graceful Shutdown**: preStop hooks allow in-flight requests to complete
-- **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0
+- **Topology Spread Constraints**: Distributes every multi-replica platform service (health monitor, manifest processor, inference monitor, inference proxy) across availability zones and nodes
+- **Pod Disruption Budgets**: `maxUnavailable: 1` on every multi-replica platform Deployment, so one voluntary disruption at a time whatever the replica count (a `minAvailable` budget on an autoscaled Deployment would widen as the HPA scales up); the single-replica cost monitor carries `karpenter.sh/do-not-disrupt` instead
+- **Health Checks**: Startup, liveness, and readiness probes on every container
+- **Graceful Shutdown**: preStop hooks plus a uvicorn drain budget (`GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`) inside `terminationGracePeriodSeconds` let in-flight requests and streams complete
+- **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0, one surge pod, and three retained revisions
 - **Auto-Healing**: Kubernetes restarts failed pods
 
 ### Global HA

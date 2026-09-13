@@ -205,8 +205,8 @@ class ModelManager:
 class RegionalBucketManager:
     """Uploads local files to a region's general-purpose regional bucket.
 
-    Mirrors :class:`ModelManager` but targets the per-region
-    ``gco-regional-shared-<account>-<region>`` bucket instead of the central
+    Mirrors :class:`ModelManager` but targets the per-region general-purpose
+    regional bucket (CloudFormation-generated name) instead of the central
     model bucket. The bucket name is always resolved from the *target
     region's own* SSM parameter store, never the global region's or any other
     region's, so an upload only ever writes to the bucket that lives in the

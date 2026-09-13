@@ -2,8 +2,9 @@
 Tests for gco/services/cost_api.py — the cost-monitor HTTP service.
 
 Exercises the probe endpoints, /internal/status, /internal/reports (list +
-ad-hoc generation with error mapping: OpenCost outages to 503, S3 failures
-to 502, window validation to 422), readiness coupling to the scheduled
+ad-hoc generation with error mapping: OpenCost outages and a not-yet-published
+report bucket to 503, S3 failures to 502, window validation to 422),
+readiness coupling to the scheduled
 reporter task, and the scheduled report loop's failure isolation. The
 CostMonitor is a mock patched into the module global; no lifespan
 initialization or AWS access occurs.
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 import gco.services.cost_api as cost_api_module
 from gco.services.cost_api import _scheduled_report_loop, app
 from gco.services.cost_monitor import (
+    CostReportBucketUnavailableError,
     OpenCostUnavailableError,
     ReportResult,
     ReportWriteError,
@@ -114,6 +116,13 @@ class TestListReportsEndpoint:
         response = client.get("/internal/reports")
         assert response.status_code == 502
 
+    def test_unpublished_bucket_maps_to_503(self, client, monitor):
+        # The monitoring stack has not published the bucket yet: not ready, not broken.
+        monitor.list_reports.side_effect = CostReportBucketUnavailableError("not readable yet")
+        response = client.get("/internal/reports")
+        assert response.status_code == 503
+        assert "not readable yet" in response.json()["detail"]
+
 
 class TestGenerateReportEndpoint:
     def test_generates_with_default_window(self, client, monitor):
@@ -141,6 +150,10 @@ class TestGenerateReportEndpoint:
 
     def test_opencost_outage_maps_to_503(self, client, monitor):
         monitor.generate_report.side_effect = OpenCostUnavailableError("down")
+        assert client.post("/internal/reports", json={}).status_code == 503
+
+    def test_unpublished_bucket_maps_to_503(self, client, monitor):
+        monitor.generate_report.side_effect = CostReportBucketUnavailableError("not yet")
         assert client.post("/internal/reports", json={}).status_code == 503
 
     def test_write_failure_maps_to_502(self, client, monitor):

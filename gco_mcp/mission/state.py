@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -318,24 +319,61 @@ class FilesystemBackend:
         return removed
 
 
+def _to_dynamodb_item(value: Any) -> Any:
+    """Recursively convert a session payload into DynamoDB-storable types.
+
+    The boto3 resource API rejects ``float`` outright (``TypeError: Float
+    types are not supported``), and a Mission session carries floats in
+    ordinary places — criterion targets, observed metric values, budget
+    limits. Floats go through ``Decimal(str(x))`` so the decimal string
+    round-trips without binary artifacts; ``bool`` is checked first
+    because it is an ``int`` subclass and must stay a DynamoDB ``BOOL``.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {key: _to_dynamodb_item(entry) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_to_dynamodb_item(entry) for entry in value]
+    return value
+
+
+def _from_dynamodb_item(value: Any) -> Any:
+    """Recursively convert DynamoDB numbers back to plain ``int``/``float``.
+
+    The resource API deserializes every ``N`` as :class:`~decimal.Decimal`;
+    integral values become ``int`` and the rest ``float`` so a session
+    loaded from DynamoDB is indistinguishable from one loaded from the
+    filesystem backend's JSON (``version == SCHEMA_VERSION`` compares an
+    ``int``, reports ``json.dumps`` the payload, comparisons stay numeric).
+    """
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, dict):
+        return {key: _from_dynamodb_item(entry) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_from_dynamodb_item(entry) for entry in value]
+    return value
+
+
 class DynamoDBBackend:
     """DynamoDB-backed implementation of :class:`MissionStateBackend`.
 
-    Stub implementation: this class declares the protocol shape so the
-    global stack's CDK wiring can reference the backend type and so the
-    resolver in slice 3.4 can construct it, but no automated test in
-    this slice exercises any code path that touches AWS. Each method
-    is annotated with a ``TODO(mission-dynamodb)`` marker right above
-    its body and the corresponding tests are skipped (see slice 3.6).
-    A separate, AWS-credentialed smoke test validates the real
-    behaviour.
+    The unit suite never touches AWS from here (every boto3-facing method
+    is excluded from coverage); the backend runs for real against the
+    Floci emulator in ``tests/test_floci_mission_state.py``, over a table
+    shaped exactly like the one ``gco/stacks/global_stack.py`` provisions.
 
     Item schema mirrors the :class:`SessionState` TypedDict one-to-one:
     the partition key is ``session_id`` and ``status`` plus ``created_at``
     feed a ``status-index`` GSI so :meth:`list_sessions` can filter by
     status without a full table scan. ``put_item`` is atomic by virtue
     of DynamoDB's single-item write semantics, so the temp-file dance
-    used by :class:`FilesystemBackend` is unnecessary here.
+    used by :class:`FilesystemBackend` is unnecessary here. Numbers cross
+    the wire through :func:`_to_dynamodb_item` / :func:`_from_dynamodb_item`
+    so both backends hand the engine the same Python types.
 
     Table-name resolution is lazy: when the constructor's ``table_name``
     argument is ``None``, the table name is fetched from SSM at
@@ -402,9 +440,10 @@ class DynamoDBBackend:
         """Fetch the session via ``get_item`` keyed on ``session_id``."""
         table = self._get_table()
         response = table.get_item(Key={"session_id": session_id})
-        item = response.get("Item")
-        if item is None:
+        raw = response.get("Item")
+        if raw is None:
             return None
+        item = _from_dynamodb_item(raw)
         if item.get("version") != SCHEMA_VERSION:
             logger.warning(
                 "Refusing to load Mission session %s: unsupported schema version %r",
@@ -426,7 +465,7 @@ class DynamoDBBackend:
         from .validation import strip_private_fields
 
         table = self._get_table()
-        table.put_item(Item=strip_private_fields(session))
+        table.put_item(Item=_to_dynamodb_item(strip_private_fields(session)))
 
     def list_sessions(
         self, filter: dict[str, Any] | None = None
@@ -459,7 +498,7 @@ class DynamoDBBackend:
                 "created_at": item.get("created_at"),
                 "iteration_count": len(item.get("iterations", []) or []),
             }
-            for item in items
+            for item in _from_dynamodb_item(list(items))
         ]
 
     def delete_session(self, session_id: str) -> bool:  # pragma: no cover - DynamoDB

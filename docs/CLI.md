@@ -3383,7 +3383,7 @@ See [Inference Guide](INFERENCE.md) for details on model weight management.
 | Command | Description |
 | --- | --- |
 | [`gco models upload`](#gco-models-upload) | Upload model weights to the central S3 bucket. |
-| [`gco models upload-regional`](#gco-models-upload-regional) | Upload local files or a directory to a region's general-purpose regional bucket (`gco-regional-shared-<account>-<region>`), resolved from that region's own SSM parameter. |
+| [`gco models upload-regional`](#gco-models-upload-regional) | Upload local files or a directory to a region's general-purpose regional bucket, resolved from that region's own `/<project>/regional-shared-bucket/name` SSM parameter. |
 | [`gco models list`](#gco-models-list) | List models in the central S3 bucket. |
 | [`gco models delete`](#gco-models-delete) | Permanently delete a model, including all current and historical S3 object versions. |
 | [`gco models uri`](#gco-models-uri) | Get the S3 URI for a model (for use with `--model-source` in inference deploy). |
@@ -3417,7 +3417,7 @@ gco models upload ./weights.safetensors --name my-model
 
 #### `gco models upload-regional`
 
-Upload local files or a directory to a region's general-purpose regional bucket (`gco-regional-shared-<account>-<region>`), resolved from that region's own SSM parameter. The bucket is general purpose and usable by any in-region workload; it also backs the Mooncake cold tier. To warm an endpoint's KV cache specifically, prefer `gco inference populate-kv`, which targets the cold-tier key prefix.
+Upload local files or a directory to a region's general-purpose regional bucket, resolved from that region's own `/<project>/regional-shared-bucket/name` SSM parameter (the bucket's name is CloudFormation-generated and never reconstructed). The bucket is general purpose and usable by any in-region workload; it also backs the Mooncake cold tier. To warm an endpoint's KV cache specifically, prefer `gco inference populate-kv`, which targets the cold-tier key prefix.
 
 ```bash
 gco models upload-regional LOCAL_PATH --region REGION [OPTIONS]
@@ -5524,7 +5524,7 @@ Release validation lifecycle.
 
 #### `gco release validate`
 
-Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When `inference` or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and TGI images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and TGI images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
 ```bash
 gco release validate --expected-account 123456789012 \
