@@ -353,8 +353,12 @@ def test_api_workload_uses_tls_only_sidecar_probe_and_service(
 
     for probe_name in ("startupProbe", "livenessProbe", "readinessProbe"):
         command = application[probe_name]["exec"]["command"]
-        assert command[:2] == ["python", "-c"]
-        assert "http://127.0.0.1:9000/" in command[2]
+        # A lean interpreter start (no site-packages scan, no environment) and
+        # a bare-socket request to the loopback listener: the probe competes
+        # with the server for the container's CPU, so it must stay cheap.
+        assert command[:4] == ["python", "-I", "-S", "-c"]
+        assert "socket.create_connection(('127.0.0.1',9000),3)" in command[4]
+        assert "urllib" not in command[4]
     for probe_name in ("startupProbe", "livenessProbe"):
         assert tls_proxy[probe_name]["tcpSocket"] == {"port": "https"}
     readiness_request = tls_proxy["readinessProbe"]["httpGet"]

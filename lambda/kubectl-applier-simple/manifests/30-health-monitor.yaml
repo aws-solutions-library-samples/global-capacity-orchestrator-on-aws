@@ -167,43 +167,94 @@ spec:
               value: "{{PENDING_REQUESTED_GPUS}}"
           resources:
             requests:
-              cpu: 100m
+              # The leader replica (webhook deliverer plus job watcher) was
+              # measured live at 85-125m with peaks over 200m; a 100m request
+              # gave it the smallest CPU weight of every API container on the
+              # node, so under node-wide contention it was starved first and
+              # its probes were the ones that timed out.
+              cpu: 200m
               memory: 128Mi
             limits:
               cpu: 500m
               memory: 512Mi
+          # The three probes below fork the interpreter because the distroless
+          # image has no shell and the listener is loopback-only (the kubelet
+          # cannot reach 127.0.0.1 inside the pod). That fork is the hazard:
+          # a probe is a process competing for the container's CPU quota, and
+          # on a contended node a slow probe kills a healthy server. So the
+          # probe starts lean (-I -S: no site-packages scan, no environment)
+          # and speaks HTTP over a bare socket instead of importing
+          # urllib.request and its ~130 modules, which cut the work per probe
+          # about fivefold, and the liveness budget below is wide enough that
+          # only a process that is actually stuck for a minute gets restarted.
+          # A live run (2026-09-13) saw the previous urllib probes time out
+          # 190 times in 25 minutes on one node and restart this container
+          # five times while it was answering every request that reached it.
           startupProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
             # timeoutSeconds is NOT optional here. The kubelet default is 1s,
-            # and this probe has to fork a CPython interpreter, import
-            # urllib.request, and complete an HTTP round trip inside that
-            # budget. On a CPU-contended node it cannot, so the probe reports
-            # "command timed out after 1s" while the process underneath is
-            # perfectly healthy, and the kubelet kills a container that was
-            # about to serve. Keep this at the same 5s the liveness probe on
-            # this container already uses.
-            timeoutSeconds: 5
-            # 24 attempts x 5s period = a 120-240s window (each attempt can
+            # and this probe has to fork a CPython interpreter and complete
+            # an HTTP round trip inside that budget. On a CPU-contended node
+            # it cannot, so the probe reports "command timed out after 1s"
+            # while the process underneath is perfectly healthy, and the
+            # kubelet kills a container that was about to serve. Startup gets
+            # the same budget as liveness: it runs when the process is
+            # slowest.
+            timeoutSeconds: 10
+            # 24 attempts x 5s period = a 120-360s window (each attempt can
             # itself burn up to timeoutSeconds). A cold start on a saturated
             # node was measured at ~80s, which the previous 12-attempt budget
             # could not cover even once the timeout above was correct.
             failureThreshold: 24
           livenessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/healthz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /healthz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            # A liveness probe exists to catch a stuck process, and a minute
+            # is a fine detection latency for that; 4 x 15s of continuous
+            # failure, each attempt allowed 10s, is what it takes to restart.
+            timeoutSeconds: 10
+            failureThreshold: 4
           readinessProbe:
             exec:
-              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/readyz', timeout=3).read()"]
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9000),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /readyz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 0
             periodSeconds: 5
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 3
           lifecycle:
             preStop:

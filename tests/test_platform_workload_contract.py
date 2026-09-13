@@ -245,11 +245,19 @@ class TestPodShape:
                 assert probe["failureThreshold"] >= 3, f"{where}: {probe_name} failureThreshold"
                 if "exec" in probe:
                     # The distroless images ship no shell: python is the only
-                    # executable, and the loopback URL keeps the probe off the
-                    # network entirely.
+                    # executable, and the loopback address keeps the probe off
+                    # the network entirely. The interpreter starts lean (-I -S)
+                    # and speaks HTTP over a bare socket: a probe is a process
+                    # competing with the server for the container's CPU, and a
+                    # live run saw urllib-importing probes time out and restart
+                    # a healthy container on a contended node.
                     command = probe["exec"]["command"]
-                    assert command[0] == "python", f"{where}: {probe_name} {command}"
+                    assert command[:4] == ["python", "-I", "-S", "-c"], (
+                        f"{where}: {probe_name} {command}"
+                    )
                     assert "127.0.0.1" in command[-1], f"{where}: {probe_name} must probe loopback"
+                    assert "import socket" in command[-1], f"{where}: {probe_name} {command}"
+                    assert "urllib" not in command[-1], f"{where}: {probe_name} imports urllib"
             startup = container["startupProbe"]
             budget = startup["periodSeconds"] * startup["failureThreshold"]
             assert budget >= STARTUP_BUDGET_SECONDS, f"{where}: startup budget {budget}s"
