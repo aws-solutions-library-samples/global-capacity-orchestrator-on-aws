@@ -44,6 +44,7 @@ PROBE_NAMES = (
     "metrics-open",
     "https-egress",
     "http-egress",
+    "pod-identity-agent",
 )
 DENY_PROBES = ("cross-jobs", "cross-system", "http-egress")
 #: What a correctly enforcing cluster answers, per probe.
@@ -54,6 +55,7 @@ ENFORCED = {
     "metrics-open": ("Succeeded", 0),
     "https-egress": ("Succeeded", 0),
     "http-egress": ("Failed", 42),
+    "pod-identity-agent": ("Succeeded", 0),
 }
 
 
@@ -243,6 +245,8 @@ class TestProbeMatrix:
         assert by_name["metrics-open"].url == "http://3.3.3.3:9090/metrics"
         assert by_name["https-egress"].url == "https://checkip.amazonaws.com/"
         assert by_name["http-egress"].url == "http://checkip.amazonaws.com/"
+        assert by_name["pod-identity-agent"].url == "http://169.254.170.23/v1/credentials"
+        assert by_name["pod-identity-agent"].client_namespace == "gco-jobs"
         assert {spec.name for spec in specs if spec.expected == "blocked"} == set(DENY_PROBES)
         assert {spec.name for spec in specs if spec.enforcement_only} == set(DENY_PROBES)
         for spec in specs:
@@ -281,7 +285,7 @@ class TestEnforcedCluster:
         assert cross_jobs["settled"] is None
         assert cross_jobs["attach_window_observed"] is False
 
-        # Two listeners then six probes, each cleared before creation and
+        # Two listeners then seven probes, each cleared before creation and
         # deleted afterwards; the record holds every Job before it exists.
         created = [
             (job["metadata"]["namespace"], job["metadata"]["name"]) for job in cluster.applied
@@ -294,6 +298,7 @@ class TestEnforcedCluster:
             ("default", f"gco-live-netpol-metrics-open-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-https-egress-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-http-egress-{TOKEN}"),
+            ("gco-jobs", f"gco-live-netpol-pod-identity-agent-{TOKEN}"),
         ]
         assert [entry[1:] for entry in cluster.deleted if entry[0] == "clear"] == created
         assert [entry[1:] for entry in cluster.deleted if entry[0] == "cleanup"] == created
@@ -502,12 +507,13 @@ class TestEnforcementDisabled:
             "same-namespace": "matched",
             "metrics-open": "matched",
             "https-egress": "matched",
+            "pod-identity-agent": "matched",
         }
         skipped = next(probe for probe in evidence["probes"] if probe["name"] == "cross-jobs")
         assert "network_policy_enforcement is false" in skipped["reason"]
         assert "observed" not in skipped
         launched = {_probe_name(job["metadata"]["name"]) for job in cluster.applied[2:]}
-        assert launched == {"same-namespace", "metrics-open", "https-egress"}
+        assert launched == {"same-namespace", "metrics-open", "https-egress", "pod-identity-agent"}
 
 
 class TestVerdictMismatches:
@@ -530,7 +536,7 @@ class TestVerdictMismatches:
         assert "same-namespace" not in failure
         # Everything the run created was still deleted.
         assert all(job["deleted"] for job in record["jobs"])
-        assert len(record["jobs"]) == 8
+        assert len(record["jobs"]) == 9
         assert "evidence" not in record
 
     @pytest.mark.parametrize(

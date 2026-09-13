@@ -293,6 +293,47 @@ class TestDnsEgress:
         assert _get_port_protocols(rule) == {("UDP", 53), ("TCP", 53)}
 
 
+# ─── EKS Pod Identity Agent everywhere ─────────────────────────────
+
+
+class TestPodIdentityAgentEgress:
+    """Plain HTTP to the node's Pod Identity Agent in every GCO namespace.
+
+    The cluster injects ``AWS_CONTAINER_CREDENTIALS_FULL_URI=
+    http://169.254.170.23/v1/credentials`` into every pod whose service account
+    has a Pod Identity association, and the SDK's container credential
+    provider dials that link-local address on port 80. Neither the HTTPS rules
+    nor the in-VPC range covers it, so an egress-isolated namespace without
+    this rule cuts every Pod-Identity-only pod off from AWS on its first call
+    — which is exactly how the shared-bucket upload examples failed live.
+    """
+
+    AGENT_RULE = {
+        "to": [{"ipBlock": {"cidr": "169.254.170.23/32"}}],
+        "ports": [{"protocol": "TCP", "port": 80}],
+    }
+
+    @pytest.mark.parametrize("namespace", ["gco-system", "gco-jobs", "gco-inference"])
+    def test_agent_rule_admits_exactly_the_link_local_endpoint(self, netpol_docs, namespace):
+        policy = _find_netpol(netpol_docs, "allow-pod-identity-agent", namespace)
+        assert policy is not None, f"{namespace} must have an allow-pod-identity-agent policy"
+        assert policy["spec"]["policyTypes"] == ["Egress"]
+        assert policy["spec"]["egress"] == [self.AGENT_RULE]
+
+    @pytest.mark.parametrize("namespace", ["gco-jobs", "gco-inference"])
+    def test_workload_namespaces_admit_every_pod(self, netpol_docs, namespace):
+        """gco-service-account pods carry whatever labels the user chose."""
+        policy = _find_netpol(netpol_docs, "allow-pod-identity-agent", namespace)
+        assert policy["spec"]["podSelector"] == {}
+
+    def test_platform_namespace_selects_the_same_pods_as_the_aws_api_rule(self, netpol_docs):
+        """Credentials are only useful to the pods that hold an association."""
+        policy = _find_netpol(netpol_docs, "allow-pod-identity-agent", "gco-system")
+        api_policy = _find_netpol(netpol_docs, "allow-aws-api-egress", "gco-system")
+        assert policy["spec"]["podSelector"] == api_policy["spec"]["podSelector"]
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"project": "gco"}}
+
+
 # ─── gco-jobs ──────────────────────────────────────────────────────
 
 
@@ -306,6 +347,7 @@ class TestJobNamespacePosture:
         "allow-same-namespace",
         "allow-dns",
         "allow-https-egress",
+        "allow-pod-identity-agent",
         "allow-vpc-egress",
     }
 
