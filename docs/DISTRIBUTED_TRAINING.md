@@ -61,7 +61,7 @@ spec:
   runtimeRef:
     name: torch-distributed
   trainer:
-    image: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime
+    image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
     numNodes: 2
     numProcPerNode: 1
     resourcesPerNode:

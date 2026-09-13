@@ -1885,7 +1885,7 @@ class TestSecurityPolicyParityWithManifestProcessor:
 def _trainjob(
     name="test-trainjob",
     namespace="gco-jobs",
-    image="pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime",
+    image="pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime",
     num_nodes=None,
     resources_per_node=None,
     runtime_patches=None,
