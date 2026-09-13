@@ -31,8 +31,8 @@ RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
 RUN dnf install -y tar gzip \
     && curl --fail --show-error --location --retry 3 \
         --output /tmp/helm.tar.gz \
-        https://get.helm.sh/helm-v4.2.4-linux-amd64.tar.gz \
-    && echo "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3  /tmp/helm.tar.gz" \
+        https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz \
+    && echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  /tmp/helm.tar.gz" \
         | sha256sum -c - \
     && mkdir -p /tmp/helm-install \
     && tar -xzf /tmp/helm.tar.gz -C /tmp/helm-install \

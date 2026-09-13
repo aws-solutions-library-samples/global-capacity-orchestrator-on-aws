@@ -295,7 +295,7 @@ class TestMlflowChartEntry:
         assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "1"
 
     def test_memory_limit_clears_the_measured_startup_ramp(self, charts):
-        # The v3.15.1-full server ramps to ~1.5GiB steady state during
+        # The v3.16.0-full server ramps to ~1.5GiB steady state during
         # startup; a 1Gi limit OOM-killed the container at ~25s every
         # cycle (kernel TaskOOM, caught live 2026-08-14 once the CPU fix
         # let startup progress far enough to hit it). 3Gi is 2x the

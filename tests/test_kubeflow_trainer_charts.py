@@ -285,7 +285,7 @@ class TestTrainerRuntimeManifest:
         ]["spec"]
         (container,) = pod_spec["containers"]
         image = container["image"]
-        assert image == "pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime"
+        assert image == "pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime"
         assert image.split("/")[0] in DEFAULT_TRUSTED_DOCKERHUB_ORGS
 
     def test_runtime_pods_do_not_automount_the_sa_token(self, manifest_text):

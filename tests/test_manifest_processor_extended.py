@@ -2215,7 +2215,7 @@ class TestAllowedKindsLockstep:
 def _trainjob_manifest(
     name: str = "test-trainjob",
     namespace: str = "gco-jobs",
-    image: str | None = "pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime",
+    image: str | None = "pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime",
     num_nodes: int | None = None,
     resources_per_node: dict | None = None,
     runtime_patches: list | None = None,

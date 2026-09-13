@@ -335,7 +335,7 @@ teardown() {
 }
 
 @test "inference demo uses the current pinned vLLM image" {
-    grep -q 'vllm/vllm-openai:v0.28.0' "$SCRIPT"
+    grep -q 'vllm/vllm-openai:v0.29.0' "$SCRIPT"
     run grep -q 'vllm/vllm-openai:v0.25.1' "$SCRIPT"
     [ "$status" -ne 0 ]
 }
@@ -592,7 +592,7 @@ run_demo() {
     [[ "$output" == *"Skipping cleanup."* ]]
     # Leftovers were force-deleted before the deploy, never after.
     grep -q '^delete pods -n gco-inference -l app=demo-llm --force --grace-period=0$' "$KUBECTL_CALLS"
-    grep -q '^inference deploy demo-llm -i vllm/vllm-openai:v0.28.0 --gpu-count 1 --replicas 1 -r us-east-1' "$GCO_CALLS"
+    grep -q '^inference deploy demo-llm -i vllm/vllm-openai:v0.29.0 --gpu-count 1 --replicas 1 -r us-east-1' "$GCO_CALLS"
     grep -q '^inference delete demo-llm -y$' "$GCO_CALLS"
 }
 

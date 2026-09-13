@@ -1,4 +1,4 @@
-boto3==1.43.85
+boto3==1.43.93
 kubernetes==36.0.3
 PyYAML==6.0.3
 urllib3==2.7.0

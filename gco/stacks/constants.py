@@ -295,10 +295,10 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 # The dependency scanner checks ``aws eks describe-addon-versions`` monthly
 # and opens an issue when newer builds are available.
 
-EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.1"
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.2"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.7"
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.10"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
 
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
@@ -307,7 +307,7 @@ EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
 EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.6.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
-EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.1"
+EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.2"
 """Amazon FSx CSI Driver — mounts FSx for Lustre file systems as Kubernetes persistent volumes."""
 
 # ---------------------------------------------------------------------------
@@ -548,7 +548,7 @@ def cost_athena_workgroup_name(project_name: str) -> str:
     return f"{project_name}-cost"
 
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.28.0"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.29.0"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP

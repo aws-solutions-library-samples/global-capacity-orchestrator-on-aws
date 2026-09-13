@@ -234,7 +234,7 @@ class TestTrainJobThroughTheQueue:
 
     def test_trusted_trainjob_is_consumed_and_deleted(self, monkeypatch, sqs, job_queue):
         body = self._trainjob_body(
-            "floci-trainjob-ok", "pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime"
+            "floci-trainjob-ok", "pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime"
         )
         sqs.send_message(QueueUrl=job_queue["queue_url"], MessageBody=json.dumps(body))
 

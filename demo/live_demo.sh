@@ -353,7 +353,7 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
     DEPLOY_OUTPUT=""
     INFERENCE_DEPLOYED=false
     for deploy_attempt in $(seq 1 5); do
-        if DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.28.0 \
+        if DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.29.0 \
                 --gpu-count 1 --replicas 1 -r "$REGION" \
                 --extra-args '--model' --extra-args 'facebook/opt-125m' 2>&1) && \
                 echo "$DEPLOY_OUTPUT" | grep -qi "registered\|success"; then

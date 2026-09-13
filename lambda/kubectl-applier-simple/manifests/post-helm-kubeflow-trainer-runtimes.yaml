@@ -67,6 +67,6 @@ spec:
                   automountServiceAccountToken: false
                   containers:
                     - name: node
-                      image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
+                      image: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime
                       securityContext:
                         allowPrivilegeEscalation: false

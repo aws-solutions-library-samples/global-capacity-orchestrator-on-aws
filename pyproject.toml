@@ -44,7 +44,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.85",
+    "boto3==1.43.93",
     "click==8.5.0",
     "requests==2.34.2",
     "pyyaml==6.0.3",
@@ -64,7 +64,7 @@ dependencies = [
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==4.0.0",
+    "fastmcp[tasks,code-mode]==4.0.3",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -72,7 +72,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cdk = [
-    "aws-cdk-lib==2.267.0",
+    "aws-cdk-lib==2.269.0",
     "cdk-nag==3.0.2",
     "constructs==10.8.1",
 ]
@@ -91,14 +91,14 @@ diagrams = [
     # the CI lint gate).
     "pyflowchart==0.6.0",
     "playwright==1.62.0",
-    "ruff==0.16.5",
+    "ruff==0.16.7",
 ]
 # Direct runtime roots for the six production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
 # only as the shared transitive constraint; they never install the project extra.
 image-health-monitor = [
-    "boto3==1.43.85",
-    "botocore==1.43.85",
+    "boto3==1.43.93",
+    "botocore==1.43.93",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
@@ -107,8 +107,8 @@ image-health-monitor = [
     "uvicorn==0.52.4",
 ]
 image-manifest-processor = [
-    "boto3==1.43.85",
-    "botocore==1.43.85",
+    "boto3==1.43.93",
+    "botocore==1.43.93",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
@@ -120,8 +120,8 @@ image-manifest-processor = [
     "uvicorn==0.52.4",
 ]
 image-inference-proxy = [
-    "boto3==1.43.85",
-    "botocore==1.43.85",
+    "boto3==1.43.93",
+    "botocore==1.43.93",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
@@ -129,20 +129,20 @@ image-inference-proxy = [
     "uvicorn==0.52.4",
 ]
 image-inference-monitor = [
-    "boto3==1.43.85",
-    "botocore==1.43.85",
+    "boto3==1.43.93",
+    "botocore==1.43.93",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
-    "boto3==1.43.85",
+    "boto3==1.43.93",
     "kubernetes==36.0.3",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
-    "boto3==1.43.85",
-    "botocore==1.43.85",
+    "boto3==1.43.93",
+    "botocore==1.43.93",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
@@ -177,16 +177,16 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==4.0.0",
+    "fastmcp[tasks,code-mode]==4.0.3",
 ]
 lint = [
-    "ruff==0.16.5",
+    "ruff==0.16.7",
     "yamllint==1.38.0",
 ]
 typecheck = [
     "mypy==2.3.1",
-    "types-requests==2.33.0.20260712",
-    "types-PyYAML==6.0.12.20260815",
+    "types-requests==2.33.0.20260906",
+    "types-PyYAML==6.0.12.20260906",
     # scripts/mkdocs_hooks.py imports mkdocs (which ships py.typed), and the
     # strict mypy job checks scripts/ — reuse the docs extra's pins so the
     # hook is genuinely type-checked instead of ignore_missing_imports'd.
@@ -209,7 +209,7 @@ test = [
     # test seeds a CloudFormation stack for output discovery. Pinning it
     # explicitly keeps test environments reproducible.
     "openapi-spec-validator==0.9.0",
-    "hypothesis==6.167.1",
+    "hypothesis==6.168.0",
     # The cost-monitor service writes Parquet reports via pyarrow (pinned to
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.
