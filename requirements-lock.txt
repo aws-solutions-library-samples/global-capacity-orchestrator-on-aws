@@ -48,7 +48,7 @@ aws-cdk-asset-node-proxy-agent-v6==2.1.2
     # via aws-cdk-lib
 aws-cdk-cloud-assembly-schema==54.15.0
     # via aws-cdk-lib
-aws-cdk-lib==2.267.0
+aws-cdk-lib==2.269.0
     # via
     #   cdk-nag
     #   gco-cli
@@ -63,12 +63,12 @@ bandit==1.9.4
     #   gco-cli (pyproject.toml)
 beartype==0.22.9
     # via py-key-value-aio
-boto3==1.43.85
+boto3==1.43.93
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   moto
-botocore==1.43.85
+botocore==1.43.93
     # via
     #   boto3
     #   gco-cli (pyproject.toml)
@@ -154,15 +154,15 @@ fastapi==0.141.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==4.0.0
+fastmcp==4.0.3
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==4.0.0
+fastmcp-slim==4.0.3
     # via
     #   fastmcp
     #   fastmcp-tasks
-fastmcp-tasks==4.0.0
+fastmcp-tasks==4.0.3
     # via fastmcp
 filelock==3.29.0
     # via
@@ -197,7 +197,7 @@ httpx2==2.12.0
     # via
     #   fastmcp-slim
     #   mcp
-hypothesis==6.167.1
+hypothesis==6.168.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -574,7 +574,7 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.5
+ruff==0.16.7
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -620,11 +620,11 @@ typeguard==2.13.3
     #   jsii
 typer==0.25.1
     # via pydocket
-types-pyyaml==6.0.12.20260815
+types-pyyaml==6.0.12.20260906
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-types-requests==2.33.0.20260712
+types-requests==2.33.0.20260906
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
