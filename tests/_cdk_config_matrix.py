@@ -760,6 +760,13 @@ _NAG_CONFIG_NAMES = {
     # SSM tree, DLQ without its own redrive) — so the single enforce entry
     # covers the whole controller surface under cdk-nag.
     "ga-traffic-dial-enforce",
+    # The opt-in vector store adds an IAM surface nothing else in this set
+    # builds: the ingest Lambda's execution role (corpus-prefix object reads,
+    # PutItem on the replicated table, InvokeModel on the embedding model, and
+    # the X-Ray wildcard every traced Lambda carries). No other config enables
+    # it, so its acknowledgments were only ever exercised by the live examples
+    # harness — which is where the missing X-Ray acknowledgment surfaced.
+    "vector-store-enabled",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

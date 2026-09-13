@@ -1342,6 +1342,15 @@ class GCOGlobalStack(Stack):
                         f"Resource::<ClusterSharedBucket45D6691E.Arn>/{corpus_prefix}*",
                     ],
                 },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Active X-Ray tracing requires xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords on Resource::* because those APIs do not "
+                        "support resource-level IAM constraints."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                },
             ],
         )
         acknowledge_nag_findings(
