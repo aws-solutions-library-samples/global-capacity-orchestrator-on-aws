@@ -40,8 +40,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T06:04:03Z
-# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
+# Generated at (UTC): 2026-09-13T18:39:14Z
+# Generated from Git commit: c13ec54b216d5dd044916ef1e08705fb19e1dd0b
 # Flowchart(s) generated from this file:
 #   * ``GCOGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.png``)
