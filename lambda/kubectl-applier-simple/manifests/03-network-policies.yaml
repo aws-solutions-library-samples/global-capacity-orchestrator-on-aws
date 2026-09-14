@@ -5,23 +5,38 @@
 #   gco-system    default-deny ingress; each platform workload is admitted on
 #                 exactly the port it serves (the TLS proxy sidecars on 8443
 #                 for the ALB, the inference monitor's :9090 metrics endpoint);
-#                 egress is DNS + HTTPS (AWS APIs, the Kubernetes API) plus the
-#                 proxy's path into gco-inference and the cost monitor's path
-#                 to OpenCost (34-cost-monitor.yaml).
+#                 egress is DNS + HTTPS (AWS APIs, the Kubernetes API), the
+#                 node's EKS Pod Identity Agent, plus the proxy's path into
+#                 gco-inference and the cost monitor's path to OpenCost
+#                 (34-cost-monitor.yaml).
 #   gco-jobs      default-deny ingress from outside the namespace, everything
 #                 allowed between job pods (distributed training, Ray, Volcano,
 #                 Slurm and Kubeflow talk pod-to-pod on framework-chosen
 #                 ports); egress is DNS, HTTPS anywhere (S3, DynamoDB, ECR,
 #                 CloudWatch, Bedrock, Hugging Face, PyPI — the regional NAT
 #                 gateways and S3/DynamoDB gateway endpoints carry it), the
-#                 in-VPC ranges from cdk.json vpc_endpoint_cidrs on any port
-#                 (Valkey, Aurora, EFS/FSx targets, VPC endpoints), the
-#                 namespace itself, and the explicit opt-in rules other
-#                 manifests add (MLflow clients, Slurm REST clients, the
-#                 Slinky operator); the KubeRay operator's namespace is
-#                 admitted to Ray head pods on the dashboard port.
+#                 node's EKS Pod Identity Agent (the credentials behind
+#                 gco-service-account), the in-VPC ranges from cdk.json
+#                 vpc_endpoint_cidrs on any port (Valkey, Aurora, EFS/FSx
+#                 targets, VPC endpoints), the namespace itself, and the
+#                 explicit opt-in rules other manifests add (MLflow clients,
+#                 Slurm REST clients, the Slinky operator); the KubeRay
+#                 operator's namespace is admitted to Ray head pods on the
+#                 dashboard port.
 #   gco-inference model pods are isolated to the authenticated proxy and to
-#                 each other; egress is DNS + HTTPS (model pulls, AWS APIs).
+#                 each other; egress is DNS + HTTPS (model pulls, AWS APIs)
+#                 and the node's EKS Pod Identity Agent.
+#
+# EKS Pod Identity serves credentials from the node itself: the cluster
+# injects AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.23/v1/credentials
+# into every pod whose service account has a Pod Identity association, and the
+# SDK's container credential provider dials that link-local address over plain
+# HTTP. An egress-isolated namespace therefore needs an explicit rule for it —
+# port 443 does not cover it, and neither does the VPC range. The
+# allow-pod-identity-agent rules below are that rule; without them a pod that
+# relies on Pod Identity (no earlier credentials in the SDK chain, such as the
+# IRSA variables the platform Deployments set explicitly) times out on its
+# first AWS call, which is how the bucket-upload examples failed live.
 #
 # DNS rules allow port 53 to any destination rather than to kube-system pods:
 # EKS Auto Mode serves cluster DNS from a per-node system service (there are
@@ -231,6 +246,35 @@ spec:
         - protocol: TCP
           port: 443
 ---
+# Allow the platform workloads to reach the node's EKS Pod Identity Agent
+# (see the header). Every platform service account carries a Pod Identity
+# association next to its IRSA annotation; the Deployments set the IRSA
+# variables explicitly today, so the SDK chain never gets this far, but the
+# association is a real credential path and must not be one a policy silently
+# closes. Same selector as allow-aws-api-egress: credentials are only useful to
+# the pods that hold an association. IPv6 clusters would need fd00:ec2::23/128
+# as well; GCO's VPCs are IPv4.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pod-identity-agent
+  namespace: gco-system
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      project: gco
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.170.23/32
+      ports:
+        - protocol: TCP
+          port: 80
+---
 # Allow HTTPS egress in gco-jobs. Jobs reach AWS APIs (S3, DynamoDB, ECR,
 # CloudWatch, Bedrock), model and dataset hubs and package indexes over 443;
 # GCO's own data lives across regions (the cluster-shared bucket and the job
@@ -253,6 +297,31 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+# Allow every job pod to reach the node's EKS Pod Identity Agent (see the
+# header). gco-service-account is the documented identity for jobs, and Pod
+# Identity is how a job running as it obtains credentials unless the manifest
+# wires IRSA itself; the shared-bucket and analytics upload examples do not,
+# and were cut off by the rules above until this one existed. Any label: user
+# jobs pick their own, exactly as allow-https-egress assumes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pod-identity-agent
+  namespace: gco-jobs
+  labels:
+    project: gco
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.170.23/32
+      ports:
+        - protocol: TCP
+          port: 80
 ---
 # Allow egress from gco-jobs to the in-VPC ranges on any port: the Valkey and
 # Aurora endpoints GCO provisions, EFS/FSx mount targets, VPC endpoints, and
@@ -340,6 +409,28 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+# Allow model pods to reach the node's EKS Pod Identity Agent (see the header).
+# gco-service-account holds a Pod Identity association in this namespace too;
+# a model server pulling weights from S3 with it gets its credentials here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pod-identity-agent
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.170.23/32
+      ports:
+        - protocol: TCP
+          port: 80
 ---
 # Allow the authenticated inference proxy to reach internal model Services.
 # No other gco-system pod is selected, and model endpoints are never exposed

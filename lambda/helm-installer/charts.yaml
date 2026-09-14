@@ -149,7 +149,7 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-efa-k8s-device-plugin
-    version: "v0.5.30"
+    version: "v0.5.32"
     namespace: kube-system
     create_namespace: false
     values:
@@ -288,7 +288,7 @@ charts:
     repo_name: jetstack
     repo_url: https://charts.jetstack.io
     chart: cert-manager
-    version: "v1.21.1"
+    version: "v1.21.2"
     namespace: cert-manager
     create_namespace: true
     values:
@@ -346,7 +346,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm-operator
-    version: "1.2.1"
+    version: "1.2.2"
     namespace: slurm-operator
     create_namespace: true
     use_oci: true
@@ -360,7 +360,7 @@ charts:
         replicas: 1
         image:
           repository: ghcr.io/slinkyproject/slurm-operator
-          tag: "1.2.1"
+          tag: "1.2.2"
         resources:
           requests:
             cpu: 100m
@@ -377,7 +377,7 @@ charts:
         enabled: true
         image:
           repository: ghcr.io/slinkyproject/slurm-operator-webhook
-          tag: "1.2.1"
+          tag: "1.2.2"
         resources:
           requests:
             cpu: 50m
@@ -398,7 +398,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm
-    version: "1.2.1"
+    version: "1.2.2"
     namespace: gco-jobs
     create_namespace: false
     use_oci: true
@@ -414,7 +414,7 @@ charts:
         slurmctld:
           image:
             repository: ghcr.io/slinkyproject/slurmctld
-            tag: "26.05.3-ubuntu24.04"
+            tag: "26.05.4-ubuntu24.04"
           resources:
             requests:
               cpu: 500m
@@ -436,7 +436,7 @@ charts:
           slurmd:
             image:
               repository: ghcr.io/slinkyproject/slurmd
-              tag: "26.05.3-ubuntu24.04"
+              tag: "26.05.4-ubuntu24.04"
             resources:
               requests:
                 cpu: "1"
@@ -474,7 +474,7 @@ charts:
         slurmrestd:
           image:
             repository: ghcr.io/slinkyproject/slurmrestd
-            tag: "26.05.3-ubuntu24.04"
+            tag: "26.05.4-ubuntu24.04"
           resources:
             requests:
               cpu: 100m
@@ -567,7 +567,7 @@ charts:
     repo_name: prometheus-community
     repo_url: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    version: "88.6.2"
+    version: "91.0.0"
     namespace: monitoring
     create_namespace: true
     wait: false
@@ -709,7 +709,7 @@ charts:
     repo_name: opencost
     repo_url: https://opencost.github.io/opencost-helm-chart
     chart: opencost
-    version: "2.5.30"
+    version: "2.5.31"
     namespace: monitoring
     create_namespace: false
     wait: false
@@ -835,7 +835,7 @@ charts:
         # to v<appVersion>-full) so the monthly deps-drift report covers
         # it. -full carries the server extras (SQLAlchemy backend, boto3
         # for the S3 artifact proxy) the tracking server needs.
-        tag: "v3.15.1-full"
+        tag: "v3.16.0-full"
       # SQLite run-metadata store on the chart's own gp3 PVC (first-class
       # storage support; mounted at /mlflow). The claim size is a
       # deployment token (cluster_observability.mlflow.persistence_size).
@@ -927,7 +927,7 @@ charts:
           # a contended node with a smaller request. The chart exposes no
           # probe knobs, so the guaranteed share is the only lever.
           cpu: "1"
-          # 2Gi requested / 3Gi limit, measured: the v3.15.1-full server
+          # 2Gi requested / 3Gi limit, measured: the v3.16.0-full server
           # ramps to ~1.5GiB steady state during startup (server + job
           # schedulers) — the previous 1Gi limit OOM-killed the container
           # at ~25s every cycle (kernel TaskOOM, caught live 2026-08-14
@@ -1064,7 +1064,7 @@ charts:
     repo_name: kueue-oci
     repo_url: oci://registry.k8s.io/kueue/charts
     chart: kueue
-    version: "0.19.2"
+    version: "0.19.4"
     namespace: kueue-system
     create_namespace: true
     use_oci: true

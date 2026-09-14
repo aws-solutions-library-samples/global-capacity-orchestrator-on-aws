@@ -664,6 +664,7 @@ class TestRunnerGuaranteedCleanup:
         with (
             patch.object(runner, "destroy_deployment", return_value=details) as destroy,
             patch.object(runner, "action_final_inventory") as final_inventory,
+            patch.object(runner.time, "monotonic", side_effect=[100.0, 4864.6]),
         ):
             instance._guaranteed_cleanup()
 
@@ -674,7 +675,10 @@ class TestRunnerGuaranteedCleanup:
         recorded = instance.checkpoint.action_results["destroy"]
         assert recorded.status == "passed"
         assert recorded.details == details
-        assert recorded.duration_seconds == 0.0
+        # The reconciliation was the run's teardown, so its row carries the time
+        # it actually took rather than a zero stamped at the end.
+        assert recorded.duration_seconds == 4764.6
+        assert recorded.started_at <= recorded.ended_at
         assert recorded.description == build_action_registry()["destroy"].description
         assert _read_json(instance.settings.checkpoint_path)["completed_actions"] == ["destroy"]
 
@@ -735,15 +739,126 @@ class TestRunnerGuaranteedCleanup:
         with (
             patch.object(runner, "destroy_deployment", return_value={"needed": True}),
             patch.object(runner, "action_final_inventory", return_value=inventory) as final,
+            # destroy is already complete (one start stamp), then inventory start/end
+            patch.object(runner.time, "monotonic", side_effect=[10.0, 20.0, 603.157]),
         ):
             instance._guaranteed_cleanup()
 
         final.assert_called_once_with(instance.context)
         assert instance.checkpoint.completed_actions == ["destroy", "final-inventory"]
+        # No action result existed yet, so the re-check is the run's final
+        # inventory and is recorded as such, with the time it took.
         recorded = instance.checkpoint.action_results["final-inventory"]
         assert recorded.status == "passed"
         assert recorded.details == inventory
+        assert recorded.duration_seconds == 583.157
+        assert instance.report.cleanup["final_inventory_recheck"] == {
+            "status": "passed",
+            "started_at": recorded.started_at,
+            "ended_at": recorded.ended_at,
+            "duration_seconds": 583.157,
+            "recorded_as_action_result": True,
+        }
+        assert instance._final_inventory_recheck is None
         assert "destroy" not in instance.checkpoint.action_results
+
+    def test_a_passed_final_inventory_action_keeps_its_row_and_the_recheck_is_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The seventh live run of #375 reported its 9.7-minute inventory as 0.000s.
+
+        The action list had already run ``final-inventory``; the guaranteed
+        post-run re-check then replaced that result with one stamped at the
+        end. Now the action's row and duration stand, the re-check is recorded
+        under cleanup with its own timing, and its scan (the latest look at
+        the account) is what the report calls the final inventory.
+        """
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance.checkpoint.completed_actions.extend(["destroy", "final-inventory"])
+        instance._identity_verified = True
+        action_scan = {"summary": {"total": 0}, "scan": "action"}
+        instance.checkpoint.action_results["final-inventory"] = ActionResult(
+            name="final-inventory",
+            description="d",
+            status="passed",
+            started_at="2026-09-13T06:18:00+00:00",
+            ended_at="2026-09-13T06:27:43+00:00",
+            duration_seconds=583.157,
+            details=action_scan,
+        )
+        recheck_scan = {"summary": {"total": 0}, "scan": "recheck"}
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(runner, "action_final_inventory", return_value=recheck_scan),
+            patch.object(runner.time, "monotonic", side_effect=[10.0, 20.0, 610.4]),
+        ):
+            instance._guaranteed_cleanup()
+
+        kept = instance.checkpoint.action_results["final-inventory"]
+        assert kept.duration_seconds == 583.157
+        assert kept.details == action_scan
+        assert kept.ended_at == "2026-09-13T06:27:43+00:00"
+        recheck = instance._final_inventory_recheck
+        assert recheck is not None
+        assert recheck.status == "passed"
+        assert recheck.duration_seconds == 590.4
+        assert recheck.details == recheck_scan
+        assert instance.report.cleanup["final_inventory_recheck"] == {
+            "status": "passed",
+            "started_at": recheck.started_at,
+            "ended_at": recheck.ended_at,
+            "duration_seconds": 590.4,
+            "recorded_as_action_result": False,
+        }
+        assert instance.checkpoint.completed_actions == ["destroy", "final-inventory"]
+
+        instance._refresh_report_results()
+        assert instance.report.final_inventory == recheck_scan
+        row = next(r for r in instance.report.action_results if r.name == "final-inventory")
+        assert row.duration_seconds == 583.157
+        persisted = _read_json(instance.settings.checkpoint_path)
+        assert persisted["action_results"]["final-inventory"]["duration_seconds"] == 583.157
+
+    def test_a_failed_recheck_replaces_a_passed_final_inventory_action(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A residue found after the guaranteed teardown is the verdict that counts."""
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance.checkpoint.completed_actions.extend(["destroy", "final-inventory"])
+        instance._identity_verified = True
+        instance.checkpoint.action_results["final-inventory"] = ActionResult(
+            name="final-inventory",
+            description="d",
+            status="passed",
+            started_at="s",
+            ended_at="e",
+            duration_seconds=583.157,
+            details={"summary": {"total": 0}},
+        )
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(
+                runner, "action_final_inventory", side_effect=RuntimeError("residue remains")
+            ),
+            patch.object(runner.time, "monotonic", side_effect=[10.0, 20.0, 45.5]),
+        ):
+            instance._guaranteed_cleanup()
+
+        recorded = instance.checkpoint.action_results["final-inventory"]
+        assert recorded.status == "failed"
+        assert recorded.error == "RuntimeError: residue remains"
+        assert recorded.duration_seconds == 25.5
+        assert instance._final_inventory_recheck is None
+        assert "final_inventory_recheck" not in instance.report.cleanup
+        assert instance.checkpoint.completed_actions == ["destroy"]
+        instance._refresh_report_results()
+        assert instance.report.final_inventory is None
 
     def test_final_inventory_failure_is_checkpointed_as_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -818,7 +933,16 @@ class TestRunnerRun:
         assert instance.report.status == "passed"
         assert instance.report.ended_at is not None
         destroy.assert_called_once_with(instance.context)
-        assert instance.report.cleanup == {"completed": True, "needed": True}
+        recheck = instance.report.cleanup["final_inventory_recheck"]
+        assert instance.report.cleanup == {
+            "completed": True,
+            "needed": True,
+            "final_inventory_recheck": recheck,
+        }
+        # The action ran and passed on its own, so the post-run re-check is
+        # evidence beside it rather than a replacement for its row.
+        assert recheck["status"] == "passed"
+        assert recheck["recorded_as_action_result"] is False
         assert instance.checkpoint.completed_actions == list(build_action_registry())
         assert instance.report.final_inventory == inventory
         report, markdown = self._reports(instance)
@@ -826,6 +950,12 @@ class TestRunnerRun:
         assert report["final_inventory"] == inventory
         assert [entry["name"] for entry in report["action_results"]] == list(
             build_action_registry()
+        )
+        final_row = next(e for e in report["action_results"] if e["name"] == "final-inventory")
+        assert final_row["details"] == {"action": "final-inventory"}
+        assert (
+            report["cleanup"]["final_inventory_recheck"]["duration_seconds"]
+            == (recheck["duration_seconds"])
         )
         assert "- **Status:** **PASSED**" in markdown
         output = capsys.readouterr().out
@@ -911,7 +1041,15 @@ class TestRunnerRun:
         assert instance.report.status == "failed"
         assert "stack is ROLLBACK_COMPLETE" in (instance.report.fatal_error or "")
         destroy.assert_called_once_with(instance.context)
-        assert instance.report.cleanup == {"completed": True, **teardown}
+        recheck = instance.report.cleanup["final_inventory_recheck"]
+        assert instance.report.cleanup == {
+            "completed": True,
+            **teardown,
+            "final_inventory_recheck": recheck,
+        }
+        # The action list never reached final-inventory, so the post-run scan
+        # is the run's final inventory and is recorded as the action result.
+        assert recheck["recorded_as_action_result"] is True
         assert instance.checkpoint.completed_actions == [
             "preflight",
             "baseline",

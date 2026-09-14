@@ -19,30 +19,6 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# CVE-2026-56854 — golang.org/x/crypto/ssh authentication bypass caused by
-# unenforced source-address restrictions, fixed in x/crypto v0.55.0. The
-# Now carried only by the pinned Helm binary (helm-v4.2.4-linux-amd64,
-# lambda/helm-installer/Dockerfile), which still embeds v0.54.0. Buildx was the
-# other carrier and no longer is: re-checked 2026-09-08, stable Buildx v0.37.0
-# shipped 2026-09-02 and its released binaries link x/crypto v0.55.0 (verified
-# with `go version -m` against both published architectures), so bumping
-# ARG BUILDX_VERSION cleared the dev image and left only this Helm copy.
-#
-# Not clearable by a stable pin bump: v4.2.4 (2026-08-13) is still the latest
-# Helm release, so there is no fixed stable Helm to move to.
-#
-# Low runtime risk: Helm is a deploy-time chart client and exposes no SSH
-# server, so the vulnerable server-side authentication path is unreachable.
-#
-# Clears when a stable Helm release embeds x/crypto >= v0.55.0: bump the
-# authenticated Helm URL and SHA256 trust anchor in
-# lambda/helm-installer/Dockerfile, update the expected pins in
-# tests/test_supply_chain_integrity.py, then drop this entry. Re-dated to
-# 2026-10-22 to review alongside CVE-2026-50163, the other suppression waiting
-# on exactly that stable Helm release.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-56854
-CVE-2026-56854 exp:2026-10-22
-
 # CVE-2026-17106 (GHSA-hfg8-hc9c-6c3h) — github.com/moby/go-archive v0.2.0: a
 # crafted tar archive can write outside the extraction directory during
 # untar. Statically linked into the docker-buildx CLI plugin that
@@ -55,12 +31,12 @@ CVE-2026-56854 exp:2026-10-22
 # Security workflow was green on main at eeeab67 (2026-08-18T20:50Z), 27
 # minutes before publication, so this appeared on an unchanged buildx binary.
 #
-# Not clearable by a stable pin bump: re-checked 2026-09-08 against the now
-# current stable Buildx v0.37.0, which this repository pins. Upstream published
+# Not clearable by a stable pin bump: re-checked 2026-09-13 against the now
+# current stable Buildx v0.37.1, which this repository pins. Upstream published
 # go-archive v0.3.0 on 2026-07-30 (v0.3.3 by 2026-08-05), but Buildx has not
-# adopted it — v0.37.0 links v0.2.0, verified with `go version -m` against both
-# published architectures. The advisory range is `< 0.3.0`, so v0.37.0 moving
-# down from v0.2.1 to v0.2.0 neither clears nor worsens the finding.
+# adopted it — v0.37.1 still links v0.2.0, verified with `go version -m` on the
+# published linux-amd64 binary. The advisory range is `< 0.3.0`, so the v0.37.0
+# -> v0.37.1 bump neither clears nor worsens the finding.
 #
 # Low runtime risk: the flagged path is tar extraction. buildx is a
 # build-time CLI plugin that extracts contexts and cache artifacts authored by
@@ -180,34 +156,6 @@ CVE-2026-69192 exp:2026-10-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-73566
 CVE-2026-73566 exp:2026-11-14
 
-# CVE-2026-50163 (GHSA-77gc-fj98-665h) — oras.land/oras-go/v2 v2.6.1
-# information disclosure / arbitrary file access via crafted tarball
-# hardlinks, statically linked into the pinned Helm binary
-# (helm-v4.2.4-linux-amd64, lambda/helm-installer/Dockerfile). Surfaced by
-# security:trivy:container-scan on the helm-installer Lambda image — the
-# only scanned image that carries helm. Fixed in oras-go v2.6.2.
-#
-# Not introduced by any change of ours: the advisory reached the Trivy DB
-# after the last green main run and appeared on an unchanged helm binary.
-#
-# Not clearable by a stable pin bump: re-checked 2026-09-01 — v4.2.4 is
-# the latest stable Helm release and its binary still reports oras-go v2.6.1.
-# v4.3.0-rc.1 contains v2.6.2, but this release deliberately excludes
-# prerelease tooling; remove this suppression when a stable Helm build carries
-# the fix.
-#
-# Low runtime risk: the flagged path is OCI-registry chart *pull*
-# extraction. The helm-installer Lambda pulls only the version-pinned charts
-# in charts.yaml from operator-configured registries during stack deploys — not untrusted, attacker-supplied artifacts — and the Lambda
-# runs only at deploy time, not as a long-lived network service.
-#
-# Clears when a stable Helm release ships with oras-go >= v2.6.2: bump the
-# authenticated Helm URL and SHA256 trust anchor in
-# lambda/helm-installer/Dockerfile (workflows derive both pins from there),
-# update the expected pins in tests/test_supply_chain_integrity.py, then drop
-# this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
-CVE-2026-50163 exp:2026-10-22
 # CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
 # against the built dev image, under its python-pkg target.
@@ -272,7 +220,7 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 # likewise present in the stdlib resolver) — all eight are Go STDLIB flaws
 # in binaries built with go1.26.5, fixed in Go 1.25.13 / 1.26.6 /
 # 1.27.0-rc.3. The last two formerly sat in this file as golang.org/x/net
-# suppressions; the kubectl v1.36.4 / helm v4.2.4 pins ship x/net 0.56.0,
+# suppressions; the kubectl v1.36.4 / helm pins ship x/net >= 0.56.0,
 # which cleared the module finding and left only this stdlib copy
 # (verified 2026-08-21 with trivy rootfs against both release binaries).
 #
@@ -284,25 +232,27 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 #
 # Flagged in the scanned stable-tool images:
 #   dev (Dockerfile.dev)                    kubectl
-#   helm-installer                          helm, kubectl
+#   helm-installer                          kubectl
 # A fresh 2026-09-01 pull of the AWS Lambda Python 3.14 base scans clean for
 # aws-lambda-rie, so the remaining occurrences are all in pins we track.
 # docker and docker-buildx both dropped off this list on 2026-09-08: stable
 # Docker 29.8.0 and Buildx v0.37.0 are built with go1.26.8, past the 1.26.6 fix
 # line. Verified per binary with `go version` and a pinned-Trivy 0.74.0 rootfs
 # scan: the 29.8.0 and v0.37.0 binaries report zero stdlib findings, while the
-# 29.7.2 and v0.36.1 binaries they replace each reported all eight.
+# 29.7.2 and v0.36.1 binaries they replace each reported all eight. helm
+# followed on 2026-09-13: stable v4.3.0 reports go1.27.1 (`go version -m` on the
+# published linux-amd64 archive), so the helm-installer image now carries
+# these ids through kubectl alone.
 #
 # Not clearable by an allowed pin bump — upstream re-checked 2026-09-01:
 #   kubectl        v1.36.4 is latest stable-1.36 and reports go1.26.5. Both
 #                  shipped kubectl pins match and CI enforces the supported
 #                  ±1 minor skew against cdk.json::kubernetes_version.
-#   helm           v4.2.4 is the latest stable release and reports go1.26.5;
-#                  only a prerelease currently carries patched Go.
+#   helm           cleared 2026-09-13 by bumping to stable v4.3.0 (go1.27.1).
 #   docker         cleared 2026-09-08 by bumping to stable 29.8.0 (go1.26.8).
 #   docker-buildx  cleared 2026-09-08 by bumping to stable v0.37.0 (go1.26.8).
-# Only kubectl keeps these ids alive in the dev image, and only kubectl and
-# helm keep them alive in helm-installer.
+# Only kubectl keeps these ids alive, in both the dev and helm-installer
+# images.
 #
 # Low runtime risk. Every flagged binary is a short-lived CLI/tooling client,
 # never a long-lived network service:

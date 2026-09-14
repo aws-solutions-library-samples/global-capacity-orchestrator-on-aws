@@ -100,4 +100,4 @@ kube-prometheus-stack, OpenCost and MLflow follow `cluster_observability` and
 ## Dependencies
 
 - `boto3`, `pyyaml`, `urllib3` (see `requirements.txt`)
-- Helm v4.2.4, kubectl v1.36.4 (installed in Docker image)
+- Helm v4.3.0, kubectl v1.36.4 (installed in Docker image)

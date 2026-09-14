@@ -15,10 +15,16 @@ pods and reading the verdict from each probe's exit code:
   (``allow-metrics-to-inference-monitor`` admits exactly the metrics port,
   which is what lets Prometheus scrape it);
 * ``gco-jobs`` -> ``https://checkip.amazonaws.com/``: **reachable**
-  (``allow-dns`` plus ``allow-https-egress``); and
+  (``allow-dns`` plus ``allow-https-egress``);
 * ``gco-jobs`` -> ``http://checkip.amazonaws.com/`` on port 80: **blocked**
   (no rule admits it — the same host over 443 answered, so this is the policy
-  deciding, not the network).
+  deciding, not the network); and
+* ``gco-jobs`` -> ``http://169.254.170.23/v1/credentials``: **reachable**
+  (``allow-pod-identity-agent`` — the node's EKS Pod Identity Agent, which is
+  where a ``gco-service-account`` pod gets its AWS credentials; the probe
+  carries no token, so the agent answers 4xx, and any HTTP answer counts).
+  Port 80 to the internet is blocked by the previous probe, so this one shows
+  the rule admitting exactly the link-local endpoint.
 
 Every probe is a digest-pinned BusyBox Job labelled with this run's token
 (``manifests/netpol-probe-job.yaml``); the two listeners are the same image
@@ -62,6 +68,9 @@ _PROBE_MANIFEST = "netpol-probe-job.yaml"
 _TARGET_PORT = 8080
 _INFERENCE_MONITOR_METRICS_PORT = 9090
 _EGRESS_HOST = "checkip.amazonaws.com"
+#: The EKS Pod Identity Agent's link-local address on every node; the
+#: cluster points AWS_CONTAINER_CREDENTIALS_FULL_URI at this path.
+_POD_IDENTITY_AGENT_URL = "http://169.254.170.23/v1/credentials"
 #: A namespace the manifests leave unpoliced, so a client there proves the
 #: target namespace's ingress rules and nothing else.
 _UNPOLICED_NAMESPACE = "default"
@@ -151,6 +160,14 @@ def _probe_specs(
             "blocked",
             "gco-jobs egress (no rule admits port 80)",
             enforcement_only=True,
+        ),
+        ProbeSpec(
+            "pod-identity-agent",
+            "gco-jobs",
+            _POD_IDENTITY_AGENT_URL,
+            "reachable",
+            "gco-jobs/allow-pod-identity-agent",
+            enforcement_only=False,
         ),
     )
 

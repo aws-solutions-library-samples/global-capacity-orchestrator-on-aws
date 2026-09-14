@@ -52,7 +52,7 @@ CREDENTIAL_PERSISTING_WORKFLOWS = {"release.yml", "release-publish.yml"}
 ALLOWED_RUNNER_LABELS = {
     "ubuntu-latest",
     "ubuntu-24.04-arm",
-    "macos-15",
+    "macos-26",
     "windows-latest",
 }
 

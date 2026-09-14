@@ -27,14 +27,14 @@
       "source_commit": "90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4"
     },
     "cli/images.py": {
-      "digest": "d95bc2ac7b13403bfed36933623ff7f0515f00dce5f86713e6a0eb30d71ba1da",
-      "generated_at": "2026-09-01T17:12:46Z",
-      "source_commit": "014029fc23b3763b4a03447e9e95b4a3fafcc3f3"
+      "digest": "7311767db53848aaf1e95ad897e4ebf004074d0e59d549831e19938847ffe765",
+      "generated_at": "2026-09-13T13:44:22Z",
+      "source_commit": "c49331669c66625fecfecf44ae6ab5f95afbfcb4"
     },
     "cli/inference.py": {
-      "digest": "25a7079b4866427df4440cf64ef5c2d5e120df25e0271ad7204bcd5bfb8e7990",
-      "generated_at": "2026-09-03T18:56:22Z",
-      "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
+      "digest": "f3357fb5e19b50d4e5365f3d25e5b287231906da3b738db89d86278b16cfd03c",
+      "generated_at": "2026-09-13T13:44:22Z",
+      "source_commit": "c49331669c66625fecfecf44ae6ab5f95afbfcb4"
     },
     "cli/jobs.py": {
       "digest": "0b274cf5ac7558d8924ec8c24f0411f4303f65266e3ceafc55802c1c20d9e06b",
@@ -67,9 +67,9 @@
       "source_commit": "5d1a9122b6630246e01cafdaf458d11c2da8b4ae"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "6050915505f946f134bedab52edaa5259673e3c6909a1440fb04c216b15fe7f1",
-      "generated_at": "2026-09-12T09:16:12Z",
-      "source_commit": "0e0c4c0e608367283092ad1925b30259ab1785aa"
+      "digest": "7316bccfec73eb9faf00d8ed49c9ccb126f6ed15a7c2b81e8136c81bce47e3f7",
+      "generated_at": "2026-09-13T13:44:22Z",
+      "source_commit": "c49331669c66625fecfecf44ae6ab5f95afbfcb4"
     },
     "gco/services/manifest_api.py": {
       "digest": "b8ef7f04c38d93f1cec9bfc7d9c5ad5413fe47c6fac75d675eef199d659ac202",
@@ -122,9 +122,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/stacks/global_stack.py": {
-      "digest": "c368e662aa30046264ae74da79ce6f1f5e87eb4594a77eb1bfa912daf6f6013d",
-      "generated_at": "2026-09-12T06:04:03Z",
-      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
+      "digest": "37f98e6a0fb80bf147de9d4e3bb508b2e470ca72e85e515bfe5c2b561a5a50bf",
+      "generated_at": "2026-09-13T18:39:14Z",
+      "source_commit": "c13ec54b216d5dd044916ef1e08705fb19e1dd0b"
     },
     "gco/stacks/monitoring_stack.py": {
       "digest": "27363b1ad7a4aeb4072e365a474fbb2d1b5151ab2e8f86f47c6842373d179189",

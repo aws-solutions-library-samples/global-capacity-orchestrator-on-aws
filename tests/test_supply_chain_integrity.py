@@ -103,8 +103,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             "lambda/helm-installer/Dockerfile",
-            "v4.2.4",
-            "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3",
+            "v4.3.0",
+            "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
         ),
         (
             "lambda/helm-installer/Dockerfile",
@@ -886,13 +886,13 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ]
 
     assert "ARG BUILDX_SHA256" not in dev_dockerfile
-    assert "ARG BUILDX_VERSION=v0.37.0" in buildx_section
+    assert "ARG BUILDX_VERSION=v0.37.1" in buildx_section
     assert "buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" in buildx_section
     assert (
-        'amd64) BUILDX_SHA256="ae43fa08c796b44efc86d7a63c55f73f7c35f3101188dea7bf93bcd6f99577ba"'
+        'amd64) BUILDX_SHA256="9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b"'
     ) in buildx_section
     assert (
-        'arm64) BUILDX_SHA256="d263ce31bd2c9e9210aaa2c7537c67802bccabcd342e4c9fe4907085ddb41aa5"'
+        'arm64) BUILDX_SHA256="e5cc9fe3bbff5cbc91230981f7860e06076110730a2db997082652199042a1f2"'
     ) in buildx_section
     assert (
         'echo "${BUILDX_SHA256}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -'
@@ -900,9 +900,9 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
 
     assert "ARG HELM_SHA256" not in installer_dockerfile
     assert "ARG KUBECTL_SHA256" not in installer_dockerfile
-    assert "helm-v4.2.4-linux-amd64.tar.gz" in helm_section
+    assert "helm-v4.3.0-linux-amd64.tar.gz" in helm_section
     assert (
-        "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3  /tmp/helm.tar.gz"
+        "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  /tmp/helm.tar.gz"
     ) in helm_section
     assert "release/v1.36.4/bin/linux/amd64/kubectl" in kubectl_section
     assert (

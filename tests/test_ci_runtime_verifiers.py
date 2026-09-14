@@ -136,12 +136,12 @@ def _dev_outputs() -> dict[tuple[str, ...], str]:
     return {
         ("node", "--version"): "v24.21.0",
         ("npm", "--version"): "12.0.2",
-        ("cdk", "--version"): "2.1140.0 (build abc123)",
-        ("aws", "--version"): "aws-cli/2.36.41 Python/3.13.11 Linux/6.11",
+        ("cdk", "--version"): "2.1141.0 (build abc123)",
+        ("aws", "--version"): "aws-cli/2.36.44 Python/3.13.11 Linux/6.11",
         ("docker", "--version"): "Docker version 29.8.0, build deadbeef",
-        ("docker", "buildx", "version"): "github.com/docker/buildx v0.37.0 abc123",
-        ("uv", "--version"): "uv 0.12.11 (abc123 2026-08-01)",
-        ("uvx", "--version"): "uvx 0.12.11 (abc123 2026-08-01)",
+        ("docker", "buildx", "version"): "github.com/docker/buildx v0.37.1 abc123",
+        ("uv", "--version"): "uv 0.12.13 (abc123 2026-08-01)",
+        ("uvx", "--version"): "uvx 0.12.13 (abc123 2026-08-01)",
         (
             "kubectl",
             "version",
@@ -169,12 +169,12 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
     assert actual == {
         "Node.js": "v24.21.0",
         "npm": "12.0.2",
-        "CDK": "2.1140.0",
-        "AWS CLI": "2.36.41",
+        "CDK": "2.1141.0",
+        "AWS CLI": "2.36.44",
         "Docker CLI": "29.8.0",
-        "Buildx": "v0.37.0",
-        "uv": "0.12.11",
-        "uvx": "0.12.11",
+        "Buildx": "v0.37.1",
+        "uv": "0.12.13",
+        "uvx": "0.12.13",
         "kubectl": "v1.36.4",
     }
 
@@ -204,7 +204,7 @@ def _helm_runner(*, kubectl_version: str = "v1.36.4"):
             "helm-installer:ci",
             "version",
             "--short",
-        ): "v4.2.4+gabcdef",
+        ): "v4.3.0+gabcdef",
         (
             "docker",
             "run",
@@ -233,7 +233,7 @@ def test_helm_installer_verifier_accepts_matching_runtime_versions(
         runner=_helm_runner(),
     )
 
-    assert actual == {"Helm": "v4.2.4", "kubectl": "v1.36.4"}
+    assert actual == {"Helm": "v4.3.0", "kubectl": "v1.36.4"}
 
 
 def test_helm_installer_verifier_rejects_a_mismatched_runtime_version(
