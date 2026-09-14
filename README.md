@@ -22,6 +22,9 @@
   <a href="https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/releases/latest"><img src="https://img.shields.io/github/v/release/aws-solutions-library-samples/global-capacity-orchestrator-on-aws?sort=semver&display_name=tag" alt="Latest Release"></a>
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"></a>
 </p>
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT--0-blue" alt="License: MIT-0"></a>
+</p>
 <!-- END BADGE TABLE -->
 
 </div>
