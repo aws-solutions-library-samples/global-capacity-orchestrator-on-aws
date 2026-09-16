@@ -629,8 +629,8 @@ class SamplingPrompt:
     call — both methods produce deterministic outputs from the same
     bound state, which is the property the determinism tests pin down.
 
-    All inputs are required positionally or by keyword; defaults are
-    only provided where the design spec defines a default.
+    All inputs are required positionally or by keyword; defaults exist
+    only for the fields whose contract documents a default value.
     """
 
     directive: str

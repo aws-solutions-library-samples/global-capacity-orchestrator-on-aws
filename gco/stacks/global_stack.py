@@ -895,7 +895,7 @@ class GCOGlobalStack(Stack):
             # VectorIndexUpdates member at serialization, and DynamoDB then
             # rejects the bare UpdateTable with "At least one of
             # ProvisionedThroughput, BillingMode, ... is required". boto3
-            # having the API (design §0.1) says nothing about this Lambda's
+            # having the API on the developer's machine says nothing about this Lambda's
             # SDK. install_latest_aws_sdk fetches a current SDK on first
             # invocation so the member survives. Verified live: the bundled
             # SDK reproduces the failure, the installed SDK creates the index.

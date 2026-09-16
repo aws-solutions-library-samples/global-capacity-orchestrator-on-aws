@@ -158,7 +158,7 @@ def test_relative_links_resolve_to_wiki_pages_or_injected_assets() -> None:
 
 
 def test_wiki_uses_no_external_image_hosts() -> None:
-    """Requirement 4.2: images come from the site itself, never external hosts."""
+    """Images come from the site itself, never from external hosts."""
     offenders: list[str] = []
     for name, text in _wiki_pages().items():
         for match in re.findall(r"!\[[^\]]*\]\(([^)\s]+)", text):
@@ -187,8 +187,8 @@ def test_every_wiki_image_maps_to_a_tracked_asset() -> None:
 def test_wiki_pages_carry_no_reference_to_docs_dir_pages_as_relative_links() -> None:
     """docs/ is not part of the built site; a relative docs/ link would 404.
 
-    The content contract (requirements 2.4) says deep documentation is linked
-    via full GitHub URLs — this catches the natural authoring mistake.
+    The content contract says deep documentation is linked via full GitHub
+    URLs — this catches the natural authoring mistake.
     """
     offenders: list[str] = []
     for name, text in _wiki_pages().items():

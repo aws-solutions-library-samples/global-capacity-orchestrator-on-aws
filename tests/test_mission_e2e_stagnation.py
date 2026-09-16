@@ -41,7 +41,7 @@ Where this test diverges from the precedents and why:
   precisely what these tests exercise.
 * **Counter-walking cadence.** ``every_iteration`` keeps every
   iteration on a real checkpoint — synthetic ``cadence_skip``
-  iterations would leave the counter alone (Requirement 6.8) and
+  iterations would leave the counter alone and
   keep stagnation latent forever. Pinning the cadence makes the
   counter sequence ``0 → 1 → 2 → 3 → 4`` predictable across the run.
 * **Generous iteration cap.** ``max_iterations=20`` is well above the
@@ -177,7 +177,7 @@ def _make_session(*, session_id: str) -> dict[str, Any]:
       this iteration cap.
     * ``every_iteration`` cadence keeps the no-progress counter
       advancing on every iteration. Synthetic ``cadence_skip``
-      iterations leave the counter alone (Requirement 6.8) and the
+      iterations leave the counter alone and the
       stagnation branch would never fire.
     * ``stagnation_threshold=4`` matches the brief. The
       Strategy_Revision_Heuristic's clause (a) fires once the counter
@@ -252,12 +252,11 @@ async def test_adjust_fires_before_terminate(tmp_path: Path) -> None:
     The test pins:
 
     * an ``adjust`` verdict appears strictly before any ``terminate``
-      verdict (Requirement 13.6's "the ``adjust`` Verdict fires …
-      before ``terminate`` does"),
+      verdict (the ``adjust`` Verdict fires before ``terminate`` does),
     * the first ``adjust`` lands on iteration 2 (the half-threshold
-      iteration, per Requirement 8.4's clause (a)),
+      iteration),
     * every ``adjust`` iteration carries a non-empty
-      ``revision_rationale`` (Requirement 8.6's templated text).
+      ``revision_rationale`` (the templated rationale text).
     """
     backend = FilesystemBackend(root=tmp_path)
     session = _make_session(session_id="sess-stagnation-adjust")
@@ -342,7 +341,7 @@ async def test_adjust_fires_before_terminate(tmp_path: Path) -> None:
 
     # ------------------------------------------------------------------ #
     # Rationale invariant — every ``adjust`` iteration must carry a
-    # non-empty ``revision_rationale`` string (Requirement 8.6). Non-
+    # non-empty ``revision_rationale`` string. Non-
     # adjust iterations leave the field unset; we don't pin its
     # absence because the engine never writes it on those paths.
     # ------------------------------------------------------------------ #

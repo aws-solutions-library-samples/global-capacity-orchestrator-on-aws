@@ -34,8 +34,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directories to walk. Everything under these is scanned. Files outside them are
-# left alone (so the spec/design tree, hidden caches, and the .git folder do not
-# trip the test).
+# left alone (so hidden caches and the .git folder do not trip the test).
 SCANNED_DIRS = (
     "gco_mcp",
     "cli",
@@ -80,8 +79,8 @@ SELF = Path(__file__).resolve()
 # purpose is to list the prohibited surface.
 TESTS_README = (PROJECT_ROOT / "tests" / "README.md").resolve()
 
-# tests/test_integration.py historically used ``re.match`` and was reviewed under
-# task 16.9 — its single call site was migrated to ``re.search``. The carve-out
+# tests/test_integration.py historically used ``re.match`` and was reviewed;
+# its single call site was migrated to ``re.search``. The carve-out
 # remains so future patches that re-introduce ``re.match`` there get one warning
 # from this guardrail before being committed.
 RE_MATCH_CARVE_OUTS = {

@@ -1840,7 +1840,7 @@ class TestWebhookSSRFPreventionProperty:
         assert error is None
 
 
-# ── Unit tests for webhook URL validation (Task 3.3) ──────────────────────
+# ── Unit tests for webhook URL validation ─────────────────────────────────
 # Test specific edge cases: IPv6 loopback, DNS failure, domain allowlist
 # filtering, port handling, IPv6 private addresses, mixed case scheme,
 # URL with credentials/userinfo.
