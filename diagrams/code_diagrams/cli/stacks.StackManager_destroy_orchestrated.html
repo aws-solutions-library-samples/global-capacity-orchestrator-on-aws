@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-12T06:04:03Z">
-        <meta name="gco-source-commit" content="e96e2c39c3626a5088651f43873dfade6a346850">
-        <meta name="gco-flow-digest" content="74e5f671b6ab98d6">
+        <meta name="gco-generated-at" content="2026-09-16T14:35:30Z">
+        <meta name="gco-source-commit" content="a3141db05a743a382b008c3642b98ab968a5aa34">
+        <meta name="gco-flow-digest" content="7dbe7e6e8a3f2467">
         <title>gco stacks destroy-all — orchestrated multi-stack destroy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,119 +208,139 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op502=>operation: "Destroy stacks in dependency order with optional exact-ARN authority.\n\n        ``retain_volumes`` reports the destroyed clusters' orphaned CSI volumes\n        instead of deleting them; see ``_cleanup_cluster_volumes``.\n        "
-op504=>operation: app_stacks = self.list_stacks()
-op506=>operation: strict_identity = expected_stack_ids is not None
-cond509=>condition: if strict_identity
-op513=>operation: assert expected_stack_ids is not None
-op515=>operation: missing = sorted(set(app_stacks) - set(expected_stack_ids))
-cond518=>operation: raise RuntimeError(f'Strict teardown target map is incomplete before cleanup; missing={missing}') if  missing
-cond529=>operation: raise RuntimeError('Strict teardown requires an exact stack authorizer') if  authorize_stack is None
-op539=>operation: invalid = sorted((name for name, stack_id in expected_stack_ids.items() if stack_id is not None and (not str(stack_id).startswith('arn:'))))
-cond542=>operation: raise RuntimeError(f"Strict teardown has invalid stack identities for: {', '.join(invalid)}") if  invalid
-op555=>operation: strict_prepared_deployment = strict_deployment_token is not None or on_change_set_prepared is not None
-cond558=>condition: if strict_prepared_deployment
-cond563=>operation: raise RuntimeError('Strict teardown dependency deployment requires both a run token and a prepared-change-set callback') if  not strict_deployment_token or on_change_set_prepared is None
-cond574=>operation: raise RuntimeError('Strict teardown lacks prepared change-set history') if  prepared_change_sets is None
-op584=>operation: expected_history_keys = set(expected_stack_ids or {})
-cond587=>operation: raise RuntimeError('Strict teardown change-set history does not match target identities') if  set(prepared_change_sets) != expected_history_keys
-op600=>operation: stacks = list(app_stacks)
-cond603=>condition: if expected_stack_ids is not None
-cond608=>condition: for stack_name in expected_stack_ids
-cond613=>operation: stacks.append(stack_name) if  stack_name not in stacks
-op628=>operation: project_name = self.config.project_name
-op630=>operation: post_regional_stacks, regional_api_stacks, regional_stacks, pre_regional_stacks = _get_stack_destroy_phases(stacks, project_name=project_name)
-op632=>operation: strict_resources: dict[str, dict[str, str]] = {}
-cond635=>condition: if strict_identity
-op639=>operation: assert expected_stack_ids is not None
-op641=>operation: assert authorize_stack is not None
-op643=>operation: strict_resources = self._resolve_strict_teardown_resources(stacks=stacks, regional_stacks=regional_stacks, expected_stack_ids=expected_stack_ids, authorize_stack=authorize_stack)
-op648=>operation: destroy_safety: _StackOperationSafetyKwargs = {'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
-st651=>start: start record_cleanup
-io653=>inputoutput: input: name, details
-cond657=>operation: on_cleanup_complete(name, details) if  on_cleanup_complete is not None
-e667=>end: end record_cleanup
-cond671=>condition: if not self._image_registry_destroy_preflight(force=force)
-io678=>inputoutput: output: (False, [], list(stacks))
-e676=>end: end function return
-op684=>operation: bastion_targets = {name: details for name, details in strict_resources.items() if details.get('vpc_id')}
-op686=>operation: bastions = self.cleanup_orphaned_bastions(stacks, parallel=parallel, resource_targets=bastion_targets if strict_identity else None)
-sub688=>subroutine: record_cleanup('bastions', {'terminated_instances': bastions})
-cond691=>operation: record_cleanup('bastion-iam', self._cleanup_bastion_iam()) if  not strict_identity
-op701=>operation: global_stack_name = f'{project_name}-global'
-op703=>operation: backup = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
-sub705=>subroutine: record_cleanup('backup-vault', backup)
-cond708=>operation: raise RuntimeError('Strict backup-vault cleanup failed before stack deletion: ' + json.dumps(backup['errors'], sort_keys=True)) if  strict_identity and backup.get('errors')
-op718=>operation: successful: list[str] = []
-op720=>operation: failed: list[str] = []
-op722=>operation: implicit_log_groups: dict[str, dict[str, Any]] = {}
-cond725=>operation: implicit_log_groups = self._collect_implicit_log_groups(stacks) if  not strict_identity
-st736=>start: start finish
-io738=>inputoutput: input: overall
-op741=>operation: 'Funnel every exit through the teardown sweeps.\n\n            Called at each return point so a partially failed teardown\n            still cleans up the stacks that DID delete (implicit log\n            groups), while the success-only sweeps (runtime traffic-dial\n            parameters) run exactly when everything is gone. New exit\n            paths must return through here as well.\n            '
-cond744=>operation: record_cleanup('implicit-log-groups', self._cleanup_implicit_log_groups(implicit_log_groups, successful)) if  implicit_log_groups
-cond755=>operation: record_cleanup('traffic-dial-parameters', self._cleanup_traffic_dial_parameters()) if  overall
-io768=>inputoutput: output: (overall, successful, failed)
-e766=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op607=>operation: "Destroy stacks in dependency order with optional exact-ARN authority.\n\n        ``retain_volumes`` reports the destroyed clusters' orphaned CSI volumes\n        instead of deleting them; see ``_cleanup_cluster_volumes``.\n\n        ``keep_control_plane`` tears down only the workload tier — the regional\n        API bridges and the base regional stacks — and leaves\n        ``<project>-global``, ``<project>-api-gateway`` and\n        ``<project>-monitoring`` standing. It first updates the monitoring\n        stack in place so it no longer references the regional stacks (see\n        :meth:`detach_monitoring_from_regions`), then skips every sweep that\n        only makes sense when the whole deployment is going away: the\n        image-registry preflight, the backup-vault purge, bastion IAM\n        retirement, and the traffic-dial parameter purge. This is how a\n        deployment is scaled to zero workload Regions and the teardown half\n        of ``gco upgrade``.\n        "
+op609=>operation: app_stacks = self.list_stacks()
+op611=>operation: strict_identity = expected_stack_ids is not None
+cond614=>condition: if strict_identity
+op618=>operation: assert expected_stack_ids is not None
+op620=>operation: missing = sorted(set(app_stacks) - set(expected_stack_ids))
+cond623=>operation: raise RuntimeError(f'Strict teardown target map is incomplete before cleanup; missing={missing}') if  missing
+cond634=>operation: raise RuntimeError('Strict teardown requires an exact stack authorizer') if  authorize_stack is None
+op644=>operation: invalid = sorted((name for name, stack_id in expected_stack_ids.items() if stack_id is not None and (not str(stack_id).startswith('arn:'))))
+cond647=>operation: raise RuntimeError(f"Strict teardown has invalid stack identities for: {', '.join(invalid)}") if  invalid
+op660=>operation: strict_prepared_deployment = strict_deployment_token is not None or on_change_set_prepared is not None
+cond663=>condition: if strict_prepared_deployment
+cond668=>operation: raise RuntimeError('Strict teardown dependency deployment requires both a run token and a prepared-change-set callback') if  not strict_deployment_token or on_change_set_prepared is None
+cond679=>operation: raise RuntimeError('Strict teardown lacks prepared change-set history') if  prepared_change_sets is None
+op689=>operation: expected_history_keys = set(expected_stack_ids or {})
+cond692=>operation: raise RuntimeError('Strict teardown change-set history does not match target identities') if  set(prepared_change_sets) != expected_history_keys
+op705=>operation: stacks = list(app_stacks)
+cond708=>condition: if expected_stack_ids is not None
+cond713=>condition: for stack_name in expected_stack_ids
+cond718=>operation: stacks.append(stack_name) if  stack_name not in stacks
+op733=>operation: project_name = self.config.project_name
+op735=>operation: post_regional_stacks, regional_api_stacks, regional_stacks, pre_regional_stacks = _get_stack_destroy_phases(stacks, project_name=project_name)
+cond738=>condition: if keep_control_plane
+cond743=>condition: if not self.detach_monitoring_from_regions()
+io750=>inputoutput: output: (False, [], [f'{project_name}-monitoring'])
+e748=>end: end function return
+op756=>operation: workload_tier = set(regional_api_stacks) | set(regional_stacks)
+op758=>operation: post_regional_stacks = []
+op760=>operation: pre_regional_stacks = []
+op762=>operation: stacks = [stack for stack in stacks if stack in workload_tier]
+op767=>operation: strict_resources: dict[str, dict[str, str]] = {}
+cond770=>condition: if strict_identity
+op774=>operation: assert expected_stack_ids is not None
+op776=>operation: assert authorize_stack is not None
+op778=>operation: strict_resources = self._resolve_strict_teardown_resources(stacks=stacks, regional_stacks=regional_stacks, expected_stack_ids=expected_stack_ids, authorize_stack=authorize_stack)
+op783=>operation: destroy_safety: _StackOperationSafetyKwargs = {'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
+st786=>start: start record_cleanup
+io788=>inputoutput: input: name, details
+cond792=>operation: on_cleanup_complete(name, details) if  on_cleanup_complete is not None
+e802=>end: end record_cleanup
+cond806=>condition: if not keep_control_plane and (not self._image_registry_destroy_preflight(force=force))
+io813=>inputoutput: output: (False, [], list(stacks))
+e811=>end: end function return
+op819=>operation: bastion_targets = {name: details for name, details in strict_resources.items() if details.get('vpc_id')}
+op821=>operation: bastions = self.cleanup_orphaned_bastions(stacks, parallel=parallel, resource_targets=bastion_targets if strict_identity else None)
+sub823=>subroutine: record_cleanup('bastions', {'terminated_instances': bastions})
+cond826=>operation: record_cleanup('bastion-iam', self._cleanup_bastion_iam()) if  not strict_identity and (not keep_control_plane)
+cond837=>condition: if not keep_control_plane
+op841=>operation: global_stack_name = f'{project_name}-global'
+op843=>operation: backup = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
+sub845=>subroutine: record_cleanup('backup-vault', backup)
+cond848=>operation: raise RuntimeError('Strict backup-vault cleanup failed before stack deletion: ' + json.dumps(backup['errors'], sort_keys=True)) if  strict_identity and backup.get('errors')
+op861=>operation: successful: list[str] = []
+op863=>operation: failed: list[str] = []
+op865=>operation: implicit_log_groups: dict[str, dict[str, Any]] = {}
+cond868=>operation: implicit_log_groups = self._collect_implicit_log_groups(stacks) if  not strict_identity
+st879=>start: start finish
+io881=>inputoutput: input: overall
+op884=>operation: 'Funnel every exit through the teardown sweeps.\n\n            Called at each return point so a partially failed teardown\n            still cleans up the stacks that DID delete (implicit log\n            groups), while the success-only sweeps (runtime traffic-dial\n            parameters) run exactly when everything is gone. New exit\n            paths must return through here as well.\n            '
+cond887=>operation: record_cleanup('implicit-log-groups', self._cleanup_implicit_log_groups(implicit_log_groups, successful)) if  implicit_log_groups
+cond898=>operation: record_cleanup('traffic-dial-parameters', self._cleanup_traffic_dial_parameters()) if  overall and (not keep_control_plane)
+io911=>inputoutput: output: (overall, successful, failed)
+e909=>end: end function return
 
-op502->op504
-op504->op506
-op506->cond509
-cond509(yes)->op513
-op513->op515
-op515->cond518
-cond518->cond529
-cond529->op539
-op539->cond542
-cond542->op555
-op555->cond558
-cond558(yes)->cond563
-cond563->cond574
-cond574->op584
-op584->cond587
-cond587->op600
-op600->cond603
-cond603(yes)->cond608
-cond608(yes)->cond613
-cond613->cond608
-cond608(no)->op628
-op628->op630
-op630->op632
-op632->cond635
-cond635(yes)->op639
-op639->op641
-op641->op643
-op643->op648
-op648->st651
-st651->io653
-io653->cond657
-cond657->e667
-e667->cond671
-cond671(yes)->io678
-io678->e676
-cond671(no)->op684
-op684->op686
-op686->sub688
-sub688->cond691
-cond691->op701
-op701->op703
-op703->sub705
-sub705->cond708
-cond708->op718
-op718->op720
-op720->op722
-op722->cond725
-cond725->st736
-st736->io738
-io738->op741
-op741->cond744
-cond744->cond755
-cond755->io768
-io768->e766
-cond635(no)->op648
-cond603(no)->op628
-cond558(no)->op600
-cond509(no)->op555
+op607->op609
+op609->op611
+op611->cond614
+cond614(yes)->op618
+op618->op620
+op620->cond623
+cond623->cond634
+cond634->op644
+op644->cond647
+cond647->op660
+op660->cond663
+cond663(yes)->cond668
+cond668->cond679
+cond679->op689
+op689->cond692
+cond692->op705
+op705->cond708
+cond708(yes)->cond713
+cond713(yes)->cond718
+cond718->cond713
+cond713(no)->op733
+op733->op735
+op735->cond738
+cond738(yes)->cond743
+cond743(yes)->io750
+io750->e748
+cond743(no)->op756
+op756->op758
+op758->op760
+op760->op762
+op762->op767
+op767->cond770
+cond770(yes)->op774
+op774->op776
+op776->op778
+op778->op783
+op783->st786
+st786->io788
+io788->cond792
+cond792->e802
+e802->cond806
+cond806(yes)->io813
+io813->e811
+cond806(no)->op819
+op819->op821
+op821->sub823
+sub823->cond826
+cond826->cond837
+cond837(yes)->op841
+op841->op843
+op843->sub845
+sub845->cond848
+cond848->op861
+op861->op863
+op863->op865
+op865->cond868
+cond868->st879
+st879->io881
+io881->op884
+op884->cond887
+cond887->cond898
+cond898->io911
+io911->e909
+cond837(no)->op861
+cond770(no)->op783
+cond738(no)->op767
+cond708(no)->op733
+cond663(no)->op705
+cond614(no)->op660
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -330,17 +350,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-12T06:04:03Z -->
-        <!-- Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850 -->
+        <!-- Generated at (UTC): 2026-09-16T14:35:30Z -->
+        <!-- Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-12T06:04:03Z">2026-09-12T06:04:03Z</time>
+            Generated at (UTC): <time datetime="2026-09-16T14:35:30Z">2026-09-16T14:35:30Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>e96e2c39c3626a5088651f43873dfade6a346850</code>
+            Source commit: <code>a3141db05a743a382b008c3642b98ab968a5aa34</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>74e5f671b6ab98d6</code>
+            Flow content SHA-256: <code>7dbe7e6e8a3f2467</code>
           </p>
           <div id="canvas"></div>
         </div>
