@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="3cd149b6d42f30a0">
+        <meta name="gco-generated-at" content="2026-09-16T14:35:30Z">
+        <meta name="gco-source-commit" content="a3141db05a743a382b008c3642b98ab968a5aa34">
+        <meta name="gco-flow-digest" content="3efb43a0388537b4">
         <title>Cross-Region Aggregator Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,12 +208,12 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op411=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
-op413=>operation: http_method = event.get('httpMethod', 'GET')
-op415=>operation: path = event.get('path', '')
-op417=>operation: query_params = event.get('queryStringParameters') or {}
-op419=>operation: body = event.get('body')
-op422=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
+op4=>operation: http_method = event.get('httpMethod', 'GET')
+op6=>operation: path = event.get('path', '')
+op8=>operation: query_params = event.get('queryStringParameters') or {}
+op10=>operation: body = event.get('body')
+op13=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
     result = aggregate_jobs(namespace=query_params.get('namespace'), status=query_params.get('status'), limit=int(query_params.get('limit', '50')))
 elif path == '/api/v1/global/jobs' and http_method == 'DELETE':
     body_data = json.loads(body) if body else {}
@@ -225,30 +225,30 @@ elif path == '/api/v1/global/status':
 else:
     return {'statusCode': 404, 'body': json.dumps({'error': 'Not found', 'path': path})}
 return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result)}
-cond421=>condition: exception raised?
-cond424=>condition: except RuntimeError
-sub428=>subroutine: _LOGGER.exception('Regional aggregation bridge discovery failed')
-io433=>inputoutput: output: {'statusCode': 503, 'body': json.dumps({'error': 'Regional aggregation is temporarily unavailable'})}
-e431=>end: end function return
-cond436=>condition: except Exception
-sub440=>subroutine: _LOGGER.exception('Unhandled regional aggregation request failure')
-io445=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error'})}
-e443=>end: end function return
+cond12=>condition: exception raised?
+cond15=>condition: except RuntimeError
+sub19=>subroutine: _LOGGER.exception('Regional aggregation bridge discovery failed')
+io24=>inputoutput: output: {'statusCode': 503, 'body': json.dumps({'error': 'Regional aggregation is temporarily unavailable'})}
+e22=>end: end function return
+cond27=>condition: except Exception
+sub31=>subroutine: _LOGGER.exception('Unhandled regional aggregation request failure')
+io36=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error'})}
+e34=>end: end function return
 
-op411->op413
-op413->op415
-op415->op417
-op417->op419
-op419->op422
-op422->cond421
-cond421(yes)->cond424
-cond424(yes)->sub428
-sub428->io433
-io433->e431
-cond424(no)->cond436
-cond436(yes)->sub440
-sub440->io445
-io445->e443
+op2->op4
+op4->op6
+op6->op8
+op8->op10
+op10->op13
+op13->cond12
+cond12(yes)->cond15
+cond15(yes)->sub19
+sub19->io24
+io24->e22
+cond15(no)->cond27
+cond27(yes)->sub31
+sub31->io36
+io36->e34
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -258,17 +258,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-16T14:35:30Z -->
+        <!-- Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-16T14:35:30Z">2026-09-16T14:35:30Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>a3141db05a743a382b008c3642b98ab968a5aa34</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>3cd149b6d42f30a0</code>
+            Flow content SHA-256: <code>3efb43a0388537b4</code>
           </p>
           <div id="canvas"></div>
         </div>

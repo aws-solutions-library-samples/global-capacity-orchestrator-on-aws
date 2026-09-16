@@ -35,7 +35,7 @@ class TestDefaults:
         # The committed cdk.json block and the code defaults must agree, so
         # operators on older config files get the same behavior as fresh
         # checkouts (the `historical` block's enabled-drift is the cautionary
-        # tale — see the spec's warning in design §2.3).
+        # tale).
         import json
         from pathlib import Path
 

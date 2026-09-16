@@ -41,8 +41,8 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-16T14:35:30Z
+# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png``)
@@ -76,8 +76,11 @@ def _configured_regions() -> list[str]:
         configured = json.loads(os.environ["TARGET_REGIONS"])
     except (KeyError, json.JSONDecodeError) as exc:
         raise RuntimeError("Regional API discovery is not configured") from exc
-    if not isinstance(configured, list) or not configured:
+    if not isinstance(configured, list):
         raise RuntimeError("Regional API discovery is not configured")
+    # An empty list is a control-plane-only deployment (zero workload Regions):
+    # discovery finds no bridges and every aggregation answers with empty
+    # results rather than a 503.
 
     regions: list[str] = []
     for value in configured:

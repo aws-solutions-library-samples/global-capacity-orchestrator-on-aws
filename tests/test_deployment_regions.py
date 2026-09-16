@@ -233,14 +233,42 @@ class TestDeploymentRegionsValidation:
         assert config.get_deployment_partition() == "aws"
         assert config.supports_global_accelerator() is True
 
-    def test_empty_regional_list_raises_error(self, base_context):
-        """Test that empty regional list raises error."""
+    def test_empty_regional_list_is_control_plane_only(self, base_context):
+        """Zero workload Regions is valid; the three control-plane scalars fix the partition."""
         base_context["deployment_regions"] = {
             "regional": [],
         }
-        app = MockApp(base_context)
-        with pytest.raises(ConfigValidationError, match="At least one region must be specified"):
-            ConfigLoader(app)
+        config = ConfigLoader(MockApp(base_context))
+        assert config.get_regions() == []
+        assert config.get_deployment_partition() == "aws"
+        assert config.supports_global_accelerator() is True
+        assert config.is_control_plane_only() is False
+
+    @pytest.mark.parametrize("value", ["true", "TRUE", " True ", True])
+    def test_control_plane_only_context_ignores_the_configured_regions(self, base_context, value):
+        """The run-scoped flag empties the workload list without editing cdk.json."""
+        base_context["deployment_regions"] = {"regional": ["us-east-1", "us-west-2"]}
+        base_context["gco:control-plane-only"] = value
+        config = ConfigLoader(MockApp(base_context))
+        assert config.is_control_plane_only() is True
+        assert config.get_regions() == []
+        assert config.get_deployment_regions()["global"] == "us-east-2"
+        assert config.get_deployment_partition() == "aws"
+
+    @pytest.mark.parametrize("value", [None, "false", "yes", "1", 1, "", []])
+    def test_control_plane_only_context_requires_an_explicit_true(self, base_context, value):
+        base_context["deployment_regions"] = {"regional": ["us-east-1"]}
+        if value is not None:
+            base_context["gco:control-plane-only"] = value
+        config = ConfigLoader(MockApp(base_context))
+        assert config.is_control_plane_only() is False
+        assert config.get_regions() == ["us-east-1"]
+
+    def test_control_plane_only_key_is_shared_with_the_cli(self):
+        """The CLI passes the same key through ``--context``; both sides read one constant."""
+        from gco.stacks.constants import CONTROL_PLANE_ONLY_CONTEXT_KEY
+
+        assert CONTROL_PLANE_ONLY_CONTEXT_KEY == "gco:control-plane-only"
 
 
 class TestDeploymentRegionsMultiRegion:

@@ -12,7 +12,7 @@
 # site/nodejs-coverage/ after this build, which is why the nav's "Coverage
 # reports" entries are full external URLs rather than local pages.
 #
-# Constraints honored by this file (see .kiro spec / tests/test_wiki.py):
+# Constraints honored by this file (guarded by tests/test_wiki.py):
 #   - yaml.safe_load-able: no custom YAML tags (guard tests read the nav
 #     without importing MkDocs — rules out !!python/name: emoji config).
 #   - Self-contained site: font: false keeps Material off Google Fonts; no

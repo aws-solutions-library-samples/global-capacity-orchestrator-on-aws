@@ -886,7 +886,24 @@ class TestInfrastructureDestroyTools:
         assert "--parallel" in argv
         assert "--max-workers" in argv
         assert "4" in argv
+        assert "--keep-control-plane" not in argv
         assert mock_task.call_args.kwargs["is_stack_op"] is True
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DESTROY": "true"})
+    def test_destroy_all_argv_passes_keep_control_plane(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.destroy_all(
+                    keep_control_plane=True,
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        argv = mock_task.call_args.args[0]
+        assert argv[:3] == ["gco", "stacks", "destroy-all"]
+        assert "--keep-control-plane" in argv
 
 
 # =============================================================================

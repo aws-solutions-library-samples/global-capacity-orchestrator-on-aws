@@ -1338,3 +1338,223 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         bastion_iam.assert_not_called()
         dial.assert_called_once()
         assert "traffic-dial-parameters" in {name for name, _ in cleanups}
+
+
+class TestKeepControlPlaneTeardown:
+    """``destroy_orchestrated(keep_control_plane=True)`` removes only the workload tier.
+
+    The global, API Gateway and monitoring stacks stay, the monitoring stack is
+    first updated in place so it stops referencing the regional stacks, and the
+    sweeps that only make sense for a full teardown (image-registry preflight,
+    backup-vault purge, bastion IAM retirement, traffic-dial purge) never run.
+    """
+
+    _ALL_STACKS = [
+        "gco-global",
+        "gco-api-gateway",
+        "gco-us-east-1",
+        "gco-regional-api-us-east-1",
+        "gco-monitoring",
+    ]
+
+    def _run(self, *, detach_result: bool = True, destroy_result: bool = True):
+        from contextlib import ExitStack
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        cleanups: list[tuple[str, dict]] = []
+        destroyed: list[str] = []
+
+        def fake_destroy(stack_name, **_kwargs):
+            destroyed.append(stack_name)
+            return destroy_result
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(StackManager, "list_stacks", return_value=list(self._ALL_STACKS))
+            )
+            preflight = stack.enter_context(
+                patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True)
+            )
+            detach = stack.enter_context(
+                patch.object(
+                    StackManager, "detach_monitoring_from_regions", return_value=detach_result
+                )
+            )
+            bastions = stack.enter_context(
+                patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0)
+            )
+            vault = stack.enter_context(
+                patch.object(StackManager, "_cleanup_backup_vault", return_value={"errors": []})
+            )
+            bastion_iam = stack.enter_context(
+                patch.object(StackManager, "_cleanup_bastion_iam", return_value={"errors": []})
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_eks_security_groups",
+                    return_value={"errors": [], "blocked_by_enis": []},
+                )
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[])
+            )
+            stack.enter_context(patch.object(StackManager, "destroy", side_effect=fake_destroy))
+            collect = stack.enter_context(
+                patch.object(StackManager, "_collect_implicit_log_groups", return_value={})
+            )
+            dial = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_traffic_dial_parameters",
+                    return_value={"deleted": [], "errors": []},
+                )
+            )
+            volumes = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_cluster_volumes",
+                    return_value={"deleted": [], "surviving": [], "errors": []},
+                )
+            )
+            result = StackManager(config).destroy_orchestrated(
+                force=True,
+                keep_control_plane=True,
+                on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
+            )
+        mocks = {
+            "preflight": preflight,
+            "detach": detach,
+            "bastions": bastions,
+            "vault": vault,
+            "bastion_iam": bastion_iam,
+            "collect": collect,
+            "dial": dial,
+            "volumes": volumes,
+        }
+        return result, destroyed, cleanups, mocks
+
+    def test_only_the_workload_tier_is_destroyed_and_global_sweeps_are_skipped(self):
+        (ok, successful, failed), destroyed, cleanups, mocks = self._run()
+
+        assert ok is True and failed == []
+        # Bridges before base regional stacks; nothing else is touched.
+        assert destroyed == ["gco-regional-api-us-east-1", "gco-us-east-1"]
+        assert sorted(successful) == ["gco-regional-api-us-east-1", "gco-us-east-1"]
+        mocks["detach"].assert_called_once_with()
+        mocks["preflight"].assert_not_called()
+        mocks["vault"].assert_not_called()
+        mocks["bastion_iam"].assert_not_called()
+        mocks["dial"].assert_not_called()
+        # Per-stack sweeps still run for the stacks that went away.
+        mocks["volumes"].assert_called_once_with("gco-us-east-1", region=None, retain=False)
+        assert mocks["bastions"].call_args.args[0] == [
+            "gco-us-east-1",
+            "gco-regional-api-us-east-1",
+        ]
+        assert mocks["collect"].call_args.args[0] == [
+            "gco-us-east-1",
+            "gco-regional-api-us-east-1",
+        ]
+        recorded = {name for name, _ in cleanups}
+        assert "dynamic-pvs" in recorded
+        assert {"backup-vault", "bastion-iam", "traffic-dial-parameters"}.isdisjoint(recorded)
+
+    def test_a_failed_monitoring_detach_stops_before_any_deletion(self):
+        (ok, successful, failed), destroyed, _cleanups, mocks = self._run(detach_result=False)
+
+        assert ok is False
+        assert successful == []
+        assert failed == ["gco-monitoring"]
+        assert destroyed == []
+        mocks["bastions"].assert_not_called()
+
+    def test_a_failed_regional_delete_is_reported_without_global_sweeps(self):
+        (ok, _successful, failed), destroyed, _cleanups, mocks = self._run(destroy_result=False)
+
+        assert ok is False
+        assert "gco-regional-api-us-east-1" in failed
+        assert destroyed == ["gco-regional-api-us-east-1"]
+        mocks["dial"].assert_not_called()
+
+
+class TestDetachMonitoringFromRegions:
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager(config)
+
+    def test_deploys_monitoring_with_the_control_plane_only_context_and_restores_it(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        manager.set_extra_cdk_context({"feature_enabled_overrides": "fsx_lustre"})
+        seen_context: list[dict[str, str]] = []
+
+        def fake_deploy(self, **kwargs):
+            seen_context.append(dict(self._extra_cdk_context))
+            return True
+
+        with (
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "deploy", autospec=True, side_effect=fake_deploy) as deploy,
+        ):
+            assert manager.detach_monitoring_from_regions() is True
+
+        deploy.assert_called_once()
+        assert deploy.call_args.kwargs == {
+            "stack_name": "gco-monitoring",
+            "require_approval": False,
+            "exclusively": True,
+        }
+        assert seen_context == [
+            {"feature_enabled_overrides": "fsx_lustre", "gco:control-plane-only": "true"}
+        ]
+        # The caller's run-scoped context survives the detach untouched.
+        assert manager._extra_cdk_context == {"feature_enabled_overrides": "fsx_lustre"}
+
+    def test_context_is_restored_when_the_deploy_raises(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "deploy", side_effect=RuntimeError("cdk failed")),
+        ):
+            try:
+                manager.detach_monitoring_from_regions()
+            except RuntimeError as exc:
+                assert str(exc) == "cdk failed"
+            else:  # pragma: no cover - the deploy must raise
+                raise AssertionError("expected the deploy failure to propagate")
+        assert manager._extra_cdk_context == {}
+
+    def test_an_absent_monitoring_stack_has_nothing_to_detach(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
+            patch.object(StackManager, "deploy") as deploy,
+        ):
+            assert manager.detach_monitoring_from_regions() is True
+        deploy.assert_not_called()
+
+    def test_a_failed_deploy_reports_false(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "deploy", return_value=False),
+        ):
+            assert manager.detach_monitoring_from_regions() is False

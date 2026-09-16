@@ -30,7 +30,12 @@ you are signing up for.
 4. **Submit a test job and (optionally) an inference endpoint** — the
    repository ships ready-to-submit
    [example manifests](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/README.md).
-5. **Tear down** — one command destroys the stacks with best-effort cleanup
+5. **Upgrade, later** — `gco upgrade` moves the checkout, the local install
+   and every deployed stack to the latest release in one pass. It recreates
+   the regional stacks, so the procedure starts by backing regional data up
+   to the cluster-shared bucket; see
+   [docs/UPGRADING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/UPGRADING.md).
+6. **Tear down** — one command destroys the stacks with best-effort cleanup
    of known resources.
 
 Prefer to let an agent drive? `gco autopilot` launches Claude Code by

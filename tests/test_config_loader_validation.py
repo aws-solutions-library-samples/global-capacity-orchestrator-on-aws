@@ -36,11 +36,10 @@ class TestConfigLoaderValidation:
         with pytest.raises(ConfigValidationError, match="Required configuration field"):
             ConfigLoader(app)
 
-    def test_config_loader_validates_empty_regions(self):
-        """Test that ConfigLoader validates empty regions list."""
-        from gco.config.config_loader import ConfigLoader, ConfigValidationError
+    def test_config_loader_accepts_empty_regions(self):
+        """An empty regional list is a valid control-plane-only topology."""
+        from gco.config.config_loader import ConfigLoader
 
-        # Empty list is treated as falsy, so it triggers "Required configuration field" error
         app = cdk.App(
             context={
                 "project_name": "test",
@@ -83,8 +82,7 @@ class TestConfigLoaderValidation:
             }
         )
 
-        with pytest.raises(ConfigValidationError, match="At least one region must be specified"):
-            ConfigLoader(app)
+        assert ConfigLoader(app).get_regions() == []
 
     def test_config_loader_accepts_more_than_ten_regions(self):
         """Test that ConfigLoader does not impose an artificial region-count cap."""

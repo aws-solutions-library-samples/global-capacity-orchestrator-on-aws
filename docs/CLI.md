@@ -34,6 +34,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [release](#release-commands)
   - [examples](#examples-commands)
   - [deps](#deps-commands)
+  - [upgrade](#upgrade-command)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Examples](#examples)
@@ -1394,7 +1395,32 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
+| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway and monitoring stacks standing (scale to zero workload Regions) |
 | `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
+
+##### Keeping the control plane (`--keep-control-plane`)
+
+`--keep-control-plane` scales the deployment to zero workload Regions instead of
+removing it. Only the regional API bridges and the base regional stacks are
+destroyed; `<project>-global`, `<project>-api-gateway` and `<project>-monitoring`
+stay, together with everything they own — the DynamoDB tables, the model and
+cluster-shared buckets, the image registry, EFS recovery points in the backup
+vault, and the cost-report bucket. Before anything is deleted the monitoring stack
+is updated in place with `--context gco:control-plane-only=true` (the run-scoped
+equivalent of an empty `deployment_regions.regional`) so it stops referencing the
+regional stacks; CloudFormation would otherwise refuse to delete a stack whose
+exports are still consumed. The sweeps that only make sense for a full teardown
+are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
+retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
+bastions, implicit log groups, dynamically provisioned EBS volumes) still run for
+the stacks that went away.
+
+Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
+in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
+first. The next `gco stacks deploy-all` recreates the regional stacks from
+`cdk.json`; run `gco stacks regions remove <region>` first if the scale-down is
+meant to last (see [Scaling to zero workload Regions](CUSTOMIZATION.md#scaling-to-zero-workload-regions)).
+`gco upgrade` uses this same teardown before it recreates the regional stacks.
 
 ##### Dynamically provisioned EBS volumes
 
@@ -1523,7 +1549,7 @@ gco stacks regions COMMAND [OPTIONS]
 
 - `list` - Show the configured topology (`gco stacks regions list`): global/API/monitoring Regions, the workload Region list, the resolved partition, and the cdk.json path. On a broken config, `partition_error` explains what synth would reject.
 - `add` - Add a workload Region (`gco stacks regions add`); re-adding a present Region is a reported no-op.
-- `remove` - Remove a workload Region (`gco stacks regions remove`); the resulting list must stay valid (at least one Region). Removing a typo'd entry from a hand-edited config is allowed — validation applies to the result, so this doubles as the repair path.
+- `remove` - Remove a workload Region (`gco stacks regions remove`); the resulting list must stay valid (SDK-known, unique Regions in one AWS partition). Removing the last Region is allowed and leaves a control-plane-only topology — `gco stacks deploy-all` then stands up only the global, API Gateway, and monitoring stacks until a Region is added back (see [Scaling to zero workload Regions](CUSTOMIZATION.md#scaling-to-zero-workload-regions)). Removing a typo'd entry from a hand-edited config is allowed — validation applies to the result, so this doubles as the repair path.
 - `set` - Set a control-plane Region scalar (`gco stacks regions set <global|api_gateway|monitoring> <region>`); the whole topology must stay in one AWS partition. Already-deployed stacks are not moved or destroyed.
 
 All commands accept `--config-path` to target an explicit cdk.json (useful when running outside a checkout); the mutating ones accept `-y` to skip confirmation.
@@ -5655,6 +5681,108 @@ gco -o json deps scan
 
 # Save the report for a PR description
 gco deps scan --report /tmp/dependency-report.md
+```
+
+---
+
+### Upgrade Command
+
+Move a whole GCO deployment — the checked-out source, the locally installed
+CLI and toolchain, the `gco-dev` container image, and the deployed
+CloudFormation stacks — to the latest tagged release in one pass. The
+procedure around the command (what to back up first and how to restore it
+afterwards) is in [UPGRADING.md](UPGRADING.md); read it before the first run.
+
+#### `gco upgrade`
+
+Runs inside a git checkout of the repository and:
+
+1. fetches the release tags from the git remote and checks out the highest
+   `vMAJOR.MINOR.PATCH` (or the tag named with `--ref`) as a detached HEAD.
+   `cdk.json` — the deployment's own configuration — is snapshotted before the
+   checkout and written back byte-for-byte afterwards, whether it was modified
+   locally or committed on a fork branch;
+2. refreshes the local install: `pip install -e .` when the running `gco` is the
+   editable install of this checkout (falling back to `uv pip` for interpreters
+   without pip), `npm ci` when the checkout carries its own CDK toolchain
+   (`node_modules/.bin/cdk`), and a rebuild of the `gco-dev` image when a
+   container runtime and the image are both present;
+3. scales the workload tier to zero: the monitoring stack is updated in place
+   with `--context gco:control-plane-only=true` so it stops referencing the
+   regional stacks, then every regional API bridge and regional stack is
+   **destroyed** — the same teardown as
+   [`gco stacks destroy-all --keep-control-plane`](#keeping-the-control-plane---keep-control-plane),
+   with its retry loop;
+4. runs the ordinary deploy-all on the new release: `<project>-global` and
+   `<project>-api-gateway` are updated in place, the regional stacks and their
+   bridges are recreated from `cdk.json`, and the monitoring stack is updated
+   back to the full topology.
+
+Step 3 deletes the data inside the regional stacks — EFS and FSx file systems,
+Valkey, Aurora, in-cluster volumes (Prometheus, Grafana, MLflow) and, unless its
+removal policy is `retain`, the regional-shared bucket. The control plane's
+shared state (DynamoDB tables, the model and cluster-shared buckets, the image
+registry, EFS recovery points in the backup vault, the cost-report bucket) is
+untouched. Unless `-y` is given the command prints this plan, names every stack
+it will destroy, and asks you to type the project name to continue.
+
+```bash
+gco upgrade [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--check` | | Show the plan and the latest release; change nothing |
+| `--yes` | `-y` | Skip the typed confirmation |
+| `--ref vX.Y.Z` | | Upgrade to this release tag instead of the latest |
+| `--remote NAME` | | Git remote whose tags define the releases (default: `origin`; forks that track upstream use `--remote upstream`) |
+| `--skip-checkout` | | Keep the current checkout and toolchain; only cycle the stacks (finish an interrupted upgrade, or deploy a release a fork merged itself) |
+| `--skip-container` | | Do not rebuild the dev-container image |
+| `--image NAME` | | Dev-container image to rebuild when it exists locally (default: `gco-dev`) |
+| `--force` | | Cycle the stacks even when the checkout is already at the target release |
+| `--parallel` | `-p` | Destroy and recreate regional stacks in parallel |
+| `--max-workers` | `-w` | Max parallel stack operations (default: 4) |
+| `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable), exactly as for `gco stacks deploy-all --enable`; the same overrides ride the teardown and the redeploy |
+
+**Behaviour to know:**
+
+- The checkout must be clean apart from `cdk.json`; any other local modification
+  stops the command before it changes anything (commit or stash first).
+- When the checkout is already at the latest release the command reports that and
+  exits 0 without touching the stacks; `--force` runs the stack cycle anyway.
+- If the stack cycle fails, the checkout and local install are already on the new
+  release. Fix the cause (the failing stack is named) and rerun
+  `gco upgrade --skip-checkout` to finish; the teardown half is idempotent.
+- The running `gco` process keeps executing the previous release's CLI code until
+  you open a new shell (the dev-container shell function starts a fresh container
+  from the rebuilt image). The deployed stacks are on the new release either way.
+- `gco -o json upgrade` emits one document: the plan (`current_version`,
+  `target`, `latest`, `checkout`, `install`, `control_plane_stacks`,
+  `workload_stacks`) plus a `steps` map (`checkout`, `python`, `node`,
+  `container`, `stacks`) with each step's outcome. `--check` emits
+  `{"status": "ok", "up_to_date": …, "plan": …}`; an already-current checkout
+  emits `{"status": "up-to-date", …}`. There is deliberately no MCP tool for
+  this command — it replaces the checkout the MCP server itself runs from.
+
+**Examples:**
+
+```bash
+# See what would happen (fetches tags, synthesizes the stack list, changes nothing)
+gco upgrade --check
+
+# The whole upgrade, with the typed confirmation
+gco upgrade
+
+# Unattended, regional stacks in parallel
+gco upgrade -y --parallel
+
+# A specific release, from the upstream remote of a fork
+gco upgrade --ref v8.1.0 --remote upstream
+
+# Finish an interrupted upgrade (checkout already moved)
+gco upgrade --skip-checkout -y
 ```
 
 ## Configuration

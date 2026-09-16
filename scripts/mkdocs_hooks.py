@@ -1,8 +1,8 @@
 """MkDocs hook: serve the repository's tracked ``images/`` inside the wiki.
 
-Requirement 4.2 of the github-pages-wiki spec forbids wiki pages from using
-external image hosts (``raw.githubusercontent.com``) *and* from committing
-duplicate copies of tracked binaries. MkDocs, however, only serves files
+The wiki's content contract (enforced by ``tests/test_wiki.py``) forbids wiki
+pages from using external image hosts (``raw.githubusercontent.com``) *and*
+from committing duplicate copies of tracked binaries. MkDocs, however, only serves files
 under ``docs_dir`` (``wiki/``). This hook closes that gap: ``on_files``
 injects every file under the repo's ``images/`` directory into the build as
 ``assets/images/<name>``, so wiki pages reference ``assets/images/x.png``,

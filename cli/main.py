@@ -47,6 +47,7 @@ from .commands import (
     swarm_cmd,
     tasks,
     templates,
+    upgrade,
     vector,
     webhooks,
 )
@@ -165,6 +166,7 @@ cli.add_command(mission_cmd)
 cli.add_command(swarm_cmd)
 cli.add_command(vector)
 cli.add_command(status)
+cli.add_command(upgrade)
 
 
 def main() -> None:

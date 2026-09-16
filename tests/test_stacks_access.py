@@ -49,6 +49,32 @@ class TestStacksAccessCommand:
             calls = [str(c) for c in mock_run.call_args_list]
             assert any("us-east-1" in c for c in calls)
 
+    def test_empty_regional_list_refuses_to_guess_a_region(self, runner):
+        """A control-plane-only deployment has no cluster: fail with guidance, no AWS calls."""
+        with (
+            patch("cli.config._load_cdk_json", return_value={"regional": []}),
+            patch("subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(stacks, ["access"])
+        assert result.exit_code == 1
+        assert "No workload Regions are configured" in result.output
+        assert "gco stacks regions add" in result.output
+        mock_run.assert_not_called()
+
+    def test_missing_regional_key_falls_back_to_default_region(self, runner):
+        """Without a regional list at all, the configured default Region is used."""
+        with (
+            patch("cli.config._load_cdk_json", return_value={"global": "us-east-2"}),
+            patch("subprocess.run") as mock_run,
+            patch("time.sleep"),
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="NAME STATUS\nnode1 Ready\n", stderr=""
+            )
+            runner.invoke(stacks, ["access"])
+        calls = [str(c) for c in mock_run.call_args_list]
+        assert any("us-east-1" in c for c in calls)
+
     def test_custom_region_override(self, runner):
         """With -r, should use the specified region."""
         with patch("subprocess.run") as mock_run, patch("time.sleep"):

@@ -1480,7 +1480,7 @@ class TestYamlAnchorAliasRejectionProperty:
 
 # =============================================================================
 # Unit tests for _extract_pod_spec and _inject_security_defaults
-# (Task 8.1: SA token auto-mount disabled)
+# (SA token auto-mount disabled)
 # =============================================================================
 
 

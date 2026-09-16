@@ -42,7 +42,9 @@ from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.resource_governance import parse_k8s_quantity
 from gco.stacks.constants import (
+    CONTROL_PLANE_ONLY_CONTEXT_KEY,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
+    control_plane_only_requested,
     known_cloudformation_regions,
     validated_deployment_partition,
     validated_regional_deployment_regions,
@@ -1283,7 +1285,10 @@ class ConfigLoader:
         - global: Region for Global Accelerator and SSM parameters (default: us-east-2)
         - api_gateway: Region for API Gateway stack (default: us-east-2)
         - monitoring: Region for Monitoring stack (default: us-east-2)
-        - regional: List of regions for EKS clusters (default: ["us-east-1"])
+        - regional: List of regions for EKS clusters (default: ["us-east-1"]).
+          An explicitly empty list is valid and means a control-plane-only
+          deployment: only the global, API Gateway, and monitoring stacks are
+          synthesized until a workload Region is added back.
 
         Note: Global Accelerator is a global service but requires a "home" region
         for CloudFormation deployment. us-east-2 is used by default to keep
@@ -1291,12 +1296,27 @@ class ConfigLoader:
         """
         deployment_regions = self.app.node.try_get_context("deployment_regions") or {}
 
+        regional = deployment_regions.get("regional", ["us-east-1"])
+        if self.is_control_plane_only():
+            regional = []
         return {
             "global": deployment_regions.get("global", "us-east-2"),
             "api_gateway": deployment_regions.get("api_gateway", "us-east-2"),
             "monitoring": deployment_regions.get("monitoring", "us-east-2"),
-            "regional": deployment_regions.get("regional", ["us-east-1"]),
+            "regional": regional,
         }
+
+    def is_control_plane_only(self) -> bool:
+        """Return whether this run synthesizes with zero workload Regions.
+
+        True when ``--context gco:control-plane-only=true`` was passed (see
+        :data:`gco.stacks.constants.CONTROL_PLANE_ONLY_CONTEXT_KEY`). The
+        configured ``deployment_regions.regional`` list in ``cdk.json`` is
+        left untouched; only this synthesis ignores it.
+        """
+        return control_plane_only_requested(
+            self.app.node.try_get_context(CONTROL_PLANE_ONLY_CONTEXT_KEY)
+        )
 
     def get_deployment_partition(self) -> str:
         """Return the one SDK partition shared by every configured Region."""
@@ -1334,7 +1354,7 @@ class ConfigLoader:
         return str(region)
 
     def get_regions(self) -> list[str]:
-        """Get list of regions for EKS cluster deployment."""
+        """Get list of regions for EKS cluster deployment (empty when scaled to zero)."""
         deployment_regions = self.get_deployment_regions()
         regional = deployment_regions["regional"]
         return list(regional) if isinstance(regional, list) else [str(regional)]

@@ -60,8 +60,8 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-09T17:36:47Z
-# Generated from Git commit: d03cb5dc20f9b805636c85ce7af957eebb94c28e
+# Generated at (UTC): 2026-09-16T14:35:30Z
+# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)
@@ -629,8 +629,8 @@ class SamplingPrompt:
     call — both methods produce deterministic outputs from the same
     bound state, which is the property the determinism tests pin down.
 
-    All inputs are required positionally or by keyword; defaults are
-    only provided where the design spec defines a default.
+    All inputs are required positionally or by keyword; defaults exist
+    only for the fields whose contract documents a default value.
     """
 
     directive: str

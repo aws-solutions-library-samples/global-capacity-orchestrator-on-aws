@@ -42,9 +42,9 @@
       "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
     },
     "cli/stacks.py": {
-      "digest": "938b969d4d4204d5de8fd08a678ae059cfb99e37f3033416b4a33d1dc35e82ac",
-      "generated_at": "2026-09-12T06:04:03Z",
-      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
+      "digest": "f311e582b730ee119a9bd3d3441a0d8fc0505af04192d2a4dc96f6aa242162fb",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "gco/services/api_routes/inference_proxy.py": {
       "digest": "ae18182ce131a19615218376b735358c4daa7b042919b2253b6ef523326d9717",
@@ -117,19 +117,19 @@
       "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
     },
     "gco/stacks/api_gateway_global_stack.py": {
-      "digest": "4c8b73858c91de0d903a7c15cd03032dd49f01886e235d65b82fd603b13e542e",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "4591d40f163a47917cb3d33392787b75b2e5df44c1a51a3caaae55e26c24c6ef",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "gco/stacks/global_stack.py": {
-      "digest": "37f98e6a0fb80bf147de9d4e3bb508b2e470ca72e85e515bfe5c2b561a5a50bf",
-      "generated_at": "2026-09-13T18:39:14Z",
-      "source_commit": "c13ec54b216d5dd044916ef1e08705fb19e1dd0b"
+      "digest": "7608e8f00d43faf0d54811ab2a64ce9ee3f135b190a93df4c6ce901b65253524",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "gco/stacks/monitoring_stack.py": {
-      "digest": "27363b1ad7a4aeb4072e365a474fbb2d1b5151ab2e8f86f47c6842373d179189",
-      "generated_at": "2026-09-12T06:04:03Z",
-      "source_commit": "e96e2c39c3626a5088651f43873dfade6a346850"
+      "digest": "33ae9b30da08d7db0c28b4720ad8f10038ee8e25dca20a3bb4dd2e62c4100cde",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "gco/stacks/regional_api_gateway_stack.py": {
       "digest": "b6cfc8a24e5c5910db198427c66ae673105ff1f1a0efe2f9a64bf2fe5646e8e1",
@@ -167,9 +167,9 @@
       "source_commit": "37fd4384775eeebf18fea3e5e085cef9645077be"
     },
     "gco_mcp/mission/sampling.py": {
-      "digest": "cf3dfb1e6b19466316cc285a5d2f2d5b51584e75a5485220dbad1ab3a2e48672",
-      "generated_at": "2026-09-09T17:36:47Z",
-      "source_commit": "d03cb5dc20f9b805636c85ce7af957eebb94c28e"
+      "digest": "a070f3bcd65ad5c50a2b453c8c80a46326bc45fe484a35145d6d85af2a748aee",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "gco_mcp/mission/sandbox.py": {
       "digest": "775a991e291c59da0a7cfe1c17ad49ea7d086f7ce1b7e5ad2a8e22233bde2044",
@@ -207,9 +207,9 @@
       "source_commit": "4c42b84d53d6cc01cd2b3c7e4011a43f850678b6"
     },
     "lambda/cross-region-aggregator/handler.py": {
-      "digest": "85b65b3b404b053fd0fad6904d25f1256329dbb769b1f87889a5086d057efd3d",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "21b07031f3f06216a839b1746568228fd41ec427ff3888bc69a24f8b7867828d",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "lambda/drift-detection/handler.py": {
       "digest": "5a948169b2fff72ea665fb999e10deb8f95c9f690846e5b7357c1978d394dbeb",
@@ -262,9 +262,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "lambda/tls-certificate-manager/handler.py": {
-      "digest": "989ea02a07bc585849ab3d7080584720ac4226e0c8c82d22fcde995ca56a1843",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "24e22d1e79ca00cad0e32f28529f13b4d829a6e67802d73988805eaa6c91108a",
+      "generated_at": "2026-09-16T14:35:30Z",
+      "source_commit": "a3141db05a743a382b008c3642b98ab968a5aa34"
     },
     "lambda/tls-shared/backend_tls.py": {
       "digest": "11652b71e59034d77aabe5f0030abaece7c5575f702bae5551cad004b11d95cd",

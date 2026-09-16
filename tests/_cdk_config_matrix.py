@@ -92,6 +92,40 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        # Control-plane-only topology: zero workload Regions. This is the
+        # shape a deployment passes through when it is scaled to zero (and
+        # what ``gco upgrade`` leaves standing while it recreates the regional
+        # stacks). Only the global, API Gateway, and monitoring stacks
+        # synthesize; every per-Region loop in them must degrade to a no-op
+        # (no IAM statement without resources, no dashboard widget with an
+        # empty metric list, no ECR replication rule without destinations).
+        "zero-regions",
+        {
+            "deployment_regions": {
+                "global": "us-east-2",
+                "api_gateway": "us-east-2",
+                "monitoring": "us-east-2",
+                "regional": [],
+            }
+        },
+    ),
+    (
+        # The run-scoped equivalent of "zero-regions": ``gco upgrade`` passes
+        # ``--context gco:control-plane-only=true`` to update the monitoring
+        # stack in place without touching cdk.json, so the configured Region
+        # list here is deliberately non-empty and must be ignored by synth.
+        "control-plane-only-context",
+        {"gco:control-plane-only": "true"},
+    ),
+    (
+        # The run-scoped ``--enable`` path: ``gco stacks deploy-all --enable
+        # fsx_lustre,valkey`` threads this comma-separated context value
+        # instead of editing cdk.json. The knob-coverage guard resolves the
+        # constant-named ``try_get_context`` read, so the matrix must vary it.
+        "feature-enabled-overrides-context",
+        {"feature_enabled_overrides": "fsx_lustre,valkey"},
+    ),
+    (
         "valkey-enabled",
         {
             "valkey": {

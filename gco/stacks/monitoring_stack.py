@@ -72,8 +72,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T06:04:03Z
-# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
+# Generated at (UTC): 2026-09-16T14:35:30Z
+# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
@@ -651,21 +651,46 @@ class GCOMonitoringStack(Stack):
             period_override=cloudwatch.PeriodOverride.AUTO,
         )
 
-        # Add widgets in logical order
+        # Add widgets in logical order. The control-plane sections (Global
+        # Accelerator, API Gateway, Lambda, DynamoDB) are always present. The
+        # per-Region sections exist only when at least one workload Region is
+        # configured: a control-plane-only deployment has no cluster, queue,
+        # or file system to chart, and a single-value widget whose metric list
+        # is empty is rejected by CloudWatch's dashboard validation at deploy
+        # time, so the sections are replaced by one explanatory note instead.
         dashboard.add_widgets(*self._create_global_accelerator_widgets())
         dashboard.add_widgets(*self._create_api_gateway_widgets())
         dashboard.add_widgets(*self._create_lambda_widgets())
-        dashboard.add_widgets(*self._create_sqs_widgets())
+        if self.regional_stacks:
+            dashboard.add_widgets(*self._create_sqs_widgets())
         dashboard.add_widgets(*self._create_dynamodb_widgets())
-        dashboard.add_widgets(*self._create_eks_widgets())
-        dashboard.add_widgets(*self._create_gpu_widgets())
-        dashboard.add_widgets(*self._create_fsx_widgets())
-        dashboard.add_widgets(*self._create_valkey_widgets())
-        dashboard.add_widgets(*self._create_aurora_pgvector_widgets())
-        dashboard.add_widgets(*self._create_alb_widgets())
-        dashboard.add_widgets(*self._create_application_widgets())
+        if self.regional_stacks:
+            dashboard.add_widgets(*self._create_eks_widgets())
+            dashboard.add_widgets(*self._create_gpu_widgets())
+            dashboard.add_widgets(*self._create_fsx_widgets())
+            dashboard.add_widgets(*self._create_valkey_widgets())
+            dashboard.add_widgets(*self._create_aurora_pgvector_widgets())
+            dashboard.add_widgets(*self._create_alb_widgets())
+            dashboard.add_widgets(*self._create_application_widgets())
+        else:
+            dashboard.add_widgets(self._create_no_workload_regions_widget())
 
         return dashboard
+
+    def _create_no_workload_regions_widget(self) -> cloudwatch.IWidget:
+        """Explain the missing per-Region sections of a control-plane-only deployment."""
+        return cloudwatch.TextWidget(
+            markdown=(
+                "# Workload Regions\n"
+                "No workload Regions are configured (`deployment_regions.regional` is "
+                "empty), so this deployment has no EKS cluster, job queue, GPU, storage, "
+                "ALB, or application metrics to show. Add a Region with "
+                "`gco stacks regions add <region>` and run `gco stacks deploy-all` to "
+                "bring the per-Region sections back."
+            ),
+            width=24,
+            height=2,
+        )
 
     def _create_global_accelerator_widgets(self) -> list[cloudwatch.IWidget]:
         """Create Global Accelerator monitoring widgets.

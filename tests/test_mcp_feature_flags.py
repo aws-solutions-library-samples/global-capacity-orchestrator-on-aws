@@ -128,7 +128,7 @@ class TestFeatureFlags:
                 assert feature_flags.is_enabled(flag) is True, (
                     f"umbrella on should enable {flag} (per-flag unset)"
                 )
-            # Explicit per-flag assertion for FLAG_IMAGE_PUBLISH (Req 1.11, 1.15).
+            # Explicit per-flag assertion for FLAG_IMAGE_PUBLISH.
             assert feature_flags.is_enabled(feature_flags.FLAG_IMAGE_PUBLISH) is True, (
                 "umbrella on should enable FLAG_IMAGE_PUBLISH when its env var is unset"
             )

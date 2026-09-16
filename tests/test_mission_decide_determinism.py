@@ -6,13 +6,13 @@ of the loop: given the persisted ``SessionState``, the in-progress
 ``(VerdictLabel, VerdictReason)`` tuple. Two universal properties must
 hold and are pinned down here:
 
-* **Property 1 — control-path determinism.** For every well-formed
+* **Control-path determinism.** For every well-formed
   ``(session, iteration, now)`` triple, calling ``decide_verdict``
   twice must return equal tuples. The cascade reads no clocks (``now``
   is on the call signature), no globals, no random sources — so
   identical inputs must produce identical outputs.
 
-* **Property 2 — sampling cannot mutate the control path.** The
+* **Sampling cannot mutate the control path.** The
   cascade may not consult any field whose value is the output of an
   LLM sampler. The persistent record of those outputs lives under
   ``iteration["sampling_output"]`` on prior iterations. Mutating
@@ -28,9 +28,6 @@ wall-clock under five seconds even on the slowest CI runner. The
 shared strategies live in ``tests/strategies/mission.py`` so other
 slices (engine tests, audit reconstruction tests, sampling tests) can
 reuse them.
-
-Validates: Property 1 (Control-path determinism), Property 2
-(Sampling cannot mutate the control path).
 """
 
 from __future__ import annotations
@@ -70,7 +67,7 @@ _PBT_SETTINGS = settings(
 
 
 # ---------------------------------------------------------------------------
-# Property 1 — control-path determinism
+# Control-path determinism
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +90,7 @@ class TestVerdictDeterminism:
     ) -> None:
         """Calling ``decide_verdict`` twice on the same inputs returns equal tuples.
 
-        Validates: Property 1 (Control-path determinism).
+        Pins the control-path determinism property.
         """
         session, iteration, now = triple
         first = decide_verdict(session, iteration, now)
@@ -102,7 +99,7 @@ class TestVerdictDeterminism:
 
 
 # ---------------------------------------------------------------------------
-# Property 2 — sampling cannot mutate the control path
+# Sampling cannot mutate the control path
 # ---------------------------------------------------------------------------
 
 
@@ -149,7 +146,7 @@ class TestVerdictSamplingIndependence:
         distinct strings in turn and assert the verdict tuple is
         identical across all three runs.
 
-        Validates: Property 2 (Sampling cannot mutate the control path).
+        Pins the sampling-isolation property.
         """
         # Re-align the in-progress iteration's criteria_evaluation to
         # the session's criteria so the cascade exercises every branch
@@ -188,7 +185,7 @@ class TestVerdictSamplingIndependence:
 
 
 # ---------------------------------------------------------------------------
-# Property 2 (stricter) — full sampler-mode profile cycling
+# Sampling isolation (stricter) — full sampler-mode profile cycling
 # ---------------------------------------------------------------------------
 
 
@@ -292,7 +289,7 @@ class TestVerdictUnaffectedBySamplerMode:
         result. After the loop, every collected tuple must equal the
         first.
 
-        Validates: Property 2 (Sampling cannot mutate the control path).
+        Pins the stricter form of the sampling-isolation property.
         """
         # Re-align the in-progress iteration's criteria_evaluation to
         # the session's criteria so the cascade exercises every branch

@@ -30,6 +30,7 @@ from .storage_cmd import storage
 from .swarm_cmd import swarm_cmd
 from .tasks_cmd import tasks
 from .templates_cmd import templates
+from .upgrade_cmd import upgrade
 from .vector_cmd import vector
 from .webhooks_cmd import webhooks
 
@@ -59,6 +60,7 @@ __all__ = [
     "storage",
     "tasks",
     "templates",
+    "upgrade",
     "vector",
     "webhooks",
 ]

@@ -1190,12 +1190,18 @@ class TestRegionAvailability:
 class TestConfigValidationEdgeCases:
     """Tests for configuration validation edge cases."""
 
-    def test_empty_regions_list(self, valid_context):
-        """Test that empty regions list raises error."""
+    def test_empty_regions_list_is_a_control_plane_only_topology(self, valid_context):
+        """An empty workload list is valid: the control-plane stacks stand alone."""
         valid_context["deployment_regions"]["regional"] = []
-        app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="At least one region must be specified"):
-            ConfigLoader(app)
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_regions() == []
+        assert config.get_deployment_partition() == "aws"
+
+    def test_non_list_regions_value_rejected(self, valid_context):
+        """A scalar where the list belongs is still a configuration error."""
+        valid_context["deployment_regions"]["regional"] = "us-east-1"
+        with pytest.raises(ConfigValidationError, match="must be a list"):
+            ConfigLoader(MockApp(valid_context))
 
     def test_missing_global_accelerator_config_applies_defaults(self, valid_context):
         """An absent global_accelerator block synthesizes with the defaults."""

@@ -132,19 +132,43 @@ def validated_deployment_partition(
     return next(iter(regions_by_partition))
 
 
+CONTROL_PLANE_ONLY_CONTEXT_KEY = "gco:control-plane-only"
+"""Run-scoped CDK context key that synthesizes the app with zero workload Regions.
+
+Passing ``--context gco:control-plane-only=true`` makes ``ConfigLoader`` report an
+empty ``deployment_regions.regional`` without editing ``cdk.json``, so the
+synthesized app contains only the global, API Gateway, and monitoring stacks.
+``gco upgrade`` uses it to update the monitoring stack in place so it stops
+referencing the regional stacks before those are destroyed and recreated. Any
+value other than the string ``"true"`` (case-insensitive) leaves the configured
+Region list alone.
+"""
+
+
+def control_plane_only_requested(value: object) -> bool:
+    """Return whether a ``gco:control-plane-only`` context value opts in."""
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() == "true"
+
+
 def validated_regional_deployment_regions(
     value: object,
     *,
     known_regions: Collection[str] | None = None,
 ) -> tuple[str, ...]:
-    """Return a non-empty, unique list of SDK-known workload Regions.
+    """Return a unique, possibly empty list of SDK-known workload Regions.
 
-    There is deliberately no project-specific allowlist or maximum count. The
-    optional ``known_regions`` argument lets callers reuse endpoint metadata
-    they have already loaded while preserving this one validation contract.
+    There is deliberately no project-specific allowlist, minimum, or maximum
+    count. An empty list is a valid *control-plane-only* topology: the global,
+    API Gateway, and monitoring stacks stand with no regional cluster behind
+    them, which is how a deployment is scaled to zero workload Regions (and
+    what ``gco upgrade`` passes through while it recreates them). The optional
+    ``known_regions`` argument lets callers reuse endpoint metadata they have
+    already loaded while preserving this one validation contract.
     """
-    if not isinstance(value, list) or not value:
-        raise ValueError("At least one region must be specified")
+    if not isinstance(value, list):
+        raise ValueError("deployment_regions.regional must be a list of AWS region names")
 
     regions: list[str] = []
     valid_regions = (

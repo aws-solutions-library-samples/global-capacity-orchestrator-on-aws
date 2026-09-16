@@ -65,6 +65,7 @@ from click import Abort
 
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 from gco.stacks.constants import (
+    CONTROL_PLANE_ONLY_CONTEXT_KEY,
     known_cloudformation_regions,
     validated_deployment_partition,
     validated_regional_deployment_regions,
@@ -73,8 +74,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T06:04:03Z
-# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
+# Generated at (UTC): 2026-09-16T14:35:30Z
+# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -4546,6 +4547,38 @@ class StackManager:
             )
         return remaining
 
+    def detach_monitoring_from_regions(self) -> bool:
+        """Update ``<project>-monitoring`` in place so it references no regional stack.
+
+        The monitoring stack holds cross-region references into every regional
+        stack (FSx file-system IDs, Aurora cluster identifiers, …), and
+        CloudFormation refuses to delete a producing stack while a consumer
+        still reads its exports. Synthesizing the app with the
+        ``gco:control-plane-only`` context — the run-scoped equivalent of an
+        empty ``deployment_regions.regional`` — and deploying only the
+        monitoring stack drops those references first, which is what lets the
+        regional stacks be destroyed while the monitoring stack (and the
+        cost-report data it owns) stays. A monitoring stack that is not
+        deployed has nothing to detach and is left alone. ``cdk.json`` is never
+        edited; the caller's run-scoped context is restored afterwards.
+        """
+        monitoring_stack = f"{self.config.project_name}-monitoring"
+        if not self._stack_exists_in_cloudformation(monitoring_stack):
+            return True
+        saved_context = dict(self._extra_cdk_context)
+        self.set_extra_cdk_context({**saved_context, CONTROL_PLANE_ONLY_CONTEXT_KEY: "true"})
+        try:
+            print(
+                f"  Updating {monitoring_stack} so it no longer references the regional stacks..."
+            )
+            return self.deploy(
+                stack_name=monitoring_stack,
+                require_approval=False,
+                exclusively=True,
+            )
+        finally:
+            self.set_extra_cdk_context(saved_context)
+
     def destroy_orchestrated(
         self,
         force: bool = False,
@@ -4563,11 +4596,24 @@ class StackManager:
         on_change_set_prepared: ChangeSetPreparedCallback | None = None,
         on_ecr_repository_created: EcrRepositoryCreatedCallback | None = None,
         retain_volumes: bool = False,
+        keep_control_plane: bool = False,
     ) -> tuple[bool, list[str], list[str]]:
         """Destroy stacks in dependency order with optional exact-ARN authority.
 
         ``retain_volumes`` reports the destroyed clusters' orphaned CSI volumes
         instead of deleting them; see ``_cleanup_cluster_volumes``.
+
+        ``keep_control_plane`` tears down only the workload tier — the regional
+        API bridges and the base regional stacks — and leaves
+        ``<project>-global``, ``<project>-api-gateway`` and
+        ``<project>-monitoring`` standing. It first updates the monitoring
+        stack in place so it no longer references the regional stacks (see
+        :meth:`detach_monitoring_from_regions`), then skips every sweep that
+        only makes sense when the whole deployment is going away: the
+        image-registry preflight, the backup-vault purge, bastion IAM
+        retirement, and the traffic-dial parameter purge. This is how a
+        deployment is scaled to zero workload Regions and the teardown half
+        of ``gco upgrade``.
         """
         app_stacks = self.list_stacks()
         strict_identity = expected_stack_ids is not None
@@ -4620,6 +4666,16 @@ class StackManager:
             pre_regional_stacks,
         ) = _get_stack_destroy_phases(stacks, project_name=project_name)
 
+        if keep_control_plane:
+            # The monitoring stack stays, so its cross-region references to the
+            # regional stacks must be dropped before those can be deleted.
+            if not self.detach_monitoring_from_regions():
+                return False, [], [f"{project_name}-monitoring"]
+            workload_tier = set(regional_api_stacks) | set(regional_stacks)
+            post_regional_stacks = []
+            pre_regional_stacks = []
+            stacks = [stack for stack in stacks if stack in workload_tier]
+
         strict_resources: dict[str, dict[str, str]] = {}
         if strict_identity:
             assert expected_stack_ids is not None
@@ -4646,7 +4702,7 @@ class StackManager:
             if on_cleanup_complete is not None:
                 on_cleanup_complete(name, details)
 
-        if not self._image_registry_destroy_preflight(force=force):
+        if not keep_control_plane and not self._image_registry_destroy_preflight(force=force):
             return False, [], list(stacks)
 
         bastion_targets = {
@@ -4663,21 +4719,25 @@ class StackManager:
         # role/profile and, below, the implicit log groups CloudFormation
         # never modeled. Strict (live-validation) teardowns skip both: the
         # harness owns fenced log-group deletion and audits IAM itself.
-        if not strict_identity:
+        if not strict_identity and not keep_control_plane:
             record_cleanup("bastion-iam", self._cleanup_bastion_iam())
 
-        global_stack_name = f"{project_name}-global"
-        backup = self._cleanup_backup_vault(
-            expected_stack_id=(expected_stack_ids or {}).get(global_stack_name),
-            authorize_stack=authorize_stack,
-            require_expected_identity=strict_identity,
-        )
-        record_cleanup("backup-vault", backup)
-        if strict_identity and backup.get("errors"):
-            raise RuntimeError(
-                "Strict backup-vault cleanup failed before stack deletion: "
-                + json.dumps(backup["errors"], sort_keys=True)
+        # The backup vault belongs to the global stack. When that stack stays,
+        # so do its recovery points: they are the EFS backups an operator may
+        # restore from once the regional stacks are recreated.
+        if not keep_control_plane:
+            global_stack_name = f"{project_name}-global"
+            backup = self._cleanup_backup_vault(
+                expected_stack_id=(expected_stack_ids or {}).get(global_stack_name),
+                authorize_stack=authorize_stack,
+                require_expected_identity=strict_identity,
             )
+            record_cleanup("backup-vault", backup)
+            if strict_identity and backup.get("errors"):
+                raise RuntimeError(
+                    "Strict backup-vault cleanup failed before stack deletion: "
+                    + json.dumps(backup["errors"], sort_keys=True)
+                )
 
         successful: list[str] = []
         failed: list[str] = []
@@ -4704,7 +4764,7 @@ class StackManager:
                     "implicit-log-groups",
                     self._cleanup_implicit_log_groups(implicit_log_groups, successful),
                 )
-            if overall:
+            if overall and not keep_control_plane:
                 # Only after a complete teardown: while any stack survives,
                 # the accelerator may still be live and a manual override on
                 # it is standing operator intent the purge must not erase.
@@ -6345,10 +6405,20 @@ def get_stack_destroy_order(
     stacks: list[str],
     *,
     project_name: str = "gco",
+    keep_control_plane: bool = False,
 ) -> list[str]:
-    """Return the exact project-aware order used by orchestrated destroy."""
-    phases = _get_stack_destroy_phases(stacks, project_name=project_name)
-    return [stack for phase in phases for stack in phase]
+    """Return the exact project-aware order used by orchestrated destroy.
+
+    With ``keep_control_plane`` only the workload tier is listed — the regional
+    API bridges followed by the base regional stacks — mirroring what
+    ``StackManager.destroy_orchestrated(keep_control_plane=True)`` deletes.
+    """
+    monitoring, bridges, regional, pre_regional = _get_stack_destroy_phases(
+        stacks, project_name=project_name
+    )
+    if keep_control_plane:
+        return [*bridges, *regional]
+    return [*monitoring, *bridges, *regional, *pre_regional]
 
 
 # =============================================================================

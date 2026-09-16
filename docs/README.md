@@ -36,6 +36,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |
 | [Operational Runbooks](RUNBOOKS.md) | Operators | Step-by-step incident response procedures for common failure scenarios |
 | [Maintenance](MAINTENANCE.md) | Maintainers | Routine upkeep: adding instance types, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) version upgrades, base-image and CVE-suppression refreshes, dependency bumps |
+| [Upgrading GCO](UPGRADING.md) | Operators | `gco upgrade`: move the checkout, local install, dev image and every deployed stack to the latest tagged release — what is destroyed, what to back up to the cluster-shared bucket first, and how to restore it afterwards |
 | [Live Release Validation](LIVE_RELEASE_VALIDATION.md) | Maintainers / operators | Run the local deploy-test-destroy harness and post its sanitized summary in a pull request comment; full reports stay local |
 | [Example Validation](EXAMPLE_VALIDATION.md) | Maintainers / operators | Validate the complete example gallery statically and through the sequential live examples harness |
 | [Floci Testing](FLOCI_TESTING.md) | Contributors / maintainers | The emulated-AWS test layer between in-process mocks and real-account validation: how CI runs it, what it proves, known emulator gaps, and how `gco release validate --emulator-endpoint` rehearses the harness |

@@ -212,21 +212,33 @@ def test_every_config_knob_is_matrix_covered() -> None:
     """
     import ast
 
+    import gco.config.config_loader as loader_module
     from tests._cdk_config_matrix import MATRIX_COVERAGE_ALLOWLIST
 
-    loader_path = Path(__file__).resolve().parent.parent / "gco" / "config" / "config_loader.py"
+    loader_path = Path(loader_module.__file__)
     tree = ast.parse(loader_path.read_text(encoding="utf-8"))
+
+    def _context_key(argument: ast.expr) -> str | None:
+        """Resolve a ``try_get_context`` argument: a literal, or a module-level constant."""
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            return argument.value
+        if isinstance(argument, ast.Name):
+            value = getattr(loader_module, argument.id, None)
+            if isinstance(value, str):
+                return value
+        return None
+
     read_keys = {
-        node.args[0].value
+        key
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "try_get_context"
         and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
+        and (key := _context_key(node.args[0])) is not None
     }
     assert read_keys, "no try_get_context reads found; the extraction is broken"
+    assert "gco:control-plane-only" in read_keys, "constant-named context keys must resolve"
 
     covered = {key for _, overrides in CONFIGS for key in overrides}
     allowlisted = set(MATRIX_COVERAGE_ALLOWLIST)

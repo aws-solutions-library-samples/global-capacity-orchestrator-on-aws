@@ -804,6 +804,45 @@ class TestApiGatewayStackSynth:
         assert not any("/POST/api/v1/manifests" in resource for resource in normalized_resources)
         assert not any("/inference/" in resource for resource in normalized_resources)
 
+    def test_aggregator_role_has_no_regional_grants_with_zero_regions(self):
+        """A control-plane-only topology omits the per-Region grants instead of emitting
+        statements with no resources (which CDK rejects at synth)."""
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        app = cdk.App()
+        stack = GCOApiGatewayGlobalStack(
+            app,
+            "test-api-gateway-zero-regions",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+            certificate_regions=[],
+            env=cdk.Environment(account="123456789012", region="us-east-2"),
+        )
+        assert stack.certificate_regions == ()
+        template = assertions.Template.from_stack(stack)
+        aggregator_role_ids = [
+            logical_id
+            for logical_id, role in template.find_resources("AWS::IAM::Role").items()
+            if role.get("Properties", {}).get("RoleName") == "gco-cross-region-aggregator"
+        ]
+        assert len(aggregator_role_ids) == 1
+
+        granted_actions: set[str] = set()
+        for policy in template.find_resources("AWS::IAM::Policy").values():
+            if {"Ref": aggregator_role_ids[0]} not in policy["Properties"].get("Roles", []):
+                continue
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+                actions = statement.get("Action", [])
+                granted_actions.update([actions] if isinstance(actions, str) else actions)
+                assert statement.get("Resource") not in ([], None)
+        assert "execute-api:Invoke" not in granted_actions
+        assert "cloudformation:DescribeStacks" not in granted_actions
+
+        # The aggregator and the backend-TLS manager both receive the empty list
+        # verbatim, so scale-up is an ordinary Update rather than a recreate.
+        rendered = json.dumps(template.to_json())
+        assert '"TARGET_REGIONS": "[]"' in rendered
+        assert '"CERTIFICATE_REGIONS": "[]"' in rendered
+
     def test_api_gateway_has_lambda(self):
         """Test that ApiGatewayStack creates Lambda proxy function(s)."""
         from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
