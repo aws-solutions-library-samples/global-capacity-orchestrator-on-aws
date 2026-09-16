@@ -985,34 +985,40 @@ class GCOApiGatewayGlobalStack(Stack):
         )
         self.aggregator_role = aggregator_role
 
-        regional_stack_arns = [
-            (
-                f"arn:{self.partition}:cloudformation:{region}:{self.account}:"
-                f"stack/{self.project_name}-regional-api-{region}/*"
+        # With zero workload Regions configured (a control-plane-only
+        # deployment) there is no regional bridge to describe or invoke. An
+        # identity policy statement must name at least one resource, so the
+        # two grants are simply absent until a Region is added; the aggregator
+        # then discovers nothing and answers with empty results.
+        if self.certificate_regions:
+            regional_stack_arns = [
+                (
+                    f"arn:{self.partition}:cloudformation:{region}:{self.account}:"
+                    f"stack/{self.project_name}-regional-api-{region}/*"
+                )
+                for region in self.certificate_regions
+            ]
+            aggregator_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["cloudformation:DescribeStacks"],
+                    resources=regional_stack_arns,
+                )
             )
-            for region in self.certificate_regions
-        ]
-        aggregator_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["cloudformation:DescribeStacks"],
-                resources=regional_stack_arns,
+            aggregator_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["execute-api:Invoke"],
+                    resources=[
+                        (
+                            f"arn:{self.partition}:execute-api:{region}:{self.account}:"
+                            f"*/*/{method}/{path}"
+                        )
+                        for region in self.certificate_regions
+                        for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+                    ],
+                )
             )
-        )
-        aggregator_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["execute-api:Invoke"],
-                resources=[
-                    (
-                        f"arn:{self.partition}:execute-api:{region}:{self.account}:"
-                        f"*/*/{method}/{path}"
-                    )
-                    for region in self.certificate_regions
-                    for method, path in AGGREGATOR_REGIONAL_API_ROUTES
-                ],
-            )
-        )
 
         aggregator_log_group = logs.LogGroup(
             self,

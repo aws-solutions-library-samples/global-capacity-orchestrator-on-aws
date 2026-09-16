@@ -744,7 +744,9 @@ def test_stacks_destroy_all_confirms_retries_cleanup_and_then_succeeds(
     assert "test-gco-us-east-1 failed" in result.output
     assert "test-gco-us-east-1 destroyed" in result.output
     assert "Destroyed: 2/2 stacks" in result.output
-    destroy_order.assert_called_once_with(stack_names, project_name="test-gco")
+    destroy_order.assert_called_once_with(
+        stack_names, project_name="test-gco", keep_control_plane=False
+    )
     manager.cleanup_orphaned_network_interfaces.assert_called_once_with()
     sleep.assert_called_once_with(30)
     assert manager.destroy_orchestrated.call_count == 2
@@ -1386,3 +1388,57 @@ def test_stacks_destroy_all_machine_confirmation_lists_targets_on_stderr(
     assert "test-gco-us-east-1" in result.stderr
     assert "test-gco-global" in result.stderr
     assert "Are you sure you want to destroy all stacks?" in result.stderr
+
+
+def test_destroy_all_keep_control_plane_lists_only_the_workload_tier(runner: CliRunner) -> None:
+    """The confirmation names the workload tier, warns about regional data, and the
+    manager receives keep_control_plane=True."""
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = [
+        "test-gco-global",
+        "test-gco-api-gateway",
+        "test-gco-us-east-1",
+        "test-gco-regional-api-us-east-1",
+        "test-gco-monitoring",
+    ]
+    manager.destroy_orchestrated.return_value = (
+        True,
+        ["test-gco-regional-api-us-east-1", "test-gco-us-east-1"],
+        [],
+    )
+
+    with patch("cli.stacks.get_stack_manager", return_value=manager):
+        result = _invoke(
+            runner,
+            stacks,
+            ["destroy-all", "--keep-control-plane"],
+            input_text="y\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "keep the control plane" in result.output
+    assert "test-gco-regional-api-us-east-1" in result.output
+    assert "test-gco-us-east-1" in result.output
+    assert "test-gco-global" not in result.output.split("Are you sure")[0]
+    assert "destroy the workload tier?" in result.output
+    assert "Destroyed: 2/2 stacks" in result.output
+    assert "control plane" in result.output.lower()
+    assert manager.destroy_orchestrated.call_args.kwargs["keep_control_plane"] is True
+
+
+def test_destroy_all_keep_control_plane_with_yes_skips_the_prompt(runner: CliRunner) -> None:
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = ["test-gco-global", "test-gco-us-east-1"]
+    manager.destroy_orchestrated.return_value = (True, ["test-gco-us-east-1"], [])
+
+    with patch("cli.stacks.get_stack_manager", return_value=manager):
+        result = _invoke(runner, stacks, ["destroy-all", "--keep-control-plane", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert "Are you sure" not in result.output
+    assert "gco stacks regions remove <region>" in result.output
+    assert manager.destroy_orchestrated.call_args.kwargs["keep_control_plane"] is True

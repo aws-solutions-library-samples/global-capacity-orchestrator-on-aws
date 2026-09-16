@@ -148,7 +148,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `bootstrap_cdk` | `gco stacks bootstrap` — bootstrap [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) in an AWS account/region. |
 | `deploy_all` | `gco stacks deploy-all` — deploy every CDK stack in dependency order. |
 | `deploy_stack` | `gco stacks deploy` — deploy a single CDK stack to AWS. |
-| `destroy_all` | `gco stacks destroy-all` — destroy every CDK stack in reverse dependency order. |
+| `destroy_all` | `gco stacks destroy-all` — destroy every CDK stack in reverse dependency order, or with `keep_control_plane=True` only the workload tier (scale to zero Regions). |
 | `destroy_stack` | `gco stacks destroy` — destroy a single CDK stack. |
 | `disable_aurora` | `gco stacks aurora disable` — flip Aurora pgvector off in cdk.json. |
 | `disable_fsx` | `gco stacks fsx disable` — flip [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) Lustre off in cdk.json. |

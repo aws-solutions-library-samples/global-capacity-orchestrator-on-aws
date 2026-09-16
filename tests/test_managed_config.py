@@ -163,9 +163,21 @@ class TestEngineValidation:
         with pytest.raises(ManagedConfigError, match="single AWS partition"):
             add_deployment_region("cn-north-1", config_path=cdk_json)
 
-    def test_removing_last_region_rejected(self, cdk_json: Path):
-        with pytest.raises(ManagedConfigError, match="At least one region"):
-            remove_deployment_region("us-east-1", config_path=cdk_json)
+    def test_removing_last_region_yields_a_control_plane_only_topology(self, cdk_json: Path):
+        """An empty workload list is valid: only the control-plane stacks remain."""
+        report = remove_deployment_region("us-east-1", config_path=cdk_json)
+        assert report.changed is True
+        status = get_deployment_regions_status(config_path=cdk_json)
+        assert status["regional"] == []
+        assert status["partition"] == "aws"
+        assert "partition_error" not in status
+
+    def test_non_list_regional_value_rejected(self, cdk_json: Path):
+        document = json.loads(cdk_json.read_text(encoding="utf-8"))
+        document["context"]["deployment_regions"]["regional"] = "us-east-1"
+        cdk_json.write_text(json.dumps(document), encoding="utf-8")
+        with pytest.raises(ManagedConfigError, match="must be a JSON array"):
+            add_deployment_region("us-west-2", config_path=cdk_json)
 
     def test_malformed_json_refused(self, tmp_path: Path):
         path = tmp_path / "cdk.json"

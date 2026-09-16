@@ -121,8 +121,10 @@ def _validate_regional_result(document: dict[str, Any], candidate: tuple[str, ..
     """Reject a regional-Regions candidate the CDK app would refuse at synth.
 
     Applies the exact synth-time validators: every entry must be an SDK-known
-    CloudFormation Region, unique, non-empty — and together with the effective
+    CloudFormation Region and unique — and together with the effective
     global/api_gateway/monitoring scalars must resolve to one AWS partition.
+    An empty candidate is valid: it describes a control-plane-only deployment
+    (global, API Gateway, and monitoring stacks with no workload cluster).
     """
     validated_regional_deployment_regions(list(candidate))
     container = document.get("context", {}).get("deployment_regions", {})

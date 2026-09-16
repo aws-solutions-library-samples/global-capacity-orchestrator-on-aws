@@ -1334,6 +1334,23 @@ class TestStackDeploymentOrder:
             "gco-global",
         ]
 
+    def test_get_stack_destroy_order_keep_control_plane_lists_only_the_workload_tier(self):
+        """Bridges then base regional stacks; monitoring and the globals are never listed."""
+        from cli.stacks import get_stack_destroy_order
+
+        stacks = [
+            "gco-us-east-1",
+            "gco-global",
+            "gco-regional-api-us-east-1",
+            "gco-us-west-2",
+            "gco-api-gateway",
+            "gco-monitoring",
+        ]
+
+        result = get_stack_destroy_order(stacks, keep_control_plane=True)
+
+        assert result == ["gco-regional-api-us-east-1", "gco-us-west-2", "gco-us-east-1"]
+
     def test_deployment_order_non_gco_project(self):
         """#139: ordering is by suffix, so a non-``gco`` project orders
         identically. Regression for the hardcoded ``gco-*`` priority dict."""

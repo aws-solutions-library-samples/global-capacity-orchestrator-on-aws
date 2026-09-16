@@ -501,13 +501,15 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
         parallel: bool = False,
         max_workers: int | None = None,
         retain_volumes: bool = False,
+        keep_control_plane: bool = False,
         *,
         ctx: Any = CurrentContext(),
         progress: Any = Progress(),
     ) -> str:
         """[gated by GCO_ENABLE_INFRASTRUCTURE_DESTROY] long-running.
 
-        `gco stacks destroy-all` — destroy every CDK stack in reverse dependency order.
+        `gco stacks destroy-all` — destroy every CDK stack in reverse dependency order,
+        or with keep_control_plane=True only the workload tier (scale to zero Regions).
 
         Typical wall-clock: 20-40 minutes for a multi-region teardown.
         Clients that speak FastMCP's task protocol can receive a task
@@ -525,6 +527,11 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
             retain_volumes: Report each cluster's orphaned EBS volumes instead
                 of deleting them (passes ``--retain-volumes``). Defaults to
                 False, matching the CLI.
+            keep_control_plane: Destroy only the regional API bridges and
+                regional stacks and leave the global, API Gateway and
+                monitoring stacks standing (passes ``--keep-control-plane``).
+                Regional data (EFS/FSx, Valkey, Aurora, in-cluster volumes) is
+                still deleted. Defaults to False, matching the CLI.
         """
         argv = ["gco", "stacks", "destroy-all"]
         if yes:
@@ -535,6 +542,8 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
             argv += ["--max-workers", str(max_workers)]
         if retain_volumes:
             argv.append("--retain-volumes")
+        if keep_control_plane:
+            argv.append("--keep-control-plane")
         return await _run_long_task(
             argv,
             ctx=ctx,
@@ -597,8 +606,11 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
 
         Remove a workload Region from cdk.json deployment_regions.regional.
 
-        Config-only and idempotent: the resulting list must stay valid (at
-        least one Region); removing an absent Region is a reported no-op.
+        Config-only and idempotent: the resulting list must stay valid
+        (SDK-known, unique Regions in one AWS partition). Removing the last
+        Region is allowed and leaves a control-plane-only topology (global,
+        API Gateway, and monitoring stacks with no workload cluster);
+        removing an absent Region is a reported no-op.
         A deployed stack for the removed Region is NOT destroyed — that
         requires an explicit destroy_stack call (separately gated).
 

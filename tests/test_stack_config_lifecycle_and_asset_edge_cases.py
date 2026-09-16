@@ -811,8 +811,31 @@ def test_setup_access_reports_outer_failures(exception: Exception, expected: str
     assert expected in result.output
 
 
-def _report(changed: bool) -> Any:
-    return SimpleNamespace(changed=changed, summary=lambda: "managed summary")
+def _report(changed: bool, new: Any = ("us-east-1",)) -> Any:
+    return SimpleNamespace(changed=changed, new=new, summary=lambda: "managed summary")
+
+
+def test_regions_remove_warns_when_the_workload_list_becomes_empty() -> None:
+    """Removing the last Region is allowed and announces the control-plane-only topology."""
+    with patch(
+        "cli.managed_config.remove_deployment_region",
+        return_value=_report(True, new=()),
+    ):
+        result = _invoke_stacks(["regions", "remove", "us-east-1", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "managed summary" in result.output
+    assert "control-plane-only topology" in result.output
+    assert "gco stacks regions add <region>" in result.output
+
+
+def test_regions_remove_stays_quiet_while_regions_remain() -> None:
+    with patch(
+        "cli.managed_config.remove_deployment_region",
+        return_value=_report(True, new=("us-west-2",)),
+    ):
+        result = _invoke_stacks(["regions", "remove", "us-east-1", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "control-plane-only topology" not in result.output
 
 
 @pytest.mark.parametrize(

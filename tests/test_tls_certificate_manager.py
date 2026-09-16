@@ -931,10 +931,9 @@ def test_from_event_falls_back_to_environment_for_scheduled_events() -> None:
     ("regions", "message"),
     (
         ("us-west-2", "Regions must be a list"),
-        ([], "At least one valid AWS workload region"),
-        (["us-west-2", "not a region"], "At least one valid AWS workload region"),
+        (["us-west-2", "not a region"], "valid AWS workload region names"),
     ),
-    ids=("string", "empty", "invalid-entry"),
+    ids=("string", "invalid-entry"),
 )
 def test_from_event_rejects_invalid_region_lists(regions, message: str) -> None:
     """Region lists are validated before any AWS client is created."""
@@ -943,6 +942,14 @@ def test_from_event_rejects_invalid_region_lists(regions, message: str) -> None:
 
     with pytest.raises(ValueError, match=message):
         handler.ManagerConfig.from_event(event)
+
+
+def test_from_event_accepts_an_empty_region_list() -> None:
+    """Zero workload Regions (a control-plane-only deployment) is a valid configuration."""
+    handler = load_lambda_module("tls-certificate-manager")
+    event = {"ResourceProperties": _resource_properties(Regions=[])}
+
+    assert handler.ManagerConfig.from_event(event).regions == ()
 
 
 def test_from_event_without_regions_anywhere_is_rejected() -> None:
@@ -954,9 +961,20 @@ def test_from_event_without_regions_anywhere_is_rejected() -> None:
 
     with (
         patch.dict(os.environ, environment, clear=True),
-        pytest.raises(ValueError, match="At least one valid AWS workload region"),
+        pytest.raises(ValueError, match="Regions are not configured"),
     ):
         handler.ManagerConfig.from_event({"ResourceProperties": properties})
+
+
+def test_from_event_falls_back_to_the_environment_region_list() -> None:
+    """Scheduled rotations carry no properties; CERTIFICATE_REGIONS supplies the list."""
+    handler = load_lambda_module("tls-certificate-manager")
+    properties = _resource_properties()
+    del properties["Regions"]
+
+    with patch.dict(os.environ, {"CERTIFICATE_REGIONS": '["eu-west-1"]'}):
+        config = handler.ManagerConfig.from_event({"ResourceProperties": properties})
+    assert config.regions == ("eu-west-1",)
 
 
 @pytest.mark.parametrize(
@@ -2146,9 +2164,8 @@ def test_unsupported_request_type_is_rejected_after_config_validation() -> None:
     ("properties", "message"),
     (
         (None, "OldResourceProperties must be an object"),
-        ({}, r"OldResourceProperties\.Regions must be a non-empty list"),
-        ({"Regions": []}, r"Regions must be a non-empty list"),
-        ({"Regions": "us-west-2"}, r"Regions must be a non-empty list"),
+        ({}, r"OldResourceProperties\.Regions must be a list"),
+        ({"Regions": "us-west-2"}, r"Regions must be a list"),
         ({"Regions": ["us-west-2", 7]}, "contains an invalid region"),
         ({"Regions": ["us-west-2", "US-WEST-2"]}, "contains an invalid region"),
         ({"Regions": ["us-west-2", " us-west-2 "]}, "contains a duplicate region"),
@@ -2156,7 +2173,6 @@ def test_unsupported_request_type_is_rejected_after_config_validation() -> None:
     ids=(
         "not-object",
         "missing-regions",
-        "empty-regions",
         "regions-not-list",
         "non-string-region",
         "invalid-region",
@@ -2178,6 +2194,25 @@ def test_retired_regions_from_update_preserves_old_order() -> None:
     event = {"OldResourceProperties": {"Regions": ["us-west-2", " eu-west-1", "ap-south-1"]}}
 
     assert handler._retired_regions_from_update(event, config) == ("us-west-2", "ap-south-1")
+
+
+def test_scaling_to_zero_regions_retires_every_previous_region() -> None:
+    """An Update to an empty list retires every leaf certificate of the old topology."""
+    handler = load_lambda_module("tls-certificate-manager")
+    config = replace(_manager_config(handler), regions=())
+    event = {"OldResourceProperties": {"Regions": ["us-west-2", "eu-west-1"]}}
+
+    assert handler._retired_regions_from_update(event, config) == ("us-west-2", "eu-west-1")
+
+
+def test_scaling_up_from_zero_regions_retires_nothing() -> None:
+    """The previous empty list (a control-plane-only topology) is valid and retires nothing."""
+    handler = load_lambda_module("tls-certificate-manager")
+    config = replace(_manager_config(handler), regions=("us-west-2",))
+    event = {"OldResourceProperties": {"Regions": []}}
+
+    assert handler._event_regions(event["OldResourceProperties"], "OldResourceProperties") == ()
+    assert handler._retired_regions_from_update(event, config) == ()
 
 
 # ---------------------------------------------------------------------------

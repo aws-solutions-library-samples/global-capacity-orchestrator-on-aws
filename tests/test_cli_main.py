@@ -2851,7 +2851,7 @@ class TestStacksDestroyAllOrchestrated:
             result = runner.invoke(cli, ["stacks", "destroy-all", "-y"])
 
         assert result.exit_code == 0
-        mock_order.assert_called_once_with(stacks, project_name="acme")
+        mock_order.assert_called_once_with(stacks, project_name="acme", keep_control_plane=False)
 
     def test_destroy_all_error(self):
         """Test destroy-all with exception."""

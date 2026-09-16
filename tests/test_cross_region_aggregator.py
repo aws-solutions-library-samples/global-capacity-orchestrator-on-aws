@@ -603,8 +603,8 @@ class TestDiscoveryConfiguration:
 
     @pytest.mark.parametrize(
         "raw",
-        [None, "not json", "{}", "[]", '["us-east-1", 7]', '["US-EAST-1"]', '["nowhere"]'],
-        ids=["unset", "not-json", "not-a-list", "empty", "non-string", "uppercase", "not-a-region"],
+        [None, "not json", "{}", '["us-east-1", 7]', '["US-EAST-1"]', '["nowhere"]'],
+        ids=["unset", "not-json", "not-a-list", "non-string", "uppercase", "not-a-region"],
     )
     def test_malformed_target_regions_fail_closed(self, monkeypatch, raw):
         if raw is None:
@@ -613,6 +613,24 @@ class TestDiscoveryConfiguration:
             monkeypatch.setenv("TARGET_REGIONS", raw)
         with pytest.raises(RuntimeError, match="not configured|invalid region"):
             handler._configured_regions()
+
+    def test_empty_target_regions_is_a_control_plane_only_deployment(self, monkeypatch):
+        """Zero workload Regions discovers no bridges and aggregates to empty results."""
+        monkeypatch.setenv("TARGET_REGIONS", "[]")
+        monkeypatch.setenv("PROJECT_NAME", "gco")
+        monkeypatch.setenv("AWS_URL_SUFFIX", "amazonaws.com")
+        handler._cached_endpoints = None
+        assert handler._configured_regions() == []
+
+        with patch.object(handler.boto3, "client") as client:
+            assert handler.get_regional_endpoints() == {}
+            result = handler.aggregate_jobs()
+        client.assert_not_called()
+        assert result["jobs"] == []
+        assert result["total"] == 0
+        assert result["regions_queried"] == 0
+        assert result["errors"] is None
+        handler._cached_endpoints = None
 
     def test_duplicate_regions_are_collapsed_in_order(self):
         with patch.dict(

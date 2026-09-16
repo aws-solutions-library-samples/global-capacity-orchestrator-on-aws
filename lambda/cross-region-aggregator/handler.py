@@ -76,8 +76,11 @@ def _configured_regions() -> list[str]:
         configured = json.loads(os.environ["TARGET_REGIONS"])
     except (KeyError, json.JSONDecodeError) as exc:
         raise RuntimeError("Regional API discovery is not configured") from exc
-    if not isinstance(configured, list) or not configured:
+    if not isinstance(configured, list):
         raise RuntimeError("Regional API discovery is not configured")
+    # An empty list is a control-plane-only deployment (zero workload Regions):
+    # discovery finds no bridges and every aggregation answers with empty
+    # results rather than a 503.
 
     regions: list[str] = []
     for value in configured:

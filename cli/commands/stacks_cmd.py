@@ -418,6 +418,14 @@ def deploy_all_orchestrated(
     help="Report each cluster's orphaned EBS volumes instead of deleting them",
 )
 @click.option(
+    "--keep-control-plane",
+    is_flag=True,
+    help=(
+        "Destroy only the regional API bridges and regional stacks; leave the global, "
+        "API Gateway and monitoring stacks standing (scale to zero workload Regions)"
+    ),
+)
+@click.option(
     "--enable",
     "enable",
     multiple=True,
@@ -432,6 +440,7 @@ def destroy_all_orchestrated(
     parallel: Any,
     max_workers: Any,
     retain_volumes: Any,
+    keep_control_plane: Any,
     enable: Mapping[str, str],
 ) -> None:
     """Destroy all stacks in the correct order.
@@ -454,6 +463,18 @@ def destroy_all_orchestrated(
     /{project}/traffic-dial SSM parameters (controller state and manual
     overrides), which are written outside CloudFormation.
 
+    --keep-control-plane scales the deployment to zero workload Regions
+    instead of removing it: only phases 2 and 3 run, after the monitoring
+    stack is updated in place so it stops referencing the regional stacks.
+    The global, API Gateway and monitoring stacks — and the shared state they
+    own (DynamoDB tables, the model and cluster-shared buckets, the image
+    registry, EFS recovery points, cost reports) — stay. Data inside the
+    regional stacks (EFS and FSx file systems, Valkey, Aurora, in-cluster
+    volumes) is still deleted, so back it up to the cluster-shared bucket
+    first. Remove the Regions from cdk.json afterwards ('gco stacks regions
+    remove') if the scale-down is meant to last; 'gco upgrade' uses this
+    same teardown before recreating the regional stacks.
+
     Use --parallel to destroy regional stacks concurrently, which can
     significantly reduce total teardown time when destroying multiple
     regional stacks.
@@ -462,6 +483,7 @@ def destroy_all_orchestrated(
         gco stacks destroy-all -y
         gco stacks destroy-all -y --parallel
         gco stacks destroy-all -y -p --max-workers 8
+        gco stacks destroy-all -y --keep-control-plane
         gco stacks destroy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
     """
     import time
@@ -482,16 +504,34 @@ def destroy_all_orchestrated(
         ordered = get_stack_destroy_order(
             stacks,
             project_name=config.project_name,
+            keep_control_plane=keep_control_plane,
         )
+        if keep_control_plane:
+            # Only the workload tier goes; the control-plane stacks are updated
+            # in place (monitoring) or left alone (global, API Gateway).
+            stacks = list(ordered)
 
         if not yes:
-            formatter.print_warning("This will destroy ALL GCO stacks:")
+            if keep_control_plane:
+                formatter.print_warning(
+                    "This will destroy the workload tier (regional API bridges and regional "
+                    "stacks) and keep the control plane:"
+                )
+            else:
+                formatter.print_warning("This will destroy ALL GCO stacks:")
             for stack in ordered:
                 if config.output_format == "table":
                     formatter.print_info(f"  - {stack}")
                 else:
                     interactive_echo(f"  - {stack}")
-            confirm("\nAre you sure you want to destroy all stacks?", abort=True)
+            if keep_control_plane:
+                formatter.print_warning(
+                    "Data inside these stacks (EFS/FSx file systems, Valkey, Aurora, "
+                    "in-cluster volumes) is deleted with them."
+                )
+                confirm("\nAre you sure you want to destroy the workload tier?", abort=True)
+            else:
+                confirm("\nAre you sure you want to destroy all stacks?", abort=True)
 
         total_stacks = len(stacks)
 
@@ -533,6 +573,7 @@ def destroy_all_orchestrated(
                 parallel=parallel,
                 max_workers=max_workers,
                 retain_volumes=retain_volumes,
+                keep_control_plane=keep_control_plane,
             )
 
             if success:
@@ -544,7 +585,13 @@ def destroy_all_orchestrated(
         formatter.print_info("")
         formatter.print_info(f"Destroyed: {total_stacks - len(failed)}/{total_stacks} stacks")
 
-        if success:
+        if success and keep_control_plane:
+            formatter.print_success(
+                "Workload tier destroyed; the global, API Gateway and monitoring stacks are "
+                "standing. Run 'gco stacks regions remove <region>' to make the scale-down "
+                "permanent, or 'gco stacks deploy-all' to recreate the regional stacks."
+            )
+        elif success:
             formatter.print_success("All stacks destroyed successfully")
         else:
             formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
@@ -698,11 +745,20 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
 
     formatter = get_output_formatter(config)
 
-    # Determine region
+    # Determine region. An explicitly empty workload list (a control-plane-only
+    # deployment) has no cluster to reach, so say so instead of guessing.
     if not region:
         cdk_regions = _load_cdk_json()
-        if cdk_regions and "regional" in cdk_regions:
+        if cdk_regions and cdk_regions.get("regional"):
             region = cdk_regions["regional"][0]
+        elif cdk_regions and cdk_regions.get("regional") == []:
+            formatter.print_error(
+                "No workload Regions are configured (deployment_regions.regional is empty), "
+                "so there is no EKS cluster to set up access for. Add one with "
+                "'gco stacks regions add <region>' and deploy it, or pass --region "
+                "for a cluster that is still deployed."
+            )
+            sys.exit(1)
         else:
             region = config.default_region or "us-east-1"
 
@@ -1132,10 +1188,13 @@ def regions_add(config: Any, region: Any, config_path: Any, yes: Any) -> None:
 def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None:
     """Remove a workload Region from deployment_regions.regional.
 
-    The resulting list must stay valid (at least one Region). Removing an
-    absent Region is a reported no-op. Removing an unknown/typo'd entry from
-    a hand-edited config is allowed — validation applies to the result, so
-    this is also the repair path.
+    The resulting list must stay valid (SDK-known, unique Regions in one AWS
+    partition). Removing the last Region is allowed: an empty list is a
+    control-plane-only topology, where 'gco stacks deploy-all' stands up only
+    the global, API Gateway, and monitoring stacks until a Region is added
+    back. Removing an absent Region is a reported no-op. Removing an
+    unknown/typo'd entry from a hand-edited config is allowed — validation
+    applies to the result, so this is also the repair path.
 
     Examples:
         gco stacks regions remove us-west-2
@@ -1164,6 +1223,13 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
             f"Config only — if {config.project_name}-{region} is deployed, destroy it "
             f"explicitly with 'gco stacks destroy {config.project_name}-{region}'"
         )
+        if not report.new:
+            formatter.print_warning(
+                "deployment_regions.regional is now empty: this is a control-plane-only "
+                "topology. 'gco stacks deploy-all' will deploy only the global, API Gateway, "
+                "and monitoring stacks until you add a Region back with "
+                "'gco stacks regions add <region>'."
+            )
     else:
         formatter.print_info(report.summary())
 

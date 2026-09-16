@@ -87,12 +87,18 @@ class ManagerConfig:
         properties = event.get("ResourceProperties") or event
         raw_regions = properties.get("Regions")
         if raw_regions is None:
-            raw_regions = json.loads(os.environ.get("CERTIFICATE_REGIONS", "[]"))
+            raw_environment = os.environ.get("CERTIFICATE_REGIONS")
+            if raw_environment is None:
+                raise ValueError("Regions are not configured")
+            raw_regions = json.loads(raw_environment)
         if not isinstance(raw_regions, list):
             raise ValueError("Regions must be a list")
+        # An empty list is a control-plane-only deployment: the root CA is still
+        # managed (so a later scale-up chains to the same root) and every leaf
+        # certificate the previous configuration issued is retired.
         regions = tuple(dict.fromkeys(str(region).strip() for region in raw_regions))
-        if not regions or any(_REGION_RE.fullmatch(region) is None for region in regions):
-            raise ValueError("At least one valid AWS workload region is required")
+        if any(_REGION_RE.fullmatch(region) is None for region in regions):
+            raise ValueError("Regions must contain only valid AWS workload region names")
 
         config = cls(
             regions=regions,
@@ -985,8 +991,8 @@ def _event_regions(properties: Any, field: str) -> tuple[str, ...]:
     if not isinstance(properties, dict):
         raise ValueError(f"{field} must be an object")
     raw_regions = properties.get("Regions")
-    if not isinstance(raw_regions, list) or not raw_regions:
-        raise ValueError(f"{field}.Regions must be a non-empty list")
+    if not isinstance(raw_regions, list):
+        raise ValueError(f"{field}.Regions must be a list")
     regions: list[str] = []
     for value in raw_regions:
         if not isinstance(value, str):

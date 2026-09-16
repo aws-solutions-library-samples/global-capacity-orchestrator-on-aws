@@ -169,7 +169,7 @@ Edit `cdk.json` to customize where each stack type deploys:
 | `global` | string | `us-east-2` | Region for partition-wide state and SSM parameters; also homes Global Accelerator in `aws` |
 | `api_gateway` | string | `us-east-2` | Region for API Gateway stack |
 | `monitoring` | string | `us-east-2` | Region for Monitoring stack |
-| `regional` | array | `["us-east-1"]` | Regions for EKS cluster deployment |
+| `regional` | array | `["us-east-1"]` | Regions for EKS cluster deployment. May be empty (`[]`) for a control-plane-only deployment — see [Scaling to zero workload Regions](#scaling-to-zero-workload-regions) |
 
 **Example: Deploy everything to us-west-2:**
 
@@ -203,6 +203,23 @@ Edit `cdk.json` to customize where each stack type deploys:
   }
 }
 ```
+
+### Scaling to zero workload Regions
+
+`regional` may be an empty list. That is a **control-plane-only** topology: `gco stacks deploy-all` stands up (or leaves standing) only the global, API Gateway, and monitoring stacks, and every per-Region surface degrades cleanly — the API Gateway's aggregator answers with empty results, the backend-TLS manager keeps the private root CA but issues no leaf certificates, ECR replication has no destinations, Global Accelerator has a listener with no endpoint groups, and the monitoring dashboard replaces its per-Region sections with a note. Use it to park a deployment without paying for clusters, to hold the shared state (DynamoDB tables, the model and cluster-shared buckets, the image registry) while every workload Region is rebuilt, or as the intermediate state `gco upgrade` passes through (see [UPGRADING.md](UPGRADING.md)).
+
+```bash
+gco stacks destroy-all --keep-control-plane -y   # detach monitoring, destroy the regional API bridges and regional stacks
+gco stacks regions remove us-east-1 -y           # config edits never destroy stacks; cdk.json now has "regional": []
+gco stacks deploy-all -y                         # updates the three control-plane stacks in place for the empty topology
+
+gco stacks regions add us-east-1 -y              # scale back up
+gco stacks deploy-all -y                         # recreates gco-us-east-1 and its regional API bridge
+```
+
+Destroy before you edit the configuration: a base regional stack that is no longer in `cdk.json` is also no longer in the CDK app, so `gco stacks destroy gco-<region>` cannot find it (only orphaned regional API bridges are deleted directly). `destroy-all --keep-control-plane` handles the order for you — it first updates the monitoring stack in place so it stops referencing the regional stacks (`--context gco:control-plane-only=true`, the run-scoped equivalent of an empty list), then tears down the workload tier and leaves `<project>-global`, `<project>-api-gateway` and `<project>-monitoring` standing, skipping the sweeps that only make sense for a full teardown (backup-vault purge, traffic-dial parameter purge, bastion IAM retirement).
+
+Two things do not survive a scale-to-zero: the data inside the destroyed regional stacks (EFS and FSx file systems, Valkey and Aurora instances, in-cluster volumes, the regional-shared bucket unless its removal policy is `retain`) and the "first workload Region" default that Region-scoped commands infer from `cdk.json` — `gco stacks access` refuses to guess and says so, while `gco cluster …`, `gco storage sync regional-shared …` and similar commands fall back to the configured default Region (`--region` / `GCO_DEFAULT_REGION`), where nothing is deployed. Back up regional data to the cluster-shared bucket first (`gco storage sync cluster-shared ./data --direction upload`); the control-plane stacks and everything in them are untouched.
 
 ### Environment Variables
 
