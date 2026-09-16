@@ -51,7 +51,7 @@ def test_top_level_docs_index_is_exact() -> None:
     indexed = {
         target for target in re.findall(r"\]\(([A-Z][A-Z0-9_]+\.md)\)", index) if "/" not in target
     }
-    assert len(actual) == 31
+    assert len(actual) == 32
     assert indexed == actual, (
         f"docs/README.md drifted; missing={sorted(actual - indexed)!r}, "
         f"stale={sorted(indexed - actual)!r}"
@@ -62,7 +62,7 @@ def test_cli_toc_and_module_readme_match_command_modules() -> None:
     modules = sorted((ROOT / "cli" / "commands").glob("*_cmd.py"))
     expected_groups = set(cli.commands)
     expected_files = {path.name for path in modules}
-    assert len(expected_groups) == len(expected_files) == 27
+    assert len(expected_groups) == len(expected_files) == 28
 
     cli_doc = (ROOT / "docs" / "CLI.md").read_text(encoding="utf-8")
     toc = _section(cli_doc, "## Table of Contents", "## Installation")

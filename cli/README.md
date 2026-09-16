@@ -31,6 +31,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `images.py` | Container image registry management (`gco images`): repositories, tags, lifecycle, replication |
 | `job_policy.py` | Reads the deployed job-validation policy (`GET /api/v1/policy`) and judges manifests against it |
 | `managed_config.py` | Managed deployment-config engine: validated, atomic, audited `cdk.json` edits behind `gco stacks regions/bedrock/eks` |
+| `upgrade.py` | Whole-deployment upgrade engine behind `gco upgrade`: release-tag resolution, `cdk.json`-preserving checkout, local install and dev-image refresh, and the scale-to-zero / deploy-all stack cycle |
 | `cost_analytics.py` | Athena-backed Kubernetes cost analytics (`gco costs k8s ...`) |
 | `vector_store.py` | Operator client for the vector store (`gco vector`) |
 | `cluster_tunnel.py` | Shared helpers for reaching a possibly-private EKS API endpoint (`gco cluster tunnel`) |
@@ -75,6 +76,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `swarm_cmd.py` | `gco swarm ...` |
 | `tasks_cmd.py` | `gco tasks ...` |
 | `templates_cmd.py` | `gco templates ...` |
+| `upgrade_cmd.py` | `gco upgrade` |
 | `vector_cmd.py` | `gco vector ...` |
 | `webhooks_cmd.py` | `gco webhooks ...` |
 

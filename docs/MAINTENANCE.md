@@ -789,6 +789,18 @@ Roll out to a non-production account/region first, watch the first NodePool
 scale-up, then promote to the remaining regions — the same staged pattern as an
 EKS upgrade.
 
+### Upgrading a running deployment
+
+`gco stacks deploy-all` updates the stacks a checkout describes, but it does not
+move the checkout, refresh the installed CLI or the dev image, or recreate the
+regional stacks — and some release changes to the workload tier cannot be
+applied in place. `gco upgrade` does all of that in one pass: it checks out the
+latest release tag (preserving `cdk.json`), refreshes the local install, scales
+the workload tier to zero with the control plane standing, and runs deploy-all
+on the new release. Every regional stack is destroyed and recreated, so the
+procedure starts with backing regional data up to the cluster-shared bucket;
+[UPGRADING.md](UPGRADING.md) is the guide.
+
 ### Rollback
 
 There is no one-click release rollback; infrastructure is declarative, so you

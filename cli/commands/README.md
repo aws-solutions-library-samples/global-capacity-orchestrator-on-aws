@@ -50,6 +50,7 @@ registered groups; this table only says what each module owns.
 | `swarm_cmd.py` | `gco swarm ...` | Swarm supervision: one orchestrator Mission driving child Missions. | [reference](../../docs/CLI.md#swarm-commands) |
 | `tasks_cmd.py` | `gco tasks ...` | Inspect long-running MCP / CLI task status. | [reference](../../docs/CLI.md#tasks-commands) |
 | `templates_cmd.py` | `gco templates ...` | Manage job templates. | [reference](../../docs/CLI.md#templates-commands) |
+| `upgrade_cmd.py` | `gco upgrade` | Move the checkout, local install, dev image and deployed stacks to the latest tagged release. | [reference](../../docs/CLI.md#upgrade-command) |
 | `vector_cmd.py` | `gco vector ...` | Semantic search over an S3-ingested document corpus. | [reference](../../docs/CLI.md#vector-commands) |
 | `webhooks_cmd.py` | `gco webhooks ...` | Manage webhooks for job event notifications. | [reference](../../docs/CLI.md#webhooks-commands) |
 | `__init__.py` | — | Imports every group so `cli/main.py` can register them with `cli.add_command()` | — |

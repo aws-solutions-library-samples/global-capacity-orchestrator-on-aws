@@ -290,6 +290,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 - See [docs/INFERENCE.md](docs/INFERENCE.md) for inference serving guide
 - See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for customization options
 - Review [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for architecture details
+- When a new release ships, [docs/UPGRADING.md](docs/UPGRADING.md) explains `gco upgrade` — it recreates the regional stacks, so back regional data up to the cluster-shared bucket first
 - Optionally enable [direct Regional API access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access) for IAM-authorized callers that need an explicitly region-pinned path; the bridge itself is always deployed for aggregation
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
