@@ -693,8 +693,8 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
 
         Set cdk.json bedrock.capacity_advisor_default_model_id.
 
-        The default model for gco capacity advise and its historical
-        variant. Config-only and idempotent; Mission sampling and gco
+        The default model for gco capacity ai-recommend and gco capacity
+        predict. Config-only and idempotent; Mission sampling and gco
         autopilot have their own keys (set_mission_default_model and
         set_claude_code_default_model). Validation mirrors the runtime
         reader (non-empty, no surrounding whitespace). Sibling settings

@@ -24,6 +24,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Network Policy Enforcement](#network-policy-enforcement)
   - [VPC Endpoints](#vpc-endpoints)
 - [Configuring GPU Nodepools](#configuring-gpu-nodepools)
+  - [Which instance types can actually launch](#which-instance-types-can-actually-launch)
   - [Modify Instance Types](#modify-instance-types)
   - [Adjust GPU Limits](#adjust-gpu-limits)
   - [Configure Spot Instances](#configure-spot-instances)
@@ -631,6 +632,28 @@ cluster-shared bucket, the SSM registry) are cross-region and always leave
 through the NAT gateways.
 
 ## Configuring GPU Nodepools
+
+### Which instance types can actually launch
+
+GCO's NodePools select by `eks.amazonaws.com/instance-family`, and the node
+provisioning itself is done by EKS Auto Mode. Two consequences follow:
+
+- **At any one time, only the instance types on the
+  [EKS Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances)
+  can launch.** A family that appears in a NodePool but is not yet supported by
+  Auto Mode contributes no candidate instance types, so Karpenter picks from the
+  supported families in the same pool. A workload that pins itself to an
+  unsupported family (through a node selector or affinity on
+  `eks.amazonaws.com/instance-family`) stays `Pending` until support arrives.
+  `gco capacity check` tells you whether EC2 has the capacity; the Auto Mode
+  list tells you whether Auto Mode will provision it.
+- **GCO lists reviewed families ahead of Auto Mode support on purpose.** The
+  shipped pools already name the newest generations (for example `g7` and
+  `g7e` in the GPU and inference pools, `p6-b300` and `p6e-gb200` in the EFA
+  pools). The moment AWS adds one of them to the supported list, existing
+  deployments start scheduling onto it — no GCO release, redeploy, or NodePool
+  edit is needed. See [Adding a new instance type or family](MAINTENANCE.md#adding-a-new-instance-type-or-family)
+  for how a family is reviewed into the catalog.
 
 ### Modify Instance Types
 
@@ -2052,7 +2075,7 @@ You may need a specific model for **regulatory, data-residency, model-governance
 
 ```bash
 # Capacity advisor — pass any model or inference-profile id enabled in your account
-gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-5-20250929-v1:0
+gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-6
 gco capacity predict -i p5.48xlarge -r us-east-1 --model eu.amazon.nova-pro-v1:0
 
 # Mission engine
@@ -2065,7 +2088,7 @@ The `ai_recommend` MCP tool takes the same override as a `model="..."` argument;
 remaining controls select an Autopilot engine/model for one environment:
 
 ```bash
-export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-6"
 export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
 export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # shared/Claude model
 export GCO_AUTOPILOT_ENGINE="codex"

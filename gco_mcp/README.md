@@ -1284,7 +1284,7 @@ gco_mcp/
     ├── inference.py       — gco://inference/{endpoint_name} (live endpoint state)
     ├── cluster.py         — gco://cluster/{region}/topology (NodePools + pending pods)
     ├── costs.py           — costs://gco/summary/{days_window} (cost summary cache)
-    ├── mission.py         — mission://sessions/{id} + mission://sessions/{id}/report
+    ├── mission.py         — mission://sessions/{id} + …/report + …/audit-replay
     ├── self.py            — mcp://gco/* (server introspection resources)
     └── tasks.py           — tasks://gco/{task_id} (FastMCP background task status)
 ```

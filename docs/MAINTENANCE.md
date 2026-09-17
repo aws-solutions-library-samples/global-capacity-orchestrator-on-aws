@@ -63,6 +63,16 @@ GCO separates three concerns that must not be conflated:
 The checked-in catalog makes the first two concerns complete and deterministic;
 NodePool family lists keep the third concern deliberate.
 
+A fourth concern is outside GCO's control: **which of those families EKS Auto
+Mode can provision right now** is decided by the
+[Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances).
+That is why NodePool family lists intentionally run ahead of it — a reviewed
+family such as `g7`/`g7e` is added to the pools as soon as EC2 advertises it,
+so deployments pick it up the day Auto Mode supports it without waiting for a
+GCO release. Adding a family that Auto Mode does not support yet is therefore
+expected, not a mistake; do not remove one for that reason alone (see
+[Which instance types can actually launch](CUSTOMIZATION.md#which-instance-types-can-actually-launch)).
+
 ### Sources of truth
 
 | Purpose | Authoritative file(s) | Contract |

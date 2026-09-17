@@ -1365,8 +1365,8 @@ def bedrock_set_capacity_advisor_model(
 ) -> None:
     """Set context.bedrock.capacity_advisor_default_model_id.
 
-    This is the default `gco capacity advise` (and its historical variant)
-    uses; Mission sampling and `gco autopilot` have their own keys (see
+    This is the default `gco capacity ai-recommend` and `gco capacity predict`
+    use; Mission sampling and `gco autopilot` have their own keys (see
     set-mission-model and set-claude-code-model). Model and inference-profile
     IDs are free-form (custom profiles, marketplace models), so validation
     mirrors the runtime reader: a non-empty string without surrounding

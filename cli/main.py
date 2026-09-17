@@ -8,7 +8,7 @@ Commands:
     gco jobs submit-sqs job.yaml -r us-east-1   # Submit job via SQS (recommended)
     gco jobs submit job.yaml -n gco-jobs        # Submit job via API Gateway
     gco jobs list --all-regions                 # List jobs across regions
-    gco capacity check -t g4dn.xlarge           # Check GPU capacity
+    gco capacity check -i g4dn.xlarge           # Check GPU capacity
     gco inference deploy my-llm -i ...          # Deploy inference endpoint
     gco stacks destroy-all -y                   # Tear down everything
 
