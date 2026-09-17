@@ -35,7 +35,6 @@ def queue(config: Any) -> None:
     - Track job status globally
     - View job history and statistics
     """
-    pass
 
 
 @queue.command("submit")

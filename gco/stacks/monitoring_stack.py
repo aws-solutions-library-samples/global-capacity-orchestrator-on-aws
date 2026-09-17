@@ -2269,7 +2269,6 @@ class GCOMonitoringStack(Stack):
         """
         # GA alarms skipped - metrics only available in us-west-2
         # Dashboard widgets use region parameter to display GA metrics correctly
-        pass
 
     def _create_api_gateway_alarms(self) -> None:
         """Create API Gateway alarms"""
@@ -2554,7 +2553,6 @@ class GCOMonitoringStack(Stack):
         # The test suite explicitly documents that the ALB alarm count is
         # currently zero (test_alb_unhealthy_hosts_alarm_skipped); update
         # that test when adding real alarms.
-        pass
 
     def _create_application_alarms(self) -> None:
         """Create application-specific alarms"""

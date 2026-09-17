@@ -22,7 +22,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def inference(config: Any) -> None:
     """Manage multi-region inference endpoints."""
-    pass
 
 
 @inference.command("deploy")

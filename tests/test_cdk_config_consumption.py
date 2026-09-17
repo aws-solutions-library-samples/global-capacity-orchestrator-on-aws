@@ -76,7 +76,7 @@ def _is_documentation_key(key: str) -> bool:
 
 def _is_cdk_feature_flag(key: str) -> bool:
     """Return True if `key` is a CDK feature flag interpreted by the CDK CLI."""
-    return key.startswith("@aws-cdk") or key.startswith("aws-cdk")
+    return key.startswith(("@aws-cdk", "aws-cdk"))
 
 
 def _real_keys(block: dict[str, Any]) -> list[str]:

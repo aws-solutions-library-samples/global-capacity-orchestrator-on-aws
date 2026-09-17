@@ -29,7 +29,6 @@ def _discard_mirror_log(_message: str) -> None:
 @pass_config
 def images(config: Any) -> None:
     """Manage container images in the project ECR registry (gco/* repos)."""
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +478,6 @@ def images_orphans(config: Any, threshold_days: Any) -> None:
 @images.group("lifecycle")
 def lifecycle() -> None:
     """Lifecycle policy management."""
-    pass
 
 
 @lifecycle.command("get")
@@ -530,7 +528,6 @@ def lifecycle_set(config: Any, name: Any, policy_file: Any) -> None:
 @images.group("replication")
 def replication() -> None:
     """Replication management."""
-    pass
 
 
 @replication.command("get")

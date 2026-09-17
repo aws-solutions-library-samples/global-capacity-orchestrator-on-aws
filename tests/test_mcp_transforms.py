@@ -100,9 +100,7 @@ def _reload_mcp_with_env(env: dict[str, str]) -> object:
     cached_submodules = [
         name
         for name in list(sys.modules)
-        if name.startswith("tools.")
-        or name.startswith("resources.")
-        or name in ("tools", "resources")
+        if name.startswith(("tools.", "resources.")) or name in ("tools", "resources")
     ]
     for name in cached_submodules:
         sys.modules.pop(name, None)

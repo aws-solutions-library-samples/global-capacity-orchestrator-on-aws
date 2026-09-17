@@ -61,7 +61,6 @@ def _apply_enable_overrides(formatter: Any, manager: Any, enable: Mapping[str, s
 @pass_config
 def stacks(config: Any) -> None:
     """Deploy and manage GCO CDK stacks."""
-    pass
 
 
 @stacks.command("list")
@@ -1111,7 +1110,6 @@ def regions_cmd(config: Any) -> None:
     enforces, atomic, idempotent, and audited. They never deploy — run
     'gco stacks deploy' afterwards to apply the change.
     """
-    pass
 
 
 @regions_cmd.command("list")
@@ -1293,7 +1291,6 @@ def bedrock_cmd(config: Any) -> None:
     Every edit uses the shared managed-config engine: validated, atomic,
     idempotent, and audited.
     """
-    pass
 
 
 @bedrock_cmd.command("show")
@@ -1547,7 +1544,6 @@ def bedrock_set_codex_reasoning_effort(
 @pass_config
 def fsx_cmd(config: Any) -> None:
     """Manage FSx for Lustre configuration."""
-    pass
 
 
 @fsx_cmd.command("status")
@@ -1706,7 +1702,6 @@ def fsx_disable(config: Any, region: Any, yes: Any) -> None:
 @pass_config
 def valkey_cmd(config: Any) -> None:
     """Manage Valkey Serverless cache configuration."""
-    pass
 
 
 @valkey_cmd.command("status")
@@ -1816,7 +1811,6 @@ def valkey_disable(config: Any, yes: Any) -> None:
 @pass_config
 def aurora_cmd(config: Any) -> None:
     """Manage Aurora PostgreSQL (pgvector) configuration."""
-    pass
 
 
 @aurora_cmd.command("status")
@@ -1987,7 +1981,6 @@ def addons_cmd(config: Any) -> None:
     chart that fails to install never rolls back the cluster. Use these commands
     to see per-chart status and re-run the installer without a full redeploy.
     """
-    pass
 
 
 @addons_cmd.command("status")

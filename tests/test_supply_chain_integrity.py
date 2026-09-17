@@ -291,13 +291,7 @@ def test_workflows_never_pip_install_a_package_pyproject_declares() -> None:
                 # lock) are all legitimate. A token that merely *contains* a
                 # variable is not exempt: ``pyyaml==${v}`` still names the
                 # package, which is the copy this guard exists to prevent.
-                if (
-                    token.startswith("-")
-                    or token.startswith(".")
-                    or token.startswith("$")
-                    or "/" in token
-                    or token.endswith(".txt")
-                ):
+                if token.startswith(("-", ".", "$")) or "/" in token or token.endswith(".txt"):
                     continue
                 name = normalize(re.split(r"[\[=!<>;~]", token, maxsplit=1)[0])
                 if name in declared:

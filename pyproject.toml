@@ -289,6 +289,15 @@ select = [
     "UP",     # pyupgrade
     "ARG",    # flake8-unused-arguments
     "SIM",    # flake8-simplify
+    # Rules whose whole value is that they are boring: each one catches a
+    # specific mistake that is invisible in review and cheap to prevent.
+    "T10",    # flake8-debugger: a forgotten breakpoint() would hang CI
+    "PGH",    # pygrep-hooks: blanket `# type: ignore` / `# noqa` with no code
+    "YTT",    # flake8-2020: version checks that break on Python 3.10+/4.x
+    "PLE",    # Pylint errors: only the genuinely-broken subset
+    "LOG",    # flake8-logging: misuse of the logging API itself
+    "EXE",    # flake8-executable: a shebang that cannot be executed
+    "PIE",    # flake8-pie: dead placeholders and reimplemented builtins
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)

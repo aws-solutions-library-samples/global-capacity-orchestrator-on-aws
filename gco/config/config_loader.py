@@ -145,8 +145,6 @@ def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
 
-    pass
-
 
 class ConfigLoader:
     """

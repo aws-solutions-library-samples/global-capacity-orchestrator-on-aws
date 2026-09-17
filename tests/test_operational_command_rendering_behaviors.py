@@ -574,7 +574,7 @@ def test_dag_run_ignores_unknown_progress_and_returns_success(
 ) -> None:
     dag_file = tmp_path / "dag.yaml"
     dag_file.write_text("name: demo\nsteps: []\n", encoding="utf-8")
-    dag_definition = SimpleNamespace(name="demo", steps=[], validate=lambda: [])
+    dag_definition = SimpleNamespace(name="demo", steps=[], validate=list)
     completed = SimpleNamespace(has_failures=lambda: False)
     fake_runner = MagicMock()
 

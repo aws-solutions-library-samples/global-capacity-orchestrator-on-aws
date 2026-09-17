@@ -2984,7 +2984,7 @@ class TestCapacityBlockTrend:
 
             # Create a clear upward ramp: week N gets N offerings
             offerings = []
-            for week in range(0, 26):
+            for week in range(26):
                 for _ in range(week):
                     offerings.append({"StartDate": now + timedelta(weeks=week, days=1)})
 
@@ -3012,7 +3012,7 @@ class TestCapacityBlockTrend:
 
             # Create a clear downward ramp: week N gets (25 - N) offerings
             offerings = []
-            for week in range(0, 26):
+            for week in range(26):
                 for _ in range(25 - week):
                     offerings.append({"StartDate": now + timedelta(weeks=week, days=1)})
 

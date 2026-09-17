@@ -19,7 +19,6 @@ def webhooks(config: Any) -> None:
     Webhooks receive HTTP POST notifications when job events occur
     (job.started, job.completed, job.failed).
     """
-    pass
 
 
 @webhooks.command("list")

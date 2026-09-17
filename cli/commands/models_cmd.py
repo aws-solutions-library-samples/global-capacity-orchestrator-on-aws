@@ -15,7 +15,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def models(config: Any) -> None:
     """Manage model weights in the central S3 bucket."""
-    pass
 
 
 @models.command("upload")

@@ -69,8 +69,17 @@ async def kubernetes_readiness_check() -> dict[str, str]:
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Log unexpected failures without exposing internal routing details."""
-    logger.exception(
+    """Log unexpected failures without exposing internal routing details.
+
+    ``exc`` is intentionally unused: the traceback comes from the active
+    exception, and the response deliberately says nothing about it.
+    """
+    # LOG004 is suppressed because this IS an exception handler. Starlette
+    # awaits it from inside its own `except` block, so the exception is still
+    # active and `.exception()` records the traceback; ruff only sees that the
+    # call is not lexically inside an `except`. Downgrading to `.error()` as it
+    # suggests would silently drop the traceback that makes a 500 debuggable.
+    logger.exception(  # noqa: LOG004
         "Unhandled inference proxy exception for %s %s", request.method, request.url.path
     )
     return JSONResponse(status_code=500, content={"error": "Internal server error"})

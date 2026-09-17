@@ -2702,7 +2702,7 @@ class TestActionConvergence:
 
     @contextlib.contextmanager
     def _clock(self) -> Iterator[list[int]]:
-        ticks = iter(range(0, 10_000))
+        ticks = iter(range(10_000))
         sleeps: list[int] = []
         with (
             patch.object(actions_convergence.time, "monotonic", side_effect=lambda: next(ticks)),

@@ -15,7 +15,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def config_cmd(config: Any) -> None:
     """Manage CLI configuration."""
-    pass
 
 
 @config_cmd.command("show")

@@ -16,7 +16,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def files(config: Any) -> None:
     """Manage file systems (EFS/FSx)."""
-    pass
 
 
 @files.command("list")

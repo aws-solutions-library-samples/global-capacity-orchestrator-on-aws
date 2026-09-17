@@ -20,7 +20,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def capacity(config: Any) -> None:
     """Check EC2 capacity availability."""
-    pass
 
 
 @capacity.command("check")
@@ -1668,7 +1667,6 @@ def traffic_dial(config: Any) -> None:
     controller honors; `clear` removes the override so the controller (when
     enabled in enforce mode) resumes managing the region.
     """
-    pass
 
 
 @traffic_dial.command("show")

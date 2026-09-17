@@ -25,7 +25,6 @@ def _get_deployment_regions(config: GCOConfig) -> list[str]:
 @pass_config
 def costs(config: Any) -> None:
     """View cost breakdowns and estimates for GCO resources."""
-    pass
 
 
 def _print_query_result(config: Any, result: Any, title: str) -> None:
@@ -346,7 +345,6 @@ def costs_allocation(config: Any) -> None:
     outside CloudFormation. In an AWS Organization, activation requires
     the management (payer) account.
     """
-    pass
 
 
 @costs_allocation.command("status")
@@ -529,7 +527,6 @@ def costs_k8s(config: Any) -> None:
     cost-monitor services write to the central cost report bucket. Requires
     cost_monitoring.enabled in cdk.json and a deployed monitoring stack.
     """
-    pass
 
 
 @costs_k8s.command("namespaces")
@@ -666,7 +663,6 @@ def _cost_api_region(config: Any, region: Any) -> Any:
 @pass_config
 def costs_report(config: Any) -> None:
     """Generate and list OpenCost allocation reports via the GCO API."""
-    pass
 
 
 @costs_report.command("generate")

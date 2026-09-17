@@ -58,6 +58,6 @@ class TestPassthrough:
         assert sanitize_log_value(None) == "None"
 
     def test_output_never_contains_raw_control_characters(self) -> None:
-        hostile = "".join(chr(code) for code in range(0, 32)) + "\x7f\u0085\u2028\u2029"
+        hostile = "".join(chr(code) for code in range(32)) + "\x7f\u0085\u2028\u2029"
         sanitized = sanitize_log_value(hostile)
         assert all(ord(ch) >= 32 and ord(ch) != 127 for ch in sanitized)
