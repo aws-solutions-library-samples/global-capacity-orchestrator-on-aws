@@ -23,7 +23,6 @@ These are pure unit tests; no live MCP server, no AWS, no LLM.
 
 from __future__ import annotations
 
-import contextlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -65,11 +64,12 @@ class TestPredicateValidator:
             parse_predicate("[x for x.attr in pairs]")
 
     def test_starred_target_unpacks(self) -> None:
-        """Starred comprehension targets unpack into Name nodes."""
-        from mission.predicate import parse_predicate
+        """Starred comprehension targets unpack into Name nodes and evaluate."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        # Valid: starred unpacks into Name nodes; the body can read both.
-        parse_predicate("[(a, b) for *a, b in [[1, 2, 3]]]")
+        parsed = P("[(a, b) for *a, b in [[1, 2, 3]]]")
+        assert E(parsed, {}) == [([1, 2], 3)]
 
     def test_dict_double_star_unpacking_rejected(self) -> None:
         """Dict ``**other`` unpacking is rejected — operator-supplied dicts only."""
@@ -79,13 +79,15 @@ class TestPredicateValidator:
             parse_predicate("{**other: 1}")
 
     def test_slice_with_step_accepted(self) -> None:
-        """A slice expression with a step is accepted."""
-        from mission.predicate import parse_predicate
+        """A slice with lower / upper / step is accepted and slices the observation."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        # Slices land on the Subscript path; step / lower / upper all
-        # walk through the validator. ``obs`` is the only allowed
-        # data name in predicates.
-        parse_predicate("obs[1:10:2]")
+        # Slices land on the Subscript path; step / lower / upper all walk
+        # through the validator. ``obs`` is the only allowed data name, and
+        # nothing forces it to be a mapping at evaluation time.
+        parsed = P("obs[1:10:2]")
+        assert E(parsed, list(range(12))) == [1, 3, 5, 7, 9]
 
     def test_predicate_not_a_string_rejected(self) -> None:
         """Non-string source raises ``not_a_string``."""
@@ -502,23 +504,31 @@ class TestPredicateExtraRejects:
             parse_predicate("obs.__dict__")
 
     def test_predicate_accepts_basic_membership(self) -> None:
-        """Membership expressions exercise the In / NotIn branches."""
-        from mission.predicate import parse_predicate
+        """Membership expressions exercise the In / NotIn branches and evaluate."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("'a' in obs")
-        parse_predicate("'a' not in obs")
+        assert E(P("'a' in obs"), {"a": 1}) is True
+        assert E(P("'a' in obs"), {"b": 1}) is False
+        assert E(P("'a' not in obs"), {"a": 1}) is False
 
     def test_predicate_accepts_unary_not(self) -> None:
-        """Unary not exercises the UnaryOp branch."""
-        from mission.predicate import parse_predicate
+        """Unary not exercises the UnaryOp branch and inverts truthiness."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("not obs")
+        assert E(P("not obs"), {}) is True
+        assert E(P("not obs"), {"a": 1}) is False
 
     def test_predicate_accepts_chained_compare(self) -> None:
-        """Chained comparison exercises Compare with multiple ops."""
-        from mission.predicate import parse_predicate
+        """Chained comparisons evaluate as a conjunction, not left-to-right booleans."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("0 < obs['x'] < 10")
+        parsed = P("0 < obs['x'] < 10")
+        assert E(parsed, {"x": 5}) is True
+        assert E(parsed, {"x": 10}) is False
+        assert E(parsed, {"x": 0}) is False
 
     def test_predicate_rejects_lambda(self) -> None:
         """Lambdas are rejected up front — predicates are pure expressions."""
@@ -888,19 +898,17 @@ class TestSandboxRejections:
     def test_rejects_yield(self) -> None:
         self._reject("def g():\n    yield 1\n")
 
-    def test_rejects_lambda_expression(self) -> None:
-        # Lambdas are accepted by some sandbox validators; this script
-        # validator goes through generic_visit for Lambda nodes only
-        # when the FunctionDef body is the issue — verify behavior:
-        # ``lambda`` inside a function-def context is rejected because
-        # def's themselves aren't allowed at top level. The bare
-        # assignment ``f = lambda x: x`` is rejected when Lambda is not
-        # opted into by the validator. Skip if the validator chose to
-        # allow lambdas.
-        from mission.sandbox import ScriptRejected, validate_script_ast
+    def test_lambda_expression_is_accepted(self) -> None:
+        """A bare ``lambda`` assignment is accepted by the script validator.
 
-        with contextlib.suppress(ScriptRejected):
-            validate_script_ast("f = lambda x: x + 1\n", ["submit_job_sqs"])
+        Lambdas are ordinary expressions to this validator (there is no
+        dedicated Lambda visitor), so ``f = lambda x: x + 1`` passes. Pinning
+        the accept side means a future decision to reject lambdas has to
+        update this test deliberately rather than slip through.
+        """
+        from mission.sandbox import validate_script_ast
+
+        assert validate_script_ast("f = lambda x: x + 1\n", ["submit_job_sqs"]) is None
         # Either acceptance or rejection is documented behaviour.
 
     def test_rejects_invalid_target_aug_assign(self) -> None:
@@ -938,66 +946,94 @@ class TestPredicateOperators:
     """Cover operator-branch and comprehension-shadowing rejections."""
 
     def test_predicate_accepts_tuple_set_dict_literals(self) -> None:
-        from mission.predicate import parse_predicate
+        """Tuple, set and dict displays are accepted and build the literal values."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("(1, 2, 3)")
-        parse_predicate("{1, 2, 3}")
-        parse_predicate("{'a': 1}")
+        assert E(P("(1, 2, 3)"), {}) == (1, 2, 3)
+        assert E(P("{1, 2, 3}"), {}) == {1, 2, 3}
+        assert E(P("{'a': 1}"), {}) == {"a": 1}
 
     def test_predicate_accepts_starred_unpacking_in_list(self) -> None:
-        from mission.predicate import parse_predicate
+        """Starred elements inside a list display splice their iterable."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("[*[1, 2], 3]")
+        assert E(P("[*[1, 2], 3]"), {}) == [1, 2, 3]
 
     def test_predicate_accepts_arithmetic(self) -> None:
-        from mission.predicate import parse_predicate
+        """Arithmetic operators are accepted with normal precedence."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("(1 + 2) * 3 - 4 / 5")
+        assert E(P("(1 + 2) * 3 - 4 / 5"), {}) == 8.2
 
     def test_predicate_accepts_unary_minus(self) -> None:
-        from mission.predicate import parse_predicate
+        """Unary minus negates the subscripted observation value."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("-obs['x']")
+        assert E(P("-obs['x']"), {"x": 5}) == -5
 
     def test_predicate_accepts_bool_ops(self) -> None:
-        from mission.predicate import parse_predicate
+        """and / or chains short-circuit with Python semantics."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("True and False or True")
+        assert E(P("True and False or True"), {}) is True
+        assert E(P("True and False"), {}) is False
 
     def test_predicate_accepts_compare_chain(self) -> None:
-        from mission.predicate import parse_predicate
+        """Mixed < and <= chains evaluate as one conjunction."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("1 < 2 <= 3")
+        assert E(P("1 < 2 <= 3"), {}) is True
+        assert E(P("1 < 2 <= 1"), {}) is False
 
     def test_predicate_accepts_ternary_if_expr(self) -> None:
-        from mission.predicate import parse_predicate
+        """Conditional expressions pick the branch by the test's truthiness."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("1 if True else 2")
+        assert E(P("1 if True else 2"), {}) == 1
+        assert E(P("1 if obs['flag'] else 2"), {"flag": False}) == 2
 
     def test_predicate_accepts_fstring(self) -> None:
-        from mission.predicate import parse_predicate
+        """f-strings are accepted and interpolate the observation."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("f'value is {obs}'")
+        assert E(P("f'value is {obs}'"), {"a": 1}) == "value is {'a': 1}"
 
     def test_predicate_accepts_listcomp(self) -> None:
-        from mission.predicate import parse_predicate
+        """List comprehensions iterate the observation's keys."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("[x for x in obs]")
+        assert E(P("[x for x in obs]"), {"a": 1, "b": 2}) == ["a", "b"]
 
     def test_predicate_accepts_setcomp(self) -> None:
-        from mission.predicate import parse_predicate
+        """Set comprehensions iterate the observation's keys."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("{x for x in obs}")
+        assert E(P("{x for x in obs}"), {"a": 1, "b": 2}) == {"a", "b"}
 
     def test_predicate_accepts_genexpr(self) -> None:
-        from mission.predicate import parse_predicate
+        """Generator expressions are accepted and yield lazily."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("(x for x in obs)")
+        result = E(P("(x for x in obs)"), {"a": 1, "b": 2})
+        assert list(result) == ["a", "b"]
 
     def test_predicate_accepts_dictcomp(self) -> None:
-        from mission.predicate import parse_predicate
+        """Dict comprehensions are accepted and build the mapping."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("{x: x for x in obs}")
+        assert E(P("{x: x for x in obs}"), {"a": 1}) == {"a": "a"}
 
     def test_predicate_rejects_async_comprehension(self) -> None:
         from mission.predicate import PredicateRejected, parse_predicate
@@ -1020,23 +1056,30 @@ class TestPredicateOperators:
             parse_predicate("obs.something()")
 
     def test_predicate_accepts_dict_get_method(self) -> None:
-        """The relaxed validator accepts ``.get(key, default)`` on any value."""
-        from mission.predicate import parse_predicate
+        """The relaxed validator accepts ``.get(key, default)`` on any value, and it works."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
         # Direct on obs.
-        parse_predicate("obs.get('errors', [])")
+        assert E(P("obs.get('errors', [])"), {}) == []
         # On a comprehension target.
-        parse_predicate("any(r.get('_status') == 'ok' for r in obs['tool_results'])")
+        parsed = P("any(r.get('_status') == 'ok' for r in obs['tool_results'])")
+        assert E(parsed, {"tool_results": [{"_status": "ok"}]}) is True
+        assert E(parsed, {"tool_results": [{"_status": "error"}]}) is False
         # On a subscript result.
-        parse_predicate("obs['x'].get('y') is not None")
+        assert E(P("obs['x'].get('y') is not None"), {"x": {"y": 1}}) is True
+        assert E(P("obs['x'].get('y') is not None"), {"x": {}}) is False
 
     def test_predicate_accepts_dict_keys_values_items(self) -> None:
-        """The relaxed validator accepts ``.keys()`` / ``.values()`` / ``.items()``."""
-        from mission.predicate import parse_predicate
+        """The relaxed validator accepts ``.keys()`` / ``.values()`` / ``.items()`` and they iterate."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("any(k == 'val_loss' for k in obs['metrics'].keys())")
-        parse_predicate("any(v > 0 for v in obs['metrics'].values())")
-        parse_predicate("any(k == 'val_loss' for k, v in obs['metrics'].items())")
+        obs = {"metrics": {"val_loss": 0.5}}
+        assert E(P("any(k == 'val_loss' for k in obs['metrics'].keys())"), obs) is True
+        assert E(P("any(v > 0 for v in obs['metrics'].values())"), obs) is True
+        assert E(P("any(k == 'val_loss' for k, v in obs['metrics'].items())"), obs) is True
+        assert E(P("any(v > 1 for v in obs['metrics'].values())"), obs) is False
 
     def test_predicate_rejects_mutating_method(self) -> None:
         """Mutating dict / list methods are NOT in the read-only allowlist."""
@@ -1053,10 +1096,13 @@ class TestPredicateOperators:
                 parse_predicate(src)
 
     def test_predicate_accepts_startswith_method(self) -> None:
-        """The read-only string prefix test is part of the method allowlist."""
-        from mission.predicate import parse_predicate
+        """The read-only string prefix test is part of the method allowlist and evaluates."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("any(k.startswith('val_') for k in obs['metrics'].keys())")
+        parsed = P("any(k.startswith('val_') for k in obs['metrics'].keys())")
+        assert E(parsed, {"metrics": {"val_loss": 1}}) is True
+        assert E(parsed, {"metrics": {"train_loss": 1}}) is False
 
     def test_predicate_rejects_read_only_method_outside_allowlist(self) -> None:
         """Read-only methods outside the explicit allowlist still reject."""
@@ -1166,15 +1212,18 @@ class TestPredicateOperators:
             parse_predicate("eval('1')")
 
     def test_predicate_accepts_call_with_kwargs(self) -> None:
-        from mission.predicate import parse_predicate
+        """``len`` is in the allowed callables and returns the observation size."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        # ``len`` is in the allowed callables.
-        parse_predicate("len(obs)")
+        assert E(P("len(obs)"), {"a": 1, "b": 2}) == 2
 
     def test_predicate_accepts_subscript_on_obs(self) -> None:
-        from mission.predicate import parse_predicate
+        """Nested subscripts on obs resolve through the observation."""
+        from mission.predicate import evaluate_predicate as E
+        from mission.predicate import parse_predicate as P
 
-        parse_predicate("obs['key']['nested']")
+        assert E(P("obs['key']['nested']"), {"key": {"nested": "v"}}) == "v"
 
 
 # ---------------------------------------------------------------------------

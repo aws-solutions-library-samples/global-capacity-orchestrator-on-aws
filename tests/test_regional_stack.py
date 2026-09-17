@@ -254,7 +254,7 @@ class TestRegionalStackImports:
         """Test that GCORegionalStack can be imported."""
         from gco.stacks.regional_stack import GCORegionalStack
 
-        assert GCORegionalStack is not None
+        assert issubclass(GCORegionalStack, cdk.Stack)
 
     def test_regional_stack_has_required_methods(self):
         """Test that GCORegionalStack has expected methods."""
@@ -287,7 +287,10 @@ class TestGlobalStackMethods:
         stack = GCOGlobalStack(app, "test-global", config=config)
 
         dns_name = stack.get_accelerator_dns_name()
-        assert dns_name is not None
+        # The getter surfaces the accelerator's DnsName attribute as a CDK token.
+        assert cdk.Token.is_unresolved(dns_name)
+        accelerator_id = stack.get_logical_id(stack.accelerator.node.default_child)
+        assert stack.resolve(dns_name) == {"Fn::GetAtt": [accelerator_id, "DnsName"]}
 
     def test_global_stack_get_accelerator_arn(self):
         """Test get_accelerator_arn method."""
@@ -298,7 +301,9 @@ class TestGlobalStackMethods:
         stack = GCOGlobalStack(app, "test-global-arn", config=config)
 
         arn = stack.get_accelerator_arn()
-        assert arn is not None
+        assert cdk.Token.is_unresolved(arn)
+        accelerator_id = stack.get_logical_id(stack.accelerator.node.default_child)
+        assert stack.resolve(arn) == {"Fn::GetAtt": [accelerator_id, "AcceleratorArn"]}
 
     def test_global_stack_get_listener_arn(self):
         """Test get_listener_arn method."""
@@ -309,7 +314,9 @@ class TestGlobalStackMethods:
         stack = GCOGlobalStack(app, "test-global-listener", config=config)
 
         arn = stack.get_listener_arn()
-        assert arn is not None
+        assert cdk.Token.is_unresolved(arn)
+        listener_id = stack.get_logical_id(stack.listener.node.default_child)
+        assert stack.resolve(arn) == {"Fn::GetAtt": [listener_id, "ListenerArn"]}
 
     def test_global_stack_get_endpoint_group_arn(self):
         """Test get_endpoint_group_arn method."""
@@ -320,7 +327,12 @@ class TestGlobalStackMethods:
         stack = GCOGlobalStack(app, "test-global-endpoint", config=config)
 
         arn = stack.get_endpoint_group_arn("us-east-1")
-        assert arn is not None
+        assert cdk.Token.is_unresolved(arn)
+        group_id = stack.get_logical_id(stack.endpoint_groups["us-east-1"].node.default_child)
+        assert stack.resolve(arn) == {"Fn::GetAtt": [group_id, "EndpointGroupArn"]}
+        # Unknown Regions are an error, not a silent None.
+        with pytest.raises(ValueError, match="No endpoint group found for region: eu-west-1"):
+            stack.get_endpoint_group_arn("eu-west-1")
 
     def test_global_stack_get_endpoint_group_arn_invalid_region(self):
         """Test get_endpoint_group_arn raises error for invalid region."""
@@ -2576,75 +2588,128 @@ class TestGlobalStackDynamoDBTables:
 
 
 class TestNagSuppressions:
-    """Tests for CDK-nag suppression functions."""
+    """cdk-nag acknowledgments land on the stack, scoped to the stack type.
+
+    ``acknowledge_nag_findings`` records every suppression as a
+    ``{finding_id: reason}`` entry under cdk-nag's acknowledgment metadata key
+    on the construct it is called with. These tests read that metadata back so
+    each helper is proven to register the rule families it exists for — and
+    ``apply_all_suppressions`` to add exactly the type-specific families on top
+    of the shared Lambda/IAM baseline — rather than merely proven not to raise.
+    """
+
+    @staticmethod
+    def _acknowledged_ids(stack: cdk.Stack) -> set[str]:
+        from gco.stacks.nag_suppressions import _ACK_METADATA_KEY
+
+        ids: set[str] = set()
+        for entry in stack.node.metadata:
+            if entry.type == _ACK_METADATA_KEY and entry.data:
+                ids.update(entry.data.keys())
+        return ids
+
+    @staticmethod
+    def _rules(ids: set[str]) -> set[str]:
+        """Bare rule ids (``AwsSolutions-IAM5`` from ``AwsSolutions-IAM5[detail]``)."""
+        return {fid.split("[", 1)[0] for fid in ids}
 
     def test_add_backup_suppressions(self):
-        """Test add_backup_suppressions function."""
+        """The AWS Backup service-role managed policy is acknowledged under IAM4."""
         from gco.stacks.nag_suppressions import add_backup_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-backup-suppressions")
-
-        # Should not raise any errors
         add_backup_suppressions(stack)
+        ids = self._acknowledged_ids(stack)
+        assert ids == {
+            "AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/"
+            "service-role/AWSBackupServiceRolePolicyForBackup]"
+        }
 
     def test_apply_all_suppressions_global_stack(self):
-        """Test apply_all_suppressions for global stack type."""
+        """Global stacks get the shared baseline plus the backup acknowledgment."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-global-suppressions")
-
-        # Should not raise any errors
         apply_all_suppressions(stack, stack_type="global")
+        ids = self._acknowledged_ids(stack)
+        rules = self._rules(ids)
+        # Shared baseline: Lambda and IAM families.
+        assert {"AwsSolutions-L1", "AwsSolutions-IAM5"} <= rules
+        assert any("AWSBackupServiceRolePolicyForBackup" in fid for fid in ids)
+        # Regional-only and API-Gateway-only families must not leak in.
+        assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-APIG2", "AwsSolutions-SNS3"}
 
     def test_apply_all_suppressions_regional_stack(self):
-        """Test apply_all_suppressions for regional stack type."""
+        """Regional stacks acknowledge the EKS, VPC, storage and SQS families."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-regional-suppressions")
-
-        # Should not raise any errors
         apply_all_suppressions(
             stack,
             stack_type="regional",
             regions=["us-east-1", "us-west-2"],
             global_region="us-east-2",
         )
+        rules = self._rules(self._acknowledged_ids(stack))
+        assert {
+            "AwsSolutions-L1",
+            "AwsSolutions-IAM5",
+            "AwsSolutions-SQS4",
+            "Serverless-SQSRedrivePolicy",
+            "HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
+            "HIPAA.Security-EFSInBackupPlan",
+        } <= rules
+        assert not rules & {"AwsSolutions-APIG2", "AwsSolutions-SNS3"}
 
     def test_apply_all_suppressions_api_gateway_stack(self):
-        """Test apply_all_suppressions for api_gateway stack type."""
+        """API Gateway stacks acknowledge the APIG and Secrets Manager families."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-api-gateway-suppressions")
-
-        # Should not raise any errors
         apply_all_suppressions(stack, stack_type="api_gateway")
+        rules = self._rules(self._acknowledged_ids(stack))
+        assert {
+            "AwsSolutions-APIG2",
+            "AwsSolutions-COG4",
+            "HIPAA.Security-SecretsManagerUsingKMSKey",
+        } <= rules
+        assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-SNS3"}
 
     def test_apply_all_suppressions_monitoring_stack(self):
-        """Test apply_all_suppressions for monitoring stack type."""
+        """Monitoring stacks acknowledge the SNS and CloudWatch alarm families."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-monitoring-suppressions")
-
-        # Should not raise any errors
         apply_all_suppressions(stack, stack_type="monitoring")
+        rules = self._rules(self._acknowledged_ids(stack))
+        assert {"AwsSolutions-SNS3", "HIPAA.Security-CloudWatchAlarmAction"} <= rules
+        assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-APIG2"}
 
     def test_add_iam_suppressions_with_dynamodb_patterns(self):
-        """Test add_iam_suppressions includes DynamoDB index patterns."""
+        """A global Region adds the cross-Region DynamoDB index wildcards to IAM5."""
         from gco.stacks.nag_suppressions import add_iam_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-iam-dynamodb-suppressions")
-
-        # Should not raise any errors
         add_iam_suppressions(
             stack,
             regions=["us-east-1"],
             global_region="us-east-2",
+        )
+        ids = self._acknowledged_ids(stack)
+        iam5_details = [fid for fid in ids if fid.startswith("AwsSolutions-IAM5[")]
+        assert iam5_details, f"no AwsSolutions-IAM5 acknowledgments recorded: {sorted(ids)!r}"
+        index_patterns = [
+            fid for fid in iam5_details if "dynamodb:us-east-2:" in fid and "/index/*" in fid
+        ]
+        assert index_patterns, (
+            "expected DynamoDB index wildcard acknowledgments for the global Region; "
+            f"got {sorted(iam5_details)!r}"
         )
 
 

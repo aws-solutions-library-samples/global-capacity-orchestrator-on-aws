@@ -5139,6 +5139,12 @@ def test_regional_stack_single_lbc_chart_skips_non_lbc_chain() -> None:
             logical_name="coverage-100-regional-single-lbc",
         )
     assert stack.helm_teardown_state_machine is not None
+    # With only the LBC chart configured, the teardown definition carries the
+    # LBC uninstall task and no per-chart uninstall chain for anything else.
+    definition = json.dumps(_template.to_json())
+    assert "HelmUninstallChart-aws-load-balancer-controller" in definition
+    assert "HelmUninstallChart-keda" not in definition
+    assert "HelmUninstallChart-volcano" not in definition
 
 
 def test_global_vector_ingest_without_discoverable_notification_handler() -> None:

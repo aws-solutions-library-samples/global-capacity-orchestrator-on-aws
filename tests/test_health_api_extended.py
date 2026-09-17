@@ -50,7 +50,7 @@ class TestHealthAPILifespan:
             from gco.services.health_api import app, lifespan
 
             async with lifespan(app):
-                assert health_api_module.health_monitor is not None
+                assert health_api_module.health_monitor is mock_monitor
 
     @pytest.mark.asyncio
     async def test_lifespan_startup_failure(self):

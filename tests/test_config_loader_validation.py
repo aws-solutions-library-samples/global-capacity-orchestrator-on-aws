@@ -25,7 +25,10 @@ class TestConfigLoaderValidation:
         app = cdk.App()
         # Should not raise - validation is skipped when project_name is None
         config = ConfigLoader(app)
-        assert config is not None
+        # Nothing was validated, so nothing was required: the loader is bound to
+        # the app and the app still carries no project_name context.
+        assert config.app is app
+        assert app.node.try_get_context("project_name") is None
 
     def test_config_loader_validates_required_fields(self):
         """Test that ConfigLoader validates required fields."""

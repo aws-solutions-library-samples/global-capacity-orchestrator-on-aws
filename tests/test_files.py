@@ -205,7 +205,8 @@ class TestFileSystemClient:
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 client = FileSystemClient()
-                assert client.config is not None
+                assert client.config is mock_config.return_value
+                assert client._aws_client is mock_aws.return_value
 
     def test_get_file_systems_empty(self):
         """Test getting file systems when none exist."""

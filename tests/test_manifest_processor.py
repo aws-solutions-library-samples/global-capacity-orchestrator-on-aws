@@ -1116,7 +1116,8 @@ class TestGetExistingResource:
             namespace="default",
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-job"}}
+        mock_resource.get.assert_called_once_with(name="test-job", namespace="default")
 
     @pytest.mark.asyncio
     async def test_get_existing_configmap(self, processor_with_mocks):
@@ -1136,7 +1137,8 @@ class TestGetExistingResource:
             namespace="default",
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-cm"}}
+        mock_resource.get.assert_called_once_with(name="test-cm", namespace="default")
 
     @pytest.mark.asyncio
     async def test_get_existing_secret(self, processor_with_mocks):
@@ -1968,7 +1970,7 @@ class TestGetExistingResourceExtended:
             "v1", "Service", "test-svc", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-svc"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_job(self, processor_with_mocks):
@@ -1979,7 +1981,7 @@ class TestGetExistingResourceExtended:
             "batch/v1", "Job", "test-job", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-job"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_configmap(self, processor_with_mocks):
@@ -1990,7 +1992,7 @@ class TestGetExistingResourceExtended:
             "v1", "ConfigMap", "test-cm", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-cm"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_secret(self, processor_with_mocks):
@@ -2001,7 +2003,7 @@ class TestGetExistingResourceExtended:
             "v1", "Secret", "test-secret", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-secret"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_resource_not_found(self, processor_with_mocks):

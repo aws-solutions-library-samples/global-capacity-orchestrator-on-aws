@@ -290,7 +290,8 @@ class TestBackgroundHealthMonitor:
                 await task
 
             # Verify status was updated
-            assert health_api_module.current_health_status is not None
+            assert health_api_module.current_health_status is mock_status
+            mock_monitor.get_health_status.assert_awaited()
         finally:
             health_api_module.health_monitor = original_monitor
 

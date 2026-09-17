@@ -110,7 +110,10 @@ class TestJobManager:
             with patch("cli.jobs.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 manager = JobManager()
-                assert manager.config is not None
+                assert manager.config is mock_config.return_value
+                # The AWS client is built for the resolved config, not a fresh lookup.
+                mock_aws.assert_called_once_with(mock_config.return_value)
+                assert manager._aws_client is mock_aws.return_value
 
 
 class TestJobManagerManifestLoading:

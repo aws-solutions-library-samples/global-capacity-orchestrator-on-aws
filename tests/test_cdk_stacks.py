@@ -988,7 +988,7 @@ class TestRegionalStackSynth:
         """Test that RegionalStack can be imported without errors."""
         from gco.stacks.regional_stack import GCORegionalStack
 
-        assert GCORegionalStack is not None
+        assert issubclass(GCORegionalStack, cdk.Stack)
 
     def test_regional_stack_class_exists(self):
         """Test that RegionalStack class has expected methods."""
@@ -1012,7 +1012,20 @@ class TestStackDependencies:
             app, "test-dependency", global_accelerator_dns="test.awsglobalaccelerator.com"
         )
 
-        assert stack is not None
+        # The accelerator hostname is the contract: it is normalized onto the
+        # stack and wired into the workload proxy Lambda's environment.
+        assert stack.ga_dns == "test.awsglobalaccelerator.com"
+        assert stack.proxy_lambda is not None
+        assertions.Template.from_stack(stack).has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": assertions.Match.object_like(
+                        {"GLOBAL_ACCELERATOR_ENDPOINT": "test.awsglobalaccelerator.com"}
+                    )
+                }
+            },
+        )
 
 
 class TestStackOutputs:

@@ -242,7 +242,10 @@ class TestEndpointDrift:
 
     def test_configured_public_but_live_private(self) -> None:
         drift = endpoint_drift("PUBLIC_AND_PRIVATE", ["203.0.113.7/32"], {"public": False})
-        assert drift is not None
+        assert drift == (
+            "cdk.json eks_cluster.endpoint_access=PUBLIC_AND_PRIVATE but the live "
+            "endpoint is PRIVATE"
+        )
 
     def test_private_converged(self) -> None:
         assert endpoint_drift("PRIVATE", [], {"public": False, "public_cidrs": []}) is None

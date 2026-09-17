@@ -101,7 +101,12 @@ class TestGCOAWSClient:
                 cache_ttl_seconds=300,
             )
             client = GCOAWSClient()
-            assert client.config is not None
+            # The default constructor resolves the process-wide config and starts
+            # with cold caches; a MagicMock config never opts into regional mode.
+            assert client.config is mock_config.return_value
+            assert client._use_regional_api is False
+            assert client._api_endpoint_cache is None
+            assert client._regional_stacks_cache is None
 
     def test_cache_validity_no_timestamp(self):
         """Test cache validity when no timestamp set."""

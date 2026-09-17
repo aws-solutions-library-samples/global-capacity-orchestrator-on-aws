@@ -458,6 +458,9 @@ class TestTrainJobCrudAcceptance:
             "trainer.kubeflow.org/v1beta1", "TrainJob", "gco-jobs"
         )
         assert error is not None
+        assert (
+            "API version 'trainer.kubeflow.org/v1beta1' is not allowed for kind 'TrainJob'" in error
+        )
 
 
 class TestHelmInstallerConvergence:

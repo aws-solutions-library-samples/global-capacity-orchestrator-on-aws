@@ -329,7 +329,7 @@ class TestCapacityChecker:
         with patch("cli.capacity.checker.get_config") as mock_config:
             mock_config.return_value = MagicMock()
             checker = CapacityChecker()
-            assert checker.config is not None
+            assert checker.config is mock_config.return_value
 
     def test_get_instance_info_known_type(self):
         """A GPU type is described from EC2, including its region.

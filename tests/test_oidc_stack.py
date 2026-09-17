@@ -47,7 +47,13 @@ class TestOIDCStackSynthesis:
     def test_stack_synthesizes(self):
         """Stack should synthesize without throwing."""
         template = _synth_stack()
-        assert template is not None
+        # The provider is the stack's reason to exist; its trust must be scoped
+        # to GitHub's OIDC issuer.
+        template.resource_count_is("Custom::AWSCDKOpenIdConnectProvider", 1)
+        template.has_resource_properties(
+            "Custom::AWSCDKOpenIdConnectProvider",
+            {"Url": "https://token.actions.githubusercontent.com"},
+        )
 
     def test_stack_has_oidc_provider(self):
         """Stack should create an OIDC provider."""

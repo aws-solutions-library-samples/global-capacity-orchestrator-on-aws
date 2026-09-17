@@ -2528,31 +2528,38 @@ class TestDiagnoseDeployFailure:
         assert "delete-stack" in output
         assert "gco-monitoring" in output
 
-    def test_handles_api_error_gracefully(self):
+    def test_handles_api_error_gracefully(self, capsys):
+        """A CloudFormation client failure is swallowed: no exception, no partial diagnostics."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager.__new__(StackManager)
         manager.config = config
         manager.project_root = Path(".")
-
         with (
             patch.object(manager, "_get_deploy_region", return_value="us-east-2"),
-            patch("boto3.client", side_effect=Exception("API error")),
+            patch("boto3.client", side_effect=Exception("API error")) as client,
         ):
-            # Should not raise
-            manager._diagnose_deploy_failure("gco-monitoring")
+            assert manager._diagnose_deploy_failure("gco-monitoring") is None
+        # The diagnosis was attempted against the resolved Region and gave up
+        # quietly: best-effort diagnostics never add noise to the CDK error.
+        client.assert_called_once_with("cloudformation", region_name="us-east-2")
+        assert capsys.readouterr().out == ""
 
     def test_skips_when_no_region(self):
+        """Without a resolvable Region there is nothing to query, so no client is built."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager.__new__(StackManager)
         manager.config = config
         manager.project_root = Path(".")
-
-        with patch.object(manager, "_get_deploy_region", return_value=None):
-            manager._diagnose_deploy_failure("unknown-stack")
+        with (
+            patch.object(manager, "_get_deploy_region", return_value=None),
+            patch("boto3.client") as client,
+        ):
+            assert manager._diagnose_deploy_failure("unknown-stack") is None
+        client.assert_not_called()
 
     @staticmethod
     def _rolled_back_create_events(stack_name: str) -> list[dict]:

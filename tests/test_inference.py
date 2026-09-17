@@ -601,6 +601,11 @@ class TestInferenceEndpointStore:
         created = store.create_endpoint("scale-ep", {"image": "img", "replicas": 1}, ["us-east-1"])
         result = store.scale_endpoint("scale-ep", 5, expected_lifecycle_id=created["lifecycle_id"])
         assert result is not None
+        # The conditional write returns the new item: replicas moved, the
+        # lifecycle fence held, and the rest of the spec survived untouched.
+        assert result["spec"]["replicas"] == 5
+        assert result["spec"]["image"] == "img"
+        assert result["lifecycle_id"] == created["lifecycle_id"]
 
     def test_scale_endpoint_not_found(self, store):
         result = store.scale_endpoint("missing", 3, expected_lifecycle_id="missing-life")
@@ -1952,7 +1957,8 @@ class TestInferenceManager:
 
     def test_get_endpoint_found(self, manager, mock_store_instance):
         mock_store_instance.get_endpoint.return_value = {"endpoint_name": "ep"}
-        assert manager.get_endpoint("ep") is not None
+        assert manager.get_endpoint("ep") == {"endpoint_name": "ep"}
+        mock_store_instance.get_endpoint.assert_called_once_with("ep")
 
     def test_get_endpoint_not_found(self, manager, mock_store_instance):
         mock_store_instance.get_endpoint.return_value = None

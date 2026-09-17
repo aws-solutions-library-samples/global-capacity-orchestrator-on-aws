@@ -1069,7 +1069,10 @@ class TestInferenceManagerRegions:
         manager._get_store.return_value = mock_store
 
         result = manager.add_region("ep", "eu-west-1")
-        assert result is not None
+        # Already a target: the endpoint is returned as-is and no conditional
+        # write is attempted (an idempotent no-op, not a spurious generation bump).
+        assert result == mock_store.get_endpoint.return_value
+        mock_store.update_target_regions.assert_not_called()
 
     def test_add_region_not_found(self, manager):
         mock_store = MagicMock()
@@ -1130,7 +1133,10 @@ class TestInferenceManagerRegions:
         manager._get_store.return_value = mock_store
 
         result = manager.remove_region("ep", "eu-west-1")
-        assert result is not None
+        # Not a target: nothing to remove, so the endpoint is returned as-is and
+        # the cleanup history is left alone.
+        assert result == mock_store.get_endpoint.return_value
+        mock_store.update_target_regions.assert_not_called()
 
     def test_remove_region_not_found(self, manager):
         mock_store = MagicMock()

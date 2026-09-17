@@ -160,7 +160,7 @@ class TestMonitoringStackImports:
         """Test that GCOMonitoringStack can be imported."""
         from gco.stacks.monitoring_stack import GCOMonitoringStack
 
-        assert GCOMonitoringStack is not None
+        assert issubclass(GCOMonitoringStack, cdk.Stack)
 
 
 class TestMonitoringStackSynthesis:

@@ -1339,7 +1339,7 @@ class TestExtractPodSpec:
             "spec": {"template": {"spec": {"containers": [{"name": "c"}]}}},
         }
         ps = qp._extract_pod_spec(m)
-        assert ps is not None
+        assert ps is m["spec"]["template"]["spec"]
 
     def test_cronjob(self):
         qp = _reload()
@@ -1365,7 +1365,7 @@ class TestExtractPodSpec:
             "spec": {"containers": [{"name": "c"}]},
         }
         ps = qp._extract_pod_spec(m)
-        assert ps is not None
+        assert ps is m["spec"]
 
     def test_non_workload_returns_none(self):
         qp = _reload()

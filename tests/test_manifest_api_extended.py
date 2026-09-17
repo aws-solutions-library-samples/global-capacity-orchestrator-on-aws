@@ -33,7 +33,7 @@ class TestManifestAPILifespan:
             from gco.services.manifest_api import app, lifespan
 
             async with lifespan(app):
-                assert manifest_api_module.manifest_processor is not None
+                assert manifest_api_module.manifest_processor is mock_processor
 
     @pytest.mark.asyncio
     async def test_lifespan_startup_failure(self):
