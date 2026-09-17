@@ -40,11 +40,11 @@ The `api_routes/` package splits the manifest and inference applications into fo
 
 | File | Description |
 |------|-------------|
+| `cost.py` | Authenticated `/api/v1/cost/*` proxy to the internal cost-monitor service. |
 | `inference_proxy.py` | Authenticated, allowlisted streaming reverse proxy for managed inference serving paths. |
 | `jobs.py` | Job listing, status, logs, events, pods, metrics, retry, and deletion. |
-| `queue.py` | Idempotent global queue submission, listing, cancellation, pagination, and status polling. |
-| `cost.py` | Authenticated `/api/v1/cost/*` proxy to the internal cost-monitor service. |
 | `manifests.py` | Manifest submission and validation. |
+| `queue.py` | Idempotent global queue submission, listing, cancellation, pagination, and status polling. |
 | `templates.py` | Reusable template CRUD. |
 | `webhooks.py` | Webhook registration, deletion, and delivery testing. |
 

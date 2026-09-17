@@ -12,11 +12,11 @@ Pydantic data models used across the GCO codebase for request/response validatio
 
 | File | Description |
 |------|-------------|
-| `manifest_models.py` | Manifest submission requests, validation results, resource limit models |
-| `inference_models.py` | Inference endpoint specs (image, GPU, replicas), per-region status, canary config |
-| `health_models.py` | Health check responses, resource utilization metrics, threshold configuration |
-| `cluster_models.py` | Cluster info, node details, pod/container status models |
 | `__init__.py` | Re-exports all models for convenient `from gco.models import ...` |
+| `cluster_models.py` | Cluster info, node details, pod/container status models |
+| `health_models.py` | Health check responses, resource utilization metrics, threshold configuration |
+| `inference_models.py` | Inference endpoint specs (image, GPU, replicas), per-region status, canary config |
+| `manifest_models.py` | Manifest submission requests, validation results, resource limit models |
 
 ## Usage
 

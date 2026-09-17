@@ -458,7 +458,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 ### Compute & Orchestration
 
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
-- **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml)
+- **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml). Only families on the [EKS Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances) can launch at any one time; the pools deliberately list newer families (such as `g7`/`g7e`) ahead of that support so they come online without a GCO release — see [which instance types can actually launch](docs/CUSTOMIZATION.md#which-instance-types-can-actually-launch)
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
@@ -466,7 +466,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 ### Inference Serving
 
-- **Multi-region inference**: Deploy endpoints ([vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [TorchServe](https://pytorch.org/serve/), [SGLang](https://docs.sglang.ai/)) across regions with a single command
+- **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework ships with a ready-to-run example manifest: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [TGI](https://huggingface.co/docs/text-generation-inference) ([example](examples/inference-tgi.yaml)), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml)), [TorchServe](https://docs.pytorch.org/serve/) ([example](examples/inference-torchserve.yaml)), and [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml))
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
 - **Model weight management**: [Central S3 bucket](./docs/CLUSTER_SHARED_BUCKET.md) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
@@ -649,7 +649,7 @@ GCO implements defense in depth across the six controls in the [Security Model](
 
 - Regional platform ALBs are internal; the EKS API endpoint defaults to `PRIVATE`
 - EKS clusters run in private subnets with configurable endpoint access (PRIVATE or PUBLIC_AND_PRIVATE)
-- VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html), and CloudWatch
+- VPC gateway endpoints for S3 and DynamoDB keep that traffic off the public internet by default; opt-in interface endpoints (`vpc_endpoints.interface` in `cdk.json`) do the same for ECR, [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html), CloudWatch, and SQS
 - VPC Flow Logs (30-day retention) capture all network traffic for audit
 - Kubernetes Network Policies enforce default-deny with explicit allow rules
 
