@@ -299,12 +299,23 @@ select = [
     "EXE",    # flake8-executable: a shebang that cannot be executed
     "PIE",    # flake8-pie: dead placeholders and reimplemented builtins
     "RUF",    # Ruff's own rules, incl. RUF100: a `# noqa` that suppresses nothing
+    # Test-quality rules. PT011/PT012/PT017 are the ones with teeth: a broad
+    # `pytest.raises(ValueError)` passes on the wrong ValueError, a multi-line
+    # raises block passes when the *setup* raises, and `assert` inside `except`
+    # passes when nothing is raised at all.
+    "PT",     # flake8-pytest-style
+    "PLW1510",  # subprocess.run without an explicit check= (say which you meant)
+    "PLW2901",  # loop variable overwritten inside the loop
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)
     "B008",   # do not perform function calls in argument defaults
     "ARG001", # unused function argument
     "ARG002", # unused method argument
+    # `assert a and b` is one assertion of one invariant; pytest's assertion
+    # rewriting already shows which operand was false, so splitting it buys
+    # nothing and doubles the assertion count on ~280 sites.
+    "PT018",
 ]
 # Typography this project uses on purpose in prose, plus one glyph it prints.
 # RUF001-003 exist to catch a homoglyph smuggled into an identifier or a string

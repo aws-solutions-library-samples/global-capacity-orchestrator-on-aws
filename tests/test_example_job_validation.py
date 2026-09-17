@@ -1611,6 +1611,7 @@ class TestRunCli:
             "capture_output": True,
             "text": True,
             "timeout": 7,
+            "check": False,
         }
 
 

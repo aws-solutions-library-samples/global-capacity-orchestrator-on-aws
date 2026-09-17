@@ -40,7 +40,7 @@ REGISTERED_TAGS: dict[str, set[str]] = {
 
 
 @pytest.fixture(autouse=True)
-def _isolated_task_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def isolated_task_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect heartbeat files away from the developer's ~/.gco."""
     tasks_dir = tmp_path / "tasks"
     monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tasks_dir))
@@ -48,7 +48,7 @@ def _isolated_task_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return tasks_dir
 
 
-@pytest.fixture()
+@pytest.fixture
 def backend(tmp_path: Path) -> FilesystemBackend:
     return FilesystemBackend(root=tmp_path / "missions")
 
@@ -183,7 +183,7 @@ def load(backend: FilesystemBackend, session_id: str) -> dict[str, Any]:
 
 
 async def test_swarm_completes_when_children_complete(
-    backend: FilesystemBackend, _isolated_task_status: Path
+    backend: FilesystemBackend, isolated_task_status: Path
 ) -> None:
     """Two completing children flip the orchestrator's criterion."""
     make_orchestrator(backend)
@@ -209,7 +209,7 @@ async def test_swarm_completes_when_children_complete(
         assert entry["consumed_iterations"] == len(child["iterations"])
         assert entry["reserved_iterations"] == 0
     # Heartbeats exist for the swarm and each slot.
-    stems = {path.stem for path in _isolated_task_status.glob("*.json")}
+    stems = {path.stem for path in isolated_task_status.glob("*.json")}
     assert "swarm-mission-orch01" in stems
     assert "swarm-mission-orch01-worker-a" in stems
     assert "swarm-mission-orch01-worker-b" in stems
@@ -467,11 +467,11 @@ async def test_child_abort_settles_and_terminates(backend: FilesystemBackend) ->
 
 
 async def test_guard_refuses_live_foreign_pid(
-    backend: FilesystemBackend, _isolated_task_status: Path
+    backend: FilesystemBackend, isolated_task_status: Path
 ) -> None:
     """A running heartbeat under a live foreign PID refuses startup."""
     make_orchestrator(backend)
-    _isolated_task_status.mkdir(parents=True, exist_ok=True)
+    isolated_task_status.mkdir(parents=True, exist_ok=True)
     record = {
         "task_id": "swarm-mission-orch01",
         "tool": "swarm_run",
@@ -485,9 +485,9 @@ async def test_guard_refuses_live_foreign_pid(
         "last_stack": None,
         "last_message": None,
         "tail": [],
-        "log_path": str(_isolated_task_status / "swarm-mission-orch01.log"),
+        "log_path": str(isolated_task_status / "swarm-mission-orch01.log"),
     }
-    path = _isolated_task_status / "swarm-mission-orch01.json"
+    path = isolated_task_status / "swarm-mission-orch01.json"
     path.write_text(json.dumps(record), encoding="utf-8")
     os.chmod(path, 0o600)
 
@@ -498,7 +498,7 @@ async def test_guard_refuses_live_foreign_pid(
 
 
 async def test_guard_takes_over_dead_pid(
-    backend: FilesystemBackend, _isolated_task_status: Path
+    backend: FilesystemBackend, isolated_task_status: Path
 ) -> None:
     """An orphaned record (dead PID) is taken over, not refused."""
     make_orchestrator(backend)
@@ -506,7 +506,7 @@ async def test_guard_takes_over_dead_pid(
     await runner_a.spawn(child_request("worker-a"))
     await runner_a.spawn(child_request("worker-b"))
     # Forge a stale running record under a PID that cannot exist.
-    _isolated_task_status.mkdir(parents=True, exist_ok=True)
+    isolated_task_status.mkdir(parents=True, exist_ok=True)
     stale = {
         "task_id": "swarm-mission-orch01",
         "tool": "swarm_run",
@@ -520,9 +520,9 @@ async def test_guard_takes_over_dead_pid(
         "last_stack": None,
         "last_message": None,
         "tail": [],
-        "log_path": str(_isolated_task_status / "swarm-mission-orch01.log"),
+        "log_path": str(isolated_task_status / "swarm-mission-orch01.log"),
     }
-    path = _isolated_task_status / "swarm-mission-orch01.json"
+    path = isolated_task_status / "swarm-mission-orch01.json"
     path.write_text(json.dumps(stale), encoding="utf-8")
     os.chmod(path, 0o600)
 
@@ -585,7 +585,7 @@ def _forge_orphaned_heartbeat(tasks_dir: Path, session_id: str) -> None:
 
 
 def test_orphan_finding_is_scoped_to_resumable_swarms(
-    backend: FilesystemBackend, _isolated_task_status: Path
+    backend: FilesystemBackend, isolated_task_status: Path
 ) -> None:
     """The orphan finding must only fire where a resume can actually help.
 
@@ -601,7 +601,7 @@ def test_orphan_finding_is_scoped_to_resumable_swarms(
     already reported ``terminated`` in the same document.
     """
     make_orchestrator(backend)
-    _forge_orphaned_heartbeat(_isolated_task_status, "mission-orch01")
+    _forge_orphaned_heartbeat(isolated_task_status, "mission-orch01")
 
     live = load(backend, "mission-orch01")
     rollup = build_fleet_rollup(backend, live)  # type: ignore[arg-type]

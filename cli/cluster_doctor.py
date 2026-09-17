@@ -84,7 +84,10 @@ class ClusterProbe:
 def _run_aws(args: list[str]) -> subprocess.CompletedProcess[str]:
     """Run one aws-CLI command (list form, never a shell string)."""
     return subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv head, validated inputs, list form, no shell=True
-        ["aws", *args], capture_output=True, text=True
+        ["aws", *args],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 

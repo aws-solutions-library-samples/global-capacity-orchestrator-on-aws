@@ -1505,11 +1505,12 @@ class InferenceMonitor:
         # simply retries from the next scan. Direct method-level test fixtures
         # without a persistence timestamp remain outside this production path.
         normalized_endpoints: list[dict[str, Any]] = []
-        for endpoint in endpoints:
-            if not self._lifecycle_metadata_complete(endpoint) and isinstance(
-                endpoint.get("updated_at"), str
+        for stored in endpoints:
+            endpoint = stored
+            if not self._lifecycle_metadata_complete(stored) and isinstance(
+                stored.get("updated_at"), str
             ):
-                upgraded = self.store.ensure_lifecycle_metadata(endpoint)
+                upgraded = self.store.ensure_lifecycle_metadata(stored)
                 if not isinstance(upgraded, dict):
                     continue
                 endpoint = upgraded

@@ -33,7 +33,7 @@ REGISTERED: dict[str, Any] = {"find_docs": object(), "find_examples": object()}
 TAGS: dict[str, set[str]] = {"find_docs": {"safe"}, "find_examples": {"safe"}}
 
 
-@pytest.fixture()
+@pytest.fixture
 def backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FilesystemBackend:
     """Isolated backend + heartbeat dir + enabled flag + canned registry."""
     fs = FilesystemBackend(root=tmp_path / "missions")

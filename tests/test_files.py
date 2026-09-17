@@ -61,7 +61,7 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         "remote_path",
-        ("../var/run/secrets", "results/../../etc", "./results"),
+        ["../var/run/secrets", "results/../../etc", "./results"],
     )
     def test_storage_path_rejects_non_descendant_segments(self, remote_path: str):
         from cli.files import _storage_remote_path
@@ -71,7 +71,7 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         "remote_path",
-        (r"..\..\etc", r"folder\file"),
+        [r"..\..\etc", r"folder\file"],
     )
     def test_storage_path_rejects_kubectl_backslash_reinterpretation(self, remote_path: str):
         from cli.files import _storage_remote_path
@@ -81,11 +81,11 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         ("value", "field", "allow_subdomains"),
-        (
+        [
             ("gco-jobs\nspec: {}", "namespace", False),
             ("pod:name", "pod_name", True),
             ("UPPERCASE", "pvc_name", True),
-        ),
+        ],
     )
     def test_kubernetes_names_reject_manifest_and_file_spec_injection(
         self, value: str, field: str, allow_subdomains: bool

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -124,7 +125,7 @@ class TestReadAdminCredentials:
             mum.read_grafana_admin_credentials()
 
     def test_rejects_bad_namespace(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid namespace 'Bad NS'")):
             mum.read_grafana_admin_credentials(namespace="Bad NS")
 
 

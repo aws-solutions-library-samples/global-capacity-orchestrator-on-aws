@@ -2650,11 +2650,10 @@ class TestBedrockCapacityAdvisor:
                     "on_demand_data": {},
                 }
 
-                try:
+                with pytest.raises(RuntimeError) as excinfo:
                     advisor.get_recommendation()
-                    pytest.fail("Should have raised RuntimeError")
-                except RuntimeError as e:
-                    assert "Access denied" in str(e)
+                e = excinfo.value
+                assert "Access denied" in str(e)
 
     @patch("cli.capacity.advisor.get_config")
     def test_get_recommendation_invalid_json(self, mock_config):
@@ -2688,14 +2687,11 @@ class TestBedrockCapacityAdvisor:
                     "on_demand_data": {},
                 }
 
-                try:
+                with pytest.raises(RuntimeError) as excinfo:
                     advisor.get_recommendation()
-                    pytest.fail("Should have raised RuntimeError")
-                except RuntimeError as e:
-                    # The failure names the problem and quotes the response
-                    # head so the operator can see what the model actually said.
-                    assert "No JSON object found" in str(e)
-                    assert "This is not valid JSON" in str(e)
+                e = excinfo.value
+                assert "No JSON object found" in str(e)
+                assert "This is not valid JSON" in str(e)
 
 
 class TestGetBedrockCapacityAdvisor:

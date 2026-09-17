@@ -500,7 +500,7 @@ class TestLocalServerFlow:
 
 class TestExternalUrlFlow:
     @pytest.fixture(autouse=True)
-    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    def no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         """The flow pauses one second between events; make that instantaneous."""
         sleep = AsyncMock(return_value=None)
         monkeypatch.setattr(harness, "asyncio", SimpleNamespace(sleep=sleep))
@@ -510,7 +510,7 @@ class TestExternalUrlFlow:
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        _no_real_sleep: AsyncMock,
+        no_real_sleep: AsyncMock,
     ) -> None:
         url = "https://webhook.example.invalid/abc"
         results = {
@@ -546,8 +546,8 @@ class TestExternalUrlFlow:
         assert failed["conditions"] == ["Failed"] and failed["failed"] == 1
         assert failed["completion_time"] is not None
 
-        assert _no_real_sleep.await_count == 3
-        _no_real_sleep.assert_awaited_with(1)
+        assert no_real_sleep.await_count == 3
+        no_real_sleep.assert_awaited_with(1)
 
         out = capsys.readouterr().out
         assert "WEBHOOK DELIVERY TEST - EXTERNAL URL" in out

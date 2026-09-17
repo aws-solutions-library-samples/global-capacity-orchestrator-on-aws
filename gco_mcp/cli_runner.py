@@ -136,6 +136,7 @@ def _run_cli(
                 timeout=timeout_seconds,
                 cwd=str(PROJECT_ROOT),
                 pass_fds=pass_fds,
+                check=False,
             )
         else:
             result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
@@ -144,6 +145,7 @@ def _run_cli(
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(PROJECT_ROOT),
+                check=False,
             )
         output = result.stdout.strip()
         if result.returncode != 0:

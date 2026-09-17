@@ -431,10 +431,11 @@ class ImageManager:
         build_cmd.append(str(ctx))
 
         logger.info("Building image: %s", " ".join(build_cmd))
-        build_run_kwargs: dict[str, Any] = {"check": True, "cwd": str(ctx)}
+        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx)}
         if quiet:
             build_run_kwargs.update(capture_output=True, text=True)
-        subprocess.run(build_cmd, **build_run_kwargs)
+        # check=True: a failed build must not fall through to the push below.
+        subprocess.run(build_cmd, check=True, **build_run_kwargs)
 
         push_result = subprocess.run(
             [runtime, "push", full_uri],
@@ -488,10 +489,11 @@ class ImageManager:
 
         full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
-        tag_run_kwargs: dict[str, Any] = {"check": True}
+        tag_run_kwargs: dict[str, Any] = {}
         if quiet:
             tag_run_kwargs.update(capture_output=True, text=True)
-        subprocess.run([runtime, "tag", local_image, full_uri], **tag_run_kwargs)
+        # check=True: a failed tag must not fall through to the push below.
+        subprocess.run([runtime, "tag", local_image, full_uri], check=True, **tag_run_kwargs)
         push_result = subprocess.run(
             [runtime, "push", full_uri],
             capture_output=True,

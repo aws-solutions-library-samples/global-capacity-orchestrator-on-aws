@@ -267,7 +267,7 @@ class TestGenerationTimestamp:
         monkeypatch.setenv("GCO_DIAGRAM_SOURCE_COMMIT", "A" * 40)
         assert generation_source_commit() == "a" * 40
 
-    @pytest.mark.parametrize("value", ("", "abc", "g" * 40, "a" * 39))
+    @pytest.mark.parametrize("value", ["", "abc", "g" * 40, "a" * 39])
     def test_invalid_source_commit_fails_closed(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
@@ -762,7 +762,7 @@ class TestSourceCommitVerification:
 
     @pytest.mark.parametrize(
         ("committed", "working"),
-        (
+        [
             (
                 b"def f():\n    return True\n\ndef g():\n    return True\n",
                 b"def f():\n    return True\n\n\ndef g():\n    return True\n",
@@ -775,7 +775,7 @@ class TestSourceCommitVerification:
                 b"def f():\n    return True\n",
                 b"def f():\n    return False\n",
             ),
-        ),
+        ],
     )
     def test_any_uncommitted_source_byte_is_rejected(
         self,

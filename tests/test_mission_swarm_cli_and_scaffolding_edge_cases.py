@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1064,7 +1065,7 @@ def test_terminal_filesystem_resource_without_report_is_not_found(
     resource = importlib.import_module("resources.mission")
     session = _mission_session(backend, session_id="mission-no-report", status="completed")
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(Exception, match=re.escape("terminal but report not found")) as exc_info:
         resource._session_report_resource(session["session_id"])
 
     assert "terminal but report not found" in str(exc_info.value)

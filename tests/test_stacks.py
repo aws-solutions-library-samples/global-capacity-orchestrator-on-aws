@@ -313,10 +313,10 @@ class TestStackManager:
             with (
                 patch("os.path.exists", return_value=False),
                 patch("pathlib.Path.is_file", return_value=False),
-                pytest.raises(CdkToolchainError, match="npm ci"),
             ):
                 manager = StackManager(config)
-                manager._find_cdk()
+                with pytest.raises(CdkToolchainError, match="npm ci"):
+                    manager._find_cdk()
 
 
 class TestCdkAssetConsumerLocking:
@@ -1063,7 +1063,7 @@ class TestStackManagerOperations:
 
     @pytest.mark.parametrize(
         "command",
-        (["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]),
+        [["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]],
     )
     def test_run_cdk_prepares_assets_for_app_commands(self, command):
         """Every CDK subcommand that evaluates app.py prepares ignored assets."""

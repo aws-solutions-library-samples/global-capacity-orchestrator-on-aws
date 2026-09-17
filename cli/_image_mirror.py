@@ -305,7 +305,10 @@ def _runtime_has_buildx(runtime: str) -> bool:
     try:
         return (
             subprocess.run(  # nosec B603 - fixed argv, no shell
-                [runtime, "buildx", "version"], capture_output=True, timeout=15
+                [runtime, "buildx", "version"],
+                capture_output=True,
+                timeout=15,
+                check=False,
             ).returncode
             == 0
         )
@@ -317,7 +320,11 @@ def _runtime_supports_all_platforms(runtime: str) -> bool:
     """True if ``<runtime> pull`` advertises ``--all-platforms`` (Finch/nerdctl)."""
     try:
         out = subprocess.run(  # nosec B603 - fixed argv, no shell
-            [runtime, "pull", "--help"], capture_output=True, text=True, timeout=15
+            [runtime, "pull", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
     except OSError, subprocess.SubprocessError:
         return False

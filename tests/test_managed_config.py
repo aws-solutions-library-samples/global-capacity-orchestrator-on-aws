@@ -94,7 +94,7 @@ BASE_CONFIG: dict = {
 }
 
 
-@pytest.fixture()
+@pytest.fixture
 def cdk_json(tmp_path: Path) -> Path:
     """A realistic cdk.json fixture (comment key first, trailing newline)."""
     path = tmp_path / "cdk.json"

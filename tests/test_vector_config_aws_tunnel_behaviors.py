@@ -678,7 +678,10 @@ def test_exited_tunnel_detail_includes_cleanup_failure() -> None:
     ],
 )
 def test_start_tunnel_validates_timing_options(kwargs: dict[str, float]) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"connect_timeout_seconds must be positive|ready_poll_seconds must be positive|ready_wait_seconds must be non-negative",
+    ):
         ssm_tunnel.start_api_tunnel(
             "i-0123456789abcdef0",
             "host.example",

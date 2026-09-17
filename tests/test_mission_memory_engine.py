@@ -409,7 +409,7 @@ def _sampling_session() -> dict[str, Any]:
 
 
 @pytest.fixture
-def _factory_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+def factory_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Patch the factory's collaborators; return the recorded sampler kwargs.
 
     ``select_sampling_backend`` returns a sentinel so the closure builds,
@@ -436,7 +436,7 @@ def _factory_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 class TestFactoryRetrieval:
     async def test_results_flow_into_the_prompt_once(
-        self, monkeypatch: pytest.MonkeyPatch, _factory_recorder: list[dict[str, Any]]
+        self, monkeypatch: pytest.MonkeyPatch, factory_recorder: list[dict[str, Any]]
     ) -> None:
         store = _StubSearchStore(results=[_mission(1)])
         monkeypatch.setattr(engine_factory, "_build_memory_store", lambda: store)
@@ -451,8 +451,8 @@ class TestFactoryRetrieval:
 
         # One retrieval per wiring (cached), passed through on every call.
         assert store.queries == [session["directive_text"]]
-        assert len(_factory_recorder) == 2
-        for kwargs in _factory_recorder:
+        assert len(factory_recorder) == 2
+        for kwargs in factory_recorder:
             assert kwargs["prior_missions"] == [_mission(1)]
 
     @pytest.mark.parametrize(
@@ -468,7 +468,7 @@ class TestFactoryRetrieval:
     async def test_degrades_to_no_prior_context(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        _factory_recorder: list[dict[str, Any]],
+        factory_recorder: list[dict[str, Any]],
         store_builder: Any,
     ) -> None:
         monkeypatch.setattr(engine_factory, "_build_memory_store", store_builder)
@@ -480,7 +480,7 @@ class TestFactoryRetrieval:
         assert sampler is not None
         await sampler(session=session, ctx=None)
 
-        (kwargs,) = _factory_recorder
+        (kwargs,) = factory_recorder
         assert kwargs["prior_missions"] is None
 
     def test_suite_neutraliser_is_active(self) -> None:

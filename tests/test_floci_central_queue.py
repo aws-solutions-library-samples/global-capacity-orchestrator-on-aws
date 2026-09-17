@@ -42,7 +42,7 @@ def _manifest(name: str) -> dict[str, Any]:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(verified_floci_endpoint):
     from gco.services.template_store import JobStore
 

@@ -55,7 +55,7 @@ class _FakeBedrock:
         return {"body": io.BytesIO(json.dumps({"embedding": vector}).encode())}
 
 
-@pytest.fixture()
+@pytest.fixture
 def handler(monkeypatch):
     module = load_lambda_module("vector-ingest")
     monkeypatch.setenv("VECTOR_STORE_TABLE_NAME", _TABLE)

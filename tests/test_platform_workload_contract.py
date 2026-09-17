@@ -264,7 +264,7 @@ class TestPodShape:
             budget = startup["periodSeconds"] * startup["failureThreshold"]
             assert budget >= STARTUP_BUDGET_SECONDS, f"{where}: startup budget {budget}s"
 
-    @pytest.mark.parametrize("filename", (*DEPLOYMENT_FILES, SCALED_JOB_FILE))
+    @pytest.mark.parametrize("filename", [*DEPLOYMENT_FILES, SCALED_JOB_FILE])
     def test_every_scratch_volume_is_bounded(self, filename):
         docs = _documents(filename)
         pod_specs = [_pod_spec(doc) for doc in docs if doc["kind"] == "Deployment"] + [

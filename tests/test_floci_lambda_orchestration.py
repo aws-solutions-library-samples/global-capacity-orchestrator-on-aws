@@ -58,12 +58,12 @@ _FAIL_DEFINITION = json.dumps(
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def sfn(verified_floci_endpoint: str):
     return boto3.client("stepfunctions")
 
 
-@pytest.fixture()
+@pytest.fixture
 def ssm(verified_floci_endpoint: str):
     return boto3.client("ssm")
 
@@ -94,11 +94,11 @@ def _wait_terminal(sfn, execution_arn: str, timeout: float = 15.0) -> str:
 class TestSecretRotationLifecycle:
     """The four-step rotation protocol against a real emulator secret."""
 
-    @pytest.fixture()
+    @pytest.fixture
     def secretsmanager(self, verified_floci_endpoint: str):
         return boto3.client("secretsmanager")
 
-    @pytest.fixture()
+    @pytest.fixture
     def rotation(self, secretsmanager):
         handler = load_lambda_module("secret-rotation")
         secret_arn = secretsmanager.create_secret(
@@ -201,7 +201,7 @@ def _orchestrator_event(project: str, request_id: str, request_type: str = "Crea
 
 
 class TestHelmOrchestratorProvider:
-    @pytest.fixture()
+    @pytest.fixture
     def orchestrator(self, sfn, ssm, floci_account, monkeypatch):
         state_machine_arn = _state_machine(sfn, floci_account, _WAIT_DEFINITION)
         monkeypatch.setenv("STATE_MACHINE_ARN", state_machine_arn)
@@ -312,7 +312,7 @@ def _teardown_event(project: str, *, request_type: str = "Delete") -> dict:
 
 
 class TestHelmTeardownProvider:
-    @pytest.fixture()
+    @pytest.fixture
     def provider(self, sfn, ssm, floci_account, monkeypatch):
         def _build(teardown_definition: str):
             teardown_arn = _state_machine(sfn, floci_account, teardown_definition)
@@ -446,11 +446,11 @@ def _create_regional_api_stack(cfn, project: str, *, endpoint: str = _REGIONAL_A
 
 
 class TestCrossRegionAggregatorDiscovery:
-    @pytest.fixture()
+    @pytest.fixture
     def cfn(self, verified_floci_endpoint: str):
         return boto3.client("cloudformation")
 
-    @pytest.fixture()
+    @pytest.fixture
     def aggregator(self, monkeypatch):
         def _build(project: str, regions: list[str]):
             monkeypatch.setenv("PROJECT_NAME", project)

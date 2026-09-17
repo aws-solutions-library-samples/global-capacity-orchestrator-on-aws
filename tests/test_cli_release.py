@@ -44,7 +44,7 @@ class FakeProcesses:
         return subprocess.CompletedProcess(command, self.harness_returncode)
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_processes(tmp_path, monkeypatch):
     fake = FakeProcesses(tmp_path)
     monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", fake)

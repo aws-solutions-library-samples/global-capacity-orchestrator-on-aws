@@ -103,6 +103,7 @@ def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str
         capture_output=True,
         text=True,
         timeout=timeout,
+        check=False,
     )
 
 

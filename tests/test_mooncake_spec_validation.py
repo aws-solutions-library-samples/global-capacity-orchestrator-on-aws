@@ -147,7 +147,12 @@ class TestModeRejection:
             validate_mooncake_spec({"mode": bad_mode})
 
     def test_mode_error_lists_the_allowed_values(self):
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.mode must be one of {both, disaggregated, store}, got 'nope'"
+            ),
+        ) as exc:
             validate_mooncake_spec({"mode": "nope"})
         message = str(exc.value)
         assert "disaggregated" in message
@@ -231,7 +236,12 @@ class TestColdTierRejection:
 
     def test_cold_tier_error_names_both_conflicting_fields(self):
         block = {"mode": "store", "store": {"enabled": False, "cold_tier_enabled": True}}
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.store.cold_tier_enabled requires mooncake.store.enabled to be true"
+            ),
+        ) as exc:
             validate_mooncake_spec(block)
         message = str(exc.value)
         assert "cold_tier_enabled" in message
@@ -314,7 +324,12 @@ def manager_with_spy_store():
 class TestDeployValidateBeforeWrite:
     def test_invalid_mooncake_mode_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.mode must be one of {both, disaggregated, store}, got 'turbo'"
+            ),
+        ) as exc:
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],

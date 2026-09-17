@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -160,7 +161,12 @@ class TestDeployModeRejection:
         mgr = _make_manager()
         with (
             patch.object(mgr, "_get_store", return_value=MagicMock()),
-            pytest.raises(ValueError) as excinfo,
+            pytest.raises(
+                ValueError,
+                match=re.escape(
+                    "mooncake.mode must be one of {both, disaggregated, store}, got 'turbo'"
+                ),
+            ) as excinfo,
         ):
             mgr.deploy(
                 "ep",

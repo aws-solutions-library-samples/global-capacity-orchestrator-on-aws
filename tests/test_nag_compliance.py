@@ -302,7 +302,7 @@ class TestCdkNagCompliance:
     # ``_cdk_config_matrix.py`` for the rationale.
     CONFIGS: list[tuple[str, dict[str, Any]]] = _CONFIGS
 
-    @pytest.mark.parametrize("config_name,overrides", CONFIGS, ids=[c[0] for c in CONFIGS])
+    @pytest.mark.parametrize(("config_name", "overrides"), CONFIGS, ids=[c[0] for c in CONFIGS])
     def test_no_unsuppressed_findings(self, config_name: str, overrides: dict[str, Any]) -> None:
         from cli.stacks import cdk_asset_consumer
         from gco.stacks.regional_stack import GCORegionalStack

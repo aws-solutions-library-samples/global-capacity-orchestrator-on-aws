@@ -49,7 +49,7 @@ _FLOCI_URL_SUFFIX = "localhost.floci.io"
 
 
 class TestCapacityPoller:
-    @pytest.fixture()
+    @pytest.fixture
     def history_table(self, verified_floci_endpoint: str):
         dynamodb = boto3.client("dynamodb")
         table_name = unique_name("gco-capacity-history")
@@ -132,7 +132,7 @@ class TestCapacityPoller:
 
 
 class TestImageLookup:
-    @pytest.fixture()
+    @pytest.fixture
     def ecr(self, verified_floci_endpoint: str):
         """ECR client, skipping when the emulator host cannot create repos.
 
@@ -280,7 +280,7 @@ def gateway_alb(verified_floci_endpoint: str):
 
 
 class TestRegionalApiProxyResolution:
-    @pytest.fixture()
+    @pytest.fixture
     def proxy(self, gateway_alb, floci_account, monkeypatch):
         monkeypatch.setenv("REGISTRY_REGION", "us-east-1")
         monkeypatch.setenv("TARGET_REGION", "us-east-1")
@@ -291,7 +291,7 @@ class TestRegionalApiProxyResolution:
         # Fresh module per test: the resolution cache starts empty.
         return load_lambda_module("regional-api-proxy", shared_dirs=["proxy-shared"])
 
-    @pytest.fixture()
+    @pytest.fixture
     def registry_parameter(self, gateway_alb):
         ssm = boto3.client("ssm")
         name = f"/{gateway_alb['project']}/alb-hostname-us-east-1"
@@ -356,7 +356,7 @@ class TestRegionalApiProxyResolution:
 
 
 class TestGaRegistrationDiscoveryHalves:
-    @pytest.fixture()
+    @pytest.fixture
     def handler(self, verified_floci_endpoint: str):
         return load_lambda_module("ga-registration")
 

@@ -299,7 +299,7 @@ async def test_tls_proxy_rebind_failure_requests_container_restart(tmp_path: Pat
     assert proxy._stop.is_set()
 
 
-@pytest.mark.parametrize("filename,identity", _API_WORKLOADS.items())
+@pytest.mark.parametrize(("filename", "identity"), _API_WORKLOADS.items())
 def test_api_workload_uses_tls_only_sidecar_probe_and_service(
     filename: str,
     identity: tuple[str, str],

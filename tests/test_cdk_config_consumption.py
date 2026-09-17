@@ -126,7 +126,7 @@ _CONTEXT = _load_cdk_context()
 _BLOCKS = _discover_dict_blocks(_CONTEXT)
 
 
-@pytest.mark.parametrize("block_name,block", _BLOCKS, ids=[name for name, _ in _BLOCKS])
+@pytest.mark.parametrize(("block_name", "block"), _BLOCKS, ids=[name for name, _ in _BLOCKS])
 def test_block_keys_are_consumed(block_name: str, block: dict[str, Any]) -> None:
     """Every key in this cdk.json block must be referenced somewhere in source."""
     source = _get_python_source()

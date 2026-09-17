@@ -164,13 +164,13 @@ class TestRequestSizeLimitNoContentLength:
 class TestRequestSizeLimitMethodHandling:
     """Every HTTP method is bounded, including conventionally bodyless methods."""
 
-    @pytest.mark.parametrize("method", ("GET", "HEAD", "OPTIONS"))
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
     def test_bodyless_requests_proceed(self, client, method):
         """Normal bodyless requests are unaffected by all-method enforcement."""
         response = client.request(method, "/api/v1/health")
         assert response.status_code != 413
 
-    @pytest.mark.parametrize("method", ("GET", "HEAD", "OPTIONS"))
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
     def test_rejects_oversized_body_for_conventionally_bodyless_methods(self, client, method):
         """GET, HEAD, and OPTIONS cannot carry an unchecked oversized body."""
         oversized_body = b"x" * (DEFAULT_MAX_REQUEST_BODY_BYTES + 1)

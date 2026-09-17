@@ -132,7 +132,10 @@ def test_resolve_within_root_returns_in_root_path_or_containment_error(
         try:
             result = resolve_within_root(supplied, str(root))
         except MetricReaderError as exc:
-            assert exc.code in _CONTAINMENT_CODES
+            # Property test: either outcome is valid. A rejection must carry
+            # a containment code, and an acceptance must land inside the
+            # root — `pytest.raises` cannot express "one of these two".
+            assert exc.code in _CONTAINMENT_CODES  # noqa: PT017
         else:
             # A successful return must be a path genuinely inside the root.
             assert isinstance(result, Path)

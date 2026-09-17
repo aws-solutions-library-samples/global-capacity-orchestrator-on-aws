@@ -8,6 +8,8 @@ decimal strings for a clean DynamoDB round-trip.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from cli.inference import (
@@ -62,20 +64,29 @@ class TestAuthorByteSize:
 
     @pytest.mark.parametrize("bad", [-1, MOONCAKE_BYTE_SIZE_MAX + 1])
     def test_rejects_out_of_range_int(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("byte-size value out of range [0, 9223372036854775807]: ")
+        ):
             author_byte_size(bad)
 
     @pytest.mark.parametrize("bad", ["-1", "1.5", "2e9", "0x10", "", "   ", "abc", "1_000"])
     def test_rejects_non_base10_integer_strings(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("byte-size value must be a base-10 integer string")
+        ):
             author_byte_size(bad)
 
     @pytest.mark.parametrize("bad", [True, False])
     def test_rejects_bool(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("byte-size value must be an integer, got bool: ")
+        ):
             author_byte_size(bad)
 
     @pytest.mark.parametrize("bad", [1.0, 2.5, None, [1], {"x": 1}])
     def test_rejects_non_integer_types(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape("byte-size value must be an int or a base-10 digit string, got "),
+        ):
             author_byte_size(bad)

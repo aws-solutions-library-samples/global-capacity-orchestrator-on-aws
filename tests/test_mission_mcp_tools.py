@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import importlib
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -710,7 +711,7 @@ class TestMissionResources:
             # re-raises an ``McpError`` on this side. ``Exception``
             # is the broadest match that survives FastMCP swapping
             # the concrete class between minor releases.
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(Exception, match=re.escape("Mission session")) as exc_info:
                 await client.read_resource(f"mission://sessions/{session_id}/report")
 
         # The handler stamps "not terminal" into the message so the
@@ -1043,7 +1044,7 @@ class TestMissionResourceFallbacks:
 
         monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", _BareTerminalBackend())
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(Exception, match=re.escape("terminal but report not found")) as exc_info:
             _session_report_resource("mission-bare")
         # The raised exception's string mentions the not-found shape.
         assert "report not found" in str(exc_info.value).lower()

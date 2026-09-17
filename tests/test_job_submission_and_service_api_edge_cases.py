@@ -927,7 +927,7 @@ def test_queue_processor_poison_messages_are_retained(
 def test_jobs_selector_rejects_malformed_keys_and_values(selector: str) -> None:
     from gco.services.api_routes.jobs import _parse_exact_label_selector
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("Invalid label ")):
         _parse_exact_label_selector(selector)
 
 
@@ -2007,7 +2007,7 @@ def test_webhook_sync_watch_stops_before_buffering_when_not_running() -> None:
 async def test_request_size_middleware_replays_mixed_messages_and_falls_back() -> None:
     from gco.services.request_size_middleware import RequestSizeLimitMiddleware
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("max_body_bytes must be non-negative")):
         RequestSizeLimitMiddleware(AsyncMock(), -1)
 
     received_by_app: list[dict[str, Any]] = []

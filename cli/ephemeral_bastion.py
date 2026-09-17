@@ -568,7 +568,10 @@ def _run_aws(cmd: list[str], *, allow_exists: bool = False) -> str:
     """
     try:
         result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - argv built by validated builders; list form, no shell=True
-            cmd, capture_output=True, text=True
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(

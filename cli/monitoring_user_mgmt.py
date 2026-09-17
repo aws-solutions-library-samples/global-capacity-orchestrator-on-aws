@@ -52,7 +52,10 @@ def read_grafana_admin_credentials(
     cmd = ["kubectl", "get", "secret", secret_name, "-n", namespace, "-o", "json"]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )  # nosemgrep: dangerous-subprocess-use-audit - inputs validated above; list form, no shell=True
     except FileNotFoundError as exc:
         raise RuntimeError(

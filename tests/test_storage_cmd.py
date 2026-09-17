@@ -296,11 +296,11 @@ class TestCooperativeSigterm:
         with (
             patch("cli.commands.storage_cmd.signal.getsignal", return_value=previous),
             patch("cli.commands.storage_cmd.signal.signal") as set_signal,
-            pytest.raises(_StorageSyncTerminated, match="terminated"),
             _cooperative_storage_sigterm(),
         ):
             handler = set_signal.call_args_list[0].args[1]
-            handler(signal.SIGTERM, None)
+            with pytest.raises(_StorageSyncTerminated, match="terminated"):
+                handler(signal.SIGTERM, None)
         assert set_signal.call_args_list[-1].args == (signal.SIGTERM, previous)
 
     def test_non_main_thread_does_not_install_handler(self) -> None:

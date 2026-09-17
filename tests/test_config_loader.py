@@ -519,7 +519,7 @@ class TestInferenceProxyConfig:
         assert ConfigLoader(MockApp(valid_context)).get_inference_proxy_config() == self.DEFAULTS
 
     @pytest.mark.parametrize(
-        "configured,expected",
+        ("configured", "expected"),
         [
             ({}, DEFAULTS),
             (
@@ -542,7 +542,7 @@ class TestInferenceProxyConfig:
         assert ConfigLoader(MockApp(valid_context)).get_inference_proxy_config() == expected
 
     @pytest.mark.parametrize(
-        "field,value",
+        ("field", "value"),
         [
             ("tls_proxy_cpu_request_millicores", 1),
             ("tls_proxy_cpu_request_millicores", 250),
@@ -558,7 +558,7 @@ class TestInferenceProxyConfig:
         assert ConfigLoader(MockApp(valid_context)).get_inference_proxy_config()[field] == value
 
     @pytest.mark.parametrize(
-        "field,value",
+        ("field", "value"),
         [
             ("tls_proxy_cpu_request_millicores", 0),
             ("tls_proxy_cpu_request_millicores", 251),
@@ -647,7 +647,7 @@ class TestManifestProcessorSizingConfig:
         assert config["autoscaling"] == self.AUTOSCALING_DEFAULTS
 
     @pytest.mark.parametrize(
-        "configured,expected",
+        ("configured", "expected"),
         [
             (None, AUTOSCALING_DEFAULTS),
             ({}, AUTOSCALING_DEFAULTS),
@@ -705,7 +705,7 @@ class TestManifestProcessorSizingConfig:
         assert config["resource_limits"] == limits
 
     @pytest.mark.parametrize(
-        "resource,value,message",
+        ("resource", "value", "message"),
         [
             ("cpu", 1000, "must be a Kubernetes quantity string"),
             ("cpu", "", "must be a Kubernetes quantity string"),
@@ -752,7 +752,7 @@ class TestManifestProcessorSizingConfig:
             ConfigLoader(MockApp(valid_context))
 
     @pytest.mark.parametrize(
-        "key,value",
+        ("key", "value"),
         [
             ("max_replicas", 0),
             ("max_replicas", 101),
@@ -773,7 +773,7 @@ class TestManifestProcessorSizingConfig:
             ConfigLoader(MockApp(valid_context))
 
     @pytest.mark.parametrize(
-        "key,value",
+        ("key", "value"),
         [("max_replicas", 1), ("max_replicas", 100), ("cpu_target_utilization_percentage", 1)],
     )
     def test_autoscaling_boundaries_are_inclusive(self, valid_context, key, value):
@@ -862,7 +862,7 @@ class TestNetworkPostureConfig:
         assert "allowed keys: gateway, interface" in str(exc_info.value)
 
     @pytest.mark.parametrize(
-        "key,value",
+        ("key", "value"),
         [("gateway", "s3"), ("gateway", [3]), ("interface", {"sts": True}), ("interface", [None])],
     )
     def test_vpc_endpoint_lists_must_be_lists_of_strings(self, valid_context, key, value):
@@ -873,7 +873,7 @@ class TestNetworkPostureConfig:
             ConfigLoader(MockApp(valid_context))
 
     @pytest.mark.parametrize(
-        "key,value,unsupported",
+        ("key", "value", "unsupported"),
         [
             ("gateway", ["s3", "sts"], "sts"),
             ("interface", ["ecr", "s3"], "ecr, s3"),
@@ -1249,7 +1249,7 @@ class TestConfigValidationEdgeCases:
         ):
             ConfigLoader(app)
 
-    @pytest.mark.parametrize("value", (0, True, 10 * 1024 * 1024 + 1))
+    @pytest.mark.parametrize("value", [0, True, 10 * 1024 * 1024 + 1])
     def test_invalid_manifest_processor_request_body_limit(self, valid_context, value):
         """Request limits must remain positive integers within API Gateway's cap."""
         valid_context["manifest_processor"]["max_request_body_bytes"] = value
@@ -1260,7 +1260,7 @@ class TestConfigValidationEdgeCases:
         ):
             ConfigLoader(app)
 
-    @pytest.mark.parametrize("value", (None, "false", 1, 0))
+    @pytest.mark.parametrize("value", [None, "false", 1, 0])
     def test_invalid_manifest_processor_validation_enabled(self, valid_context, value):
         """The master validation switch must be a literal JSON boolean."""
         valid_context["manifest_processor"]["validation_enabled"] = value
@@ -1451,14 +1451,14 @@ class TestConfigValidationEdgeCases:
         ):
             ConfigLoader(app)
 
-    @pytest.mark.parametrize("value", ([], "invalid", 1, False))
+    @pytest.mark.parametrize("value", [[], "invalid", 1, False])
     def test_job_validation_policy_must_be_an_object(self, valid_context, value):
         """The shared policy container cannot use a truthy non-object value."""
         valid_context["job_validation_policy"] = value
         with pytest.raises(ConfigValidationError, match="job_validation_policy must be an object"):
             ConfigLoader(MockApp(valid_context))
 
-    @pytest.mark.parametrize("value", (None, "false", 0, []))
+    @pytest.mark.parametrize("value", [None, "false", 0, []])
     def test_manifest_security_policy_must_be_an_object(self, valid_context, value):
         """Null and scalar policy values fail synthesis instead of disabling checks."""
         valid_context["job_validation_policy"]["manifest_security_policy"] = value
@@ -1468,7 +1468,7 @@ class TestConfigValidationEdgeCases:
         ):
             ConfigLoader(MockApp(valid_context))
 
-    @pytest.mark.parametrize("value", (None, "true", 1, 0, [], {}))
+    @pytest.mark.parametrize("value", [None, "true", 1, 0, [], {}])
     def test_manifest_security_policy_values_must_be_booleans(self, valid_context, value):
         """Policy members must be JSON booleans, not merely truthy or falsey."""
         valid_context["job_validation_policy"]["manifest_security_policy"] = {
@@ -1488,7 +1488,7 @@ class TestConfigValidationEdgeCases:
         with pytest.raises(ConfigValidationError, match=r"unsupported fields.*block_host_paths"):
             ConfigLoader(MockApp(valid_context))
 
-    @pytest.mark.parametrize("value", (None, "true", 1, 0))
+    @pytest.mark.parametrize("value", [None, "true", 1, 0])
     def test_require_accelerator_toleration_must_be_boolean(self, valid_context, value):
         """The adjacent default-on accelerator control is strict too."""
         valid_context["job_validation_policy"]["require_accelerator_toleration"] = value

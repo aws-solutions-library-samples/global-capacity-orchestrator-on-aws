@@ -226,7 +226,7 @@ class TestDeployFlagThreading:
 
     @pytest.mark.parametrize(
         "flag_args",
-        (["--mooncake-protocol", "rdma"], ["--mooncake-device-name", "eth0"]),
+        [["--mooncake-protocol", "rdma"], ["--mooncake-device-name", "eth0"]],
     )
     def test_transfer_flags_require_mooncake_mode(self, runner, flag_args):
         mock_mgr = MagicMock()

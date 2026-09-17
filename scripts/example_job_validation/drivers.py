@@ -73,7 +73,9 @@ class ExampleRunResult:
 
 
 def _run_cli(args: list[str], repo_root: Path, timeout: int = 600) -> tuple[int, str, str]:
-    result = subprocess.run(args, cwd=repo_root, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(
+        args, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False
+    )
     return result.returncode, result.stdout, result.stderr
 
 

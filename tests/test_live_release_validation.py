@@ -2973,7 +2973,7 @@ class TestEcrOwnershipCleanup:
 
     @pytest.mark.parametrize(
         "error_code",
-        ("ImageNotFoundException", "RepositoryNotFoundException"),
+        ["ImageNotFoundException", "RepositoryNotFoundException"],
     )
     def test_describe_tag_returns_none_only_for_authoritative_absence(
         self,
@@ -4774,7 +4774,7 @@ class TestCheckpointPersistence:
 
     @pytest.mark.parametrize(
         "checkpoint_name",
-        ("live-release-validation.json", "live-release-validation.md"),
+        ["live-release-validation.json", "live-release-validation.md"],
     )
     def test_checkpoint_cannot_collide_with_reserved_report_name(
         self,

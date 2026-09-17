@@ -135,7 +135,8 @@ def _run_release_validate(
         env=env,
         capture_output=True,
         text=True,
-        timeout=2400,  # a full app synth inside cdk list runs ~5 minutes alone
+        timeout=2400,  # a full app synth inside cdk list runs ~5 minutes alone,
+        check=False,
     )
     return result, report_dir
 
@@ -208,7 +209,8 @@ class TestPreflightAndBaselineAgainstTheEmulator:
             env=env,
             capture_output=True,
             text=True,
-            timeout=2400,  # a full app synth inside cdk list runs ~5 minutes alone
+            timeout=2400,  # a full app synth inside cdk list runs ~5 minutes alone,
+            check=False,
         )
         assert result.returncode != 0, (
             "an account mismatch must fail the run — identity pinning is the core "

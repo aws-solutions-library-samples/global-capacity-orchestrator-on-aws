@@ -1783,7 +1783,7 @@ class TestEnvBoolParser:
             monkeypatch.setenv("X", value)
             assert qp.parse_boolean_environment("X", True) is True
 
-    @pytest.mark.parametrize("value", ("treu", "2", "${UNRESOLVED_BOOLEAN}"))
+    @pytest.mark.parametrize("value", ["treu", "2", "${UNRESOLVED_BOOLEAN}"])
     def test_env_bool_rejects_malformed_values(self, monkeypatch, value):
         qp = _reload()
         monkeypatch.setenv("X", value)
@@ -1792,7 +1792,7 @@ class TestEnvBoolParser:
 
     @pytest.mark.parametrize(
         "name",
-        (
+        [
             "BLOCK_PRIVILEGED",
             "BLOCK_PRIVILEGE_ESCALATION",
             "BLOCK_HOST_NETWORK",
@@ -1802,7 +1802,7 @@ class TestEnvBoolParser:
             "BLOCK_ADDED_CAPABILITIES",
             "BLOCK_RUN_AS_ROOT",
             "REQUIRE_ACCELERATOR_TOLERATION",
-        ),
+        ],
     )
     def test_malformed_boolean_rejects_queue_worker_startup(self, monkeypatch, name):
         """Every queue-worker admission toggle fails closed during import."""

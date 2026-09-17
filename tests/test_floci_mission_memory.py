@@ -63,7 +63,7 @@ def dynamodb(verified_floci_endpoint: str):
     return boto3.client("dynamodb")
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(dynamodb, monkeypatch: pytest.MonkeyPatch):
     """A ``MissionMemoryStore`` against a fresh emulator table.
 

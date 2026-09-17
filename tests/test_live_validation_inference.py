@@ -878,11 +878,13 @@ class TestSequentialAndFinallyBehavior:
 
         monkeypatch.setattr(runtime_module.time, "sleep", sleep)
 
+        wait = (
+            runner.wait_for_ddb_running
+            if waiter == "ddb-running"
+            else runner._wait_for_owned_record
+        )
         with pytest.raises(ManagedInferenceValidationError, match="before timeout"):
-            if waiter == "ddb-running":
-                runner.wait_for_ddb_running(plans[0], records[0])
-            else:
-                runner._wait_for_owned_record(plans[0], records[0])
+            wait(plans[0], records[0])
 
         assert calls == [{"timeout": 2.0}]
         assert sleeps == [2.0]
@@ -911,11 +913,13 @@ class TestSequentialAndFinallyBehavior:
         sleeps: list[float] = []
         monkeypatch.setattr(runtime_module.time, "sleep", lambda seconds: sleeps.append(seconds))
 
+        wait = (
+            runner.wait_for_ddb_running
+            if waiter == "ddb-running"
+            else runner._wait_for_owned_record
+        )
         with pytest.raises(KeyboardInterrupt):
-            if waiter == "ddb-running":
-                runner.wait_for_ddb_running(plans[0], records[0])
-            else:
-                runner._wait_for_owned_record(plans[0], records[0])
+            wait(plans[0], records[0])
 
         assert sleeps == []
 

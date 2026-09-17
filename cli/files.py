@@ -622,6 +622,7 @@ class FileSystemClient:
                     ],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if status_result.stdout.strip() == "Running":
                     break
@@ -647,6 +648,7 @@ class FileSystemClient:
                 ],
                 capture_output=True,
                 text=True,
+                check=False,
             )
 
             if list_result.returncode != 0:
@@ -709,6 +711,7 @@ class FileSystemClient:
                     ],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
 
     def download_from_storage(
@@ -807,6 +810,7 @@ class FileSystemClient:
                     ],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if status_result.stdout.strip() == "Running":
                     break
@@ -872,6 +876,7 @@ class FileSystemClient:
                     ],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
 
 

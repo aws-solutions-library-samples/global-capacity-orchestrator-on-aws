@@ -383,6 +383,7 @@ class JobManager:
                         ["kubectl", "delete", "job", job_name, "-n", job_ns],
                         capture_output=True,
                         text=True,
+                        check=False,
                     )
                 else:
                     # Job is still active — auto-rename to avoid collision
@@ -416,7 +417,10 @@ class JobManager:
 
             # Run kubectl apply
             result = subprocess.run(
-                kubectl_cmd, capture_output=True, text=True
+                kubectl_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )  # nosemgrep: dangerous-subprocess-use-audit - kubectl_cmd is a list ["kubectl","apply","-f",temp_path]; temp_path is a secure tempfile, not user input
 
             if result.returncode != 0:
@@ -485,6 +489,7 @@ class JobManager:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode != 0:
             return None  # Job doesn't exist

@@ -64,7 +64,7 @@ def ssm(verified_floci_endpoint: str):
     return boto3.client("ssm")
 
 
-@pytest.fixture()
+@pytest.fixture
 def deployment(dynamodb, s3, ssm, monkeypatch):
     """A vector-store deployment's discoverable surface, minus the index.
 

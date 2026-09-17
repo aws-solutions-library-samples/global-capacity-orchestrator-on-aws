@@ -86,6 +86,7 @@ def _detect_container_runtime_uncached() -> str | None:
                 ["docker", "info"],
                 capture_output=True,
                 timeout=5,
+                check=False,
             )
             if result.returncode == 0:
                 return "docker"
@@ -99,6 +100,7 @@ def _detect_container_runtime_uncached() -> str | None:
                 ["finch", "info"],
                 capture_output=True,
                 timeout=5,
+                check=False,
             )
             if result.returncode == 0:
                 return "finch"
@@ -112,6 +114,7 @@ def _detect_container_runtime_uncached() -> str | None:
                 ["podman", "info"],
                 capture_output=True,
                 timeout=5,
+                check=False,
             )
             if result.returncode == 0:
                 return "podman"

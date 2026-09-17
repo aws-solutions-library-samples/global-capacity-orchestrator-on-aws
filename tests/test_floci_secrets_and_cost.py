@@ -31,13 +31,13 @@ from tests._floci import floci_test_markers, unique_name
 pytestmark = floci_test_markers()
 
 
-@pytest.fixture()
+@pytest.fixture
 def secretsmanager(verified_floci_endpoint: str):
     return boto3.client("secretsmanager")
 
 
-@pytest.fixture()
-def _clean_auth_middleware(monkeypatch):
+@pytest.fixture
+def clean_auth_middleware(monkeypatch):
     """Reset auth_middleware's module-level cache and client between tests."""
     import gco.services.auth_middleware as auth
 
@@ -54,9 +54,9 @@ def _clean_auth_middleware(monkeypatch):
 
 class TestAuthTokenLoading:
     def test_tokens_load_from_a_real_secret_arn(
-        self, secretsmanager, monkeypatch, _clean_auth_middleware
+        self, secretsmanager, monkeypatch, clean_auth_middleware
     ):
-        auth = _clean_auth_middleware
+        auth = clean_auth_middleware
         arn = secretsmanager.create_secret(
             Name=unique_name("gco-auth"),
             SecretString=json.dumps({"token": "wire-token-1"}),
@@ -72,9 +72,9 @@ class TestAuthTokenLoading:
         )
 
     def test_rotation_overlap_accepts_current_and_pending(
-        self, secretsmanager, monkeypatch, _clean_auth_middleware
+        self, secretsmanager, monkeypatch, clean_auth_middleware
     ):
-        auth = _clean_auth_middleware
+        auth = clean_auth_middleware
         name = unique_name("gco-auth-rotating")
         arn = secretsmanager.create_secret(
             Name=name, SecretString=json.dumps({"token": "current-token"})
@@ -94,9 +94,9 @@ class TestAuthTokenLoading:
         )
 
     def test_missing_secret_yields_no_tokens_not_an_exception(
-        self, secretsmanager, monkeypatch, _clean_auth_middleware
+        self, secretsmanager, monkeypatch, clean_auth_middleware
     ):
-        auth = _clean_auth_middleware
+        auth = clean_auth_middleware
         region = "us-east-1"
         account = boto3.client("sts").get_caller_identity()["Account"]
         monkeypatch.setenv(
@@ -139,7 +139,7 @@ class _OpenCostStub(BaseHTTPRequestHandler):
         return
 
 
-@pytest.fixture()
+@pytest.fixture
 def opencost_stub():
     server = HTTPServer(("127.0.0.1", 0), _OpenCostStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -150,7 +150,7 @@ def opencost_stub():
 
 
 class TestCostReportPipeline:
-    @pytest.fixture()
+    @pytest.fixture
     def monitor(self, verified_floci_endpoint, opencost_stub):
         from gco.services.cost_monitor import CostMonitor, OpenCostClient
 

@@ -1338,8 +1338,8 @@ class TestDependencyVersionConsistency:
         """Extract pinned dependency versions from a requirements.txt file."""
         deps = {}
         with open(req_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+            for raw_line in f:
+                line = raw_line.strip()
                 if line and not line.startswith("#") and "==" in line:
                     name, version = line.split("==")
                     deps[name.strip().lower().replace("-", "_")] = version.strip()

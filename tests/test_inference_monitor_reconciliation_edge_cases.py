@@ -1143,7 +1143,8 @@ def test_ensure_service_propagates_nonabsence_read_error() -> None:
 
 
 @pytest.mark.parametrize(
-    "method_name,args", [("_scale_deployment", (2,)), ("_update_deployment_image", ("new:v2",))]
+    ("method_name", "args"),
+    [("_scale_deployment", (2,)), ("_update_deployment_image", ("new:v2",))],
 )
 def test_deployment_mutation_fences_disappearance(method_name: str, args: tuple[Any, ...]) -> None:
     monitor = _make_monitor()
@@ -1153,7 +1154,8 @@ def test_deployment_mutation_fences_disappearance(method_name: str, args: tuple[
 
 
 @pytest.mark.parametrize(
-    "method_name,args", [("_scale_deployment", (2,)), ("_update_deployment_image", ("new:v2",))]
+    ("method_name", "args"),
+    [("_scale_deployment", (2,)), ("_update_deployment_image", ("new:v2",))],
 )
 def test_deployment_mutation_includes_resource_version(
     method_name: str, args: tuple[Any, ...]

@@ -296,7 +296,7 @@ class TestMalformedSecurityPolicy:
 
     @pytest.mark.parametrize(
         "policy",
-        (
+        [
             None,
             "false",
             0,
@@ -304,7 +304,7 @@ class TestMalformedSecurityPolicy:
             {"block_host_path": None},
             {"block_privileged": "false"},
             {"unknown_toggle": True},
-        ),
+        ],
     )
     def test_rejects_malformed_policy(self, mock_k8s_config, policy):
         with pytest.raises(ValueError, match="manifest_security_policy"):
@@ -312,12 +312,12 @@ class TestMalformedSecurityPolicy:
 
     @pytest.mark.parametrize(
         ("field", "value"),
-        (
+        [
             ("require_accelerator_toleration", "true"),
             ("require_accelerator_toleration", None),
             ("validation_enabled", "false"),
             ("validation_enabled", 1),
-        ),
+        ],
     )
     def test_rejects_malformed_adjacent_boolean_controls(self, mock_k8s_config, field, value):
         with pytest.raises(ValueError, match=rf"{field} must be a boolean"):

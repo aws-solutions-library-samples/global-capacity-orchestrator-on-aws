@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -353,7 +354,7 @@ def test_srp_authenticate_calls_admin_password_flow_and_normalizes_tokens() -> N
 
 @pytest.mark.parametrize("api_base", ["http://api.example", "https:///missing-host"])
 def test_fetch_studio_url_rejects_non_https_or_hostless_base(api_base: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("api_base ")):
         analytics_user_mgmt.fetch_studio_url(api_base, "token")
 
 

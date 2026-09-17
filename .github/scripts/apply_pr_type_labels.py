@@ -97,7 +97,7 @@ def label_plan(current: list[str], declared: list[str]) -> tuple[list[str], list
 
 
 def _gh_json(args: list[str]) -> dict[str, Any]:
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {proc.stderr.strip()[:400]}")
     payload: dict[str, Any] = json.loads(proc.stdout or "{}")
@@ -118,7 +118,7 @@ def apply_labels(number: int, to_add: list[str], to_remove: list[str]) -> None:
         args += ["--add-label", name]
     for name in to_remove:
         args += ["--remove-label", name]
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"could not update labels: {proc.stderr.strip()[:400]}")
 

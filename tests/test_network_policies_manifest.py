@@ -167,7 +167,7 @@ class TestDefaultDenyIngress:
 class TestPlatformIngress:
     """Each gco-system Deployment is admitted on exactly the port it serves."""
 
-    @pytest.mark.parametrize("app,ports", sorted(PLATFORM_INGRESS_PORTS.items()))
+    @pytest.mark.parametrize(("app", "ports"), sorted(PLATFORM_INGRESS_PORTS.items()))
     def test_each_platform_workload_has_a_port_scoped_ingress_allow(self, netpol_docs, app, ports):
         rules = _ingress_rules_selecting(netpol_docs, "gco-system", {"app": app, "project": "gco"})
         assert rules, f"{app}: default-deny ingress with no allow rule — unreachable"
@@ -176,7 +176,7 @@ class TestPlatformIngress:
             allowed |= {port for _proto, port in _get_port_protocols(rule)}
         assert allowed == ports, f"{app}: allowed ports {allowed} != served ports {ports}"
 
-    @pytest.mark.parametrize("app,ports", sorted(PLATFORM_INGRESS_PORTS.items()))
+    @pytest.mark.parametrize(("app", "ports"), sorted(PLATFORM_INGRESS_PORTS.items()))
     def test_probed_port_rules_admit_any_source(self, netpol_docs, app, ports):
         """Port only, no ``from``: the ALB is not a pod and neither is the kubelet.
 

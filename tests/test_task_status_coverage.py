@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -616,7 +617,7 @@ class TestWriterDegradationBranches:
             )
 
             assert writer._log_fp is None
-            with pytest.raises(OSError):
+            with pytest.raises(OSError, match=re.escape("Bad file descriptor")):
                 os.fstat(borrowed_fd)
             writer.finish(state="succeeded", exit_code=0)
             assert (status_root / "fdopen-failed.json").is_file()

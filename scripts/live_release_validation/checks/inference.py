@@ -568,6 +568,7 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 timeout=command_timeout,
                 env=environment,
                 shell=False,
+                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             commands = cast(list[dict[str, Any]], record.setdefault("commands", []))

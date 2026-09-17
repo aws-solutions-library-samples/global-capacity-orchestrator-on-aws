@@ -3213,12 +3213,12 @@ class TestActionDestroy:
         ctx = self._ctx()
         ctx.stack_manager.destroy_orchestrated.side_effect = RuntimeError("cdk exploded")
 
-        with (
-            self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers,
-            pytest.raises(RuntimeError, match="last failure: RuntimeError: cdk exploded; cleanup"),
-        ):
+        with self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers:
             helpers["delete_helper"].side_effect = ValueError("helper gone")
-            actions_destroy.destroy_deployment(ctx)
+            with pytest.raises(
+                RuntimeError, match="last failure: RuntimeError: cdk exploded; cleanup"
+            ):
+                actions_destroy.destroy_deployment(ctx)
 
         attempt = ctx.checkpoint.state["destroy_attempts"][0]
         assert attempt["overall_success"] is False
@@ -4380,9 +4380,10 @@ class TestActionTopology:
     def test_convergence_errors_are_bounded_and_re_raised(self) -> None:
         ctx = self._ctx()
 
-        with self._checks() as checks, pytest.raises(TimeoutError, match="add-ons still running"):
+        with self._checks() as checks:
             checks["converge"].side_effect = TimeoutError("add-ons still running")
-            actions_topology.action_topology(ctx)
+            with pytest.raises(TimeoutError, match="add-ons still running"):
+                actions_topology.action_topology(ctx)
 
         evidence = ctx.checkpoint.state["topology_convergence"]["regions"]["us-east-1"]
         assert evidence["error"] == "TimeoutError: add-ons still running"

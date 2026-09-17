@@ -473,7 +473,7 @@ class TestEnvPairParsing:
         first separator may be treated as the delimiter."""
         assert contract._parse_env_pair("GCO_TOKEN=a=b=c") == ("GCO_TOKEN", "a=b=c")
 
-    @pytest.mark.parametrize("pair", ("noequals", "=novalue"))
+    @pytest.mark.parametrize("pair", ["noequals", "=novalue"])
     def test_a_malformed_pair_is_rejected_by_argparse(self, pair: str) -> None:
         with pytest.raises(contract.argparse.ArgumentTypeError, match="expects KEY=VALUE"):
             contract._parse_env_pair(pair)
@@ -531,7 +531,7 @@ class TestCodexConfigRejections:
 
         assert any(".aws provider table" in problem for problem in problems)
 
-    @pytest.mark.parametrize("region", ("", None, 7), ids=("empty", "absent", "not-a-string"))
+    @pytest.mark.parametrize("region", ["", None, 7], ids=("empty", "absent", "not-a-string"))
     def test_an_unusable_provider_region_is_reported(self, region: object) -> None:
         config = _real_codex_config()
         aws = config["model_providers"][CODEX_BEDROCK_PROVIDER]["aws"]

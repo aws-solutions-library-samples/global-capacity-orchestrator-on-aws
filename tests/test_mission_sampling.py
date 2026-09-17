@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -675,13 +676,11 @@ def test_bedrock_backend_no_credentials() -> None:
 
     with mock.patch.dict("sys.modules", {"boto3": fake_boto3}):
         backend = BedrockSamplingBackend()
-        try:
+        with pytest.raises(SamplingTransportError) as excinfo:
             _run(backend.sample(_make_prompt()))
-        except SamplingTransportError as err:
-            assert err.code == "bedrock_no_credentials"
-            assert err.__cause__ is no_creds
-        else:
-            raise AssertionError("expected SamplingTransportError")
+        err = excinfo.value
+        assert err.code == "bedrock_no_credentials"
+        assert err.__cause__ is no_creds
 
 
 def test_bedrock_backend_partial_credentials() -> None:
@@ -696,13 +695,11 @@ def test_bedrock_backend_partial_credentials() -> None:
 
     with mock.patch.dict("sys.modules", {"boto3": fake_boto3}):
         backend = BedrockSamplingBackend()
-        try:
+        with pytest.raises(SamplingTransportError) as excinfo:
             _run(backend.sample(_make_prompt()))
-        except SamplingTransportError as err:
-            assert err.code == "bedrock_no_credentials"
-            assert err.__cause__ is partial
-        else:
-            raise AssertionError("expected SamplingTransportError")
+        err = excinfo.value
+        assert err.code == "bedrock_no_credentials"
+        assert err.__cause__ is partial
 
 
 def test_bedrock_backend_client_error_access_denied() -> None:
@@ -716,13 +713,11 @@ def test_bedrock_backend_client_error_access_denied() -> None:
     fake_client = _FakeBedrockClient(raises=err)
     with _patch_boto3_session(fake_client):
         backend = BedrockSamplingBackend()
-        try:
+        with pytest.raises(SamplingTransportError) as excinfo:
             _run(backend.sample(_make_prompt()))
-        except SamplingTransportError as caught:
-            assert caught.code == "bedrock_AccessDeniedException"
-            assert caught.__cause__ is err
-        else:
-            raise AssertionError("expected SamplingTransportError")
+        caught = excinfo.value
+        assert caught.code == "bedrock_AccessDeniedException"
+        assert caught.__cause__ is err
 
 
 def test_bedrock_backend_malformed_response_keyerror() -> None:
@@ -730,13 +725,11 @@ def test_bedrock_backend_malformed_response_keyerror() -> None:
     fake_client = _FakeBedrockClient(response={"output": {}})
     with _patch_boto3_session(fake_client):
         backend = BedrockSamplingBackend()
-        try:
+        with pytest.raises(SamplingTransportError) as excinfo:
             _run(backend.sample(_make_prompt()))
-        except SamplingTransportError as caught:
-            assert caught.code == "bedrock_malformed_response"
-            assert isinstance(caught.__cause__, KeyError)
-        else:
-            raise AssertionError("expected SamplingTransportError")
+        caught = excinfo.value
+        assert caught.code == "bedrock_malformed_response"
+        assert isinstance(caught.__cause__, KeyError)
 
 
 def test_bedrock_backend_malformed_response_indexerror() -> None:
@@ -744,13 +737,11 @@ def test_bedrock_backend_malformed_response_indexerror() -> None:
     fake_client = _FakeBedrockClient(response={"output": {"message": {"content": []}}})
     with _patch_boto3_session(fake_client):
         backend = BedrockSamplingBackend()
-        try:
+        with pytest.raises(SamplingTransportError) as excinfo:
             _run(backend.sample(_make_prompt()))
-        except SamplingTransportError as caught:
-            assert caught.code == "bedrock_malformed_response"
-            assert isinstance(caught.__cause__, IndexError)
-        else:
-            raise AssertionError("expected SamplingTransportError")
+        caught = excinfo.value
+        assert caught.code == "bedrock_malformed_response"
+        assert isinstance(caught.__cause__, IndexError)
 
 
 def test_bedrock_backend_satisfies_protocol() -> None:
@@ -930,44 +921,40 @@ def test_validate_strategy_accepts_well_formed_tool_calls() -> None:
 
 def test_validate_strategy_rejects_tool_not_allowlisted() -> None:
     """A tool name not in the allowlist surfaces ``tool_not_allowlisted``."""
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy=_good_strategy(),
             allowlist=["other_tool"],
             registered_tools=_REGISTERED,
             allow_scripts=False,
         )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "tool_not_allowlisted"
-        assert err.details["tool_name"] == "submit_job_sqs"
-        assert err.details["allowlist"] == ["other_tool"]
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    assert err.details["reason"] == "tool_not_allowlisted"
+    assert err.details["tool_name"] == "submit_job_sqs"
+    assert err.details["allowlist"] == ["other_tool"]
 
 
 def test_validate_strategy_rejects_tool_args_invalid() -> None:
     """Args missing required fields surface ``tool_args_invalid``."""
     strategy: dict[str, Any] = {"tool_calls": [{"tool_name": "submit_job_sqs", "args": {}}]}
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
             allow_scripts=False,
         )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "tool_args_invalid"
-        assert err.details["tool_name"] == "submit_job_sqs"
-        # Pydantic v2 ``.errors()`` payload: a list of dicts. The exact
-        # contents vary across releases, so we just check the shape.
-        assert isinstance(err.details["errors"], list)
-        assert len(err.details["errors"]) >= 1
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    assert err.details["reason"] == "tool_args_invalid"
+    assert err.details["tool_name"] == "submit_job_sqs"
+    # Pydantic v2 ``.errors()`` payload: a list of dicts. The exact
+    # contents vary across releases, so we just check the shape.
+    assert isinstance(err.details["errors"], list)
+    assert len(err.details["errors"]) >= 1
 
 
 def test_validate_strategy_skips_args_check_when_tool_has_no_input_schema() -> None:
@@ -987,21 +974,17 @@ def test_validate_strategy_skips_args_check_when_tool_has_no_input_schema() -> N
 def test_validate_strategy_rejects_script_when_allow_scripts_false() -> None:
     """A scripted strategy with ``allow_scripts=False`` is rejected upstream."""
     strategy: dict[str, Any] = {"script": "x = 1"}
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
             allow_scripts=False,
         )
-    except MissionValidationError as err:
-        # Delegated to validate_strategy; the structural validator
-        # produces the ``scripts_not_allowed_by_session`` reason.
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "scripts_not_allowed_by_session"
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    assert err.details["reason"] == "scripts_not_allowed_by_session"
 
 
 def test_validate_strategy_accepts_clean_script_when_allow_scripts_true() -> None:
@@ -1020,33 +1003,31 @@ def test_validate_strategy_accepts_clean_script_when_allow_scripts_true() -> Non
 def test_validate_strategy_rejects_script_with_dunder() -> None:
     """A script using ``__import__`` is rejected by the AST validator."""
     strategy: dict[str, Any] = {"script": "x = __import__('os')"}
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
             allow_scripts=True,
         )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        # The reason comes from the sandbox's AST validator. Either a
-        # ``dunder_name`` or a related stable token from the validator.
-        assert "reason" in err.details
-        # The reason should reference dunder / import / builtin paths.
-        reason = err.details["reason"]
-        assert any(
-            tok in reason
-            for tok in (
-                "dunder",
-                "import",
-                "builtin",
-                "name_not_allowed",
-                "forbidden_call",
-            )
-        ), f"unexpected reason: {reason!r}"
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    # The reason comes from the sandbox's AST validator. Either a
+    # ``dunder_name`` or a related stable token from the validator.
+    assert "reason" in err.details
+    # The reason should reference dunder / import / builtin paths.
+    reason = err.details["reason"]
+    assert any(
+        tok in reason
+        for tok in (
+            "dunder",
+            "import",
+            "builtin",
+            "name_not_allowed",
+            "forbidden_call",
+        )
+    ), f"unexpected reason: {reason!r}"
 
 
 def test_validate_strategy_rejects_both_tool_calls_and_script() -> None:
@@ -1060,36 +1041,32 @@ def test_validate_strategy_rejects_both_tool_calls_and_script() -> None:
         ],
         "script": "x = 1",
     }
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
             allow_scripts=True,
         )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "must_have_exactly_one_of_tool_calls_or_script"
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    assert err.details["reason"] == "must_have_exactly_one_of_tool_calls_or_script"
 
 
 def test_validate_strategy_rejects_neither_tool_calls_nor_script() -> None:
     """An empty strategy dict is rejected — neither shape present."""
-    try:
+    with pytest.raises(MissionValidationError) as excinfo:
         validate_strategy_against_catalog(
             strategy={},
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
             allow_scripts=False,
         )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "must_have_exactly_one_of_tool_calls_or_script"
-    else:
-        raise AssertionError("expected MissionValidationError")
+    err = excinfo.value
+    assert err.code == "validation_error"
+    assert err.details is not None
+    assert err.details["reason"] == "must_have_exactly_one_of_tool_calls_or_script"
 
 
 def test_validate_strategy_estimator_zero_for_unmapped_tool() -> None:
@@ -2146,13 +2123,11 @@ class TestBedrockSampling:
             assert isinstance(backend, BedrockSamplingBackend)
 
             # Direct ``sample`` call surfaces the tagged transport error.
-            try:
+            with pytest.raises(SamplingTransportError) as excinfo:
                 _run(backend.sample(_make_prompt()))
-            except SamplingTransportError as caught:
-                assert caught.code == "bedrock_no_credentials"
-                assert caught.__cause__ is no_creds
-            else:
-                raise AssertionError("expected SamplingTransportError")
+            caught = excinfo.value
+            assert caught.code == "bedrock_no_credentials"
+            assert caught.__cause__ is no_creds
 
             # ---- Step 3: routing the same backend through the full
             # orchestration helper produces a fallback envelope tagged

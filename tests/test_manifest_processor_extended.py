@@ -9,6 +9,7 @@ _get_job_status derivation for pending state. Pulls in Hypothesis for
 a couple of property-based sweeps over the validator.
 """
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -225,7 +226,9 @@ class TestListJobsNamespaceValidation:
     @pytest.mark.asyncio
     async def test_list_jobs_invalid_namespace(self, manifest_processor):
         """Test list_jobs raises error for invalid namespace."""
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(
+            ValueError, match=re.escape("Namespace 'unauthorized-namespace' not allowed")
+        ) as exc_info:
             await manifest_processor.list_jobs(namespace="unauthorized-namespace")
 
         assert "not allowed" in str(exc_info.value)

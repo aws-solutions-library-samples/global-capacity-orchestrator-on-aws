@@ -106,6 +106,28 @@ def _no_real_image_mirror(request):
 
 
 # ============================================================================
+# Function-scoped: never read the developer's real kubeconfig from tests
+# ============================================================================
+#
+# ``cli.kubectl_helpers.update_kubeconfig`` reads the kubeconfig that
+# ``aws eks update-kubeconfig`` would write and, when the cluster entry is
+# already pinned to a local tunnel, deliberately leaves it alone and skips the
+# refresh. That is the right production behaviour and the wrong thing to let a
+# test observe: on a machine where a past ``gco cluster tunnel`` (or a live
+# validation run) left ``gco-us-east-1`` pinned in ``~/.kube/config``, every
+# test that expects the refresh subprocess to run fails, while CI — with no
+# kubeconfig at all — passes. Point ``KUBECONFIG`` at a per-test path that does
+# not exist so the helper sees the same empty world everywhere. Tests that
+# exercise the pinning itself write their own file and set the variable
+# themselves, which nests over this one and wins.
+
+
+@pytest.fixture(autouse=True)
+def _isolated_kubeconfig(monkeypatch, tmp_path):
+    monkeypatch.setenv("KUBECONFIG", str(tmp_path / ".kube-isolated" / "config"))
+
+
+# ============================================================================
 # Function-scoped: never touch the real mission-memory table from tests
 # ============================================================================
 #

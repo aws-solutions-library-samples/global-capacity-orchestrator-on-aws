@@ -1400,6 +1400,7 @@ class StackManager:
                 ],
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -1482,6 +1483,7 @@ class StackManager:
                     capture_output=True,
                     text=True,
                     timeout=30,
+                    check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError("Unable to verify the npm packaging version") from exc
@@ -1507,6 +1509,7 @@ class StackManager:
                 cwd=staging_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(

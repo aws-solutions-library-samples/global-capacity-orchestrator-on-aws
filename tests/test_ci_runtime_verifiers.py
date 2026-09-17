@@ -339,7 +339,7 @@ def test_container_verifier_run_command_refuses_silent_output(container_verifier
         container_verifier.run_command([sys.executable, "-c", ""])
 
 
-@pytest.mark.parametrize("profile", ("dev", "helm-installer"))
+@pytest.mark.parametrize("profile", ["dev", "helm-installer"])
 def test_container_verifier_main_dispatches_each_profile(
     container_verifier: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
 ) -> None:

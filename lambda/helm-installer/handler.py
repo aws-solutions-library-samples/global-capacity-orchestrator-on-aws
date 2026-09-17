@@ -412,6 +412,7 @@ def run_helm(
             text=True,
             env=helm_env,
             timeout=cmd_timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning(f"helm subprocess timed out after {exc.timeout}s: {' '.join(cmd)}")
@@ -490,6 +491,7 @@ def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bo
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
         )
     except subprocess.TimeoutExpired:
@@ -508,6 +510,7 @@ def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bo
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"kubectl delete timed out for {secret}")
@@ -681,6 +684,7 @@ def _strip_custom_resource_finalizers(
                 text=True,
                 env=env,
                 timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             return f"Timed out listing {resource_type} instances for finalizer removal"
@@ -704,6 +708,7 @@ def _strip_custom_resource_finalizers(
                     text=True,
                     env=env,
                     timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return f"Timed out removing finalizers from {line}"
@@ -750,6 +755,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                     text=True,
                     env=env,
                     timeout=KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return False, f"Timed out discovering {api_group} custom resources"
@@ -786,6 +792,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                 text=True,
                 env=env,
                 timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+                check=False,
             )
             if deletion.returncode != 0:
                 failure = (deletion.stderr or deletion.stdout).strip()
@@ -812,6 +819,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                     text=True,
                     env=env,
                     timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return False, (
@@ -894,6 +902,7 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             text=True,
             env=env,
             timeout=30,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out scaling health-monitor deployment to zero"
@@ -932,6 +941,7 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             text=True,
             env=env,
             timeout=135,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out waiting for health-monitor pods to terminate"
@@ -987,6 +997,7 @@ def run_kubectl(
                 text=True,
                 env=env,
                 timeout=command_timeout_seconds,
+                check=False,
             )
         )
     except subprocess.TimeoutExpired as exc:
@@ -1902,6 +1913,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
             text=True,
             env=env,
             timeout=30,
+            check=False,
         )
         if result.returncode != 0:
             logger.warning(f"Failed to list webhooks: {result.stderr}")
@@ -1925,6 +1937,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
             if svc_result.returncode != 0 or "/" not in svc_result.stdout:
                 continue
@@ -1947,6 +1960,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
 
             if not ep_result.stdout.strip():
@@ -1960,6 +1974,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                     text=True,
                     env=env,
                     timeout=15,
+                    check=False,
                 )
 
     except Exception as e:

@@ -63,7 +63,7 @@ def dynamodb(verified_floci_endpoint: str):
     return boto3.client("dynamodb")
 
 
-@pytest.fixture()
+@pytest.fixture
 def corpus_bucket(s3):
     bucket = unique_name("gco-cluster-shared")
     s3.create_bucket(Bucket=bucket)
@@ -74,7 +74,7 @@ def corpus_bucket(s3):
     s3.delete_bucket(Bucket=bucket)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store_table(dynamodb):
     """A vector-store-shaped table, minus the index the emulator lacks."""
     table_name = unique_name("gco-vector-store")
@@ -89,7 +89,7 @@ def store_table(dynamodb):
     dynamodb.delete_table(TableName=table_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def handler(monkeypatch, store_table):
     """The production handler wired to the emulator, Bedrock stubbed."""
     module = load_lambda_module("vector-ingest")

@@ -10,6 +10,7 @@ processor with mocked Kubernetes config plus sample valid Deployment
 and Job manifests so each test starts from a known-good baseline.
 """
 
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -546,7 +547,7 @@ class TestCreateManifestProcessorFromEnv:
 
     @pytest.mark.parametrize(
         "name",
-        (
+        [
             "BLOCK_PRIVILEGED",
             "BLOCK_PRIVILEGE_ESCALATION",
             "BLOCK_HOST_NETWORK",
@@ -557,7 +558,7 @@ class TestCreateManifestProcessorFromEnv:
             "BLOCK_RUN_AS_ROOT",
             "REQUIRE_ACCELERATOR_TOLERATION",
             "VALIDATION_ENABLED",
-        ),
+        ],
     )
     def test_create_from_env_rejects_malformed_booleans(self, name):
         """Typos and unresolved substitutions stop REST service startup."""
@@ -1593,7 +1594,9 @@ class TestListJobs:
     @pytest.mark.asyncio
     async def test_list_jobs_disallowed_namespace(self, processor_with_mocks):
         """Test listing jobs from disallowed namespace raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(
+            ValueError, match=re.escape("Namespace 'kube-system' not allowed")
+        ) as exc_info:
             await processor_with_mocks.list_jobs(namespace="kube-system")
 
         assert "not allowed" in str(exc_info.value)
@@ -2089,11 +2092,8 @@ class TestCreateAndUpdateResource:
             "metadata": {"name": "test", "namespace": "default"},
         }
 
-        try:
+        with pytest.raises(Exception, match="Creation failed"):
             await processor_with_mocks._create_resource(manifest)
-            pytest.fail("Should have raised exception")
-        except Exception as e:
-            assert "Creation failed" in str(e)
 
     @pytest.mark.asyncio
     async def test_update_resource_success(self, processor_with_mocks):
@@ -2131,11 +2131,8 @@ class TestCreateAndUpdateResource:
             "metadata": {"name": "test", "namespace": "default"},
         }
 
-        try:
+        with pytest.raises(Exception, match="Update failed"):
             await processor_with_mocks._update_resource(manifest)
-            pytest.fail("Should have raised exception")
-        except Exception as e:
-            assert "Update failed" in str(e)
 
 
 # =========================================================================

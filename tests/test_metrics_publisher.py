@@ -406,15 +406,12 @@ class TestMetricsPublisherEdgeCases:
         with patch("boto3.client") as mock_client:
             mock_client.side_effect = Exception("AWS credentials not found")
 
-            try:
+            with pytest.raises(Exception, match="AWS credentials not found"):
                 MetricsPublisher(
                     namespace="Test/Namespace",
                     cluster_name="test-cluster",
                     region="us-east-1",
                 )
-                pytest.fail("Should have raised exception")
-            except Exception as e:
-                assert "AWS credentials not found" in str(e)
 
     def test_put_metric_with_timestamp(self):
         """Test metric put with custom timestamp."""

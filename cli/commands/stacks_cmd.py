@@ -937,6 +937,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             ["kubectl", "get", "nodes", "--request-timeout=10s"],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             node_count = len(

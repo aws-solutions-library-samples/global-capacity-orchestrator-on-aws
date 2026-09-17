@@ -23,6 +23,7 @@ These are pure unit tests; no live MCP server, no AWS, no LLM.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -356,7 +357,9 @@ class TestMissionResourceReport:
         state_module._BACKEND_INSTANCE = backend
         try:
             # FastMCP swaps NotFoundError/ResourceError/KeyError between releases.
-            with pytest.raises(Exception):  # noqa: B017
+            with pytest.raises(
+                Exception, match=re.escape("Mission session 'does-not-exist' not found")
+            ):
                 _session_report_resource("does-not-exist")
         finally:
             state_module._BACKEND_INSTANCE = original
@@ -393,7 +396,9 @@ class TestMissionResourceReport:
         state_module._BACKEND_INSTANCE = backend
         try:
             # FastMCP swaps NotFoundError/ResourceError/KeyError between releases.
-            with pytest.raises(Exception):  # noqa: B017
+            with pytest.raises(
+                Exception, match=re.escape("Mission session 'sess-pending' is not terminal")
+            ):
                 _session_report_resource("sess-pending")
         finally:
             state_module._BACKEND_INSTANCE = original
@@ -689,7 +694,7 @@ class TestEvaluatePhaseHelpers:
         """``_compare_numbers`` with an unknown operator raises ValueError."""
         from mission.engine import _compare_numbers
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("unknown comparison operator: '??'")):
             _compare_numbers(1.0, "??", 1.0)
 
     def test_compare_numbers_all_ops(self) -> None:
@@ -3021,7 +3026,9 @@ class TestCadenceResolver:
         from mission.checkpoints import should_evaluate_now
 
         session = self._make_session("invalid_kind")
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("unknown checkpoint cadence kind: 'invalid_kind'")
+        ):
             should_evaluate_now(session, 0, datetime(2025, 1, 1, tzinfo=UTC))
 
     def test_mark_checkpoint(self) -> None:

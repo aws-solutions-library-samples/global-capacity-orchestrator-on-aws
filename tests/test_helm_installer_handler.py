@@ -3091,7 +3091,7 @@ class TestValidationFileCleanup:
         assert not target.exists()
 
     def test_directory_removal_error_propagates(self, tmp_path):
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match=r"Operation not permitted|Is a directory"):
             helm_handler._remove_validation_file(str(tmp_path))
 
 

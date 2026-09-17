@@ -294,7 +294,7 @@ class TestProbes:
         )
         recorded: list[list[str]] = []
 
-        def fake_run(args, capture_output, text):
+        def fake_run(args, capture_output, text, check):
             recorded.append(args)
             return _completed(stdout=payload)
 
@@ -331,7 +331,7 @@ class TestProbes:
         monkeypatch.setattr(
             cluster_doctor.subprocess,
             "run",
-            lambda args, capture_output, text: _completed(stdout=payload),
+            lambda args, capture_output, text, check: _completed(stdout=payload),
         )
         assert cluster_doctor.list_access_entries("gco-us-east-1", "us-east-1") == [
             _ROLE,
@@ -363,7 +363,7 @@ class TestProbes:
         monkeypatch.setattr(
             cluster_doctor.subprocess,
             "run",
-            lambda args, capture_output, text: _completed(stdout=payload),
+            lambda args, capture_output, text, check: _completed(stdout=payload),
         )
         assert cluster_doctor.list_associated_access_policies("c", "us-east-1", _ROLE) == [
             "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"

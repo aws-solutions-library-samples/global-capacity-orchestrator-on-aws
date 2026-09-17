@@ -30,7 +30,7 @@ pytestmark = floci_test_markers()
 REGION = "us-east-1"
 
 
-@pytest.fixture()
+@pytest.fixture
 def gateway_endpoint(verified_floci_endpoint, floci_account):
     """A real S3 gateway endpoint in a throwaway VPC; both removed afterwards."""
     ec2 = boto3.client("ec2", region_name=REGION)
