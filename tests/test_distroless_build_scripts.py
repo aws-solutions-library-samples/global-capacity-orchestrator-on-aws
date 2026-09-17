@@ -33,10 +33,14 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from gco.service_images import discover_service_dockerfiles
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILES = REPO_ROOT / "dockerfiles"
 
-SERVICE_DOCKERFILES = sorted(DOCKERFILES.glob("*-dockerfile"))
+SERVICE_DOCKERFILES = [
+    REPO_ROOT / path for path in discover_service_dockerfiles(REPO_ROOT).values()
+]
 
 
 def _load_script(name: str) -> ModuleType:

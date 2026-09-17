@@ -294,7 +294,7 @@ rebuild that pulls the latest fixes. The dependency scan flags an epoch older
 than 45 days; Trivy's container scan is the backstop.
 
 - `APT_SECURITY_EPOCH` (Debian images): `Dockerfile.dev` and the six
-  `dockerfiles/*-dockerfile` service images.
+  `dockerfiles/Dockerfile.*` service images.
 - `DNF_SECURITY_EPOCH` (Amazon Linux 2023): `lambda/helm-installer/Dockerfile`.
 
 Set the ARG default to today's date (`YYYY-MM-DD`), rebuild, and re-run the

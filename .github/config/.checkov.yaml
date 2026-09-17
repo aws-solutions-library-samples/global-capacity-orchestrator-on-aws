@@ -13,8 +13,6 @@ skip-path:
   - .ruff_cache
   # Example manifests are documentation/templates, not production code
   - examples
-  # dockerfiles/ contains Dockerfiles for K8s services
-  - dockerfiles
 
 # Frameworks to scan
 framework:
@@ -24,19 +22,21 @@ framework:
 # Compact output
 compact: true
 
-# Skip specific checks globally with justification:
+# There is deliberately no global `skip-check` list.
 #
-# === Dockerfile Checks ===
-# CKV_DOCKER_2: HEALTHCHECK not needed for Lambda containers (Lambda manages health)
-#               or development containers (Dockerfile.dev)
-# CKV_DOCKER_3: USER directive not needed for Lambda containers (runs as Lambda runtime user)
-#               Dockerfile.dev is for local development only
+# Every exemption is an inline `# checkov:skip=<CHECK>:<reason>` comment in the
+# file it applies to, so the reason travels with the code and a new file gets
+# no free pass. Two Dockerfile checks are exempted this way:
 #
-# === Kubernetes Checks ===
-# Kubernetes check skips for third-party GPU components are defined inline in
-# the manifests (e.g. lambda/kubectl-applier-simple/manifests/50-dcgm-exporter.yaml)
-# using checkov:skip comments for better traceability.
-skip-check:
-  # Dockerfile checks
-  - CKV_DOCKER_2  # HEALTHCHECK - not applicable for Lambda/dev containers
-  - CKV_DOCKER_3  # USER - Lambda runtime handles user, dev container runs locally
+# - CKV_DOCKER_2 (HEALTHCHECK): the platform services are Kubernetes
+#   Deployments whose liveness/readiness contracts live in their manifests, and
+#   the Lambda/dev images are not long-running services. A Docker HEALTHCHECK
+#   would be dead metadata in both cases.
+# - CKV_DOCKER_3 (USER): claimed only by `Dockerfile.dev` and the
+#   helm-installer Lambda image. Every deployed service image sets `USER`, so
+#   the check stays live for them — a new service image that forgot to drop
+#   root fails this scan.
+#
+# Kubernetes check skips for third-party GPU components are inline in the
+# manifests too (e.g.
+# lambda/kubectl-applier-simple/manifests/50-dcgm-exporter.yaml).

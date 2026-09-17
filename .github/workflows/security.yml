@@ -19,6 +19,8 @@
 #                                        — CodeQL security-and-quality pack on JavaScript
 #   - security:codeql:python-code-analysis
 #                                        — CodeQL security-and-quality pack on Python
+#   - security:discover:images           — enumerates the images the container
+#                                          scan matrix builds (from the tree)
 #   - security:gitleaks:secrets          — gitleaks on current files (no git history)
 #   - security:kics:iac                  — KICS on cdk.out (needs CDK synth first)
 #   - security:npm-audit:all-packages    — npm audit on every locked npm graph
@@ -26,8 +28,8 @@
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
-#                                          (six service images + two Lambda images
-#                                          + Dockerfile.dev)
+#                                          (every service image + every container
+#                                          Lambda + Dockerfile.dev, discovered)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
 # Scanner command failures fail their jobs. CodeQL analysis uploads SARIF to
@@ -321,10 +323,38 @@ jobs:
           path: trivy-fs-report.json
           retention-days: 30
 
+  security-discover-images:
+    name: "security:discover:images"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # The container-scan matrix below is derived from the tree instead of
+    # listed by hand, so an image can never ship unscanned because someone
+    # forgot this file: every `dockerfiles/Dockerfile.<service>`, every
+    # container Lambda (`lambda/<name>/Dockerfile`), and every root
+    # `Dockerfile.<name>`. That last family is the contributor dev container —
+    # never deployed, but contributors run host-side gco/cdk/kubectl commands
+    # inside it, and scanning it here surfaces a CVE on the PR that bumps its
+    # base image rather than on the next weekly cve-scan run.
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Discover buildable images
+        id: discover
+        # `gco.service_images` is standard-library only and needs no install,
+        # so this job stays a checkout plus one interpreter call.
+        run: |
+          set -euo pipefail
+          images="$(python3 -m gco.service_images --github-matrix)"
+          printf 'matrix={"include":%s}\n' "${images}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "${images}" | python3 -m json.tool
+
   security-trivy-container-scan:
     name: "security:trivy:container-scan"
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: security-discover-images
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Rebuild the service images locally and scan each with Trivy. Fills a
     # gap the AWS GitLab runner couldn't handle (docker builds were flaky).
@@ -332,32 +362,7 @@ jobs:
     # `workflow_call` — simpler and the build time is modest.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - image: health-monitor
-            dockerfile: dockerfiles/health-monitor-dockerfile
-          - image: cost-monitor
-            dockerfile: dockerfiles/cost-monitor-dockerfile
-          - image: manifest-processor
-            dockerfile: dockerfiles/manifest-processor-dockerfile
-          - image: inference-monitor
-            dockerfile: dockerfiles/inference-monitor-dockerfile
-          - image: inference-proxy
-            dockerfile: dockerfiles/inference-proxy-dockerfile
-          - image: queue-processor
-            dockerfile: dockerfiles/queue-processor-dockerfile
-          - image: helm-installer
-            dockerfile: lambda/helm-installer/Dockerfile
-            context: lambda/helm-installer
-          - image: tls-certificate-manager
-            dockerfile: lambda/tls-certificate-manager/Dockerfile
-            context: lambda/tls-certificate-manager
-          # Dev container — never deployed, but contributors run host-side
-          # gco/cdk/kubectl commands inside it. Scanning here means a CVE
-          # in the dev image surfaces on the same PR that introduced the
-          # bump (rather than waiting for the next weekly cve-scan run).
-          - image: dev
-            dockerfile: Dockerfile.dev
+      matrix: ${{ fromJSON(needs.security-discover-images.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
@@ -373,7 +378,9 @@ jobs:
         # reused everywhere.
         uses: ./.github/actions/build-image-with-retry
         with:
-          context: ${{ matrix.context || '.' }}
+          # Discovery always supplies a context ('.' for the root-context
+          # images), so there is no fallback to paper over a missing key.
+          context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           tags: ${{ matrix.image }}:scan
           load: true

@@ -1,4 +1,7 @@
 # GCO deployment-local PKI manager. Runs only during bootstrap and scheduled rotation.
+# checkov:skip=CKV_DOCKER_2:AWS Lambda invokes the handler and decides liveness
+# itself; this image is not a long-running service, so a Docker HEALTHCHECK
+# would be dead metadata.
 FROM public.ecr.aws/lambda/python:3.14
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

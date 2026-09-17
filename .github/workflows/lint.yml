@@ -235,7 +235,7 @@ jobs:
                 FOUND=1
                 echo "=== Linting $df ==="
                 hadolint "$df" --ignore DL3008 --ignore DL3013
-              done < <(find . -type f \( -name "Dockerfile*" -o -name "*dockerfile" -o -name "*Dockerfile" \) \
+              done < <(find . -type f -name "Dockerfile*" \
                 -not -path "./.git/*" \
                 -not -path "./cdk.out/*" \
                 -not -path "./.venv/*" \

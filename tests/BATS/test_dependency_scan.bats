@@ -3042,7 +3042,7 @@ EOF
 # ── extract_security_epochs ─────────────────────────────────────────────────
 
 @test "extract_security_epochs: reads APT_SECURITY_EPOCH from a service Dockerfile" {
-    run extract_security_epochs "dockerfiles/health-monitor-dockerfile"
+    run extract_security_epochs "dockerfiles/Dockerfile.health-monitor"
     [ "$status" -eq 0 ]
     [[ "$output" =~ ^APT_SECURITY_EPOCH\|[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
 }

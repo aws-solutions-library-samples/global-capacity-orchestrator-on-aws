@@ -1162,16 +1162,17 @@ spec:
 
 ### 2. Add Image to CDK Stack
 
-Edit `gco/stacks/regional_stack.py`:
+Add the build recipe as `dockerfiles/Dockerfile.my-service` — the filename is
+the catalog, so `gco/service_images.py` discovers it and the CI container-scan
+matrix picks it up with no list to edit — then edit
+`gco/stacks/regional_stack.py`:
 
 ```python
-# In _create_container_images method
-self.my_service_image = ecr_assets.DockerImageAsset(
-    self, "MyServiceImage",
-    directory=".",
-    file="path/to/my-service-dockerfile",
-    platform=ecr_assets.Platform.LINUX_AMD64
-)
+# In _create_container_images method. The helper resolves
+# dockerfiles/Dockerfile.<service>, builds from the repository root, and
+# excludes the inputs that cannot affect this image so an unrelated edit
+# does not churn its asset hash.
+self.my_service_image = self._service_image_asset("MyServiceImage", "my-service")
 
 # In _create_kubectl_lambda method, add to ImageReplacements
 "ImageReplacements": {

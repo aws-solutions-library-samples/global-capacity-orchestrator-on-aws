@@ -500,7 +500,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/cost-monitor-dockerfile
+          file: dockerfiles/Dockerfile.cost-monitor
           tags: cost-monitor:ci
           load: true
           cache-from: type=gha,scope=cost-monitor
@@ -548,7 +548,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/health-monitor-dockerfile
+          file: dockerfiles/Dockerfile.health-monitor
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
@@ -631,7 +631,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/manifest-processor-dockerfile
+          file: dockerfiles/Dockerfile.manifest-processor
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
@@ -697,7 +697,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-monitor-dockerfile
+          file: dockerfiles/Dockerfile.inference-monitor
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
@@ -763,7 +763,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-proxy-dockerfile
+          file: dockerfiles/Dockerfile.inference-proxy
           tags: inference-proxy:ci
           load: true
           cache-from: type=gha,scope=inference-proxy
@@ -825,7 +825,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/queue-processor-dockerfile
+          file: dockerfiles/Dockerfile.queue-processor
           tags: queue-processor:ci
           load: true
           cache-from: type=gha,scope=queue-processor
@@ -1465,7 +1465,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/health-monitor-dockerfile
+          file: dockerfiles/Dockerfile.health-monitor
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
@@ -1474,7 +1474,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/cost-monitor-dockerfile
+          file: dockerfiles/Dockerfile.cost-monitor
           tags: cost-monitor:ci
           load: true
           cache-from: type=gha,scope=cost-monitor
@@ -1483,7 +1483,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/manifest-processor-dockerfile
+          file: dockerfiles/Dockerfile.manifest-processor
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
@@ -1492,7 +1492,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-monitor-dockerfile
+          file: dockerfiles/Dockerfile.inference-monitor
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
@@ -1501,7 +1501,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-proxy-dockerfile
+          file: dockerfiles/Dockerfile.inference-proxy
           tags: inference-proxy:ci
           load: true
           cache-from: type=gha,scope=inference-proxy

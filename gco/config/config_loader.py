@@ -1528,7 +1528,7 @@ class ConfigLoader:
           policy the SQS queue processor enforces.
 
         Note: The 'image' field is a placeholder default. In practice, the actual
-        image is built from dockerfiles/manifest-processor-dockerfile and pushed
+        image is built from dockerfiles/Dockerfile.manifest-processor and pushed
         to ECR during CDK deployment. The {{MANIFEST_PROCESSOR_IMAGE}} placeholder
         in manifests is replaced with the ECR image URI.
         """

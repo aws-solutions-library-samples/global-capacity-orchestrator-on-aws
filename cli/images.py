@@ -38,6 +38,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from gco.service_images import discover_service_dockerfiles
+
 from ._container_runtime import detect_container_runtime
 from ._image_uri import (
     aws_partition,
@@ -83,23 +85,15 @@ _TAG_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$")
 # one account+region get isolated ECR namespaces (#139). Resolved per-instance
 # from ``config.project_name`` into ``self._repo_prefix`` in ``__init__``.
 
-# First-party images that GCO builds and ships itself, as opposed to
-# the user images pushed through ``build``/``push``. Each entry pairs
-# the logical image name (which becomes the ``gco/<name>`` ECR
-# repository suffix) with the Dockerfile under ``dockerfiles/`` that
-# produces it. Listing these here lets callers enumerate the shipped
-# images and resolve any one of them to its registry URI by name,
-# the same way the platform services (health-monitor,
-# manifest-processor, queue-processor, inference-monitor,
-# inference-proxy) are built from their matching
-# ``dockerfiles/<name>-dockerfile``.
-_MAINTAINED_IMAGES: dict[str, str] = {
-    "health-monitor": "dockerfiles/health-monitor-dockerfile",
-    "manifest-processor": "dockerfiles/manifest-processor-dockerfile",
-    "queue-processor": "dockerfiles/queue-processor-dockerfile",
-    "inference-monitor": "dockerfiles/inference-monitor-dockerfile",
-    "inference-proxy": "dockerfiles/inference-proxy-dockerfile",
-}
+# First-party images that GCO builds and ships itself, as opposed to the user
+# images pushed through ``build``/``push``. Each entry pairs the logical image
+# name (which becomes the ``gco/<name>`` ECR repository suffix) with the
+# Dockerfile that produces it, and the mapping is *discovered* from
+# ``dockerfiles/Dockerfile.<name>`` rather than typed out: the previous
+# hand-kept list had already drifted (it was missing cost-monitor), so the
+# filenames are the single source of truth shared with the regional stack and
+# the CI build/scan matrix. See ``gco.service_images``.
+_MAINTAINED_IMAGES: dict[str, str] = discover_service_dockerfiles()
 
 # Default image served by disaggregated prefill/decode deployments when the
 # operator does not supply one. As of this tag the upstream vLLM OpenAI server

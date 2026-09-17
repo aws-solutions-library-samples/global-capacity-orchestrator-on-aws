@@ -57,8 +57,9 @@ _ALLOWLIST: dict[str, str] = {}
 
 
 def _is_dockerfile(path: Path) -> bool:
+    """Recognize both shapes the repo uses: ``Dockerfile`` and ``Dockerfile.<name>``."""
     name = path.name
-    return name == "Dockerfile" or name.startswith("Dockerfile.") or name.endswith("-dockerfile")
+    return name == "Dockerfile" or name.startswith("Dockerfile.")
 
 
 def _iter_dockerfiles() -> list[Path]:

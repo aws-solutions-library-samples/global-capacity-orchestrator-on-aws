@@ -4,6 +4,9 @@
 # Lambda base image had issues with the Helm/kubectl binary entrypoint.
 # This Lambda only runs during stack deploys, so cost savings from ARM64
 # would be negligible.
+# checkov:skip=CKV_DOCKER_2:AWS Lambda invokes the handler and decides liveness
+# itself; this image is not a long-running service, so a Docker HEALTHCHECK
+# would be dead metadata.
 FROM public.ecr.aws/lambda/python:3.14
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -84,5 +87,12 @@ COPY charts.yaml .
 # needed nor possible.
 RUN python -m compileall -q "${LAMBDA_TASK_ROOT}"
 ENV PYTHONDONTWRITEBYTECODE=1
+
+# Lambda normally supplies a least-privileged runtime user; declare one
+# explicitly so the image remains non-root in generic container runtimes too
+# (same posture as lambda/tls-certificate-manager). Nothing here needs root at
+# invoke time: the task root is read-only, handler.py redirects every helm/
+# kubectl writable path to /tmp, and the installed binaries are mode 0755.
+USER 1000:1000
 
 CMD ["handler.lambda_handler"]
