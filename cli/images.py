@@ -529,7 +529,7 @@ class ImageManager:
                 size = details[0].get("imageSizeInBytes")
                 if isinstance(size, int):
                     return size
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("describe_images for size lookup failed: %s", e)
         return None
 
@@ -568,7 +568,7 @@ class ImageManager:
             for page in paginator.paginate(repositoryName=repository_name):
                 count += len(page.get("imageDetails", []))
             return count
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("describe_images count for %s failed: %s", repository_name, e)
             return 0
 
@@ -1104,13 +1104,13 @@ class ImageManager:
         """Return every image URI referenced by a registered inference endpoint."""
         try:
             from .inference import InferenceManager
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("InferenceManager unavailable: %s", e)
             return set()
         try:
             manager = InferenceManager(self.config)
             endpoints = manager.list_endpoints()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("list_endpoints failed: %s", e)
             return set()
         refs: set[str] = set()
@@ -1141,19 +1141,19 @@ class ImageManager:
         """
         try:
             from .jobs import JobManager
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("JobManager unavailable: %s", e)
             return set()
 
         try:
             manager = JobManager(self.config)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("JobManager init failed: %s", e)
             return set()
 
         try:
             jobs = manager.list_jobs(all_regions=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("list_jobs(all_regions=True) failed: %s", e)
             return set()
 

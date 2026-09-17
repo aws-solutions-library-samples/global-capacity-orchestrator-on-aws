@@ -32,7 +32,7 @@ import pytest
 # import the same way they do in production, matching the sibling tool tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 _LOCAL_FILE_TOOL = "metrics_from_local_file"
 
@@ -48,7 +48,7 @@ def _import_metrics_tool_module():
     try:
         import run_mcp  # noqa: F401 - import-time side effect registers the tools
         import tools.metrics as metrics_module
-    except Exception as exc:  # noqa: BLE001 - any import-surface failure -> skip
+    except Exception as exc:  # any import-surface failure -> skip
         pytest.skip(f"tools.metrics not importable in this environment: {exc}")
     return metrics_module
 

@@ -367,12 +367,12 @@ def fetch_studio_url(api_base: str, id_token: str) -> tuple[str, int, str]:
     # wrong line and bandit / semgrep attach findings to the first
     # line of the call.
     # fmt: off
-    request = urllib.request.Request(  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  # noqa: S310
+    request = urllib.request.Request(  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         login_url,
         headers={"Authorization": id_token, "Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  # noqa: S310
+    with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         status = int(response.status)
         body = response.read().decode("utf-8")
         correlation_id = response.headers.get("x-amzn-RequestId") or "N/A"

@@ -29,7 +29,7 @@ from hypothesis import strategies as st
 # tests have to do it themselves before the import.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import types  # noqa: E402
+from mission import types
 
 # ---------------------------------------------------------------------------
 # Leaf strategies — JSON-stable scalars and recursive "any" values

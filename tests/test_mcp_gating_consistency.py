@@ -106,7 +106,7 @@ def _snapshot(flag_overrides: dict[str, str]) -> dict[str, object]:
     """Import run_mcp in a subprocess under ``flag_overrides``; return its report."""
     env = {**os.environ, **_clean_env(), **flag_overrides}
     script = _SNAPSHOT_SCRIPT.format(gco_mcp_dir=str(_GCO_MCP_DIR), marker=_MARKER)
-    result = subprocess.run(  # noqa: S603 — fixed interpreter, generated script
+    result = subprocess.run(  # fixed interpreter, generated script
         [sys.executable, "-c", script],
         env=env,
         capture_output=True,

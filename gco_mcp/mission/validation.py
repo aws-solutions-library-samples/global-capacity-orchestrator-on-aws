@@ -859,7 +859,7 @@ def validate_strategy(
                 },
             )
         try:
-            from mission.sandbox import (  # noqa: PLC0415 — lazy: sandbox is an optional runtime dep
+            from mission.sandbox import (  # lazy: sandbox is an optional runtime dep
                 ScriptRejected,
                 validate_script_ast,
             )

@@ -94,7 +94,7 @@ def send_response(
             headers={"Content-Type": "application/json"},
             timeout=10.0,
         )
-    except Exception as exc:  # noqa: BLE001 - callback failure can only be logged
+    except Exception as exc:  # callback failure can only be logged
         logger.error("Failed to send CloudFormation response: %s", exc)
 
 
@@ -124,7 +124,7 @@ def get_k8s_client(cluster_name: str, region: str) -> tuple[str, str, str]:
     sts_client = session.client("sts", region_name=region)
     sts_endpoint = str(sts_client.meta.endpoint_url).rstrip("/")
     sts_url = f"{sts_endpoint}/?Action=GetCallerIdentity&Version=2011-06-15"
-    signed_url = sts_client._request_signer.generate_presigned_url(  # noqa: SLF001
+    signed_url = sts_client._request_signer.generate_presigned_url(
         request_dict={
             "method": "GET",
             "url": sts_url,
@@ -189,7 +189,7 @@ def find_gateway_address(
             value = address.get("value")
             if address_type == "Hostname" and isinstance(value, str) and value.strip():
                 return value.strip()
-    except Exception as exc:  # noqa: BLE001 - polling falls back to exact tags
+    except Exception as exc:  # polling falls back to exact tags
         logger.warning("Error checking Gateway status: %s", exc)
     return None
 
@@ -244,7 +244,7 @@ def find_alb_by_gateway_hostname(
                 state,
             )
             return str(load_balancer["DNSName"]), arn, state
-    except Exception as exc:  # noqa: BLE001 - discovery polling retries
+    except Exception as exc:  # discovery polling retries
         logger.warning("Error finding Gateway ALB by hostname: %s", exc)
     return None, None, None
 
@@ -301,7 +301,7 @@ def find_platform_alb_by_tags(
                 state,
             )
             return str(load_balancer["DNSName"]), arn, state
-    except Exception as exc:  # noqa: BLE001 - discovery polling retries
+    except Exception as exc:  # discovery polling retries
         logger.warning("Error finding Gateway ALB by tags: %s", exc)
     return None, None, None
 
@@ -345,7 +345,7 @@ def check_existing_ga_endpoint(ga_client: Any, endpoint_group_arn: str, alb_arn:
         if any(endpoint.get("EndpointId") == alb_arn for endpoint in endpoints):
             logger.info("ALB %s is already registered with GA", alb_arn)
             return True
-    except Exception as exc:  # noqa: BLE001 - add_endpoints remains authoritative
+    except Exception as exc:  # add_endpoints remains authoritative
         logger.warning("Error checking existing GA endpoints: %s", exc)
     return False
 
@@ -549,7 +549,7 @@ def remove_ga_endpoints(
         if strict:
             raise
         logger.warning("Failed to clean up GA endpoints: %s", exc)
-    except Exception as exc:  # noqa: BLE001 - delete guards remain best effort
+    except Exception as exc:  # delete guards remain best effort
         if strict:
             raise
         logger.warning("Failed to clean up GA endpoints: %s", exc)
@@ -802,7 +802,7 @@ def handle_delete(
         try:
             ga_client = boto3.client("globalaccelerator", region_name="us-west-2")
             deregister_alb_from_ga(ga_client, endpoint_group_arn)
-        except Exception as exc:  # noqa: BLE001 - Delete must continue to SSM cleanup
+        except Exception as exc:  # Delete must continue to SSM cleanup
             logger.error("GA deregistration failed during Delete: %s", exc, exc_info=True)
 
     region = str(props["Region"])
@@ -811,7 +811,7 @@ def handle_delete(
     project_name = str(props.get("ProjectName", "gco"))
     try:
         delete_alb_hostname_from_ssm(region, registry_region, project_name)
-    except Exception as exc:  # noqa: BLE001 - raw Delete must always respond success
+    except Exception as exc:  # raw Delete must always respond success
         logger.error("SSM registry cleanup failed during Delete: %s", exc, exc_info=True)
 
     send_response(event, context, "SUCCESS", {}, physical_id)
@@ -830,7 +830,7 @@ def on_delete_event(event: dict[str, Any], _context: Any = None) -> dict[str, An
         try:
             ga_client = boto3.client("globalaccelerator", region_name="us-west-2")
             deregister_alb_from_ga(ga_client, endpoint_group_arn)
-        except Exception as exc:  # noqa: BLE001 - provider Delete must never wedge the stack
+        except Exception as exc:  # provider Delete must never wedge the stack
             logger.error("GA deregistration guard failed: %s", exc, exc_info=True)
 
     region = props.get("Region")
@@ -843,7 +843,7 @@ def on_delete_event(event: dict[str, Any], _context: Any = None) -> dict[str, An
                 registry_region,
                 str(props.get("ProjectName", "gco")),
             )
-        except Exception as exc:  # noqa: BLE001 - provider Delete must never wedge the stack
+        except Exception as exc:  # provider Delete must never wedge the stack
             logger.error("SSM registry cleanup guard failed: %s", exc, exc_info=True)
     else:
         logger.warning("No Region supplied; cannot identify the SSM registry parameter")
@@ -866,7 +866,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
             handle_delete(event, context, props, physical_id)
         else:
             handle_create_update(event, context, props, physical_id)
-    except Exception as exc:  # noqa: BLE001 - must answer the raw custom resource
+    except Exception as exc:  # must answer the raw custom resource
         logger.error("Registration handler failed: %s", exc, exc_info=True)
         if request_type == "Delete":
             send_response(event, context, "SUCCESS", {}, physical_id)

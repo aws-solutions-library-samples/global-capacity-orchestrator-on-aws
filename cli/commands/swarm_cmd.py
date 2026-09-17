@@ -47,7 +47,7 @@ import click
 # module is loaded.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
 
-from gco.bedrock import BedrockFTUFormNotAcceptedError  # noqa: E402
+from gco.bedrock import BedrockFTUFormNotAcceptedError
 
 _FEATURE_FLAG_HINT = (
     "Swarm tools are gated. Set GCO_ENABLE_SWARM=true (or GCO_ENABLE_ALL_TOOLS=true) to enable."
@@ -115,7 +115,7 @@ def _ensure_tool_registry() -> None:
     FastMCP instance, which starts empty in a plain CLI process.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
-    from tools import register_all_tools  # noqa: PLC0415
+    from tools import register_all_tools
 
     register_all_tools()
 
@@ -123,7 +123,7 @@ def _ensure_tool_registry() -> None:
 def _resolve_registered_tools_for_cli() -> tuple[dict[str, Any], dict[str, set[str]]]:
     """Snapshot the live registry as ``(name -> Tool, name -> tags)``."""
     _ensure_tool_registry()
-    from server import mcp  # noqa: PLC0415 — lazy
+    from server import mcp  # lazy
 
     async def _list() -> list[Any]:
         return list(await mcp._list_tools())
@@ -146,8 +146,8 @@ def _deps_builder(*, dry_run: bool) -> Any:
     the catalog); children build plain engines. ``--dry-run`` swaps in
     the canned-stub dispatcher, mirroring ``gco mission run``.
     """
-    from mission._engine_factory import build_engine_dependencies  # noqa: PLC0415
-    from mission.swarm import (  # noqa: PLC0415
+    from mission._engine_factory import build_engine_dependencies
+    from mission.swarm import (
         SUPERVISOR_TOOL_DOCSTRINGS,
         SUPERVISOR_TOOL_SCHEMAS,
         SUPERVISOR_TOOLS,
@@ -182,8 +182,8 @@ def _deps_builder(*, dry_run: bool) -> Any:
 
 
 def _make_runner(orchestrator_id: str, *, dry_run: bool) -> Any:
-    from mission.state import get_backend  # noqa: PLC0415
-    from mission.swarm_runner import SwarmRunner  # noqa: PLC0415
+    from mission.state import get_backend
+    from mission.swarm_runner import SwarmRunner
 
     registered, tags = _resolve_registered_tools_for_cli()
 
@@ -224,11 +224,11 @@ def _persist_orchestrator(
     Exits 1 with the structured envelope on any validation failure —
     before anything is persisted.
     """
-    from mission import sampling as mission_sampling  # noqa: PLC0415
-    from mission import swarm as swarm_rules  # noqa: PLC0415
-    from mission import validation as mission_validation  # noqa: PLC0415
-    from mission.state import get_backend  # noqa: PLC0415
-    from mission.validation import MissionValidationError  # noqa: PLC0415
+    from mission import sampling as mission_sampling
+    from mission import swarm as swarm_rules
+    from mission import validation as mission_validation
+    from mission.state import get_backend
+    from mission.validation import MissionValidationError
 
     try:
         directive_clean = mission_validation.validate_directive(directive)
@@ -284,10 +284,10 @@ def _scaffold_plan(
     except the permanent Anthropic first-time-use gate, which is
     reported as a hard error (Mission precedent).
     """
-    from mission import sampling as mission_sampling  # noqa: PLC0415
-    from mission import swarm as swarm_rules  # noqa: PLC0415
-    from mission import swarm_scaffold  # noqa: PLC0415
-    from mission.validation import MissionValidationError  # noqa: PLC0415
+    from mission import sampling as mission_sampling
+    from mission import swarm as swarm_rules
+    from mission import swarm_scaffold
+    from mission.validation import MissionValidationError
 
     try:
         config = swarm_rules.validate_swarm_config(swarm_config)
@@ -542,8 +542,8 @@ def _drive(
     max_orchestrator_iterations: int | None = None,
 ) -> dict[str, Any]:
     """Build a runner and drive the swarm, mapping runner errors to exits."""
-    from mission.swarm_runner import SwarmRunnerBusyError  # noqa: PLC0415
-    from mission.validation import MissionValidationError  # noqa: PLC0415
+    from mission.swarm_runner import SwarmRunnerBusyError
+    from mission.validation import MissionValidationError
 
     runner = _make_runner(orchestrator_id, dry_run=dry_run)
     try:
@@ -684,7 +684,7 @@ def swarm_iterate_cmd(
 
 
 def _load_orchestrator_or_exit(session_id: str) -> tuple[Any, dict[str, Any]]:
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.state import get_backend
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -705,7 +705,7 @@ def _load_orchestrator_or_exit(session_id: str) -> tuple[Any, dict[str, Any]]:
 @click.option("--output", type=click.Choice(["json", "table"]), default="json", show_default=True)
 def swarm_status_cmd(session_id: str, output: str) -> None:
     """One-call fleet rollup: rails, pool, child table, findings."""
-    from mission.swarm_runner import build_fleet_rollup  # noqa: PLC0415
+    from mission.swarm_runner import build_fleet_rollup
 
     backend, session = _load_orchestrator_or_exit(session_id)
     rollup = build_fleet_rollup(backend, session)  # type: ignore[arg-type]
@@ -734,8 +734,8 @@ def swarm_status_cmd(session_id: str, output: str) -> None:
 @click.argument("session_id")
 def swarm_abort_cmd(session_id: str) -> None:
     """Terminate the orchestrator and abort every non-terminal child."""
-    from mission.swarm_runner import abort_swarm  # noqa: PLC0415
-    from mission.types import TERMINAL_STATES  # noqa: PLC0415
+    from mission.swarm_runner import abort_swarm
+    from mission.types import TERMINAL_STATES
 
     backend, session = _load_orchestrator_or_exit(session_id)
     if session["status"] in TERMINAL_STATES:
@@ -748,8 +748,8 @@ def swarm_abort_cmd(session_id: str) -> None:
 @click.option("--status", default=None, help="Filter by lifecycle status.")
 def swarm_list_cmd(status: str | None) -> None:
     """List swarm (orchestrator) sessions on the configured backend."""
-    from mission.state import get_backend  # noqa: PLC0415
-    from mission.swarm_runner import list_swarms  # noqa: PLC0415
+    from mission.state import get_backend
+    from mission.swarm_runner import list_swarms
 
     _emit_json({"swarms": list_swarms(get_backend(), status=status)})
 

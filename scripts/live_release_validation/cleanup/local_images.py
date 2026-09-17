@@ -109,7 +109,7 @@ def prune_local_cdk_asset_images_safely() -> dict[str, Any]:
     """``prune_cdk_asset_images`` that also absorbs unexpected exceptions."""
     try:
         return prune_cdk_asset_images()
-    except Exception as exc:  # noqa: BLE001 - disk reclamation is best-effort by contract
+    except Exception as exc:  # disk reclamation is best-effort by contract
         return {
             "runtime": None,
             "removed_images": [],

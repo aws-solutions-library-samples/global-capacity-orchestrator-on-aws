@@ -29,12 +29,12 @@ import pytest
 # in production, matching the convention used by the sibling tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.logs import (  # noqa: E402
+from metric_readers.logs import (
     coerce_scalar,
     extract_by_json_key,
     extract_by_regex,
 )
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 # ---------------------------------------------------------------------------
 # JSON-key extraction: non-object lines are skipped, object lines still extract

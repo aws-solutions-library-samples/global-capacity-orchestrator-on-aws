@@ -1072,7 +1072,7 @@ class MissionEngine:
         for augmenter in self.observation_augmenters:
             try:
                 contribution = augmenter(session)
-            except Exception as exc:  # noqa: BLE001 — degrade, never fail the phase
+            except Exception as exc:  # degrade, never fail the phase
                 obs.setdefault("errors", []).append(
                     {
                         "tool_name": "_observation_augmenter",

@@ -33,8 +33,8 @@ import pytest
 # tests/test_mcp_feature_flags.py.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import cli_runner  # noqa: E402
-from tools._long_task import _run_long_task  # noqa: E402
+import cli_runner
+from tools._long_task import _run_long_task
 
 
 class _FakeProgress(dict):

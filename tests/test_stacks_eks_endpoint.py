@@ -191,7 +191,7 @@ class TestEndpointDriftInStatus:
     def test_probe_failures_never_break_status(self, monkeypatch) -> None:
         formatter = self._formatter()
 
-        def raise_error(cluster, region):  # noqa: ANN001
+        def raise_error(cluster, region):
             raise RuntimeError("describe failed")
 
         monkeypatch.setattr("cli.kubectl_helpers.describe_cluster_access", raise_error)

@@ -564,7 +564,7 @@ class WebhookDispatcher:
             self._deliveries_failed += 1
             logger.info("Webhook delivery cancelled: webhook_id=%s", webhook_id)
             raise
-        except Exception as exc:  # noqa: BLE001 — sanitize the logical delivery boundary
+        except Exception as exc:  # sanitize the logical delivery boundary
             last_error = f"Delivery failure: {type(exc).__name__}"
             logger.error(
                 "Webhook delivery raised: webhook_id=%s error_type=%s",

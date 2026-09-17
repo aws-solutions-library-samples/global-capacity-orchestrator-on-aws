@@ -34,9 +34,9 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring every other test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import mission.state as mission_state  # noqa: E402
-import run_mcp  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
+import mission.state as mission_state
+import run_mcp
+from mission.state import FilesystemBackend
 
 # Every tool the GCO_ENABLE_MISSION gate registers. Used only to strip the
 # singleton registry back to its default shape, so it has to be complete:

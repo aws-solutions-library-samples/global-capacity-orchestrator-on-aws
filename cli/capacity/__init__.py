@@ -13,7 +13,7 @@ Submodules:
 
 # Re-export everything so ``from cli.capacity import X`` keeps working.
 # Re-export get_config so tests that patch cli.capacity.get_config keep working.
-from cli.config import get_config as get_config  # noqa: F401
+from cli.config import get_config as get_config
 
 from .advisor import (
     BedrockCapacityAdvisor,
@@ -62,7 +62,6 @@ __all__ = [
     "RegionDialStatus",
     "SpotPlacementConfigLimitError",
     "SpotPriceInfo",
-    "instance_type_info_from_ec2",
     "TrafficDialError",
     "TrafficDialManager",
     "compute_price_trend",
@@ -73,4 +72,5 @@ __all__ = [
     "get_capacity_history_store",
     "get_multi_region_capacity_checker",
     "get_traffic_dial_manager",
+    "instance_type_info_from_ec2",
 ]

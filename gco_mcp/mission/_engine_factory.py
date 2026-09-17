@@ -54,9 +54,9 @@ from typing import TYPE_CHECKING, Any, cast
 # without making the ``mcp`` directory a package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mission import sampling as mission_sampling  # noqa: E402
-from mission import state as mission_state  # noqa: E402
-from mission.engine import (  # noqa: E402
+from mission import sampling as mission_sampling
+from mission import state as mission_state
+from mission.engine import (
     MissionEngine,
     ObservationAugmenter,
     SandboxRunner,
@@ -162,7 +162,7 @@ async def fetch_registered_tool_metadata() -> tuple[dict[str, Any], dict[str, st
     test harness with a stub mcp instance, etc.).
     """
     try:
-        from server import mcp  # noqa: PLC0415 - lazy
+        from server import mcp  # lazy
     except Exception:
         return {}, {}
     try:
@@ -243,7 +243,7 @@ async def _live_dispatch_tool(
     # path).
     context: Any | None
     try:
-        from fastmcp.server.dependencies import get_context  # noqa: PLC0415
+        from fastmcp.server.dependencies import get_context
 
         try:
             context = get_context()
@@ -253,7 +253,7 @@ async def _live_dispatch_tool(
         context = ctx_inner
     del context  # FastMCP uses contextvars internally
 
-    from server import mcp  # noqa: PLC0415
+    from server import mcp
 
     tool_obj = await mcp.get_tool(tool_name)
     if tool_obj is None:
@@ -299,7 +299,7 @@ def _build_sandbox_runner(session: Mapping[str, Any]) -> SandboxRunner | None:
     if not session.get("allow_scripted_strategies"):
         return None
     try:
-        from mission.sandbox import MissionSandbox  # noqa: PLC0415
+        from mission.sandbox import MissionSandbox
     except ImportError:
         return None
 
@@ -336,10 +336,10 @@ def _build_memory_store() -> Any | None:
     engine build.
     """
     try:
-        from mission.memory import MissionMemoryStore  # noqa: PLC0415
+        from mission.memory import MissionMemoryStore
 
         return MissionMemoryStore()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -371,7 +371,7 @@ def _build_sampling_callable(
     # multi-iteration drive of one CLI invocation or one MCP request —
     # only pays the AWS round-trip once. Outer-list trick keeps the
     # cache mutable through the inner closure without ``nonlocal``.
-    from mission._environment import gather_session_environment  # noqa: PLC0415
+    from mission._environment import gather_session_environment
 
     env_cache: list[Mapping[str, Any] | None] = []
     # Prior similar missions from the memory vector index. Same
@@ -405,7 +405,7 @@ def _build_sampling_callable(
         if not env_cache:
             try:
                 env_cache.append(gather_session_environment(session))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 env_cache.append(None)
         env_ctx = env_cache[0]
         if not memory_cache:
@@ -417,7 +417,7 @@ def _build_sampling_callable(
                     else None
                 )
                 memory_cache.append(results or None)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 memory_cache.append(None)
         prior_missions = memory_cache[0]
         return await mission_sampling.maybe_sample_strategy_revision(

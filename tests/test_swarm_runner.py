@@ -18,15 +18,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission._engine_factory import EngineDependencies  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.swarm_runner import (  # noqa: E402
+from mission._engine_factory import EngineDependencies
+from mission.state import FilesystemBackend
+from mission.swarm_runner import (
     SwarmRunner,
     SwarmRunnerBusyError,
     build_children_snapshot,
     build_fleet_rollup,
 )
-from mission.types import SCHEMA_VERSION  # noqa: E402
+from mission.types import SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Harness

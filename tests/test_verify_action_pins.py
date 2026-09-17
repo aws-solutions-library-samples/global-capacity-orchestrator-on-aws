@@ -300,7 +300,7 @@ class _Response:
 def test_resolve_tag_returns_the_commit_sha(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         captured["url"] = request.full_url
         captured["auth"] = request.get_header("Authorization")
         return _Response({"sha": SHA_A})
@@ -316,7 +316,7 @@ def test_resolve_tag_sends_no_authorization_without_a_token(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         captured["auth"] = request.get_header("Authorization")
         return _Response({"sha": SHA_A})
 
@@ -332,7 +332,7 @@ def test_resolve_tag_sends_no_authorization_without_a_token(
 def test_resolve_tag_maps_http_errors_to_a_reason(
     monkeypatch: pytest.MonkeyPatch, code: int, expected: str
 ) -> None:
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, code, "boom", {}, None)  # type: ignore[arg-type]
 
     monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
@@ -342,7 +342,7 @@ def test_resolve_tag_maps_http_errors_to_a_reason(
 
 
 def test_resolve_tag_survives_a_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         raise urllib.error.URLError("no route")
 
     monkeypatch.setattr(verifier.urllib.request, "urlopen", fake_urlopen)
@@ -389,7 +389,7 @@ def _refuse_token_then_allow_anonymous(
 ) -> list[str | None]:
     attempts: list[str | None] = []
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         auth = request.get_header("Authorization")
         attempts.append(auth)
         if auth is not None:
@@ -424,7 +424,7 @@ def test_a_404_is_not_retried_anonymously(monkeypatch: pytest.MonkeyPatch) -> No
     """A missing tag is an answer, not a credential problem; one call only."""
     attempts: list[str | None] = []
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         attempts.append(request.get_header("Authorization"))
         raise urllib.error.HTTPError(request.full_url, 404, "no", {}, None)  # type: ignore[arg-type]
 
@@ -439,7 +439,7 @@ def test_no_fallback_is_attempted_when_there_was_no_token(
     """Retrying an already-anonymous request would just burn the rate limit."""
     attempts: list[str | None] = []
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         attempts.append(request.get_header("Authorization"))
         raise urllib.error.HTTPError(request.full_url, 403, "no", {}, None)  # type: ignore[arg-type]
 
@@ -472,7 +472,7 @@ def test_no_fallback_is_attempted_when_there_was_no_token(
 def test_a_malformed_repository_is_refused_without_a_request(
     monkeypatch: pytest.MonkeyPatch, repository: str
 ) -> None:
-    def explode(request, timeout=None):  # noqa: ANN001, ANN202
+    def explode(request, timeout=None):
         raise AssertionError("no request may be issued for a malformed repository")
 
     monkeypatch.setattr(verifier.urllib.request, "urlopen", explode)
@@ -485,7 +485,7 @@ def test_a_malformed_repository_is_refused_without_a_request(
 def test_a_malformed_version_is_refused_without_a_request(
     monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
-    def explode(request, timeout=None):  # noqa: ANN001, ANN202
+    def explode(request, timeout=None):
         raise AssertionError("no request may be issued for a malformed version")
 
     monkeypatch.setattr(verifier.urllib.request, "urlopen", explode)
@@ -497,7 +497,7 @@ def test_a_malformed_version_is_refused_without_a_request(
 def test_the_request_url_is_always_the_github_api(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         seen.append(request.full_url)
         return _Response({"sha": SHA_A})
 
@@ -533,7 +533,7 @@ def _resolving_to(sha_for: dict[str, str] | None, *, error: str | None = None):
     matches no real pin, so it reads as a moved tag.
     """
 
-    def resolve(repository: str, version: str, *, token: str | None = None):  # noqa: ANN202
+    def resolve(repository: str, version: str, *, token: str | None = None):
         if error is not None:
             return verifier.TagResolution(error=error)
         assert sha_for is not None

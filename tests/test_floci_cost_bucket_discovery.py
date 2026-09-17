@@ -199,7 +199,7 @@ class _OpenCostStub(BaseHTTPRequestHandler):
         "data": [{"gco-jobs": {"name": "gco-jobs", "cpuCost": 1.5, "totalCost": 1.5}}],
     }
 
-    def do_GET(self):  # noqa: N802 - http.server API
+    def do_GET(self):  # http.server API
         body = json.dumps(self.payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

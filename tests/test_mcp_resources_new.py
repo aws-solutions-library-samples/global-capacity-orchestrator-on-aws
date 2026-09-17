@@ -284,6 +284,6 @@ class TestModuleStructure:
         assert "args" in inspect.signature(_run_cli).parameters
 
     def test_version_module_importable(self):
-        from version import get_project_version  # noqa: F401
+        from version import get_project_version
 
         assert get_project_version() != "unknown"

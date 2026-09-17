@@ -44,8 +44,8 @@ from hypothesis import strategies as st
 # they do in production, matching the convention used by the sibling tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission.sampling import SamplingTransportError  # noqa: E402
-from mission_judge.shape import ErrorCode, is_finite_float  # noqa: E402
+from mission.sampling import SamplingTransportError
+from mission_judge.shape import ErrorCode, is_finite_float
 
 # ---------------------------------------------------------------------------
 # Constants

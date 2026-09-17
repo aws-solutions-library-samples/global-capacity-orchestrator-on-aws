@@ -810,7 +810,7 @@ def install_claude_code() -> int:
     """Install the pinned Claude Code release; return the npm exit code."""
     if shutil.which("npm") is None:
         return 127
-    return subprocess.call(claude_install_command())  # noqa: S603
+    return subprocess.call(claude_install_command())
 
 
 def codex_install_command() -> list[str]:
@@ -822,7 +822,7 @@ def install_codex() -> int:
     """Install the pinned Codex release; return the npm exit code."""
     if shutil.which("npm") is None:
         return 127
-    return subprocess.call(codex_install_command())  # noqa: S603
+    return subprocess.call(codex_install_command())
 
 
 def build_launch_argv(
@@ -937,8 +937,8 @@ def exec_claude(argv: list[str], env: dict[str, str]) -> int:
     process and its exit code is propagated.
     """
     if sys.platform == "win32":
-        return subprocess.call(argv, env=env)  # noqa: S603
-    os.execvpe(argv[0], argv, env)  # noqa: S606
+        return subprocess.call(argv, env=env)
+    os.execvpe(argv[0], argv, env)
     raise AssertionError("unreachable: execvpe replaces the process on success")
 
 

@@ -44,7 +44,7 @@ from click.testing import CliRunner
 # regardless of how pytest is invoked.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from cli.main import cli  # noqa: E402
+from cli.main import cli
 
 # The command-group package re-exports the ``mission`` Click group under
 # the name ``mission_cmd``, which shadows the submodule attribute. Reach
@@ -66,8 +66,8 @@ def isolated_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     Without overriding the cache every CLI test would write to
     ``~/.gco/missions/`` on the developer's machine.
     """
-    from mission import state as mission_state  # noqa: PLC0415
-    from mission.state import FilesystemBackend  # noqa: PLC0415
+    from mission import state as mission_state
+    from mission.state import FilesystemBackend
 
     backend = FilesystemBackend(root=tmp_path)
     monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", backend)

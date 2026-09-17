@@ -24,7 +24,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring every other test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402, I001 — sys.path tweak above must run first
+import run_mcp  # noqa: I001 — sys.path tweak above must run first
 
 
 # ---------------------------------------------------------------------------

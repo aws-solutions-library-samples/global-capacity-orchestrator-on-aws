@@ -42,8 +42,8 @@ from hypothesis import strategies as st
 # files have to do the same before the imports below resolve.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import sampling  # noqa: E402
-from mission.sampling import (  # noqa: E402
+from mission import sampling
+from mission.sampling import (
     FINAL_LESSONS_SCHEMA,
     OBSERVATION_FIELD_BYTE_CAP,
     OBSERVATION_FIELD_TRUNCATE_TO,
@@ -1150,7 +1150,7 @@ class _FakeBackend:
         self._raises = raises
         self.calls: list[Any] = []
 
-    async def sample(self, prompt: Any) -> str:  # noqa: ARG002
+    async def sample(self, prompt: Any) -> str:
         self.calls.append(prompt)
         if self._raises is not None:
             raise self._raises

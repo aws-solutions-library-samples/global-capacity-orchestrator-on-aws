@@ -33,8 +33,8 @@ from hypothesis import strategies as st
 # production, matching the convention used by the sibling Mission tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission_judge.score import clamp_score, parse_score  # noqa: E402
-from mission_judge.shape import ErrorCode, JudgeError  # noqa: E402
+from mission_judge.score import clamp_score, parse_score
+from mission_judge.shape import ErrorCode, JudgeError
 
 # The inclusive bounds of the progress-score interval the clamp targets.
 _LOWER = 0.0

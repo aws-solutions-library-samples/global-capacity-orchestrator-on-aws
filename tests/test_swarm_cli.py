@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import importlib  # noqa: E402
+import importlib
 
 # ``from cli.commands import swarm_cmd`` would resolve to the Click Group
 # re-exported by the package __init__, not the module — import the module

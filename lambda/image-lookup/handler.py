@@ -78,7 +78,7 @@ def _describe_repository(ecr: Any, repository_name: str) -> dict[str, Any] | Non
         resp = ecr.describe_repositories(repositoryNames=[repository_name])
     except ecr.exceptions.RepositoryNotFoundException:
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Some boto3 stubs surface RepositoryNotFoundException via the
         # generic ClientError shape rather than the typed exception. Sniff
         # the error code and translate consistently.
@@ -125,7 +125,7 @@ def _has_retain_tag(ecr: Any, repository_arn: str) -> bool:
     """Return True when ``gco:retain=true`` is present on the repository."""
     try:
         resp = ecr.list_tags_for_resource(resourceArn=repository_arn)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("list_tags_for_resource failed for %s: %s", repository_arn, exc)
         raise RuntimeError(
             f"Unable to verify retention tags for {repository_arn}; refusing deletion"

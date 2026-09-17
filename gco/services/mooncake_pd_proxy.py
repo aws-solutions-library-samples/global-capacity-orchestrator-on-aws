@@ -166,7 +166,7 @@ async def _prime_prefill(path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp.raise_for_status()
         data = resp.json()
         return data.get("kv_transfer_params") or {}
-    except Exception as exc:  # noqa: BLE001 - priming is best-effort
+    except Exception as exc:  # priming is best-effort
         logger.warning("prefill priming failed; decode will serve directly: %s", exc)
         return {}
 

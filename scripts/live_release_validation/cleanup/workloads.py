@@ -159,7 +159,7 @@ def cleanup_workloads(ctx: RunContext) -> dict[str, Any]:
                 result["central_jobs"].append(_cleanup_central_job(ctx, central_job))
                 workload_record = _central_workload_record(ctx, central_job)
             reconciled_central_workloads.add(id(workload_record))
-        except Exception as exc:  # noqa: BLE001 - preserve every unresolved resource
+        except Exception as exc:  # preserve every unresolved resource
             error = f"{type(exc).__name__}: {exc}"
             result["errors"].append({"resource": f"central:{job_id}", "error": error})
             result["unresolved"].append({"resource": f"central:{job_id}", "reason": error})
@@ -189,7 +189,7 @@ def cleanup_workloads(ctx: RunContext) -> dict[str, Any]:
                     "deletion": deletion,
                 }
             )
-        except Exception as exc:  # noqa: BLE001 - preserve every unresolved resource
+        except Exception as exc:  # preserve every unresolved resource
             error = f"{type(exc).__name__}: {exc}"
             result["errors"].append({"resource": reference, "error": error})
             result["unresolved"].append({"resource": reference, "reason": error})

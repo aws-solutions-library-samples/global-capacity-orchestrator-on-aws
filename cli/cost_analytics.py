@@ -113,7 +113,7 @@ class CostAnalytics:
             start_kwargs["ExecutionParameters"] = parameters
         try:
             start = self._athena.start_query_execution(**start_kwargs)
-        except Exception as exc:  # noqa: BLE001 - boto error shapes vary
+        except Exception as exc:  # boto error shapes vary
             raise AthenaQueryError(
                 f"Failed to start Athena query (workgroup {self.workgroup}, "
                 f"database {self.database}): {exc}"

@@ -33,22 +33,22 @@ import pytest
 
 # Mirror the import pattern used by every other ``test_mission_*`` module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission import _engine_factory as engine_factory  # noqa: E402
-from mission.embeddings import EmbeddingError  # noqa: E402
-from mission.engine import MissionEngine  # noqa: E402
-from mission.memory import (  # noqa: E402
+from mission import SCHEMA_VERSION
+from mission import _engine_factory as engine_factory
+from mission.embeddings import EmbeddingError
+from mission.engine import MissionEngine
+from mission.memory import (
     MissionMemoryError,
     MissionMemoryUnavailableError,
 )
-from mission.sampling import (  # noqa: E402
+from mission.sampling import (
     PRIOR_MISSIONS_BYTE_CAP,
     PROMPT_BYTE_BUDGET,
     TRUNCATION_MARKER,
     SamplingPrompt,
     _summarise_prior_missions,
 )
-from mission.state import FilesystemBackend  # noqa: E402
+from mission.state import FilesystemBackend
 
 # ---------------------------------------------------------------------------
 # Harness

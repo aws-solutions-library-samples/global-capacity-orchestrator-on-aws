@@ -669,7 +669,7 @@ def launch_bastion(
         try:
             instance_id = _clean_scalar(_run_aws(cmd))
             return _validate(instance_id, _INSTANCE_RE, "launched instance id")
-        except RuntimeError as exc:  # noqa: PERF203 — bounded retry loop
+        except RuntimeError as exc:  # bounded retry loop
             last_error = exc
             if (
                 "Invalid IAM Instance Profile" not in str(exc)
@@ -730,7 +730,7 @@ def launch_bastion_with_fallback(
                 project_name=project_name,
                 instance_type=candidate,
             )
-        except RuntimeError as exc:  # noqa: PERF203 — bounded fallback chain
+        except RuntimeError as exc:  # bounded fallback chain
             if not _is_instance_type_unavailable(exc):
                 raise
             last_error = exc

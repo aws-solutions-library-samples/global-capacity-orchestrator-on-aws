@@ -137,7 +137,7 @@ class SpotPriceGate:
                 StartTime=end - timedelta(hours=_PRICE_LOOKBACK_HOURS),
                 EndTime=end,
             )
-        except Exception as exc:  # noqa: BLE001 - lookup failures defer, never dispatch
+        except Exception as exc:  # lookup failures defer, never dispatch
             logger.warning(
                 "Spot price lookup failed for %s in %s: %s",
                 instance_type,

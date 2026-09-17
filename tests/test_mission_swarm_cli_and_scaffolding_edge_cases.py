@@ -375,7 +375,7 @@ def test_run_to_completion_failure_envelopes(
 
 
 def test_mission_scaffold_ftu_and_table_file_paths(
-    backend: FilesystemBackend,  # noqa: ARG001 - forces hermetic fixture
+    backend: FilesystemBackend,  # forces hermetic fixture
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -540,7 +540,7 @@ def test_mission_run_ftu_validation_and_threshold_failures(
 
 
 def test_mission_memory_list_maps_unexpected_store_failure(
-    backend: FilesystemBackend,  # noqa: ARG001
+    backend: FilesystemBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SimpleNamespace(list_memories=MagicMock(side_effect=RuntimeError("index broke")))

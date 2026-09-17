@@ -46,9 +46,9 @@ from hypothesis import strategies as st
 # pytest has to do it itself before the import below resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gco_mcp"))
 
-from mission.decide import decide_verdict  # noqa: E402
+from mission.decide import decide_verdict
 
-from tests.strategies.mission import (  # noqa: E402
+from tests.strategies.mission import (
     decide_verdict_inputs,
     iteration_records,
     session_states,

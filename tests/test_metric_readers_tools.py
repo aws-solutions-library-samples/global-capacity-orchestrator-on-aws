@@ -45,7 +45,7 @@ from hypothesis import strategies as st
 # convention used by the sibling metric-reader tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.shape import is_numeric_value  # noqa: E402
+from metric_readers.shape import is_numeric_value
 
 # Every Aggregation_Mode a History_Bearing_Reader must honour.
 _MODES = ("last", "first", "min", "max", "mean")
@@ -72,7 +72,7 @@ def _import_metrics_tool_module():
     """
     try:
         import tools.metrics as metrics_module
-    except Exception as exc:  # noqa: BLE001 - any import-surface failure -> skip
+    except Exception as exc:  # any import-surface failure -> skip
         pytest.skip(f"tools.metrics not importable in this environment: {exc}")
     return metrics_module
 

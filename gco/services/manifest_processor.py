@@ -522,7 +522,7 @@ class ManifestProcessor:
                     e.reason,
                 )
                 entry = {"status": "unavailable", "reason": f"{e.status} {e.reason}"}
-            except Exception as e:  # noqa: BLE001 - any read failure is "unavailable"
+            except Exception as e:  # any read failure is "unavailable"
                 logger.warning(
                     "Failed to read resource governance for namespace %s: %s",
                     sanitize_log_value(namespace),

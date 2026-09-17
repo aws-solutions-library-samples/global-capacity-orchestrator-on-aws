@@ -87,7 +87,7 @@ async def _lease_heartbeat(
             )
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - loss must fence the in-flight result
+        except Exception:  # loss must fence the in-flight result
             logger.exception(
                 "Lease renewal failed for central queue job %s",
                 sanitize_log_value(job_id),
@@ -135,7 +135,7 @@ async def _defer_price_gated_job(
                 job_id,
                 observed_price=observed,
             )
-        except Exception:  # noqa: BLE001 - observations are advisory only
+        except Exception:  # observations are advisory only
             logger.exception(
                 "Failed to persist spot gate observation for %s",
                 sanitize_log_value(job_id),
@@ -331,7 +331,7 @@ async def process_queued_jobs_once(
                 sanitize_log_value(job_id),
             )
             processed.append({"job_id": job_id, "status": "retryable", "error": error})
-        except Exception as exc:  # noqa: BLE001 - isolate malformed/permanent records
+        except Exception as exc:  # isolate malformed/permanent records
             error = _bounded_error(exc)
             logger.exception(
                 "Failed to process central queue job %s",
@@ -358,7 +358,7 @@ async def process_queued_jobs_once(
                         claim_generation=int(generation),
                         **transition_options,
                     )
-                except Exception:  # noqa: BLE001 - lease recovery remains the fallback
+                except Exception:  # lease recovery remains the fallback
                     logger.exception(
                         "Unable to persist failure for central queue job %s",
                         sanitize_log_value(job_id),
@@ -436,7 +436,7 @@ async def reconcile_active_jobs_once(
                     exc,
                 )
                 continue
-        except Exception as exc:  # noqa: BLE001 - reconciliation is best-effort per record
+        except Exception as exc:  # reconciliation is best-effort per record
             logger.warning(
                 "Unable to reconcile central queue job %s: %s",
                 sanitize_log_value(job_id),
@@ -586,7 +586,7 @@ class CentralQueueWorker:
                         )
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # noqa: BLE001 - transient pass failures are retried
+                except Exception as exc:  # transient pass failures are retried
                     self.last_error = _bounded_error(exc)
                     logger.exception("Central queue worker pass failed")
 

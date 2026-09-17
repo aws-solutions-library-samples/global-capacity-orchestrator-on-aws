@@ -35,8 +35,8 @@ from hypothesis import strategies as st
 # in production, matching the convention used by the sibling tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.localfs import resolve_within_root  # noqa: E402
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers.localfs import resolve_within_root
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 # The stable codes that signal a path was refused for containment reasons.
 # Any one of them is an acceptable, safe outcome; a returned out-of-root path

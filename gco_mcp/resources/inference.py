@@ -38,7 +38,7 @@ def _inference_resource(endpoint_name: str) -> str:
         )
     try:
         record = _get_manager().get_endpoint(endpoint_name)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return json.dumps({"error": str(e), "endpoint_name": endpoint_name})
     if record is None:
         return json.dumps({"error": "endpoint not found", "endpoint_name": endpoint_name})

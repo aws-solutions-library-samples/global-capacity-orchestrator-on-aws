@@ -195,7 +195,7 @@ class _FakeGh:
         self.edit_fails = edit_fails
         self.calls: list[list[str]] = []
 
-    def __call__(self, argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG002
+    def __call__(self, argv: list[str], **kwargs: Any) -> Any:
         self.calls.append(argv)
         assert argv[0] == "gh", argv
         if argv[1:3] == ["pr", "view"]:
@@ -236,7 +236,7 @@ def test_fetch_pull_request_tolerates_a_null_label_list(
 ) -> None:
     """``gh`` emits ``"labels": null`` for a PR with none, not ``[]``."""
 
-    def run(argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG001
+    def run(argv: list[str], **kwargs: Any) -> Any:
         return _Completed(0, stdout=json.dumps({"body": _FEAT_BODY, "labels": None}))
 
     monkeypatch.setattr(script.subprocess, "run", run)
@@ -249,7 +249,7 @@ def test_a_failing_gh_command_surfaces_its_stderr(
 ) -> None:
     """The stderr excerpt is the only diagnostic a workflow log will show."""
 
-    def run(argv: list[str], **kwargs: Any) -> Any:  # noqa: ARG001
+    def run(argv: list[str], **kwargs: Any) -> Any:
         return _Completed(1, stderr="gh: Not Found (HTTP 404)")
 
     monkeypatch.setattr(script.subprocess, "run", run)

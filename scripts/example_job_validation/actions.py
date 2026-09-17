@@ -43,7 +43,7 @@ def _capacity_skip_reason(ctx: RunContext, region: str, quota_code: str) -> str 
     try:
         quota = client.get_service_quota(ServiceCode="ec2", QuotaCode=quota_code)
         value = float(quota["Quota"]["Value"])
-    except Exception as exc:  # noqa: BLE001 — quota lookup failing must not fail the run
+    except Exception as exc:  # quota lookup failing must not fail the run
         return f"quota {quota_code} lookup failed ({type(exc).__name__}); treating as unavailable"
     if value <= 0:
         name = quota["Quota"].get("QuotaName", quota_code)

@@ -553,12 +553,12 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                 for (region, name), entry in sorted(blocked.items())
             )
             raise RuntimeError(f"Log-group cleanup could not converge for: {summary}")
-    except Exception as exc:  # noqa: BLE001 - attach helper cleanup and partial evidence
+    except Exception as exc:  # attach helper cleanup and partial evidence
         cleanup_error = exc
     finally:
         try:
             helper_cleanup = _delete_log_cleanup_helper(ctx)
-        except Exception as exc:  # noqa: BLE001 - preserve both independent failures
+        except Exception as exc:  # preserve both independent failures
             helper_error = exc
 
     errors = []

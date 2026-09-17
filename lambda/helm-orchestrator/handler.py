@@ -333,7 +333,7 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         logger.error("Execution-metadata persistence failed", exc_info=True)
         try:
             _stop_execution_and_wait(sfn_client, execution_arn)
-        except Exception as stop_exc:  # noqa: BLE001 - surface unsafe rollback state
+        except Exception as stop_exc:  # surface unsafe rollback state
             raise RuntimeError(
                 f"Could not confirm untracked execution {execution_arn} stopped"
             ) from stop_exc

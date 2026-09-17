@@ -352,7 +352,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         try:
             results.append(_ingest_object(bucket, key))
-        except Exception as err:  # noqa: BLE001 — per-object isolation, re-raised below
+        except Exception as err:  # per-object isolation, re-raised below
             logger.exception("vector-ingest failed for s3://%s/%s", bucket, key)
             failures.append({"key": key, "status": "failed", "error": str(err)})
 

@@ -42,8 +42,8 @@ import pytest
 # have to do the same before importing ``mission.*``.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
+from mission import SCHEMA_VERSION
+from mission.state import FilesystemBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers

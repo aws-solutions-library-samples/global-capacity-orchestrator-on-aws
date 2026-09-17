@@ -21,10 +21,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
-from mission import state as mission_state  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.types import SCHEMA_VERSION  # noqa: E402
+import run_mcp
+from mission import state as mission_state
+from mission.state import FilesystemBackend
+from mission.types import SCHEMA_VERSION
 
 _TOOL_NAMES = (
     "swarm_start",

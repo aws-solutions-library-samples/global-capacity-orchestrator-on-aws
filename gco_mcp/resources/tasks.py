@@ -56,7 +56,7 @@ def _coerce_to_dict(record: object) -> dict[str, Any]:
         if callable(method):
             try:
                 payload = method()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if isinstance(payload, dict):
                 return payload

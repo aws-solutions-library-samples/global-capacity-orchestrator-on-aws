@@ -559,7 +559,7 @@ class TestRunWithRetry:
         calls = {"n": 0}
         seq = list(results)
 
-        def fake_run(cmd, env, *, timeout=120):  # noqa: ANN001
+        def fake_run(cmd, env, *, timeout=120):
             calls["n"] += 1
             return seq[min(calls["n"] - 1, len(seq) - 1)]
 
@@ -618,7 +618,7 @@ class TestRenderChartUsesRetry:
     def test_render_routes_through_run_with_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict = {}
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001
+        def fake_retry(cmd, env, **kwargs):
             captured["cmd"] = cmd
             captured["kwargs"] = kwargs
             return (0, "rendered", "")
@@ -643,7 +643,7 @@ class TestValidateOnlineRetriesEveryNetworkCall:
         # resolve/repo commands here.
         retried: list[list[str]] = []
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001
+        def fake_retry(cmd, env, **kwargs):
             retried.append(cmd)
             return (0, "apiVersion: v2\nname: keda\nversion: 2.20.1\n", "")
 
@@ -939,7 +939,7 @@ class TestValidateOnlineRepass:
         show_seq = list(outcomes.get("show", [(0, "version: 1.2.3\n", "")]))
         shows = {"n": 0}
 
-        def fake_run(cmd, env, *, timeout=120):  # noqa: ANN001
+        def fake_run(cmd, env, *, timeout=120):
             calls.append(list(cmd))
             if cmd[1] == "show":
                 result = show_seq[min(shows["n"], len(show_seq) - 1)]
@@ -984,7 +984,7 @@ class TestValidateOnlineRepass:
         bad = self._ref("bad-chart")
         calls: list[list[str]] = []
 
-        def fake_run(cmd, env, *, timeout=120):  # noqa: ANN001
+        def fake_run(cmd, env, *, timeout=120):
             calls.append(list(cmd))
             if cmd[1] == "show":
                 if "bad-chart" in cmd[3]:
@@ -1364,7 +1364,7 @@ class TestRenderChartValuesFile:
         """The values block reaches helm as ``--values <file>`` and never lingers."""
         seen: dict[str, object] = {}
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             index = cmd.index("--values")
             values_path = Path(cmd[index + 1])
             seen["path"] = values_path
@@ -1391,7 +1391,7 @@ class TestRenderChartValuesFile:
         and left the half-written values file behind.
         """
 
-        def explode(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        def explode(*_a, **_k):
             raise TypeError("unserialisable")
 
         monkeypatch.setattr(validator.yaml, "safe_dump", explode)
@@ -1420,7 +1420,7 @@ class TestSyncClassicReposFailures:
     ) -> None:
         calls: list[list[str]] = []
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             calls.append(list(cmd))
             if cmd[1:3] == ["repo", "add"]:
                 return (
@@ -1457,7 +1457,7 @@ class TestValidateRefsVerbose:
     """The verbose narration for each resolve/render outcome."""
 
     def _route(self, monkeypatch: pytest.MonkeyPatch, *, show: tuple, template: tuple) -> None:
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             return show if cmd[1] == "show" else template
 
         monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
@@ -1512,7 +1512,7 @@ class TestValidateOnlineEdges:
         # Faked at the *retry* boundary: faking `_run` would let the inner
         # per-command retry absorb the blip, and the outer re-pass -- the thing
         # under test -- would never trigger.
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             if cmd[1] == "show":
                 shows["n"] += 1
                 return (1, "", "blip") if shows["n"] == 1 else (0, "version: 1.2.3\n", "")
@@ -1542,7 +1542,7 @@ class TestGoModFetch:
         def read(self) -> bytes:
             return self._body
 
-        def __enter__(self):  # noqa: ANN204
+        def __enter__(self):
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -1553,7 +1553,7 @@ class TestGoModFetch:
 
         seen: dict[str, object] = {}
 
-        def fake_urlopen(url, timeout=None):  # noqa: ANN001, ANN202
+        def fake_urlopen(url, timeout=None):
             seen["url"] = url
             return self._Response(b"module x\n\nrequire sigs.k8s.io/gateway-api v1.5.0\n")
 
@@ -1574,7 +1574,7 @@ class TestGoModFetch:
 
         attempts = {"n": 0}
 
-        def flaky(url, timeout=None):  # noqa: ANN001, ANN202
+        def flaky(url, timeout=None):
             attempts["n"] += 1
             if attempts["n"] < 3:
                 raise urllib.error.URLError("reset")
@@ -1590,7 +1590,7 @@ class TestGoModFetch:
     ) -> None:
         import urllib.request
 
-        def down(url, timeout=None):  # noqa: ANN001, ANN202
+        def down(url, timeout=None):
             raise TimeoutError("timed out")
 
         monkeypatch.setattr(urllib.request, "urlopen", down)
@@ -1814,7 +1814,7 @@ class TestFetchUpstreamTorchRuntime:
     def test_a_classic_entry_syncs_its_repo_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[list[str]] = []
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             calls.append(list(cmd))
             return (0, self._RENDER, "")
 
@@ -1913,7 +1913,7 @@ class TestMainRemainingPaths:
         monkeypatch.setattr(validator.shutil, "which", lambda name: "/usr/bin/helm")
         monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             if cmd[1] == "show":
                 return (0, "version: 0.18.2\n", "")
             return (0, "", "")
@@ -1969,7 +1969,7 @@ class TestLastBranches:
     ) -> None:
         """Without --verbose nothing is printed, but the failure must not be lost."""
 
-        def fake_retry(cmd, env, **kwargs):  # noqa: ANN001, ANN202
+        def fake_retry(cmd, env, **kwargs):
             return (0, "version: 1.2.3\n", "") if cmd[1] == "show" else (1, "", "nope")
 
         monkeypatch.setattr(validator, "_run_with_retry", fake_retry)

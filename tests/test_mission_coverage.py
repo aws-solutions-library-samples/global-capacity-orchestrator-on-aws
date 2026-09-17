@@ -1698,7 +1698,7 @@ class TestAuditReplayShapes:
         handler = MissionAuditCollectorHandler(capacity=10)
         handler._buffer.append({"x": 1})
         handler.clear()
-        assert handler._buffer == deque() if False else True  # noqa: S101
+        assert handler._buffer == deque() if False else True
         assert len(handler._buffer) == 0
 
     def test_replay_collector_filters_non_mission_events(self) -> None:

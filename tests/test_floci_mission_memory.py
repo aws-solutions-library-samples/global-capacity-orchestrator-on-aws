@@ -42,8 +42,8 @@ from tests._floci import floci_test_markers, unique_name
 
 # Mirror the import pattern used by the other ``test_mission_*`` modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-from mission import memory as memory_module  # noqa: E402
-from mission.memory import (  # noqa: E402
+from mission import memory as memory_module
+from mission.memory import (
     MEMORY_SCHEMA_VERSION,
     MissionMemoryError,
     MissionMemoryStore,

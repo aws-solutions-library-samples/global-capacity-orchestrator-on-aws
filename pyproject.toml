@@ -298,6 +298,7 @@ select = [
     "LOG",    # flake8-logging: misuse of the logging API itself
     "EXE",    # flake8-executable: a shebang that cannot be executed
     "PIE",    # flake8-pie: dead placeholders and reimplemented builtins
+    "RUF",    # Ruff's own rules, incl. RUF100: a `# noqa` that suppresses nothing
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)
@@ -305,12 +306,23 @@ ignore = [
     "ARG001", # unused function argument
     "ARG002", # unused method argument
 ]
+# Typography this project uses on purpose in prose, plus one glyph it prints.
+# RUF001-003 exist to catch a homoglyph smuggled into an identifier or a string
+# comparison; an en dash in a sentence, a multiplication sign in
+# "3 × g5.4xlarge", and the ℹ prefix on informational CLI lines are none of
+# those. Every other confusable stays reported.
+allowed-confusables = ["–", "×", "ℹ"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gco", "cli"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG", "S101"]
+# RUF012 (mutable class default) guards production classes against shared
+# state between instances. Test classes are pytest containers that are never
+# instantiated twice, and their class-level fixtures/tables are the readable
+# way to share data between cases, so the rule is noise there. S101 (assert)
+# is not in the enabled set, so it needs no exemption.
+"tests/*" = ["ARG", "RUF012"]
 "lambda/*" = ["ARG"]
 
 [tool.mypy]

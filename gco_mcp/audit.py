@@ -253,7 +253,7 @@ def _build_audit_entry(
     status: str,
     duration_ms: float,
     error: str | None,
-    result: Any,  # noqa: ARG001  -- reserved for future result-shape capture
+    result: Any,  # reserved for future result-shape capture
 ) -> dict[str, Any]:
     """Build the JSON dict for a single tool-invocation audit entry.
 

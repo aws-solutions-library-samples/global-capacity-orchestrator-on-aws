@@ -51,11 +51,11 @@ def _expected_stack_count_for_all() -> int | None:
     """
     try:
         from cli.config import _load_cdk_json
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:  # best-effort
         return None
     try:
         cdk_regions = _load_cdk_json()
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:  # best-effort
         return None
     if not isinstance(cdk_regions, dict):
         return None

@@ -215,7 +215,7 @@ def _run_full_scan(repo_root: Path, *, stream: bool) -> dict[str, object]:
         env.pop("GITHUB_STEP_SUMMARY", None)
         env.setdefault("WORKFLOWS_DIR", ".github/workflows")
 
-        result = subprocess.run(  # noqa: S603 — fixed argv, repo-owned script
+        result = subprocess.run(  # fixed argv, repo-owned script
             ["bash", str(_SCAN_SCRIPT)],
             cwd=repo_root,
             env=env,

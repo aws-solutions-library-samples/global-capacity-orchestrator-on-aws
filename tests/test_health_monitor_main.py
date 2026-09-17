@@ -84,7 +84,7 @@ class TestHealthMonitorMain:
             patch(
                 "gco.services.webhook_dispatcher.create_webhook_dispatcher_from_env",
                 return_value=mock_dispatcher,
-            ),  # noqa: F841
+            ),
             patch.object(health_monitor_module.asyncio, "sleep") as mock_sleep,
         ):
             mock_monitor = MagicMock()
@@ -149,7 +149,7 @@ class TestHealthMonitorMain:
             patch(
                 "gco.services.webhook_dispatcher.create_webhook_dispatcher_from_env",
                 return_value=mock_dispatcher,
-            ),  # noqa: F841
+            ),
             patch.object(health_monitor_module.asyncio, "sleep") as mock_sleep,
         ):
             mock_monitor = MagicMock()

@@ -103,7 +103,7 @@ def monitoring_status(config: Any) -> None:
         current = get_cluster_observability_config()
         formatter.print_info("Cluster observability config:")
         formatter.print(current)
-    except Exception as exc:  # noqa: BLE001 — surface every loader error
+    except Exception as exc:  # surface every loader error
         formatter.print_error(f"Failed to read cluster observability config: {exc}")
         sys.exit(1)
 
@@ -133,7 +133,7 @@ def monitoring_enable(config: Any, yes: bool) -> None:
         formatter.print_info(
             f"Run `gco stacks deploy {config.project_name}-<region>` (or deploy-all) to apply"
         )
-    except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
+    except Exception as exc:  # user-facing error from file I/O
         formatter.print_error(f"Failed to enable cluster observability: {exc}")
         sys.exit(1)
 
@@ -165,7 +165,7 @@ def monitoring_disable(config: Any, yes: bool) -> None:
         formatter.print_info(
             f"Run `gco stacks deploy {config.project_name}-<region>` (or deploy-all) to apply"
         )
-    except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
+    except Exception as exc:  # user-facing error from file I/O
         formatter.print_error(f"Failed to disable cluster observability: {exc}")
         sys.exit(1)
 

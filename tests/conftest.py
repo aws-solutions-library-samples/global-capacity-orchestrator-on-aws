@@ -62,7 +62,7 @@ def ensure_lambda_build_dirs():
 # Patch only the real repository root; tests that intentionally exercise asset
 # preparation against ``tmp_path`` continue through the production code.
 @pytest.fixture(scope="session", autouse=True)
-def _neutralize_lambda_build(ensure_lambda_build_dirs):  # noqa: ARG001 — dep order only
+def _neutralize_lambda_build(ensure_lambda_build_dirs):  # dep order only
     from cli import stacks as _stacks
 
     real_root = PROJECT_ROOT.resolve()

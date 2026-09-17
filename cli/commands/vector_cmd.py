@@ -54,7 +54,7 @@ def _exit_unavailable(err: Exception) -> None:
 
 def _build_client(query_region: str | None = None) -> Any:
     """Construct the store client (SSM-lazy; free until first use)."""
-    from ..vector_store import VectorStoreClient  # noqa: PLC0415
+    from ..vector_store import VectorStoreClient
 
     return VectorStoreClient(query_region=query_region)
 
@@ -86,13 +86,13 @@ def vector() -> None:
 )
 def vector_status_cmd(region: str | None, output: str) -> None:
     """Show table, replica, and vector-index state."""
-    from ..vector_store import VectorStoreUnavailableError  # noqa: PLC0415
+    from ..vector_store import VectorStoreUnavailableError
 
     try:
         status = _build_client(query_region=region).status()
     except VectorStoreUnavailableError as err:
         _exit_unavailable(err)
-    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+    except Exception as err:  # CLI boundary: envelope, don't traceback
         _emit_error("vector_status_failed", {"message": str(err)})
         raise SystemExit(1) from None
 
@@ -138,7 +138,7 @@ def vector_ingest_cmd(files: tuple[Path, ...], demo: bool, wait: bool, output: s
     replication then fans them out to every replica region. Re-uploading
     a file overwrites its chunks in place.
     """
-    from ..vector_store import (  # noqa: PLC0415
+    from ..vector_store import (
         VectorStoreUnavailableError,
         demo_corpus_paths,
     )
@@ -158,7 +158,7 @@ def vector_ingest_cmd(files: tuple[Path, ...], demo: bool, wait: bool, output: s
         summary = _build_client().ingest(paths, wait_timeout_seconds=300 if wait else 0)
     except VectorStoreUnavailableError as err:
         _exit_unavailable(err)
-    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+    except Exception as err:  # CLI boundary: envelope, don't traceback
         _emit_error("vector_ingest_failed", {"message": str(err)})
         raise SystemExit(1) from None
 
@@ -211,13 +211,13 @@ def vector_search_cmd(
     query: str, top_k: int, source: str | None, region: str | None, output: str
 ) -> None:
     """Search the corpus for chunks similar to QUERY."""
-    from ..vector_store import VectorStoreUnavailableError  # noqa: PLC0415
+    from ..vector_store import VectorStoreUnavailableError
 
     try:
         results = _build_client(query_region=region).search(query, top_k=top_k, source=source)
     except VectorStoreUnavailableError as err:
         _exit_unavailable(err)
-    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+    except Exception as err:  # CLI boundary: envelope, don't traceback
         _emit_error("vector_search_failed", {"message": str(err)})
         raise SystemExit(1) from None
 

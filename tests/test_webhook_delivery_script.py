@@ -41,7 +41,7 @@ import pytest
 
 # Import the module under test.
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-import test_webhook_delivery as harness  # noqa: E402 - sys.path set above
+import test_webhook_delivery as harness  # sys.path set above
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +93,7 @@ class TestWebhookHandler:
                 method="POST",
             )
             # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 - loopback only
+            with urllib.request.urlopen(req, timeout=5) as resp:  # loopback only
                 assert resp.status == 200
                 assert resp.headers["Content-Type"] == "application/json"
                 assert json.loads(resp.read()) == {"status": "received"}
@@ -130,7 +130,7 @@ class TestWebhookHandler:
                 method="POST",
             )
             # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 assert resp.status == 200
         finally:
             server.shutdown()

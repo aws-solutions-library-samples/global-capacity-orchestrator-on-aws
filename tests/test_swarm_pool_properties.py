@@ -25,7 +25,7 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission.swarm import (  # noqa: E402
+from mission.swarm import (
     compute_pool_balance,
     respawn_entry,
     settle_entry,

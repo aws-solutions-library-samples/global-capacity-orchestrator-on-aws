@@ -41,7 +41,7 @@ import pytest
 # the ``mcp.`` prefix that fastmcp's PyPI namespace would shadow.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402, F401  -- side-effect registers tools/resources
+import run_mcp  # side-effect registers tools/resources
 
 mcp = run_mcp.mcp
 _EKS_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"

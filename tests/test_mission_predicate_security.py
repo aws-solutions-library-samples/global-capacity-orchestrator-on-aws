@@ -43,8 +43,8 @@ from hypothesis import strategies as st
 # has to do it itself before the import resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import predicate as predicate_module  # noqa: E402
-from mission.predicate import (  # noqa: E402
+from mission import predicate as predicate_module
+from mission.predicate import (
     PredicateRejected,
     evaluate_predicate,
     parse_predicate,

@@ -100,7 +100,7 @@ def _expected_report_bucket(ctx: RunContext) -> str:
     ssm = ctx.session.client("ssm", region_name=region)
     try:
         response = ssm.get_parameter(Name=parameter_name)
-    except Exception as exc:  # noqa: BLE001 - absence and access failures both fail validation
+    except Exception as exc:  # absence and access failures both fail validation
         raise RuntimeError(
             f"Cost report bucket parameter {parameter_name} in {region} is not readable: {exc}"
         ) from exc
@@ -520,7 +520,7 @@ def _verify_report_object(ctx: RunContext, report: dict[str, Any]) -> dict[str, 
     bucket = str(validated_report["bucket"])
     try:
         head = s3.head_object(Bucket=bucket, Key=key)
-    except Exception as exc:  # noqa: BLE001 - absence and access failures both fail validation
+    except Exception as exc:  # absence and access failures both fail validation
         raise RuntimeError(
             f"Cost report object s3://{bucket}/{key} is not readable: {exc}"
         ) from exc

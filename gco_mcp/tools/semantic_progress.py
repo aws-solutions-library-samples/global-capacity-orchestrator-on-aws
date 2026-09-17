@@ -32,14 +32,14 @@ from server import mcp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # The sampling seam — reused, not reconstructed.
-from mission.sampling import (  # noqa: E402
+from mission.sampling import (
     SamplingTransportError,
     select_sampling_backend,
 )
-from mission_judge import prompt as judge_prompt  # noqa: E402
-from mission_judge import rubric as judge_rubric  # noqa: E402
-from mission_judge import score as judge_score  # noqa: E402
-from mission_judge.shape import (  # noqa: E402
+from mission_judge import prompt as judge_prompt
+from mission_judge import rubric as judge_rubric
+from mission_judge import score as judge_score
+from mission_judge.shape import (
     ErrorCode,
     JudgeError,
     error_envelope,
@@ -137,7 +137,7 @@ if is_enabled(FLAG_SEMANTIC_PROGRESS):
             )
         except JudgeError as err:
             return error_envelope(err.code, **err.details)
-        except Exception as err:  # noqa: BLE001 - defensive: nothing escapes the tool
+        except Exception as err:  # defensive: nothing escapes the tool
             return error_envelope(
                 ErrorCode.SAMPLING_TRANSPORT_ERROR, reason="unexpected", detail=str(err)
             )

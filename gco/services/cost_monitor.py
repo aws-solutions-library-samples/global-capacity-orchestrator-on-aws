@@ -161,7 +161,7 @@ class CostReportBucketLocator:
             return self._cached
         try:
             response = self._ssm.get_parameter(Name=self.parameter_name)
-        except Exception as exc:  # noqa: BLE001 - absence and transport errors converge
+        except Exception as exc:  # absence and transport errors converge
             if self._cached is not None:
                 logger.warning(
                     "Refreshing cost report bucket from %s (%s) failed; keeping %s: %s",
@@ -543,7 +543,7 @@ class CostMonitor:
         payload = rows_to_parquet_bytes(rows)
         try:
             self._s3.put_object(Bucket=bucket, Key=key, Body=payload)
-        except Exception as exc:  # noqa: BLE001 - boto surfaces many shapes
+        except Exception as exc:  # boto surfaces many shapes
             raise ReportWriteError(f"Failed to write cost report to S3: {exc}") from exc
 
         return ReportResult(
@@ -596,7 +596,7 @@ class CostMonitor:
     def _object_exists(self, bucket: str, key: str) -> bool:
         try:
             self._s3.head_object(Bucket=bucket, Key=key)
-        except Exception:  # noqa: BLE001 - 404 and transport errors both mean "write it"
+        except Exception:  # 404 and transport errors both mean "write it"
             return False
         return True
 

@@ -393,7 +393,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         url = response.get("AuthorizedUrl", "")
         return _format_success(url, URL_EXPIRES_SECONDS)
 
-    except Exception as exc:  # noqa: BLE001 -- outer catch-all so every failure returns an opaque error token
+    except Exception as exc:  # outer catch-all so every failure returns an opaque error token
         # Log with exception info so CloudWatch captures the stack trace,
         # but never leak the message to the HTTP response body.
         logger.error("Presigned URL generation failed: %s", exc, exc_info=True)

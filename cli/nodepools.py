@@ -662,7 +662,7 @@ def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) 
                 name=nodeclass_name,
             )
             deleted["ec2nodeclass"] = nodeclass_name
-        except Exception as e:  # noqa: BLE001 - best effort; the NodePool is the primary target
+        except Exception as e:  # best effort; the NodePool is the primary target
             if "404" not in str(e):
                 logger.warning("Could not delete EC2NodeClass %s: %s", nodeclass_name, e)
 

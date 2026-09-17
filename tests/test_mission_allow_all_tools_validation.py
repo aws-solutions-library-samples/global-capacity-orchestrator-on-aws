@@ -31,7 +31,7 @@ from hypothesis import strategies as st
 # before the import below resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import validation  # noqa: E402
+from mission import validation
 
 # The full tag vocabulary applied to MCP tools. Every generated registry
 # carries one tool of each tag so the expansion is exercised against the

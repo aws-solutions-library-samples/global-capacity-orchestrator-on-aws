@@ -294,7 +294,7 @@ class TestProbes:
         )
         recorded: list[list[str]] = []
 
-        def fake_run(args, capture_output, text):  # noqa: ANN001
+        def fake_run(args, capture_output, text):
             recorded.append(args)
             return _completed(stdout=payload)
 
@@ -320,7 +320,7 @@ class TestProbes:
         assert cluster_doctor.caller_principal_arn() is None
 
     def test_caller_principal_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -344,7 +344,7 @@ class TestProbes:
         assert cluster_doctor.list_access_entries("c", "r") is None
 
     def test_list_access_entries_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -375,7 +375,7 @@ class TestProbes:
         assert cluster_doctor.list_associated_access_policies("c", "r", _ROLE) is None
 
     def test_list_associated_policies_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -466,7 +466,7 @@ class TestProbeCluster:
         assert probe.kubeconfig_server == _ENDPOINT
 
     def test_missing_cluster_skips_the_dependent_probes(self, monkeypatch) -> None:
-        def raise_not_found(cluster, region):  # noqa: ANN001
+        def raise_not_found(cluster, region):
             raise RuntimeError("ResourceNotFoundException: no cluster")
 
         monkeypatch.setattr(

@@ -35,8 +35,8 @@ from cli.models import RegionalBucketManager
 # Ensure gco_mcp/ is importable, then load the server so every tool is registered.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402  (import for path/registration side effects)
-from tools.inference import populate_kv_cache  # noqa: E402
+import run_mcp  # import for path/registration side effects
+from tools.inference import populate_kv_cache
 
 assert run_mcp is not None  # keep the registration import from being pruned
 

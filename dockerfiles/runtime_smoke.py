@@ -62,7 +62,7 @@ def main() -> int:
             # runtime), never from untrusted input.
             # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
             importlib.import_module(name)
-        except BaseException as exc:  # noqa: BLE001 — aggregate every breakage
+        except BaseException as exc:  # aggregate every breakage
             failures.append(f"stdlib extension {name}: {type(exc).__name__}: {exc}")
 
     try:
@@ -70,7 +70,7 @@ def main() -> int:
         # RUN, not user input; importing it dynamically is this script's job.
         # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         importlib.import_module(entry_module)
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         failures.append(f"entry module {entry_module}: {type(exc).__name__}: {exc}")
 
     actual_user = "<unresolved>"
@@ -80,7 +80,7 @@ def main() -> int:
         actual_user = getpass.getuser()
         if actual_user != expected_user:
             failures.append(f"runtime user: expected {expected_user!r}, got {actual_user!r}")
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         failures.append(f"runtime identity lookup: {type(exc).__name__}: {exc}")
 
     try:
@@ -89,14 +89,14 @@ def main() -> int:
         ca_count = ssl.create_default_context().cert_store_stats()["x509_ca"]
         if ca_count <= 0:
             failures.append("OpenSSL default trust store loaded zero CA certificates")
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         failures.append(f"CA trust store: {type(exc).__name__}: {exc}")
 
     try:
         import zoneinfo
 
         zoneinfo.ZoneInfo("UTC")
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         failures.append(f"zoneinfo/tzdata: {type(exc).__name__}: {exc}")
 
     if failures:

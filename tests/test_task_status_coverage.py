@@ -25,8 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
-from tools import _task_status as task_status_module  # noqa: E402
-from tools._task_status import (  # noqa: E402 (sys.path insert above)
+from tools import _task_status as task_status_module
+from tools._task_status import (  # sys.path insert above
     TaskStatusWriter,
     _is_pid_alive,
     _prune_old_tasks,

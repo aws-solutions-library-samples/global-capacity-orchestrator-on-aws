@@ -49,15 +49,15 @@ from hypothesis import strategies as st
 # pytest has to do it itself before the import resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission import sandbox as sandbox_module  # noqa: E402
-from mission.engine import MissionEngine  # noqa: E402
-from mission.sandbox import (  # noqa: E402
+from mission import SCHEMA_VERSION
+from mission import sandbox as sandbox_module
+from mission.engine import MissionEngine
+from mission.sandbox import (
     ScriptRejected,
     make_default_sandbox_runner,
     validate_script_ast,
 )
-from mission.state import FilesystemBackend  # noqa: E402
+from mission.state import FilesystemBackend
 
 # ---------------------------------------------------------------------------
 # Tool allowlist used throughout the tests

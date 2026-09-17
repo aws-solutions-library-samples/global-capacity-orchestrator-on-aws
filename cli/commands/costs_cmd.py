@@ -375,7 +375,7 @@ def costs_allocation_status(config: Any, extra_tags: Any) -> None:
         backfill_note: str | None = None
         try:
             backfills = tracker.get_cost_allocation_backfill_history()
-        except Exception as exc:  # noqa: BLE001 - history is advisory only
+        except Exception as exc:  # history is advisory only
             backfills = []
             backfill_note = f"backfill history unavailable: {exc}"
 

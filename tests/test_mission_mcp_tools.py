@@ -47,7 +47,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring every other test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 # Canonical roster of the ten tools surfaced by ``gco_mcp/tools/mission.py``.
 # Frozen so accidental in-test mutation is impossible.
@@ -960,7 +960,7 @@ class TestMissionResourceFallbacks:
 
     def test_session_resource_returns_envelope_for_unknown_id(
         self,
-        isolated_backend,  # noqa: ARG002
+        isolated_backend,
     ):
         """``_session_resource`` returns a JSON error envelope for unknown ids.
 
@@ -981,7 +981,7 @@ class TestMissionResourceFallbacks:
         self,
         isolated_backend,
         tmp_path,
-        monkeypatch,  # noqa: ARG002
+        monkeypatch,
     ):
         """``_session_report_resource`` reads ``session["final_report"]`` for non-filesystem backends.
 
@@ -996,7 +996,7 @@ class TestMissionResourceFallbacks:
         # A minimal non-filesystem backend: returns whatever session
         # we hand it, advertises itself as not-FilesystemBackend.
         class _StubBackend:
-            def load_session(self, session_id):  # noqa: ARG002
+            def load_session(self, session_id):
                 return {
                     "session_id": "mission-stub",
                     "status": "completed",
@@ -1021,7 +1021,7 @@ class TestMissionResourceFallbacks:
     def test_report_resource_raises_when_embedded_report_missing(
         self,
         isolated_backend,
-        monkeypatch,  # noqa: ARG002
+        monkeypatch,
     ):
         """The handler raises not-found when the terminal session has no embedded report.
 
@@ -1032,7 +1032,7 @@ class TestMissionResourceFallbacks:
         from resources.mission import _session_report_resource
 
         class _BareTerminalBackend:
-            def load_session(self, session_id):  # noqa: ARG002
+            def load_session(self, session_id):
                 return {
                     "session_id": "mission-bare",
                     "status": "completed",

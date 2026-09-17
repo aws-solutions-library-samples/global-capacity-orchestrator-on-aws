@@ -29,7 +29,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring the other test modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 _EKS_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 

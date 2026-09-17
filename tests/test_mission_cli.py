@@ -46,8 +46,8 @@ from click.testing import CliRunner
 # regardless of how pytest is invoked.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from cli.main import cli  # noqa: E402
-from tests._scaffold_replay import (  # noqa: E402
+from cli.main import cli
+from tests._scaffold_replay import (
     DEFAULT_FIXTURE,
     DEFAULT_MODEL_ID,
     ScaffoldReplayCapture,
@@ -67,8 +67,8 @@ def isolated_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     share state. Without overriding the cache every CLI test would
     write to ``~/.gco/missions/`` on the developer's machine.
     """
-    from mission import state as mission_state  # noqa: PLC0415
-    from mission.state import FilesystemBackend  # noqa: PLC0415
+    from mission import state as mission_state
+    from mission.state import FilesystemBackend
 
     backend = FilesystemBackend(root=tmp_path)
     monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", backend)
@@ -133,7 +133,7 @@ def _install_default_sampling(
     capture_slug: str = "event_goal_reached",
 ) -> tuple[ScaffoldReplayCapture, list[tuple[str | None, Any, str]]]:
     """Resolve sampling to a replay backend and record model overrides."""
-    from mission import sampling as mission_sampling  # noqa: PLC0415
+    from mission import sampling as mission_sampling
 
     capture = DEFAULT_FIXTURE.capture(capture_slug)
     selections: list[tuple[str | None, Any, str]] = []
@@ -155,8 +155,8 @@ def _install_default_sampling(
 
 def _install_terminal_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep run/iterate offline while exercising the real backend selector."""
-    from mission import _engine_factory  # noqa: PLC0415
-    from mission.engine import MissionEngine  # noqa: PLC0415
+    from mission import _engine_factory
+    from mission.engine import MissionEngine
 
     mission_command = import_module("cli.commands.mission_cmd")
 
@@ -1119,7 +1119,7 @@ class TestMissionScaffoldCriteriaCli:
 
         # Validator runs without raising.
         sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-        from mission import validation  # noqa: PLC0415
+        from mission import validation
 
         validation.validate_criteria(loaded)
 
@@ -1188,7 +1188,7 @@ class TestMissionScaffoldCriteriaCli:
         """
         _enable_flag(monkeypatch)
         sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-        from mission import sampling as mission_sampling  # noqa: PLC0415
+        from mission import sampling as mission_sampling
 
         class _BrokenBackend:
             backend_name = "bedrock"
@@ -1315,7 +1315,7 @@ class TestMissionStartUncappedCli:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        isolated_backend: Path,  # noqa: ARG002
+        isolated_backend: Path,
     ) -> None:
         """``--max-iterations -1`` is accepted; the persisted budget reflects it."""
         _enable_flag(monkeypatch)
@@ -1353,7 +1353,7 @@ class TestMissionStartUncappedCli:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        isolated_backend: Path,  # noqa: ARG002
+        isolated_backend: Path,
     ) -> None:
         """``--max-wall-clock -1`` is accepted."""
         _enable_flag(monkeypatch)
@@ -1386,7 +1386,7 @@ class TestMissionStartUncappedCli:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        isolated_backend: Path,  # noqa: ARG002
+        isolated_backend: Path,
     ) -> None:
         """``--max-iterations 0`` is rejected with the new reason code."""
         _enable_flag(monkeypatch)
@@ -1632,7 +1632,7 @@ class TestMissionRunCli:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        isolated_backend: Path,  # noqa: ARG002
+        isolated_backend: Path,
     ) -> None:
         """``run`` scaffolds from the default fixture while the model override is omitted."""
         _enable_flag(monkeypatch)

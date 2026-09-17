@@ -220,7 +220,7 @@ class _FakeDynamoTable:
     def __init__(self) -> None:
         self.items: dict[str, dict] = {}
 
-    def put_item(self, Item, ConditionExpression=None, **_kw):  # noqa: N803
+    def put_item(self, Item, ConditionExpression=None, **_kw):
         key = Item["endpoint_name"]
         if (
             ConditionExpression
@@ -231,18 +231,18 @@ class _FakeDynamoTable:
         self.items[key] = copy.deepcopy(Item)
         return {}
 
-    def get_item(self, Key, **_kw):  # noqa: N803
+    def get_item(self, Key, **_kw):
         item = self.items.get(Key["endpoint_name"])
         return {"Item": copy.deepcopy(item)} if item is not None else {}
 
     def update_item(
         self,
-        Key,  # noqa: N803
-        UpdateExpression,  # noqa: N803
-        ExpressionAttributeValues=None,  # noqa: N803
-        ExpressionAttributeNames=None,  # noqa: N803
-        ConditionExpression=None,  # noqa: N803
-        ReturnValues=None,  # noqa: N803
+        Key,
+        UpdateExpression,
+        ExpressionAttributeValues=None,
+        ExpressionAttributeNames=None,
+        ConditionExpression=None,
+        ReturnValues=None,
         **_kw,
     ):
         key = Key["endpoint_name"]

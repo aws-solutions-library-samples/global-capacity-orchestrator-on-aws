@@ -16,7 +16,7 @@ import pytest
 # Ensure gco_mcp/ is importable (mirrors tests/test_mcp_server.py).
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from tools import cluster as cluster_tool  # noqa: E402
+from tools import cluster as cluster_tool
 
 
 def test_tool_builds_print_argv_with_region_and_instance(monkeypatch: pytest.MonkeyPatch) -> None:

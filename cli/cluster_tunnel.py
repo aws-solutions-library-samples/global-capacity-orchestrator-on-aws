@@ -241,7 +241,7 @@ def teardown_bastion(
         formatter.print_info(f"Tearing down ephemeral bastion {instance_id}...")
         ephemeral_bastion.destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
         formatter.print_success(f"Ephemeral bastion {instance_id} terminated.")
-    except Exception as exc:  # noqa: BLE001 — never crash teardown; guide the operator
+    except Exception as exc:  # never crash teardown; guide the operator
         formatter.print_error(
             f"Failed to tear down bastion {instance_id}: {exc}\n"
             "Check for and terminate any orphan with:\n"

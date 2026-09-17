@@ -48,7 +48,7 @@ from hypothesis import strategies as st
 # pytest has to do it itself before the import below resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gco_mcp"))
 
-from mission.types import SCHEMA_VERSION  # noqa: E402
+from mission.types import SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Constants — narrow range chosen so datetime arithmetic never overflows.

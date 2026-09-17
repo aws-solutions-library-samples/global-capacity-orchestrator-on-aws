@@ -29,12 +29,12 @@ from click.testing import CliRunner
 
 # Mirror the path-injection pattern used by the other test_mission_* files.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-from mission.memory import (  # noqa: E402
+from mission.memory import (
     MissionMemoryError,
     MissionMemoryUnavailableError,
 )
 
-from cli.main import cli  # noqa: E402
+from cli.main import cli
 
 # ---------------------------------------------------------------------------
 # Harness

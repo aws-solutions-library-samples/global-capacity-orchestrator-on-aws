@@ -200,7 +200,7 @@ def test_every_collision_path_is_accounted_for(live: dict[str, set[str]]) -> Non
     collisions = {
         path
         for path, apps in live.items()
-        if len(apps - _NOT_ALB_EXPOSED) > 1  # noqa: PLR2004 — >1 app means a collision
+        if len(apps - _NOT_ALB_EXPOSED) > 1  # >1 app means a collision
     }
     undecided = sorted(collisions - set(_EXPECTED_WINNER))
     assert not undecided, (

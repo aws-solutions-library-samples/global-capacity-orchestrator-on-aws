@@ -32,14 +32,14 @@ from hypothesis import strategies as st
 # production, matching the convention used by the sibling Mission tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission_judge.prompt import (  # noqa: E402
+from mission_judge.prompt import (
     MAX_CONTEXT_CHARS,
     TRUNCATION_MARKER,
     JudgePrompt,
     build_prompt,
     truncate_context,
 )
-from mission_judge.rubric import RUBRIC_VERSION  # noqa: E402
+from mission_judge.rubric import RUBRIC_VERSION
 
 # ---------------------------------------------------------------------------
 # Strategies

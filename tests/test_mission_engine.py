@@ -44,10 +44,10 @@ import pytest
 # has to do it itself before the imports below resolve.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission import engine as mission_engine  # noqa: E402
-from mission.engine import MissionEngine, MissionEngineError  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
+from mission import SCHEMA_VERSION
+from mission import engine as mission_engine
+from mission.engine import MissionEngine, MissionEngineError
+from mission.state import FilesystemBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -841,7 +841,7 @@ async def test_run_iteration_translates_script_rejected_from_runner(
 
     # Lazy import — same pattern the engine itself uses.
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sandbox import ScriptRejected  # noqa: E402
+    from mission.sandbox import ScriptRejected
 
     async def fake_sandbox_runner(
         script: str, ctx: Any, tool_dispatcher: Any
@@ -898,7 +898,7 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
     """
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sandbox import SandboxTerminated  # noqa: E402
+    from mission.sandbox import SandboxTerminated
 
     async def fake_sandbox_runner(
         script: str, ctx: Any, tool_dispatcher: Any
@@ -977,7 +977,7 @@ def test_make_default_sandbox_runner_returns_bound_run_method() -> None:
     know about the sandbox class.
     """
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sandbox import (  # noqa: E402
+    from mission.sandbox import (
         MissionSandbox,
         make_default_sandbox_runner,
     )
@@ -1013,7 +1013,7 @@ async def test_engine_uses_sampling_used_strategy_when_sampling_callable_returns
     audit verdict event carries the model-derived text.
     """
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sampling import SamplingUsed  # noqa: E402
+    from mission.sampling import SamplingUsed
 
     sampler_calls: list[dict[str, Any]] = []
     dispatcher_calls: list[tuple[str, dict]] = []
@@ -1115,7 +1115,7 @@ async def test_engine_falls_back_when_sampling_callable_returns_sampling_fallbac
     to ``None`` and runs the deterministic strategy instead.
     """
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sampling import SamplingFallback  # noqa: E402
+    from mission.sampling import SamplingFallback
 
     sampler_calls: list[dict[str, Any]] = []
     dispatcher_calls: list[tuple[str, dict]] = []
@@ -1292,7 +1292,7 @@ async def test_engine_final_lessons_callable_overlays_lessons(
     ``recommended_followups`` mirrors the sampler's list.
     """
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sampling import SamplingUsed  # noqa: E402
+    from mission.sampling import SamplingUsed
 
     final_calls: list[dict[str, Any]] = []
 

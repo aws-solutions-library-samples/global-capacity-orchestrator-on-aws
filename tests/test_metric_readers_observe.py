@@ -45,11 +45,11 @@ import pytest
 # module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.shape import error_envelope, metrics_result  # noqa: E402
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission.engine import MissionEngine  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.types import ToolCallRecord  # noqa: E402
+from metric_readers.shape import error_envelope, metrics_result
+from mission import SCHEMA_VERSION
+from mission.engine import MissionEngine
+from mission.state import FilesystemBackend
+from mission.types import ToolCallRecord
 
 # The metric key the reader emits and the criterion reads back by dot-path.
 _METRIC_KEY = "loss"

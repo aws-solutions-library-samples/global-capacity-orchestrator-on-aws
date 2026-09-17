@@ -424,7 +424,7 @@ def test_get_refuses_a_non_http_url() -> None:
 def test_get_returns_status_and_body_and_sends_basic_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         captured["auth"] = request.get_header("Authorization")
         return _Response(200, {"database": "ok"})
 
@@ -442,7 +442,7 @@ def test_get_returns_the_http_status_of_an_error_response(
     """A 404 for an unprovisioned uid is an answer, not a transport failure."""
     import urllib.error
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+    def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
 
     monkeypatch.setattr(script.urllib.request, "urlopen", fake_urlopen)
@@ -496,7 +496,7 @@ def _grafana(monkeypatch: pytest.MonkeyPatch, answers: dict[str, list[tuple[int,
     monkeypatch.setattr(script.time, "sleep", clock.sleep)
     calls: list[str] = []
 
-    def fake_get(url: str, auth=None, timeout=10.0):  # noqa: ANN001, ANN202
+    def fake_get(url: str, auth=None, timeout=10.0):
         path = url.split("/", 3)[3] if url.count("/") >= 3 else url
         calls.append(path)
         queue = answers[path]
@@ -721,7 +721,7 @@ class TestCli:
     ) -> None:
         seen: dict[str, object] = {}
 
-        def fake_verify(url, dashboards_dir, user, password, timeout_seconds):  # noqa: ANN001, ANN202
+        def fake_verify(url, dashboards_dir, user, password, timeout_seconds):
             seen.update(url=url, user=user, password=password, timeout=timeout_seconds)
             return ["a: Grafana answered 404, expected 200"]
 
@@ -755,7 +755,7 @@ class TestCli:
     ) -> None:
         seen: dict[str, object] = {}
 
-        def fake_verify(url, dashboards_dir, user, password, timeout_seconds):  # noqa: ANN001, ANN202
+        def fake_verify(url, dashboards_dir, user, password, timeout_seconds):
             seen.update(user=user, password=password)
             return []
 
