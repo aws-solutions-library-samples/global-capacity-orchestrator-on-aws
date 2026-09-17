@@ -1,11 +1,13 @@
 """Documentation-coverage guards for the test suite, CLI, and MCP tools.
 
-Four checks fail CI when reference docs fall behind the code they describe:
+Six checks fail CI when reference docs fall behind the code they describe:
 
 * test_every_test_file_is_documented: every tests/test_*.py module is listed in tests/README.md.
 * test_every_cli_command_is_documented: every command in the gco Click tree is documented in docs/CLI.md (matched as `gco <path>`).
 * test_every_mcp_tool_is_documented: every registered MCP tool (all feature flags on) appears in gco_mcp/tools/README.md.
 * test_every_documented_uvx_invocation_pins_the_project_python: every uvx / uv tool install snippet in gco_mcp/README.md pins --python to the minimum version from pyproject's requires-python.
+* test_every_wiki_gco_invocation_is_a_real_command: every `gco <group> [<subcommand>]` inside a wiki shell block resolves in the Click tree (the wiki's copy-paste commands are the first thing a newcomer runs).
+* test_every_wiki_example_manifest_exists: every `examples/…` path the wiki names is a shipped file.
 
 Each test fails with the full list of undocumented items so the fix is mechanical: add the missing entry, with a short description, to the doc. Each guard also asserts a sanity floor on the number of items it discovered, so a broken enumeration (an import error, an empty subprocess result) fails loudly instead of passing vacuously. The MCP catalog is enumerated in a subprocess with GCO_ENABLE_ALL_TOOLS set so the guard sees the full set without perturbing the import-time tool registration the other MCP tests rely on.
 """
@@ -189,4 +191,81 @@ def test_every_documented_uvx_invocation_pins_the_project_python() -> None:
     assert not offenders, (
         "Documented uvx invocations out of sync with requires-python "
         f"(every one must pin --python {expected}):\n  " + "\n  ".join(offenders)
+    )
+
+
+# =============================================================================
+# Wiki quick-start commands
+# =============================================================================
+
+_WIKI_DIR = REPO_ROOT / "wiki"
+_FENCED_BLOCK = re.compile(r"```(?:bash|sh|shell|console)\n(.*?)```", re.DOTALL)
+#: ``gco <group> [<subcommand>]`` at the start of a shell line (after an
+#: optional prompt or ``&&`` chain), ignoring the global options that may sit
+#: between ``gco`` and the group (``gco -o json jobs policy``).
+_GCO_INVOCATION = re.compile(
+    r"(?:^|&&|\|\|)\s*gco(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?"
+)
+_EXAMPLE_PATH = re.compile(r"\bexamples/[\w./-]+\.(?:yaml|yml|json)\b")
+
+
+def _wiki_shell_lines() -> list[tuple[str, str]]:
+    """``(page, line)`` for every non-comment line inside a wiki shell block."""
+    out: list[tuple[str, str]] = []
+    for page in sorted(_WIKI_DIR.glob("*.md")):
+        text = page.read_text(encoding="utf-8")
+        for block in _FENCED_BLOCK.findall(text):
+            for raw in block.splitlines():
+                line = raw.split("#", 1)[0].strip()
+                if line and not line.startswith("#"):
+                    out.append((page.name, line))
+    return out
+
+
+def test_every_wiki_gco_invocation_is_a_real_command() -> None:
+    """The wiki's copy-paste commands must exist in the Click tree.
+
+    The wiki is the first thing a newcomer runs; a renamed subcommand there
+    is the most expensive kind of documentation rot. ``gco <group>`` and
+    ``gco <group> <subcommand>`` tokens inside every shell block are checked
+    against the real command tree (option-only lines such as ``gco --version``
+    are skipped, since they carry no command path).
+    """
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from cli.main import cli
+
+    commands = set(_iter_cli_commands(cli))
+    groups = {c for c in commands if " " not in c}
+    checked = 0
+    offenders: list[str] = []
+    for page, line in _wiki_shell_lines():
+        for group, sub in _GCO_INVOCATION.findall(line):
+            checked += 1
+            if group not in groups:
+                offenders.append(f"{page}: unknown command group 'gco {group}' in: {line}")
+            elif (
+                sub
+                and f"{group} {sub}" not in commands
+                and any(c.startswith(f"{group} ") for c in commands)
+            ):
+                offenders.append(f"{page}: unknown subcommand 'gco {group} {sub}' in: {line}")
+    assert checked >= 10, f"sanity floor: only found {checked} gco invocations in wiki shell blocks"
+    assert not offenders, "Wiki shell blocks invoke commands that do not exist:\n  " + "\n  ".join(
+        offenders
+    )
+
+
+def test_every_wiki_example_manifest_exists() -> None:
+    """``examples/…`` paths in wiki shell blocks and prose name shipped files."""
+    checked = 0
+    missing: list[str] = []
+    for page in sorted(_WIKI_DIR.glob("*.md")):
+        for rel in sorted(set(_EXAMPLE_PATH.findall(page.read_text(encoding="utf-8")))):
+            checked += 1
+            if not (REPO_ROOT / rel).is_file():
+                missing.append(f"{page.name}: {rel}")
+    assert checked >= 5, f"sanity floor: only found {checked} example paths in the wiki"
+    assert not missing, "Wiki references example manifests that do not exist:\n  " + "\n  ".join(
+        missing
     )

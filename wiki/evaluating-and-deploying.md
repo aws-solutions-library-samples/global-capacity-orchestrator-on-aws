@@ -1,47 +1,40 @@
 # Evaluating & deploying
 
-The
+Want to run it right now? [Get started](get-started.md) is the
+command-by-command fast path. This page is for the questions that come before
+and after that: what a deployment needs, what it costs, what you can change,
+and how it is upgraded and removed. The
 [Quick Start Guide](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/QUICKSTART.md)
-is the authoritative walkthrough — it aims to take you from a clean machine
-to a running deployment in under 60 minutes, and it marks the exact point
-where AWS charges begin. This page summarizes the journey so you know what
-you are signing up for.
+remains the authoritative walkthrough.
 
 ## What you need
 
-- **Recommended path:** a container runtime (Docker, Finch, or Colima) and
-  AWS credentials. The dev container ships everything else — Python, Node.js,
-  CDK, kubectl, and the AWS CLI at pinned versions — so you skip dependency
-  resolution entirely.
+- **Recommended path:** a container runtime (Docker, Finch, Podman, or
+  Colima) and AWS credentials. The dev container ships everything else —
+  Python, Node.js, CDK, kubectl, and the AWS CLI at pinned versions — so you
+  skip dependency resolution entirely.
 - **Host installs are the advanced path.** GCO pins exact versions of many
   Python packages; the README's
   [Prerequisites](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#prerequisites)
   section covers the clean-virtualenv route and its known caveats.
+- **An AWS account you can create infrastructure in.** One deployment is one
+  AWS partition (`aws`, `aws-cn`, or `aws-us-gov`); any number of Regions
+  inside it.
 
-## The journey
+## The lifecycle
 
-1. **Clone and build the dev container** — a setup script builds the image
-   and wires a `gco` shell function so commands run from your normal shell.
-2. **First success milestone** — the CLI runs locally; no AWS charges yet.
-3. **Deploy** — one command stands up the global control plane and every
-   region configured in `cdk.json`. CDK bootstrap happens automatically.
-   *This is the point where billable AWS resources exist.* Helm charts
-   converge asynchronously afterwards and can take 10–30+ minutes.
-4. **Submit a test job and (optionally) an inference endpoint** — the
-   repository ships ready-to-submit
-   [example manifests](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/README.md).
-5. **Upgrade, later** — `gco upgrade` moves the checkout, the local install
-   and every deployed stack to the latest release in one pass. It recreates
-   the regional stacks, so the procedure starts by backing regional data up
-   to the cluster-shared bucket; see
-   [docs/UPGRADING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/UPGRADING.md).
-6. **Tear down** — one command destroys the stacks with best-effort cleanup
-   of known resources.
+| Phase | What happens | Command |
+| --- | --- | --- |
+| **Deploy** | One CDK app stands up the global control plane and every Region in `cdk.json`; CDK bootstrap is automatic. *Billable resources exist from here.* Helm charts converge asynchronously afterwards (10–30+ minutes) and never roll back the cluster. | `gco stacks deploy-all -y` |
+| **Operate** | Submit jobs by SQS, REST API, or the global queue; deploy inference endpoints; watch the fleet. | `gco jobs …`, `gco inference …`, `gco status` |
+| **Grow or shrink** | Add or remove workload Regions in `cdk.json` and redeploy — down to zero Regions, which leaves only the control plane running. | `gco stacks regions add <region>` |
+| **Upgrade** | Move the checkout, the local install, the dev image, and every deployed stack to the latest tagged release in one pass. The regional stacks are recreated, so the procedure starts with backing regional data up to the cluster-shared bucket — read [docs/UPGRADING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/UPGRADING.md) first. | `gco upgrade` |
+| **Tear down** | Destroy every stack in dependency order with best-effort cleanup of the resources CloudFormation leaves behind. | `gco stacks destroy-all -y` |
 
 Prefer to let an agent drive? `gco autopilot` launches Claude Code by
 default; `gco autopilot --engine codex` launches OpenAI Codex. Both run on
-Amazon Bedrock with the GCO MCP server and recommended companions wired in—so
-you can deploy, check capacity, and submit jobs conversationally. See
+Amazon Bedrock with the GCO MCP server and recommended companions wired in —
+so you can deploy, check capacity, and submit jobs conversationally. See
 [docs/AUTOPILOT.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/AUTOPILOT.md).
 
 ![Listing deployed CDK stacks via natural language through the GCO MCP server](assets/images/gco_mcp_list_stacks.png)
