@@ -8,7 +8,7 @@ down, and writes a per-example report — reusing the
 destroy, final-inventory, checkpointing, reporting) with one new ``examples``
 action.
 
-Selection is supported (``--examples``, ``--skip``, ``--category``) so an
+Selection is supported (``--examples``, ``--skip-examples``) so an
 author who changed one example can validate just that one against existing
 infrastructure. The offline half (``--static-only``) parses every example,
 checks it against the API/SQS transport gates it is documented to use, and
