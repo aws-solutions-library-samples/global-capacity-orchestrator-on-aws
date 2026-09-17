@@ -16,6 +16,10 @@
 # zoneinfo, dpkg scanner metadata) that the FROM scratch runtime stage copies
 # wholesale. The deployed image contains no shell, package manager, or
 # coreutils. See the script's module docstring for the full rationale.
+# checkov:skip=CKV_DOCKER_2:Kubernetes owns this service's health contract — the
+# liveness/readiness probes in lambda/kubectl-applier-simple/manifests/ are the
+# real check, and the distroless runtime stage has no shell for a Docker
+# HEALTHCHECK to exec anyway.
 FROM python:3.14.7-slim AS builder
 
 # Set working directory
