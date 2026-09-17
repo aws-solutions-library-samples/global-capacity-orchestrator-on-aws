@@ -14,6 +14,7 @@ from urllib.parse import quote
 import requests
 import yaml
 
+from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
 from .aws_client import get_aws_client
@@ -45,20 +46,6 @@ def _format_duration(seconds: int) -> str:
         return f"{minutes}m{secs:02d}s"
     hours, mins = divmod(minutes, 60)
     return f"{hours}h{mins:02d}m{secs:02d}s"
-
-
-def _first_manifest_namespace(manifests: list[dict[str, Any]]) -> str | None:
-    """Return the first explicit ``metadata.namespace`` found in a manifest list.
-
-    Used by the SQS submission path to populate the envelope ``namespace``
-    field (informational — the queue processor reads each manifest's own
-    namespace for validation). Returns None if no manifest declares one.
-    """
-    for manifest in manifests:
-        ns = manifest.get("metadata", {}).get("namespace") if isinstance(manifest, dict) else None
-        if ns:
-            return str(ns)
-    return None
 
 
 def resolve_submission_identity(
@@ -1181,9 +1168,6 @@ class JobManager:
         Returns:
             Submission result dictionary with message_id and queue info
         """
-        import json
-        import uuid
-
         import boto3
 
         # Load manifests if path provided
@@ -1222,30 +1206,17 @@ class JobManager:
         if not queue_url:
             raise ValueError(f"Job queue not found in stack {stack.stack_name}")
 
-        # Create SQS message. The ``namespace`` field in the envelope is
-        # informational only — the queue processor reads each manifest's
-        # own ``metadata.namespace`` for validation and application. Report
-        # the first manifest's namespace here so the submission response
-        # matches reality when the user doesn't pass ``--namespace``.
-        job_id = str(uuid.uuid4())[:8]
-        envelope_namespace = namespace or _first_manifest_namespace(manifest_list) or "gco-jobs"
-        message_body = {
-            "job_id": job_id,
-            "manifests": manifest_list,
-            "namespace": envelope_namespace,
-            "priority": priority,
-            "submitted_at": datetime.now(UTC).isoformat(),
-        }
+        # Build the envelope through the shared protocol module, which the
+        # in-cluster consumer and the CI end-to-end test also import, so the
+        # producer cannot drift from the reader.
+        message = build_job_message(manifest_list, namespace=namespace, priority=priority)
 
         # Send to SQS
         sqs = boto3.client("sqs", region_name=region)
         response = sqs.send_message(
             QueueUrl=queue_url,
-            MessageBody=json.dumps(message_body),
-            MessageAttributes={
-                "Priority": {"DataType": "Number", "StringValue": str(priority)},
-                "JobId": {"DataType": "String", "StringValue": job_id},
-            },
+            MessageBody=message.json(),
+            MessageAttributes=message.attributes,
         )
 
         # Get job name from first manifest
@@ -1259,11 +1230,11 @@ class JobManager:
             "status": "queued",
             "method": "sqs",
             "message_id": response["MessageId"],
-            "job_id": job_id,
+            "job_id": message.job_id,
             "job_name": job_name,
             "queue_url": queue_url,
             "region": region,
-            "namespace": envelope_namespace,
+            "namespace": message.namespace,
             "priority": priority,
         }
 

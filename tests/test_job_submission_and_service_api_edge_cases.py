@@ -2358,9 +2358,10 @@ def _manager() -> Any:
 
 
 def test_cli_identity_namespace_resource_mapping_and_image_shape_helpers() -> None:
-    from cli.jobs import _extract_image_refs, _first_manifest_namespace, resolve_submission_identity
+    from cli.jobs import _extract_image_refs, resolve_submission_identity
+    from gco.job_envelope import first_manifest_namespace
 
-    assert _first_manifest_namespace([{}, {"metadata": {"namespace": "ml"}}]) == "ml"
+    assert first_manifest_namespace([{}, {"metadata": {"namespace": "ml"}}]) == "ml"
     assert resolve_submission_identity(
         {"resources": {"kind": "Job", "name": "trainer", "namespace": "ml"}}
     ) == ("trainer", "ml")

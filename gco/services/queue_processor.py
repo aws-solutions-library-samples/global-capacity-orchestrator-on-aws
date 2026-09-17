@@ -10,7 +10,8 @@ manifests). On success the message is deleted; on failure it returns to the
 queue after the visibility timeout (5 min) and eventually lands in the DLQ
 after 3 failed attempts.
 
-Message format (produced by `gco jobs submit-sqs`):
+Message format — the shared envelope in ``gco.job_envelope``, which
+``gco jobs submit-sqs`` builds and this service reads:
     {
         "job_id": "abc123",
         "manifests": [<k8s manifest dicts>],
@@ -85,6 +86,7 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
+from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
@@ -1021,7 +1023,7 @@ def _record_failure_on_final_receive(
     submitted_at = body.get("submitted_at")
     _record_job_failure(
         job_id,
-        namespace=str(body.get("namespace", "gco-jobs")),
+        namespace=str(body.get("namespace", DEFAULT_JOB_NAMESPACE)),
         error=error,
         message=message,
         priority=priority,
@@ -1081,7 +1083,7 @@ def drain_one_message_after_config_failure(reason: str) -> bool:
     submitted_at = body.get("submitted_at")
     recorded = _record_job_failure(
         job_id,
-        namespace=str(body.get("namespace", "gco-jobs")),
+        namespace=str(body.get("namespace", DEFAULT_JOB_NAMESPACE)),
         error=f"queue processor could not initialize Kubernetes credentials: {reason}",
         message="Queue processor configuration failure",
         priority=priority if isinstance(priority, int) else 0,

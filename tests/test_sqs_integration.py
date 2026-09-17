@@ -7,14 +7,79 @@ sends an SQS message with the manifest payload and priority, and
 returns a {status: queued, method: sqs, message_id, region} dict.
 Also covers missing-stack, missing-output, and send_message failure
 paths. Uses patched boto3.client so no real AWS calls are made.
+
+The envelope itself (``gco.job_envelope``) is covered here too: it is the wire
+format between this producer and the in-cluster queue processor, so its
+defaults, its injectable id/timestamp, and the exact serialization the
+submission puts on the queue are pinned alongside the submission that uses
+them. The same builder produces the message CI feeds to the real consumer in
+``integration:kind:cluster-e2e``.
 """
 
+import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cli.config import GCOConfig
 from cli.jobs import JobManager
+from gco.job_envelope import DEFAULT_JOB_NAMESPACE, build_job_message, first_manifest_namespace
+
+
+class TestJobEnvelope:
+    """The wire format shared by ``gco jobs submit-sqs`` and the consumer."""
+
+    MANIFESTS = [{"kind": "Job", "metadata": {"name": "trainer", "namespace": "ml"}}]
+
+    def test_every_field_the_consumer_reads_is_present(self) -> None:
+        message = build_job_message(
+            self.MANIFESTS,
+            namespace="gco-jobs",
+            priority=7,
+            job_id="deadbeef",
+            submitted_at=datetime(2026, 3, 26, 12, 0, tzinfo=UTC),
+        )
+        assert message.body == {
+            "job_id": "deadbeef",
+            "manifests": self.MANIFESTS,
+            "namespace": "gco-jobs",
+            "priority": 7,
+            "submitted_at": "2026-03-26T12:00:00+00:00",
+        }
+        assert message.job_id == "deadbeef"
+        assert message.namespace == "gco-jobs"
+        assert message.priority == 7
+
+    def test_the_namespace_falls_back_to_the_first_manifest_then_the_default(self) -> None:
+        """The envelope namespace is informational, so it must not invent one."""
+        assert build_job_message(self.MANIFESTS).namespace == "ml"
+        assert build_job_message([{"kind": "Job"}]).namespace == DEFAULT_JOB_NAMESPACE
+        assert first_manifest_namespace([{"kind": "Job"}]) is None
+        assert first_manifest_namespace(["not-a-dict"]) is None  # type: ignore[list-item]
+
+    def test_a_generated_job_id_is_short_and_unique(self) -> None:
+        """The id is a correlation handle in log lines and message attributes."""
+        first = build_job_message(self.MANIFESTS)
+        second = build_job_message(self.MANIFESTS)
+        assert first.job_id != second.job_id
+        assert len(first.job_id) == 8
+
+    def test_the_generated_timestamp_is_timezone_aware(self) -> None:
+        """A naive stamp would be unorderable against the consumer's records."""
+        stamped = datetime.fromisoformat(build_job_message(self.MANIFESTS).body["submitted_at"])
+        assert stamped.tzinfo is not None
+
+    def test_attributes_carry_the_priority_and_id_as_sqs_types(self) -> None:
+        message = build_job_message(self.MANIFESTS, priority=3, job_id="abc12345")
+        assert message.attributes == {
+            "Priority": {"DataType": "Number", "StringValue": "3"},
+            "JobId": {"DataType": "String", "StringValue": "abc12345"},
+        }
+
+    def test_json_round_trips_through_the_consumers_parser(self) -> None:
+        message = build_job_message(self.MANIFESTS, job_id="abc12345")
+        assert json.loads(message.json()) == message.body
 
 
 class TestJobManagerSQS:
@@ -109,6 +174,21 @@ class TestJobManagerSQS:
             assert result["region"] == "us-east-1"
             assert result["priority"] == 5
             assert result["job_name"] == "test-job"
+
+            # The body on the wire is the shared envelope, and the reported
+            # job_id/namespace are the ones actually sent — not a second
+            # derivation that could disagree with the message.
+            sent = mock_sqs.send_message.call_args.kwargs
+            body = json.loads(sent["MessageBody"])
+            assert body["job_id"] == result["job_id"]
+            assert body["namespace"] == result["namespace"] == "gco-jobs"
+            assert body["manifests"] == manifests
+            assert body["priority"] == 5
+            assert datetime.fromisoformat(body["submitted_at"]).tzinfo is not None
+            assert sent["MessageAttributes"] == {
+                "Priority": {"DataType": "Number", "StringValue": "5"},
+                "JobId": {"DataType": "String", "StringValue": result["job_id"]},
+            }
 
     def test_submit_job_sqs_no_stack(self, job_manager):
         """Test SQS submission fails when no stack exists."""
