@@ -12,6 +12,7 @@ module-level runtime cache so tests run in any order.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -745,7 +746,7 @@ class TestFsxConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             get_fsx_config()
 
@@ -806,7 +807,7 @@ class TestFsxConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             update_fsx_config({"enabled": True})
 
@@ -1707,7 +1708,7 @@ class TestStackManagerOrchestrated:
             mock_preflight.return_value = True  # preflight passes
 
             manager = StackManager(config)
-            success, successful, failed = manager.destroy_orchestrated(force=True)
+            success, _successful, _failed = manager.destroy_orchestrated(force=True)
 
             assert success is True
             assert mock_destroy.call_count >= 2
@@ -2104,7 +2105,7 @@ class TestParallelDeployment:
             mock_deploy.return_value = True
 
             manager = StackManager(config)
-            success, successful, failed = manager.deploy_orchestrated(
+            success, _successful, _failed = manager.deploy_orchestrated(
                 require_approval=False,
                 parallel=True,  # Even with parallel=True
             )
@@ -3669,7 +3670,7 @@ class TestStackManagerOrchestratedParallel:
             mock_deploy.side_effect = deploy_side_effect
 
             manager = StackManager(config)
-            success, successful, failed = manager.deploy_orchestrated(
+            success, _successful, failed = manager.deploy_orchestrated(
                 require_approval=False,
                 parallel=True,
             )

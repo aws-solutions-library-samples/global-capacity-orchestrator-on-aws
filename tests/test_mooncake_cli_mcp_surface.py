@@ -35,8 +35,8 @@ from cli.inference import InferenceManager
 # Ensure gco_mcp/ is importable, then load the server so every tool is registered.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402  (import for path/registration side effects)
-from tools.inference import (  # noqa: E402
+import run_mcp  # import for path/registration side effects
+from tools.inference import (
     deploy_disaggregated_inference,
     mooncake_topology_status,
     set_mooncake_topology,
@@ -341,7 +341,7 @@ def test_deleted_endpoint_rejects_mooncake_configuration(method_name, kwargs):
 
     with (
         patch.object(mgr, "_get_store", return_value=mock_store),
-        pytest.raises(ValueError, match="deleted.*redeploy"),
+        pytest.raises(ValueError, match=r"deleted.*redeploy"),
     ):
         getattr(mgr, method_name)("ep", **kwargs)
 

@@ -277,7 +277,7 @@ class TestGlobalAcceleratorValidation:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="global_accelerator.health_check_interval must be one of",
+            match=re.escape("global_accelerator.health_check_interval must be one of"),
         ):
             ConfigLoader(app)
 
@@ -295,7 +295,7 @@ class TestGlobalAcceleratorValidation:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="global_accelerator.health_check_threshold must be an integer between",
+            match=re.escape("global_accelerator.health_check_threshold must be an integer between"),
         ):
             ConfigLoader(app)
 
@@ -370,7 +370,8 @@ class TestTrafficDialValidation:
         """A scalar traffic_dial value fails with a precise message."""
         valid_context["global_accelerator"]["traffic_dial"] = 5
         with pytest.raises(
-            ConfigValidationError, match="global_accelerator.traffic_dial must be a mapping"
+            ConfigValidationError,
+            match=re.escape("global_accelerator.traffic_dial must be a mapping"),
         ):
             ConfigLoader(MockApp(valid_context))
 
@@ -1255,7 +1256,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="manifest_processor.max_request_body_bytes must be an integer",
+            match=re.escape("manifest_processor.max_request_body_bytes must be an integer"),
         ):
             ConfigLoader(app)
 
@@ -1484,7 +1485,7 @@ class TestConfigValidationEdgeCases:
         valid_context["job_validation_policy"]["manifest_security_policy"] = {
             "block_host_paths": True
         }
-        with pytest.raises(ConfigValidationError, match="unsupported fields.*block_host_paths"):
+        with pytest.raises(ConfigValidationError, match=r"unsupported fields.*block_host_paths"):
             ConfigLoader(MockApp(valid_context))
 
     @pytest.mark.parametrize("value", (None, "true", 1, 0))
@@ -1693,7 +1694,7 @@ class TestAnalyticsEnvironmentConfig:
         valid_context["analytics_environment"] = {"enabled": "yes"}
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="analytics_environment.enabled must be a bool"
+            ConfigValidationError, match=re.escape("analytics_environment.enabled must be a bool")
         ):
             ConfigLoader(app)
 
@@ -1703,7 +1704,7 @@ class TestAnalyticsEnvironmentConfig:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="analytics_environment.hyperpod.enabled must be a bool",
+            match=re.escape("analytics_environment.hyperpod.enabled must be a bool"),
         ):
             ConfigLoader(app)
 
@@ -1713,7 +1714,7 @@ class TestAnalyticsEnvironmentConfig:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="analytics_environment.canvas.enabled must be a bool",
+            match=re.escape("analytics_environment.canvas.enabled must be a bool"),
         ):
             ConfigLoader(app)
 
@@ -1749,7 +1750,7 @@ class TestAnalyticsEnvironmentConfig:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="analytics_environment.cognito.removal_policy must be one of",
+            match=re.escape("analytics_environment.cognito.removal_policy must be one of"),
         ):
             ConfigLoader(app)
 
@@ -1761,7 +1762,7 @@ class TestAnalyticsEnvironmentConfig:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="analytics_environment.efs.removal_policy must be one of",
+            match=re.escape("analytics_environment.efs.removal_policy must be one of"),
         ):
             ConfigLoader(app)
 

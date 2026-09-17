@@ -65,21 +65,21 @@ from typing import Any, cast
 # gco_mcp/ modules import each other with gco_mcp/ itself on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools._task_status import TaskStatusWriter, get_task  # noqa: E402
+from tools._task_status import TaskStatusWriter, get_task
 
-from mission import audit as mission_audit  # noqa: E402
-from mission import final_report  # noqa: E402
-from mission import swarm as swarm_rules  # noqa: E402
-from mission._engine_factory import EngineDependencies  # noqa: E402
-from mission.engine import MissionEngine, ObservationAugmenter  # noqa: E402
-from mission.types import (  # noqa: E402
+from mission import audit as mission_audit
+from mission import final_report
+from mission import swarm as swarm_rules
+from mission._engine_factory import EngineDependencies
+from mission.engine import MissionEngine, ObservationAugmenter
+from mission.types import (
     SCHEMA_VERSION,
     TERMINAL_STATES,
     ChildRegistryEntry,
     SessionState,
     SwarmConfig,
 )
-from mission.validation import MissionValidationError  # noqa: E402
+from mission.validation import MissionValidationError
 
 __all__ = [
     "DepsBuilder",
@@ -619,7 +619,7 @@ class SwarmRunner:
         except asyncio.CancelledError:
             writer.finish(state="cancelled")
             raise
-        except Exception as exc:  # noqa: BLE001 — a driver bug must not kill the swarm
+        except Exception as exc:  # a driver bug must not kill the swarm
             # Persist the standard abort transition before settling the slot.
             consumed = self._terminate_child_session(child_id)
             self._settle_slot(slot, consumed=consumed, status="failed")
@@ -645,7 +645,7 @@ class SwarmRunner:
         self, slot: str, final_status: str, final_session: SessionState | None
     ) -> None:
         entry = self._registry[self._entry_index(slot)]
-        decision, reason = swarm_rules.should_respawn(entry, final_status)
+        decision, _reason = swarm_rules.should_respawn(entry, final_status)
         if not decision:
             return
         directive = str(final_session.get("directive_text", "")) if final_session else ""

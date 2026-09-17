@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 from contextlib import contextmanager
 from decimal import Decimal
@@ -244,7 +245,7 @@ def test_vector_ingest_translates_upload_failures(tmp_path: Path, error: Excepti
     s3.put_object.side_effect = error
     client._s3_client = s3
 
-    with pytest.raises(VectorStoreError, match="upload of doc.md failed"):
+    with pytest.raises(VectorStoreError, match=re.escape("upload of doc.md failed")):
         client.ingest([document])
 
 
@@ -335,7 +336,7 @@ def test_codex_reasoning_validator_handles_absent_and_malformed_containers(
     document: dict[str, object],
 ) -> None:
     if document.get("context", {}).get("bedrock") == "bad":
-        with pytest.raises(ValueError, match="context.bedrock must be a JSON object"):
+        with pytest.raises(ValueError, match=re.escape("context.bedrock must be a JSON object")):
             managed_config._codex_reasoning_effort_validator(document, "high")
     else:
         managed_config._codex_reasoning_effort_validator(document, "high")
@@ -362,12 +363,16 @@ def test_current_managed_list_rejects_nonarray() -> None:
 
 
 def test_scalar_container_rejects_outer_and_nested_nonobjects() -> None:
-    with pytest.raises(ManagedConfigError, match="context.bedrock must be a JSON object"):
+    with pytest.raises(
+        ManagedConfigError, match=re.escape("context.bedrock must be a JSON object")
+    ):
         managed_config._scalar_container(
             {"context": {"bedrock": "bad"}},
             CODEX_REASONING_EFFORT,
         )
-    with pytest.raises(ManagedConfigError, match="context.bedrock.codex must be a JSON object"):
+    with pytest.raises(
+        ManagedConfigError, match=re.escape("context.bedrock.codex must be a JSON object")
+    ):
         managed_config._scalar_container(
             {"context": {"bedrock": {"codex": "bad"}}},
             CODEX_REASONING_EFFORT,
@@ -721,7 +726,7 @@ def test_vector_ssm_transport_error_is_unavailable() -> None:
 
 
 def test_codex_reasoning_validator_rejects_nonobject_nested_codex() -> None:
-    with pytest.raises(ValueError, match="context.bedrock.codex must be a JSON object"):
+    with pytest.raises(ValueError, match=re.escape("context.bedrock.codex must be a JSON object")):
         managed_config._codex_reasoning_effort_validator(
             {"context": {"bedrock": {"codex": "bad"}}},
             "high",

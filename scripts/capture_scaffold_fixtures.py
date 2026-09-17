@@ -488,7 +488,7 @@ async def _capture_model(
                 file=sys.stderr,
             )
             return False
-        except Exception as exc:  # noqa: BLE001 - surface and keep going
+        except Exception as exc:  # surface and keep going
             print(
                 f"[{model_id}] unexpected error for {directive.slug!r}: "
                 f"{type(exc).__name__}: {exc}",
@@ -675,7 +675,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
         async def _capture_concurrently(
             model_id: str,
-        ) -> bool | None | BedrockFTUFormNotAcceptedError:
+        ) -> bool | BedrockFTUFormNotAcceptedError | None:
             async with semaphore:
                 if anthropic_ftu.is_set() and "anthropic." in model_id:
                     print(f"[{model_id}] skipped after Anthropic FTU failure", file=sys.stderr)
@@ -690,7 +690,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                 except BedrockFTUFormNotAcceptedError as exc:
                     anthropic_ftu.set()
                     return exc
-                except Exception as exc:  # noqa: BLE001 - isolate broad model failures
+                except Exception as exc:  # isolate broad model failures
                     print(
                         f"[{model_id}] unexpected capture failure: {type(exc).__name__}: {exc}",
                         file=sys.stderr,

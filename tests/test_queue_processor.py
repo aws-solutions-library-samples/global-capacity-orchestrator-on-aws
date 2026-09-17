@@ -314,7 +314,7 @@ class TestApplyManifest:
         return qp, mock_resource
 
     def test_create(self):
-        qp, res = self._setup_mocks()
+        qp, _res = self._setup_mocks()
         assert qp.apply_manifest(_job()).status == "created"
 
     def test_update_on_409(self):
@@ -437,7 +437,7 @@ class TestProcessOneMessage:
         sqs.delete_message.assert_not_called()
 
     def test_multiple_success(self):
-        qp, sqs = self._setup([_job(name="a"), _job(name="b")])
+        qp, _sqs = self._setup([_job(name="a"), _job(name="b")])
         assert qp.process_one_message() is True
         assert qp.apply_manifest.call_count == 2
 
@@ -791,7 +791,7 @@ class TestFinalReceiveFailureRecording:
         assert kwargs["submitted_at"] == "2026-03-26T12:00:00+00:00"
 
     def test_apply_exception_on_final_receive_records_bounded_error(self, monkeypatch):
-        qp, sqs = self._setup([_job()], monkeypatch, receive_count=3)
+        qp, _sqs = self._setup([_job()], monkeypatch, receive_count=3)
         qp.apply_manifest = MagicMock(side_effect=RuntimeError("z" * 5000))
         assert qp.process_one_message() is False
         kwargs = qp.JobStore.return_value.record_job_failure.call_args.kwargs
@@ -1152,7 +1152,7 @@ class TestImageRegistryAllowlist:
         monkeypatch.setenv("TRUSTED_REGISTRIES", "")
         monkeypatch.setenv("TRUSTED_DOCKERHUB_ORGS", "gco")
         qp = _reload()
-        ok, err = qp.validate_manifest(_job_with_image("gco-malicious/evil:v1"))
+        ok, _err = qp.validate_manifest(_job_with_image("gco-malicious/evil:v1"))
         assert not ok, "'gco-malicious' must not be treated as trusted org 'gco'"
 
     def test_multilevel_registry_path_allowed(self, monkeypatch):

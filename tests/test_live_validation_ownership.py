@@ -1034,7 +1034,7 @@ class TestCheckpointRetainedKmsKeys:
 
     def test_regional_stack_must_expose_exactly_one_retained_key(self) -> None:
         ctx = self._environment(resources=[self._resource("OtherKey", _KEY_ID)])
-        with pytest.raises(RuntimeError, match="Expected one retained EKS KMS key.*found 0"):
+        with pytest.raises(RuntimeError, match=r"Expected one retained EKS KMS key.*found 0"):
             self._invoke(ctx)
         ctx.kms.describe_key.assert_not_called()
 
@@ -1120,7 +1120,7 @@ class TestCheckpointRetainedKmsKeys:
     def test_ownership_drift_against_persisted_record_fails_closed(self) -> None:
         previous = _kms_record(logical_id="SomethingElse", cleanup_policy="cloudformation-delete")
         ctx = self._environment(state=_stack_state(owned_kms_keys=[previous]))
-        with pytest.raises(RuntimeError, match="KMS ownership changed .*: logical_id"):
+        with pytest.raises(RuntimeError, match=r"KMS ownership changed .*: logical_id"):
             self._invoke(ctx)
 
     def test_unexpected_live_arn_is_refused_even_past_identity_validation(self) -> None:

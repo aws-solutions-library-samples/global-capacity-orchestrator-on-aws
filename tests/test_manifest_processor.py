@@ -165,13 +165,13 @@ class TestNamespaceValidation:
     def test_allowed_namespace_default(self, processor, valid_deployment):
         """Test default namespace is allowed."""
         valid_deployment["metadata"]["namespace"] = "default"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_allowed_namespace_gco_jobs(self, processor, valid_deployment):
         """Test gco-jobs namespace is allowed."""
         valid_deployment["metadata"]["namespace"] = "gco-jobs"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_disallowed_namespace(self, processor, valid_deployment):
@@ -189,7 +189,7 @@ class TestNamespaceValidation:
             "metadata": {"name": "test-config"},
             "data": {"key": "value"},
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -198,7 +198,7 @@ class TestResourceLimitValidation:
 
     def test_within_cpu_limits(self, processor, valid_deployment):
         """Test CPU within limits passes validation."""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_exceeds_cpu_limits(self, processor, valid_deployment):
@@ -258,7 +258,7 @@ class TestSecurityContextValidation:
 
     def test_non_privileged_passes(self, processor, valid_deployment):
         """Test non-privileged container passes validation."""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_privileged_container_fails(self, processor, valid_deployment):
@@ -295,7 +295,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "docker.io/nginx:latest"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_gcr_allowed(self, processor, valid_deployment):
@@ -303,7 +303,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "gcr.io/project/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_public_ecr_allowed(self, processor, valid_deployment):
@@ -311,7 +311,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "public.ecr.aws/test/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_quay_allowed(self, processor, valid_deployment):
@@ -319,13 +319,13 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "quay.io/test/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_official_image_allowed(self, processor, valid_deployment):
         """Test official images without registry prefix are allowed."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = "nginx:latest"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_untrusted_registry_fails(self, processor, valid_deployment):
@@ -367,7 +367,7 @@ class TestCronJobValidation:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_cronjob_exceeds_limits(self, processor):
@@ -396,7 +396,7 @@ class TestCronJobValidation:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -418,7 +418,7 @@ class TestValidationDisabled:
             "kind": "Deployment",
             "metadata": {"name": "test", "namespace": "kube-system"},
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -1324,7 +1324,7 @@ class TestResourceLimitEdgeCases:
                 ]
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_statefulset(self, processor):
@@ -1350,7 +1350,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_daemonset(self, processor):
@@ -1374,7 +1374,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_uses_requests_when_no_limits(self, processor):
@@ -1399,7 +1399,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -1431,7 +1431,7 @@ class TestImageValidationEdgeCases:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "registry.k8s.io/pause:3.9"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_k8s_gcr_io_allowed(self, processor, valid_deployment):
@@ -1439,19 +1439,19 @@ class TestImageValidationEdgeCases:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "k8s.gcr.io/pause:3.9"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_gco_registry_allowed(self, processor, valid_deployment):
         """Test gco registry images are allowed."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = "gco/worker:v1"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_empty_image_allowed(self, processor, valid_deployment):
         """Test empty image is allowed (will fail at apply time)."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = ""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
 
@@ -1844,7 +1844,7 @@ class TestValidationEdgeCases:
             "metadata": {"name": "test", "namespace": "default"},
             "spec": None,  # This will cause issues when accessing spec
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         # Should handle gracefully - either pass or return validation error
         assert isinstance(is_valid, bool)
 
@@ -1866,7 +1866,7 @@ class TestValidationEdgeCases:
                 ],
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_container_without_resources(self, processor):
@@ -1889,7 +1889,7 @@ class TestValidationEdgeCases:
                 }
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_container_with_only_requests(self, processor):
@@ -1914,7 +1914,7 @@ class TestValidationEdgeCases:
                 }
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -2287,7 +2287,7 @@ class TestValidateSecurityContextExceptionPath:
                 },
             }
             result = processor._validate_security_context(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 
@@ -2313,7 +2313,7 @@ class TestValidateImageSourcesExceptionPath:
                 "spec": {"template": {"spec": {"containers": "not-a-list"}}},
             }
             result = processor._validate_image_sources(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 
@@ -2349,7 +2349,7 @@ class TestImageSourceUntrustedDockerHubOrg:
                 },
             }
             result = processor._validate_image_sources(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 

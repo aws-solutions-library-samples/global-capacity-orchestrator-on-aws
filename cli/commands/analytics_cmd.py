@@ -63,7 +63,7 @@ def analytics_status(config: Any) -> None:
         current = get_analytics_config()
         formatter.print_info("Analytics environment config:")
         formatter.print(current)
-    except Exception as exc:  # noqa: BLE001 — surface every loader error
+    except Exception as exc:  # surface every loader error
         formatter.print_error(f"Failed to read analytics config: {exc}")
         sys.exit(1)
 
@@ -125,7 +125,7 @@ def analytics_enable(config: Any, hyperpod: bool, canvas: bool, yes: bool) -> No
         formatter.print_info(
             f"Run `gco stacks deploy {config.project_name}-analytics` to apply changes"
         )
-    except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
+    except Exception as exc:  # user-facing error from file I/O
         formatter.print_error(f"Failed to enable analytics environment: {exc}")
         sys.exit(1)
 
@@ -158,7 +158,7 @@ def analytics_disable(config: Any, yes: bool) -> None:
         formatter.print_info(
             f"Run `gco stacks destroy {config.project_name}-analytics` to tear down resources"
         )
-    except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
+    except Exception as exc:  # user-facing error from file I/O
         formatter.print_error(f"Failed to disable analytics environment: {exc}")
         sys.exit(1)
 
@@ -591,10 +591,11 @@ def studio_login(
         poll_interval = 5  # seconds
         elapsed = 0
         url = ""
-        expires_in = 0
 
         while elapsed < max_wait:
-            url, expires_in, _ = fetch_studio_url(api_base, id_token)
+            # Only the URL matters here; the presigned expiry is reported by
+            # `analytics studio-url`, not by this open-in-browser path.
+            url, _expires_in, _ = fetch_studio_url(api_base, id_token)
             if url:
                 break
             # 202 -- profile still provisioning.

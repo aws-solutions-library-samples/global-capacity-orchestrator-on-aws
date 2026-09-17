@@ -381,7 +381,7 @@ class TestMonitoringStackDashboardWidgets:
         assert len(dashboards) == 1
 
         # Get the dashboard body
-        dashboard_key = list(dashboards.keys())[0]
+        dashboard_key = next(iter(dashboards.keys()))
         dashboard_body = dashboards[dashboard_key]["Properties"]["DashboardBody"]
         assert dashboard_body is not None
 

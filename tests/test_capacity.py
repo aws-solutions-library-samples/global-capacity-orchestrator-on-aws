@@ -1519,7 +1519,7 @@ class TestCapacityCheckerRecommendCapacityTypeEdgeCases:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "medium"
                 )
 
@@ -1780,7 +1780,7 @@ class TestCapacityCheckerEstimateExtended:
                     return_value=InstanceTypeInfo("m5.large", 2, 8, 0, None, 0),
                 ),
             ):
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "m5.large", "us-east-1", "high"
                 )
 
@@ -2207,7 +2207,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "medium"
                 )
 
@@ -2245,7 +2245,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "high"
                 )
 
@@ -2274,7 +2274,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "high"
                 )
 

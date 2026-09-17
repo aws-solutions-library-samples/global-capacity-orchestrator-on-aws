@@ -1209,7 +1209,7 @@ class TestMarkerAllowedSources:
         assert set(copies) <= allowed
 
     def test_uncharted_canonical_contributes_nothing(self) -> None:
-        canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
+        _canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
         allowed = generate_mod.marker_allowed_sources(
             [Target(source="cli/unrelated.py", function="f")]
         )
@@ -2162,7 +2162,7 @@ class TestSourceCommitVerificationGitFailures:
 
         with pytest.raises(
             RuntimeError,
-            match="cannot read example.py from GCO_DIAGRAM_SOURCE_COMMIT .*does not exist",
+            match=r"cannot read example.py from GCO_DIAGRAM_SOURCE_COMMIT .*does not exist",
         ):
             _verify_targets_match_source_commit(
                 project_root=tmp_path,

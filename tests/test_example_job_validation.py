@@ -10,6 +10,7 @@ registry — without any AWS access.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -799,7 +800,9 @@ class TestReadinessWaiters:
     def test_trainer_missing_crd_error_is_actionable(self, monkeypatch) -> None:
         monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
         kubectl = self._kubectl({"get crd": (1, "", "NotFound")})
-        with pytest.raises(drivers.ExampleValidationError, match="helm.kubeflow_trainer"):
+        with pytest.raises(
+            drivers.ExampleValidationError, match=re.escape("helm.kubeflow_trainer")
+        ):
             drivers.wait_trainer_runtime_ready(kubectl, timeout=0)
 
     def test_trainer_missing_runtime_error_is_actionable(self, monkeypatch) -> None:
@@ -825,7 +828,9 @@ class TestReadinessWaiters:
     def test_mlflow_missing_error_is_actionable(self, monkeypatch) -> None:
         monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
         kubectl = self._kubectl({"get deployment mlflow": (1, "", "NotFound")})
-        with pytest.raises(drivers.ExampleValidationError, match="cluster_observability.mlflow"):
+        with pytest.raises(
+            drivers.ExampleValidationError, match=re.escape("cluster_observability.mlflow")
+        ):
             drivers.wait_mlflow_ready(kubectl, timeout=0)
 
 
@@ -1664,7 +1669,8 @@ class TestMutationChannels:
         )
         parsed = _synthetic_parsed("synthetic-bad", spec, [self._deployment([])])
         with pytest.raises(
-            ValueError, match="Unsupported mutation channel in 'Deployment.volumes.MODEL'"
+            ValueError,
+            match=re.escape("Unsupported mutation channel in 'Deployment.volumes.MODEL'"),
         ):
             drivers.apply_mutations(parsed)
 

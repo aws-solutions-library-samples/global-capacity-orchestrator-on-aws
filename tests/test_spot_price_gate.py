@@ -371,7 +371,7 @@ class TestWorkerSpotGateIntegration:
         gate = _open_gate(price=0.90)
 
         with patch.object(worker_module, "_lease_heartbeat", AsyncMock()):
-            polled, processed = await process_queued_jobs_once(
+            _polled, processed = await process_queued_jobs_once(
                 processor, store, limit=1, spot_gate=gate
             )
 
@@ -571,7 +571,7 @@ class TestWorkerSpotGateIntegration:
         stop.set()
         gate = _open_gate(price=0.90)
 
-        polled, processed = await process_queued_jobs_once(
+        _polled, processed = await process_queued_jobs_once(
             processor, store, limit=5, stop_event=stop, spot_gate=gate
         )
 

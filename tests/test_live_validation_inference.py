@@ -1362,7 +1362,7 @@ class TestIsolatedKubeconfig:
             attempts += 1
             return 1, "", "Error from server (Forbidden): forbidden"
 
-        with pytest.raises(RuntimeError, match="permanent.*Forbidden"):
+        with pytest.raises(RuntimeError, match=r"permanent.*Forbidden"):
             kube._wait_for_cluster_api(forbidden, tunnel_process=None)
         assert attempts == 1
 
@@ -1394,7 +1394,7 @@ class TestIsolatedKubeconfig:
         def must_not_probe(*args: str, **kwargs: Any) -> tuple[int, str, str]:
             raise AssertionError("kubectl must not run after the tunnel exits")
 
-        with pytest.raises(RuntimeError, match="exit code 42.*Session Manager channel closed"):
+        with pytest.raises(RuntimeError, match=r"exit code 42.*Session Manager channel closed"):
             kube._wait_for_cluster_api(must_not_probe, tunnel_process=_Process())
 
     def test_access_failure_propagates_before_tunnel(
@@ -1719,7 +1719,7 @@ class TestAdditionalResumeAndDeadlineSafety:
             kubectl=slow_kubectl,
         )
         monkeypatch.setattr(inventory_module.time, "monotonic", monotonic)
-        with pytest.raises(ManagedInferenceValidationError, match="deadline|timeout"):
+        with pytest.raises(ManagedInferenceValidationError, match=r"deadline|timeout"):
             runner.prove_absence(records[0])
         assert observed_timeouts == [1.0]
         assert clock.now == 1.0

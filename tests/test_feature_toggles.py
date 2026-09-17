@@ -7,6 +7,7 @@ to use the same generic helpers still works.
 """
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -48,7 +49,7 @@ class TestGenericFeatureConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             _get_feature_config("my_feature", {"enabled": False})
 
@@ -129,7 +130,7 @@ class TestGenericFeatureConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             _update_feature_config("my_feature", {"enabled": True}, {"enabled": False})
 
@@ -199,7 +200,7 @@ class TestValkeyConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             get_valkey_config()
 
@@ -252,7 +253,7 @@ class TestValkeyConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             update_valkey_config({"enabled": True})
 
@@ -307,7 +308,7 @@ class TestAuroraConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             get_aurora_config()
 
@@ -368,7 +369,7 @@ class TestAuroraConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             update_aurora_config({"enabled": True})
 

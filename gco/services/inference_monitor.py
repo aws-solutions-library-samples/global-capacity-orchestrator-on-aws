@@ -1344,7 +1344,7 @@ class InferenceMonitor:
         if authority is None:
             return resource
         self._assert_current_leadership()
-        metadata, annotations, _uid, resource_version = self._object_metadata(resource)
+        _metadata, annotations, _uid, resource_version = self._object_metadata(resource)
         if getattr(self, "_lease_name", None) is None and resource_version is None:
             # Historical method-level fixtures use metadata-less MagicMocks.
             # Production reconciliation always has a Lease and real metadata.
@@ -2782,7 +2782,7 @@ class InferenceMonitor:
         try:
             bucket = get_ssm_parameter_optional(param_name, region=self.region)
             return bucket if isinstance(bucket, str) and bucket else None
-        except Exception as e:  # noqa: BLE001 - any read failure means "unresolved"
+        except Exception as e:  # any read failure means "unresolved"
             logger.warning(
                 "Failed to resolve general-purpose regional bucket for %s: %s",
                 self.region,
@@ -3512,7 +3512,7 @@ class InferenceMonitor:
         if not command and runtime_framework == "vllm":
             if args:
                 if "--root-path" not in args:
-                    args = list(args) + ["--root-path", serving_prefix]
+                    args = [*args, "--root-path", serving_prefix]
             else:
                 args = ["--root-path", serving_prefix]
 

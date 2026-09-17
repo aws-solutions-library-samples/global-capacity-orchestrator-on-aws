@@ -611,7 +611,7 @@ class TestDiscoveryConfiguration:
             monkeypatch.delenv("TARGET_REGIONS", raising=False)
         else:
             monkeypatch.setenv("TARGET_REGIONS", raw)
-        with pytest.raises(RuntimeError, match="not configured|invalid region"):
+        with pytest.raises(RuntimeError, match=r"not configured|invalid region"):
             handler._configured_regions()
 
     def test_empty_target_regions_is_a_control_plane_only_deployment(self, monkeypatch):

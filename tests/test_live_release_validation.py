@@ -276,7 +276,7 @@ class TestCentralQueueResume:
         assert record["appearance_deadline"] == original_deadline
 
         changed = {**persisted, "k8s_job_uid": "uid-central-replaced"}
-        with pytest.raises(RuntimeError, match="identity changed|UID disagrees"):
+        with pytest.raises(RuntimeError, match=r"identity changed|UID disagrees"):
             checks_central_queue._reconcile_central_workload_identity(
                 ctx,
                 central_record,
@@ -1655,7 +1655,7 @@ class TestDeterministicTopologyReadiness:
         first_arn = str(environment.target_groups["us-east-1"][0]["TargetGroupArn"])
         environment.target_group_tags["us-east-1"][first_arn].pop("gco.aws/backend")
 
-        with pytest.raises(RuntimeError, match="invalid gco.aws/backend identity"):
+        with pytest.raises(RuntimeError, match=re.escape("invalid gco.aws/backend identity")):
             self._invoke(environment)
 
         environment.ctx.aws_client.call_api.assert_not_called()
@@ -1675,7 +1675,7 @@ class TestDeterministicTopologyReadiness:
         removed = environment.target_groups["us-east-1"].pop()
         environment.target_group_tags["us-east-1"].pop(str(removed["TargetGroupArn"]))
 
-        with pytest.raises(RuntimeError, match="missing target groups.*inference-proxy"):
+        with pytest.raises(RuntimeError, match=r"missing target groups.*inference-proxy"):
             self._invoke(environment)
 
         environment.ctx.aws_client.call_api.assert_not_called()
@@ -1943,7 +1943,7 @@ class TestDeterministicTopologyReadiness:
 
         environment.ctx.aws_client.call_api.side_effect = call_api
 
-        with pytest.raises(RuntimeError, match="Health stability call failed.*round 1"):
+        with pytest.raises(RuntimeError, match=r"Health stability call failed.*round 1"):
             self._invoke(environment)
 
         warmup = environment.ctx.checkpoint.state["topology_health_warmup_samples"]
@@ -1961,7 +1961,7 @@ class TestDeterministicTopologyReadiness:
             RuntimeError("API request failed: 504 Gateway Timeout"),
         ]
 
-        with pytest.raises(RuntimeError, match="Health warm-up call failed.*attempt 3"):
+        with pytest.raises(RuntimeError, match=r"Health warm-up call failed.*attempt 3"):
             self._invoke(environment)
 
         warmup = environment.ctx.checkpoint.state["topology_health_warmup_samples"]
@@ -1975,7 +1975,7 @@ class TestDeterministicTopologyReadiness:
             "API request failed: 403 Forbidden"
         )
 
-        with pytest.raises(RuntimeError, match="Health warm-up call failed.*attempt 1"):
+        with pytest.raises(RuntimeError, match=r"Health warm-up call failed.*attempt 1"):
             self._invoke(environment)
 
         assert environment.ctx.aws_client.call_api.call_count == 1
@@ -1991,7 +1991,7 @@ class TestDeterministicTopologyReadiness:
             403, "Service unavailable"
         )
 
-        with pytest.raises(RuntimeError, match="Health warm-up call failed.*attempt 1"):
+        with pytest.raises(RuntimeError, match=r"Health warm-up call failed.*attempt 1"):
             self._invoke(environment)
 
         assert environment.ctx.aws_client.call_api.call_count == 1
@@ -2133,7 +2133,7 @@ class TestDeterministicTopologyReadiness:
 
         environment.ctx.aws_client.call_api.side_effect = call_api
 
-        with pytest.raises(RuntimeError, match="post-helm-gateway.yaml"):
+        with pytest.raises(RuntimeError, match=re.escape("post-helm-gateway.yaml")):
             self._invoke(environment)
 
         samples = environment.ctx.checkpoint.state["topology_metrics_samples"]
@@ -2161,7 +2161,7 @@ class TestDeterministicTopologyReadiness:
 
         environment.ctx.aws_client.call_api.side_effect = call_api
 
-        with pytest.raises(RuntimeError, match="Malformed metrics response.*resource_utilization"):
+        with pytest.raises(RuntimeError, match=r"Malformed metrics response.*resource_utilization"):
             self._invoke(environment)
 
         sample = environment.ctx.checkpoint.state["topology_metrics_samples"][0]
@@ -6113,7 +6113,7 @@ class TestProjectTargetGroupScanner:
     def test_target_groups_participate_in_all_zero_gate(self):
         from scripts.live_release_validation.inventory import project as inventory_project
 
-        resources = dict.fromkeys(inventory_project._REGIONAL_PROJECT_RESOURCE_CATEGORIES, [])
+        resources = {key: [] for key in inventory_project._REGIONAL_PROJECT_RESOURCE_CATEGORIES}
         resources["target_groups"] = [
             "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/orphan/id"
         ]
@@ -6964,7 +6964,7 @@ class TestOpenCostLiveValidationRetry:
     def test_corrupt_retry_journal_fails_closed(self, journal):
         ctx = _context(state={"opencost_report_attempts": {"us-east-1": journal}})
 
-        with pytest.raises(RuntimeError, match="OpenCost .*checkpoint"):
+        with pytest.raises(RuntimeError, match=r"OpenCost .*checkpoint"):
             checks_opencost._generate_validation_report(ctx, "us-east-1")
 
         ctx.aws_client.make_authenticated_request.assert_not_called()
@@ -6982,7 +6982,7 @@ class TestOpenCostLiveValidationRetry:
         ctx = _context(state={"opencost_report_attempts": {"us-west-2": None}})
         ctx.deployment_regions = ("us-east-1", "us-west-2")
 
-        with pytest.raises(RuntimeError, match="us-west-2.*malformed"):
+        with pytest.raises(RuntimeError, match=r"us-west-2.*malformed"):
             checks_opencost._generate_validation_report(ctx, "us-east-1")
 
         ctx.aws_client.make_authenticated_request.assert_not_called()
@@ -7139,7 +7139,7 @@ class TestOpenCostLiveValidationRetry:
 
         with (
             patch.object(checks_opencost.time, "sleep") as sleep,
-            pytest.raises(RuntimeError, match="504.*Gateway timeout"),
+            pytest.raises(RuntimeError, match=r"504.*Gateway timeout"),
         ):
             checks_opencost._generate_validation_report(ctx, "us-east-1")
 
@@ -7175,7 +7175,7 @@ class TestOpenCostLiveValidationRetry:
         assert ctx.persist_callback.call_count == 2
 
         ctx.aws_client.make_authenticated_request.reset_mock()
-        with pytest.raises(RuntimeError, match="successful HTTP outcome.*no validated report"):
+        with pytest.raises(RuntimeError, match=r"successful HTTP outcome.*no validated report"):
             checks_opencost._generate_validation_report(ctx, "us-east-1")
         ctx.aws_client.make_authenticated_request.assert_not_called()
 

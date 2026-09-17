@@ -1157,7 +1157,7 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
     def test_full_success_sweeps_collected_groups(self):
         collected = {"gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]}}
-        (ok, successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
+        (ok, _successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
             destroy_results=[True, True],
             collected=collected,
         )

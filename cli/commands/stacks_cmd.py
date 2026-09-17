@@ -565,7 +565,7 @@ def destroy_all_orchestrated(
                 else:
                     formatter.print_error(f"  ✗ {stack_name} failed")
 
-            success, successful, failed = manager.destroy_orchestrated(
+            success, _successful, failed = manager.destroy_orchestrated(
                 force=True,
                 on_stack_start=on_start,
                 on_stack_complete=on_complete,

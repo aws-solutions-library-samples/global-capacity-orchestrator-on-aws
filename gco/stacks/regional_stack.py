@@ -76,7 +76,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import aws_cdk.aws_eks_v2 as eks
 import yaml
@@ -1704,7 +1704,7 @@ class GCORegionalStack(Stack):
     # validation run sched241-350ffc7d caught exactly that (two g4dn.xlarge
     # NodeClaims requesting ``nvidia.com/gpu: "0"``, churned mid-install,
     # failing GPU DaemonSet convergence checks).
-    _ADDON_NODE_TOLERATIONS = [
+    _ADDON_NODE_TOLERATIONS: ClassVar[list[dict[str, str]]] = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "vpc.amazonaws.com/efa", "operator": "Exists", "effect": "NoSchedule"},

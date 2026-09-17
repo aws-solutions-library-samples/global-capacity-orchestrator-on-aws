@@ -442,7 +442,7 @@ class TestGCOAWSClientRequests:
                 )
                 client._cache_timestamp = time.time()
 
-                with pytest.raises(RuntimeError, match="my-job.*already exists"):
+                with pytest.raises(RuntimeError, match=r"my-job.*already exists"):
                     client.submit_manifests(
                         manifests=[{"apiVersion": "batch/v1", "kind": "Job"}],
                         namespace="default",
@@ -1041,7 +1041,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
             client.get_regional_api_endpoint = MagicMock()
             client.get_api_endpoint = MagicMock()
 
-            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+            with pytest.raises(ValueError, match=r"requires a non-empty.*AWS region"):
                 client.make_authenticated_request(
                     "GET",
                     "/api/v1/jobs",
@@ -1062,7 +1062,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
             client.get_regional_api_endpoint = MagicMock()
             client.get_api_endpoint = MagicMock()
 
-            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+            with pytest.raises(ValueError, match=r"requires a non-empty.*AWS region"):
                 client.make_authenticated_request("GET", "/api/v1/jobs")
 
         client.get_regional_api_endpoint.assert_not_called()

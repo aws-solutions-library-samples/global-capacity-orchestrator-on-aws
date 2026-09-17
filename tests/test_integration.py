@@ -107,7 +107,7 @@ def _load_trusted_config() -> tuple[list[str], list[str]]:
 
 TRUSTED_REGISTRIES, TRUSTED_DOCKERHUB_ORGS = _load_trusted_config()
 # Add "library" for official Docker Hub images
-TRUSTED_DOCKERHUB_ORGS = list(TRUSTED_DOCKERHUB_ORGS) + ["library"]
+TRUSTED_DOCKERHUB_ORGS = [*TRUSTED_DOCKERHUB_ORGS, "library"]
 
 
 # =============================================================================

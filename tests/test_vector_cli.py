@@ -8,6 +8,7 @@
 import hashlib
 import io
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -330,7 +331,7 @@ class TestSsmResolution:
         monkeypatch.setattr("gco.services.aws_ssm.get_ssm_parameter", _missing)
         store = VectorStoreClient()
 
-        with pytest.raises(VectorStoreUnavailableError, match="vector_store.enabled"):
+        with pytest.raises(VectorStoreUnavailableError, match=re.escape("vector_store.enabled")):
             store.search("q")
 
     def test_names_resolve_once_and_are_cached(self, monkeypatch):
@@ -451,7 +452,7 @@ class TestDemoCorpus:
         )
         monkeypatch.chdir(checkout)
 
-        with pytest.raises(VectorStoreError, match="regular docs/.* files inside"):
+        with pytest.raises(VectorStoreError, match=r"regular docs/.* files inside"):
             demo_corpus_paths()
 
 

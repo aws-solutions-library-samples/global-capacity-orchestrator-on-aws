@@ -20,6 +20,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -55,7 +56,7 @@ from cli.managed_config import (
 # Ensure gco_mcp/ is importable, mirroring the other MCP test modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 REGION_TOOLS = (
     "list_deployment_regions",
@@ -188,7 +189,9 @@ class TestEngineValidation:
     def test_missing_context_refused(self, tmp_path: Path):
         path = tmp_path / "cdk.json"
         path.write_text(json.dumps({"app": "x"}), encoding="utf-8")
-        with pytest.raises(ManagedConfigError, match="does not look like a GCO cdk.json"):
+        with pytest.raises(
+            ManagedConfigError, match=re.escape("does not look like a GCO cdk.json")
+        ):
             add_deployment_region("us-west-2", config_path=path)
 
     def test_container_wrong_type_refused(self, tmp_path: Path):
@@ -819,35 +822,35 @@ class TestEngineScalars:
     def test_set_capacity_advisor_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.capacity_advisor_default_model_id must be a non-empty string",
+            match=re.escape("bedrock.capacity_advisor_default_model_id must be a non-empty string"),
         ):
             set_capacity_advisor_default_model("   ", config_path=cdk_json)
 
     def test_set_capacity_advisor_model_surrounding_whitespace_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.capacity_advisor_default_model_id must not have",
+            match=re.escape("bedrock.capacity_advisor_default_model_id must not have"),
         ):
             set_capacity_advisor_default_model(" model-id ", config_path=cdk_json)
 
     def test_set_claude_code_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.claude_code_default_model_id must be a non-empty string",
+            match=re.escape("bedrock.claude_code_default_model_id must be a non-empty string"),
         ):
             set_claude_code_default_model("   ", config_path=cdk_json)
 
     def test_set_claude_code_model_surrounding_whitespace_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.claude_code_default_model_id must not have",
+            match=re.escape("bedrock.claude_code_default_model_id must not have"),
         ):
             set_claude_code_default_model(" model-id ", config_path=cdk_json)
 
     def test_set_codex_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.codex_default_model_id must be a non-empty string",
+            match=re.escape("bedrock.codex_default_model_id must be a non-empty string"),
         ):
             set_codex_default_model("   ", config_path=cdk_json)
 
@@ -857,7 +860,7 @@ class TestEngineScalars:
         before = path.read_bytes()
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.codex_default_model_id must be a non-empty string",
+            match=re.escape("bedrock.codex_default_model_id must be a non-empty string"),
         ):
             set_codex_default_model("", config_path=path)
         assert path.read_bytes() == before
@@ -865,7 +868,7 @@ class TestEngineScalars:
     def test_set_codex_model_surrounding_whitespace_rejected(self, cdk_json: Path):
         with pytest.raises(
             ManagedConfigError,
-            match="bedrock.codex_default_model_id must not have",
+            match=re.escape("bedrock.codex_default_model_id must not have"),
         ):
             set_codex_default_model(" model-id ", config_path=cdk_json)
 
@@ -883,7 +886,9 @@ class TestEngineScalars:
         document = json.loads(cdk_json.read_text(encoding="utf-8"))
         document["context"]["bedrock"]["codex"] = "xhigh"
         cdk_json.write_text(json.dumps(document), encoding="utf-8")
-        with pytest.raises(ManagedConfigError, match="context.bedrock.codex must be a JSON object"):
+        with pytest.raises(
+            ManagedConfigError, match=re.escape("context.bedrock.codex must be a JSON object")
+        ):
             set_codex_reasoning_effort("high", config_path=cdk_json)
 
     def test_unchanged_codex_reasoning_rejects_unknown_siblings(self, cdk_json: Path):

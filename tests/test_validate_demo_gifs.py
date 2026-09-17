@@ -361,7 +361,7 @@ def test_the_byte_ceiling_is_checked_before_the_file_is_read(
     payload = _gif_bytes()
     _, relative = _single(tmp_path, monkeypatch, payload, _policy())
 
-    with pytest.raises(validator.ValidationError, match="bytes exceeds .*-byte limit"):
+    with pytest.raises(validator.ValidationError, match=r"bytes exceeds .*-byte limit"):
         validator._validate_gif(relative, _policy(max_bytes=len(payload) - 1))
 
 
@@ -488,7 +488,7 @@ def test_a_decoder_frame_count_mismatch_is_rejected(
         def __exit__(self, *_: object) -> None:
             return None
 
-    def fake_open(path):  # noqa: ANN001, ANN202
+    def fake_open(path):
         opens["count"] += 1
         # First open: the real image, so verify() and the size check run on it.
         # Second open: a decoder that reports one frame fewer than the parser.
@@ -554,7 +554,7 @@ def test_main_turns_a_pillow_warning_into_exit_one(
     root = _fake_repo(tmp_path, {"demo/a.gif": _gif_bytes()})
     _point_at(monkeypatch, root, {Path("demo/a.gif"): _policy()})
 
-    def bomb(relative_path, policy):  # noqa: ANN001, ANN202
+    def bomb(relative_path, policy):
         raise validator.Image.DecompressionBombWarning("Image size exceeds limit")
 
     monkeypatch.setattr(validator, "_validate_gif", bomb)

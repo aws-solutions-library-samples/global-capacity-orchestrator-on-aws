@@ -31,10 +31,10 @@ from .inference_runtime import InferenceRuntimeMixin
 
 __all__ = [
     "KUBERNETES_INVENTORY_KINDS",
+    "OWNER_LABEL",
     "EndpointPlan",
     "ManagedInferenceLifecycle",
     "ManagedInferenceValidationError",
-    "OWNER_LABEL",
     "build_delete_command",
     "build_deploy_command",
     "build_endpoint_plans",

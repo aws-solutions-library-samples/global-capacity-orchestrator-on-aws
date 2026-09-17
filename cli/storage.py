@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, ClassVar, Self
 
 import boto3
 from botocore.exceptions import ClientError
@@ -371,7 +371,7 @@ class StorageManager:
 
     _UPLOAD_DIGEST_METADATA = "gco-sync-sha256"
 
-    _PURPOSES = {
+    _PURPOSES: ClassVar[dict[str, str]] = {
         "cluster-shared": "Cross-region cluster job artifacts and shared data",
         "model-weights": "Central model weights used by inference endpoints",
         "regional-shared": "General-purpose data for workloads in one region",
@@ -532,7 +532,7 @@ class StorageManager:
                 name = log_buckets.get((scope_key, descriptor.logical_id_prefix))
             else:
                 name, arn = self._resolve_primary_bucket(descriptor, region, account)
-        except Exception as exc:  # noqa: BLE001 - an unresolvable entry is reported, not fatal
+        except Exception as exc:  # an unresolvable entry is reported, not fatal
             detail = f"could not resolve: {exc}"
 
         if name and not arn:
@@ -674,14 +674,14 @@ class StorageManager:
             identity = boto3.client("sts").get_caller_identity()
             value = identity.get("Account")
             return str(value) if value else None
-        except Exception:  # noqa: BLE001 - the inventory degrades without it
+        except Exception:  # the inventory degrades without it
             return None
 
     def _partition_for(self, region: str) -> str:
         """ARN partition for a region (aws, aws-cn, aws-us-gov)."""
         try:
             return str(boto3.Session().get_partition_for_region(region))
-        except Exception:  # noqa: BLE001 - commercial is the right default
+        except Exception:  # commercial is the right default
             return "aws"
 
     def resolve_bucket(self, alias: str, region: str | None = None) -> dict[str, str]:
@@ -1356,8 +1356,8 @@ class StorageManager:
     ) -> None:
         """Enumerate and open one source directory through already-pinned descriptors."""
         for name in sorted(os.listdir(directory_fd)):
-            child_parts = directory_parts + (name,)
-            child_relative_parts = relative_parts + (name,)
+            child_parts = (*directory_parts, name)
+            child_relative_parts = (*relative_parts, name)
             child = confinement.display_path(child_parts)
             relative = "/".join(child_relative_parts)
             cls._validate_upload_relative_path(relative, child)

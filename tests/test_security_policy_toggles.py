@@ -108,7 +108,7 @@ class TestBlockPrivilegedToggle:
         """block_privileged: true (default) → privileged containers rejected."""
         processor = _make_processor(mock_k8s_config)
         manifest = _job_manifest(container_overrides={"securityContext": {"privileged": True}})
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -133,7 +133,7 @@ class TestBlockPrivilegeEscalationToggle:
         manifest = _job_manifest(
             container_overrides={"securityContext": {"allowPrivilegeEscalation": True}}
         )
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -154,7 +154,7 @@ class TestBlockHostNetworkToggle:
         """block_host_network: true (default) → hostNetwork rejected."""
         processor = _make_processor(mock_k8s_config)
         manifest = _job_manifest(pod_spec_overrides={"hostNetwork": True})
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -175,7 +175,7 @@ class TestBlockHostPIDToggle:
         """block_host_pid: true (default) → hostPID rejected."""
         processor = _make_processor(mock_k8s_config)
         manifest = _job_manifest(pod_spec_overrides={"hostPID": True})
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -196,7 +196,7 @@ class TestBlockHostIPCToggle:
         """block_host_ipc: true (default) → hostIPC rejected."""
         processor = _make_processor(mock_k8s_config)
         manifest = _job_manifest(pod_spec_overrides={"hostIPC": True})
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -225,7 +225,7 @@ class TestBlockHostPathToggle:
                 "volumes": [{"name": "host-vol", "hostPath": {"path": _FIXTURE_HOST_PATH}}]
             }
         )
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -250,7 +250,7 @@ class TestBlockAddedCapabilitiesToggle:
         manifest = _job_manifest(
             container_overrides={"securityContext": {"capabilities": {"add": ["SYS_ADMIN"]}}}
         )
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -282,7 +282,7 @@ class TestBlockRunAsRootToggle:
             manifest_security_policy={"block_run_as_root": True},
         )
         manifest = _job_manifest(pod_spec_overrides={"securityContext": {"runAsUser": 0}})
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -396,7 +396,7 @@ class TestAllowedKindsConfigurability:
         )
         for kind in ["Job", "Deployment", "Service", "Pod"]:
             manifest = _job_manifest(kind=kind)
-            is_valid, error = processor.validate_manifest(manifest)
+            is_valid, _error = processor.validate_manifest(manifest)
             assert is_valid is False, f"Empty allowed_kinds should reject {kind}"
 
     def test_adding_non_default_kind(self, mock_k8s_config):
@@ -421,7 +421,7 @@ class TestAllowedKindsConfigurability:
             extra_config={"allowed_kinds": ["Job", "NetworkPolicy"]},
         )
         manifest = _job_manifest(kind="Deployment")
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 

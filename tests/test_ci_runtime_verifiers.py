@@ -185,7 +185,7 @@ def test_dev_verifier_rejects_a_valid_but_wrong_runtime_version(
     outputs = _dev_outputs()
     outputs[("node", "--version")] = "v24.18.0"
 
-    with pytest.raises(container_verifier.VerificationError, match="expected Node.js"):
+    with pytest.raises(container_verifier.VerificationError, match=re.escape("expected Node.js")):
         container_verifier.verify_dev_image(
             "gco-dev",
             ROOT / "Dockerfile.dev",
@@ -259,7 +259,9 @@ def test_container_verifier_refuses_a_dockerfile_missing_a_pin(
     dockerfile = tmp_path / "Dockerfile.dev"
     dockerfile.write_text("FROM scratch\nARG NODE_VERSION=24.21.0\n", encoding="utf-8")
 
-    with pytest.raises(container_verifier.VerificationError, match="missing Dockerfile.dev pins"):
+    with pytest.raises(
+        container_verifier.VerificationError, match=re.escape("missing Dockerfile.dev pins")
+    ):
         container_verifier.parse_dev_pins(dockerfile)
 
 
@@ -295,7 +297,9 @@ def test_container_verifier_requires_exactly_one_resolvable_pin(
 
 
 def test_container_verifier_rejects_unparseable_tool_output(container_verifier: Any) -> None:
-    with pytest.raises(container_verifier.VerificationError, match="could not parse Node.js"):
+    with pytest.raises(
+        container_verifier.VerificationError, match=re.escape("could not parse Node.js")
+    ):
         container_verifier._extract_version("command not found", r"v(\d+\.\d+\.\d+)", "Node.js")
 
 

@@ -1308,7 +1308,7 @@ def test_role_autoscaling_validator_accepts_absent_optional_bounds() -> None:
 )
 def test_manager_deploy_rejects_incompatible_framework_contracts(kwargs: dict[str, Any]) -> None:
     manager = _manager_with_store(MagicMock())
-    with pytest.raises(ValueError, match="framework|Mooncake"):
+    with pytest.raises(ValueError, match=r"framework|Mooncake"):
         manager.deploy(
             "ep",
             image="image:v1",

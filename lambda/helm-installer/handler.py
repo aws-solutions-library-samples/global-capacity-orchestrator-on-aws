@@ -379,7 +379,7 @@ def run_helm(
     provable bound than create/update without changing the latter's 13-minute
     allowance.
     """
-    cmd = ["helm"] + args
+    cmd = ["helm", *args]
 
     helm_env = os.environ.copy()
     helm_env["KUBECONFIG"] = kubeconfig
@@ -1880,13 +1880,11 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
     The webhook will be recreated when its chart is successfully reinstalled.
     """
     try:
-        # Use kubectl to check for stale webhooks (simpler than kubernetes Python client)
-        code, stdout, _ = run_helm(
-            ["--kubeconfig", kubeconfig],  # dummy — we just need the env
-            kubeconfig,
-        )
-
-        # Get all mutating webhook configs
+        # Use kubectl to check for stale webhooks (simpler than kubernetes
+        # Python client). Everything below builds its own KUBECONFIG env; an
+        # earlier revision also spawned a throwaway `helm --kubeconfig` here
+        # "for the env" and discarded every result, which was one helm
+        # process per cleanup for nothing.
         import subprocess
 
         env = os.environ.copy()

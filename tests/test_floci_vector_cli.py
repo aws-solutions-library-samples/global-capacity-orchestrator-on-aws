@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import boto3
 import pytest
@@ -159,7 +160,7 @@ class TestDiscoveryAndIngestOverTheRealWire:
     def test_a_missing_deployment_maps_to_unavailable(self, monkeypatch):
         monkeypatch.setenv("GCO_PROJECT_NAME", unique_name("gco-absent"))
 
-        with pytest.raises(VectorStoreUnavailableError, match="vector_store.enabled"):
+        with pytest.raises(VectorStoreUnavailableError, match=re.escape("vector_store.enabled")):
             _client().status()
 
 

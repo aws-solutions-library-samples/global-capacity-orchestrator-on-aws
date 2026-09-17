@@ -145,7 +145,7 @@ def list_endpoint_groups(ga_client: Any, listener_arn: str) -> dict[str, dict[st
                 continue
             groups[str(region)] = {
                 "arn": str(arn),
-                "traffic_dial": int(round(float(group.get("TrafficDialPercentage", 100.0)))),
+                "traffic_dial": round(float(group.get("TrafficDialPercentage", 100.0))),
             }
         token = response.get("NextToken")
         if not token:
@@ -223,7 +223,7 @@ def healthy_percent(
         if not values:
             return None
         return 100.0 * sum(values) / len(values)
-    except Exception as exc:  # noqa: BLE001 - missing telemetry means "hold"
+    except Exception as exc:  # missing telemetry means "hold"
         logger.warning("Health signal unavailable for %s: %s", region, exc)
         return None
 
@@ -232,7 +232,7 @@ def target_dial(healthy: float, min_dial: int, full_health: int) -> int:
     """Map a healthy percent to a target dial percentage."""
     if healthy >= full_health:
         return 100
-    return max(min_dial, int(round(healthy)))
+    return max(min_dial, round(healthy))
 
 
 def step_limit(current: int, target: int, max_step: int) -> int:
@@ -326,7 +326,7 @@ def publish_metrics(cloudwatch_client: Any, decisions: list[dict[str, Any]]) -> 
                 Namespace=DIAL_METRIC_NAMESPACE,
                 MetricData=metric_data[index : index + METRIC_BATCH_SIZE],
             )
-    except Exception as exc:  # noqa: BLE001 - metrics are advisory
+    except Exception as exc:  # metrics are advisory
         logger.warning("Failed to publish traffic-dial metrics: %s", exc)
 
 
@@ -339,7 +339,7 @@ def store_state(ssm_client: Any, project_name: str, state: dict[str, Any]) -> No
             Type="String",
             Overwrite=True,
         )
-    except Exception as exc:  # noqa: BLE001 - state is advisory
+    except Exception as exc:  # state is advisory
         logger.warning("Failed to store traffic-dial state: %s", exc)
 
 

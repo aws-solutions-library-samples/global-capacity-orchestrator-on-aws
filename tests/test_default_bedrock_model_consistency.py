@@ -13,6 +13,7 @@ models must each have a complete captured scaffolder fixture.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -760,7 +761,7 @@ def test_canonical_config_errors_when_no_owned_path_exists(monkeypatch: Any) -> 
 
     with pytest.raises(
         bedrock_config.BedrockModelConfigurationError,
-        match="Could not locate canonical cdk.json",
+        match=re.escape("Could not locate canonical cdk.json"),
     ):
         bedrock_config._canonical_cdk_json_path()
 

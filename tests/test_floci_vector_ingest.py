@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 
 import boto3
 import pytest
@@ -164,7 +165,7 @@ class TestIngestOverTheRealWire:
     def test_missing_object_fails_that_object_over_the_real_wire(self, handler, corpus_bucket):
         # The real emulator answers NoSuchKey; per-object isolation turns
         # it into a summary failure and a batch-level raise.
-        with pytest.raises(RuntimeError, match="ghost.md"):
+        with pytest.raises(RuntimeError, match=re.escape("ghost.md")):
             handler.lambda_handler(_event(corpus_bucket, f"{_PREFIX}ghost.md"), context=None)
 
 

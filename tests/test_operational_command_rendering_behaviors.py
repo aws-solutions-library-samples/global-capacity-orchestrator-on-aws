@@ -224,7 +224,7 @@ def test_codex_validator_leaves_dangling_or_nonassignment_config_for_codex() -> 
     ],
 )
 def test_codex_validator_rejects_malformed_or_broadened_gco_policy(assignment: str) -> None:
-    with pytest.raises(ValueError, match="owned by Autopilot|cannot override"):
+    with pytest.raises(ValueError, match=r"owned by Autopilot|cannot override"):
         _validate_codex_engine_args(("-c", assignment))
 
 

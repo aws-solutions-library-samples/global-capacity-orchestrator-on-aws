@@ -2444,7 +2444,7 @@ class TestAuthoritativeManifestPlanner:
         (tmp_path / "10-base.yaml").write_text(manifest)
         (tmp_path / "post-helm-duplicate.yaml").write_text(manifest)
 
-        with pytest.raises(ValueError, match="duplicate.*first declared"):
+        with pytest.raises(ValueError, match=r"duplicate.*first declared"):
             handler_module.plan_manifests(str(tmp_path), {})
 
     @pytest.mark.parametrize(

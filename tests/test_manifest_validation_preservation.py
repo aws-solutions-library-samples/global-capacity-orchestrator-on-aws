@@ -364,7 +364,7 @@ class TestImageSourcePreservation:
     def test_untrusted_image_with_slash(self, manifest_processor):
         """Untrusted org images rejected."""
         manifest = _make_job_manifest(image="unknown-org/suspicious-tool:v1")
-        is_valid, error = manifest_processor.validate_manifest(manifest)
+        is_valid, _error = manifest_processor.validate_manifest(manifest)
         assert is_valid is False
 
 

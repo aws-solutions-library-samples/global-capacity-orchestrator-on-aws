@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -65,7 +66,7 @@ def test_python_percent_reads_coverage_py_totals(tmp_path: Path) -> None:
 
 def test_python_percent_rejects_a_document_without_totals(tmp_path: Path) -> None:
     path = _write(tmp_path, "coverage.json", {"files": {}})
-    with pytest.raises(renderer.BadgeError, match="no totals.percent_covered"):
+    with pytest.raises(renderer.BadgeError, match=re.escape("no totals.percent_covered")):
         renderer.python_percent(path)
 
 

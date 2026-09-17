@@ -728,7 +728,7 @@ class TestCleanupBackupVault:
         assert "Cleaned up 2 backup recovery points" in capsys.readouterr().out
 
     def test_missing_exact_stack_resource_short_circuits(self, manager: Any) -> None:
-        cloudformation, backup, client = self._clients(resources=[])
+        _cloudformation, backup, client = self._clients(resources=[])
         with patch("boto3.client", side_effect=client):
             result = manager._cleanup_backup_vault()
         assert result["status"] == "vault-resource-absent"

@@ -40,7 +40,9 @@ DEPLOYMENT_FILES = (
 )
 SCALED_JOB_FILE = "post-helm-sqs-consumer.yaml"
 TLS_SIDECAR = "api-tls-proxy"
-IRSA_TOKEN_PATH = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"  # noqa: S105 - a mount path, not a secret
+IRSA_TOKEN_PATH = (
+    "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"  # a mount path, not a secret
+)
 
 #: Typed placeholder rendering: bare integers where Kubernetes wants integers,
 #: quantities where it wants quantities. Everything else becomes a string.

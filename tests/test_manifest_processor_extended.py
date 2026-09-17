@@ -188,7 +188,7 @@ class TestManifestValidationErrors:
             "spec": None,  # This will cause issues during validation
         }
 
-        is_valid, error = manifest_processor.validate_manifest(manifest)
+        is_valid, _error = manifest_processor.validate_manifest(manifest)
         # Should handle gracefully
         assert is_valid is False or is_valid is True  # Either outcome is valid
 
@@ -844,7 +844,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{untrusted_domain}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, _error = self.processor._validate_image_sources(manifest)
 
         assert is_valid is False, (
             f"Image '{image}' from untrusted domain '{untrusted_domain}' should be "

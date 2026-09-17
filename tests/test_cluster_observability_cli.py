@@ -482,7 +482,7 @@ class TestStartApiTunnel:
         monkeypatch.setattr(ssm_tunnel.socket, "create_connection", refused)
         monkeypatch.setattr(ssm_tunnel.time, "sleep", lambda _seconds: None)
 
-        with pytest.raises(RuntimeError, match="exit code 23.*Session Manager channel failed"):
+        with pytest.raises(RuntimeError, match=r"exit code 23.*Session Manager channel failed"):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
                 "https://ABC.gr7.us-east-1.eks.amazonaws.com",

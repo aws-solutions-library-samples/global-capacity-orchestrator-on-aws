@@ -234,7 +234,7 @@ class TestManifestValidationProperties:
             sc.pop("privileged", None)
             sc.pop("allowPrivilegeEscalation", None)
 
-        is_valid, error = self.processor.validate_manifest(manifest)
+        is_valid, _error = self.processor.validate_manifest(manifest)
         # May still fail on resource limits, but should not crash
         assert isinstance(is_valid, bool)
 
@@ -257,7 +257,7 @@ class TestManifestValidationProperties:
                 }
             },
         }
-        is_valid, error = self.processor.validate_manifest(manifest)
+        is_valid, _error = self.processor.validate_manifest(manifest)
         assert isinstance(is_valid, bool)
 
     @given(manifest=valid_manifest)

@@ -16,6 +16,7 @@ MockApp/MockNode pair surfacing a hand-crafted CDK context. Covers:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -152,7 +153,9 @@ def test_explicit_disable_opts_out() -> None:
 
 
 def test_non_bool_enabled_is_rejected() -> None:
-    with pytest.raises(ConfigValidationError, match="cluster_observability.enabled must be a bool"):
+    with pytest.raises(
+        ConfigValidationError, match=re.escape("cluster_observability.enabled must be a bool")
+    ):
         _loader({"enabled": "yes"})
 
 
@@ -168,7 +171,8 @@ def test_empty_retention_is_rejected() -> None:
 
 def test_non_bool_alertmanager_enabled_is_rejected() -> None:
     with pytest.raises(
-        ConfigValidationError, match="cluster_observability.alertmanager.enabled must be a bool"
+        ConfigValidationError,
+        match=re.escape("cluster_observability.alertmanager.enabled must be a bool"),
     ):
         _loader({"alertmanager": {"enabled": 1}})
 

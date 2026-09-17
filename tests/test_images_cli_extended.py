@@ -1036,7 +1036,7 @@ class TestEcrLoginAndCollision:
                 "cli.images.subprocess.run",
                 return_value=MagicMock(returncode=1, stderr=b"denied"),
             ),
-            pytest.raises(RuntimeError, match="login.*failed"),
+            pytest.raises(RuntimeError, match=r"login.*failed"),
         ):
             manager._ecr_login("docker")
 

@@ -73,12 +73,10 @@ __all__ = [
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
     "DEFAULT_BEDROCK_REGION",
+    "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "ENV_BEDROCK_MODEL_ID",
     "ENV_BEDROCK_REGION",
-    "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "FINAL_LESSONS_SCHEMA",
-    "BedrockSamplingBackend",
-    "MissionValidationError",
     "OBSERVATION_FIELD_BYTE_CAP",
     "OBSERVATION_FIELD_TRUNCATE_TO",
     "PRIOR_MISSIONS_BYTE_CAP",
@@ -86,12 +84,14 @@ __all__ = [
     "RECENT_ITERATIONS_LIMIT",
     "STRATEGY_REVISION_SCHEMA",
     "STRATEGY_SHAPE_SCHEMA",
+    "TRUNCATION_MARKER",
+    "BedrockSamplingBackend",
+    "MissionValidationError",
     "SamplingBackend",
     "SamplingFallback",
     "SamplingPrompt",
     "SamplingTransportError",
     "SamplingUsed",
-    "TRUNCATION_MARKER",
     "maybe_sample_final_lessons",
     "maybe_sample_strategy_revision",
     "resolve_sampling_state",
@@ -1311,7 +1311,7 @@ def validate_strategy_against_catalog(
                 )
             try:
                 schema.model_validate(args)
-            except Exception as exc:  # noqa: BLE001 - pydantic ValidationError + similar
+            except Exception as exc:  # pydantic ValidationError + similar
                 # Pydantic v2 ValidationError exposes ``.errors()`` as a
                 # list of structured dicts. Tolerate any other exception
                 # type (e.g. older Pydantic, custom validators) by
@@ -1320,7 +1320,7 @@ def validate_strategy_against_catalog(
                 if callable(errors_method):
                     try:
                         errors_payload: Any = errors_method()
-                    except Exception:  # noqa: BLE001 - defensive
+                    except Exception:  # defensive
                         errors_payload = [{"type": "unknown", "msg": str(exc)}]
                 else:
                     errors_payload = [{"type": "unknown", "msg": str(exc)}]

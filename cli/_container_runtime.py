@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # cache state idempotent under concurrent first-callers and avoids
 # the static-analysis false positive on a stand-alone bool flag.
 _UNCHECKED: object = object()
-_container_runtime_cache: str | None | object = _UNCHECKED
+_container_runtime_cache: str | object | None = _UNCHECKED
 
 
 def detect_container_runtime() -> str | None:

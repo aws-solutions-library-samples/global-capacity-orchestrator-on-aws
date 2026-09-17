@@ -1990,7 +1990,7 @@ class TestInferenceManager:
             "lifecycle_id": "life-scale",
             "spec": {"autoscaling": {"enabled": True}},
         }
-        with pytest.raises(ValueError, match="autoscaled.*min/max"):
+        with pytest.raises(ValueError, match=r"autoscaled.*min/max"):
             manager.scale("ep", 5)
         mock_store_instance.scale_endpoint.assert_not_called()
 
@@ -2013,7 +2013,7 @@ class TestInferenceManager:
             "desired_state": "deleted",
             "spec": {"replicas": 1},
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.scale("ep", 5)
         mock_store_instance.scale_endpoint.assert_not_called()
 
@@ -2042,7 +2042,7 @@ class TestInferenceManager:
             "lifecycle_id": "life-stop",
             "desired_state": "deleted",
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.stop("ep")
         mock_store_instance.update_desired_state.assert_not_called()
 
@@ -2124,7 +2124,7 @@ class TestInferenceManager:
             "desired_state": "deleted",
             "spec": {"image": "old:v1"},
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.update_image("ep", "new:v2")
         mock_store_instance.update_spec.assert_not_called()
 

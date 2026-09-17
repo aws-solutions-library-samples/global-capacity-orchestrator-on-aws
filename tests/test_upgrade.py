@@ -144,7 +144,7 @@ def test_run_git_raises_with_stderr_or_status() -> None:
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(  # noqa: S603 - test fixture, fixed argv
+    return subprocess.run(  # test fixture, fixed argv
         ["git", "-C", str(root), *args],
         check=True,
         capture_output=True,
@@ -306,7 +306,7 @@ def test_checkout_release_leaves_an_identical_cdk_json_alone(release_repo: Path)
 
 def test_checkout_release_refuses_other_local_modifications(release_repo: Path) -> None:
     (release_repo / "VERSION").write_text("hacked\n")
-    with pytest.raises(UpgradeError, match="local modifications.*VERSION"):
+    with pytest.raises(UpgradeError, match=r"local modifications.*VERSION"):
         engine.checkout_release(release_repo, ReleaseTag((8, 1, 0), "v8.1.0"))
     assert _git(release_repo, "describe", "--tags", "--exact-match", "HEAD").strip() == "v8.0.1"
 

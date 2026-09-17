@@ -409,7 +409,7 @@ class TestDeletedCanaryTerminality:
 
         with (
             patch.object(manager, "_get_store", return_value=mock_store),
-            pytest.raises(ValueError, match="deleted.*redeploy"),
+            pytest.raises(ValueError, match=r"deleted.*redeploy"),
         ):
             getattr(manager, method_name)("my-llm", *args)
 

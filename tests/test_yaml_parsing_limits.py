@@ -255,7 +255,7 @@ class TestValidateManifestDepth:
             )
 
         manifest = {"deeply": _nested_dict(10)}
-        is_valid, error = proc.validate_manifest(manifest)
+        is_valid, _error = proc.validate_manifest(manifest)
         assert is_valid is True
 
 
