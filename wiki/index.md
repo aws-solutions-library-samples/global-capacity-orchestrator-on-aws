@@ -17,7 +17,7 @@ charges start at the third one, and the last one removes everything again.
 
 ```bash
 git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git && cd global-capacity-orchestrator-on-aws
-./scripts/setup-dev-alias.sh && source ~/.zshrc                  # dev container + `gco` shell function (or ~/.bashrc — the script says which)
+./scripts/setup-dev-alias.sh && source ~/.zshrc                   # dev container + `gco` shell function (or ~/.bashrc — the script says which)
 gco stacks deploy-all -y                                          # billable from here: global control plane + every Region in cdk.json
 gco jobs submit-sqs examples/simple-job.yaml --region us-east-1   # your first job
 gco stacks destroy-all -y                                         # tear it all down
