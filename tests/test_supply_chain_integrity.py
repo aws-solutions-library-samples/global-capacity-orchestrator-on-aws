@@ -353,6 +353,18 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
         ),
         (
+            "integration-kind-cost-pipeline",
+            "Install Helm",
+            "helm-${HELM_VERSION}-linux-amd64.tar.gz",
+            'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
+        ),
+        (
+            "integration-kind-cost-pipeline",
+            "Install Calico for NetworkPolicy enforcement",
+            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
+            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
+        ),
+        (
             "integration-kind-examples-smoke",
             "Install Helm",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
@@ -393,7 +405,11 @@ def test_kind_node_and_probe_images_are_prepulled_before_use() -> None:
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     jobs = workflow["jobs"]
 
-    for job_id in ("integration-kind-cluster-e2e", "integration-kind-examples-smoke"):
+    for job_id in (
+        "integration-kind-cluster-e2e",
+        "integration-kind-cost-pipeline",
+        "integration-kind-examples-smoke",
+    ):
         steps = jobs[job_id]["steps"]
         kind_index = next(
             index
@@ -500,6 +516,128 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
         if str(step.get("uses", "")).startswith("helm/kind-action")
     )
     assert install_helm_index < prefetch_index < kind_index
+
+
+def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() -> None:
+    """The cost-pipeline job must stay a real-artifact test, fail-fast on mutation.
+
+    Same prefetch/local-archive contract as examples-smoke (registry retries
+    only on the read-only ``helm pull``; every install consumes one local
+    archive once), plus the properties that make the job worth having: the
+    chart identities come from ``charts.yaml`` through ``--emit-ref`` /
+    ``--emit-values`` (never a literal version), the cost monitor is the
+    ``cost-monitor:ci`` image built from the shipped Dockerfile and rendered
+    from the shipped ``34-cost-monitor.yaml`` with the production
+    ``OPENCOST_BASE_URL`` untouched, the S3 stand-in is the digest-pinned
+    Floci emulator, the monitor's real data probe and report API are what is
+    asserted, and the Parquet columns are checked against
+    ``ALLOCATION_REPORT_FIELDS`` inside the monitor's own container.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    job = workflow["jobs"]["integration-kind-cost-pipeline"]
+    assert job["name"] == "integration:kind:cost-pipeline"
+    assert job["timeout-minutes"] >= 45
+    assert job["env"]["CI_S3_EMULATOR_IMAGE"].startswith("floci/floci:")
+    steps = job["steps"]
+    by_name = {step.get("name"): step for step in steps if isinstance(step, dict)}
+
+    prefetch = by_name["Prefetch pinned Kind charts with retry"]["run"]
+    assert "for attempt in 1 2 3 4" in prefetch
+    assert "timeout 60s helm pull" in prefetch
+    assert 'echo "${env_name}=${archive}" >> "${GITHUB_ENV}"' in prefetch
+    for chart, env_name in (
+        ("kube-prometheus-stack", "KPS_CHART_ARCHIVE"),
+        ("opencost", "OPENCOST_CHART_ARCHIVE"),
+    ):
+        assert f"pull_chart {chart} {env_name}" in prefetch
+
+    local_archives = {
+        "Install pinned kube-prometheus-stack with shipped values": (
+            "kube-prometheus-stack",
+            "${KPS_CHART_ARCHIVE}",
+        ),
+        "Install pinned OpenCost with shipped values": ("opencost", "${OPENCOST_CHART_ARCHIVE}"),
+    }
+    for step_name, (chart, archive) in local_archives.items():
+        run = by_name[step_name]["run"]
+        assert archive in run, step_name
+        assert f"--emit-ref {chart}" in run, step_name
+        assert f"--emit-values {chart}" in run, step_name
+        assert "helm repo add" not in run, step_name
+        assert "helm repo update" not in run, step_name
+        assert "helm pull" not in run, step_name
+        assert "for attempt in" not in run, step_name
+        assert "retrying" not in run.lower(), step_name
+        mutations = re.findall(r"^\s*(?:if ! )?helm (?:install|upgrade)\b", run, re.MULTILINE)
+        assert len(mutations) == 1, step_name
+    # The deploy-time overlay mirrors the regional stack's injected values;
+    # the CI-only omissions are named where they are set.
+    kps = by_name["Install pinned kube-prometheus-stack with shipped values"]["run"]
+    assert '["context"]["cluster_observability"]' in kps
+    assert '"storageClassName": storage_class' in kps
+    assert 'storage_class = "gco-observability-gp3"' in kps
+    assert "rollout status statefulset/prometheus-kube-prometheus-stack-prometheus" in kps
+    opencost = by_name["Install pinned OpenCost with shipped values"]["run"]
+    assert 'defaultClusterId: "${CI_CLUSTER_ID}"' in opencost
+    # The Service/port the monitor's OPENCOST_BASE_URL names and the shipped
+    # egress rule admits, plus the ServiceMonitor the shipped values enable.
+    assert '= "9003"' in opencost
+    assert "get servicemonitor opencost" in opencost
+
+    build = by_name["Build cost-monitor image"]
+    assert build["with"]["file"] == "dockerfiles/Dockerfile.cost-monitor"
+    assert build["with"]["tags"] == "cost-monitor:ci"
+    render = by_name["Render and apply the cost monitor"]["run"]
+    assert "34-cost-monitor.yaml" in render
+    assert '"{{COST_MONITOR_IMAGE}}": "cost-monitor:ci"' in render
+    assert 'irsa = {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}' in render
+    assert '{"name": "COST_REPORT_BUCKET", "value": os.environ["COST_REPORT_BUCKET"]}' in render
+    assert '"value": f"http://{s3_ip}:4566"' in render  # ClusterIP: path-style S3 addressing
+    # The production OpenCost URL is asserted present, never injected: the
+    # render adds emulator credentials and the bucket, nothing OpenCost-side.
+    assert '{"name": "OPENCOST_BASE_URL"' not in render
+    assert '>= {"OPENCOST_BASE_URL"' in render
+    assert "networkpolicy allow-cost-monitor-to-opencost" in render
+    assert "ci-allow-s3-emulator-egress" in render
+
+    status = by_name["Wait for the cost monitor to see OpenCost returning data"]["run"]
+    assert "/internal/status" in status
+    assert 'status["opencost_returning_data"]' in status
+    assert 'status["opencost_healthy"]' in status
+    report = by_name["Generate an ad-hoc report and verify the Parquet object end to end"]["run"]
+    assert "/internal/reports" in report
+    assert "from gco.services.cost_monitor import ALLOCATION_REPORT_FIELDS" in report
+    assert "table.column_names == list(ALLOCATION_REPORT_FIELDS)" in report
+    assert "kubectl -n gco-system exec deploy/cost-monitor" in report
+    assert "aws s3api head-object" in report
+    prometheus = by_name["Verify Prometheus scrapes the pinned OpenCost"]["run"]
+    assert "node_total_hourly_cost" in prometheus
+    netpol = by_name["Verify only the cost monitor may reach OpenCost"]["run"]
+    assert netpol.count("--image=busybox:1.38.0") == 1
+    assert "probe netpol-probe-unlabelled app=netpol-probe blocked" in netpol
+    assert "probe netpol-probe-cost-monitor app=cost-monitor,project=gco reachable" in netpol
+
+    order = [step.get("name") or step.get("uses") for step in steps]
+    kind_index = next(
+        i
+        for i, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    assert (
+        order.index("Install Helm")
+        < order.index("Prefetch pinned Kind charts with retry")
+        < kind_index
+    )
+    assert (
+        order.index("Apply the shipped NetworkPolicies (Calico-enforced)")
+        < order.index("Install pinned kube-prometheus-stack with shipped values")
+        < order.index("Install pinned OpenCost with shipped values")
+        < order.index("Render and apply the cost monitor")
+        < order.index("Verify Prometheus scrapes the pinned OpenCost")
+        < order.index("Wait for the cost monitor to see OpenCost returning data")
+        < order.index("Generate an ad-hoc report and verify the Parquet object end to end")
+        < order.index("Verify only the cost monitor may reach OpenCost")
+    )
 
 
 def test_kind_manifests_are_authenticated_before_local_apply() -> None:
