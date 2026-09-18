@@ -27,7 +27,7 @@ Key capabilities:
 - DynamoDB-backed desired state with continuous reconciliation
 - Rolling updates, scaling, stop/start without losing configuration
 - Global Accelerator routing to the nearest healthy region
-- Support for [vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html), and [TorchServe](https://docs.pytorch.org/serve/) out of the box
+- Support for [vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/), and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) out of the box
 
 ## Architecture
 
@@ -280,25 +280,26 @@ GCO works with any containerized inference server. These frameworks have example
 | [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.29.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
 | [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.19` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 | [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
-| [TorchServe](https://docs.pytorch.org/serve/) ([example](../examples/inference-torchserve.yaml)) | `pytorch/torchserve:0.12.0-gpu` | 8080 | `/ping` | PyTorch model serving |
 
 `gco inference deploy --framework` accepts `vllm` and `sglang`. These two are
 the runtimes with a strict adapter contract: the persisted framework selects
 the renderer arguments and probes, the request body `gco inference invoke`
-builds, and the model-identity document `gco inference models` reads. Triton,
-TorchServe, and any other OpenAI-compatible server deploy without
-`--framework`; the CLI then falls back to OpenAI-compatible requests.
+builds, and the model-identity document `gco inference models` reads. Triton
+and any other OpenAI-compatible server deploy without `--framework`; the CLI
+then falls back to OpenAI-compatible requests.
+
+PyTorch's TorchServe is not listed any more either: its project notice states
+it is no longer actively maintained, with no planned updates, bug fixes, new
+features, or security patches, so GCO no longer ships an example for it.
 
 Hugging Face's Text Generation Inference (TGI) was the second strict runtime
 until it entered maintenance mode on 2025-12-11 and its repository was
-archived read-only on 2026-03-21. New `--framework tgi` deployments are
-refused with a message that points at SGLang and vLLM. Endpoints that were
-deployed with TGI before then are still supported: the renderer keeps their
-startup probe, `gco inference invoke` still speaks TGI's `/generate` and
-`/generate_stream`, and `gco inference models` still reads TGI's `/info`, so
-upgrading GCO neither restarts nor breaks a running TGI endpoint. Migrate
-them at your own pace by deploying an SGLang or vLLM endpoint alongside and
-deleting the TGI one.
+archived read-only on 2026-03-21; SGLang replaced it and the TGI adapter was
+removed outright. `--framework tgi` is no longer a choice, the renderer,
+`gco inference invoke`, and `gco inference models` no longer recognise a
+record persisted as `tgi`, and the authenticated proxy no longer exposes TGI's
+`/info` and `/generate_stream` paths. An endpoint that is still running TGI
+has to be redeployed with `--framework sglang` or `vllm`.
 
 ### vLLM Example
 
@@ -344,17 +345,6 @@ gco inference deploy triton-models \
   --health-path /v2/health/ready \
   --gpu-count 1 \
   --model-source s3://your-bucket/models/triton-repo
-```
-
-### TorchServe Example
-
-```bash
-gco inference deploy torchserve-resnet \
-  -i pytorch/torchserve:0.12.0-gpu \
-  --port 8080 \
-  --health-path /ping \
-  --gpu-count 1 \
-  --model-source s3://your-bucket/models/torchserve-mar
 ```
 
 ## Disaggregated Inference (Mooncake)
@@ -737,7 +727,6 @@ The CLI resolves the serving framework from the persisted `--framework` (falling
 - **vLLM** → `/v1/completions` (OpenAI-compatible; `--stream` sets `"stream": true`)
 - **SGLang** → `/generate` (native API: `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`; `--stream` sets `"stream": true` on the same path)
 - **Triton** → `/v2/models` (Triton HTTP API)
-- **TGI** (legacy endpoints only) → `/generate`, or `/generate_stream` when streaming
 
 `--no-stream` explicitly forces buffered output, including when raw JSON contains
 `"stream": true`. Response streaming can continue for up to the 15-minute
@@ -1028,7 +1017,6 @@ gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1
 # Other available examples:
 # examples/inference-sglang.yaml
 # examples/inference-triton.yaml
-# examples/inference-torchserve.yaml
 # examples/model-download-job.yaml
 ```
 

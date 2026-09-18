@@ -34,12 +34,12 @@ OWN_REGION = "us-east-1"
 NAMESPACE = "gco-inference"
 
 # A mix of server images: vLLM takes the root-path serving branch, SGLang the
-# launcher-injection branch, legacy TGI the startup-probe-only branch, and
-# plain images none of them, so every container argument shape is exercised.
+# launcher-injection branch, and plain images neither, so every container
+# argument shape is exercised.
 IMAGES = [
     "vllm/vllm-openai:v0.6.0",
     "lmsysorg/sglang:v0.5.19",
-    "ghcr.io/huggingface/text-generation-inference:2.0",
+    "nvcr.io/nvidia/tritonserver:26.08-py3",
     "myregistry/custom-model:1.2.3",
     "123456789012.dkr.ecr.us-east-1.amazonaws.com/models/llama:prod",
 ]

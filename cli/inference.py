@@ -554,15 +554,6 @@ class InferenceManager:
         Returns:
             Created endpoint record
         """
-        if framework == "tgi":
-            # Endpoints persisted with ``framework: tgi`` by earlier releases
-            # keep their renderer/probe contract until they are deleted; only
-            # new deployments are refused.
-            raise ValueError(
-                "framework 'tgi' is no longer accepted: Hugging Face placed Text "
-                "Generation Inference in maintenance mode on 2025-12-11 and archived "
-                "it on 2026-03-21. Deploy with 'sglang' or 'vllm'."
-            )
         if framework not in (None, "vllm", "sglang"):
             raise ValueError("framework must be 'vllm' or 'sglang'")
         if mooncake_mode is not None and framework == "sglang":

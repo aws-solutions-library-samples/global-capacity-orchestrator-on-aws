@@ -624,11 +624,11 @@ class TestCommandsAndResponses:
         ("framework", "payload"),
         [
             ("vllm", {"text": "wrong-framework"}),
-            ("vllm", {"generated_text": "retired-tgi-contract"}),
+            ("vllm", {"generated_text": "retired-contract"}),
             ("vllm", {"choices": [{"message": {"content": "chat"}}]}),
             ("sglang", {"choices": [{"text": "wrong-framework"}]}),
             ("sglang", [{"text": "list-is-not-the-selected-contract"}]),
-            ("sglang", {"generated_text": "retired-tgi-contract"}),
+            ("sglang", {"generated_text": "retired-contract"}),
             ("vllm", {"choices": []}),
             ("vllm", {"choices": [{"text": "  "}]}),
             ("sglang", {"text": ""}),

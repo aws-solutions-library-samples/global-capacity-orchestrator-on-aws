@@ -162,7 +162,7 @@ class TestHarnessInvocation:
         assert value_of("--inference-sglang-image").endswith("c" * 64)
         assert value_of("--inference-sglang-model-id") == "test/sglang-model"
         assert value_of("--inference-sglang-model-revision") == "d" * 40
-        assert not any(value.startswith("--inference-tgi") for value in command)
+        assert not any("tgi" in value for value in command)
         assert value_of("--inference-gpu-count") == "0"
         assert "--confirm-inference-deployment" in command
         assert value_of("--repo-root") == str(fake_processes.repo_root)

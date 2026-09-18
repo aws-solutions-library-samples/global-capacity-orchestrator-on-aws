@@ -2475,7 +2475,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--image` | `-i` | Container image (required) |
-| `--framework` | | Explicit serving runtime (`vllm` or `sglang`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. `sglang` renders the official launcher (`python3 -m sglang.launch_server`) bound to `0.0.0.0:<--port>` with `--model-path` taken from `-e MODEL=...` unless it is passed through `--extra-args`. `tgi` is no longer accepted (Hugging Face archived TGI on 2026-03-21); endpoints already persisted as `tgi` keep working. |
+| `--framework` | | Explicit serving runtime (`vllm` or `sglang`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. `sglang` renders the official launcher (`python3 -m sglang.launch_server`) bound to `0.0.0.0:<--port>` with `--model-path` taken from `-e MODEL=...` unless it is passed through `--extra-args`. `tgi` is no longer accepted: Hugging Face archived TGI on 2026-03-21 and its adapter was removed, so an endpoint still running TGI has to be redeployed as `sglang` or `vllm`. |
 | `--region` | `-r` | Target region(s), repeatable (default: all deployed regions) |
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |
@@ -2664,7 +2664,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.29.0
 
 #### `gco inference invoke`
 
-Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton, plus legacy TGI endpoints) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images, SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`, Triton's `/v2/models`, and TGI's `/generate` with `{"inputs": ..., "parameters": {...}}`.
+Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images, SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`, and Triton's `/v2/models`.
 
 ```bash
 gco inference invoke ENDPOINT_NAME [OPTIONS]
@@ -2687,9 +2687,8 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 
 `--stream` forces the `"stream": true` body field (OpenAI-compatible and SGLang
 native requests alike) and prints bytes as they arrive. `--no-stream` forces
-buffered model output even if raw JSON asks for streaming. Legacy TGI streaming
-automatically uses `/generate_stream`; request bodies remain buffered because
-API Gateway supports response streaming only.
+buffered model output even if raw JSON asks for streaming. Request bodies
+remain buffered because API Gateway supports response streaming only.
 
 **Example:**
 
@@ -2743,7 +2742,7 @@ gco inference health my-llm -r us-east-1
 
 #### `gco inference models`
 
-Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. Endpoints persisted as `tgi` before SGLang replaced it still answer through TGI's `/info`. The persisted `--framework` from deploy is used by default.
+Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
 
 ```bash
 gco inference models ENDPOINT_NAME [OPTIONS]

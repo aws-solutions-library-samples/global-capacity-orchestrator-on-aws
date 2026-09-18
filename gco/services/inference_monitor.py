@@ -3498,22 +3498,17 @@ class InferenceMonitor:
         # Runtime behavior is persisted explicitly by callers that need a
         # strict adapter. Legacy endpoints without the field retain image
         # detection. Only vLLM is given --root-path: the authenticated platform
-        # proxy strips /inference/{name} before forwarding /health, /generate,
-        # /server_info or /info to the model Service, so SGLang and TGI serve
-        # their documented unprefixed paths. ``tgi`` is still rendered for
-        # endpoints deployed before SGLang replaced it (the CLI refuses new TGI
-        # deployments); dropping its startup probe would restart-loop a running
-        # TGI pod on the next reconcile while its model loads.
+        # proxy strips /inference/{name} before forwarding /health, /generate
+        # or /server_info to the model Service, so SGLang serves its documented
+        # unprefixed paths.
         serving_prefix = f"/inference/{name}"
         runtime_framework = spec.get("framework")
-        if runtime_framework not in ("vllm", "sglang", "tgi"):
+        if runtime_framework not in ("vllm", "sglang"):
             image_lower = image.lower()
             if "vllm" in image_lower:
                 runtime_framework = "vllm"
             elif "sglang" in image_lower:
                 runtime_framework = "sglang"
-            elif "text-generation-inference" in image_lower or "/tgi" in image_lower:
-                runtime_framework = "tgi"
             else:
                 runtime_framework = None
         if not command and runtime_framework == "vllm":
@@ -3662,17 +3657,17 @@ class InferenceMonitor:
             volume_mounts=volume_mounts if volume_mounts else None,
             command=command,
             args=args,
-            # SGLang (and legacy TGI) answer /health with 503 until the model
-            # is loaded, which for a multi-gigabyte checkpoint outlasts the
-            # liveness budget below; the startup probe holds liveness off for
-            # up to 20 minutes while that happens.
+            # SGLang answers /health only once the model is loaded, which for a
+            # multi-gigabyte checkpoint outlasts the liveness budget below; the
+            # startup probe holds liveness off for up to 20 minutes while that
+            # happens.
             startup_probe=(
                 client.V1Probe(
                     http_get=client.V1HTTPGetAction(path=health_path, port=port),
                     period_seconds=15,
                     failure_threshold=80,
                 )
-                if runtime_framework in ("sglang", "tgi")
+                if runtime_framework == "sglang"
                 else None
             ),
             liveness_probe=client.V1Probe(

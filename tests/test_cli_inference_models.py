@@ -94,8 +94,9 @@ class TestInferenceDeploy:
             "a" * 40,
         ]
 
-    def test_tgi_is_no_longer_a_framework_choice(self, runner):
-        """Hugging Face archived TGI; the option surface refuses it before any manager call."""
+    @pytest.mark.parametrize("framework", ["tgi", "triton", "torchserve"])
+    def test_only_vllm_and_sglang_are_framework_choices(self, runner, framework):
+        """Only the two runtimes with a strict adapter contract are selectable."""
         mock_mgr = MagicMock()
         with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
             result = runner.invoke(
@@ -103,33 +104,17 @@ class TestInferenceDeploy:
                 [
                     "inference",
                     "deploy",
-                    "tgi-mistral",
+                    "ep",
                     "-i",
-                    "ghcr.io/huggingface/text-generation-inference:3.3.7",
+                    "registry.example/server:1",
                     "--framework",
-                    "tgi",
+                    framework,
                 ],
             )
         assert result.exit_code == 2
         assert "Invalid value for '--framework'" in result.output
-        assert "sglang" in result.output
+        assert "vllm" in result.output and "sglang" in result.output
         mock_mgr.deploy.assert_not_called()
-
-    def test_manager_refuses_a_tgi_deploy_with_a_migration_message(self, runner):
-        """The manager guard covers callers that bypass the Click choice (API, MCP)."""
-        from cli.inference import InferenceManager
-
-        manager = InferenceManager.__new__(InferenceManager)
-        with pytest.raises(ValueError, match="no longer accepted") as excinfo:
-            manager.deploy(
-                endpoint_name="tgi-mistral",
-                image="ghcr.io/huggingface/text-generation-inference:3.3.7",
-                framework="tgi",
-            )
-        message = str(excinfo.value)
-        assert "2025-12-11" in message
-        assert "2026-03-21" in message
-        assert "'sglang' or 'vllm'" in message
 
     def test_deploy_with_regions(self, runner):
         mock_mgr = MagicMock()
@@ -807,8 +792,36 @@ class TestInferenceInvoke:
             "stream": False,
         }
 
-    def test_invoke_with_prompt_legacy_tgi_endpoint_keeps_working(self, runner):
-        """Endpoints persisted as ``tgi`` before SGLang replaced it keep their contract."""
+    def test_invoke_explicit_generate_path_on_any_endpoint_speaks_the_sglang_contract(self, runner):
+        """``/generate`` is the only native generation path left; its body shape is SGLang's."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint(
+            image="registry.example/team/private-server@sha256:" + "a" * 64,
+        )
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        mock_resp.json.return_value = {"text": "native response", "meta_info": {}}
+        mock_client.make_authenticated_request.return_value = mock_resp
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli, ["inference", "invoke", "ep", "-p", "Hello", "--path", "/generate"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "native response" in result.output
+        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
+        assert call_kwargs["path"] == "/inference/ep/generate"
+        assert call_kwargs["body"] == {
+            "text": "Hello",
+            "sampling_params": {"max_new_tokens": 100},
+            "stream": False,
+        }
+
+    def test_invoke_persisted_tgi_record_is_treated_as_an_openai_server(self, runner):
+        """The retired ``tgi`` contract is unknown now; such records fall back to OpenAI."""
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint(
             image="registry.example/team/private-server@sha256:" + "a" * 64,
@@ -817,21 +830,17 @@ class TestInferenceInvoke:
         mock_client = MagicMock()
         mock_resp = MagicMock()
         mock_resp.ok = True
-        mock_resp.json.return_value = [{"generated_text": "TGI response"}]
+        mock_resp.json.return_value = {"choices": [{"text": "openai fallback"}]}
         mock_client.make_authenticated_request.return_value = mock_resp
         with (
             patch("cli.inference.get_inference_manager", return_value=mock_mgr),
             patch("cli.aws_client.get_aws_client", return_value=mock_client),
         ):
             result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "Hello"])
-        assert result.exit_code == 0
-        assert "TGI response" in result.output
+        assert result.exit_code == 0, result.output
         call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
-        assert call_kwargs["path"] == "/inference/ep/generate"
-        assert call_kwargs["body"] == {
-            "inputs": "Hello",
-            "parameters": {"max_new_tokens": 100},
-        }
+        assert call_kwargs["path"] == "/inference/ep/v1/completions"
+        assert call_kwargs["body"]["prompt"] == "Hello"
 
     def test_invoke_with_raw_data(self, runner):
         mock_mgr = MagicMock()
@@ -1004,34 +1013,6 @@ class TestInferenceInvoke:
             "text": "hello",
             "sampling_params": {"max_new_tokens": 100},
             "stream": True,
-        }
-
-    def test_invoke_legacy_tgi_stream_uses_generate_stream_path(self, runner):
-        mock_mgr = MagicMock()
-        mock_mgr.get_endpoint.return_value = self._mock_endpoint(
-            image="registry.example/team/private-server@sha256:" + "b" * 64,
-            framework="tgi",
-        )
-        mock_client = MagicMock()
-        mock_resp = MagicMock(ok=True, status_code=200, encoding="utf-8")
-        mock_resp.iter_content.return_value = [b'{"token":{"text":"hello"}}\n']
-        mock_client.make_authenticated_request.return_value = mock_resp
-        with (
-            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
-            patch("cli.aws_client.get_aws_client", return_value=mock_client),
-        ):
-            result = runner.invoke(
-                cli,
-                ["inference", "invoke", "ep", "-p", "hello", "--stream"],
-            )
-
-        assert result.exit_code == 0
-        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
-        assert call_kwargs["path"].endswith("/generate_stream")
-        assert call_kwargs["stream"] is True
-        assert call_kwargs["body"] == {
-            "inputs": "hello",
-            "parameters": {"max_new_tokens": 100},
         }
 
     def test_invoke_endpoint_not_found(self, runner):
@@ -1416,13 +1397,15 @@ class TestInferenceModels:
         [
             ("vllm", "lmsysorg/sglang:v0.5.19", "vllm"),
             ("sglang", "vllm/vllm-openai:v0.29.0", "sglang"),
-            ("tgi", "lmsysorg/sglang:v0.5.19", "tgi"),
             (None, "vllm/vllm-openai:v0.29.0", "vllm"),
             (None, "lmsysorg/sglang:v0.5.19", "sglang"),
-            (None, "ghcr.io/huggingface/text-generation-inference:3.3.7", "tgi"),
-            (None, "registry.example/tgi-mirror:1", "tgi"),
             (None, "nvcr.io/nvidia/tritonserver:26.08-py3", "triton"),
             (None, "registry.example/team/private-server@sha256:" + "a" * 64, "openai"),
+            # The retired TGI contract is no longer recognised from a record
+            # or an image name; those endpoints are plain OpenAI-compatible
+            # servers to the CLI until they are redeployed.
+            ("tgi", "registry.example/team/private-server:1", "openai"),
+            (None, "ghcr.io/huggingface/text-generation-inference:3.3.7", "openai"),
             ("custom", "lmsysorg/sglang:v0.5.19", "sglang"),
         ],
     )
@@ -1433,47 +1416,21 @@ class TestInferenceModels:
 
         assert _resolve_invoke_framework(persisted, image.lower()) == expected
 
-    def test_legacy_tgi_models_uses_read_only_info_path_from_persisted_framework(self, runner):
+    def test_models_persisted_tgi_record_is_refused_as_unsupported(self, runner):
+        """A record persisted under the retired ``tgi`` contract has no identity document."""
         endpoint = self._mock_endpoint()
         endpoint["spec"]["framework"] = "tgi"
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = endpoint
         mock_client = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.ok = True
-        mock_resp.json.return_value = {
-            "model_id": "test/tgi-model",
-            "model_sha": "a" * 40,
-        }
-        mock_client.make_authenticated_request.return_value = mock_resp
         with (
             patch("cli.inference.get_inference_manager", return_value=mock_mgr),
             patch("cli.aws_client.get_aws_client", return_value=mock_client),
         ):
             result = runner.invoke(cli, ["inference", "models", "ep"])
-        assert result.exit_code == 0
-        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
-        assert call_kwargs["method"] == "GET"
-        assert call_kwargs["path"] == "/inference/ep/info"
-
-    def test_legacy_tgi_models_infers_the_archived_official_image(self, runner):
-        endpoint = self._mock_endpoint()
-        endpoint["spec"]["image"] = "ghcr.io/huggingface/text-generation-inference:3.3.7"
-        mock_mgr = MagicMock()
-        mock_mgr.get_endpoint.return_value = endpoint
-        mock_client = MagicMock()
-        mock_resp = MagicMock(ok=True)
-        mock_resp.json.return_value = {"model_id": "test/model", "model_sha": "a" * 40}
-        mock_client.make_authenticated_request.return_value = mock_resp
-        with (
-            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
-            patch("cli.aws_client.get_aws_client", return_value=mock_client),
-        ):
-            result = runner.invoke(cli, ["inference", "models", "ep"])
-        assert result.exit_code == 0
-        assert mock_client.make_authenticated_request.call_args.kwargs["path"] == (
-            "/inference/ep/info"
-        )
+        assert result.exit_code == 1
+        assert "unsupported persisted inference framework" in result.output
+        mock_client.make_authenticated_request.assert_not_called()
 
     def test_models_endpoint_not_found(self, runner):
         mock_mgr = MagicMock()
@@ -1710,15 +1667,18 @@ class TestInferenceInvokeRemaining:
     @pytest.mark.parametrize(
         ("payload", "expected_output"),
         [
-            ({"generated_text": "dict result"}, "dict result"),
-            ([{"generated_text": "list result"}], "list result"),
-            ({"generated_text": ""}, '"generated_text": ""'),
+            # Shapes no adapter claims fall through to the structured document,
+            # including the retired TGI ``generated_text`` forms.
+            ({"generated_text": "dict result"}, '"generated_text": "dict result"'),
+            ([{"generated_text": "list result"}], '"generated_text": "list result"'),
+            ({"result": "unclaimed"}, '"result": "unclaimed"'),
         ],
     )
-    def test_invoke_buffered_generated_text_shapes(self, runner, payload, expected_output):
-        """Legacy TGI response shapes (dict and list) still render for ``tgi`` images."""
+    def test_invoke_buffered_unclaimed_shapes_render_the_document(
+        self, runner, payload, expected_output
+    ):
         mock_mgr = MagicMock()
-        mock_mgr.get_endpoint.return_value = self._endpoint(image="tgi:latest")
+        mock_mgr.get_endpoint.return_value = self._endpoint(image="registry.example/server:1")
         mock_client = MagicMock()
         mock_client.make_authenticated_request.return_value = self._buffered_response(payload)
         with (
@@ -1727,7 +1687,7 @@ class TestInferenceInvokeRemaining:
         ):
             result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert expected_output in result.output
 
     @pytest.mark.parametrize(

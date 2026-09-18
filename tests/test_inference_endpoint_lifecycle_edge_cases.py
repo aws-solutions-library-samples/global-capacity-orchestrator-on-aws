@@ -1336,8 +1336,9 @@ def test_role_autoscaling_validator_accepts_absent_optional_bounds() -> None:
     [
         ({"framework": "unknown"}, r"framework must be 'vllm' or 'sglang'"),
         ({"framework": "sglang", "mooncake_mode": "store"}, r"Mooncake serving requires the vllm"),
-        ({"framework": "tgi"}, r"framework 'tgi' is no longer accepted"),
-        ({"framework": "tgi", "mooncake_mode": "store"}, r"framework 'tgi' is no longer accepted"),
+        # The retired TGI runtime is just an unknown framework now.
+        ({"framework": "tgi"}, r"framework must be 'vllm' or 'sglang'"),
+        ({"framework": "tgi", "mooncake_mode": "store"}, r"framework must be 'vllm' or 'sglang'"),
         ({"framework": "sglang"}, r"framework 'sglang' needs the model to serve"),
         (
             {"framework": "sglang", "env": {"MODEL": ""}, "extra_args": ["--log-level", "warning"]},

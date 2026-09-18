@@ -1764,59 +1764,34 @@ def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
     assert container.startup_probe is None
 
 
-def test_legacy_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance() -> None:
-    """Endpoints persisted as ``tgi`` before SGLang replaced it keep their probe contract."""
-    monitor = _make_monitor()
-    monitor._active_authority = ReconcileAuthority(
-        endpoint_name="chat",
-        lifecycle_id=LIFECYCLE_ID,
-        region_generation=REGION_GENERATION,
-        leader_epoch="epoch-1",
-    )
-    deployment = _build_deployment(
-        monitor,
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # A record persisted under the retired TGI contract, and a plain
+        # unknown image: neither gets a launcher, a root path, or the SGLang
+        # startup probe. Such an endpoint has to be redeployed as sglang/vllm.
         {
             "image": "ghcr.io/huggingface/text-generation-inference@sha256:" + "a" * 64,
             "framework": "tgi",
             "port": 8080,
             "health_check_path": "/health",
-            "env": {
-                "MODEL_ID": "test/model",
-                "REVISION": "b" * 40,
-                "PORT": "8080",
-            },
-        },
-    )
-
-    container = deployment.spec.template.spec.containers[0]
-    assert not container.args or "--root-path" not in container.args
-    assert container.ports[0].container_port == 8080
-    assert container.startup_probe.http_get.path == "/health"
-    assert container.startup_probe.http_get.port == 8080
-    assert container.startup_probe.period_seconds == 15
-    assert container.startup_probe.failure_threshold == 80
-    assert container.readiness_probe.http_get.path == "/health"
-    expected = {
-        "gco.io/lifecycle-id": LIFECYCLE_ID,
-        "gco.io/region-generation": REGION_GENERATION,
-        "gco.io/leader-epoch": "epoch-1",
-    }
-    assert deployment.metadata.annotations == expected
-    assert deployment.spec.template.metadata.annotations == expected
-
-
-def test_legacy_official_tgi_image_infers_tgi_probe_contract() -> None:
-    monitor = _make_monitor()
-    deployment = _build_deployment(
-        monitor,
-        {
-            "image": "ghcr.io/huggingface/text-generation-inference:3.3.7",
-            "port": 8080,
-            "health_check_path": "/health",
             "env": {"MODEL_ID": "test/model", "PORT": "8080"},
         },
-    )
+        {
+            "image": "registry.example/team/private-server@sha256:" + "b" * 64,
+            "port": 9000,
+            "health_check_path": "/healthz",
+            "env": {"MODEL": "test/model"},
+        },
+    ],
+    ids=["retired-tgi-record", "unknown-image"],
+)
+def test_unrecognised_runtimes_get_no_adapter_behaviour(spec: dict) -> None:
+    monitor = _make_monitor()
+    deployment = _build_deployment(monitor, spec)
     container = deployment.spec.template.spec.containers[0]
-    assert container.startup_probe is not None
-    assert container.startup_probe.http_get.path == "/health"
-    assert not container.args or "--root-path" not in container.args
+    assert container.command is None
+    assert container.args is None
+    assert container.startup_probe is None
+    assert container.ports[0].container_port == spec["port"]
+    assert container.readiness_probe.http_get.path == spec["health_check_path"]
