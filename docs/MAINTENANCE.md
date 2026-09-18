@@ -515,6 +515,7 @@ Human indexes are executable contracts, not best-effort lists:
 | Add/remove a workflow | `.github/workflows/*.yml`, `.github/CI.md`, `.github/workflows/README.md`, `CONTRIBUTING.md`, and the wiki summary | `tests/test_documentation_consistency.py` |
 | Add/remove a production image group | `pyproject.toml` `image-*`, its one matching Dockerfile, and `CONTRIBUTING.md` | `tests/test_documentation_consistency.py` |
 | Change MCP tool counts | `README.md`, `QUICKSTART.md`, `gco_mcp/README.md`, and `gco_mcp/tools/README.md` | `tests/test_mcp_tool_count_docs.py` |
+| Add a row to an inventory that is read by name (package/file inventory tables, the per-module MCP tool tables, the applier manifest tables, the `docs/CLI.md` command groups, a workflow's `Jobs (alphabetical by display name)` roster) | Insert it in alphabetical position (natural order where names carry numbers; files before directories); rosters must also name every job | `tests/test_documentation_alphabetical_order.py` |
 
 ## Dependency management policy
 

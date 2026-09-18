@@ -28,7 +28,8 @@
 #   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
-#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer apply
+#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
+#   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
@@ -1573,6 +1574,97 @@ jobs:
           kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/05-priority-classes.yaml
+      - name: Server-side dry-run the inference Deployments the monitor renders
+        # `gco inference deploy` writes an endpoint record; the in-cluster
+        # inference monitor turns it into a Deployment through
+        # InferenceMonitor._build_inference_deployment_object and creates it.
+        # Its unit tests pin the rendered object's shape (launcher command,
+        # de-duplicated --host/--port/--model-path, the SGLang startup probe);
+        # none of them ever showed the object to an API server, so a field the
+        # Kubernetes client accepts but the apiserver rejects — a probe with
+        # both httpGet and exec, a quantity the scheduler cannot parse, a label
+        # value over 63 characters — would surface on the first live deploy.
+        # --dry-run=server runs the full admission chain (schema, defaulting,
+        # validating webhooks) in gco-inference without persisting anything,
+        # so no GPU node is needed. Three specs cover the renderer's branches:
+        # the vLLM default, the SGLang default (injected launcher), and SGLang
+        # with operator-supplied launcher flags and placement. The
+        # ServiceAccount every rendered pod names must exist in the namespace
+        # the shipped manifests create — that is a pod-start precondition the
+        # dry-run of a Deployment cannot see, so it is asserted separately.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "${RUNNER_TEMP}/inference-deployments.yaml"
+          from unittest.mock import MagicMock, patch
+
+          import yaml
+          from kubernetes import client
+
+          from gco.services.inference_monitor import InferenceMonitor
+
+          # Nothing here reaches a cluster: kubectl does that with the output.
+          with (
+              patch("gco.services.inference_monitor.config.load_incluster_config"),
+              patch("gco.services.inference_monitor.client.AppsV1Api"),
+              patch("gco.services.inference_monitor.client.CoreV1Api"),
+              patch("gco.services.inference_monitor.client.NetworkingV1Api"),
+              patch("gco.services.inference_monitor.client.DiscoveryV1Api"),
+          ):
+              monitor = InferenceMonitor(
+                  cluster_id="gco-ci", region="us-east-1", store=MagicMock(), namespace="gco-inference"
+              )
+          specs = {
+              "ci-vllm": {
+                  "image": "vllm/vllm-openai:v0.11.0",
+                  "framework": "vllm",
+                  "port": 8000,
+                  "gpu_count": 1,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "facebook/opt-125m"},
+              },
+              "ci-sglang": {
+                  "image": "lmsysorg/sglang:v0.5.19",
+                  "framework": "sglang",
+                  "port": 30000,
+                  "gpu_count": 1,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+              },
+              "ci-sglang-explicit": {
+                  "image": "lmsysorg/sglang:v0.5.19",
+                  "framework": "sglang",
+                  "port": 30000,
+                  "gpu_count": 2,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+                  "args": [
+                      "--model-path", "Qwen/Qwen2.5-0.5B-Instruct",
+                      "--attention-backend", "triton", "--disable-cuda-graph",
+                  ],
+                  "node_selector": {"node.kubernetes.io/instance-type": "g6.12xlarge"},
+              },
+          }
+          api = client.ApiClient()
+          documents = []
+          for name, spec in specs.items():
+              deployment = monitor._build_inference_deployment_object(
+                  name=name, deploy_name=name, app_label=name,
+                  namespace="gco-inference", spec=spec, replicas=1,
+              )
+              body = api.sanitize_for_serialization(deployment)
+              documents.append({"apiVersion": "apps/v1", "kind": "Deployment", **body})
+              container = body["spec"]["template"]["spec"]["containers"][0]
+              assert body["spec"]["template"]["spec"]["serviceAccountName"] == "gco-service-account"
+              if spec["framework"] == "sglang":
+                  assert container["command"] == ["python3", "-m", "sglang.launch_server"], container
+                  assert container["args"].count("--model-path") == 1, container["args"]
+                  assert "startupProbe" in container, "SGLang render must carry the startup probe"
+          print(yaml.safe_dump_all(documents, sort_keys=False))
+          PY
+          kubectl -n gco-inference get serviceaccount gco-service-account
+          kubectl apply --dry-run=server -f "${RUNNER_TEMP}/inference-deployments.yaml" \
+            | tee "${RUNNER_TEMP}/inference-dry-run.log"
+          test "$(grep -c 'created (server dry run)' "${RUNNER_TEMP}/inference-dry-run.log")" = "3"
       - name: Seed API workload TLS Secrets for Kind
         # Production creates these Secrets through the post-Helm cert-manager
         # Certificates. This raw-manifest Kind job deliberately does not install
@@ -2583,6 +2675,895 @@ jobs:
           kubectl -n gco-jobs get events --sort-by=.lastTimestamp | tail -30 || true
           kubectl -n gco-ci-sqs describe deploy sqs || true
           kubectl -n gco-ci-sqs logs deploy/sqs --tail=100 || true
+
+  integration-kind-cost-pipeline:
+    name: "integration:kind:cost-pipeline"
+    # The cost pipeline is three processes talking to each other — Prometheus
+    # scrapes the cluster and OpenCost, OpenCost prices allocations from
+    # those series, the cost monitor turns OpenCost's answer into Parquet in
+    # S3 — and until this job every layer of CI checked exactly one of them
+    # in isolation: the unit suite feeds the monitor a hand-written
+    # /allocation/compute body, the Floci suite proves the S3 write with an
+    # OpenCost double, integration:docker:cost-monitor boots the image
+    # against an unreachable OpenCost, and integration:kind:cluster-e2e
+    # scales the monitor to zero before its rollouts (no AWS, and the node's
+    # CPU goes to the API tiers). So the seams that only break for real —
+    # the response shape of the PINNED OpenCost release, the shipped
+    # charts.yaml Prometheus wiring and ServiceMonitor, the
+    # allow-cost-monitor-to-opencost egress rule under an enforcing CNI,
+    # and `opencost_returning_data`, the status flag the live release
+    # validation gates on — were exercised for the first time on a real
+    # cluster, one deploy cycle late.
+    #
+    # This job runs the REAL cost-monitor image against the REAL pinned
+    # OpenCost and kube-prometheus-stack charts (versions, namespaces and
+    # values read from lambda/helm-installer/charts.yaml at run time, like
+    # examples-smoke) with the same digest-pinned Floci emulator cluster-e2e
+    # runs as its S3, then: waits for the monitor to report OpenCost healthy
+    # AND returning data, generates an ad-hoc report through the monitor's
+    # own API, reads the Parquet object back inside the monitor's container
+    # and checks its columns against ALLOCATION_REPORT_FIELDS (the Glue
+    # table contract), confirms Prometheus is actually scraping OpenCost,
+    # and probes that only cost-monitor-labelled pods may reach OpenCost.
+    #
+    # Value overlays are limited to what the regional stack itself injects
+    # at deploy time (storage class / sizes / retention / cluster id — see
+    # GCORegionalStack._observability_chart_values and
+    # _opencost_chart_values) plus CI-only adjustments that sit outside the
+    # path under test, or exist only because kind has no cloud provider, and
+    # are called out where they are set. Kept out of
+    # cluster-e2e on purpose: that job's single node has no CPU to spare
+    # for Prometheus, and its rollouts are the ones that must not flake.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Same digest-pinned emulator floci-tests.yml and cluster-e2e run;
+      # tests/test_pinned_floci_version.py holds every occurrence to the
+      # identical tag+digest. Here it is the cost report bucket's S3.
+      CI_S3_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      # Digest references cannot be addressed by `kind load`; retagged
+      # locally and pulled with imagePullPolicy: Never (see cluster-e2e).
+      CI_S3_LOCAL_IMAGE: "gco-ci-s3-emulator:local"
+      # Fixed bucket for the monitor's COST_REPORT_BUCKET path — the
+      # production Deployment discovers its bucket through SSM instead, and
+      # that discovery is what the Floci suite covers.
+      COST_REPORT_BUCKET: "gco-ci-cost-reports"
+      # Stands in for the EKS cluster name the regional stack injects as
+      # opencost.exporter.defaultClusterId and the monitor's CLUSTER_NAME —
+      # every Parquet row must carry it.
+      CI_CLUSTER_ID: "gco-cost-pipeline"
+      # The kind and Calico pins shared with the other kind jobs live in the
+      # workflow-level env block at the top of this file — one declaration.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Reclaim runner disk space before Kind image builds
+        uses: ./.github/actions/free-disk-space
+      - name: Pre-pull Kind bootstrap images with retry
+        # kind-action otherwise pulls the node image implicitly with no
+        # retry; the probe image and the emulator are loaded into the node
+        # right after creation so no pod ever waits on a registry.
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: |
+            ${{ env.KIND_NODE_IMAGE }}
+            busybox:1.38.0
+            ${{ env.CI_S3_EMULATOR_IMAGE }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project (chart emit helper + manifest rendering)
+        # -e . provides PyYAML for validate_helm_charts.py --emit-* and the
+        # render step below, which parses the shipped cost-monitor manifest
+        # rather than patching it with sed.
+        run: pip install -e .
+      - name: Derive the Helm pin from the production installer Dockerfile
+        # Single source: lambda/helm-installer/Dockerfile (see the
+        # charts-valid job for the full rationale).
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
+          helm version --short
+      - name: Prefetch pinned Kind charts with retry
+        # Same contract as examples-smoke: public-registry retries stay on
+        # the read-only `helm pull`; every install below consumes one local
+        # archive exactly once, so a chart or cluster failure is fail-fast.
+        run: |
+          set -euo pipefail
+          pull_chart() {
+            local chart_name env_name ref version _namespace repo_url pull_dir
+            local attempt delay archive success
+            local -a pull_args archives
+            chart_name="$1"
+            env_name="$2"
+            read -r ref version _namespace repo_url < <(
+              python3 .github/scripts/validate_helm_charts.py --emit-ref "${chart_name}"
+            )
+            pull_dir="${RUNNER_TEMP}/kind-charts/${chart_name}"
+            mkdir -p "${pull_dir}"
+            if [[ "${ref}" == oci://* ]]; then
+              pull_args=("${ref}")
+            else
+              pull_args=("${ref#*/}" --repo "${repo_url}")
+            fi
+
+            success=0
+            for attempt in 1 2 3 4; do
+              rm -f "${pull_dir}"/*.tgz
+              echo "::group::helm pull ${chart_name} (attempt ${attempt}/4)"
+              if timeout 60s helm pull "${pull_args[@]}" --version "${version}" \
+                  --destination "${pull_dir}"; then
+                success=1
+                echo "::endgroup::"
+                break
+              fi
+              echo "::endgroup::"
+              if [ "${attempt}" -lt 4 ]; then
+                delay=$((2 ** attempt))
+                echo "::warning::Chart pull failed; retrying in ${delay}s."
+                sleep "${delay}"
+              fi
+            done
+            if [ "${success}" -ne 1 ]; then
+              echo "::error::Failed to pull ${chart_name} ${version} after 4 attempts."
+              return 1
+            fi
+
+            shopt -s nullglob
+            archives=("${pull_dir}"/*.tgz)
+            shopt -u nullglob
+            if [ "${#archives[@]}" -ne 1 ]; then
+              echo "::error::Expected one ${chart_name} archive, found ${#archives[@]}."
+              return 1
+            fi
+            archive="${archives[0]}"
+            echo "${env_name}=${archive}" >> "${GITHUB_ENV}"
+            echo "Pinned ${chart_name} archive: ${archive}"
+          }
+
+          pull_chart kube-prometheus-stack KPS_CHART_ARCHIVE
+          pull_chart opencost OPENCOST_CHART_ARCHIVE
+      - name: Create kind cluster (no default CNI)
+        # kind/node pins come from the workflow-level env block (tracked by
+        # the dependency drift scan). The default CNI is disabled so Calico
+        # can take over: kindnet accepts NetworkPolicy objects without
+        # enforcing them, and the egress probes at the end of this job are
+        # only a test when the shipped gco-system policies are enforced.
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        with:
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
+          cluster_name: "gco-cost-pipeline"
+          config: ".github/kind/kind-calico.yaml"
+          # The control plane cannot go Ready without a CNI; the next step
+          # installs Calico and waits via rollout status.
+          wait: "0s"
+      - name: Load pinned probe image and the S3 emulator into Kind
+        run: |
+          set -euo pipefail
+          kind load docker-image busybox:1.38.0 --name gco-cost-pipeline
+          docker tag "${CI_S3_EMULATOR_IMAGE}" "${CI_S3_LOCAL_IMAGE}"
+          kind load docker-image "${CI_S3_LOCAL_IMAGE}" --name gco-cost-pipeline
+      - name: Install Calico for NetworkPolicy enforcement
+        # Mirrors the proven step in integration:kind:cluster-e2e, including
+        # the retry loop: calico-node readiness is a known CI flake because
+        # it pulls from quay.io and runs install-cni / mount-bpffs init
+        # containers, which can exceed one timeout window under runner
+        # image-pull latency. The apply is idempotent, so each attempt
+        # re-applies and re-waits.
+        run: |
+          set -euo pipefail
+          calico_manifest="${RUNNER_TEMP}/calico.yaml"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${calico_manifest}" \
+            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
+          kubectl apply -f "${calico_manifest}"
+
+          attempts=3
+          for i in $(seq 1 "${attempts}"); do
+            echo "::group::Calico rollout attempt ${i}/${attempts}"
+            kubectl apply -f "${calico_manifest}"
+            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
+               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
+              echo "Calico is ready."
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "Calico not ready on attempt ${i}/${attempts}."
+            echo "::endgroup::"
+            if [ "${i}" -lt "${attempts}" ]; then
+              sleep 15
+            fi
+          done
+
+          echo "::error::Calico did not become ready after ${attempts} attempts."
+          kubectl -n kube-system get pods -o wide || true
+          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
+          exit 1
+      - name: Set up Buildx (enables shared GHA layer cache)
+        uses: ./.github/actions/setup-buildx-with-retry
+      - name: Build cost-monitor image
+        # Same GHA cache scope as integration:docker:cost-monitor,
+        # integration:kind:cluster-e2e and security:trivy:container-scan —
+        # one Dockerfile + context, so layer reuse is automatic.
+        uses: ./.github/actions/build-image-with-retry
+        with:
+          context: .
+          file: dockerfiles/Dockerfile.cost-monitor
+          tags: cost-monitor:ci
+          load: true
+          cache-from: type=gha,scope=cost-monitor
+          cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
+      - name: Load the cost-monitor image into kind
+        run: kind load docker-image cost-monitor:ci --name gco-cost-pipeline
+      - name: Apply platform namespaces + RBAC + priority classes
+        # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
+        # tokens; annotations are opaque strings to the apiserver, so the
+        # raw apply is valid (same approach as cluster-e2e).
+        # 05-priority-classes.yaml must land before the Deployment: pod
+        # admission rejects an unresolvable priorityClassName, and the
+        # cost-monitor pod spec references gco-platform-critical.
+        run: |
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
+          kubectl apply -f lambda/kubectl-applier-simple/manifests/05-priority-classes.yaml
+      - name: Apply the shipped NetworkPolicies (Calico-enforced)
+        # gco-system is egress-isolated by 03-network-policies.yaml (DNS +
+        # HTTPS-to-AWS only); the cost monitor reaches OpenCost solely
+        # through the allow-cost-monitor-to-opencost rule that ships beside
+        # it in 34-cost-monitor.yaml. Applying the base policies is what
+        # makes that rule — and the negative probe at the end — a real
+        # verdict rather than a no-op. The one list-valued placeholder is
+        # rendered from kind's own node CIDR exactly as cluster-e2e does.
+        # No API-server egress exception is needed here: unlike the health
+        # and manifest processors, the cost monitor never talks to the
+        # Kubernetes API.
+        run: |
+          set -euo pipefail
+          node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+          node_cidr="$(echo "${node_ip}" | awk -F. '{print $1"."$2".0.0/16"}')"
+          echo "kind node ${node_ip} -> in-VPC analogue ${node_cidr}"
+          python3 - "${node_cidr}" <<'PY' > "${RUNNER_TEMP}/network-policies.yaml"
+          import sys
+          from pathlib import Path
+
+          cidr = sys.argv[1]
+          path = Path("lambda/kubectl-applier-simple/manifests/03-network-policies.yaml")
+          text = path.read_text(encoding="utf-8")
+          # Same substitution GCORegionalStack performs: the first ipBlock
+          # entry carries no indent (the manifest supplies it).
+          block = f'- ipBlock:\n            cidr: "{cidr}"'
+          text = text.replace("{{VPC_ENDPOINT_CIDR_BLOCKS}}", block)
+          if "{{" in text:
+              raise SystemExit(f"unsubstituted token(s) remain: {text}")
+          print(text)
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/network-policies.yaml"
+      - name: Provide the observability StorageClass
+        # The regional stack pins storageClassName gco-observability-gp3 (an
+        # EBS gp3 class it ships) on every observability PVC. kind has no
+        # EBS driver, so alias the name to kind's local-path provisioner —
+        # the Prometheus PVC binds under the production class name.
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: gco-observability-gp3
+          provisioner: rancher.io/local-path
+          volumeBindingMode: WaitForFirstConsumer
+          EOF
+      - name: Deploy the CI S3 emulator in its own namespace
+        # The report bucket's S3 wire API, inside the cluster. Its own
+        # namespace keeps gco-system's shipped default-deny posture intact:
+        # the only loosening is the single CI egress rule applied with the
+        # cost monitor below.
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: gco-ci-aws
+            labels:
+              gco.aws/ci-only: "true"
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: s3
+            namespace: gco-ci-aws
+            labels:
+              app: s3
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: s3
+            template:
+              metadata:
+                labels:
+                  app: s3
+              spec:
+                containers:
+                  - name: emulator
+                    image: ${CI_S3_LOCAL_IMAGE}
+                    imagePullPolicy: Never
+                    env:
+                      - name: FLOCI_STORAGE_MODE
+                        value: memory
+                    ports:
+                      - containerPort: 4566
+                    readinessProbe:
+                      tcpSocket:
+                        port: 4566
+                      initialDelaySeconds: 2
+                      periodSeconds: 2
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: s3
+            namespace: gco-ci-aws
+          spec:
+            selector:
+              app: s3
+            ports:
+              - protocol: TCP
+                port: 4566
+                targetPort: 4566
+          EOF
+          kubectl -n gco-ci-aws rollout status deployment/s3 --timeout=3m
+      - name: Create the cost report bucket
+        # Through a port-forward: the emulator has no ingress from the
+        # runner. The monitor's bucket is fixed via COST_REPORT_BUCKET below,
+        # so it must exist before the first scheduled pass.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-ci-aws port-forward svc/s3 4566:4566 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+          export AWS_ENDPOINT_URL="http://127.0.0.1:4566"
+          export AWS_ACCESS_KEY_ID=testing
+          export AWS_SECRET_ACCESS_KEY=testing
+          export AWS_REGION=us-east-1
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${AWS_ENDPOINT_URL}" || true)
+            if [ "${code}" = "200" ] || [ "${code}" = "404" ]; then
+              echo "Emulator is answering HTTP (${code}) through the port-forward."
+              break
+            fi
+            sleep 1
+          done
+          aws s3api create-bucket --bucket "${COST_REPORT_BUCKET}"
+          aws s3api head-bucket --bucket "${COST_REPORT_BUCKET}"
+          echo "bucket ${COST_REPORT_BUCKET} exists in the emulator"
+      - name: Install pinned kube-prometheus-stack with shipped values
+        # The chart, version, namespace and static hardening values are the
+        # installer Lambda's (charts.yaml). The overlay is the deploy-time
+        # layer GCORegionalStack._observability_chart_values deep-merges
+        # over them — the same sizes and retention read from cdk.json, the
+        # same gp3 class name (aliased above) — plus three CI-only omissions
+        # that sit outside the Prometheus -> OpenCost -> monitor path:
+        # Grafana and Alertmanager (two more image pulls, two more PVCs and
+        # ~600Mi on a single node that has to run Prometheus), and
+        # node-exporter's hostRootFsMount, which needs a shared/slave root
+        # mount kind's container nodes cannot provide and crash-loops
+        # otherwise. The release name is fixed: OpenCost's shipped
+        # Prometheus wiring names the kube-prometheus-stack-prometheus
+        # Service the release creates.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref kube-prometheus-stack
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values kube-prometheus-stack \
+            > "${RUNNER_TEMP}/kps-values.yaml"
+          python3 - <<'PY' > "${RUNNER_TEMP}/kps-ci-overlay.yaml"
+          import json
+          import yaml
+
+          obs = json.loads(open("cdk.json", encoding="utf-8").read())["context"]["cluster_observability"]
+          storage_class = "gco-observability-gp3"  # _OBSERVABILITY_STORAGE_CLASS
+          overlay = {
+              # GCORegionalStack._observability_chart_values, verbatim shape.
+              "prometheus": {
+                  "prometheusSpec": {
+                      "retention": obs["prometheus"]["retention"],
+                      "storageSpec": {
+                          "volumeClaimTemplate": {
+                              "spec": {
+                                  "storageClassName": storage_class,
+                                  "resources": {
+                                      "requests": {"storage": obs["prometheus"]["persistence_size"]}
+                                  },
+                              }
+                          }
+                      },
+                  }
+              },
+              # CI-only omissions (see the step comment).
+              "grafana": {"enabled": False},
+              "alertmanager": {"enabled": False},
+              "prometheus-node-exporter": {"hostRootFsMount": {"enabled": False}},
+          }
+          print(yaml.safe_dump(overlay, sort_keys=False))
+          PY
+          cat "${RUNNER_TEMP}/kps-ci-overlay.yaml"
+          helm install kube-prometheus-stack "${KPS_CHART_ARCHIVE}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/kps-values.yaml" \
+            --values "${RUNNER_TEMP}/kps-ci-overlay.yaml" \
+            --wait --timeout 10m
+          # The Prometheus StatefulSet is created by the operator after the
+          # release, so `helm --wait` does not cover it. It must bind its
+          # PVC under the production class name and serve before OpenCost
+          # has anything to read.
+          for _ in $(seq 1 60); do
+            if kubectl -n "${namespace}" get statefulset prometheus-kube-prometheus-stack-prometheus >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n "${namespace}" rollout status statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=5m
+          kubectl -n "${namespace}" get pvc
+          test "$(kubectl -n "${namespace}" get pvc -o jsonpath='{.items[0].spec.storageClassName}')" = "gco-observability-gp3"
+      - name: Install pinned OpenCost with shipped values
+        # Exactly what the installer Lambda does for this chart, with the
+        # one deploy-time value the regional stack injects
+        # (_opencost_chart_values: opencost.exporter.defaultClusterId, the
+        # cluster id OpenCost stamps on every allocation). Two CI-only
+        # adjustments: the OpenCost UI is disabled — a separate container
+        # that reads the same API and plays no part in the report path — and
+        # an emptyDir is mounted at /var/configs. On EKS the AWS provider
+        # prices from the pricing API in memory and the shipped
+        # readOnlyRootFilesystem costs nothing (the live validation's ad-hoc
+        # report prices the hour); kind has no cloud provider, so OpenCost
+        # falls back to its default price sheet, which it materialises under
+        # /var/configs before it can price anything — read-only there, it
+        # logged "No pricing found for key=default, setting values to 0" and
+        # emitted no node_total_hourly_cost at all (caught on this job's
+        # first run). The scratch volume keeps the shipped security context
+        # exactly as it is and lets the fallback provider load its sheet.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref opencost
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values opencost \
+            > "${RUNNER_TEMP}/opencost-values.yaml"
+          cat > "${RUNNER_TEMP}/opencost-ci-overlay.yaml" <<EOF
+          opencost:
+            exporter:
+              defaultClusterId: "${CI_CLUSTER_ID}"
+              extraVolumeMounts:
+                - name: pricing-configs
+                  mountPath: /var/configs
+            ui:
+              enabled: false
+          extraVolumes:
+            - name: pricing-configs
+              emptyDir: {}
+          EOF
+          helm install opencost "${OPENCOST_CHART_ARCHIVE}" \
+            --namespace "${namespace}" \
+            --values "${RUNNER_TEMP}/opencost-values.yaml" \
+            --values "${RUNNER_TEMP}/opencost-ci-overlay.yaml" \
+            --wait --timeout 5m
+          # The shipped hardening must survive the overlay: the scratch volume
+          # is mounted INTO a read-only root, not instead of one.
+          test "$(kubectl -n "${namespace}" get deployment opencost \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="opencost")].securityContext.readOnlyRootFilesystem}')" = "true"
+          # The Service the monitor's OPENCOST_BASE_URL names, on the port the
+          # allow-cost-monitor-to-opencost rule admits.
+          kubectl -n "${namespace}" get service opencost
+          test "$(kubectl -n "${namespace}" get service opencost -o jsonpath='{.spec.ports[?(@.name=="http")].port}')" = "9003"
+          kubectl -n "${namespace}" get servicemonitor opencost
+      - name: Render and apply the cost monitor
+        # The shipped 34-cost-monitor.yaml with a configuration the service
+        # can run on here. Tokens are the regional stack's; the ServiceAccount
+        # role ARN is an opaque annotation and stays a stub. The rendered
+        # Deployment is then adjusted the way cluster-e2e adjusts the queue
+        # processor: IRSA cannot resolve off EKS, so the two web-identity
+        # variables go and static emulator credentials plus the endpoint
+        # override come in — AWS_ENDPOINT_URL by ClusterIP, deliberately:
+        # botocore addresses a hostname endpoint virtual-hosted-style
+        # (<bucket>.<host>), which no in-cluster DNS resolves, and an IP
+        # endpoint path-style. COST_REPORT_BUCKET fixes the bucket in place
+        # of the SSM discovery the Floci suite covers. The production
+        # OPENCOST_BASE_URL and every probe stay exactly as shipped. The
+        # CI-only egress rule admits the monitor to the emulator namespace
+        # on 4566 and nothing else — the shipped rules still own OpenCost.
+        run: |
+          set -euo pipefail
+          s3_ip="$(kubectl -n gco-ci-aws get service s3 -o jsonpath='{.spec.clusterIP}')"
+          test -n "${s3_ip}"
+          echo "emulator ClusterIP ${s3_ip}"
+          python3 - "${s3_ip}" <<'PY' > "${RUNNER_TEMP}/cost-monitor.yaml"
+          import os
+          import re
+          import sys
+          import time
+          from pathlib import Path
+
+          import yaml
+
+          s3_ip = sys.argv[1]
+          values = {
+              "{{COST_MONITOR_IMAGE}}": "cost-monitor:ci",
+              "{{DEPLOYMENT_TIMESTAMP}}": str(int(time.time())),
+              "{{CLUSTER_NAME}}": os.environ["CI_CLUSTER_ID"],
+              "{{REGION}}": "us-east-1",
+              "{{PROJECT_NAME}}": "gco",
+              "{{COST_REPORT_INTERVAL_MINUTES}}": "60",
+              "{{COST_MONITORING_ENABLED}}": "true",
+          }
+          text = Path("lambda/kubectl-applier-simple/manifests/34-cost-monitor.yaml").read_text(encoding="utf-8")
+          for token, value in values.items():
+              text = text.replace(token, value)
+          # Role ARN + SSM parameter tokens: opaque to the process here.
+          text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "ci-stub", text)
+          documents = list(yaml.safe_load_all(text))
+          (deployment,) = [d for d in documents if d["kind"] == "Deployment"]
+          (container,) = deployment["spec"]["template"]["spec"]["containers"]
+          irsa = {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
+          kept = [entry for entry in container["env"] if entry["name"] not in irsa]
+          assert {e["name"] for e in kept} >= {"OPENCOST_BASE_URL", "COST_REPORT_BUCKET_PARAMETER", "REGION"}
+          container["env"] = kept + [
+              {"name": "COST_REPORT_BUCKET", "value": os.environ["COST_REPORT_BUCKET"]},
+              {"name": "AWS_ENDPOINT_URL", "value": f"http://{s3_ip}:4566"},
+              {"name": "AWS_ACCESS_KEY_ID", "value": "testing"},
+              {"name": "AWS_SECRET_ACCESS_KEY", "value": "testing"},
+              {"name": "AWS_DEFAULT_REGION", "value": "us-east-1"},
+          ]
+          assert container["image"] == "cost-monitor:ci", container["image"]
+          # IfNotPresent in production (content-hash tags); the kind node has
+          # no registry to fall back to, so require the loaded image.
+          container["imagePullPolicy"] = "Never"
+          print(yaml.safe_dump_all(documents, sort_keys=False))
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/cost-monitor.yaml"
+          kubectl apply -f - <<'EOF'
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: ci-allow-s3-emulator-egress
+            namespace: gco-system
+            labels:
+              gco.aws/ci-only: "true"
+          spec:
+            podSelector:
+              matchLabels:
+                app: cost-monitor
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: gco-ci-aws
+                ports:
+                  - protocol: TCP
+                    port: 4566
+          EOF
+          kubectl -n gco-system get networkpolicy allow-cost-monitor-to-opencost
+          if ! kubectl -n gco-system rollout status deployment/cost-monitor --timeout=4m; then
+            echo "::error::cost-monitor did not roll out under NetworkPolicy enforcement"
+            kubectl -n gco-system describe pods -l app=cost-monitor || true
+            kubectl -n gco-system logs -l app=cost-monitor --tail=100 || true
+            exit 1
+          fi
+      - name: Verify Prometheus scrapes the pinned OpenCost
+        # The shipped charts.yaml values enable OpenCost's ServiceMonitor and
+        # tell Prometheus to select every ServiceMonitor. If either half
+        # drifts, OpenCost still answers /healthz but its own cost series
+        # never land in Prometheus and allocations come back empty — the
+        # exact failure the monitor's data probe exists to catch, asserted
+        # here at its source: an `up` OpenCost target and at least one
+        # node_total_hourly_cost series.
+        run: |
+          set -euo pipefail
+          kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+          sleep 3
+          deadline=$((SECONDS + 300))
+          until python3 - <<'PY'
+          import json
+          import sys
+          import urllib.parse
+          import urllib.request
+
+          base = "http://127.0.0.1:9090/api/v1"
+          targets = json.load(urllib.request.urlopen(f"{base}/targets?state=active", timeout=10))
+          opencost = [
+              t for t in targets["data"]["activeTargets"]
+              if "opencost" in t.get("scrapePool", "")
+          ]
+          up = [t for t in opencost if t.get("health") == "up"]
+          print(f"opencost targets: {len(opencost)} active, {len(up)} up")
+          if not up:
+              for t in opencost:
+                  print("  ", t.get("scrapeUrl"), t.get("health"), t.get("lastError"))
+              sys.exit(1)
+          query = urllib.parse.urlencode({"query": "count(node_total_hourly_cost)"})
+          result = json.load(urllib.request.urlopen(f"{base}/query?{query}", timeout=10))
+          series = result["data"]["result"]
+          print(f"node_total_hourly_cost series: {series[0]['value'][1] if series else 0}")
+          sys.exit(0 if series else 1)
+          PY
+          do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::Prometheus never reported OpenCost up with cost series within 300s"
+              exit 1
+            fi
+            sleep 10
+          done
+      - name: Wait for the cost monitor to see OpenCost returning data
+        # /internal/status performs the live one-hour allocation probe the
+        # release validation gates on: opencost_healthy is OpenCost's
+        # /healthz through the shipped egress rule; opencost_returning_data
+        # is a real /allocation/compute answer with at least one allocation.
+        # That flag is satisfied by OpenCost's synthetic rows alone — on this
+        # job's first run the hour held only `__unmounted__` (the Prometheus
+        # PVC's cost) while no pod had accumulated a full query-resolution
+        # interval yet — so the wait also requires a real namespace among the
+        # allocation names before the report step reads them back. Bounded,
+        # because OpenCost needs a few Prometheus scrape intervals of cAdvisor
+        # and its own series, at its 300s query resolution, before it can
+        # price a pod.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-system port-forward svc/cost-monitor 18080:8080 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+          sleep 3
+          deadline=$((SECONDS + 900))
+          until python3 - <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          status = json.load(urllib.request.urlopen("http://127.0.0.1:18080/internal/status", timeout=60))
+          print(json.dumps({k: status[k] for k in (
+              "opencost_healthy", "opencost_returning_data", "allocation_names",
+              "bucket", "bucket_source", "cluster", "last_error")}))
+          assert status["service"] == "cost-monitor"
+          assert status["bucket"] == "gco-ci-cost-reports", status["bucket"]
+          assert status["bucket_source"] == "environment", status["bucket_source"]
+          if not status["opencost_healthy"]:
+              print("OpenCost /healthz not yet reachable through allow-cost-monitor-to-opencost")
+              sys.exit(1)
+          if not status["opencost_returning_data"]:
+              sys.exit(1)
+          real = [name for name in status["allocation_names"] if not name.startswith("__")]
+          if not real:
+              print("OpenCost returns only synthetic allocations so far; waiting for a pod allocation")
+              sys.exit(1)
+          print(f"OpenCost prices {len(real)} namespace(s): {', '.join(real)}")
+          sys.exit(0)
+          PY
+          do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::cost-monitor never reported a real namespace allocation within 900s"
+              kubectl -n gco-system logs deploy/cost-monitor --tail=100 || true
+              kubectl -n monitoring logs deploy/opencost -c opencost --tail=100 || true
+              exit 1
+            fi
+            sleep 15
+          done
+      - name: Generate an ad-hoc report and verify the Parquet object end to end
+        # POST /internal/reports is the path `gco cost report` reaches through
+        # the manifest processor's /api/v1/cost proxy. The response names the
+        # object; it is then checked from both ends of the pipe — the runner
+        # confirms the object exists in the emulator and is listed by the
+        # monitor's own GET, and the monitor's container reads it back with
+        # the same boto3 + pyarrow it wrote with, asserting the Parquet
+        # columns are exactly ALLOCATION_REPORT_FIELDS (the Glue table
+        # contract in gco/stacks/monitoring_stack.py), the row count matches,
+        # every row carries the injected cluster id, the namespaces are the
+        # cluster's real ones, and OpenCost priced at least one of them.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-system port-forward svc/cost-monitor 18080:8080 >/dev/null 2>&1 &
+          pf_api=$!
+          kubectl -n gco-ci-aws port-forward svc/s3 4566:4566 >/dev/null 2>&1 &
+          pf_s3=$!
+          trap 'kill "${pf_api}" "${pf_s3}" 2>/dev/null || true' EXIT
+          sleep 3
+          curl --fail --silent --show-error \
+            -X POST -H 'Content-Type: application/json' \
+            -d '{"window_hours": 1, "include_rows": true}' \
+            -o "${RUNNER_TEMP}/adhoc-report.json" -w 'HTTP %{http_code}\n' \
+            http://127.0.0.1:18080/internal/reports
+          read -r s3_key row_count < <(python3 - <<'PY'
+          import json
+          import os
+
+          body = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "adhoc-report.json")))
+          report = body["report"]
+          assert body["bucket"] == "gco-ci-cost-reports", body["bucket"]
+          assert body["region"] == "us-east-1", body["region"]
+          assert report["row_count"] > 0, report
+          assert report["s3_key"].startswith("adhoc/region=us-east-1/date="), report["s3_key"]
+          assert report["s3_key"].endswith(".parquet"), report["s3_key"]
+          assert len(body["rows"]) == report["row_count"], (len(body["rows"]), report["row_count"])
+          print(report["s3_key"], report["row_count"])
+          PY
+          )
+          echo "ad-hoc report: ${s3_key} (${row_count} rows)"
+
+          # The monitor's own listing must show the object it just wrote.
+          # (Response to a file, then parsed: the data is never piped into an
+          # interpreter, which is the shape the curl-pipe-shell rule flags.)
+          curl --fail --silent --show-error \
+            -o "${RUNNER_TEMP}/adhoc-listing.json" \
+            "http://127.0.0.1:18080/internal/reports?adhoc=true"
+          S3_KEY="${s3_key}" python3 - <<'PY'
+          import json
+          import os
+
+          listing = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "adhoc-listing.json")))
+          keys = [entry["key"] for entry in listing["reports"]]
+          assert os.environ["S3_KEY"] in keys, (os.environ["S3_KEY"], keys)
+          print(f"GET /internal/reports?adhoc=true lists {len(keys)} object(s), including the new report")
+          PY
+          # ...and the object must really be in the emulator.
+          export AWS_ENDPOINT_URL="http://127.0.0.1:4566"
+          export AWS_ACCESS_KEY_ID=testing
+          export AWS_SECRET_ACCESS_KEY=testing
+          export AWS_REGION=us-east-1
+          aws s3api head-object --bucket "${COST_REPORT_BUCKET}" --key "${s3_key}"
+
+          # Read it back inside the monitor's container: same image, same
+          # credentials/endpoint, same pyarrow. The image is FROM scratch
+          # (no shell), so the script is handed to python directly.
+          cat > "${RUNNER_TEMP}/verify_parquet.py" <<'PY'
+          import io
+          import os
+          import sys
+
+          import boto3
+          import pyarrow.parquet as pq
+
+          from gco.services.cost_monitor import ALLOCATION_REPORT_FIELDS
+
+          bucket, key, expected_rows, cluster_id = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+          body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+          table = pq.read_table(io.BytesIO(body))
+          assert table.column_names == list(ALLOCATION_REPORT_FIELDS), table.column_names
+          assert table.num_rows == expected_rows, (table.num_rows, expected_rows)
+          rows = table.to_pylist()
+          assert all(row["cluster"] == cluster_id for row in rows), sorted({row["cluster"] for row in rows})
+          namespaces = sorted(row["namespace"] for row in rows)
+          # Real allocations for real namespaces, not only OpenCost's synthetic
+          # __idle__ / __unmounted__ rows: the system and monitoring pods have
+          # been running longest, so at least one of those must be priced.
+          real = [name for name in namespaces if not name.startswith("__")]
+          assert real, namespaces
+          assert {"kube-system", "monitoring"} & set(real), namespaces
+          priced = [row for row in rows if row["total_cost"] > 0]
+          assert priced, "OpenCost returned allocations but priced none of them"
+          print(f"parquet ok: {table.num_rows} rows x {len(table.column_names)} columns, {len(priced)} priced")
+          print("namespaces:", ", ".join(namespaces))
+          for row in sorted(rows, key=lambda r: r["total_cost"], reverse=True)[:5]:
+              print(f"  {row['namespace']}: cpu_core_hours={row['cpu_core_hours']:.4f} total_cost={row['total_cost']:.6f}")
+          PY
+          kubectl -n gco-system exec deploy/cost-monitor -- \
+            python -c "$(cat "${RUNNER_TEMP}/verify_parquet.py")" \
+            "${COST_REPORT_BUCKET}" "${s3_key}" "${row_count}" "${CI_CLUSTER_ID}"
+      - name: Verify only the cost monitor may reach OpenCost
+        # allow-cost-monitor-to-opencost selects app=cost-monitor and admits
+        # monitoring:9003. Under Calico that must mean: a pod wearing the
+        # label reaches OpenCost through the production URL, and any other
+        # gco-system pod — DNS resolves, the connection does not — is denied.
+        # Both probes run the same command; only the label differs, so the
+        # verdict is the policy's and not the target's.
+        run: |
+          set -euo pipefail
+          probe() {
+            # probe <name> <labels> <reachable|blocked>
+            local name="$1" labels="$2" expect="$3" phase="" output exit_code
+            kubectl -n gco-system run "${name}" \
+              --image=busybox:1.38.0 \
+              --labels="${labels}" \
+              --restart=Never \
+              --command -- sh -c '
+                if wget -qO- -T 5 http://opencost.monitoring.svc.cluster.local:9003/healthz; then
+                  echo NETPOL_REACHABLE
+                  exit 0
+                fi
+                echo NETPOL_BLOCKED
+                exit 42
+              '
+            for _ in $(seq 1 90); do
+              phase=$(kubectl -n gco-system get pod "${name}" -o jsonpath='{.status.phase}')
+              case "${phase}" in
+                Succeeded|Failed) break ;;
+              esac
+              sleep 1
+            done
+            output=$(kubectl -n gco-system logs "${name}" 2>&1)
+            exit_code=$(kubectl -n gco-system get pod "${name}" \
+              -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
+            printf '%s\n' "${output}"
+            if [ "${expect}" = "blocked" ] && [ "${phase}" = "Failed" ] && [ "${exit_code}" = "42" ] \
+                && printf '%s\n' "${output}" | grep -qx NETPOL_BLOCKED; then
+              echo "PASS (blocked): ${labels} -> opencost:9003"
+            elif [ "${expect}" = "reachable" ] && [ "${phase}" = "Succeeded" ] && [ "${exit_code}" = "0" ] \
+                && printf '%s\n' "${output}" | grep -qx NETPOL_REACHABLE; then
+              echo "PASS (reachable): ${labels} -> opencost:9003"
+            else
+              echo "FAIL: ${labels} -> opencost:9003 expected ${expect}, phase=${phase} exit=${exit_code}"
+              kubectl -n gco-system describe pod "${name}"
+              exit 1
+            fi
+            kubectl -n gco-system delete pod "${name}" --wait=false
+          }
+          probe netpol-probe-unlabelled app=netpol-probe blocked
+          probe netpol-probe-cost-monitor app=cost-monitor,project=gco reachable
+      - name: Summary
+        run: |
+          echo "=== Kind cost-pipeline summary ==="
+          echo "Pinned charts (charts.yaml):"
+          helm list -n monitoring
+          echo ""
+          echo "Prometheus, OpenCost and the cost monitor:"
+          kubectl -n monitoring get pods,pvc --no-headers 2>/dev/null || echo "  (none)"
+          kubectl -n gco-system get deploy,pods --no-headers 2>/dev/null || echo "  (none)"
+          echo ""
+          echo "NetworkPolicies in gco-system (shipped + the one CI-only emulator egress):"
+          kubectl -n gco-system get networkpolicy --no-headers 2>/dev/null || echo "  (none)"
+          echo ""
+          echo "Report objects in the emulator bucket:"
+          kubectl -n gco-system exec deploy/cost-monitor -- python -c '
+          import boto3, sys
+          for page in boto3.client("s3").get_paginator("list_objects_v2").paginate(Bucket=sys.argv[1]):
+              for entry in page.get("Contents", []):
+                  print("  " + entry["Key"], "(" + str(entry["Size"]), "bytes)")
+          ' "${COST_REPORT_BUCKET}"
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n gco-system describe deploy cost-monitor || true
+          kubectl -n gco-system logs deploy/cost-monitor --tail=200 || true
+          kubectl -n gco-system get networkpolicy || true
+          kubectl -n gco-system get events --sort-by=.lastTimestamp | tail -50 || true
+          kubectl -n monitoring get pods,svc,servicemonitor,pvc || true
+          kubectl -n monitoring describe deploy opencost || true
+          kubectl -n monitoring logs deploy/opencost -c opencost --tail=200 || true
+          kubectl -n monitoring logs statefulset/prometheus-kube-prometheus-stack-prometheus -c prometheus --tail=100 || true
+          kubectl -n monitoring get events --sort-by=.lastTimestamp | tail -50 || true
+          kubectl -n gco-ci-aws describe deploy s3 || true
+          kubectl -n gco-ci-aws logs deploy/s3 --tail=100 || true
 
   integration-kind-examples-smoke:
     name: "integration:kind:examples-smoke"

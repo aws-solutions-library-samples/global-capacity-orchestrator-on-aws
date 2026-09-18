@@ -26,10 +26,10 @@
 #   - security:npm-audit:all-packages    — npm audit on every locked npm graph
 #   - security:pip-audit:deps            — pip-audit on requirements-lock.txt
 #   - security:semgrep:sast              — semgrep scan --config auto
-#   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
 #                                          (every service image + every container
 #                                          Lambda + Dockerfile.dev, discovered)
+#   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
 # Scanner command failures fail their jobs. CodeQL analysis uploads SARIF to

@@ -55,8 +55,8 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `analytics_doctor` | `gco analytics doctor` — run analytics environment health checks. |
-| `analytics_status` | `gco analytics status` — show the analytics environment configuration. |
 | `analytics_login_url` | `gco analytics studio login` — get a [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio presigned login URL. |
+| `analytics_status` | `gco analytics status` — show the analytics environment configuration. |
 | `analytics_user_add` | `gco analytics users add` — create a [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) user in the analytics pool. |
 | `analytics_user_remove` | `gco analytics users remove` — delete a Cognito user from the analytics user pool. |
 | `analytics_users_list` | `gco analytics users list` — list Cognito users in the analytics user pool. |
@@ -196,6 +196,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
+| `check_job_policy` | Check which regions would admit a manifest and whether the regions still agree on policy. Evaluates the manifest against each region's deployed policy using the manifest processor's own checks; any field differing across regions means a region was deployed from a different `cdk.json` checkout. `offline=True` reads `cdk.json` with no AWS calls, reporting the configured rather than deployed policy. Advisory. |
 | `cluster_health` | Get health status of GCO clusters. |
 | `delete_job` | Delete a job. |
 | `get_job` | Get details of a specific job, including the node its pods landed on and that node's instance type and spot/on-demand capacity type. |
@@ -204,7 +205,6 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
 | `get_job_pods` | Get pod details, placement, and container status for a job. Each pod carries the instance type and capacity type of the node it landed on. |
 | `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings. Reads the cluster, not a local `cdk.json`. |
-| `check_job_policy` | Check which regions would admit a manifest and whether the regions still agree on policy. Evaluates the manifest against each region's deployed policy using the manifest processor's own checks; any field differing across regions means a region was deployed from a different `cdk.json` checkout. `offline=True` reads `cdk.json` with no AWS calls, reporting the configured rather than deployed policy. Advisory. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
 | `queue_status` | View [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue status (pending, in-flight, DLQ counts). |
@@ -249,12 +249,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `monitoring_status` | `gco monitoring status` — show the cluster observability toggle + config. |
-| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. |
-| `enable_monitoring` | `gco monitoring enable` — flip cluster observability on in cdk.json. |
 | `disable_monitoring` | `gco monitoring disable` — flip cluster observability off in cdk.json. |
+| `enable_monitoring` | `gco monitoring enable` — flip cluster observability on in cdk.json. |
+| `monitoring_status` | `gco monitoring status` — show the cluster observability toggle + config. |
 | `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. |
 | `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). |
+| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. |
 
 ### `nodepools.py`
 
@@ -333,8 +333,8 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
 | `list_storage_buckets` | List deployed GCO [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and their human-friendly aliases. |
-| `s3_inventory` | Describe every S3 bucket the deployment creates — central and per-region shared buckets, model weights, cost reports, the optional analytics bucket, and every access-log sink — with owning stack, purpose, reserved prefixes, pod read/write access and how pods discover it, removal policy, and deployed status. `summary.pod_writable` answers "where can a job write?". |
 | `list_storage_contents` | List contents of shared EFS storage. |
+| `s3_inventory` | Describe every S3 bucket the deployment creates — central and per-region shared buckets, model weights, cost reports, the optional analytics bucket, and every access-log sink — with owning stack, purpose, reserved prefixes, pod read/write access and how pods discover it, removal policy, and deployed status. `summary.pod_writable` answers "where can a job write?". |
 | `sync_storage_bucket` | Sync between a GCO S3 bucket and a confined local path using explicit `download` (default) or `upload` direction; neither direction deletes destination-only data (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC` and confined to `GCO_STORAGE_LOCAL_ROOT`). |
 | `upload_to_regional_bucket` | `gco models upload-regional` — upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` to a regional bucket (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |
 
@@ -353,9 +353,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
+| `task_prune` | Delete old local task records while retaining the newest N (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
 | `task_status` | Return live status of long-running tools. |
 | `task_tail` | Return the last N lines of a long-running task's raw output log. |
-| `task_prune` | Delete old local task records while retaining the newest N (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
 
 ### `templates.py`
 

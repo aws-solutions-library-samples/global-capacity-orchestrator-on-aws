@@ -22,7 +22,7 @@ Enforcement also decides whether a whole class of bug is visible at all. The off
 
 ## Usage
 
-Used by the `integration:kind:cluster-e2e` and `integration:kind:examples-smoke` jobs in `.github/workflows/integration-tests.yml`:
+Used by the `integration:kind:cluster-e2e`, `integration:kind:cost-pipeline` and `integration:kind:examples-smoke` jobs in `.github/workflows/integration-tests.yml`:
 
 ```yaml
 - name: Create kind cluster
