@@ -24,7 +24,7 @@ import requests
 
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
 DEFAULT_NAMESPACE = "monitoring"
-DEFAULT_ADMIN_SECRET = "kube-prometheus-stack-grafana"  # nosec B105 - Kubernetes Secret name, not its contents
+DEFAULT_ADMIN_SECRET = "kube-prometheus-stack-grafana"  # nosec B105  # Kubernetes Secret name, not its contents
 
 _HTTP_TIMEOUT_SECONDS = 15
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")

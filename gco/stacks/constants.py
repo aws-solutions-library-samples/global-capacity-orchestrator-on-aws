@@ -262,7 +262,7 @@ def api_gateway_auth_secret_name(project_name: str) -> str:
     Keep the three call sites in lockstep by calling this helper with the
     stack's ``project_name`` rather than re-typing the name.
     """
-    return f"{project_name}/api-gateway-auth-token"  # nosec B105 — secret path/name, not a credential
+    return f"{project_name}/api-gateway-auth-token"  # nosec B105  # secret path/name, not a credential
 
 
 def cross_region_aggregator_role_name(project_name: str) -> str:

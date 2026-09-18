@@ -371,7 +371,7 @@ def _mock_helm_installer(stack):
     stack.helm_installer_lambda = MagicMock()
     stack.helm_installer_provider = MagicMock()
     stack.helm_installer_provider.service_token = (
-        "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN
+        "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106  # test fixture ARN
     )
 
 
@@ -392,7 +392,7 @@ def _synth_regional(config):
             "vs-regional",
             config=config,
             region="us-east-1",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN
             env=cdk.Environment(account="123456789012", region="us-east-1"),
         )
         return assertions.Template.from_stack(stack)

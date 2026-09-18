@@ -584,10 +584,13 @@ exclude_dirs = [
     "/lambda/inference-streaming-proxy-build/",
 ]
 # CI runs at --severity-level low, so every finding bandit can raise fails
-# the build unless the line carries a `# nosec Bxxx - <why>` that names the
-# rule and says why it does not apply. That is deliberate: a hard-coded
-# credential or a shell=True call added tomorrow trips the gate on the first
-# push instead of hiding below a threshold. The only rules skipped outright
+# the build unless the line carries a `# nosec Bxxx  # <why>` that names the
+# rule and says why it does not apply. The second `#` matters: bandit reads
+# every word after `nosec` up to the next `#` as a test name, so a reason
+# written after a plain dash is parsed as ids and logged as noise. The low
+# threshold is deliberate: a hard-coded credential or a shell=True call added
+# tomorrow trips the gate on the first push instead of hiding below a
+# threshold. The only rules skipped outright
 # are the ones that fire on *every* use of a feature the project is built on
 # (a CLI that orchestrates kubectl / helm / docker / the AWS CLI) and carry no
 # signal of their own:

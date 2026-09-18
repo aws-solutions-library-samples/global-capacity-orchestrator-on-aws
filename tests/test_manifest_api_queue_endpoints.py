@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-_TEST_SIGNING_KEY = "test-queue-endpoints-signing-key"  # nosec B105 - test-only key
+_TEST_SIGNING_KEY = "test-queue-endpoints-signing-key"  # nosec B105  # test-only key
 _REQUEST_HEADERS: dict[str, str] = {}
 
 

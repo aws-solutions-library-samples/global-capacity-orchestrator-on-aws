@@ -467,7 +467,7 @@ def copy_image(
     item: MirrorItem,
     runtime: str = "docker",
     strategy: str = "buildx",
-    password: str = "",  # nosec B107 - empty means "no registry login"; callers pass the real token
+    password: str = "",  # nosec B107  # empty means "no registry login"; callers pass the real token
     log: LogFn = print,
 ) -> None:
     """Copy one image registry-to-registry, preserving the full manifest list.

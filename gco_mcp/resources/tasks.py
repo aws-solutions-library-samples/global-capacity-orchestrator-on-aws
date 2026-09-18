@@ -56,7 +56,7 @@ def _coerce_to_dict(record: object) -> dict[str, Any]:
         if callable(method):
             try:
                 payload = method()
-            except Exception:  # nosec B112 - try the next serialiser name
+            except Exception:  # nosec B112  # try the next serialiser name
                 continue
             if isinstance(payload, dict):
                 return payload

@@ -6691,7 +6691,7 @@ _CLUSTER_OBSERVABILITY_DEFAULTS: dict[str, Any] = {
     "grafana": {
         "persistence_size": "10Gi",
         "admin_user": "admin",
-        "admin_password_rotation_schedule": "0 4 1 * *",  # nosec B105 - cron schedule, not a password
+        "admin_password_rotation_schedule": "0 4 1 * *",  # nosec B105  # cron schedule, not a password
     },
     "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
     "alertmanager": {"enabled": True, "persistence_size": "5Gi"},

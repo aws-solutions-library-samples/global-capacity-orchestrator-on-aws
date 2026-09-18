@@ -13,6 +13,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
   - [Naming conventions](#naming-conventions)
   - [Draft pull requests](#draft-pull-requests)
   - [Cross-cutting defaults](#cross-cutting-defaults)
+  - [Gate thresholds](#gate-thresholds)
   - [Action pinning](#action-pinning)
 - [Live release validation stays local](#live-release-validation-stays-local)
 - [Composite actions](#composite-actions)
@@ -140,6 +141,35 @@ All CI workflows share the same safety defaults:
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Caching: `actions/setup-python` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache` on `.mypy_cache/`.
 - AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
+
+### Gate thresholds
+
+Every static gate fails at the lowest level that carries signal, and the tree
+is clean at that level. The intent is a fence rather than a report: the first
+push that adds a hard-coded secret, an unreachable branch, a naive `datetime`,
+or a call to a deprecated API fails, instead of joining a backlog below some
+threshold. When a finding is a genuine false positive the fix is an inline
+annotation on the offending line that names the rule *and says why* — never a
+wider threshold or a blanket ignore — so the exception is reviewed in the diff
+where it lives.
+
+| Gate | Fails on | False positive goes in | Configured in |
+|------|----------|------------------------|---------------|
+| ruff (`lint:ruff:python`) | every enabled rule, including `T10`/`PGH`/`YTT`/`PLE`/`LOG`/`EXE`/`PIE`/`RUF`/`PT`/`DTZ`, `PLW1510` (`subprocess.run` without `check=`), `PLW2901`; `RUF100` fails a `# noqa` that suppresses nothing | `# noqa: RULE  # why` on the line | `[tool.ruff.lint]` in `pyproject.toml` |
+| mypy (`lint:mypy:*`) | `--strict` plus `warn_unreachable`: a branch the types say can never run is either dead code or a lying annotation | `# type: ignore[code]  # why`, and `warn_unused_ignores` removes it the day it stops being needed | `[tool.mypy]` in `pyproject.toml` |
+| bandit (`security:bandit:sast`) | `--severity-level low` — every finding | `# nosec Bxxx  # why` on the line (the second `#` keeps bandit from reading the reason as test names); only the three blanket subprocess rules (`B404`/`B603`/`B607`) are skipped outright, with the reasoning next to them | `[tool.bandit]` in `pyproject.toml`, `security.yml` |
+| npm audit (`security:npm-audit:all-packages`) | advisories of `moderate` severity and above in every owned graph | an exact, expiring entry in `.github/config/.npm-audit-ignore` (see [`check_npm_audit.py`](scripts/check_npm_audit.py)) | `FAIL_AT` in the checker, pinned to the workflow's `--audit-level` by a test |
+| pip-audit (`security:pip-audit:deps`) | every advisory | an exact, expiring entry in `.github/config/.pip-audit-ignore` | [pip-audit-ignore validator](#pip-audit-ignore-validator) |
+| yamllint (`lint:yamllint:yaml`) | `--strict`; booleans must be spelled `true` / `false` (YAML 1.1 parsers read `yes`/`on` as booleans, YAML 1.2 parsers as strings) | `# yamllint disable-line rule:<name>` | `.github/config/.yamllint.yml` |
+| pytest (`unit:pytest:*`) | any `DeprecationWarning` / `PendingDeprecationWarning` raised during a test, an unregistered marker (`--strict-markers`), a misspelled config option (`--strict-config`), an `xfail` that passes (`xfail_strict`) | a narrow `filterwarnings` ignore matched on message *and* module, with a note on where upstream stands | `[tool.pytest.ini_options]` in `pyproject.toml` |
+| coverage (`unit:pytest:core`) | any authored line or branch left unexecuted (`fail_under = 100`) | `# pragma: no cover` on the line, or an `omit` entry that `tests/test_coverage_omit_policy.py` accepts | `[tool.coverage.*]` in `pyproject.toml` |
+| checkov (`security:checkov:iac`) | every Kubernetes and Dockerfile check, no severity floor | `# checkov:skip=CKV_ID:why` in the manifest or Dockerfile | `.github/config/.checkov.yaml` |
+
+Trivy (`--severity HIGH,CRITICAL`) and KICS (`--fail-on high`) keep their
+floors: their medium tiers are dominated by advisories in base-image packages
+the images never exercise, and every image is rebuilt on a security epoch that
+picks up the OS patches regardless (see the *Base-image security epochs* row
+under [What it checks](#what-it-checks)).
 
 ### Action pinning
 
@@ -696,8 +726,8 @@ Most jobs map to a single command you can run locally. Quick reference:
 
 ```bash
 # Lint (matches jobs in workflows/lint.yml)
-ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff format --check .   # CI lints the whole checkout, not a directory list
+ruff check .
 yamllint -c .github/config/.yamllint.yml --strict .
 python .github/scripts/verify_action_pins.py   # add --verify-upstream to resolve each tag
 bash .github/scripts/use-pinned-npm.sh package.json
@@ -731,7 +761,7 @@ cdk synth --quiet
 pytest tests/test_cdk_synthesis_matrix.py
 
 # Security (matches security:bandit:sast). Every finding fails; a line that
-# is a false positive carries `# nosec Bxxx - <why>` (see [tool.bandit] in
+# is a false positive carries `# nosec Bxxx  # <why>` (see [tool.bandit] in
 # pyproject.toml for the three blanket subprocess rules that are skipped).
 bandit -r . -c pyproject.toml --severity-level low
 

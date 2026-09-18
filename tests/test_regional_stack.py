@@ -453,7 +453,7 @@ class TestMonitoringStackMethods:
         mock_api_gw_stack.api.rest_api_name = "test-api"
         mock_api_gw_stack.proxy_lambda.function_name = "test-proxy"
         mock_api_gw_stack.rotation_lambda.function_name = "test-rotation"
-        mock_api_gw_stack.secret.secret_name = "test-secret"  # nosec B105 - test fixture mock value, not a real secret
+        mock_api_gw_stack.secret.secret_name = "test-secret"  # nosec B105  # test fixture mock value, not a real secret
 
         mock_regional_stack = MagicMock()
         mock_regional_stack.deployment_region = "us-east-1"
@@ -714,7 +714,7 @@ class TestRegionalStackSynthesis:
         stack.helm_installer_lambda = MagicMock()
         stack.helm_installer_provider = MagicMock()
         stack.helm_installer_provider.service_token = (
-            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN with fake account ID, not a real credential
+            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106  # test fixture ARN with fake account ID, not a real credential
         )
 
     @staticmethod
@@ -758,7 +758,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-vpc",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -803,7 +803,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-ga-dereg",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -946,7 +946,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-ecr",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -994,7 +994,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-vpc-endpoints",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1121,7 +1121,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-pod-identity",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1205,7 +1205,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-efs",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1237,7 +1237,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-iam",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1724,7 +1724,7 @@ class TestRegionalStackSynthesis:
                 "test-regional-lambda",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1762,7 +1762,7 @@ class TestRegionalStackWithFsx:
                 "test-regional-fsx",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1794,7 +1794,7 @@ class TestRegionalStackWithFsx:
                 "test-regional-no-fsx",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -1867,7 +1867,7 @@ class TestAwsCustomResourceSharedRole:
                 logical_name,
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2216,7 +2216,7 @@ class TestRegionalStackGetters:
                 "test-regional-getter-cluster",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2249,7 +2249,7 @@ class TestRegionalStackGetters:
                 "test-regional-getter-vpc",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2267,7 +2267,7 @@ class TestRegionalStackFsxConfigurations:
         stack.helm_installer_lambda = MagicMock()
         stack.helm_installer_provider = MagicMock()
         stack.helm_installer_provider.service_token = (
-            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN with fake account ID, not a real credential
+            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106  # test fixture ARN with fake account ID, not a real credential
         )
 
     def test_fsx_with_persistent_deployment_type(self):
@@ -2308,7 +2308,7 @@ class TestRegionalStackFsxConfigurations:
                 "test-fsx-persistent",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2360,7 +2360,7 @@ class TestRegionalStackFsxConfigurations:
                 "test-fsx-s3-import",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2404,7 +2404,7 @@ class TestRegionalStackFsxConfigurations:
                 "test-fsx-s3-export",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -2449,7 +2449,7 @@ class TestRegionalStackFsxConfigurations:
                 "test-fsx-persistent-2",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
 
@@ -3101,7 +3101,7 @@ class TestClusterSharedBucketRegionalIntegration:
                 logical_name,
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
             return assertions.Template.from_stack(stack)
@@ -3398,7 +3398,7 @@ class TestRegionalStackVolcanoImageMirror:
                 "test-regional-mirror",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN, fake account, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN, fake account, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
         return stack
@@ -3500,7 +3500,7 @@ class TestRegionalStackEksControlPlaneAzExclusion:
         stack.helm_installer_lambda = MagicMock()
         stack.helm_installer_provider = MagicMock()
         stack.helm_installer_provider.service_token = (
-            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN
+            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106  # test fixture ARN
         )
 
     def _build(self, unsupported_names):
@@ -3649,7 +3649,7 @@ class TestAddonTolerationShapes:
                 "test-regional-addon-tolerations",
                 config=config,
                 region="us-east-1",
-                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
                 env=cdk.Environment(account="123456789012", region="us-east-1"),
             )
             template = assertions.Template.from_stack(stack)

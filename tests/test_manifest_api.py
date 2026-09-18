@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-_TEST_SIGNING_KEY = "test-manifest-api-signing-key"  # nosec B105 - test-only key
+_TEST_SIGNING_KEY = "test-manifest-api-signing-key"  # nosec B105  # test-only key
 
 
 def _sign_request(request) -> None:

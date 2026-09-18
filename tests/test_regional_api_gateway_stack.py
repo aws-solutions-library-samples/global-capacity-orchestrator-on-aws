@@ -149,7 +149,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -207,7 +207,7 @@ class TestRegionalApiGatewayStack:
             config=mock_config,
             region="us-east-1",
             vpc=vpc,
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID
             aggregator_role_arn=aggregator_role_arn,
             env=cdk.Environment(region="us-east-1"),
         )
@@ -270,7 +270,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -334,7 +334,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -360,7 +360,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -423,7 +423,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -444,7 +444,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -470,7 +470,7 @@ class TestRegionalApiGatewayStack:
             region="us-east-1",
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
-            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
             aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
@@ -485,7 +485,7 @@ class TestRegionalApiGatewayStack:
                     "Variables": assertions.Match.object_like(
                         {
                             "ALB_ENDPOINT": "internal-test-alb.elb.amazonaws.com",
-                            "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID
+                            "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID
                             "BACKEND_TLS_SERVER_NAME": "backend.gco.gco.internal",
                             "BACKEND_TLS_ROOT_CA_PARAMETER": "/gco/backend-tls/root-ca.pem",
                             "BACKEND_TLS_ROOT_CA_REGION": "us-east-2",
@@ -870,8 +870,8 @@ class TestRegionalApiClientIntegration:
             patch.object(client, "_session") as mock_session,
         ):
             mock_creds = MagicMock()
-            mock_creds.access_key = "test"  # nosec B105 - test fixture mock credential, not a real key
-            mock_creds.secret_key = "test"  # nosec B105 - test fixture mock credential, not a real key
+            mock_creds.access_key = "test"  # nosec B105  # test fixture mock credential, not a real key
+            mock_creds.secret_key = "test"  # nosec B105  # test fixture mock credential, not a real key
             mock_creds.token = None
             mock_session.get_credentials.return_value = mock_creds
 

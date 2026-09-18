@@ -73,7 +73,7 @@ _SERVICES: dict[str, dict[str, Any]] = {
 }
 
 _MONITORING_NAMESPACE = "monitoring"
-_GRAFANA_SECRET = "kube-prometheus-stack-grafana"  # nosec B105 - Kubernetes Secret name, not its contents
+_GRAFANA_SECRET = "kube-prometheus-stack-grafana"  # nosec B105  # Kubernetes Secret name, not its contents
 
 # Default self-terminate backstop for an `--via-ssm auto` bastion.
 # Mirrors cli.ephemeral_bastion.DEFAULT_TTL_MINUTES (kept literal to avoid an
@@ -383,7 +383,7 @@ def users_add(
             "username": username,
             "user_id": user_id,
             "email": email,
-            "password_state": "set",  # nosec B105 - state label, not a credential
+            "password_state": "set",  # nosec B105  # state label, not a credential
             "password_generated": generate_password,
             "password_source": "generated" if generate_password else "provided",
         }

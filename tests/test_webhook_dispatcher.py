@@ -214,7 +214,7 @@ class TestWebhookDispatcher:
     def test_sign_payload(self, dispatcher):
         """Test HMAC payload signing."""
         payload = '{"event": "job.completed"}'
-        secret = "my-secret-key"  # nosec B105 - test fixture for HMAC signing test, not a real credential
+        secret = "my-secret-key"  # nosec B105  # test fixture for HMAC signing test, not a real credential
 
         signature = dispatcher._sign_payload(payload, secret)
 

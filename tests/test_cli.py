@@ -666,7 +666,7 @@ class TestCliFromEnvExtended:
         monkeypatch.setenv("GCO_VERBOSE", "true")
         monkeypatch.setenv(
             "GCO_CACHE_DIR",
-            "/tmp/cache",  # nosec B108 - test fixture using temp directory
+            "/tmp/cache",  # nosec B108  # test fixture using temp directory
         )
 
         config = GCOConfig.from_env()
@@ -679,7 +679,7 @@ class TestCliFromEnvExtended:
         assert config.default_namespace == "custom-ns"
         assert config.output_format == "json"
         assert config.verbose is True
-        assert config.cache_dir == "/tmp/cache"  # nosec B108 - test fixture using temp directory
+        assert config.cache_dir == "/tmp/cache"  # nosec B108  # test fixture using temp directory
 
     def test_from_env_verbose_variations(self, monkeypatch):
         """Test from_env handles various verbose values."""

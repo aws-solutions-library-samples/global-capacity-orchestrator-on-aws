@@ -287,7 +287,7 @@ class TestStackManagerDeployOptions:
             manager = StackManager(config)
             result = manager.deploy(
                 "test-stack",
-                outputs_file="/tmp/outputs.json",  # nosec B108 - test fixture using temp directory
+                outputs_file="/tmp/outputs.json",  # nosec B108  # test fixture using temp directory
                 require_approval=False,
             )
 
@@ -295,7 +295,7 @@ class TestStackManagerDeployOptions:
             call_args = mock_run.call_args[0][0]
             assert "--outputs-file" in call_args
             assert (
-                "/tmp/outputs.json" in call_args  # nosec B108 - test fixture using temp directory
+                "/tmp/outputs.json" in call_args  # nosec B108  # test fixture using temp directory
             )
 
     def test_deploy_with_parameters(self):
@@ -609,7 +609,7 @@ class TestIsBootstrapped:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -680,7 +680,7 @@ class TestStrictBootstrapValidation:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -755,7 +755,7 @@ class TestEnsureBootstrapped:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -802,7 +802,7 @@ class TestGetDeployRegion:
         config.monitoring_region = "us-east-2"
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -973,7 +973,7 @@ class TestDeployCallsEnsureBootstrapped:
         config.global_region = "us-east-2"
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 

@@ -209,7 +209,7 @@ def _try_get_task_id(ctx: Any | None) -> str | None:
         from fastmcp_tasks.context import get_task_context
 
         candidates.append(getattr(get_task_context(), "task_id", None))
-    except Exception:  # nosec B110 - no task context outside a task worker
+    except Exception:  # nosec B110  # no task context outside a task worker
         pass
 
     if ctx is not None:

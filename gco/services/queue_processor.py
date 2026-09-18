@@ -634,14 +634,14 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
                 res = c.get("resources", {}) or {}
                 limits = res.get("limits", {}) or {}
                 requests = res.get("requests", {}) or {}
-                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113  # dict.get(), not HTTP requests
                 total_gpu += multiplier * int(gpu)
-                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get(), not HTTP requests
                 if isinstance(cpu_str, str) and cpu_str.endswith("m"):
                     total_cpu += multiplier * int(cpu_str[:-1])
                 else:
                     total_cpu += multiplier * int(float(cpu_str) * 1000)
-                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113 - dict.get(), not HTTP requests
+                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113  # dict.get(), not HTTP requests
                 mem_bytes = _parse_memory_string(str(mem_str))
                 total_memory += multiplier * mem_bytes
 

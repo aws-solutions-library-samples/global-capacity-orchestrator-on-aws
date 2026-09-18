@@ -680,7 +680,7 @@ class GCOApiGatewayGlobalStack(Stack):
         secret = secretsmanager.Secret(
             self,
             "GCOAuthSecret",
-            secret_name=api_gateway_auth_secret_name(self.project_name),  # nosec B106 — this is the secret path, not a password
+            secret_name=api_gateway_auth_secret_name(self.project_name),  # nosec B106  # this is the secret path, not a password
             description="HMAC signing key for API Gateway backend requests (auto-rotated)",
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template=json.dumps({"description": "GCO backend HMAC signing key"}),

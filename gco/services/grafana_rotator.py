@@ -44,11 +44,11 @@ logger = logging.getLogger("gco.grafana_rotator")
 # subchart resources are named ``kube-prometheus-stack-grafana``). All three are
 # overridable via env so the manifest stays the single source of truth.
 DEFAULT_NAMESPACE = "monitoring"
-DEFAULT_SECRET_NAME = "kube-prometheus-stack-grafana"  # nosec B105 - Kubernetes Secret name, not its contents
+DEFAULT_SECRET_NAME = "kube-prometheus-stack-grafana"  # nosec B105  # Kubernetes Secret name, not its contents
 DEFAULT_SERVICE_URL = "http://kube-prometheus-stack-grafana.monitoring.svc"
 
 _ADMIN_USER_KEY = "admin-user"
-_ADMIN_PASSWORD_KEY = "admin-password"  # nosec B105 - data key inside the Secret, not the value
+_ADMIN_PASSWORD_KEY = "admin-password"  # nosec B105  # data key inside the Secret, not the value
 
 # 24 random bytes -> ~32 URL-safe characters. Comfortably above any sane
 # minimum-length policy while staying a valid Grafana password.

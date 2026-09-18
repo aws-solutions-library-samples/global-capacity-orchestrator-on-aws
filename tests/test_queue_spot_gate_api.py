@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_TEST_SIGNING_KEY = "test-spot-gate-signing-key"  # nosec B105 - test-only key
+_TEST_SIGNING_KEY = "test-spot-gate-signing-key"  # nosec B105  # test-only key
 
 
 def _sign_request(request) -> None:

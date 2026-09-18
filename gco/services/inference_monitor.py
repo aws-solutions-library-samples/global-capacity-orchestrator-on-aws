@@ -345,7 +345,7 @@ PD_PROXY_PORT = 8000
 # container through a Secret reference at pod start — it is never written to the
 # endpoint spec or passed as a command-line argument.
 PD_PROXY_ADMIN_API_KEY_ENV = "ADMIN_API_KEY"
-ADMIN_API_KEY_SECRET_DATA_KEY = "ADMIN_API_KEY"  # nosec B105 - Secret data key name, not the key value
+ADMIN_API_KEY_SECRET_DATA_KEY = "ADMIN_API_KEY"  # nosec B105  # Secret data key name, not the key value
 
 # The proxy program (gco/services/mooncake_pd_proxy.py) is shipped to the proxy
 # pod as a ConfigMap and run from this mount path. The prefill/decode backend
@@ -5045,7 +5045,7 @@ class InferenceMonitor:
         return (
             labels == cls._generated_admin_secret_labels(expected_name)
             and lifecycle_annotation is None
-            and secret_type == "Opaque"  # nosec B105 - Kubernetes Secret type, not a credential
+            and secret_type == "Opaque"  # nosec B105  # Kubernetes Secret type, not a credential
             and cls._secret_has_admin_api_key(secret)
         )
 

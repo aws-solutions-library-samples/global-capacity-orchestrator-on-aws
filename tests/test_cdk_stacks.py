@@ -936,7 +936,7 @@ class TestMonitoringStackSynth:
         mock_api_gw_stack.api.rest_api_name = "test-api"
         mock_api_gw_stack.proxy_lambda.function_name = "test-proxy"
         mock_api_gw_stack.rotation_lambda.function_name = "test-rotation"
-        mock_api_gw_stack.secret.secret_name = "test-secret"  # nosec B105 - test fixture mock value, not a real secret
+        mock_api_gw_stack.secret.secret_name = "test-secret"  # nosec B105  # test fixture mock value, not a real secret
 
         # Create mock regional stacks
         mock_regional_stack = MagicMock()

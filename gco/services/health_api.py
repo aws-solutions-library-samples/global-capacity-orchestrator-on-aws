@@ -406,7 +406,7 @@ def _run_server() -> None:
     """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
+    host = os.getenv("HOST", "0.0.0.0")  # container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     graceful_shutdown_seconds = int(

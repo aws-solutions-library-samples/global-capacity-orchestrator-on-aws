@@ -3058,7 +3058,7 @@ class TestStackManagerDeployWithOptions:
                 parameters={"Param1": "Value1"},
                 tags={"Env": "test"},
                 progress="bar",
-                output_dir="/tmp/cdk-out",  # nosec B108 - test fixture using temp directory
+                output_dir="/tmp/cdk-out",  # nosec B108  # test fixture using temp directory
             )
 
             assert result is True
@@ -3110,7 +3110,7 @@ class TestStackManagerDestroyWithOptions:
             result = manager.destroy(
                 stack_name="test-stack",
                 force=True,
-                output_dir="/tmp/cdk-out",  # nosec B108 - test fixture using temp directory
+                output_dir="/tmp/cdk-out",  # nosec B108  # test fixture using temp directory
             )
 
             assert result is True

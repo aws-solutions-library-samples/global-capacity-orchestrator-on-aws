@@ -295,10 +295,10 @@ def users_add(
                 "email": email,
                 "user_pool_id": pool_id,
                 "region": region,
-                "password_state": "permanent",  # nosec B105 - state label, not a credential
+                "password_state": "permanent",  # nosec B105  # state label, not a credential
                 "password_generated": generate_password,
                 "password_source": "generated" if generate_password else "provided",
-                "password_permanent": True,  # nosec B105 - boolean flag, not a credential
+                "password_permanent": True,  # nosec B105  # boolean flag, not a credential
             }
             if generate_password:
                 result["password"] = final_password
@@ -323,7 +323,7 @@ def users_add(
             "user_pool_id": pool_id,
             "region": region,
             "password_state": "temporary" if temporary_password else "not_returned",
-            "password_generated": False,  # nosec B105 - boolean flag, not a credential
+            "password_generated": False,  # nosec B105  # boolean flag, not a credential
             "password_source": "cognito" if temporary_password else "unavailable",
             "password_permanent": False if temporary_password else None,
         }
@@ -486,7 +486,7 @@ def users_set_password(
             formatter.print_info(f"Generated password (printed exactly once): {new_password}")
     else:
         result: dict[str, Any] = {
-            "password_set": True,  # nosec B105 - boolean flag, not a credential
+            "password_set": True,  # nosec B105  # boolean flag, not a credential
             "username": username,
             "user_pool_id": pool_id,
             "region": region,

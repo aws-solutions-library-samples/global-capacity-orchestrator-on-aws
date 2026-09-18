@@ -116,7 +116,7 @@ async def test_with_local_server() -> bool:
     port = 8888
     server = start_local_server(port)
     webhook_url = f"http://localhost:{port}/webhook"
-    webhook_secret = "test-secret-key"  # nosec B105 — local test fixture, not a real secret
+    webhook_secret = "test-secret-key"  # nosec B105  # local test fixture, not a real secret
 
     # Create mock webhook store
     mock_store = MagicMock()

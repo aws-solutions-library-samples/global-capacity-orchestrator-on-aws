@@ -384,9 +384,9 @@ def run_helm(
     helm_env = os.environ.copy()
     helm_env["KUBECONFIG"] = kubeconfig
     # Lambda has read-only filesystem except /tmp
-    helm_env["HELM_CACHE_HOME"] = "/tmp/.helm/cache"  # nosec B108 - Lambda runtime requires /tmp for writable storage
-    helm_env["HELM_CONFIG_HOME"] = "/tmp/.helm/config"  # nosec B108 - Lambda runtime requires /tmp for writable storage
-    helm_env["HELM_DATA_HOME"] = "/tmp/.helm/data"  # nosec B108 - Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_CACHE_HOME"] = "/tmp/.helm/cache"  # nosec B108  # Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_CONFIG_HOME"] = "/tmp/.helm/config"  # nosec B108  # Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_DATA_HOME"] = "/tmp/.helm/data"  # nosec B108  # Lambda runtime requires /tmp for writable storage
     if env:
         helm_env.update(env)
 

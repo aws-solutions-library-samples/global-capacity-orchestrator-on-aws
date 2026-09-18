@@ -21,7 +21,7 @@ import pytest
 
 # Signing key used by tests that hit authenticated endpoints. The autouse
 # fixture seeds the middleware cache; each request gets a fresh nonce.
-_TEST_SIGNING_KEY = "test-health-api-signing-key"  # nosec B105 - test fixture
+_TEST_SIGNING_KEY = "test-health-api-signing-key"  # nosec B105  # test fixture
 
 
 def _auth_headers(method: str, request_target: str, body: bytes = b"") -> dict[str, str]:

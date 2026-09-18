@@ -646,7 +646,7 @@ def check_resource_caps(manifest: dict[str, Any], policy: JobValidationPolicy) -
                 limits = resources.get("limits", {})
 
                 # Use limits if available, otherwise requests.
-                cpu = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113 - dict.get()
+                cpu = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get()
                 total_cpu += multiplier * parse_cpu_millicores(cpu)
 
                 memory = limits.get("memory") or requests.get("memory", "0")  # nosec B113

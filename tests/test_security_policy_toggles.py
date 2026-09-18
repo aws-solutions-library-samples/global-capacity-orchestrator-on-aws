@@ -21,7 +21,7 @@ from kubernetes import config as k8s_config
 # literal, not a filesystem operation. Pulled out as a module-level constant
 # so `# nosec B108` stays pinned to this single line regardless of how the
 # formatter reflows the manifest dict below.
-_FIXTURE_HOST_PATH = "/tmp"  # nosec B108 - K8s manifest fixture string, not a filesystem operation
+_FIXTURE_HOST_PATH = "/tmp"  # nosec B108  # K8s manifest fixture string, not a filesystem operation
 _UNSET = object()
 
 # ---------------------------------------------------------------------------

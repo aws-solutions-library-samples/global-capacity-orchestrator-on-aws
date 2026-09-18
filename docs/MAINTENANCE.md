@@ -692,7 +692,15 @@ closing it.
 - `tests/` — the pytest suite. Markers are declared in `pyproject.toml`
   `[tool.pytest.ini_options]` (`slow`, `integration`, `unit`, `mission_e2e`,
   `mooncake_image`, `helm_online`, `asyncio`), and `addopts` includes
-  `--strict-markers` so a typo'd marker fails instead of silently skipping.
+  `--strict-markers` so a typo'd marker fails instead of silently skipping
+  (and `--strict-config` so a typo'd option in that block does too).
+  `filterwarnings` turns every `DeprecationWarning` and
+  `PendingDeprecationWarning` into a test failure: a dependency announcing
+  that an API we call is going away gets fixed when it is announced, not when
+  the upgrade removes it. A third-party warning that is not ours to fix gets a
+  narrow ignore there, matched on message and module, with a note on where
+  upstream stands. See [Gate thresholds](../.github/CI.md#gate-thresholds) for
+  the same rule across every other gate.
 - Heavy tests are opt-in via env vars so the default run stays fast:
   `GCO_MOONCAKE_IMAGE_TEST=1` (pulls the ~9 GB [vLLM](https://docs.vllm.ai/en/latest/) image) and
   `GCO_HELM_CHART_VALIDATION=1` (needs `helm` + network).

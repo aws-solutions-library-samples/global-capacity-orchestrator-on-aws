@@ -100,7 +100,7 @@ def create_mock_api_gateway_stack():
     mock_api_gw_stack.api.rest_api_name = "gco-global-api"
     mock_api_gw_stack.proxy_lambda.function_name = "gco-test-proxy"
     mock_api_gw_stack.rotation_lambda.function_name = "gco-test-rotation"
-    mock_api_gw_stack.secret.secret_name = "gco/api-gateway-auth-token"  # nosec B105 - test fixture mock value, not a real secret
+    mock_api_gw_stack.secret.secret_name = "gco/api-gateway-auth-token"  # nosec B105  # test fixture mock value, not a real secret
     return mock_api_gw_stack
 
 

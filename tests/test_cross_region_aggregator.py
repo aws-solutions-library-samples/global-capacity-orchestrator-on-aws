@@ -701,7 +701,7 @@ class TestSigV4Signing:
         return session
 
     def test_signs_with_frozen_credentials(self):
-        credentials = Credentials("AKIAEXAMPLE", "secret", token="session-token")  # nosec B106 - fixture value, not a real credential
+        credentials = Credentials("AKIAEXAMPLE", "secret", token="session-token")  # nosec B106  # fixture value, not a real credential
 
         with patch.object(handler.boto3, "Session", return_value=self._session(credentials)):
             headers = _REAL_SIGV4_HEADERS("us-east-1", "get", self._URL, '{"a": 1}')
@@ -709,13 +709,13 @@ class TestSigV4Signing:
         assert headers["Content-Type"] == "application/json"
         assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/")
         assert "/us-east-1/execute-api/aws4_request" in headers["Authorization"]
-        assert headers["X-Amz-Security-Token"] == "session-token"  # nosec B105 - fixture value
+        assert headers["X-Amz-Security-Token"] == "session-token"  # nosec B105  # fixture value
         assert "X-Amz-Date" in headers
 
     def test_signs_with_credentials_that_cannot_be_frozen(self):
         class StaticCredentials:
             access_key = "AKIASTATIC"
-            secret_key = "secret"  # nosec B105 - fixture value, not a real credential
+            secret_key = "secret"  # nosec B105  # fixture value, not a real credential
             token = None
 
         with patch.object(
