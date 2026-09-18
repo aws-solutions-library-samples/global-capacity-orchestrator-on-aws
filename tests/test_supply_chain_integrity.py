@@ -614,6 +614,12 @@ def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() ->
     # egress rule admits, plus the ServiceMonitor the shipped values enable.
     assert '= "9003"' in opencost
     assert "get servicemonitor opencost" in opencost
+    # kind has no cloud provider: the fallback price sheet needs a writable
+    # /var/configs, supplied as a scratch volume INTO the shipped read-only
+    # root — which the step must prove survived the overlay.
+    assert "mountPath: /var/configs" in opencost
+    assert "emptyDir: {}" in opencost
+    assert 'securityContext.readOnlyRootFilesystem}\')" = "true"' in opencost
 
     build = by_name["Build cost-monitor image"]
     assert build["with"]["file"] == "dockerfiles/Dockerfile.cost-monitor"

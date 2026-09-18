@@ -2709,8 +2709,9 @@ jobs:
     # Value overlays are limited to what the regional stack itself injects
     # at deploy time (storage class / sizes / retention / cluster id — see
     # GCORegionalStack._observability_chart_values and
-    # _opencost_chart_values) plus CI-only omissions that are OUTSIDE the
-    # path under test and are called out where they are set. Kept out of
+    # _opencost_chart_values) plus CI-only adjustments that sit outside the
+    # path under test, or exist only because kind has no cloud provider, and
+    # are called out where they are set. Kept out of
     # cluster-e2e on purpose: that job's single node has no CPU to spare
     # for Prometheus, and its rollouts are the ones that must not flake.
     runs-on: ubuntu-latest
@@ -3138,9 +3139,19 @@ jobs:
         # Exactly what the installer Lambda does for this chart, with the
         # one deploy-time value the regional stack injects
         # (_opencost_chart_values: opencost.exporter.defaultClusterId, the
-        # cluster id OpenCost stamps on every allocation). CI-only: the
-        # OpenCost UI is disabled — it is a separate container that reads
-        # the same API and plays no part in the report path.
+        # cluster id OpenCost stamps on every allocation). Two CI-only
+        # adjustments: the OpenCost UI is disabled — a separate container
+        # that reads the same API and plays no part in the report path — and
+        # an emptyDir is mounted at /var/configs. On EKS the AWS provider
+        # prices from the pricing API in memory and the shipped
+        # readOnlyRootFilesystem costs nothing (the live validation's ad-hoc
+        # report prices the hour); kind has no cloud provider, so OpenCost
+        # falls back to its default price sheet, which it materialises under
+        # /var/configs before it can price anything — read-only there, it
+        # logged "No pricing found for key=default, setting values to 0" and
+        # emitted no node_total_hourly_cost at all (caught on this job's
+        # first run). The scratch volume keeps the shipped security context
+        # exactly as it is and lets the fallback provider load its sheet.
         run: |
           set -euo pipefail
           read -r _ref _version namespace _repo_url < <(
@@ -3152,14 +3163,24 @@ jobs:
           opencost:
             exporter:
               defaultClusterId: "${CI_CLUSTER_ID}"
+              extraVolumeMounts:
+                - name: pricing-configs
+                  mountPath: /var/configs
             ui:
               enabled: false
+          extraVolumes:
+            - name: pricing-configs
+              emptyDir: {}
           EOF
           helm install opencost "${OPENCOST_CHART_ARCHIVE}" \
             --namespace "${namespace}" \
             --values "${RUNNER_TEMP}/opencost-values.yaml" \
             --values "${RUNNER_TEMP}/opencost-ci-overlay.yaml" \
             --wait --timeout 5m
+          # The shipped hardening must survive the overlay: the scratch volume
+          # is mounted INTO a read-only root, not instead of one.
+          test "$(kubectl -n "${namespace}" get deployment opencost \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="opencost")].securityContext.readOnlyRootFilesystem}')" = "true"
           # The Service the monitor's OPENCOST_BASE_URL names, on the port the
           # allow-cost-monitor-to-opencost rule admits.
           kubectl -n "${namespace}" get service opencost
@@ -3387,15 +3408,20 @@ jobs:
           echo "ad-hoc report: ${s3_key} (${row_count} rows)"
 
           # The monitor's own listing must show the object it just wrote.
+          # (Response to a file, then parsed: the data is never piped into an
+          # interpreter, which is the shape the curl-pipe-shell rule flags.)
           curl --fail --silent --show-error \
-            "http://127.0.0.1:18080/internal/reports?adhoc=true" \
-            | S3_KEY="${s3_key}" python3 -c '
-          import json, os, sys
-          listing = json.load(sys.stdin)
+            -o "${RUNNER_TEMP}/adhoc-listing.json" \
+            "http://127.0.0.1:18080/internal/reports?adhoc=true"
+          S3_KEY="${s3_key}" python3 - <<'PY'
+          import json
+          import os
+
+          listing = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "adhoc-listing.json")))
           keys = [entry["key"] for entry in listing["reports"]]
           assert os.environ["S3_KEY"] in keys, (os.environ["S3_KEY"], keys)
           print(f"GET /internal/reports?adhoc=true lists {len(keys)} object(s), including the new report")
-          '
+          PY
           # ...and the object must really be in the emulator.
           export AWS_ENDPOINT_URL="http://127.0.0.1:4566"
           export AWS_ACCESS_KEY_ID=testing
