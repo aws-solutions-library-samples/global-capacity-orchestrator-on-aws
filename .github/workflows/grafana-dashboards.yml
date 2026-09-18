@@ -23,26 +23,22 @@
 # Static payload validation (JSON shape, uids, grid positions, legend-token
 # survival through the applier's real substitution) runs in the main pytest
 # suite (tests/test_grafana_dashboards.py); this workflow only adds the part
-# that needs the real Grafana binary. Paths-filtered: it runs when the
-# dashboards, the chart pin, this workflow, or its script change.
+# that needs the real Grafana binary.
+#
+# Deliberately not paths-filtered. Its gate is a required status check on
+# main, and a paths-filtered workflow does not run at all on a pull request
+# outside its paths — the check then never reports and the PR is blocked
+# waiting for it, rather than the job being skipped. Running the ~3-minute
+# provisioning check on every PR is the price of a required check that
+# always answers.
 #
 # =============================================================================
 name: Grafana Dashboards
 on:
   push:
     branches: [main]
-    paths:
-      - "lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml"
-      - "lambda/helm-installer/charts.yaml"
-      - ".github/scripts/validate_grafana_dashboards.py"
-      - ".github/workflows/grafana-dashboards.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - "lambda/kubectl-applier-simple/manifests/post-helm-grafana-*.yaml"
-      - "lambda/helm-installer/charts.yaml"
-      - ".github/scripts/validate_grafana_dashboards.py"
-      - ".github/workflows/grafana-dashboards.yml"
   workflow_dispatch:
 
 # Booting a real Grafana container is a 15-minute-timeout job, so a
@@ -134,3 +130,38 @@ jobs:
       - name: Remove the Grafana container
         if: always()
         run: docker rm -f grafana || true
+
+  # --------------------------------------------------------------------------
+  # gate:grafana-dashboards — the one required status check this workflow reports.
+  #
+  # Branch protection on main requires the `gate:*` job of each PR workflow
+  # instead of every job by name, so adding, renaming, re-sharding or
+  # matrix-expanding a job never needs a ruleset edit. This job `needs` every
+  # other job in the file — tests/test_workflow_gate_contract.py fails when
+  # one is missing — and .github/scripts/verify_gate_needs.py refuses to pass
+  # unless each of them succeeded. See .github/CI.md "Required checks".
+  #
+  # `always()`: GitHub treats a skipped required check as passing, so the gate
+  # must run and fail explicitly whenever a needed job failed, was cancelled,
+  # or was skipped without an allowance — including when the run itself was
+  # cancelled. The draft clause is the one narrowing: a draft PR cannot
+  # merge, and `ready_for_review` re-runs the workflow with the clause true.
+  # --------------------------------------------------------------------------
+  gate-grafana-dashboards:
+    name: "gate:grafana-dashboards"
+    needs:
+      - provision-check
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Only the verifier is needed; the rest of the tree stays out.
+          sparse-checkout: .github/scripts
+      - name: Require every needed job to have succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_gate_needs.py --needs "$NEEDS_JSON"

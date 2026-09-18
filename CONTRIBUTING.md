@@ -445,7 +445,7 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/pages.yml` | Successful Unit Tests run on `main` | Publish the strict MkDocs site, coverage report, and badge JSON |
 | `.github/workflows/mooncake-image.yml` | `main`, PR, manual | Validate the pinned upstream Mooncake image contract |
 | `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready | Sync the declared type-of-change checkbox to its release-note label |
-| `.github/workflows/grafana-dashboards.yml` | Paths-filtered `main`/PR + manual | Provision curated dashboards into the real Grafana image resolved from the pinned chart |
+| `.github/workflows/grafana-dashboards.yml` | `main`, PR, manual | Provision curated dashboards into the real Grafana image resolved from the pinned chart |
 
 #### Published coverage reports and badges
 
@@ -725,10 +725,17 @@ ruleset with no bypass actors). Publishing through the workflow is the
 supported path; its guards are what keep manual mistakes out of the tag
 namespace.
 
-When a new required status check is introduced (for example a new
-cdk-nag matrix entry), add it to the branch protection required-checks
-list on `main` as part of the same PR review; a check that reports on
-every PR but isn't required is a silent gap in the merge gate.
+Branch protection on `main` requires one `gate:*` status check per
+PR-triggered workflow rather than every job by name (see
+[Required checks](.github/CI.md#required-checks)). A new or renamed job —
+a cdk-nag matrix entry, a trivy image leg, a new kind run — therefore
+never needs a ruleset edit: add it to the gate's `needs` list in its
+workflow, which `tests/test_workflow_gate_contract.py` enforces. Only a
+new PR-triggered *workflow* touches the ruleset: give it a `gate:<file>`
+job, add the file to `release.yml`'s dispatch list and the CI.md table,
+and add the new `gate:<file>` context to the ruleset in the same review; a
+gate that reports on every PR but isn't required is a silent gap in the
+merge gate.
 
 After releasing, confirm the auto-generated GitHub Release notes read well (they are categorized by PR label per `.github/release.yml`), then deploy to production environments. The GitHub Releases page is GCO's changelog — there is no separate `CHANGELOG.md` to maintain.
 

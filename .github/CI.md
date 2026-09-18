@@ -10,6 +10,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 - [Workflows](#workflows)
   - [Primary (run on every push + PR)](#primary-run-on-every-push--pr)
   - [Satellites](#satellites)
+  - [Required checks](#required-checks)
   - [Naming conventions](#naming-conventions)
   - [Draft pull requests](#draft-pull-requests)
   - [Cross-cutting defaults](#cross-cutting-defaults)
@@ -100,7 +101,7 @@ Each file maps to one row in the README badge table.
 
 ### Satellites
 
-Workflows outside the four badged gates. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR but is a narrow, feature-specific contract test rather than a headline gate.
+Workflows outside the four badged gates. Most are schedule- or dispatch-driven; `mooncake-image.yml` and `grafana-dashboards.yml` also run on every push and PR (each carries a required `gate:*` check, see [Required checks](#required-checks)) but are narrow, feature-specific contract tests rather than headline gates.
 
 | File | Trigger | Purpose |
 |------|---------|---------|
@@ -111,12 +112,45 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 | `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Publish the project site to GitHub Pages via `actions/deploy-pages`: build the MkDocs orientation wiki (`wiki/` + `mkdocs.yml`, strict mode) from the triggering run's commit at the site root; download that run's `pytest-coverage` and `bash-coverage-report` artifacts and the `node-inference-streaming-proxy-coverage` artifact from the **Inference Streaming Proxy** run for the same commit; serve the three reports at `/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/` (with a redirect at the old `/coverage/`); and render the three shields.io badge JSONs at the site root with `scripts/render_coverage_badges.py` (so the README badges' percent-encoded URLs never change). Split out of `unit-tests.yml` so a GitHub Pages backend stall — or a wiki build failure — surfaces here instead of failing the test gate; the PR-side `lint:mkdocs:strict` job runs the identical build pre-merge |
 | `workflows/mooncake-image.yml` | `push`: `main`, PR, manual | Pull the upstream Mooncake vLLM image pinned in `cli/images.py` (`_DISAGGREGATED_DEFAULT_IMAGE`) and run `tests/test_mooncake_image_contract.py`: prefill-decode proxy health under the image's `python3`, `MooncakeStoreConfig` acceptance of the rendered store config, and KV-connector name registration. Deliberately not Trivy/CVE-scanned — the image is upstream and unpatchable; version drift is surfaced by `deps-scan` |
 | `workflows/pr-type-label.yml` | PR opened/edited/reopened/ready (drafts included) | Sync the declared type-of-change checkbox to the corresponding release-note label without using `pull_request_target` or interpolating untrusted body text into shell; fork PRs are skipped for maintainer labelling |
-| `workflows/grafana-dashboards.yml` | Paths-filtered `push`/PR + manual | Resolve the Grafana image from the pinned kube-prometheus-stack chart, provision every curated dashboard ConfigMap into the real image, and require each uid to load without provisioning errors |
+| `workflows/grafana-dashboards.yml` | `push`: `main`, PR, manual | Resolve the Grafana image from the pinned kube-prometheus-stack chart, provision every curated dashboard ConfigMap into the real image, and require each uid to load without provisioning errors. Deliberately not paths-filtered: its gate is a required check, and a paths-filtered workflow never reports on a PR outside its paths, which blocks the merge instead of skipping the job |
+
+### Required checks
+
+Branch protection on `main` (the ruleset *main — required CI (no bypass)*, with "require branches to be up to date" on) requires exactly one status check per PR-triggered workflow — its `gate:*` job — rather than every job by name. `pr-type-label.yml` is the one PR workflow without a gate: it is a labeler, not a merge gate, and cannot be one (it runs on `edited` rather than `synchronize` and skips fork PRs).
+
+| Required check | Workflow | What has to pass |
+|----------------|----------|------------------|
+| `gate:floci-tests` | `workflows/floci-tests.yml` | the emulated-AWS integration layer and the live-validation E2E |
+| `gate:grafana-dashboards` | `workflows/grafana-dashboards.yml` | every curated dashboard provisions into the pinned Grafana |
+| `gate:inference-streaming-proxy` | `workflows/inference-streaming-proxy.yml` | the streaming Lambda's Node.js suite at its exact 100% floors |
+| `gate:integration-tests` | `workflows/integration-tests.yml` | every image build, functional container test, dev-container leg, kind run and autopilot probe |
+| `gate:lint` | `workflows/lint.yml` | every linter, type checker and the strict MkDocs build |
+| `gate:mooncake-image` | `workflows/mooncake-image.yml` | the upstream Mooncake image contract |
+| `gate:security` | `workflows/security.yml` | every scanner, including each discovered trivy image leg and both CodeQL languages |
+| `gate:unit-tests` | `workflows/unit-tests.yml` | every pytest shard and the combined 100% floor, BATS, CLI smoke, CDK synth, each cdk-nag matrix leg, and the dependency-path jobs |
+
+Each gate is the last job of its workflow. It `needs` every other job in the file, is scheduled with `if: always() && (draft clause)`, and hands `toJSON(needs)` to `.github/scripts/verify_gate_needs.py`, which prints one row per needed job to the log and the step summary and refuses to pass unless every result is `success`. A matrix job is covered by its one entry in `needs` — `needs.<job>.result` is the aggregate over every leg — so the discovered trivy image matrix, the cdk-nag config matrix, the pytest shards and the dev-container architectures are all gated without being named anywhere outside their workflow.
+
+What this buys over requiring jobs individually:
+
+- **Job changes never touch the ruleset.** Adding, renaming, re-sharding or matrix-expanding a job is a workflow edit; `tests/test_workflow_gate_contract.py` fails the PR until the gate's `needs` lists the new job, alphabetically.
+- **A ruleset entry cannot rot.** Under per-job required checks, a name that drifted from its job (a renamed matrix leg, a mistyped context) was silently unsatisfiable: the PR sat at *Expected — Waiting for status to be reported* and nothing in the repository could detect it. Eight names derived from eight filenames leave nothing to drift.
+- **Skips no longer pass.** GitHub treats a skipped required check as passing, so a job whose `if:` broke and skipped used to satisfy the ruleset. The gate demands `success` from every unconditional job. Only jobs whose `if:` is conditional beyond the draft clause may skip, and each needs a written allowance in the gate step: `changes` may skip unconditionally (it runs only on pull requests), and `unit:lockfile:freshness` / `unit:fresh-install` may skip only while `changes.outputs.deps` is `false` — the filter's own verdict, not a broken condition. The contract test pins the allowance set to exactly the conditional jobs, so a new conditional job has to be given its reason in the same review.
+- **Cancellation fails closed.** `always()` runs the gate even when the run was cancelled, and a `cancelled` dependency is a failing gate — never a skipped check standing in for a pass.
+
+Rules the contract test enforces around the gates:
+
+- A gated workflow carries no `paths`/`paths-ignore` filter on `push` or `pull_request`: a filtered workflow does not run at all on a PR outside its paths, so its required gate would never report and the PR would be blocked rather than the job skipped (this is why `grafana-dashboards.yml` runs on every PR).
+- No job in a gated workflow sets job-level `continue-on-error`, which would report `success` to `needs` after failing.
+- `release.yml` dispatches exactly the gated workflows against the release branch, since a PR opened with `GITHUB_TOKEN` gets its checks only by `workflow_dispatch`.
+- The table above lists exactly the gates, and the draft-gating contract's one exemption is the same file as this one's.
+
+Adding a PR workflow therefore means: a `gate-<file>` job named `gate:<file>` as its last job, needing every other job, with the gate `if:`, checkout with `sparse-checkout: .github/scripts` and the verifier step; the file in `release.yml`'s dispatch list; a row in the table above; the inventory in both `tests/test_workflow_gate_contract.py` and `tests/test_workflow_draft_pr_gating_contract.py`; and the new `gate:<file>` context added to the ruleset. The ruleset edit is the one step outside the repository, and it happens once per workflow rather than once per job.
 
 ### Naming conventions
 
-- **Display names:** colon-delimited `category:tool:test_name`, for example `unit:pytest:core`, `security:trivy:container-scan`, `lint:mypy:stacks`.
-- **Job IDs:** hyphen-delimited (GitHub Actions requires `[A-Za-z0-9_-]`), for example `unit-pytest-core`, `security-trivy-container-scan`.
+- **Display names:** colon-delimited `category:tool:test_name`, for example `unit:pytest:core`, `security:trivy:container-scan`, `lint:mypy:stacks`. The aggregators are `gate:<workflow file stem>`, for example `gate:unit-tests`, so the required-check name is derivable from the filename.
+- **Job IDs:** hyphen-delimited (GitHub Actions requires `[A-Za-z0-9_-]`), for example `unit-pytest-core`, `security-trivy-container-scan`, `gate-unit-tests`.
 - **Click target for every badge:** the workflow file on the Actions tab, not a per-job deep link. GitHub's per-job URL scheme is inconsistent; the Actions tab surfaces every job of a workflow in one view.
 
 ### Draft pull requests
@@ -128,7 +162,7 @@ Two details make that safe rather than lossy:
 - `ready_for_review` is in every PR workflow's trigger `types`, so the full suite fires the moment a PR leaves draft. Without it a PR could reach a mergeable state having never run CI.
 - Declaring `types` at all **replaces** the default `[opened, synchronize, reopened]`, so those three are restated explicitly. Dropping `synchronize` would silently stop CI on pushes to an open PR while opened/reopened kept working.
 
-`unit:pytest:core` composes the draft clause with its `always()` schedule. That is the only permitted narrowing of the stable required check: a draft PR cannot merge, and marking it ready re-runs the workflow with the clause true, so every mergeable state still yields a real aggregate result instead of a skip standing in for a pass.
+`unit:pytest:core` and every `gate:*` job compose the draft clause with their `always()` schedule. That is the only permitted narrowing of a stable required check: a draft PR cannot merge, and marking it ready re-runs the workflow with the clause true, so every mergeable state still yields a real aggregate result instead of a skip standing in for a pass.
 
 `pr-type-label.yml` is the one deliberate exemption — one short job, and the type label drives release-note grouping and review routing, both worth having correct while a PR is still a draft. `tests/test_workflow_draft_pr_gating_contract.py` pins the gate, the trigger types, the concurrency defaults, and that exemption.
 
@@ -137,7 +171,7 @@ Two details make that safe rather than lossy:
 All CI workflows share the same safety defaults:
 
 - `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** for the release pair — `release.yml` and `release-publish.yml` share one repository-wide `group: release` with `cancel-in-progress: false`, so releases serialize across both stages and a half-run release is never cancelled mid-flight. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight. The scheduled scans (`cve-scan.yml`, `deps-scan.yml`) keep the standard per-ref group but also set `cancel-in-progress: false` — a scan in flight is never worth cancelling, and scoping the group by ref keeps two manual `workflow_dispatch` runs on different branches from serializing behind each other.
-- `timeout-minutes` on every job, sized to the job: 2 min for path-filter and list jobs, 10 for lint, 15 for unit, 20–30 for integration and image builds, 45 for the Floci release-validation e2e and 60 for the Kind examples smoke run.
+- `timeout-minutes` on every job, sized to the job: 2 min for path-filter and list jobs, 5 for the `gate:*` aggregators, 10 for lint, 15 for unit, 20–30 for integration and image builds, 45 for the Floci release-validation e2e and 60 for the Kind examples smoke run.
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Caching: `actions/setup-python` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache` on `.mypy_cache/`.
 - AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
