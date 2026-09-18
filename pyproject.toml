@@ -560,8 +560,21 @@ exclude_dirs = [
     "/lambda/helm-installer-build/",
     "/lambda/inference-streaming-proxy-build/",
 ]
-skips = ["B101", "B104", "B113", "B311"]
+# CI runs at --severity-level low, so every finding bandit can raise fails
+# the build unless the line carries a `# nosec Bxxx - <why>` that names the
+# rule and says why it does not apply. That is deliberate: a hard-coded
+# credential or a shell=True call added tomorrow trips the gate on the first
+# push instead of hiding below a threshold. The only rules skipped outright
+# are the ones that fire on *every* use of a feature the project is built on
+# (a CLI that orchestrates kubectl / helm / docker / the AWS CLI) and carry no
+# signal of their own:
+skips = ["B101", "B104", "B113", "B311", "B404", "B603", "B607"]
 # B101: assert used in tests and CDK constructs (harmless)
 # B104: bind to 0.0.0.0 required for container services
 # B113: false positives on dict.get() calls named "requests" (all HTTP calls have timeouts)
 # B311: random not used for security purposes
+# B404: "consider the implications of importing subprocess" — every subprocess import
+# B603: "subprocess call, check for untrusted input" — every argv-list call without a
+#       shell. The dangerous variant, shell=True (B602), is NOT skipped.
+# B607: "partial executable path" — running `kubectl` / `helm` from PATH is the
+#       intended behaviour of a CLI; pinning absolute paths would break it.

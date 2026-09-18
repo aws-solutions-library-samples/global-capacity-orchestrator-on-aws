@@ -479,8 +479,9 @@ pip install -e ".[cdk,typecheck]"
 mypy gco/stacks/ app.py diagrams/
 mypy .github/oidc_provider/  # separate run: two modules named "app"
 
-# Run security scans
-bandit -r . -c pyproject.toml --severity-level medium
+# Run security scans (every finding fails; annotate a genuine false positive
+# with `# nosec Bxxx - <why>` on the offending line)
+bandit -r . -c pyproject.toml --severity-level low
 
 # Run tests with coverage (matches unit:pytest:core)
 pytest tests/ --cov --cov-report=html --cov-fail-under=100 \

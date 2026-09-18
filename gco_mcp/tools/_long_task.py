@@ -157,7 +157,7 @@ async def _terminate_and_reap(
         return
     except TimeoutError:
         pass
-    except Exception:
+    except Exception:  # nosec B110 - the kill/reap fallback below must still run
         # A failed wait task should not prevent the kill/reap fallback.
         pass
 

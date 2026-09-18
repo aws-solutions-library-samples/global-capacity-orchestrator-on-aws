@@ -1199,7 +1199,7 @@ def _extract_tool_json_schemas(
             # Pydantic v2 models expose model_json_schema() as a classmethod.
             json_schema = model.model_json_schema()
             schemas[name] = json_schema
-        except Exception:
+        except Exception:  # nosec B112 - a tool without a schema has none to render
             # Non-Pydantic schema, or a mock that doesn't support it.
             continue
     return schemas

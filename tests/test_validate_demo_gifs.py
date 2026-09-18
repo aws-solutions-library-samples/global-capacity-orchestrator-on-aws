@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import struct
-import subprocess  # nosec B404 - fixed argv, no shell: builds a throwaway git repo
+import subprocess  # fixed argv, no shell: builds a throwaway git repo
 import sys
 from pathlib import Path
 
@@ -255,7 +255,7 @@ def _fake_repo(tmp_path: Path, tracked: dict[str, bytes]) -> Path:
         [GIT, "config", "user.name", "t"],
         [GIT, "add", "-A"],
     ):
-        subprocess.run(argv, cwd=root, check=True, capture_output=True)  # nosec B603
+        subprocess.run(argv, cwd=root, check=True, capture_output=True)
     return root
 
 

@@ -101,7 +101,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess  # nosec B404  # fixed argv, no shell: `git ls-files` only
+import subprocess  # fixed argv, no shell: `git ls-files` only
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -497,7 +497,7 @@ def tracked_shell_scripts(root: Path) -> list[str]:
     gate, matching how ``lint:shellcheck:shell`` builds its inventory.
     """
     try:
-        completed = subprocess.run(  # nosec B603  # fixed argv, no shell
+        completed = subprocess.run(  # fixed argv, no shell
             ["git", "-C", str(root), "ls-files", "*.sh"],
             capture_output=True,
             text=True,

@@ -55,7 +55,7 @@ _EKS_KEY_LOGICAL_ID = "EksSecretsEncryptionKey74AFFE88"
 _KMS_PENDING_WINDOW_DAYS = 7
 
 
-_LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"
+_LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"  # nosec B105 - AWS tag key, not a secret
 
 
 _LOG_CLEANUP_HELPER_STACK_PREFIX = "LiveValidationLogCleanup"
@@ -64,13 +64,13 @@ _LOG_CLEANUP_HELPER_STACK_PREFIX = "LiveValidationLogCleanup"
 _LOG_CLEANUP_HELPER_RUN_TAG = "LiveValidationHelperRun"
 
 
-_LOG_CLEANUP_HELPER_TOKEN_TAG = "LiveValidationHelperToken"
+_LOG_CLEANUP_HELPER_TOKEN_TAG = "LiveValidationHelperToken"  # nosec B105 - AWS tag key, not a secret
 
 
 _LOG_CLEANUP_ROLE_RUN_TAG = "LiveValidationCleanupRoleRun"
 
 
-_LOG_CLEANUP_ROLE_TOKEN_TAG = "LiveValidationCleanupRoleToken"
+_LOG_CLEANUP_ROLE_TOKEN_TAG = "LiveValidationCleanupRoleToken"  # nosec B105 - AWS tag key, not a secret
 
 
 _LOG_CLEANUP_ROLE_OUTPUT = "CleanupRoleArn"

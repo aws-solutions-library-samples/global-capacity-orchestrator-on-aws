@@ -938,7 +938,9 @@ def exec_claude(argv: list[str], env: dict[str, str]) -> int:
     """
     if sys.platform == "win32":
         return subprocess.call(argv, env=env)
-    os.execvpe(argv[0], argv, env)
+    # Replacing the process is the point: the terminal becomes the agent
+    # session. argv is the launcher built by this module, never a shell string.
+    os.execvpe(argv[0], argv, env)  # nosec B606
     raise AssertionError("unreachable: execvpe replaces the process on success")
 
 

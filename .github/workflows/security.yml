@@ -82,8 +82,15 @@ jobs:
         # carry a security defect. What is out of scope (the test-suite,
         # generated trees, vendored wheels) is listed in [tool.bandit]
         # exclude_dirs in pyproject.toml.
+        #
+        # --severity-level low: every finding fails the job. The tree is
+        # clean at this level, with each remaining low-severity site carrying
+        # a `# nosec Bxxx - <why>` annotation, so a new hard-coded secret or
+        # shell=True call trips the gate immediately rather than hiding below
+        # a medium threshold. The blanket subprocess rules (B404/B603/B607)
+        # are skipped in [tool.bandit] with the rationale next to them.
         run: |
-          bandit -r . -c pyproject.toml --severity-level medium \
+          bandit -r . -c pyproject.toml --severity-level low \
             -f json -o bandit-report.json
       - name: Upload bandit report
         if: always()

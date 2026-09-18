@@ -730,8 +730,10 @@ pytest tests/test_nag_compliance.py
 cdk synth --quiet
 pytest tests/test_cdk_synthesis_matrix.py
 
-# Security (matches security:bandit:sast)
-bandit -r . -c pyproject.toml --severity-level medium
+# Security (matches security:bandit:sast). Every finding fails; a line that
+# is a false positive carries `# nosec Bxxx - <why>` (see [tool.bandit] in
+# pyproject.toml for the three blanket subprocess rules that are skipped).
+bandit -r . -c pyproject.toml --severity-level low
 
 # Validate workflow files (matches lint:actionlint:workflows)
 actionlint

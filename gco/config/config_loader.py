@@ -1950,7 +1950,7 @@ class ConfigLoader:
                 "admin_user": "admin",
                 # Monthly (04:00 on the 1st) rotation of the chart-generated
                 # Grafana admin password, run by an in-cluster CronJob.
-                "admin_password_rotation_schedule": "0 4 1 * *",
+                "admin_password_rotation_schedule": "0 4 1 * *",  # nosec B105 - cron schedule, not a password
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},

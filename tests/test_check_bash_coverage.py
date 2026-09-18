@@ -29,7 +29,7 @@ import importlib.util
 import inspect
 import json
 import re
-import subprocess  # nosec B404 - fixed argv, no shell: builds a throwaway git repo
+import subprocess  # fixed argv, no shell: builds a throwaway git repo
 import sys
 import tomllib
 from pathlib import Path
@@ -78,7 +78,7 @@ def _fake_repo(tmp_path: Path, scripts: dict[str, str]) -> Path:
         [GIT, "config", "user.name", "t"],
         [GIT, "add", "-A"],
     ):
-        subprocess.run(argv, cwd=root, check=True, capture_output=True)  # nosec B603
+        subprocess.run(argv, cwd=root, check=True, capture_output=True)
     return root
 
 

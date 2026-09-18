@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess  # nosec B404 - fixed argv only, never a shell string
+import subprocess  # fixed argv only, never a shell string
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -164,7 +164,7 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     """Run a fixed-argv tool, translating a missing binary or a timeout into UpgradeError."""
     try:
-        return subprocess.run(  # nosec B603 - fixed argv, no shell
+        return subprocess.run(  # fixed argv, no shell
             list(argv),
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
