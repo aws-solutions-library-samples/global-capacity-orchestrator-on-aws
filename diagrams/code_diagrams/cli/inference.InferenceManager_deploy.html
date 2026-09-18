@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T14:22:22Z">
-        <meta name="gco-source-commit" content="90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b">
-        <meta name="gco-flow-digest" content="35cea856ab165552">
+        <meta name="gco-generated-at" content="2026-09-18T17:54:55Z">
+        <meta name="gco-source-commit" content="7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab">
+        <meta name="gco-flow-digest" content="88b98afe279f7e63">
         <title>gco inference deploy — multi-region endpoint deploy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -212,80 +212,91 @@ function base64ToSvgDocument(base64) {
 cond5=>operation: raise ValueError("framework must be 'vllm' or 'sglang'") if  framework not in (None, 'vllm', 'sglang')
 cond16=>operation: raise ValueError('Mooncake serving requires the vllm framework') if  mooncake_mode is not None and framework == 'sglang'
 cond27=>operation: raise ValueError("framework 'sglang' needs the model to serve: pass -e MODEL=<id-or-path> or --extra-args=--model-path --extra-args <id-or-path>") if  framework == 'sglang' and (not (env or {}).get('MODEL')) and (not {'--model-path', '--model'} & set(extra_args or []))
-cond38=>operation: framework = 'vllm' if  mooncake_mode is not None and framework is None
-op48=>operation: mooncake_block: dict[str, Any] | None = None
-cond51=>condition: if mooncake_mode is not None
-cond56=>condition: if image is None
-op60=>operation: from .images import default_disaggregated_image
-op62=>operation: image = default_disaggregated_image(config=self.config)
-op67=>operation: mooncake_block = self._build_mooncake_block(mode=mooncake_mode, prefill_replicas=prefill_replicas, decode_replicas=decode_replicas, store=mooncake_store, transfer=mooncake_transfer, proxy=mooncake_proxy, autoscaling=mooncake_autoscaling, default_proxy_image=image)
-cond73=>operation: raise ValueError('an image is required (pass image, or set mooncake_mode to use the default upstream Mooncake-enabled vLLM image)') if  image is None
-cond84=>condition: if not target_regions
-op88=>operation: stacks = self._aws_client.discover_regional_stacks()
-op90=>operation: target_regions = list(stacks.keys())
-cond93=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
-op106=>operation: region_image_map: dict[str, str] = {}
-cond109=>condition: if rewrite_image
-op113=>operation: from ._image_uri import rewrite_image_uri_for_region
-cond116=>operation: region_image_map[region] = rewrite_image_uri_for_region(image, region) while  region in target_regions
-op128=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
-cond131=>operation: spec['framework'] = framework if  framework
-cond142=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
-cond153=>operation: spec['gpu_type'] = gpu_type if  gpu_type
-cond164=>operation: spec['model_path'] = model_path if  model_path
-cond175=>operation: spec['model_source'] = model_source if  model_source
-cond186=>operation: spec['env'] = env if  env
-cond197=>operation: spec['autoscaling'] = autoscaling if  autoscaling
-cond208=>operation: spec['capacity_type'] = capacity_type if  capacity_type
-cond219=>operation: spec['args'] = extra_args if  extra_args
-cond230=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
-cond241=>operation: spec['node_selector'] = node_selector if  node_selector
-cond252=>operation: spec['mooncake'] = mooncake_block if  mooncake_block is not None
-op262=>operation: store = self._get_store()
-op264=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
-io269=>inputoutput: output: result
-e267=>end: end function return
+cond38=>condition: if framework == 'sglang' and node_selector
+op42=>operation: pinned_gpu = str(node_selector.get(GPU_NAME_NODE_LABEL, '')).lower()
+op44=>operation: pinned_family = str(node_selector.get(INSTANCE_FAMILY_NODE_LABEL, '')).lower()
+op46=>operation: pinned = pinned_gpu if pinned_gpu in SGLANG_UNSUPPORTED_GPU_NAMES else pinned_family if pinned_family in SGLANG_UNSUPPORTED_GPU_FAMILIES else None
+cond49=>operation: raise ValueError(f"framework 'sglang' needs an NVIDIA GPU with compute capability 8.0 or newer ({SGLANG_SUPPORTED_GPU_EXAMPLES}); the node selector pins '{pinned}', for which SGLang ships no prebuilt kernels") if  pinned is not None
+cond63=>operation: framework = 'vllm' if  mooncake_mode is not None and framework is None
+op73=>operation: mooncake_block: dict[str, Any] | None = None
+cond76=>condition: if mooncake_mode is not None
+cond81=>condition: if image is None
+op85=>operation: from .images import default_disaggregated_image
+op87=>operation: image = default_disaggregated_image(config=self.config)
+op92=>operation: mooncake_block = self._build_mooncake_block(mode=mooncake_mode, prefill_replicas=prefill_replicas, decode_replicas=decode_replicas, store=mooncake_store, transfer=mooncake_transfer, proxy=mooncake_proxy, autoscaling=mooncake_autoscaling, default_proxy_image=image)
+cond98=>operation: raise ValueError('an image is required (pass image, or set mooncake_mode to use the default upstream Mooncake-enabled vLLM image)') if  image is None
+cond109=>condition: if not target_regions
+op113=>operation: stacks = self._aws_client.discover_regional_stacks()
+op115=>operation: target_regions = list(stacks.keys())
+cond118=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
+op131=>operation: region_image_map: dict[str, str] = {}
+cond134=>condition: if rewrite_image
+op138=>operation: from ._image_uri import rewrite_image_uri_for_region
+cond141=>operation: region_image_map[region] = rewrite_image_uri_for_region(image, region) while  region in target_regions
+op153=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
+cond156=>operation: spec['framework'] = framework if  framework
+cond167=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
+cond178=>operation: spec['gpu_type'] = gpu_type if  gpu_type
+cond189=>operation: spec['model_path'] = model_path if  model_path
+cond200=>operation: spec['model_source'] = model_source if  model_source
+cond211=>operation: spec['env'] = env if  env
+cond222=>operation: spec['autoscaling'] = autoscaling if  autoscaling
+cond233=>operation: spec['capacity_type'] = capacity_type if  capacity_type
+cond244=>operation: spec['args'] = extra_args if  extra_args
+cond255=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
+cond266=>operation: spec['node_selector'] = node_selector if  node_selector
+cond277=>operation: spec['mooncake'] = mooncake_block if  mooncake_block is not None
+op287=>operation: store = self._get_store()
+op289=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
+io294=>inputoutput: output: result
+e292=>end: end function return
 
 op2->cond5
 cond5->cond16
 cond16->cond27
 cond27->cond38
-cond38->op48
-op48->cond51
-cond51(yes)->cond56
-cond56(yes)->op60
-op60->op62
-op62->op67
-op67->cond73
-cond73->cond84
-cond84(yes)->op88
-op88->op90
-op90->cond93
-cond93->op106
-op106->cond109
+cond38(yes)->op42
+op42->op44
+op44->op46
+op46->cond49
+cond49->cond63
+cond63->op73
+op73->cond76
+cond76(yes)->cond81
+cond81(yes)->op85
+op85->op87
+op87->op92
+op92->cond98
+cond98->cond109
 cond109(yes)->op113
-op113->cond116
-cond116->op128
-op128->cond131
-cond131->cond142
-cond142->cond153
-cond153->cond164
-cond164->cond175
-cond175->cond186
-cond186->cond197
-cond197->cond208
-cond208->cond219
-cond219->cond230
-cond230->cond241
-cond241->cond252
-cond252->op262
-op262->op264
-op264->io269
-io269->e267
-cond109(no)->op128
-cond84(no)->op106
-cond56(no)->op67
-cond51(no)->cond73
+op113->op115
+op115->cond118
+cond118->op131
+op131->cond134
+cond134(yes)->op138
+op138->cond141
+cond141->op153
+op153->cond156
+cond156->cond167
+cond167->cond178
+cond178->cond189
+cond189->cond200
+cond200->cond211
+cond211->cond222
+cond222->cond233
+cond233->cond244
+cond244->cond255
+cond255->cond266
+cond266->cond277
+cond277->op287
+op287->op289
+op289->io294
+io294->e292
+cond134(no)->op153
+cond109(no)->op131
+cond81(no)->op92
+cond76(no)->cond98
+cond38(no)->cond63
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -295,17 +306,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T14:22:22Z -->
-        <!-- Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b -->
+        <!-- Generated at (UTC): 2026-09-18T17:54:55Z -->
+        <!-- Generated from Git commit: 7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T14:22:22Z">2026-09-18T14:22:22Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T17:54:55Z">2026-09-18T17:54:55Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b</code>
+            Source commit: <code>7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>35cea856ab165552</code>
+            Flow content SHA-256: <code>88b98afe279f7e63</code>
           </p>
           <div id="canvas"></div>
         </div>
