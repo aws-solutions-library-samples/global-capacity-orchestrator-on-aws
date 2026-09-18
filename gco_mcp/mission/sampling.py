@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -511,7 +511,7 @@ def _summarise_iteration_for_lessons(
 
 def _pair_criteria_with_status(
     criteria: Sequence[Criterion],
-    statuses: Sequence[CriterionResult],
+    statuses: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return ``criteria`` annotated with their most recent status entry.
 
@@ -522,11 +522,16 @@ def _pair_criteria_with_status(
     ``status`` set to ``{"status": "inconclusive", "evidence": null}``
     so the model always sees a stable shape.
 
+    ``statuses`` is normally the persisted ``criteria_evaluation`` list
+    of :class:`CriterionResult` rows, but it is read back from disk, so
+    the helper takes any mappings and skips an entry that lacks a
+    ``criterion_id`` rather than trusting the row shape.
+
     The ``_parsed_ast`` private key on a ``predicate`` criterion is
     stripped — it is a Python ``ast.Expression`` object that is not
     JSON-serialisable and that the model has no use for.
     """
-    by_id: dict[str, CriterionResult] = {}
+    by_id: dict[str, Mapping[str, Any]] = {}
     for s in statuses:
         cid = s.get("criterion_id")
         if cid is None:

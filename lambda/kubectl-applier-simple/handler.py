@@ -441,7 +441,7 @@ def _log_service_account_automount_flip(
 
 def plan_manifests(
     manifests_dir: str,
-    replacements: dict[str, str],
+    replacements: object,
 ) -> dict[str, Any]:
     """Plan the complete raw-manifest inventory without mutating the cluster.
 
@@ -449,6 +449,11 @@ def plan_manifests(
     replacements, then an unresolved UPPER_SNAKE placeholder gates the entire
     file out. Every remaining nonempty YAML document must have an exact,
     supported identity and be unique across both apply phases.
+
+    ``replacements`` is the ``ImageReplacements`` value exactly as it
+    arrived in the CloudFormation / Step Functions event, so it is typed
+    ``object`` and validated here: anything but a string-to-string mapping
+    is reported as a planning failure rather than trusted.
     """
     phases: dict[str, list[dict[str, Any]]] = {"base": [], "post-helm": []}
     skipped: dict[str, list[str]] = {"base": [], "post-helm": []}

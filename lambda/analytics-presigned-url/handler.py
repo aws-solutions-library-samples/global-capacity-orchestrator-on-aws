@@ -105,12 +105,16 @@ _POSIX_ID_OFFSET = 100000
 # ==========================================================================
 
 
-def _parse_claims(event: dict[str, Any]) -> dict[str, Any]:
+def _parse_claims(event: object) -> dict[str, Any]:
     """Extract the Cognito claims dict from an API Gateway proxy event.
 
     Returns an empty dict if ``event["requestContext"]["authorizer"]["claims"]``
     is not present or not a dict. The caller decides whether an empty
     result warrants a 401 -- see :func:`lambda_handler`.
+
+    ``event`` is typed ``object`` because every layer of the path is
+    shape-checked here, the event itself included; the helper makes no
+    assumption about what API Gateway (or a test) hands it.
     """
     if not isinstance(event, dict):
         return {}

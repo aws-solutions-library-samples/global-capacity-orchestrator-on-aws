@@ -554,14 +554,7 @@ class JobManager:
         """Query jobs in a specific region."""
         try:
             response = self._aws_client.get_jobs(region=region, namespace=namespace, status=status)
-
-            jobs = []
-            # response is a list, but we expect a dict with "jobs" key from the API
-            job_list = response.get("jobs", []) if isinstance(response, dict) else response
-            for job_data in job_list:
-                jobs.append(self._parse_job_info(job_data, region))
-
-            return jobs
+            return [self._parse_job_info(job_data, region) for job_data in response.get("jobs", [])]
         except Exception as exc:
             logger.warning("Failed to query jobs in %s: %s", region, exc)
             return []

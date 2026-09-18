@@ -1581,14 +1581,26 @@ class StorageManager:
 
     @staticmethod
     def _validate_windows_download_part(part: str, source_key: str) -> None:
-        if not sys.platform.startswith("win"):
-            return
+        """Reject a path component Windows cannot store or treats specially.
+
+        Enforced on Windows hosts only. The rules themselves live in
+        :meth:`_windows_download_part_problem` so they are type-checked on
+        every platform; only the dispatch is platform-conditional.
+        """
+        if sys.platform.startswith("win"):
+            problem = StorageManager._windows_download_part_problem(part)
+            if problem is not None:
+                raise ValueError(f"{problem}: {source_key!r}")
+
+    @staticmethod
+    def _windows_download_part_problem(part: str) -> str | None:
+        """Return why ``part`` is not a safe Windows filename, or ``None`` if it is."""
         if part.endswith((".", " ")):
-            raise ValueError(f"Unsafe Windows S3 object key cannot be synced: {source_key!r}")
+            return "Unsafe Windows S3 object key cannot be synced"
         if any(
             unicodedata.category(character) == "Cc" or character in '<>:"|?*' for character in part
         ):
-            raise ValueError(f"Unsafe Windows S3 object key cannot be synced: {source_key!r}")
+            return "Unsafe Windows S3 object key cannot be synced"
 
         stem = part.split(".", 1)[0].rstrip(" .").casefold()
         reserved = {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
@@ -1596,7 +1608,8 @@ class StorageManager:
         if stem in reserved or (
             len(stem) == 4 and stem[:3] in {"com", "lpt"} and stem[3] in numbered_suffixes
         ):
-            raise ValueError(f"Reserved Windows path cannot be synced: {source_key!r}")
+            return "Reserved Windows path cannot be synced"
+        return None
 
     @classmethod
     def _download_relative_parts(cls, relative_key: str, source_key: str) -> tuple[str, ...]:
@@ -1611,15 +1624,24 @@ class StorageManager:
 
     @staticmethod
     def _local_collision_parts(path: Path) -> tuple[str, ...]:
-        """Return path components normalized conservatively for the host filesystem."""
+        """Return path components normalized conservatively for the host filesystem.
+
+        One branch per platform, with the Linux rule in the ``else``: mypy
+        only checks the branch for the platform it runs on and skips the
+        others, whereas a fall-through after a platform-conditional
+        ``return`` would be flagged as unreachable.
+        """
         if sys.platform.startswith("win"):
             return tuple(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
-        parts = tuple(os.path.normcase(part) for part in path.parts)
-        if sys.platform == "darwin":
+        elif sys.platform == "darwin":
             # Default macOS volumes compare names case-insensitively and apply
             # Unicode normalization even though os.path.normcase is a no-op.
-            return tuple(unicodedata.normalize("NFD", part).casefold() for part in parts)
-        return parts
+            return tuple(
+                unicodedata.normalize("NFD", os.path.normcase(part)).casefold()
+                for part in path.parts
+            )
+        else:
+            return tuple(os.path.normcase(part) for part in path.parts)
 
     @classmethod
     def _validate_sync_plan(cls, objects: list[_SyncObject]) -> None:

@@ -390,7 +390,6 @@ class _ScriptValidator(ast.NodeVisitor):
             target,
             "assignment / loop target must be a plain identifier",
         )
-        return []  # unreachable; _reject raises
 
     def _bind_targets(self, target: ast.AST) -> None:
         for name_node in self._collect_target_names(target):

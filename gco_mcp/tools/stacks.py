@@ -57,8 +57,9 @@ def _expected_stack_count_for_all() -> int | None:
         cdk_regions = _load_cdk_json()
     except Exception:  # best-effort
         return None
-    if not isinstance(cdk_regions, dict):
-        return None
+    # _load_cdk_json only ever returns a dict (it falls back to ``{}`` when
+    # the file is missing or the block is not a mapping), so a shape check
+    # here would be dead code; the keys are what need checking.
     if "regional" not in cdk_regions:
         return None
     regional = cdk_regions["regional"]

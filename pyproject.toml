@@ -343,8 +343,20 @@ known-first-party = ["gco", "cli"]
 
 [tool.mypy]
 python_version = "3.14"
-# --strict equivalent: every option enabled except "warn_unreachable" which has
-# false positives on platform-conditional branches. Keep these in sync with CI.
+# --strict plus warn_unreachable. Keep these in sync with CI.
+#
+# warn_unreachable fails the build on code the types say can never run: a
+# guard on a value whose type rules the guarded case out, an `or {}` fallback
+# on a value that is always truthy, a branch after an always-taken return.
+# Each is either dead code or a type annotation that is lying about what the
+# function accepts; both are worth a build break. Platform-conditional code is
+# exempt as long as it is written as `if sys.platform ...: ... else: ...`
+# (mypy skips the branch that does not apply to the checking platform without
+# calling it unreachable); only code *after* a platform-conditional return is
+# flagged. A check that mypy genuinely cannot model, such as a flag another
+# task flips while this one awaits, carries a per-line
+# `# type: ignore[unreachable]` that says so.
+warn_unreachable = true
 warn_return_any = true
 warn_unused_configs = true
 check_untyped_defs = true

@@ -763,7 +763,7 @@ class GCOAWSClient:
         region: str | None = None,
         namespace: str | None = None,
         status: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """
         Get jobs from GCO clusters.
 
@@ -773,7 +773,10 @@ class GCOAWSClient:
             status: Filter by status (running, completed, failed)
 
         Returns:
-            List of job information dictionaries
+            The ``GET /api/v1/jobs`` envelope: the Job objects under
+            ``"jobs"`` plus the page metadata (``total``, ``count``,
+            ``limit``, ``offset``, ``has_more``) and the answering
+            cluster's ``cluster_id`` / ``region``.
         """
         params = []
         if namespace:
@@ -788,7 +791,7 @@ class GCOAWSClient:
         )
 
         response.raise_for_status()
-        result: list[dict[str, Any]] = response.json()
+        result: dict[str, Any] = response.json()
         return result
 
     def get_job_details(

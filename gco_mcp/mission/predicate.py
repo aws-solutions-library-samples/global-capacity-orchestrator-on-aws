@@ -278,7 +278,6 @@ class _PredicateValidator(ast.NodeVisitor):
             target,
             "comprehension target must be a plain identifier",
         )
-        return []  # unreachable; _reject raises
 
     # ---- top-level entry ----------------------------------------------
 

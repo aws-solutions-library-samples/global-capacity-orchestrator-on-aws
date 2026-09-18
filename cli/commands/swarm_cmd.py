@@ -299,34 +299,34 @@ def _scaffold_plan(
     plan: list[dict[str, Any]] | None = None
     fallback_reason: str | None = None
     if use_resolved:
+        # Bedrock is the only sampling transport, so resolving a backend always
+        # succeeds; an unreachable model surfaces from the sample call itself
+        # and lands in the scaffold error below as ``transport_error``.
         backend_obj = mission_sampling.select_sampling_backend(None)
-        if backend_obj is not None:
-            try:
-                plan = asyncio.run(
-                    swarm_scaffold.generate_sampled_plan(
-                        backend_obj,
-                        directive,
-                        config=config,
-                        registered_tools=registered,
-                        registered_tags=tags,
-                        tool_docstrings=_tool_docstrings(registered),
-                        max_children=max_children,
-                        tool_allowlist=(None if allow_all_tools else list(tool_allowlist) or None),
-                        retries=retries,
-                    )
+        try:
+            plan = asyncio.run(
+                swarm_scaffold.generate_sampled_plan(
+                    backend_obj,
+                    directive,
+                    config=config,
+                    registered_tools=registered,
+                    registered_tags=tags,
+                    tool_docstrings=_tool_docstrings(registered),
+                    max_children=max_children,
+                    tool_allowlist=(None if allow_all_tools else list(tool_allowlist) or None),
+                    retries=retries,
                 )
-            except BedrockFTUFormNotAcceptedError as exc:
-                _emit_error("bedrock_ftu_form_not_accepted", {"message": str(exc)})
-                raise SystemExit(1) from exc
-            except swarm_scaffold.SwarmScaffoldError as exc:
-                fallback_reason = exc.last_reason
-                click.echo(
-                    f"Sampled plan rejected ({exc.last_reason}); "
-                    "falling back to the deterministic single-worker plan.",
-                    err=True,
-                )
-        else:
-            fallback_reason = "sampling_backend_unavailable"
+            )
+        except BedrockFTUFormNotAcceptedError as exc:
+            _emit_error("bedrock_ftu_form_not_accepted", {"message": str(exc)})
+            raise SystemExit(1) from exc
+        except swarm_scaffold.SwarmScaffoldError as exc:
+            fallback_reason = exc.last_reason
+            click.echo(
+                f"Sampled plan rejected ({exc.last_reason}); "
+                "falling back to the deterministic single-worker plan.",
+                err=True,
+            )
     if plan is None:
         try:
             plan = swarm_scaffold.generate_deterministic_plan(

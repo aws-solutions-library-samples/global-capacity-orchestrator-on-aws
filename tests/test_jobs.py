@@ -1479,26 +1479,19 @@ class TestJobManagerQueryJobsInRegion:
 
         assert result == []
 
-    def test_query_jobs_in_region_list_response(self):
-        """Test querying jobs when API returns list directly."""
+    def test_query_jobs_in_region_envelope_without_jobs_key(self):
+        """An envelope that carries no ``jobs`` key (an empty page) yields no jobs."""
         from unittest.mock import MagicMock
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        # Some APIs might return a list directly instead of {"jobs": [...]}
-        manager._aws_client.get_jobs.return_value = [
-            {
-                "metadata": {"name": "job1", "namespace": "default"},
-                "spec": {},
-                "status": {"active": 1},
-            }
-        ]
+        manager._aws_client.get_jobs.return_value = {"total": 0, "count": 0}
 
         result = manager._query_jobs_in_region("us-east-1", None, None)
 
-        assert len(result) == 1
+        assert result == []
 
 
 # =============================================================================

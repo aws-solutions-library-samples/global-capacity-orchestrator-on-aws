@@ -781,10 +781,13 @@ class WebhookDispatcher:
                 # Run the synchronous watch in a thread executor
                 events = await asyncio.to_thread(self._sync_watch_jobs)
 
-                # Process collected events
+                # Process collected events. ``stop()`` flips ``_running`` from
+                # another task while this one is awaiting the watch thread, so
+                # the flag is re-read per event; mypy still sees the ``while``
+                # condition's narrowing and calls the re-check unreachable.
                 for event_type, job in events:
                     if not self._running:
-                        break
+                        break  # type: ignore[unreachable]
 
                     try:
                         await self._process_job_event(event_type, job)

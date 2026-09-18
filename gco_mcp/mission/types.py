@@ -306,8 +306,21 @@ class Strategy(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
-class Observation(TypedDict):
-    """The Observe_Phase output — a normalized view of Execute_Phase results."""
+class Observation(TypedDict, total=False):
+    """The Observe_Phase output — a normalized view of Execute_Phase results.
+
+    ``total=False`` because an iteration's Observation is built up over
+    the cycle rather than in one step. ``MissionEngine`` seeds every
+    :class:`IterationRecord` with an empty placeholder; a scripted
+    Strategy hands back whatever subset the sandbox produced (and only
+    the keys it managed to fill when the sandbox was terminated); the
+    Observe_Phase then ``setdefault``s the five core keys —
+    ``tool_results``, ``metrics``, ``events``, ``phase_started_at``,
+    ``phase_ended_at`` — so evaluators after it see a uniform shape.
+    Readers that can run earlier (a failed Observe, a cadence check on
+    the latest iteration, the stagnation cascade's look-back) therefore
+    treat every key as optional, and the type says so.
+    """
 
     tool_results: list[Any]
     metrics: dict[str, Any]

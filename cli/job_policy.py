@@ -28,7 +28,7 @@ import concurrent.futures
 import contextlib
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -271,9 +271,14 @@ def _quiet_admission_logging() -> Iterator[None]:
 
 
 def evaluate_manifests(
-    manifests: list[dict[str, Any]], policy: JobValidationPolicy
+    manifests: Iterable[object], policy: JobValidationPolicy
 ) -> list[AdmissionIssue]:
-    """Evaluate every manifest against one policy."""
+    """Evaluate every manifest against one policy.
+
+    ``manifests`` is whatever the YAML loader produced. A scalar or list
+    document mixed into a directory scan is not a manifest and is skipped
+    rather than crashing the batch; the parameter type says as much.
+    """
     issues: list[AdmissionIssue] = []
     with _quiet_admission_logging():
         for manifest in manifests:

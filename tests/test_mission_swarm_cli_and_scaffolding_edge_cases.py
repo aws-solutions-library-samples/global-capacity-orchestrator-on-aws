@@ -692,19 +692,6 @@ def test_swarm_scaffold_plan_sampling_paths(
     assert fallback["fallback_reason"] == "invalid_spawn"
     assert "falling back" in capsys.readouterr().err
 
-    monkeypatch.setattr(sampling, "select_sampling_backend", lambda _value: None)
-    unavailable = swarm_cmd_mod._scaffold_plan(
-        directive="Find docs.",
-        swarm_config=_swarm_config(),
-        tool_allowlist=("find_docs",),
-        allow_all_tools=False,
-        max_children=None,
-        use_sampling=True,
-        retries=1,
-    )
-    assert unavailable["sampling_path"] is False
-    assert unavailable["fallback_reason"] == "sampling_backend_unavailable"
-
 
 def test_swarm_scaffold_plan_maps_ftu_and_validation(
     monkeypatch: pytest.MonkeyPatch,

@@ -14,7 +14,7 @@ import contextlib
 import json
 import secrets
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -118,9 +118,7 @@ if is_enabled(FLAG_MISSION):
         """
         return mission_validation.strip_private_fields(session)
 
-    def _strip_private_fields_iterations(
-        iterations: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
+    def _strip_private_fields_iterations(iterations: Iterable[object]) -> list[Any]:
         """Strip private keys from each iteration's ``criteria_evaluation`` shape.
 
         Thin alias over
