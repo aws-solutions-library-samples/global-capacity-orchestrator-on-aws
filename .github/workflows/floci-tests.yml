@@ -8,13 +8,13 @@
 # unit-tests.yml and a real-account run of the live validation harness.
 #
 # Jobs (alphabetical by display name):
-#   - floci:integration — stores/queues/secrets/S3/CloudFormation/harness-
-#     inventory tests (tests/test_floci_*.py minus the E2E) against the
-#     emulator service container
 #   - floci:e2e:release-validate — the real live-validation harness through
 #     `gco release validate --emulator-endpoint`: verified emulator opt-in,
 #     full preflight (identity pinning, STS, region discovery, cdk list over
 #     the real cloud assembly, CDKToolkit health), baseline capture, reports
+#   - floci:integration — stores/queues/secrets/S3/CloudFormation/harness-
+#     inventory tests (tests/test_floci_*.py minus the E2E) against the
+#     emulator service container
 #
 # Both jobs DISCOVER their modules instead of naming them, so adding a Floci
 # test never needs a workflow edit and can never silently go unrun. The split
