@@ -52,8 +52,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T13:38:47Z
-# Generated from Git commit: 427c8d460bf52ad0da05e620ab1d0b6f0eea5957
+# Generated at (UTC): 2026-09-18T14:22:22Z
+# Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)

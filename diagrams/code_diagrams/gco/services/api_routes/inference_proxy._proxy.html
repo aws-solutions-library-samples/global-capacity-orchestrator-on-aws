@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="8b8875f0b5bef879">
+        <meta name="gco-generated-at" content="2026-09-18T14:22:22Z">
+        <meta name="gco-source-commit" content="90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b">
+        <meta name="gco-flow-digest" content="568bd87a593be170">
         <title>Managed inference reverse proxy (path allowlist, bounded I/O, streaming cleanup)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,48 +208,48 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4420=>operation: 'Forward one authenticated request to a managed in-cluster endpoint.'
-cond4423=>operation: raise HTTPException(status_code=400, detail='Invalid inference path') if  any((part in {'.', '..'} for part in upstream_path.split('/')))
-op4433=>operation: service_name, namespace, configured_health_path = await _resolve_upstream(endpoint_name)
-op4435=>operation: upstream_path = _validate_upstream_path(upstream_path, request.method, configured_health_path)
-op4437=>operation: encoded_suffix = quote(upstream_path, safe='/:@-._~')
-op4439=>operation: upstream_path_value = f'/{encoded_suffix}' if encoded_suffix else '/'
-op4441=>operation: upstream_url = f'http://{service_name}.{namespace}.svc.cluster.local{upstream_path_value}'
-op4443=>operation: body = await request.body()
-op4445=>operation: timeout = httpx.Timeout(connect=_bounded_timeout('INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS', 5.0, 0.1, 30.0), read=_bounded_timeout('INFERENCE_PROXY_READ_TIMEOUT_SECONDS', 300.0, 1.0, 900.0), write=_bounded_timeout('INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS', 30.0, 1.0, 300.0), pool=_bounded_timeout('INFERENCE_PROXY_POOL_TIMEOUT_SECONDS', 5.0, 0.1, 30.0))
-op4447=>operation: client = httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False)
-op4450=>operation: upstream_request = client.build_request(request.method, upstream_url, params=list(request.query_params.multi_items()), headers=_request_headers(request), content=body)
+        <div><textarea id="code" style="width: 100%;" rows="11">op478=>operation: 'Forward one authenticated request to a managed in-cluster endpoint.'
+cond481=>operation: raise HTTPException(status_code=400, detail='Invalid inference path') if  any((part in {'.', '..'} for part in upstream_path.split('/')))
+op491=>operation: service_name, namespace, configured_health_path = await _resolve_upstream(endpoint_name)
+op493=>operation: upstream_path = _validate_upstream_path(upstream_path, request.method, configured_health_path)
+op495=>operation: encoded_suffix = quote(upstream_path, safe='/:@-._~')
+op497=>operation: upstream_path_value = f'/{encoded_suffix}' if encoded_suffix else '/'
+op499=>operation: upstream_url = f'http://{service_name}.{namespace}.svc.cluster.local{upstream_path_value}'
+op501=>operation: body = await request.body()
+op503=>operation: timeout = httpx.Timeout(connect=_bounded_timeout('INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS', 5.0, 0.1, 30.0), read=_bounded_timeout('INFERENCE_PROXY_READ_TIMEOUT_SECONDS', 300.0, 1.0, 900.0), write=_bounded_timeout('INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS', 30.0, 1.0, 300.0), pool=_bounded_timeout('INFERENCE_PROXY_POOL_TIMEOUT_SECONDS', 5.0, 0.1, 30.0))
+op505=>operation: client = httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False)
+op508=>operation: upstream_request = client.build_request(request.method, upstream_url, params=list(request.query_params.multi_items()), headers=_request_headers(request), content=body)
 response = await client.send(upstream_request, stream=True)
-cond4449=>condition: exception raised?
-cond4452=>condition: except httpx.TimeoutException as exc
-op4456=>operation: await client.aclose()
-sub4458=>subroutine: raise HTTPException(status_code=504, detail='Inference endpoint timed out') from exc
-cond4460=>condition: except httpx.HTTPError as exc
-op4464=>operation: await client.aclose()
-sub4466=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
-io4474=>inputoutput: output: StreamingResponse(_stream_response(response, client), status_code=response.status_code, headers=_response_headers(response), media_type=None)
-e4472=>end: end function return
+cond507=>condition: exception raised?
+cond510=>condition: except httpx.TimeoutException as exc
+op514=>operation: await client.aclose()
+sub516=>subroutine: raise HTTPException(status_code=504, detail='Inference endpoint timed out') from exc
+cond518=>condition: except httpx.HTTPError as exc
+op522=>operation: await client.aclose()
+sub524=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
+io532=>inputoutput: output: StreamingResponse(_stream_response(response, client), status_code=response.status_code, headers=_response_headers(response), media_type=None)
+e530=>end: end function return
 
-op4420->cond4423
-cond4423->op4433
-op4433->op4435
-op4435->op4437
-op4437->op4439
-op4439->op4441
-op4441->op4443
-op4443->op4445
-op4445->op4447
-op4447->op4450
-op4450->cond4449
-cond4449(yes)->cond4452
-cond4452(yes)->op4456
-op4456->sub4458
-cond4452(no)->cond4460
-cond4460(yes)->op4464
-op4464->sub4466
-cond4460(no)->io4474
-io4474->e4472
-cond4449(no)->io4474
+op478->cond481
+cond481->op491
+op491->op493
+op493->op495
+op495->op497
+op497->op499
+op499->op501
+op501->op503
+op503->op505
+op505->op508
+op508->cond507
+cond507(yes)->cond510
+cond510(yes)->op514
+op514->sub516
+cond510(no)->cond518
+cond518(yes)->op522
+op522->sub524
+cond518(no)->io532
+io532->e530
+cond507(no)->io532
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -259,17 +259,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T14:22:22Z -->
+        <!-- Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T14:22:22Z">2026-09-18T14:22:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>8b8875f0b5bef879</code>
+            Flow content SHA-256: <code>568bd87a593be170</code>
           </p>
           <div id="canvas"></div>
         </div>
