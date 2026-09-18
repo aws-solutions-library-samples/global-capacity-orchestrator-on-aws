@@ -518,6 +518,37 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
     assert install_helm_index < prefetch_index < kind_index
 
 
+def test_kind_cluster_e2e_dry_runs_the_inference_deployments_the_monitor_renders() -> None:
+    """The rendered inference Deployments must meet a real apiserver before a live deploy.
+
+    The step has to use the production renderer (not a hand-written manifest),
+    cover the renderer's branches (vLLM default, SGLang default, SGLang with
+    operator-supplied launcher flags), submit with ``--dry-run=server`` so the
+    admission chain runs without persisting anything, and require all three to
+    be accepted. It must run once the shipped namespaces exist and before the
+    namespace picks up its ResourceQuota, so a rejection is the renderer's.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-cluster-e2e"]["steps"]
+    order = [step.get("name") or step.get("uses") for step in steps]
+    name = "Server-side dry-run the inference Deployments the monitor renders"
+    run = next(step["run"] for step in steps if step.get("name") == name)
+
+    assert "from gco.services.inference_monitor import InferenceMonitor" in run
+    assert "monitor._build_inference_deployment_object(" in run
+    assert '"framework": "vllm"' in run
+    assert run.count('"framework": "sglang"') == 2
+    assert '"--attention-backend", "triton", "--disable-cuda-graph"' in run
+    assert '"node_selector": {' in run
+    assert 'assert container["command"] == ["python3", "-m", "sglang.launch_server"]' in run
+    assert "kubectl apply --dry-run=server -f" in run
+    assert "kubectl -n gco-inference get serviceaccount gco-service-account" in run
+    assert """test "$(grep -c 'created (server dry run)' """ in run
+    assert '= "3"' in run
+    assert order.index("Apply namespaces + RBAC") < order.index(name)
+    assert order.index(name) < order.index("Apply ResourceQuotas and LimitRanges")
+
+
 def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() -> None:
     """The cost-pipeline job must stay a real-artifact test, fail-fast on mutation.
 

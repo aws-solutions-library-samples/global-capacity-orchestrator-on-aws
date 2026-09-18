@@ -28,7 +28,7 @@
 #   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
-#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer apply
+#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
 #   - integration:lambda:imports                  — import each Lambda handler
@@ -1574,6 +1574,97 @@ jobs:
           kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
           kubectl apply -f lambda/kubectl-applier-simple/manifests/05-priority-classes.yaml
+      - name: Server-side dry-run the inference Deployments the monitor renders
+        # `gco inference deploy` writes an endpoint record; the in-cluster
+        # inference monitor turns it into a Deployment through
+        # InferenceMonitor._build_inference_deployment_object and creates it.
+        # Its unit tests pin the rendered object's shape (launcher command,
+        # de-duplicated --host/--port/--model-path, the SGLang startup probe);
+        # none of them ever showed the object to an API server, so a field the
+        # Kubernetes client accepts but the apiserver rejects — a probe with
+        # both httpGet and exec, a quantity the scheduler cannot parse, a label
+        # value over 63 characters — would surface on the first live deploy.
+        # --dry-run=server runs the full admission chain (schema, defaulting,
+        # validating webhooks) in gco-inference without persisting anything,
+        # so no GPU node is needed. Three specs cover the renderer's branches:
+        # the vLLM default, the SGLang default (injected launcher), and SGLang
+        # with operator-supplied launcher flags and placement. The
+        # ServiceAccount every rendered pod names must exist in the namespace
+        # the shipped manifests create — that is a pod-start precondition the
+        # dry-run of a Deployment cannot see, so it is asserted separately.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "${RUNNER_TEMP}/inference-deployments.yaml"
+          from unittest.mock import MagicMock, patch
+
+          import yaml
+          from kubernetes import client
+
+          from gco.services.inference_monitor import InferenceMonitor
+
+          # Nothing here reaches a cluster: kubectl does that with the output.
+          with (
+              patch("gco.services.inference_monitor.config.load_incluster_config"),
+              patch("gco.services.inference_monitor.client.AppsV1Api"),
+              patch("gco.services.inference_monitor.client.CoreV1Api"),
+              patch("gco.services.inference_monitor.client.NetworkingV1Api"),
+              patch("gco.services.inference_monitor.client.DiscoveryV1Api"),
+          ):
+              monitor = InferenceMonitor(
+                  cluster_id="gco-ci", region="us-east-1", store=MagicMock(), namespace="gco-inference"
+              )
+          specs = {
+              "ci-vllm": {
+                  "image": "vllm/vllm-openai:v0.11.0",
+                  "framework": "vllm",
+                  "port": 8000,
+                  "gpu_count": 1,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "facebook/opt-125m"},
+              },
+              "ci-sglang": {
+                  "image": "lmsysorg/sglang:v0.5.19",
+                  "framework": "sglang",
+                  "port": 30000,
+                  "gpu_count": 1,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+              },
+              "ci-sglang-explicit": {
+                  "image": "lmsysorg/sglang:v0.5.19",
+                  "framework": "sglang",
+                  "port": 30000,
+                  "gpu_count": 2,
+                  "health_check_path": "/health",
+                  "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+                  "args": [
+                      "--model-path", "Qwen/Qwen2.5-0.5B-Instruct",
+                      "--attention-backend", "triton", "--disable-cuda-graph",
+                  ],
+                  "node_selector": {"node.kubernetes.io/instance-type": "g6.12xlarge"},
+              },
+          }
+          api = client.ApiClient()
+          documents = []
+          for name, spec in specs.items():
+              deployment = monitor._build_inference_deployment_object(
+                  name=name, deploy_name=name, app_label=name,
+                  namespace="gco-inference", spec=spec, replicas=1,
+              )
+              body = api.sanitize_for_serialization(deployment)
+              documents.append({"apiVersion": "apps/v1", "kind": "Deployment", **body})
+              container = body["spec"]["template"]["spec"]["containers"][0]
+              assert body["spec"]["template"]["spec"]["serviceAccountName"] == "gco-service-account"
+              if spec["framework"] == "sglang":
+                  assert container["command"] == ["python3", "-m", "sglang.launch_server"], container
+                  assert container["args"].count("--model-path") == 1, container["args"]
+                  assert "startupProbe" in container, "SGLang render must carry the startup probe"
+          print(yaml.safe_dump_all(documents, sort_keys=False))
+          PY
+          kubectl -n gco-inference get serviceaccount gco-service-account
+          kubectl apply --dry-run=server -f "${RUNNER_TEMP}/inference-deployments.yaml" \
+            | tee "${RUNNER_TEMP}/inference-dry-run.log"
+          test "$(grep -c 'created (server dry run)' "${RUNNER_TEMP}/inference-dry-run.log")" = "3"
       - name: Seed API workload TLS Secrets for Kind
         # Production creates these Secrets through the post-Helm cert-manager
         # Certificates. This raw-manifest Kind job deliberately does not install
