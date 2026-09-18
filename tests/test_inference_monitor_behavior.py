@@ -1575,7 +1575,197 @@ class TestKubernetesLifecycleFencing:
         monitor._renew_current_lease.assert_called_once()
 
 
-def test_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance() -> None:
+def test_sglang_renderer_supplies_launcher_listener_and_model_from_env() -> None:
+    """``--framework sglang`` renders the official launcher on the spec's port.
+
+    The ``lmsysorg/sglang`` image has no entrypoint and the launcher binds
+    127.0.0.1 by default, so the renderer must own the command, the listener
+    address and port, and hand the ``MODEL`` convention to ``--model-path``.
+    """
+    monitor = _make_monitor()
+    monitor._active_authority = ReconcileAuthority(
+        endpoint_name="chat",
+        lifecycle_id=LIFECYCLE_ID,
+        region_generation=REGION_GENERATION,
+        leader_epoch="epoch-1",
+    )
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "registry.example/team/private-server@sha256:" + "a" * 64,
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "microsoft/Phi-3.5-mini-instruct"},
+        },
+    )
+
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "30000",
+        "--model-path",
+        "$(MODEL)",
+    ]
+    assert container.ports[0].container_port == 30000
+    assert container.startup_probe.http_get.path == "/health"
+    assert container.startup_probe.http_get.port == 30000
+    assert container.startup_probe.period_seconds == 15
+    assert container.startup_probe.failure_threshold == 80
+    assert container.readiness_probe.http_get.path == "/health"
+    assert container.liveness_probe.http_get.path == "/health"
+    env = {item.name: item.value for item in container.env}
+    assert env["MODEL"] == "microsoft/Phi-3.5-mini-instruct"
+    expected = {
+        "gco.io/lifecycle-id": LIFECYCLE_ID,
+        "gco.io/region-generation": REGION_GENERATION,
+        "gco.io/leader-epoch": "epoch-1",
+    }
+    assert deployment.metadata.annotations == expected
+    assert deployment.spec.template.metadata.annotations == expected
+
+
+def test_sglang_renderer_never_duplicates_operator_supplied_launcher_flags() -> None:
+    """Explicit ``--host``/``--port``/``--model-path`` args win over the injected defaults."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+            "args": [
+                "--model-path",
+                "test/model",
+                "--revision",
+                "b" * 40,
+                "--host",
+                "::",
+                "--port",
+                "30000",
+            ],
+        },
+        extra_args=["--log-level", "warning"],
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == [
+        "--model-path",
+        "test/model",
+        "--revision",
+        "b" * 40,
+        "--host",
+        "::",
+        "--port",
+        "30000",
+        "--log-level",
+        "warning",
+    ]
+    assert container.args.count("--host") == 1
+    assert container.args.count("--port") == 1
+    assert container.args.count("--model-path") == 1
+    assert "$(MODEL)" not in container.args
+    assert "--root-path" not in container.args
+
+
+def test_sglang_renderer_accepts_the_short_model_alias_and_skips_env_injection() -> None:
+    """``--model`` is SGLang's alias for ``--model-path``; no second model flag is added."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "args": ["--model", "test/model"],
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.args == ["--model", "test/model", "--host", "0.0.0.0", "--port", "30000"]
+
+
+def test_sglang_renderer_without_model_env_leaves_the_model_to_the_operator() -> None:
+    """Without ``MODEL`` there is nothing to expand; the launcher gets only the listener."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"HF_TOKEN": "x"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == ["--host", "0.0.0.0", "--port", "30000"]
+
+
+def test_sglang_renderer_respects_an_operator_supplied_command() -> None:
+    """A spec that carries its own ``command`` (raw manifest style) is rendered verbatim."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "command": ["/bin/bash", "-c"],
+            "args": ["python3 -m sglang.launch_server --model-path $MODEL --port 30000"],
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["/bin/bash", "-c"]
+    assert container.args == ["python3 -m sglang.launch_server --model-path $MODEL --port 30000"]
+    # The startup probe still follows the persisted framework.
+    assert container.startup_probe is not None
+
+
+def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
+    """Records written before ``framework`` existed resolve SGLang from the image name."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == ["--host", "0.0.0.0", "--port", "30000", "--model-path", "$(MODEL)"]
+    assert container.startup_probe is not None
+
+
+def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "vllm/vllm-openai:v0.29.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command is None
+    assert container.args == ["--root-path", "/inference/chat"]
+    assert container.startup_probe is None
+
+
+def test_legacy_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance() -> None:
+    """Endpoints persisted as ``tgi`` before SGLang replaced it keep their probe contract."""
     monitor = _make_monitor()
     monitor._active_authority = ReconcileAuthority(
         endpoint_name="chat",

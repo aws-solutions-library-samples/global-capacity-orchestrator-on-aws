@@ -554,10 +554,31 @@ class InferenceManager:
         Returns:
             Created endpoint record
         """
-        if framework not in (None, "vllm", "tgi"):
-            raise ValueError("framework must be 'vllm' or 'tgi'")
-        if mooncake_mode is not None and framework == "tgi":
+        if framework == "tgi":
+            # Endpoints persisted with ``framework: tgi`` by earlier releases
+            # keep their renderer/probe contract until they are deleted; only
+            # new deployments are refused.
+            raise ValueError(
+                "framework 'tgi' is no longer accepted: Hugging Face placed Text "
+                "Generation Inference in maintenance mode on 2025-12-11 and archived "
+                "it on 2026-03-21. Deploy with 'sglang' or 'vllm'."
+            )
+        if framework not in (None, "vllm", "sglang"):
+            raise ValueError("framework must be 'vllm' or 'sglang'")
+        if mooncake_mode is not None and framework == "sglang":
             raise ValueError("Mooncake serving requires the vllm framework")
+        if (
+            framework == "sglang"
+            and not (env or {}).get("MODEL")
+            and not {"--model-path", "--model"} & set(extra_args or [])
+        ):
+            # The renderer supplies the launcher and takes the model from the
+            # ``MODEL`` convention or an explicit launcher flag; without either
+            # the pod would only crash-loop on a missing --model-path.
+            raise ValueError(
+                "framework 'sglang' needs the model to serve: pass -e MODEL=<id-or-path> "
+                "or --extra-args=--model-path --extra-args <id-or-path>"
+            )
         if mooncake_mode is not None and framework is None:
             framework = "vllm"
 

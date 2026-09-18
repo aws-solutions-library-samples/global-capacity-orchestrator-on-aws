@@ -35,9 +35,12 @@ def inference(config: Any) -> None:
 )
 @click.option(
     "--framework",
-    type=click.Choice(["vllm", "tgi"]),
+    type=click.Choice(["vllm", "sglang"]),
     default=None,
-    help="Explicit serving runtime contract; persisted for renderer/probe behavior.",
+    help="Explicit serving runtime contract; persisted for renderer/probe behavior. "
+    "'sglang' renders the official launcher (python3 -m sglang.launch_server) "
+    "listening on --port, with --model-path taken from -e MODEL=... unless passed "
+    "via --extra-args.",
 )
 @click.option(
     "--region",
@@ -48,7 +51,11 @@ def inference(config: Any) -> None:
 @click.option("--replicas", default=1, help="Replicas per region (default: 1)")
 @click.option("--gpu-count", default=1, help="GPUs per replica (default: 1)")
 @click.option("--gpu-type", help="GPU instance type hint (e.g. g5.xlarge)")
-@click.option("--port", default=8000, help="Container port (default: 8000)")
+@click.option(
+    "--port",
+    default=8000,
+    help="Container port (default: 8000; SGLang's documented default is 30000)",
+)
 @click.option("--model-path", help="EFS path for model weights")
 @click.option(
     "--model-source",
@@ -735,6 +742,36 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
         sys.exit(1)
 
 
+def _resolve_invoke_framework(persisted_framework: Any, image_lower: str) -> str:
+    """Return the serving contract ``invoke``/``models`` should speak to an endpoint.
+
+    The persisted ``framework`` wins; image heuristics only cover records
+    created before the field existed. ``tgi`` remains recognised for endpoints
+    deployed before SGLang replaced it, so those keep working until they are
+    deleted. Anything unrecognised is treated as an OpenAI-compatible server.
+    """
+    if persisted_framework in ("vllm", "sglang", "tgi"):
+        return str(persisted_framework)
+    if "vllm" in image_lower:
+        return "vllm"
+    if "sglang" in image_lower:
+        return "sglang"
+    if "text-generation-inference" in image_lower or "tgi" in image_lower:
+        return "tgi"
+    if "tritonserver" in image_lower or "triton" in image_lower:
+        return "triton"
+    return "openai"
+
+
+_SGLANG_SERVER_INFO_IDENTITY_KEYS = (
+    "model_path",
+    "served_model_name",
+    "revision",
+    "tokenizer_path",
+    "version",
+)
+
+
 @inference.command("invoke")
 @click.argument("endpoint_name")
 @click.option("--prompt", "-p", help="Text prompt to send")
@@ -821,15 +858,16 @@ def inference_invoke(
 
         # Persisted framework is authoritative for neutral/private image names;
         # image heuristics remain only for legacy records created before that
-        # field existed.
+        # field existed. ``tgi`` is still recognised so endpoints deployed
+        # before SGLang replaced it keep working until they are deleted.
+        resolved_framework = _resolve_invoke_framework(persisted_framework, image_lower)
         if api_path is None:
-            if persisted_framework == "tgi":
+            if resolved_framework == "sglang":
+                # Native SGLang API; streaming is a body flag on the same path.
+                api_path = "/generate"
+            elif resolved_framework == "tgi":
                 api_path = "/generate_stream" if stream_response else "/generate"
-            elif persisted_framework == "vllm" or "vllm" in image_lower:
-                api_path = "/v1/completions"
-            elif "text-generation-inference" in image_lower or "tgi" in image_lower:
-                api_path = "/generate_stream" if stream_response else "/generate"
-            elif "tritonserver" in image_lower or "triton" in image_lower:
+            elif resolved_framework == "triton":
                 api_path = "/v2/models"
             else:
                 api_path = "/v1/completions"
@@ -842,7 +880,15 @@ def inference_invoke(
             body = parsed_data
         else:
             assert prompt is not None
-            if "generate" in api_path:
+            if resolved_framework == "sglang" and "generate" in api_path:
+                # SGLang native format: the prompt travels as ``text`` and the
+                # decoding controls under ``sampling_params``.
+                body = {
+                    "text": prompt,
+                    "sampling_params": {"max_new_tokens": max_tokens},
+                    "stream": stream_response,
+                }
+            elif "generate" in api_path:
                 # TGI format; /generate_stream controls response streaming.
                 body = {"inputs": prompt, "parameters": {"max_new_tokens": max_tokens}}
             elif "/v2/" in api_path:
@@ -960,6 +1006,9 @@ def inference_invoke(
                 elif "generated_text" in resp_json:
                     # TGI format
                     text = resp_json["generated_text"]
+                elif isinstance(resp_json, dict) and isinstance(resp_json.get("text"), str):
+                    # SGLang native /generate format
+                    text = resp_json["text"]
                 elif isinstance(resp_json, list) and resp_json and "generated_text" in resp_json[0]:
                     text = resp_json[0]["generated_text"]
 
@@ -1218,7 +1267,7 @@ def inference_health(config: Any, endpoint_name: Any, region: Any) -> None:
 @click.argument("endpoint_name")
 @click.option(
     "--framework",
-    type=click.Choice(["vllm", "tgi"]),
+    type=click.Choice(["vllm", "sglang"]),
     default=None,
     help="Runtime metadata contract (default: persisted endpoint framework or vLLM).",
 )
@@ -1230,7 +1279,17 @@ def inference_models(
     framework: Any,
     region: Any,
 ) -> None:
-    """Read exact model identity from vLLM /v1/models or TGI /info."""
+    """Read exact model identity from vLLM /v1/models or SGLang /server_info.
+
+    vLLM's OpenAI inventory is printed as returned. For SGLang the command
+    reads ``/server_info`` (the launcher arguments the running server
+    resolved) and prints only the identity fields — ``model_path``,
+    ``served_model_name``, ``revision``, ``tokenizer_path`` and ``version`` —
+    so the exact model *and* the exact revision the process was started with
+    are visible without the multi-kilobyte scheduler state that endpoint also
+    carries. Endpoints persisted as ``tgi`` before SGLang replaced it still
+    answer through TGI's ``/info``.
+    """
     import json as _json
 
     from ..aws_client import get_aws_client
@@ -1249,16 +1308,20 @@ def inference_models(
         spec = endpoint.get("spec")
         persisted_framework = spec.get("framework") if isinstance(spec, dict) else None
         image = spec.get("image") if isinstance(spec, dict) else None
-        inferred_framework = (
-            "tgi"
-            if isinstance(image, str)
-            and ("text-generation-inference" in image.lower() or "/tgi" in image.lower())
-            else "vllm"
-        )
-        selected_framework = framework or persisted_framework or inferred_framework
-        if selected_framework not in ("vllm", "tgi"):
+        image_lower = image.lower() if isinstance(image, str) else ""
+        if persisted_framework is not None and persisted_framework not in ("vllm", "sglang", "tgi"):
             raise ValueError("endpoint has an unsupported persisted inference framework")
-        model_path = "info" if selected_framework == "tgi" else "v1/models"
+        selected_framework = framework or _resolve_invoke_framework(
+            persisted_framework, image_lower
+        )
+        if selected_framework not in ("vllm", "sglang", "tgi"):
+            # Triton and unknown OpenAI-compatible images publish no model
+            # identity document this command knows how to read; the OpenAI
+            # inventory is the closest thing to one.
+            selected_framework = "vllm"
+        model_path = {"vllm": "v1/models", "sglang": "server_info", "tgi": "info"}[
+            selected_framework
+        ]
         full_path = f"{ingress_path}/{model_path}"
 
         client = get_aws_client(config)
@@ -1271,6 +1334,14 @@ def inference_models(
         if response.ok:
             try:
                 resp_json = response.json()
+                if selected_framework == "sglang":
+                    if not isinstance(resp_json, dict):
+                        raise ValueError("SGLang /server_info did not return a JSON object")
+                    resp_json = {
+                        key: resp_json[key]
+                        for key in _SGLANG_SERVER_INFO_IDENTITY_KEYS
+                        if key in resp_json
+                    }
                 emit_structured_document(
                     resp_json,
                     output_format="json",

@@ -3496,16 +3496,22 @@ class InferenceMonitor:
         container_env = [client.V1EnvVar(name=k, value=str(v)) for k, v in env_vars.items()]
 
         # Runtime behavior is persisted explicitly by callers that need a
-        # strict adapter. Legacy endpoints without the field retain vLLM image
-        # detection, but TGI is never given vLLM's unsupported --root-path:
-        # the authenticated platform proxy strips /inference/{name} before
-        # forwarding /health, /generate, or /info to the model Service.
+        # strict adapter. Legacy endpoints without the field retain image
+        # detection. Only vLLM is given --root-path: the authenticated platform
+        # proxy strips /inference/{name} before forwarding /health, /generate,
+        # /server_info or /info to the model Service, so SGLang and TGI serve
+        # their documented unprefixed paths. ``tgi`` is still rendered for
+        # endpoints deployed before SGLang replaced it (the CLI refuses new TGI
+        # deployments); dropping its startup probe would restart-loop a running
+        # TGI pod on the next reconcile while its model loads.
         serving_prefix = f"/inference/{name}"
         runtime_framework = spec.get("framework")
-        if runtime_framework not in ("vllm", "tgi"):
+        if runtime_framework not in ("vllm", "sglang", "tgi"):
             image_lower = image.lower()
             if "vllm" in image_lower:
                 runtime_framework = "vllm"
+            elif "sglang" in image_lower:
+                runtime_framework = "sglang"
             elif "text-generation-inference" in image_lower or "/tgi" in image_lower:
                 runtime_framework = "tgi"
             else:
@@ -3516,6 +3522,23 @@ class InferenceMonitor:
                     args = [*args, "--root-path", serving_prefix]
             else:
                 args = ["--root-path", serving_prefix]
+        if not command and runtime_framework == "sglang":
+            # The lmsysorg/sglang image has no entrypoint (its CMD is a shell),
+            # so the renderer supplies the official launcher. The launcher
+            # binds 127.0.0.1:30000 by default, which the pod's Service could
+            # never reach, so the host and the spec's port are pinned unless
+            # the operator passed them explicitly. The model comes from
+            # ``--model-path`` in the args when given; otherwise from the
+            # ``MODEL`` environment convention every GCO renderer shares,
+            # expanded by the kubelet at container start.
+            command = ["python3", "-m", "sglang.launch_server"]
+            args = list(args) if args else []
+            if "--host" not in args:
+                args.extend(["--host", "0.0.0.0"])  # container listener
+            if "--port" not in args:
+                args.extend(["--port", str(port)])
+            if "--model-path" not in args and "--model" not in args and "MODEL" in env_vars:
+                args.extend(["--model-path", "$(MODEL)"])
 
         # Append caller-supplied arguments (for example the rendered
         # --kv-transfer-config) after any root-path injection so they survive
@@ -3639,13 +3662,17 @@ class InferenceMonitor:
             volume_mounts=volume_mounts if volume_mounts else None,
             command=command,
             args=args,
+            # SGLang (and legacy TGI) answer /health with 503 until the model
+            # is loaded, which for a multi-gigabyte checkpoint outlasts the
+            # liveness budget below; the startup probe holds liveness off for
+            # up to 20 minutes while that happens.
             startup_probe=(
                 client.V1Probe(
                     http_get=client.V1HTTPGetAction(path=health_path, port=port),
                     period_seconds=15,
                     failure_threshold=80,
                 )
-                if runtime_framework == "tgi"
+                if runtime_framework in ("sglang", "tgi")
                 else None
             ),
             liveness_probe=client.V1Probe(

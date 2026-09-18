@@ -801,6 +801,38 @@ def test_manager_deploy_uses_default_disaggregated_image() -> None:
 
 
 @pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"env": {"MODEL": "microsoft/Phi-3.5-mini-instruct"}},
+        {"extra_args": ["--model-path", "microsoft/Phi-3.5-mini-instruct", "--revision", "a" * 40]},
+        {"env": {"HF_TOKEN": "x"}, "extra_args": ["--model", "/models/phi3"]},
+    ],
+    ids=["model-env", "model-path-arg", "model-alias-arg"],
+)
+def test_manager_deploy_persists_sglang_when_the_model_is_supplied(kwargs: dict[str, Any]) -> None:
+    """Either the ``MODEL`` convention or an explicit launcher flag satisfies the guard."""
+    store = MagicMock()
+    store.create_endpoint.return_value = {"endpoint_name": "ep"}
+    manager = _manager_with_store(store)
+
+    manager.deploy(
+        "ep",
+        image="lmsysorg/sglang:v0.5.19",
+        target_regions=["us-east-1"],
+        port=30000,
+        framework="sglang",
+        **kwargs,
+    )
+
+    spec = store.create_endpoint.call_args.kwargs["spec"]
+    assert spec["framework"] == "sglang"
+    assert spec["port"] == 30000
+    assert "mooncake" not in spec
+    if "extra_args" in kwargs:
+        assert spec["args"] == kwargs["extra_args"]
+
+
+@pytest.mark.parametrize(
     ("migration", "message"),
     [(None, "changed while initializing"), ({"endpoint_name": "ep"}, "no lifecycle identity")],
 )
@@ -1300,21 +1332,32 @@ def test_role_autoscaling_validator_accepts_absent_optional_bounds() -> None:
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "match"),
     [
-        {"framework": "unknown"},
-        {"framework": "tgi", "mooncake_mode": "store"},
+        ({"framework": "unknown"}, r"framework must be 'vllm' or 'sglang'"),
+        ({"framework": "sglang", "mooncake_mode": "store"}, r"Mooncake serving requires the vllm"),
+        ({"framework": "tgi"}, r"framework 'tgi' is no longer accepted"),
+        ({"framework": "tgi", "mooncake_mode": "store"}, r"framework 'tgi' is no longer accepted"),
+        ({"framework": "sglang"}, r"framework 'sglang' needs the model to serve"),
+        (
+            {"framework": "sglang", "env": {"MODEL": ""}, "extra_args": ["--log-level", "warning"]},
+            r"framework 'sglang' needs the model to serve",
+        ),
     ],
 )
-def test_manager_deploy_rejects_incompatible_framework_contracts(kwargs: dict[str, Any]) -> None:
-    manager = _manager_with_store(MagicMock())
-    with pytest.raises(ValueError, match=r"framework|Mooncake"):
+def test_manager_deploy_rejects_incompatible_framework_contracts(
+    kwargs: dict[str, Any], match: str
+) -> None:
+    store = MagicMock()
+    manager = _manager_with_store(store)
+    with pytest.raises(ValueError, match=match):
         manager.deploy(
             "ep",
             image="image:v1",
             target_regions=["us-east-1"],
             **kwargs,
         )
+    store.create_endpoint.assert_not_called()
 
 
 def test_add_region_preserves_historical_cleanup_membership_without_reappending() -> None:
