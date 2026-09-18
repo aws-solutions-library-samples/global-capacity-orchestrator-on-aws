@@ -34,18 +34,15 @@ class TestCLIMain:
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
 
-    def test_cli_with_config_option(self):
+    def test_cli_with_config_option(self, tmp_path):
         """Test CLI with config file option."""
         from cli.main import cli
 
-        runner = CliRunner()
-        with runner.isolated_filesystem():
-            # Create a config file
-            with open("config.yaml", "w", encoding="utf-8") as f:
-                f.write("default_region: us-west-2\n")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("default_region: us-west-2\n", encoding="utf-8")
 
-            result = runner.invoke(cli, ["--config", "config.yaml", "--help"])
-            assert result.exit_code == 0
+        result = CliRunner().invoke(cli, ["--config", str(config_file), "--help"])
+        assert result.exit_code == 0
 
 
 class TestJobsCommands:

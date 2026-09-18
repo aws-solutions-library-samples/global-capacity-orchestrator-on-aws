@@ -401,10 +401,8 @@ def test_safe_aws_error_message_handles_missing_message() -> None:
 def test_execute_api_hostname_rejects_missing_metadata() -> None:
     resolver = MagicMock()
     resolver.construct_endpoint.return_value = None
-    session = MagicMock()
-    session.get_component.return_value = resolver
     with (
-        patch("cli.aws_client.get_botocore_session", return_value=session),
+        patch("cli.aws_client.EndpointResolver", return_value=resolver),
         pytest.raises(ValueError, match="metadata is unavailable"),
     ):
         aws_client._execute_api_service_hostname("us-test-1")

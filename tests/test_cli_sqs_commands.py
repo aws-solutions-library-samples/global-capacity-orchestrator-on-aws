@@ -836,14 +836,14 @@ class TestFilesLsCommand:
 class TestConfigInitCommand:
     """Tests for config init command."""
 
-    def test_config_init_new_file(self):
+    def test_config_init_new_file(self, tmp_path, monkeypatch):
         """Test config init creates new file."""
         from cli.main import cli
 
+        monkeypatch.chdir(tmp_path)
         runner = CliRunner()
 
         with (
-            runner.isolated_filesystem(),
             patch("pathlib.Path.home") as mock_home,
             patch("cli.config.GCOConfig.save") as mock_save,
         ):
@@ -854,22 +854,18 @@ class TestConfigInitCommand:
             # The command should attempt to save
             assert result.exit_code == 0 or mock_save.called
 
-    def test_config_init_force_overwrite(self):
+    def test_config_init_force_overwrite(self, tmp_path, monkeypatch):
         """Test config init with --force flag."""
         from cli.main import cli
 
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".gco").mkdir()
         runner = CliRunner()
 
-        with runner.isolated_filesystem():
-            # Create a mock config directory
-            import os
-
-            os.makedirs(".gco", exist_ok=True)
-
-            with patch("cli.config.GCOConfig.save") as mock_save:
-                result = runner.invoke(cli, ["config-cmd", "init", "--force"])
-                # Should attempt to save regardless of existing file
-                assert result.exit_code == 0 or mock_save.called
+        with patch("cli.config.GCOConfig.save") as mock_save:
+            result = runner.invoke(cli, ["config-cmd", "init", "--force"])
+            # Should attempt to save regardless of existing file
+            assert result.exit_code == 0 or mock_save.called
 
 
 class TestSqsNamespaceHandling:

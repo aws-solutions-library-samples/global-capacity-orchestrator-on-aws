@@ -449,8 +449,15 @@ check_untyped_defs = true
 minversion = "7.0"
 # -v + short tracebacks match the prior effective (pytest.ini) behavior;
 # --strict-markers turns a typo'd/unregistered marker into an error instead of
-# a silent skip (every marker used in the suite is registered below).
-addopts = "-v --tb=short --strict-markers"
+# a silent skip (every marker used in the suite is registered below);
+# --strict-config does the same for this block, so a misspelled option here
+# fails the run instead of being ignored.
+addopts = "-v --tb=short --strict-markers --strict-config"
+# An xfail that starts passing is news: either the bug it tracked is fixed and
+# the marker must go, or the test no longer exercises the bug. Fail the run
+# rather than reporting XPASS and moving on. (The suite currently carries no
+# xfails; this is the fence for the first one.)
+xfail_strict = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -470,9 +477,25 @@ markers = [
     "helm_online: Helm chart resolve/render check (opt-in via GCO_HELM_CHART_VALIDATION=1; needs helm + network)",
     "kubeconform_online: K8s manifest schema validation (opt-in via GCO_KUBECONFORM_VALIDATION=1; needs kubeconform + network)",
 ]
+# Deprecation warnings fail the test that raised them. A DeprecationWarning is
+# a library telling us an API we call is going away; ignoring the whole
+# category (the previous setting) meant the first place it got noticed was the
+# upgrade that removed the API. Two were hiding under the old blanket ignore:
+# botocore's internal endpoint-resolver component fetched via get_component()
+# (cli/_image_uri.py, cli/aws_client.py) and class-scoped fixtures defined as
+# instance methods (PytestRemovedIn10Warning, twelve test classes). Both are
+# fixed; the filter keeps the next one from hiding. Third-party warnings that
+# are not ours to fix go below as narrow ignores — match on message and
+# module, never the bare category — with a note on where upstream stands.
 filterwarnings = [
-    "ignore::DeprecationWarning",
-    "ignore::PendingDeprecationWarning",
+    "error::DeprecationWarning",
+    "error::PendingDeprecationWarning",
+    # fastmcp 4.0.x still sends MCP log notifications through the SDK's
+    # deprecated logging capability (SEP-2577) "per compat directive"; the
+    # warning is raised inside fastmcp, and ctx.info()/ctx.debug() callers
+    # cannot avoid it. UserWarning subclass, so it never failed a test; the
+    # ignore keeps the summary clean so a new warning stands out.
+    "ignore:The logging capability is deprecated:mcp.shared.exceptions.MCPDeprecationWarning",
 ]
 
 [tool.coverage.run]

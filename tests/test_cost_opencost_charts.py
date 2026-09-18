@@ -225,7 +225,8 @@ class TestRegionalChartWiring:
 
 class TestCostMonitorManifest:
     @pytest.fixture(scope="class")
-    def manifest_text(self) -> str:
+    @staticmethod
+    def manifest_text() -> str:
         return _COST_MONITOR_MANIFEST.read_text(encoding="utf-8")
 
     def test_manifest_is_gated_on_the_cost_placeholder(self, manifest_text):
@@ -287,7 +288,8 @@ class TestCostMonitorManifest:
 
 class TestCostDashboardManifest:
     @pytest.fixture(scope="class")
-    def manifest_text(self) -> str:
+    @staticmethod
+    def manifest_text() -> str:
         return _COST_DASHBOARD_MANIFEST.read_text(encoding="utf-8")
 
     def test_dashboard_is_gated_on_the_cost_placeholder(self, manifest_text):
@@ -319,7 +321,8 @@ class TestCostDashboardManifest:
 
 class TestApplierPruneInventory:
     @pytest.fixture(scope="class")
-    def inventory(self):
+    @staticmethod
+    def inventory():
         import sys
 
         handler_path = str(_REPO_ROOT / "lambda" / "kubectl-applier-simple")

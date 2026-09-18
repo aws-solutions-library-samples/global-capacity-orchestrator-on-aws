@@ -847,7 +847,8 @@ class TestSlinkySlurmValuesShape:
     """
 
     @pytest.fixture(scope="class")
-    def slinky_values(self) -> dict:
+    @staticmethod
+    def slinky_values() -> dict:
         import yaml
 
         charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]

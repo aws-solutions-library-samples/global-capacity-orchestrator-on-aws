@@ -249,7 +249,8 @@ class TestKubeflowTrainerChartEntry:
 
 class TestTrainerRuntimeManifest:
     @pytest.fixture(scope="class")
-    def manifest_text(self) -> str:
+    @staticmethod
+    def manifest_text() -> str:
         return _RUNTIME_MANIFEST.read_text(encoding="utf-8")
 
     def test_manifest_is_gated_on_the_trainer_placeholder(self, manifest_text):
@@ -380,7 +381,8 @@ class TestSchedulerGateReplacements:
 
 class TestApplierTrainerWiring:
     @pytest.fixture(scope="class")
-    def applier(self):
+    @staticmethod
+    def applier():
         handler_path = str(_REPO_ROOT / "lambda" / "kubectl-applier-simple")
         sys.path.insert(0, handler_path)
         try:
@@ -467,7 +469,8 @@ class TestHelmInstallerConvergence:
     """handle_task converges the trainer chart in both directions."""
 
     @pytest.fixture(scope="class")
-    def helm_handler(self):
+    @staticmethod
+    def helm_handler():
         return load_lambda_module("helm-installer")
 
     def _event(self, enabled: bool) -> dict[str, Any]:

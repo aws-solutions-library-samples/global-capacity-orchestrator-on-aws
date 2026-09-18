@@ -452,7 +452,8 @@ class TestServiceWiring:
 
 class TestQueueProcessorTemplate:
     @pytest.fixture(scope="class")
-    def scaled_job(self) -> dict[str, Any]:
+    @staticmethod
+    def scaled_job() -> dict[str, Any]:
         (scaled_job,) = [doc for doc in _documents(SCALED_JOB_FILE) if doc["kind"] == "ScaledJob"]
         return scaled_job
 

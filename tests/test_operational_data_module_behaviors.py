@@ -640,11 +640,9 @@ def test_partition_metadata_rejects_incomplete_resolution(
     suffix: str | None,
     message: str,
 ) -> None:
-    resolver = MagicMock()
-    resolver.get_partition_for_region.return_value = partition
-    resolver.get_partition_dns_suffix.return_value = suffix
     session = MagicMock()
-    session.get_component.return_value = resolver
+    session.get_partition_for_region.return_value = partition
+    session.get_data.return_value = {"partitions": [{"partition": partition, "dnsSuffix": suffix}]}
     _image_uri._partition_metadata.cache_clear()
 
     with (

@@ -37,11 +37,20 @@ def _partition_metadata(region: str) -> tuple[str, str]:
     if not region:
         raise ValueError("AWS region must not be empty")
 
-    resolver = botocore.session.get_session().get_component("endpoint_resolver")
-    partition = resolver.get_partition_for_region(region)
+    # Public botocore surface only: ``Session.get_partition_for_region`` and
+    # the bundled ``endpoints`` data file. The endpoint-resolver component
+    # that used to answer both questions is internal, and fetching it through
+    # ``get_component`` raises a DeprecationWarning (an error under the test
+    # suite's warning filters).
+    session = botocore.session.get_session()
+    partition = session.get_partition_for_region(region)
     if not partition:
         raise ValueError(f"Could not resolve an AWS partition for region {region!r}")
-    url_suffix = resolver.get_partition_dns_suffix(partition)
+    partitions = session.get_data("endpoints").get("partitions", [])
+    url_suffix = next(
+        (entry.get("dnsSuffix") for entry in partitions if entry.get("partition") == partition),
+        None,
+    )
     if not url_suffix:
         raise ValueError(f"Could not resolve the URL suffix for AWS partition {partition!r}")
     return str(partition), str(url_suffix)
