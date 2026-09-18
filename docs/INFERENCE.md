@@ -336,6 +336,19 @@ could only crash-loop on the launcher's missing `--model-path`. SGLang answers
 probe that holds liveness off for up to 20 minutes while the checkpoint
 downloads.
 
+SGLang's prebuilt kernels (`sgl-kernel`, FlashInfer) target NVIDIA compute
+capability 8.0 and newer: A10G (g5), L4 (g6/g6f/gr6), L40S (g6e), A100 (p4d),
+H100 (p5). On an older GPU the server crash-loops at startup with `no kernel
+image is available for execution on the device` — and the shipped inference
+NodePool's cheapest fit is exactly such a GPU, the T4 (g4dn). So the renderer
+adds a required node affinity that keeps `--framework sglang` pods off T4,
+V100, M60 and K80 nodes (read from the `eks.amazonaws.com/instance-gpu-name`
+label; nodes without the label are unaffected), and `gco inference deploy`
+refuses a `--node-selector` that pins one of those GPUs or families
+(`g4dn`, `p3`, `p2`, `g3`) with the reason. vLLM has no such constraint: it
+ships kernels down to compute capability 7.0, so a T4 remains a valid, cheaper
+placement for `--framework vllm`.
+
 ### Triton Example
 
 ```bash

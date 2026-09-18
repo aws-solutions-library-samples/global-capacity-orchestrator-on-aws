@@ -13,6 +13,14 @@ import secrets
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
 
+from gco.models.inference_models import (
+    GPU_NAME_NODE_LABEL,
+    INSTANCE_FAMILY_NODE_LABEL,
+    SGLANG_SUPPORTED_GPU_EXAMPLES,
+    SGLANG_UNSUPPORTED_GPU_FAMILIES,
+    SGLANG_UNSUPPORTED_GPU_NAMES,
+)
+
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
@@ -570,6 +578,25 @@ class InferenceManager:
                 "framework 'sglang' needs the model to serve: pass -e MODEL=<id-or-path> "
                 "or --extra-args=--model-path --extra-args <id-or-path>"
             )
+        if framework == "sglang" and node_selector:
+            # The renderer keeps SGLang off pre-Ampere GPUs on its own; a
+            # selector that pins one would only make the pod unschedulable
+            # forever, so refuse it here with the reason instead.
+            pinned_gpu = str(node_selector.get(GPU_NAME_NODE_LABEL, "")).lower()
+            pinned_family = str(node_selector.get(INSTANCE_FAMILY_NODE_LABEL, "")).lower()
+            pinned = (
+                pinned_gpu
+                if pinned_gpu in SGLANG_UNSUPPORTED_GPU_NAMES
+                else pinned_family
+                if pinned_family in SGLANG_UNSUPPORTED_GPU_FAMILIES
+                else None
+            )
+            if pinned is not None:
+                raise ValueError(
+                    "framework 'sglang' needs an NVIDIA GPU with compute capability 8.0 or "
+                    f"newer ({SGLANG_SUPPORTED_GPU_EXAMPLES}); the node selector pins "
+                    f"'{pinned}', for which SGLang ships no prebuilt kernels"
+                )
         if mooncake_mode is not None and framework is None:
             framework = "vllm"
 

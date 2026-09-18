@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from collections.abc import Callable
@@ -10,6 +11,37 @@ from typing import Any, cast
 from .inference_common import ManagedInferenceValidationError
 
 _TUNNEL_HEARTBEAT_INTERVAL_SECONDS = 240.0
+
+# Workload diagnostics: what the endpoint's pods are doing while a phase waits
+# on DDB or Kubernetes. A crash-looping SGLang pod once ran out the whole
+# 30-minute readiness window with the checkpoint recording nothing but the
+# timeout; the cause (eight restarts, "no kernel image is available for
+# execution on the device" on a T4 node) had to be dug out of CloudWatch by
+# hand after the cluster was gone. Snapshots are taken every
+# _DIAGNOSTICS_INTERVAL_SECONDS during a wait and once more when it fails,
+# kept as a bounded ring so a long wait cannot bloat the checkpoint.
+_DIAGNOSTICS_INTERVAL_SECONDS = 300.0
+_DIAGNOSTICS_RING_SIZE = 8
+_DIAGNOSTICS_LOG_TAIL_LINES = 40
+_DIAGNOSTICS_LOG_TAIL_BYTES = 6 * 1024
+_DIAGNOSTICS_EVENT_LIMIT = 20
+_DIAGNOSTICS_NODE_LABELS = (
+    "node.kubernetes.io/instance-type",
+    "eks.amazonaws.com/instance-family",
+    "eks.amazonaws.com/instance-gpu-name",
+    "eks.amazonaws.com/instance-gpu-count",
+    "eks.amazonaws.com/instance-gpu-memory",
+    "karpenter.sh/nodepool",
+    "eks.amazonaws.com/nodepool",
+    "karpenter.sh/capacity-type",
+    "eks.amazonaws.com/capacity-type",
+    "topology.kubernetes.io/zone",
+)
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    """A dict payload as itself, anything else as an empty dict."""
+    return value if isinstance(value, dict) else {}
 
 
 class InferenceRuntimeMixin:
@@ -131,14 +163,304 @@ class InferenceRuntimeMixin:
                 )
             time.sleep(min(float(self.settings.poll_interval_seconds), remaining))
 
+    # ------------------------------------------------------------------
+    # Workload diagnostics
+    # ------------------------------------------------------------------
+
+    def _diagnostics_read(self, *arguments: str) -> tuple[Any | None, str | None]:
+        """One best-effort kubectl read for a diagnostics snapshot.
+
+        Returns ``(payload, error)``; JSON output is decoded, anything else is
+        returned as text. Never raises: a snapshot that cannot be taken is
+        itself evidence and must not mask the failure being diagnosed.
+        """
+        timeout = min(float(self.settings.command_timeout_seconds), 30.0)
+        try:
+            code, stdout, stderr = self.kubectl(*arguments, timeout=timeout)
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+        if code != 0:
+            return None, f"kubectl exited {code}: {stderr.strip()[-500:]}"
+        if "json" in arguments:
+            try:
+                return json.loads(stdout), None
+            except json.JSONDecodeError as exc:
+                return None, f"kubectl returned non-JSON output: {exc}"
+        return stdout, None
+
+    @staticmethod
+    def _summarize_container_state(state: Any) -> dict[str, Any] | None:
+        """Flatten a container ``state``/``lastState`` block to its one active branch."""
+        if not isinstance(state, dict):
+            return None
+        for branch in ("waiting", "running", "terminated"):
+            details = state.get(branch)
+            if isinstance(details, dict):
+                summary: dict[str, Any] = {"status": branch}
+                for key in ("reason", "exitCode", "signal", "startedAt", "finishedAt"):
+                    if details.get(key) is not None:
+                        summary[key] = details[key]
+                message = details.get("message")
+                if isinstance(message, str) and message:
+                    summary["message"] = message[-500:]
+                return summary
+        return None
+
+    def _diagnose_pod(self, plan: Any, pod: dict[str, Any]) -> dict[str, Any]:
+        """Describe one pod: scheduling, per-container state, and crash output."""
+        metadata = _dict_or_empty(pod.get("metadata"))
+        spec = _dict_or_empty(pod.get("spec"))
+        status = _dict_or_empty(pod.get("status"))
+        name = str(metadata.get("name") or "")
+        diagnosis: dict[str, Any] = {
+            "name": name,
+            "phase": status.get("phase"),
+            "node": spec.get("nodeName"),
+            "start_time": status.get("startTime"),
+            "conditions": [],
+            "containers": [],
+        }
+        conditions = status.get("conditions")
+        if isinstance(conditions, list):
+            for condition in conditions:
+                if not isinstance(condition, dict) or condition.get("status") == "True":
+                    continue
+                condition_entry: dict[str, Any] = {
+                    "type": condition.get("type"),
+                    "status": condition.get("status"),
+                }
+                if condition.get("reason"):
+                    condition_entry["reason"] = condition["reason"]
+                if isinstance(condition.get("message"), str):
+                    condition_entry["message"] = condition["message"][-500:]
+                diagnosis["conditions"].append(condition_entry)
+        statuses = status.get("containerStatuses")
+        if isinstance(statuses, list):
+            for container_status in statuses:
+                if not isinstance(container_status, dict):
+                    continue
+                container_name = str(container_status.get("name") or "")
+                restarts = int(container_status.get("restartCount") or 0)
+                ready = container_status.get("ready") is True
+                entry: dict[str, Any] = {
+                    "name": container_name,
+                    "ready": ready,
+                    "restart_count": restarts,
+                    "state": self._summarize_container_state(container_status.get("state")),
+                    "last_state": self._summarize_container_state(
+                        container_status.get("lastState")
+                    ),
+                }
+                if name and container_name and (restarts > 0 or not ready):
+                    # The current attempt's output, and — the part that names
+                    # a crash-loop's cause — the previous attempt's.
+                    entry["log_tail"] = self._log_tail(name, container_name, previous=False)
+                    if restarts > 0:
+                        entry["previous_log_tail"] = self._log_tail(
+                            name, container_name, previous=True
+                        )
+                diagnosis["containers"].append(entry)
+        return diagnosis
+
+    def _log_tail(self, pod: str, container: str, *, previous: bool) -> str:
+        arguments = [
+            "logs",
+            pod,
+            "--namespace",
+            self.settings.namespace,
+            "--container",
+            container,
+            f"--tail={_DIAGNOSTICS_LOG_TAIL_LINES}",
+        ]
+        if previous:
+            arguments.append("--previous")
+        payload, error = self._diagnostics_read(*arguments)
+        if error is not None:
+            return f"<unavailable: {error}>"
+        return str(payload)[-_DIAGNOSTICS_LOG_TAIL_BYTES:]
+
+    def _diagnose_events(self, plan: Any) -> list[dict[str, Any]] | str:
+        payload, error = self._diagnostics_read(
+            "get",
+            "events",
+            "--namespace",
+            self.settings.namespace,
+            "--output",
+            "json",
+        )
+        if error is not None:
+            return f"<unavailable: {error}>"
+        items = payload.get("items") if isinstance(payload, dict) else None
+        events: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            involved = item.get("involvedObject")
+            involved_name = str(involved.get("name") or "") if isinstance(involved, dict) else ""
+            if not involved_name.startswith(str(plan.name)):
+                continue
+            message = item.get("message")
+            events.append(
+                {
+                    "object": (
+                        f"{involved.get('kind')}/{involved_name}"
+                        if isinstance(involved, dict)
+                        else involved_name
+                    ),
+                    "type": item.get("type"),
+                    "reason": item.get("reason"),
+                    "count": item.get("count"),
+                    "last_timestamp": item.get("lastTimestamp") or item.get("eventTime"),
+                    "message": message[-500:] if isinstance(message, str) else message,
+                }
+            )
+        events.sort(key=lambda event: str(event.get("last_timestamp") or ""))
+        return events[-_DIAGNOSTICS_EVENT_LIMIT:]
+
+    def _diagnose_node(self, node_name: str) -> dict[str, Any]:
+        payload, error = self._diagnostics_read("get", "node", node_name, "--output", "json")
+        if error is not None:
+            return {"error": error}
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        status = payload.get("status") if isinstance(payload, dict) else None
+        allocatable = status.get("allocatable") if isinstance(status, dict) else None
+        return {
+            "labels": {
+                key: labels[key]
+                for key in _DIAGNOSTICS_NODE_LABELS
+                if isinstance(labels, dict) and key in labels
+            },
+            "allocatable_gpus": (
+                allocatable.get("nvidia.com/gpu") if isinstance(allocatable, dict) else None
+            ),
+        }
+
+    @staticmethod
+    def _diagnostics_summary(snapshot: dict[str, Any]) -> str:
+        """One line a human can act on: pods, their worst container state, their GPU."""
+        pods = snapshot.get("pods")
+        if not isinstance(pods, list) or not pods:
+            error = snapshot.get("pods_error")
+            return f"no pods observed{f' ({error})' if error else ''}"
+        parts: list[str] = []
+        nodes = _dict_or_empty(snapshot.get("nodes"))
+        for pod in pods:
+            phase = pod.get("phase") or "?"
+            pieces = [f"{pod.get('name')}: {phase}"]
+            for condition in pod.get("conditions") or []:
+                if condition.get("type") == "PodScheduled" and condition.get("reason"):
+                    pieces.append(f"unscheduled ({condition['reason']})")
+            for container in pod.get("containers") or []:
+                state = container.get("state") or {}
+                last = container.get("last_state") or {}
+                detail = state.get("reason") or state.get("status") or "?"
+                if last.get("exitCode") is not None:
+                    detail += f", last exit {last['exitCode']}"
+                    if last.get("reason"):
+                        detail += f" {last['reason']}"
+                pieces.append(
+                    f"{container.get('name')} {detail} (restarts={container.get('restart_count', 0)})"
+                )
+            node = nodes.get(pod.get("node") or "")
+            if isinstance(node, dict) and isinstance(node.get("labels"), dict):
+                labels = node["labels"]
+                placement = "/".join(
+                    str(labels[key])
+                    for key in (
+                        "node.kubernetes.io/instance-type",
+                        "eks.amazonaws.com/instance-gpu-name",
+                    )
+                    if key in labels
+                )
+                if placement:
+                    pieces.append(f"on {placement}")
+            parts.append(", ".join(pieces))
+        return "; ".join(parts)
+
+    def capture_workload_diagnostics(
+        self,
+        plan: Any,
+        record: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Snapshot the endpoint's pods, crash output, events and nodes into the record.
+
+        Best-effort and bounded: every read has its own short timeout and a
+        failed read is recorded in place of the data. The snapshot ring keeps
+        the last ``_DIAGNOSTICS_RING_SIZE`` entries so periodic captures during
+        a long wait show the progression (pulling -> running -> crash-looping)
+        without growing the checkpoint unboundedly. Returns the snapshot; its
+        ``summary`` is what the caller appends to a timeout error.
+        """
+        snapshot: dict[str, Any] = {
+            "reason": reason,
+            "captured_at_monotonic": time.monotonic(),
+            "pods": [],
+            "nodes": {},
+        }
+        payload, error = self._diagnostics_read(
+            "get",
+            "pods",
+            "--namespace",
+            self.settings.namespace,
+            "--selector",
+            f"app={plan.name}",
+            "--output",
+            "json",
+        )
+        if error is not None:
+            snapshot["pods_error"] = error
+        else:
+            items = payload.get("items") if isinstance(payload, dict) else None
+            for pod in items if isinstance(items, list) else []:
+                if isinstance(pod, dict):
+                    snapshot["pods"].append(self._diagnose_pod(plan, pod))
+            for node_name in sorted({str(pod["node"]) for pod in snapshot["pods"] if pod["node"]}):
+                snapshot["nodes"][node_name] = self._diagnose_node(node_name)
+        snapshot["events"] = self._diagnose_events(plan)
+        snapshot["summary"] = self._diagnostics_summary(snapshot)
+
+        ring = record.setdefault("workload_diagnostics", [])
+        if not isinstance(ring, list):
+            ring = []
+            record["workload_diagnostics"] = ring
+        ring.append(snapshot)
+        del ring[:-_DIAGNOSTICS_RING_SIZE]
+        record["last_workload_summary"] = snapshot["summary"]
+        self._persist()
+        return snapshot
+
+    def _diagnostics_due(
+        self, record: dict[str, Any], plan: Any, last_capture: float, reason: str
+    ) -> float:
+        """Take a periodic snapshot when the interval has elapsed; return the new mark."""
+        now = time.monotonic()
+        if now - last_capture < _DIAGNOSTICS_INTERVAL_SECONDS:
+            return last_capture
+        self.capture_workload_diagnostics(plan, record, reason=reason)
+        return now
+
+    def _timeout_error(
+        self, plan: Any, record: dict[str, Any], message: str, *, reason: str
+    ) -> ManagedInferenceValidationError:
+        """Build a timeout error that carries the final workload diagnosis."""
+        snapshot = self.capture_workload_diagnostics(plan, record, reason=reason)
+        return ManagedInferenceValidationError(f"{message} ({snapshot['summary']})")
+
     def wait_for_ddb_running(self, plan: Any, record: dict[str, Any]) -> None:
         """Require this run's exact DDB record and running regional observation."""
         deadline = time.monotonic() + self.settings.readiness_timeout_seconds
         heartbeat_at = float("-inf")
+        diagnostics_at = time.monotonic()
         while True:
             if time.monotonic() >= deadline:
-                raise ManagedInferenceValidationError(
-                    "managed inference DDB running state was not observed before timeout"
+                raise self._timeout_error(
+                    plan,
+                    record,
+                    "managed inference DDB running state was not observed before timeout",
+                    reason="ddb-running-timeout",
                 )
             item = self._strong_get(record)
             if item is not None:
@@ -153,6 +475,13 @@ class InferenceRuntimeMixin:
                     if isinstance(statuses, dict)
                     else None
                 )
+                # The monitor's own view of the region — its state and any
+                # message it wrote — is the cheapest evidence there is.
+                record["last_ddb_observation"] = {
+                    "desired_state": item.get("desired_state"),
+                    "regional": regional if isinstance(regional, dict) else None,
+                    "observed_at_monotonic": time.monotonic(),
+                }
                 if (
                     item.get("desired_state") == "running"
                     and isinstance(regional, dict)
@@ -165,10 +494,14 @@ class InferenceRuntimeMixin:
                 heartbeat_at,
                 deadline=deadline,
             )
+            diagnostics_at = self._diagnostics_due(record, plan, diagnostics_at, "ddb-running-wait")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise ManagedInferenceValidationError(
-                    "managed inference DDB running state was not observed before timeout"
+                raise self._timeout_error(
+                    plan,
+                    record,
+                    "managed inference DDB running state was not observed before timeout",
+                    reason="ddb-running-timeout",
                 )
             time.sleep(min(float(self.settings.poll_interval_seconds), remaining))
 
@@ -264,6 +597,7 @@ class InferenceRuntimeMixin:
     def wait_for_kubernetes_ready(self, plan: Any, record: dict[str, Any]) -> None:
         """Require Deployment convergence and ready Running pods."""
         deadline = time.monotonic() + self.settings.readiness_timeout_seconds
+        diagnostics_at = time.monotonic()
         while True:
             ready, evidence = self._deployment_ready_snapshot(
                 plan,
@@ -278,9 +612,15 @@ class InferenceRuntimeMixin:
                 self._set_phase(record, "kubernetes-ready")
                 return
             if time.monotonic() >= deadline:
-                raise ManagedInferenceValidationError(
-                    "managed inference Kubernetes readiness was not observed before timeout"
+                raise self._timeout_error(
+                    plan,
+                    record,
+                    "managed inference Kubernetes readiness was not observed before timeout",
+                    reason="kubernetes-ready-timeout",
                 )
+            diagnostics_at = self._diagnostics_due(
+                record, plan, diagnostics_at, "kubernetes-ready-wait"
+            )
             time.sleep(
                 min(
                     float(self.settings.poll_interval_seconds),

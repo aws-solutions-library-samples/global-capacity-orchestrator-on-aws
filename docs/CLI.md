@@ -2475,7 +2475,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--image` | `-i` | Container image (required) |
-| `--framework` | | Explicit serving runtime (`vllm` or `sglang`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. `sglang` renders the official launcher (`python3 -m sglang.launch_server`) bound to `0.0.0.0:<--port>` with `--model-path` taken from `-e MODEL=...` unless it is passed through `--extra-args`. `tgi` is no longer accepted: Hugging Face archived TGI on 2026-03-21 and its adapter was removed, so an endpoint still running TGI has to be redeployed as `sglang` or `vllm`. |
+| `--framework` | | Explicit serving runtime (`vllm` or `sglang`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. `sglang` renders the official launcher (`python3 -m sglang.launch_server`) bound to `0.0.0.0:<--port>` with `--model-path` taken from `-e MODEL=...` unless it is passed through `--extra-args`, and keeps its pods off pre-Ampere GPUs (T4/g4dn, V100/p3, M60/g3, K80/p2), whose compute capability its prebuilt kernels do not target — a `--node-selector` pinning one is refused. `tgi` is no longer accepted: Hugging Face archived TGI on 2026-03-21 and its adapter was removed, so an endpoint still running TGI has to be redeployed as `sglang` or `vllm`. |
 | `--region` | `-r` | Target region(s), repeatable (default: all deployed regions) |
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |

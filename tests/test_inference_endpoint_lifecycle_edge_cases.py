@@ -1344,6 +1344,25 @@ def test_role_autoscaling_validator_accepts_absent_optional_bounds() -> None:
             {"framework": "sglang", "env": {"MODEL": ""}, "extra_args": ["--log-level", "warning"]},
             r"framework 'sglang' needs the model to serve",
         ),
+        # Pre-Ampere GPUs have no prebuilt SGLang kernels: a selector pinning
+        # one (by GPU name or by family) is refused with the reason, whether
+        # the operator spelled the label value in upper or lower case.
+        (
+            {
+                "framework": "sglang",
+                "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+                "node_selector": {"eks.amazonaws.com/instance-gpu-name": "T4"},
+            },
+            r"compute capability 8.0 or newer .* pins 't4'",
+        ),
+        (
+            {
+                "framework": "sglang",
+                "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+                "node_selector": {"eks.amazonaws.com/instance-family": "g4dn"},
+            },
+            r"compute capability 8.0 or newer .* pins 'g4dn'",
+        ),
     ],
 )
 def test_manager_deploy_rejects_incompatible_framework_contracts(
@@ -1359,6 +1378,24 @@ def test_manager_deploy_rejects_incompatible_framework_contracts(
             **kwargs,
         )
     store.create_endpoint.assert_not_called()
+
+
+def test_manager_deploy_accepts_sglang_on_an_ampere_or_newer_selector() -> None:
+    """A g6 (L4) family selector is a supported SGLang placement and reaches the store."""
+    store = MagicMock()
+    store.create_endpoint.return_value = {"endpoint_name": "ep"}
+    manager = _manager_with_store(store)
+    manager.deploy(
+        "ep",
+        image="lmsysorg/sglang:v0.5.19",
+        target_regions=["us-east-1"],
+        framework="sglang",
+        env={"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        node_selector={"eks.amazonaws.com/instance-family": "g6"},
+    )
+    store.create_endpoint.assert_called_once()
+    spec = store.create_endpoint.call_args.kwargs["spec"]
+    assert spec["node_selector"] == {"eks.amazonaws.com/instance-family": "g6"}
 
 
 def test_add_region_preserves_historical_cleanup_membership_without_reappending() -> None:

@@ -689,8 +689,11 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         heartbeat_at = time.monotonic()
         while True:
             if time.monotonic() >= deadline:
-                raise ManagedInferenceValidationError(
-                    "managed health did not converge before timeout"
+                raise self._timeout_error(
+                    plan,
+                    record,
+                    "managed health did not converge before timeout",
+                    reason="health-timeout",
                 )
             heartbeat_at = self.keep_cluster_tunnel_alive(record, heartbeat_at, deadline=deadline)
             item = self._strong_get(record)

@@ -40,7 +40,8 @@ def inference(config: Any) -> None:
     help="Explicit serving runtime contract; persisted for renderer/probe behavior. "
     "'sglang' renders the official launcher (python3 -m sglang.launch_server) "
     "listening on --port, with --model-path taken from -e MODEL=... unless passed "
-    "via --extra-args.",
+    "via --extra-args, and needs an NVIDIA GPU of compute capability 8.0+ "
+    "(A10G/L4/L40S/A100/H100): its pods are kept off T4 (g4dn) and older GPUs.",
 )
 @click.option(
     "--region",

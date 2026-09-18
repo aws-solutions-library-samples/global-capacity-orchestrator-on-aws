@@ -916,10 +916,24 @@ class TestSequentialAndFinallyBehavior:
             if waiter == "ddb-running"
             else runner._wait_for_owned_record
         )
-        with pytest.raises(ManagedInferenceValidationError, match="before timeout"):
+        with pytest.raises(ManagedInferenceValidationError, match="before timeout") as excinfo:
             wait(plans[0], records[0])
 
-        assert calls == [{"timeout": 2.0}]
+        if waiter == "ddb-running":
+            # The heartbeat, then the timeout diagnosis (pods, events) on the
+            # command budget — the expired phase deadline does not gate it.
+            assert calls == [{"timeout": 2.0}, {"timeout": 2.0}, {"timeout": 2.0}]
+            (snapshot,) = records[0]["workload_diagnostics"]
+            assert snapshot["reason"] == "ddb-running-timeout"
+            # This fake answers every read with the heartbeat's "ok": the
+            # snapshot records that the pod list could not be decoded instead
+            # of masking the timeout, and the error still names the outcome.
+            assert snapshot["pods_error"].startswith("kubectl returned non-JSON output")
+            assert snapshot["summary"].startswith("no pods observed (kubectl returned non-JSON")
+            assert str(excinfo.value).endswith(f"({snapshot['summary']})")
+            assert records[0]["last_ddb_observation"]["regional"] == {"state": "pending"}
+        else:
+            assert calls == [{"timeout": 2.0}]
         assert sleeps == [2.0]
         assert clock.now == 3.0
 
@@ -2488,3 +2502,414 @@ class TestSharedProxyAutoscalingProof:
         )
         with pytest.raises(ManagedInferenceValidationError, match="TLS autoscaling"):
             runner.verify_shared_proxy_autoscaling(runner.state)
+
+
+class _DiagnosticsKubectl:
+    """kubectl fake for the workload-diagnostics reads, dispatching on argv."""
+
+    def __init__(self, plan_name: str) -> None:
+        self.plan_name = plan_name
+        self.calls: list[tuple[str, ...]] = []
+        self.pods: Any = {"items": []}
+        self.events: Any = {"items": []}
+        self.nodes: dict[str, Any] = {}
+        self.logs: dict[tuple[str, str, bool], Any] = {}
+        self.failures: dict[str, Any] = {}
+
+    def __call__(self, *args: str, timeout: float) -> tuple[int, str, str]:
+        del timeout
+        self.calls.append(args)
+        kind = args[1] if args[0] == "get" else args[0]
+        failure = self.failures.get(kind)
+        if isinstance(failure, BaseException):
+            raise failure
+        if isinstance(failure, tuple):
+            return failure
+        if args[0] == "logs":
+            key = (args[1], args[args.index("--container") + 1], "--previous" in args)
+            return 0, str(self.logs.get(key, f"log of {key}")), ""
+        if kind == "pods":
+            return 0, json.dumps(self.pods), ""
+        if kind == "events":
+            return 0, json.dumps(self.events), ""
+        if kind == "node":
+            return 0, json.dumps(self.nodes.get(args[2], {})), ""
+        raise AssertionError(f"unexpected kubectl call {args}")
+
+
+def _crash_looping_pod(name: str, node: str = "i-node-a") -> dict[str, Any]:
+    return {
+        "metadata": {"name": f"{name}-6fb59fd4d4-tfdqf"},
+        "spec": {"nodeName": node},
+        "status": {
+            "phase": "Running",
+            "startTime": "2026-09-18T16:12:50Z",
+            "conditions": [
+                {"type": "PodScheduled", "status": "True"},
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "ContainersNotReady",
+                    "message": "containers with unready status: [inference]",
+                },
+                "not-a-dict",
+            ],
+            "containerStatuses": [
+                {
+                    "name": "inference",
+                    "ready": False,
+                    "restartCount": 8,
+                    "state": {
+                        "waiting": {
+                            "reason": "CrashLoopBackOff",
+                            "message": "back-off 5m0s restarting failed container",
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "reason": "Error",
+                            "exitCode": 1,
+                            "finishedAt": "2026-09-18T16:37:58Z",
+                        }
+                    },
+                },
+                {
+                    "name": "sidecar",
+                    "ready": False,
+                    "restartCount": 0,
+                    "state": {"running": {"startedAt": "2026-09-18T16:18:30Z"}},
+                },
+                {"name": "ready-helper", "ready": True, "restartCount": 0, "state": {}},
+                "corrupt-status",
+            ],
+        },
+    }
+
+
+class TestWorkloadDiagnostics:
+    """The checkpoint must explain a stalled endpoint, not just time it out."""
+
+    def _runner(
+        self, tmp_path: Path, **changes: Any
+    ) -> tuple[Any, Any, dict[str, Any], _DiagnosticsKubectl]:
+        settings = _settings(tmp_path, **changes)
+        plans, _ = initialize_run_state(_ctx(tmp_path, None), settings)
+        kubectl = _DiagnosticsKubectl(plans[0].name)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings, kubectl=kubectl)
+        return runner, plans[0], records[0], kubectl
+
+    def test_snapshot_names_the_crash_loop_its_output_and_the_gpu(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": [_crash_looping_pod(plan.name), "not-a-pod"]}
+        kubectl.nodes["i-node-a"] = {
+            "metadata": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g4dn.xlarge",
+                    "eks.amazonaws.com/instance-gpu-name": "t4",
+                    "eks.amazonaws.com/instance-family": "g4dn",
+                    "unrelated": "label",
+                }
+            },
+            "status": {"allocatable": {"nvidia.com/gpu": "1"}},
+        }
+        kubectl.logs[(f"{plan.name}-6fb59fd4d4-tfdqf", "inference", True)] = (
+            "RuntimeError: no kernel image is available for execution on the device\n"
+        )
+        kubectl.events = {
+            "items": [
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-6fb59fd4d4-tfdqf"},
+                    "type": "Warning",
+                    "reason": "BackOff",
+                    "count": 9,
+                    "lastTimestamp": "2026-09-18T16:40:00Z",
+                    "message": "Back-off restarting failed container inference",
+                },
+                {
+                    "involvedObject": {"kind": "Pod", "name": "some-other-workload-abc"},
+                    "reason": "Scheduled",
+                    "lastTimestamp": "2026-09-18T16:39:00Z",
+                    "message": "ignored: not this endpoint",
+                },
+                {
+                    "involvedObject": {"kind": "Deployment", "name": plan.name},
+                    "type": "Normal",
+                    "reason": "ScalingReplicaSet",
+                    "count": 1,
+                    "eventTime": "2026-09-18T16:12:46Z",
+                    "message": 42,
+                },
+                "corrupt-event",
+            ]
+        }
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        (pod,) = snapshot["pods"]
+        assert pod["node"] == "i-node-a"
+        assert pod["conditions"] == [
+            {
+                "type": "Ready",
+                "status": "False",
+                "reason": "ContainersNotReady",
+                "message": "containers with unready status: [inference]",
+            }
+        ]
+        crashed, sidecar, helper = pod["containers"]
+        assert crashed["state"] == {
+            "status": "waiting",
+            "reason": "CrashLoopBackOff",
+            "message": "back-off 5m0s restarting failed container",
+        }
+        assert crashed["last_state"] == {
+            "status": "terminated",
+            "reason": "Error",
+            "exitCode": 1,
+            "finishedAt": "2026-09-18T16:37:58Z",
+        }
+        assert "no kernel image is available" in crashed["previous_log_tail"]
+        assert crashed["log_tail"].startswith("log of")
+        # Unready without restarts: current output only. Ready: nothing fetched.
+        assert "log_tail" in sidecar and "previous_log_tail" not in sidecar
+        assert sidecar["state"] == {"status": "running", "startedAt": "2026-09-18T16:18:30Z"}
+        assert "log_tail" not in helper and helper["state"] is None
+        assert snapshot["nodes"] == {
+            "i-node-a": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g4dn.xlarge",
+                    "eks.amazonaws.com/instance-family": "g4dn",
+                    "eks.amazonaws.com/instance-gpu-name": "t4",
+                },
+                "allocatable_gpus": "1",
+            }
+        }
+        # Events: this endpoint's only, oldest first, message trimmed to text.
+        assert [event["reason"] for event in snapshot["events"]] == ["ScalingReplicaSet", "BackOff"]
+        assert snapshot["events"][0]["object"] == f"Deployment/{plan.name}"
+        assert snapshot["events"][0]["message"] == 42
+        assert snapshot["events"][1]["count"] == 9
+        assert snapshot["summary"] == (
+            f"{plan.name}-6fb59fd4d4-tfdqf: Running, "
+            "inference CrashLoopBackOff, last exit 1 Error (restarts=8), "
+            "sidecar running (restarts=0), ready-helper ? (restarts=0), on g4dn.xlarge/t4"
+        )
+        assert record["last_workload_summary"] == snapshot["summary"]
+        assert record["workload_diagnostics"] == [snapshot]
+        # Reads: pods, the crashed container's two log tails, the sidecar's
+        # current tail, the node, then events.
+        assert [call[0] for call in kubectl.calls] == ["get", "logs", "logs", "logs", "get", "get"]
+        assert kubectl.calls[1][-1] == "--tail=40"
+        assert kubectl.calls[2][-2:] == ("--tail=40", "--previous")
+
+    def test_snapshot_summarizes_an_unscheduled_pod_and_a_missing_node_read(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-pending"},
+                    "spec": {"nodeName": "i-node-b"},
+                    "status": {
+                        "phase": "Pending",
+                        "conditions": [
+                            {
+                                "type": "PodScheduled",
+                                "status": "False",
+                                "reason": "Unschedulable",
+                                "message": "0/3 nodes are available: insufficient nvidia.com/gpu",
+                            }
+                        ],
+                        "containerStatuses": "not-a-list",
+                    },
+                }
+            ]
+        }
+        kubectl.failures["node"] = (
+            1,
+            "",
+            'Error from server (NotFound): nodes "i-node-b" not found',
+        )
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        assert snapshot["pods"][0]["containers"] == []
+        assert snapshot["nodes"] == {
+            "i-node-b": {
+                "error": 'kubectl exited 1: Error from server (NotFound): nodes "i-node-b" not found'
+            }
+        }
+        assert snapshot["summary"] == f"{plan.name}-pending: Pending, unscheduled (Unschedulable)"
+
+    def test_snapshot_records_unavailable_reads_instead_of_raising(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.failures["pods"] = OSError("tunnel closed")
+        kubectl.failures["events"] = (1, "", "forbidden")
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        assert snapshot["pods"] == []
+        assert snapshot["pods_error"] == "OSError: tunnel closed"
+        assert snapshot["events"] == "<unavailable: kubectl exited 1: forbidden>"
+        assert snapshot["summary"] == "no pods observed (OSError: tunnel closed)"
+
+    def test_log_tail_reports_its_own_failure_and_payload_shapes_are_tolerated(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-x"},
+                    "spec": {},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [
+                            {"name": "inference", "ready": False, "restartCount": 1}
+                        ],
+                    },
+                }
+            ]
+        }
+        kubectl.failures["logs"] = RuntimeError("logs unavailable")
+        kubectl.events = {"items": "corrupt"}
+        record["workload_diagnostics"] = "corrupt-ring"
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        (container,) = snapshot["pods"][0]["containers"]
+        assert container["log_tail"] == "<unavailable: RuntimeError: logs unavailable>"
+        assert container["previous_log_tail"] == "<unavailable: RuntimeError: logs unavailable>"
+        assert container["state"] is None and container["last_state"] is None
+        assert snapshot["nodes"] == {}  # no nodeName: nothing to look up
+        assert snapshot["events"] == []
+        assert snapshot["summary"] == f"{plan.name}-x: Running, inference ? (restarts=1)"
+        assert record["workload_diagnostics"] == [snapshot]
+
+    def test_events_payload_that_is_not_an_object_yields_no_events(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.events = ["not", "an", "object"]
+        kubectl.pods = ["not", "an", "object"]
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+        assert snapshot["events"] == []
+        assert snapshot["pods"] == []
+        assert snapshot["summary"] == "no pods observed"
+
+    def test_ring_keeps_the_most_recent_snapshots_only(self, tmp_path: Path) -> None:
+        runner, plan, record, _ = self._runner(tmp_path)
+        for index in range(runtime_module._DIAGNOSTICS_RING_SIZE + 3):
+            runner.capture_workload_diagnostics(plan, record, reason=f"capture-{index}")
+        ring = record["workload_diagnostics"]
+        assert len(ring) == runtime_module._DIAGNOSTICS_RING_SIZE
+        assert ring[0]["reason"] == "capture-3"
+        assert ring[-1]["reason"] == f"capture-{runtime_module._DIAGNOSTICS_RING_SIZE + 2}"
+
+    def test_periodic_capture_fires_once_per_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, _ = self._runner(tmp_path)
+        clock = SimpleNamespace(now=1000.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        mark = runner._diagnostics_due(record, plan, 1000.0, "wait")
+        assert mark == 1000.0 and "workload_diagnostics" not in record
+        clock.now += runtime_module._DIAGNOSTICS_INTERVAL_SECONDS
+        mark = runner._diagnostics_due(record, plan, mark, "wait")
+        assert mark == clock.now
+        assert [snap["reason"] for snap in record["workload_diagnostics"]] == ["wait"]
+
+    def test_ddb_running_wait_takes_periodic_snapshots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(
+            tmp_path, readiness_timeout_seconds=1200, poll_interval_seconds=200
+        )
+        kubectl.pods = {"items": [_crash_looping_pod(plan.name)]}
+        pending = _owned_item(runner.settings, plan, runner.owner_nonce)
+        pending["region_status"] = {
+            runner.settings.selected_region: {"state": "creating", "message": "rolling out"}
+        }
+        monkeypatch.setattr(runner, "_strong_get", lambda record: pending)
+        monkeypatch.setattr(runner, "keep_cluster_tunnel_alive", lambda *a, **k: 0.0)
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(
+            runtime_module.time,
+            "sleep",
+            lambda seconds: setattr(clock, "now", clock.now + float(seconds)),
+        )
+
+        with pytest.raises(ManagedInferenceValidationError, match="before timeout") as excinfo:
+            runner.wait_for_ddb_running(plan, record)
+
+        reasons = [snap["reason"] for snap in record["workload_diagnostics"]]
+        # 1200s wait, 200s polls, 300s interval: periodic captures on the
+        # polls at 400 and 800 seconds, then the capture the timeout takes.
+        assert reasons == ["ddb-running-wait", "ddb-running-wait", "ddb-running-timeout"]
+        assert record["last_ddb_observation"]["regional"] == {
+            "state": "creating",
+            "message": "rolling out",
+        }
+        assert "inference CrashLoopBackOff, last exit 1 Error (restarts=8)" in str(excinfo.value)
+
+    def test_kubernetes_ready_timeout_carries_the_diagnosis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(
+            tmp_path, readiness_timeout_seconds=2, poll_interval_seconds=1
+        )
+        crash_pod = _crash_looping_pod(plan.name)
+        kubectl.pods = {"items": [crash_pod]}
+        monkeypatch.setattr(
+            runner,
+            "_deployment_ready_snapshot",
+            lambda *args, **kwargs: (False, {"desired": 1, "ready": 0, "ready_pods": 0}),
+        )
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(
+            runtime_module.time,
+            "sleep",
+            lambda seconds: setattr(clock, "now", clock.now + float(seconds)),
+        )
+
+        with pytest.raises(ManagedInferenceValidationError, match="readiness was not") as excinfo:
+            runner.wait_for_kubernetes_ready(plan, record)
+
+        assert record["workload_diagnostics"][-1]["reason"] == "kubernetes-ready-timeout"
+        assert "CrashLoopBackOff" in str(excinfo.value)
+
+    def test_bare_conditions_and_reasonless_exits_are_summarized_plainly(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-y"},
+                    "spec": {},
+                    "status": {
+                        "phase": "Running",
+                        "conditions": [{"type": "Initialized", "status": "False"}],
+                        "containerStatuses": [
+                            {
+                                "name": "inference",
+                                "ready": True,
+                                "restartCount": 2,
+                                "state": {"running": {}},
+                                "lastState": {"terminated": {"exitCode": 137}},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+        assert snapshot["pods"][0]["conditions"] == [{"type": "Initialized", "status": "False"}]
+        (container,) = snapshot["pods"][0]["containers"]
+        # Restarted but currently ready: the previous attempt's output is the
+        # interesting part, and the current one is fetched alongside it.
+        assert set(container) >= {"log_tail", "previous_log_tail"}
+        assert (
+            snapshot["summary"]
+            == f"{plan.name}-y: Running, inference running, last exit 137 (restarts=2)"
+        )

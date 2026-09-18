@@ -48,6 +48,10 @@ from kubernetes import client, config
 from kubernetes.client.models import V1Deployment
 from kubernetes.client.rest import ApiException
 
+from gco.models.inference_models import (
+    GPU_NAME_NODE_LABEL,
+    SGLANG_UNSUPPORTED_GPU_NAMES,
+)
 from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
@@ -3716,6 +3720,33 @@ class InferenceMonitor:
         if capacity_type in ("spot", "on-demand"):
             node_selector["karpenter.sh/capacity-type"] = capacity_type
 
+        # SGLang's prebuilt kernels need compute capability >= 8.0; the
+        # shipped inference NodePool's cheapest fit is a T4 (g4dn), where the
+        # server crash-loops with "no kernel image is available for execution
+        # on the device". A required NotIn affinity keeps SGLang pods off
+        # pre-Ampere GPUs while composing with any operator node selector
+        # (a plain map cannot express "anything but"). Nodes without the
+        # label are unaffected, so self-managed node groups keep working.
+        affinity = None
+        if runtime_framework == "sglang" and accelerator != "neuron" and gpu_count > 0:
+            affinity = client.V1Affinity(
+                node_affinity=client.V1NodeAffinity(
+                    required_during_scheduling_ignored_during_execution=client.V1NodeSelector(
+                        node_selector_terms=[
+                            client.V1NodeSelectorTerm(
+                                match_expressions=[
+                                    client.V1NodeSelectorRequirement(
+                                        key=GPU_NAME_NODE_LABEL,
+                                        operator="NotIn",
+                                        values=list(SGLANG_UNSUPPORTED_GPU_NAMES),
+                                    )
+                                ]
+                            )
+                        ]
+                    )
+                )
+            )
+
         labels = {
             "app": app_label,
             "project": "gco",
@@ -3748,6 +3779,7 @@ class InferenceMonitor:
                         init_containers=init_containers if init_containers else None,
                         tolerations=tolerations,
                         node_selector=node_selector if node_selector else None,
+                        affinity=affinity,
                         volumes=volumes if volumes else None,
                     ),
                 ),

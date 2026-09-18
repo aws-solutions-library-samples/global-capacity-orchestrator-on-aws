@@ -1728,6 +1728,79 @@ def test_sglang_renderer_respects_an_operator_supplied_command() -> None:
     assert container.startup_probe is not None
 
 
+def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
+    """SGLang pods carry a required NotIn affinity for GPUs its kernels do not target.
+
+    The shipped inference NodePool's cheapest fit is a T4 (g4dn); SGLang's
+    prebuilt sgl-kernel/FlashInfer binaries need compute capability >= 8.0 and
+    crash-loop there ("no kernel image is available for execution on the
+    device"). The affinity composes with the operator's node selector, which
+    stays exactly as given.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+            "node_selector": {"eks.amazonaws.com/instance-family": "g6"},
+        },
+    )
+    pod_spec = deployment.spec.template.spec
+    assert pod_spec.node_selector == {"eks.amazonaws.com/instance-family": "g6"}
+    terms = pod_spec.affinity.node_affinity.required_during_scheduling_ignored_during_execution
+    (term,) = terms.node_selector_terms
+    (requirement,) = term.match_expressions
+    assert requirement.key == "eks.amazonaws.com/instance-gpu-name"
+    assert requirement.operator == "NotIn"
+    assert "t4" in requirement.values
+    assert set(requirement.values) == {"k80", "m60", "v100", "t4"}
+    # No preferred terms: an Ampere-or-newer GPU is a hard requirement.
+    assert terms is not None
+    assert (
+        pod_spec.affinity.node_affinity.preferred_during_scheduling_ignored_during_execution is None
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # vLLM ships sm_70+ kernels: a T4 is a valid, cheaper placement.
+        {
+            "image": "vllm/vllm-openai:v0.11.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "facebook/opt-125m"},
+        },
+        # The GPU-name label is meaningless for Neuron devices.
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "accelerator": "neuron",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+        # No accelerator requested at all: nothing to steer.
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "gpu_count": 0,
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+    ],
+    ids=["vllm", "sglang-neuron", "sglang-no-gpu"],
+)
+def test_pre_ampere_affinity_is_only_rendered_for_sglang_on_nvidia(spec: dict) -> None:
+    deployment = _build_deployment(_make_monitor(), spec)
+    assert deployment.spec.template.spec.affinity is None
+
+
 def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
     """Records written before ``framework`` existed resolve SGLang from the image name."""
     monitor = _make_monitor()
