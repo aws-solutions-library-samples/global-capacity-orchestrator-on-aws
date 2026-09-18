@@ -50,15 +50,15 @@ from scripts.live_release_validation.runner import LiveValidationRunner
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VLLM_IMAGE = "registry.example/vllm@sha256:" + "a" * 64
-TGI_IMAGE = "registry.example/tgi@sha256:" + "b" * 64
+SGLANG_IMAGE = "registry.example/sglang@sha256:" + "b" * 64
 VLLM_REVISION = "c" * 40
-TGI_REVISION = "d" * 40
+SGLANG_REVISION = "d" * 40
 OWNER_NONCE = "e" * 64
 LIFECYCLE_ID = "f" * 64
 
 
 def _runtime(
-    framework: Literal["vllm", "tgi"],
+    framework: Literal["vllm", "sglang"],
     *,
     image: str | None = None,
     model_id: str | None = None,
@@ -73,16 +73,16 @@ def _runtime(
             port=8000,
         )
     return InferenceRuntimeSpec(
-        framework="tgi",
-        image=image or TGI_IMAGE,
-        model_id=model_id or "test/tgi-model",
-        model_revision=revision or TGI_REVISION,
-        port=8080,
+        framework="sglang",
+        image=image or SGLANG_IMAGE,
+        model_id=model_id or "test/sglang-model",
+        model_revision=revision or SGLANG_REVISION,
+        port=30000,
     )
 
 
 def _runtime_matrix() -> tuple[InferenceRuntimeSpec, ...]:
-    return (_runtime("vllm"), _runtime("tgi"))
+    return (_runtime("vllm"), _runtime("sglang"))
 
 
 def _settings(tmp_path: Path, **changes: Any) -> RunSettings:
@@ -232,16 +232,16 @@ class TestStrictSettings:
                 "inference_runtimes",
                 (
                     _runtime("vllm", image="registry.example/vllm@sha256:" + "9" * 64),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", model_id="other/model"), _runtime("tgi")),
+                (_runtime("vllm", model_id="other/model"), _runtime("sglang")),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", revision="8" * 40), _runtime("tgi")),
+                (_runtime("vllm", revision="8" * 40), _runtime("sglang")),
             ),
             ("request_prompt", "A different deterministic prompt"),
             ("gpu_count", 1),
@@ -272,7 +272,7 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="@sha256"):
             _settings(
                 tmp_path,
-                inference_runtimes=(_runtime("vllm", image=image), _runtime("tgi")),
+                inference_runtimes=(_runtime("vllm", image=image), _runtime("sglang")),
             )
 
     def test_digest_parser_is_linear_on_repeated_slash_prefixes(self, tmp_path: Path) -> None:
@@ -283,7 +283,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", image=adversarial),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -294,7 +294,7 @@ class TestStrictSettings:
             tmp_path,
             inference_runtimes=(
                 _runtime("vllm", image=image),
-                _runtime("tgi"),
+                _runtime("sglang"),
             ),
         )
         assert settings.inference_runtimes[0].image == image
@@ -322,7 +322,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", image=image),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -337,8 +337,8 @@ class TestStrictSettings:
                         image="registry.example/vllm@sha256:" + same_digest,
                     ),
                     _runtime(
-                        "tgi",
-                        image="registry.example/tgi@sha256:" + same_digest,
+                        "sglang",
+                        image="registry.example/sglang@sha256:" + same_digest,
                     ),
                 ),
             )
@@ -350,7 +350,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", revision=revision),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -366,7 +366,7 @@ class TestStrictSettings:
 
     def test_request_contracts_are_literal_and_distinct(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm, tgi = settings.inference_runtimes
+        vllm, sglang = settings.inference_runtimes
         assert vllm.request_path == "/v1/completions"
         assert settings.request_body(vllm) == {
             "max_tokens": 8,
@@ -375,15 +375,23 @@ class TestStrictSettings:
             "stream": False,
             "temperature": 0,
         }
-        assert tgi.request_path == "/generate"
-        assert settings.request_body(tgi) == {
-            "inputs": "Reply with a short deterministic validation response.",
-            "parameters": {"do_sample": False, "max_new_tokens": 8},
+        # SGLang is driven through its native API on purpose: its
+        # OpenAI-compatible surface would collapse into the vLLM contract and
+        # let one response shape satisfy both adapters.
+        assert sglang.request_path == "/generate"
+        assert settings.request_body(sglang) == {
+            "sampling_params": {"max_new_tokens": 8, "temperature": 0},
+            "text": "Reply with a short deterministic validation response.",
         }
         identities = settings.identity()["inference"]["runtimes"]
         assert identities[0]["request_contract"]["body"] == settings.request_body(vllm)
-        assert identities[1]["request_contract"]["body"] == settings.request_body(tgi)
+        assert identities[1]["request_contract"]["body"] == settings.request_body(sglang)
         assert identities[0]["request_contract"] != identities[1]["request_contract"]
+        assert identities[0]["request_contract"]["response"] == "choices[0].text:non-empty-string"
+        assert identities[1]["request_contract"]["response"] == "text:non-empty-string"
+        assert set(identities[0]["request_contract"]["body"]).isdisjoint(
+            identities[1]["request_contract"]["body"]
+        )
 
 
 class TestNamesAndOwnership:
@@ -407,8 +415,8 @@ class TestNamesAndOwnership:
         assert [(plan.runtime.framework, plan.role) for plan in plans] == [
             ("vllm", "baseline"),
             ("vllm", "hpa"),
-            ("tgi", "baseline"),
-            ("tgi", "hpa"),
+            ("sglang", "baseline"),
+            ("sglang", "hpa"),
         ]
         assert state["phase"] == "planned"
         assert re.fullmatch(r"[0-9a-f]{64}", state["owner_nonce"])
@@ -480,11 +488,13 @@ class TestNamesAndOwnership:
 class TestCommandsAndResponses:
     def test_commands_are_argument_arrays_with_noninteractive_delete(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm_baseline, vllm_hpa, tgi_baseline, tgi_hpa = build_endpoint_plans(settings, OWNER_NONCE)
+        vllm_baseline, vllm_hpa, sglang_baseline, sglang_hpa = build_endpoint_plans(
+            settings, OWNER_NONCE
+        )
         baseline_command = build_deploy_command(settings, vllm_baseline, OWNER_NONCE)
         hpa_command = build_deploy_command(settings, vllm_hpa, OWNER_NONCE)
-        tgi_command = build_deploy_command(settings, tgi_baseline, OWNER_NONCE)
-        tgi_hpa_command = build_deploy_command(settings, tgi_hpa, OWNER_NONCE)
+        sglang_command = build_deploy_command(settings, sglang_baseline, OWNER_NONCE)
+        sglang_hpa_command = build_deploy_command(settings, sglang_hpa, OWNER_NONCE)
         invoke_command = build_invoke_command(settings, vllm_baseline)
         health_command = build_health_command(settings, vllm_baseline)
         models_command = build_models_command(settings, vllm_baseline)
@@ -498,8 +508,8 @@ class TestCommandsAndResponses:
         for command in (
             baseline_command,
             hpa_command,
-            tgi_command,
-            tgi_hpa_command,
+            sglang_command,
+            sglang_hpa_command,
             invoke_command,
             health_command,
             models_command,
@@ -522,13 +532,32 @@ class TestCommandsAndResponses:
         assert hpa_command[hpa_command.index("--autoscale-metric") + 1] == "cpu:70"
         assert hpa_command[hpa_command.index("--min-replicas") + 1] == "2"
         assert hpa_command[hpa_command.index("--max-replicas") + 1] == "2"
-        assert tgi_command[tgi_command.index("--framework") + 1] == "tgi"
-        assert tgi_command[tgi_command.index("--port") + 1] == "8080"
-        assert "MODEL_ID=test/tgi-model" in tgi_command
-        assert f"REVISION={TGI_REVISION}" in tgi_command
-        assert "PORT=8080" in tgi_command
-        assert "HF_MODEL_ID=test/tgi-model" not in tgi_command
-        assert "--root-path" not in tgi_command
+        assert baseline_command[baseline_command.index("--port") + 1] == "8000"
+        assert "MODEL=test/vllm-model" in baseline_command
+        assert baseline_command[baseline_command.index("--extra-args=--model") + 1 :][:5] == [
+            "--extra-args",
+            "test/vllm-model",
+            "--extra-args=--revision",
+            "--extra-args",
+            VLLM_REVISION,
+        ]
+        assert sglang_command[sglang_command.index("--framework") + 1] == "sglang"
+        assert sglang_command[sglang_command.index("--port") + 1] == "30000"
+        # SGLang shares the ``MODEL`` environment convention with vLLM; the
+        # launcher itself receives the immutable model on argv.
+        assert "MODEL=test/sglang-model" in sglang_command
+        assert sglang_command[sglang_command.index("--extra-args=--model-path") + 1 :][:5] == [
+            "--extra-args",
+            "test/sglang-model",
+            "--extra-args=--revision",
+            "--extra-args",
+            SGLANG_REVISION,
+        ]
+        assert "--extra-args=--model" not in sglang_command
+        assert "--root-path" not in sglang_command
+        assert not any(value.startswith("MODEL_ID=") for value in sglang_command)
+        assert not any(value.startswith("PORT=") for value in sglang_command)
+        assert sglang_hpa_command[sglang_hpa_command.index("--autoscale-metric") + 1] == "cpu:70"
         assert json.loads(invoke_command[invoke_command.index("--data") + 1]) == (
             settings.request_body(vllm_baseline.runtime)
         )
@@ -582,7 +611,7 @@ class TestCommandsAndResponses:
         ("framework", "payload", "expected"),
         [
             ("vllm", {"choices": [{"text": " generated "}]}, "generated"),
-            ("tgi", {"generated_text": " tgi "}, "tgi"),
+            ("sglang", {"text": " sglang ", "meta_info": {"finish_reason": "x"}}, "sglang"),
         ],
     )
     def test_exact_invoke_response_schemas(
@@ -594,14 +623,18 @@ class TestCommandsAndResponses:
     @pytest.mark.parametrize(
         ("framework", "payload"),
         [
-            ("vllm", {"generated_text": "wrong-framework"}),
+            ("vllm", {"text": "wrong-framework"}),
+            ("vllm", {"generated_text": "retired-tgi-contract"}),
             ("vllm", {"choices": [{"message": {"content": "chat"}}]}),
-            ("tgi", {"choices": [{"text": "wrong-framework"}]}),
-            ("tgi", [{"generated_text": "list-is-not-the-selected-contract"}]),
+            ("sglang", {"choices": [{"text": "wrong-framework"}]}),
+            ("sglang", [{"text": "list-is-not-the-selected-contract"}]),
+            ("sglang", {"generated_text": "retired-tgi-contract"}),
             ("vllm", {"choices": []}),
             ("vllm", {"choices": [{"text": "  "}]}),
-            ("tgi", {"generated_text": ""}),
-            ("tgi", {"not_text": "value"}),
+            ("sglang", {"text": ""}),
+            ("sglang", {"text": "   "}),
+            ("sglang", {"text": ["not", "a", "string"]}),
+            ("sglang", {"not_text": "value"}),
         ],
     )
     def test_cross_framework_empty_or_alternate_schemas_are_rejected(
@@ -648,7 +681,7 @@ class TestSequentialAndFinallyBehavior:
         assert summary["execution"] == "strictly-sequential"
         assert summary["frameworks"] == {
             "vllm": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
-            "tgi": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
         }
         assert summary["all_endpoints_absent"] is True
         serialized = json.dumps(summary)
@@ -1770,7 +1803,7 @@ class TestAdditionalResumeAndDeadlineSafety:
 
 
 class TestWireContractAndHpaDeadline:
-    @pytest.mark.parametrize("framework", ["vllm", "tgi"])
+    @pytest.mark.parametrize("framework", ["vllm", "sglang"])
     def test_real_invoke_cli_sends_exact_identity_body(
         self,
         tmp_path: Path,
@@ -1803,8 +1836,8 @@ class TestWireContractAndHpaDeadline:
 
             @staticmethod
             def json() -> Any:
-                if framework == "tgi":
-                    return {"generated_text": "ok"}
+                if framework == "sglang":
+                    return {"text": "ok", "meta_info": {}}
                 return {"choices": [{"text": "ok"}]}
 
         class Client:
@@ -1942,15 +1975,74 @@ class TestBackendProbeContracts:
             },
         }
 
-    def test_tgi_requires_health_and_exact_info_identity(
+    def test_sglang_requires_health_and_exact_server_info_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         settings = _settings(tmp_path)
         runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
         plan = plans[2]
         record = records[2]
+        assert plan.runtime.framework == "sglang"
         runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
         stages: list[str] = []
+        commands: list[list[str]] = []
+
+        def run_command(
+            checkpoint: dict[str, Any],
+            stage: str,
+            command: list[str],
+            **kwargs: Any,
+        ) -> str:
+            del checkpoint, kwargs
+            stages.append(stage)
+            commands.append(command)
+            if stage == "health":
+                return json.dumps({"status": "healthy", "http_status": 200})
+            # ``gco inference models --framework sglang`` projects the identity
+            # keys of ``/server_info``; the launcher reports the model path and
+            # revision it was actually started with.
+            return json.dumps(
+                {
+                    "model_path": plan.runtime.model_id,
+                    "served_model_name": plan.runtime.model_id,
+                    "revision": plan.runtime.model_revision,
+                    "tokenizer_path": plan.runtime.model_id,
+                    "version": "0.5.19",
+                }
+            )
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        runner.verify_backend_probes(plan, record)
+
+        assert stages == ["health", "model-info"]
+        assert commands[1][commands[1].index("--framework") + 1] == "sglang"
+        assert record["backend_probe_evidence"]["model_info"] == {
+            "path": "/server_info",
+            "configured_model_present": True,
+            "configured_revision_present": True,
+        }
+
+    @pytest.mark.parametrize(
+        "server_info",
+        [
+            {"model_path": "other/model", "revision": "d" * 40},
+            {"model_path": "test/sglang-model", "revision": "0" * 40},
+            {"model_path": "test/sglang-model"},
+            {"served_model_name": "test/sglang-model", "revision": "d" * 40},
+            ["test/sglang-model"],
+        ],
+    )
+    def test_sglang_server_info_must_match_model_path_and_revision(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        server_info: Any,
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
+        plan = plans[2]
+        record = records[2]
+        runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
 
         def run_command(
             checkpoint: dict[str, Any],
@@ -1959,25 +2051,18 @@ class TestBackendProbeContracts:
             **kwargs: Any,
         ) -> str:
             del checkpoint, command, kwargs
-            stages.append(stage)
             if stage == "health":
-                return json.dumps({"status": "healthy", "http_status": 204})
-            return json.dumps(
-                {
-                    "model_id": plan.runtime.model_id,
-                    "model_sha": plan.runtime.model_revision,
-                }
-            )
+                return json.dumps({"status": "healthy", "http_status": 200})
+            return json.dumps(server_info)
 
         monkeypatch.setattr(runner, "_run_command", run_command)
-        runner.verify_backend_probes(plan, record)
-
-        assert stages == ["health", "model-info"]
-        assert record["backend_probe_evidence"]["model_info"] == {
-            "path": "/info",
-            "configured_model_present": True,
-            "configured_revision_present": True,
-        }
+        with pytest.raises(ManagedInferenceValidationError, match="health/model probe failed"):
+            runner.verify_backend_probes(plan, record)
+        assert (
+            "SGLang /server_info did not report the exact model path and revision"
+            in record["failures"][-1]["error"]
+        )
+        assert "backend_probe_evidence" not in record
 
     def test_health_502_then_healthy_converges_and_records_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

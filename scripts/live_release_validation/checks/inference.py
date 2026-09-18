@@ -79,7 +79,7 @@ def build_endpoint_plans(
     settings: RunSettings,
     owner_nonce: str,
 ) -> tuple[EndpointPlan, ...]:
-    """Build vLLM and TGI baseline/HPA plans with peak concurrency of one."""
+    """Build vLLM and SGLang baseline/HPA plans with peak concurrency of one."""
     token = owner_nonce[:16]
     plans: list[EndpointPlan] = []
     for runtime in settings.inference_runtimes:
@@ -337,9 +337,12 @@ def extract_generated_text(output: str, framework: str) -> str:
             choices = payload.get("choices")
             if isinstance(choices, list) and choices and isinstance(choices[0], dict):
                 text = choices[0].get("text")
-    elif framework == "tgi":
+    elif framework == "sglang":
+        # Native ``/generate`` answers a single prompt with one object; a
+        # batched prompt would answer with a list, which this adapter never
+        # sends and therefore never accepts.
         if isinstance(payload, dict):
-            text = payload.get("generated_text")
+            text = payload.get("text")
     else:
         raise ManagedInferenceValidationError("unknown managed inference response framework")
     if not isinstance(text, str) or not text.strip():
@@ -490,9 +493,9 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             "health_check_path": self.settings.health_path,
             "env": self.settings.framework_env(runtime),
         }
-        extra_args = self.settings.deploy_extra_args(runtime)
-        if extra_args:
-            expected_base["args"] = list(extra_args)
+        # Both launchers receive the immutable model on argv, so a stored
+        # record without exactly those args is not this run's endpoint.
+        expected_base["args"] = list(self.settings.deploy_extra_args(runtime))
         for key, value in expected_base.items():
             if spec.get(key) != value:
                 raise ManagedInferenceValidationError(
@@ -822,13 +825,18 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                     "model_count": len(model_ids),
                 }
             else:
+                # ``gco inference models --framework sglang`` projects the
+                # server's resolved launcher arguments (``/server_info``), so
+                # the running process itself reports which model path and
+                # which revision it was started with.
                 if (
                     not isinstance(model_info, dict)
-                    or model_info.get("model_id") != runtime.model_id
-                    or model_info.get("model_sha") != runtime.model_revision
+                    or model_info.get("model_path") != runtime.model_id
+                    or model_info.get("revision") != runtime.model_revision
                 ):
                     raise ManagedInferenceValidationError(
-                        "managed TGI /info did not report the exact model id and revision"
+                        "managed SGLang /server_info did not report the exact model path "
+                        "and revision"
                     )
                 evidence["model_info"] = {
                     "path": runtime.model_info_path,
