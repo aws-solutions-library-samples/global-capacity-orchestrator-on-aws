@@ -49,9 +49,9 @@ batch ML, HPC, and everyday CPU jobs — who want:
   model weights synced from a central S3 bucket.
 - **Outputs that outlive the pod**: shared EFS by default, FSx for Lustre and
   per-Region S3 buckets when you need them.
-- **An agent-first front door**: `gco autopilot` launches Claude Code (or
-  OpenAI Codex) on Amazon Bedrock, grounded by the GCO MCP server and
-  recommended companion MCPs.
+- **An agent-first front door**: `gco autopilot` launches Claude Code on
+  Amazon Bedrock (`gco autopilot --engine codex` launches OpenAI Codex),
+  grounded by the GCO MCP server and recommended companion MCPs.
 
 The README's
 [Why GCO?](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#why-gco)
