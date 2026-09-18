@@ -306,6 +306,11 @@ select = [
     "PT",     # flake8-pytest-style
     "PLW1510",  # subprocess.run without an explicit check= (say which you meant)
     "PLW2901",  # loop variable overwritten inside the loop
+    # Naive datetimes mean "whatever zone this process happens to run in"; the
+    # services stamp records that cross regions and containers, so every
+    # datetime carries a tzinfo. A test that needs a naive value to exercise a
+    # naive-input branch says so with a per-line noqa.
+    "DTZ",    # flake8-datetimez
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)

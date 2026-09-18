@@ -12,7 +12,7 @@ the broad happy-path smoke test.
 import json
 import os
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import yaml
@@ -256,8 +256,8 @@ class TestJobManager:
             namespace="gco-jobs",
             region="us-east-1",
             status="succeeded",
-            start_time=datetime(2024, 1, 1, 10, 0, 0),
-            completion_time=datetime(2024, 1, 1, 10, 30, 0),
+            start_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
+            completion_time=datetime(2024, 1, 1, 10, 30, 0, tzinfo=UTC),
             succeeded_pods=1,
         )
 
@@ -381,7 +381,7 @@ class TestOutputFormatter:
         formatter = OutputFormatter()
         formatter.set_format("json")
 
-        data = {"timestamp": datetime(2024, 1, 15, 10, 30, 0)}
+        data = {"timestamp": datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)}
         output = formatter.format(data)
 
         parsed = json.loads(output)

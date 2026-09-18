@@ -13,7 +13,7 @@ import io
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import click
@@ -28,7 +28,7 @@ class TestSerializeValue:
         """Test serializing datetime."""
         from cli.output import _serialize_value
 
-        dt = datetime(2024, 1, 15, 10, 30, 0)
+        dt = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
         result = _serialize_value(dt)
         assert "2024-01-15" in result
 
@@ -49,7 +49,7 @@ class TestSerializeValue:
         """Test serializing dict with nested values."""
         from cli.output import _serialize_value
 
-        data = {"timestamp": datetime(2024, 1, 1), "value": 123}
+        data = {"timestamp": datetime(2024, 1, 1, tzinfo=UTC), "value": 123}
         result = _serialize_value(data)
         assert "2024-01-01" in result["timestamp"]
         assert result["value"] == 123
@@ -58,7 +58,7 @@ class TestSerializeValue:
         """Test serializing list."""
         from cli.output import _serialize_value
 
-        data = [datetime(2024, 1, 1), "test", 123]
+        data = [datetime(2024, 1, 1, tzinfo=UTC), "test", 123]
         result = _serialize_value(data)
         assert len(result) == 3
         assert "2024-01-01" in result[0]
@@ -145,7 +145,7 @@ class TestOutputFormatterJSON:
             mock_config.return_value = MagicMock(output_format="json")
             formatter = OutputFormatter()
 
-            data = {"timestamp": datetime(2024, 1, 15, 10, 30, 0)}
+            data = {"timestamp": datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)}
             result = formatter.format(data)
 
             parsed = json.loads(result)
@@ -312,7 +312,7 @@ class TestOutputFormatterCells:
             mock_config.return_value = MagicMock(output_format="table")
             formatter = OutputFormatter()
 
-            dt = datetime(2024, 1, 15, 10, 30)
+            dt = datetime(2024, 1, 15, 10, 30, tzinfo=UTC)
             result = formatter._format_cell(dt, 20)
             assert "2024-01-15" in result
 

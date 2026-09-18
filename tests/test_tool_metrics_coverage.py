@@ -21,7 +21,7 @@ import contextlib
 import importlib
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -69,7 +69,7 @@ def test_cloudwatch_explicit_window_is_parsed_and_returns_canonical_shape() -> N
     """Explicit ISO ``start_time``/``end_time`` are parsed and drive a successful read."""
     metrics_module = _import_metrics_tool_module()
     client = _cloudwatch_client_returning(
-        [{"Timestamp": datetime(2024, 3, 1, 0, 0, 0), "Average": 0.5}]
+        [{"Timestamp": datetime(2024, 3, 1, 0, 0, 0, tzinfo=UTC), "Average": 0.5}]
     )
     with patch("boto3.client", return_value=client):
         result = asyncio.run(

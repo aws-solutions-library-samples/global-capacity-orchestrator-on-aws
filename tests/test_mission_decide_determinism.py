@@ -121,8 +121,8 @@ class TestVerdictSamplingIndependence:
         session=session_states(min_prior_iterations=1, max_prior_iterations=3),
         in_progress=iteration_records(),
         now=st.datetimes(
-            min_value=datetime(2025, 1, 1),
-            max_value=datetime(2030, 1, 1),
+            min_value=datetime(2025, 1, 1, tzinfo=UTC),
+            max_value=datetime(2030, 1, 1, tzinfo=UTC),
             timezones=st.just(UTC),
         ),
         sampling_outputs=st.tuples(
@@ -267,8 +267,8 @@ class TestVerdictUnaffectedBySamplerMode:
         session=session_states(min_prior_iterations=1, max_prior_iterations=3),
         in_progress=iteration_records(),
         now=st.datetimes(
-            min_value=datetime(2025, 1, 1),
-            max_value=datetime(2030, 1, 1),
+            min_value=datetime(2025, 1, 1, tzinfo=UTC),
+            max_value=datetime(2030, 1, 1, tzinfo=UTC),
             timezones=st.just(UTC),
         ),
     )

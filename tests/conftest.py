@@ -6,7 +6,7 @@ including mock Kubernetes clients, sample manifests, and configuration objects.
 """
 
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -303,7 +303,7 @@ def sample_health_status(sample_thresholds, sample_utilization):
     return HealthStatus(
         cluster_id="gco-us-east-1",
         region="us-east-1",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(UTC),
         status="healthy",
         resource_utilization=sample_utilization,
         thresholds=sample_thresholds,

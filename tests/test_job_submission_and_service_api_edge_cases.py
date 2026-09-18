@@ -1620,7 +1620,7 @@ async def test_health_monitor_all_thresholds_can_be_disabled() -> None:
     [
         (None, None),
         ("other", None),
-        ("other", datetime.now() - timedelta(seconds=120)),
+        ("other", datetime.now(UTC) - timedelta(seconds=120)),
     ],
 )
 def test_health_monitor_lease_acquires_unowned_missing_or_naive_expired(
@@ -1775,7 +1775,7 @@ async def test_health_api_uncached_health_and_dispatcher_status_metrics() -> Non
     status = HealthStatus(
         cluster_id="cluster",
         region="us-east-1",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(UTC),
         status="healthy",
         resource_utilization=ResourceUtilization(1, 2, 3),
         thresholds=ResourceThresholds(80, 80, 80),

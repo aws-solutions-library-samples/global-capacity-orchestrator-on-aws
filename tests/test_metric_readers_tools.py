@@ -31,7 +31,7 @@ import json
 import os
 import sys
 from collections.abc import Iterator, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -162,8 +162,8 @@ def test_cloudwatch_get_success_returns_canonical_shape() -> None:
     """
     metrics_module = _import_metrics_tool_module()
 
-    older = {"Timestamp": datetime(2024, 1, 1, 0, 0, 0), "Average": 0.91}
-    newer = {"Timestamp": datetime(2024, 1, 1, 1, 0, 0), "Average": 0.42}
+    older = {"Timestamp": datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC), "Average": 0.91}
+    newer = {"Timestamp": datetime(2024, 1, 1, 1, 0, 0, tzinfo=UTC), "Average": 0.42}
     client = _cloudwatch_client_returning([older, newer])
 
     with patch("boto3.client", return_value=client) as mock_client:
@@ -199,7 +199,7 @@ def test_cloudwatch_get_success_honours_output_name() -> None:
     metrics_module = _import_metrics_tool_module()
 
     client = _cloudwatch_client_returning(
-        [{"Timestamp": datetime(2024, 6, 1, 12, 0, 0), "Sum": 1234}]
+        [{"Timestamp": datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC), "Sum": 1234}]
     )
 
     with patch("boto3.client", return_value=client):

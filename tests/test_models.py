@@ -10,7 +10,7 @@ and these tests pin the error messages so callers can rely on them.
 """
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -114,7 +114,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -128,7 +128,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -143,7 +143,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -156,7 +156,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="gco-us-east-1",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="unknown",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -169,7 +169,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="gco-us-east-1",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -182,7 +182,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=high_util,
             thresholds=thresholds,

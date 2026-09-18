@@ -1106,7 +1106,7 @@ def test_parse_iso_normalises_naive_and_offset_timestamps_to_utc() -> None:
 def test_certificate_not_after_falls_back_to_naive_attribute() -> None:
     """Certificates without ``not_valid_after_utc`` are treated as UTC."""
     handler = load_lambda_module("tls-certificate-manager")
-    certificate = SimpleNamespace(not_valid_after=datetime(2028, 6, 1, 8, 30))
+    certificate = SimpleNamespace(not_valid_after=datetime(2028, 6, 1, 8, 30, tzinfo=UTC))
 
     assert handler._certificate_not_after(certificate) == datetime(2028, 6, 1, 8, 30, tzinfo=UTC)
 

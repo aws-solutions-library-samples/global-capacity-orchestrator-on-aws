@@ -649,7 +649,7 @@ class TestStackInfo:
 
     def test_stack_info_creation(self):
         """Test creating StackInfo."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackInfo
 
@@ -657,7 +657,7 @@ class TestStackInfo:
             name="test-stack",
             status="CREATE_COMPLETE",
             region="us-east-1",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
         )
 
         assert info.name == "test-stack"
@@ -666,7 +666,7 @@ class TestStackInfo:
 
     def test_stack_info_to_dict(self):
         """Test StackInfo to_dict method."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackInfo
 
@@ -674,7 +674,7 @@ class TestStackInfo:
             name="test-stack",
             status="CREATE_COMPLETE",
             region="us-east-1",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
             outputs={"OutputKey": "OutputValue"},
             tags={"Environment": "test"},
         )
@@ -3684,7 +3684,7 @@ class TestStackManagerGetStackStatus:
 
     def test_get_stack_status_success(self):
         """Test successful stack status retrieval."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackManager
 
@@ -3698,8 +3698,8 @@ class TestStackManagerGetStackStatus:
                     {
                         "StackName": "test-stack",
                         "StackStatus": "CREATE_COMPLETE",
-                        "CreationTime": datetime(2024, 1, 1),
-                        "LastUpdatedTime": datetime(2024, 1, 2),
+                        "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
+                        "LastUpdatedTime": datetime(2024, 1, 2, tzinfo=UTC),
                         "Outputs": [{"OutputKey": "Key1", "OutputValue": "Value1"}],
                         "Tags": [{"Key": "Env", "Value": "test"}],
                     }

@@ -1536,12 +1536,12 @@ class TestListJobs:
 
     def _create_mock_job(self, name, namespace, active=0, succeeded=0, failed=0, conditions=None):
         """Helper to create a mock Kubernetes Job object."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = name
         mock_job.metadata.namespace = namespace
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.uid = f"uid-{name}"
         mock_job.spec.parallelism = 1
@@ -1550,8 +1550,12 @@ class TestListJobs:
         mock_job.status.active = active
         mock_job.status.succeeded = succeeded
         mock_job.status.failed = failed
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1) if active or succeeded else None
-        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0) if succeeded else None
+        mock_job.status.start_time = (
+            datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC) if active or succeeded else None
+        )
+        mock_job.status.completion_time = (
+            datetime(2024, 1, 1, 0, 1, 0, tzinfo=UTC) if succeeded else None
+        )
         mock_job.status.conditions = conditions or []
         return mock_job
 
@@ -1774,12 +1778,12 @@ class TestJobToDictAndGetJobStatus:
 
     def test_job_to_dict_complete(self, processor_with_mocks):
         """Test _job_to_dict converts job to dictionary correctly."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 2
@@ -1788,7 +1792,7 @@ class TestJobToDictAndGetJobStatus:
         mock_job.status.active = 1
         mock_job.status.succeeded = 2
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
         mock_job.status.completion_time = None
         mock_job.status.conditions = []
 
@@ -1804,12 +1808,12 @@ class TestJobToDictAndGetJobStatus:
 
     def test_job_to_dict_with_conditions(self, processor_with_mocks):
         """Test _job_to_dict includes conditions."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = None
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 1
@@ -1818,8 +1822,8 @@ class TestJobToDictAndGetJobStatus:
         mock_job.status.active = 0
         mock_job.status.succeeded = 1
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1)
-        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
+        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0, tzinfo=UTC)
 
         mock_condition = MagicMock()
         mock_condition.type = "Complete"

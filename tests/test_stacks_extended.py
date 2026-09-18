@@ -166,8 +166,8 @@ class TestStackManagerGetStackStatus:
         from cli.stacks import StackManager
 
         config = MagicMock()
-        created_time = datetime(2024, 1, 1, 10, 0, 0)
-        updated_time = datetime(2024, 1, 15, 14, 30, 0)
+        created_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC)
+        updated_time = datetime(2024, 1, 15, 14, 30, 0, tzinfo=UTC)
 
         with patch("boto3.client") as mock_boto:
             mock_cf = MagicMock()

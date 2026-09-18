@@ -30,7 +30,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -226,7 +226,7 @@ async def health_check() -> JSONResponse:
             current_health_status = status
 
         # Check if status is too old (more than 2 minutes)
-        age_seconds = (datetime.now() - status.timestamp).total_seconds()
+        age_seconds = (datetime.now(UTC) - status.timestamp).total_seconds()
         if age_seconds > 120 and health_monitor is not None:  # 2 minutes
             logger.warning(f"Health status is {age_seconds:.0f} seconds old, refreshing")
             status = await health_monitor.get_health_status()
@@ -260,7 +260,7 @@ async def health_check() -> JSONResponse:
             status_code=503,
             content={
                 "status": "unhealthy",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "error": "health monitor unavailable",
             },
         )

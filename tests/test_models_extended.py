@@ -9,7 +9,7 @@ KubernetesManifest and ResourceStatus edge cases.
 Pins the exact error strings so downstream callers can assert on them.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -112,7 +112,7 @@ class TestHealthStatusExtended:
             HealthStatus(
                 cluster_id="test-cluster",
                 region="",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -125,7 +125,7 @@ class TestHealthStatusExtended:
             HealthStatus(
                 cluster_id="test-cluster",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -139,7 +139,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -155,7 +155,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -178,7 +178,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=ResourceUtilization(cpu=100, memory=100, gpu=100),
             thresholds=thresholds,
@@ -196,7 +196,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=high_util,
             thresholds=thresholds,
@@ -210,7 +210,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -226,7 +226,7 @@ class TestHealthStatusExtended:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -851,7 +851,7 @@ class TestHealthStatusThresholdViolations:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -871,7 +871,7 @@ class TestHealthStatusThresholdViolations:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=high_util,
             thresholds=thresholds,
@@ -888,7 +888,7 @@ class TestHealthStatusThresholdViolations:
         status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -905,7 +905,7 @@ class TestHealthStatusThresholdViolations:
             HealthStatus(
                 cluster_id="test-cluster",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="unknown",
                 resource_utilization=utilization,
                 thresholds=thresholds,

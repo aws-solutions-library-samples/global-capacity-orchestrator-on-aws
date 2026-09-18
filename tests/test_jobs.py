@@ -46,8 +46,8 @@ class TestJobInfo:
             namespace="gco-jobs",
             region="us-east-1",
             status="succeeded",
-            start_time=datetime(2024, 1, 1, 10, 0, 0),
-            completion_time=datetime(2024, 1, 1, 10, 30, 0),
+            start_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
+            completion_time=datetime(2024, 1, 1, 10, 30, 0, tzinfo=UTC),
             succeeded_pods=1,
         )
 
@@ -841,8 +841,8 @@ class TestJobInfoProperties:
 
         from cli.jobs import JobInfo
 
-        start = datetime(2024, 1, 1, 0, 0, 0)
-        end = datetime(2024, 1, 1, 0, 5, 0)  # 5 minutes later
+        start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 0, 5, 0, tzinfo=UTC)  # 5 minutes later
 
         job = JobInfo(
             name="test-job",

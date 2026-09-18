@@ -938,8 +938,9 @@ class TestInferenceImageRefs:
 
         from cli.jobs import JobInfo
 
-        # Naive datetime — caller didn't attach tzinfo.
-        naive_recent = datetime.now()
+        # Deliberately naive — the branch under test is a caller that did not
+        # attach tzinfo, which the collector must still compare against now().
+        naive_recent = datetime.now()  # noqa: DTZ005
         fake_jm = MagicMock()
         fake_jm.list_jobs.return_value = [
             JobInfo(

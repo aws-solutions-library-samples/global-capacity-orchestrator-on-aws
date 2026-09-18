@@ -8,7 +8,7 @@ DataSync transfers, and error paths lives in test_files_extended.py.
 """
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -150,7 +150,7 @@ class TestFileSystemInfo:
             mount_target_ip="10.0.1.100",
             size_bytes=1200 * 1024 * 1024 * 1024,
             status="available",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
             tags={"Environment": "production"},
         )
 
@@ -302,7 +302,7 @@ class TestFileSystemClientEFS:
                                 "FileSystemId": "fs-12345678",
                                 "LifeCycleState": "available",
                                 "SizeInBytes": {"Value": 1024000},
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                             }
                         ]
                     }
@@ -367,7 +367,7 @@ class TestFileSystemClientFSx:
                                 "DNSName": "fs-abcdef12.fsx.us-east-1.amazonaws.com",
                                 "StorageCapacity": 1200,
                                 "Lifecycle": "AVAILABLE",
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                                 "Tags": [{"Key": "Name", "Value": "test-fsx"}],
                             }
                         ]
@@ -508,7 +508,7 @@ class TestFileSystemClientEFSDetailed:
                                 "FileSystemId": "fs-12345",
                                 "LifeCycleState": "available",
                                 "SizeInBytes": {"Value": 1024000},
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                             }
                         ]
                     }
@@ -554,7 +554,7 @@ class TestFileSystemClientFSxDetailed:
                                 "DNSName": "fs-lustre-123.fsx.us-east-1.amazonaws.com",
                                 "Lifecycle": "AVAILABLE",
                                 "StorageCapacity": 1200,
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                                 "Tags": [{"Key": "Name", "Value": "gco-fsx"}],
                             }
                         ]
@@ -680,7 +680,7 @@ class TestFileSystemInfoDataclass:
 
         from cli.files import FileSystemInfo
 
-        now = datetime.now()
+        now = datetime.now(UTC)
         info = FileSystemInfo(
             file_system_id="fs-123",
             file_system_type="fsx",

@@ -58,7 +58,7 @@ def check_file(
     A non-existent file returns two empty lists — the absence of an
     ignore file is not an error.
     """
-    today = today or datetime.date.today()
+    today = today or datetime.datetime.now(datetime.UTC).date()
     missing: list[tuple[int, str]] = []
     expired: list[tuple[int, str, datetime.date]] = []
 
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    today = args.today or datetime.date.today()
+    today = args.today or datetime.datetime.now(datetime.UTC).date()
     missing, expired = check_file(args.path, today=today)
     report = _format_report(today, missing, expired)
     if report:

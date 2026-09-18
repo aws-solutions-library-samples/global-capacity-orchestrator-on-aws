@@ -751,12 +751,12 @@ class TestGetJobEndpoint:
 
     def test_get_job_success(self, mock_manifest_processor):
         """Test getting a specific job returns success."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.annotations = {}
         mock_job.metadata.uid = "test-uid"
@@ -766,7 +766,7 @@ class TestGetJobEndpoint:
         mock_job.status.active = 1
         mock_job.status.succeeded = 0
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.status.completion_time = None
         mock_job.status.conditions = []
 
@@ -1261,14 +1261,14 @@ class TestParseJobToDict:
 
     def test_parse_job_to_dict_completed(self):
         """Test parsing a completed job."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from gco.services.api_shared import _parse_job_to_dict
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 1
@@ -1277,8 +1277,8 @@ class TestParseJobToDict:
         mock_job.status.active = 0
         mock_job.status.succeeded = 1
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
-        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 5, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 5, 0, tzinfo=UTC)
 
         # Create a condition for Complete
         mock_condition = MagicMock()
@@ -1294,14 +1294,14 @@ class TestParseJobToDict:
 
     def test_parse_job_to_dict_failed(self):
         """Test parsing a failed job."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from gco.services.api_shared import _parse_job_to_dict
 
         mock_job = MagicMock()
         mock_job.metadata.name = "failed-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {}
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 1
@@ -1310,7 +1310,7 @@ class TestParseJobToDict:
         mock_job.status.active = 0
         mock_job.status.succeeded = 0
         mock_job.status.failed = 1
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.status.completion_time = None
 
         # Create a condition for Failed
@@ -1326,14 +1326,14 @@ class TestParseJobToDict:
 
     def test_parse_job_to_dict_running(self):
         """Test parsing a running job."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from gco.services.api_shared import _parse_job_to_dict
 
         mock_job = MagicMock()
         mock_job.metadata.name = "running-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {}
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 1
@@ -1342,7 +1342,7 @@ class TestParseJobToDict:
         mock_job.status.active = 1
         mock_job.status.succeeded = 0
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.status.completion_time = None
         mock_job.status.conditions = []
 

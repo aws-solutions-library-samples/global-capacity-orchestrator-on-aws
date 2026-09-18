@@ -6361,7 +6361,9 @@ class TestAcceptedEfsAutomaticBackupRecoveryPoints:
 
     @pytest.mark.parametrize(
         "delete_at",
-        [None, "2030-01-01T00:00:00Z", datetime(2030, 1, 1)],
+        # The "naive" case is the point of this test: a tz-less DeleteAt must be
+        # refused, so this literal deliberately carries no tzinfo.
+        [None, "2030-01-01T00:00:00Z", datetime(2030, 1, 1)],  # noqa: DTZ001
         ids=["missing", "string", "naive"],
     )
     def test_scheduled_deletion_requires_an_aware_datetime(self, delete_at):

@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        suppressions = _load_suppressions(args.ignore_file, dt.date.today())
+        suppressions = _load_suppressions(args.ignore_file, dt.datetime.now(dt.UTC).date())
         report = _load_report(args.report)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
