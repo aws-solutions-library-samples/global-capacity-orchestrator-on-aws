@@ -45,8 +45,8 @@ batch ML, HPC, and everyday CPU jobs — who want:
   IAM-authenticated regional APIs in `aws-cn` and `aws-us-gov`. No kubeconfig
   distribution.
 - **Inference endpoints in every Region from one command** — vLLM, SGLang,
-  Triton, TorchServe — with rolling updates, scaling, canaries, and model
-  weights synced from a central S3 bucket.
+  Triton — with rolling updates, scaling, canaries, and model weights synced
+  from a central S3 bucket.
 - **Outputs that outlive the pod**: shared EFS by default, FSx for Lustre and
   per-Region S3 buckets when you need them.
 - **An agent-first front door**: `gco autopilot` launches Claude Code on

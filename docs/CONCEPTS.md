@@ -201,7 +201,6 @@ GCO works with any containerized inference server. These have example manifests 
 | [vLLM](https://docs.vllm.ai/en/latest/) | OpenAI-compatible LLM serving | [`examples/inference-vllm.yaml`](../examples/inference-vllm.yaml) |
 | [SGLang](https://docs.sglang.ai/) | High-throughput serving with RadixAttention | [`examples/inference-sglang.yaml`](../examples/inference-sglang.yaml) |
 | [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) | Multi-framework model serving | [`examples/inference-triton.yaml`](../examples/inference-triton.yaml) |
-| [TorchServe](https://docs.pytorch.org/serve/) | PyTorch native serving | [`examples/inference-torchserve.yaml`](../examples/inference-torchserve.yaml) |
 
 See [Inference Guide](INFERENCE.md) for the full deep dive including model weight management, canary deployments, and production EFA setup.
 

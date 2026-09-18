@@ -62,8 +62,7 @@ AWS Trainium and Inferentia workloads have their own manifests too
 Deploy endpoints to one or more regions with a single command:
 [vLLM](https://docs.vllm.ai/en/latest/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-vllm.yaml)),
 [SGLang](https://docs.sglang.ai/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-sglang.yaml)),
-[Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-triton.yaml)),
-and [TorchServe](https://docs.pytorch.org/serve/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-torchserve.yaml))
+and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-triton.yaml))
 work out of the box, with model weights synced automatically from S3 to each
 region. Desired state lives in
 DynamoDB with continuous reconciliation, so rolling updates, scaling, and

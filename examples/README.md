@@ -60,7 +60,6 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
 | [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
-| [TorchServe](#inference-frameworks) | `inference-torchserve.yaml` | Inference | ✅ | — |
 | [Triton](#inference-frameworks) | `inference-triton.yaml` | Inference | ✅ | — |
 | [vLLM](#inference-frameworks) | `inference-vllm.yaml` | Inference | ✅ | — |
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
@@ -317,16 +316,16 @@ GCO includes example manifests for multiple inference frameworks. Each creates a
 | Example | Framework | Description | Docs |
 |---------|-----------|-------------|------|
 | `inference-sglang.yaml` | SGLang | High-throughput serving with RadixAttention | [Inference Guide](../docs/INFERENCE.md) |
-| `inference-torchserve.yaml` | TorchServe | PyTorch model serving | [Inference Guide](../docs/INFERENCE.md) |
 | `inference-triton.yaml` | Triton | NVIDIA multi-framework serving (PyTorch, TensorFlow, ONNX) | [Inference Guide](../docs/INFERENCE.md) |
 | `inference-vllm.yaml` | vLLM | OpenAI-compatible LLM serving with PagedAttention | [Inference Guide](../docs/INFERENCE.md) |
 
 Hugging Face's Text Generation Inference (TGI) is no longer offered as a
 `gco inference deploy --framework` choice: the project entered maintenance
-mode on 2025-12-11 and its repository was archived on 2026-03-21. Use SGLang
-or vLLM instead. Endpoints that were deployed with TGI keep working (the
-renderer and `gco inference invoke`/`models` still recognise them) but new
-TGI deployments are refused.
+mode on 2025-12-11 and its repository was archived on 2026-03-21, and its
+adapter was removed. Use SGLang or vLLM instead; an endpoint still running
+TGI has to be redeployed. The TorchServe example was retired for the same
+reason: the PyTorch project notice states TorchServe is no longer actively
+maintained, with no planned updates, bug fixes, or security patches.
 
 **Deploy via CLI (recommended for multi-region):**
 
