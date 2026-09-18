@@ -57,6 +57,27 @@ SGLANG_UNSUPPORTED_GPU_FAMILIES: tuple[str, ...] = ("p2", "g3", "g3s", "p3", "p3
 #: Ampere-or-newer examples for the operator-facing refusal message.
 SGLANG_SUPPORTED_GPU_EXAMPLES = "A10G (g5), L4 (g6/g6f/gr6), L40S (g6e), A100 (p4d), H100 (p5)"
 
+#: ``timeoutSeconds`` for every probe the renderer puts on an inference
+#: container. Left unset, the kubelet applies 1 s — invisible in the rendered
+#: manifest and the same default that has already crash-looped the platform
+#: workloads on a contended node (see tests/test_workload_probe_timing_contract.py),
+#: which is why every probe in this repository states its timeout. For SGLang
+#: it is not even a margin question: its ``/health`` is a real check, not a
+#: ping. With ``SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION`` on by default
+#: (sglang 0.5.19, ``http_server.health_generate``) it submits a one-token
+#: generation and then polls ``await asyncio.sleep(1)`` before its first look
+#: at the result, so a healthy server answers in 1.00-1.03 s and never faster.
+#: Under the 1 s default every probe timed out: readiness flapped and liveness
+#: killed a healthy A10G container every ``initialDelay + failureThreshold *
+#: period`` seconds (live release validation, 2026-09-18 — exit 0 after
+#: SIGTERM, ``Liveness probe failed: context deadline exceeded``). Five seconds
+#: clears that floor with room for a busy CPU, stays under the 10 s readiness
+#: period so probes never queue, and still fails a hung engine, whose check
+#: runs to SGLang's own 20 s ``HEALTH_CHECK_TIMEOUT`` and returns 503. vLLM's
+#: ``/health`` answers immediately; it gets the same explicit value so the
+#: kubelet default can never quietly return.
+INFERENCE_PROBE_TIMEOUT_SECONDS = 5
+
 
 @dataclass
 class InferenceEndpointSpec:

@@ -1011,6 +1011,10 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             self.verify_hpa_stability(plan, record)
         self.verify_backend_probes(plan, record)
         self.invoke(plan, record)
+        # Last, so it covers the whole leg: a container that crashed or was
+        # killed by a probe anywhere between creation and invocation fails
+        # the leg even though every wait above was satisfied in between.
+        self.verify_no_container_restarts(plan, record)
         record["validation_steps_complete"] = True
         self._persist()
         return True

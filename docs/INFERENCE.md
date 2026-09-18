@@ -334,7 +334,17 @@ no model either way is refused before anything is persisted, because the pod
 could only crash-loop on the launcher's missing `--model-path`. SGLang answers
 `/health` with 503 until the model is loaded, so the renderer adds a startup
 probe that holds liveness off for up to 20 minutes while the checkpoint
-downloads.
+downloads. Once serving, SGLang's `/health` is a real check rather than a
+ping: it generates one token and polls for the result at one-second steps, so
+a healthy server answers in just over a second and never faster. The
+Kubernetes default probe timeout of 1 s therefore fails every probe —
+readiness flaps and liveness kills a healthy container every few minutes —
+so every probe the renderer places on an inference container states
+`timeoutSeconds: 5` (vLLM's included, so the silent kubelet default can never
+return): wide enough for the one-second floor and a busy CPU while still
+failing a hung engine, whose check runs to SGLang's own 20 s limit and
+returns 503. `tests/test_workload_probe_timing_contract.py` holds the
+rendered probes to the same rules as the platform manifests.
 
 SGLang's prebuilt kernels (`sgl-kernel`, FlashInfer) target NVIDIA compute
 capability 8.0 and newer: A10G (g5), L4 (g6/g6f/gr6), L40S (g6e), A100 (p4d),

@@ -50,6 +50,7 @@ from kubernetes.client.rest import ApiException
 
 from gco.models.inference_models import (
     GPU_NAME_NODE_LABEL,
+    INFERENCE_PROBE_TIMEOUT_SECONDS,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
 from gco.services.inference_store import InferenceEndpointStore
@@ -3652,6 +3653,12 @@ class InferenceMonitor:
         uses_root_path = args is not None and "--root-path" in args
         probe_health = f"{serving_prefix}{health_path}" if uses_root_path else health_path
 
+        # Every probe states its timeout; the kubelet's silent 1 s default is
+        # what killed a healthy SGLang container every ~3 minutes (its /health
+        # generates a token and polls at one-second steps, so it answers in
+        # just over a second and never faster). See INFERENCE_PROBE_TIMEOUT_SECONDS.
+        probe_timeout = INFERENCE_PROBE_TIMEOUT_SECONDS
+
         container = client.V1Container(
             name="inference",
             image=image,
@@ -3670,6 +3677,7 @@ class InferenceMonitor:
                     http_get=client.V1HTTPGetAction(path=health_path, port=port),
                     period_seconds=15,
                     failure_threshold=80,
+                    timeout_seconds=probe_timeout,
                 )
                 if runtime_framework == "sglang"
                 else None
@@ -3679,11 +3687,13 @@ class InferenceMonitor:
                 initial_delay_seconds=120,
                 period_seconds=15,
                 failure_threshold=5,
+                timeout_seconds=probe_timeout,
             ),
             readiness_probe=client.V1Probe(
                 http_get=client.V1HTTPGetAction(path=probe_health, port=port),
                 initial_delay_seconds=30,
                 period_seconds=10,
+                timeout_seconds=probe_timeout,
             ),
         )
 

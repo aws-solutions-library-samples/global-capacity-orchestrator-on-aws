@@ -628,6 +628,50 @@ class InferenceRuntimeMixin:
                 )
             )
 
+    def verify_no_container_restarts(self, plan: Any, record: dict[str, Any]) -> None:
+        """Refuse a leg whose containers restarted on the way to serving.
+
+        Readiness, HPA stability and a successful invocation can all be
+        observed *between* restarts: an SGLang container whose probes timed
+        out was killed by liveness every ~3 minutes while readiness flapped
+        true often enough for the leg to pass (2026-09-18, A10G). A restart
+        means a crash or a probe kill, and either is a defect the release
+        must not carry, so the final diagnostics snapshot is audited: every
+        container of every pod must report ``restartCount`` 0. The snapshot
+        already holds the previous attempt's log tail and the pod events
+        (``Liveness probe failed``, ``Killing``), so the failure names its
+        cause. A snapshot that could not list the pods fails closed.
+        """
+        snapshot = self.capture_workload_diagnostics(plan, record, reason="restart-audit")
+        if "pods_error" in snapshot:
+            raise ManagedInferenceValidationError(
+                "managed inference restart audit could not list the endpoint's pods "
+                f"({snapshot['pods_error']})"
+            )
+        pods = snapshot["pods"]
+        if not pods:
+            raise ManagedInferenceValidationError(
+                "managed inference restart audit found no pods for a serving endpoint"
+            )
+        restarted = [
+            f"{pod.get('name')}/{container.get('name')} restarted "
+            f"{int(container.get('restart_count') or 0)}x"
+            for pod in pods
+            for container in pod.get("containers") or []
+            if int(container.get("restart_count") or 0) > 0
+        ]
+        record["restart_audit"] = {
+            "pods": [str(pod.get("name")) for pod in pods],
+            "restarted": restarted,
+        }
+        self._persist()
+        if restarted:
+            raise ManagedInferenceValidationError(
+                "managed inference containers restarted during the leg: "
+                f"{'; '.join(restarted)} ({snapshot['summary']})"
+            )
+        self._set_phase(record, "restart-audited")
+
     def _hpa_matches(
         self,
         plan: Any,

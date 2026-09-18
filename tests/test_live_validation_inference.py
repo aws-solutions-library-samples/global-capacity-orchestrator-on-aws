@@ -695,6 +695,7 @@ class TestSequentialAndFinallyBehavior:
             ("wait_for_kubernetes_ready", 1),
             ("verify_backend_probes", 1),
             ("invoke", 1),
+            ("verify_no_container_restarts", 1),
             ("verify_hpa_stability", 2),
         ],
     )
@@ -719,6 +720,7 @@ class TestSequentialAndFinallyBehavior:
             "wait_for_kubernetes_ready",
             "verify_backend_probes",
             "invoke",
+            "verify_no_container_restarts",
             "verify_hpa_stability",
         ):
             monkeypatch.setattr(
@@ -2913,3 +2915,172 @@ class TestWorkloadDiagnostics:
             snapshot["summary"]
             == f"{plan.name}-y: Running, inference running, last exit 137 (restarts=2)"
         )
+
+
+def _probe_killed_pod(name: str, node: str = "i-node-g5") -> dict[str, Any]:
+    """A serving pod that liveness killed once: Running, ready, restartCount 1, exit 0.
+
+    The shape observed on 2026-09-18: SGLang's ``/health`` took 1.0 s, the
+    probe timeout was 1 s, so the kubelet sent SIGTERM and the server exited
+    cleanly — nothing about the pod's *current* state says anything is wrong.
+    """
+    return {
+        "metadata": {"name": f"{name}-5cd6678d9-rvl79"},
+        "spec": {"nodeName": node},
+        "status": {
+            "phase": "Running",
+            "startTime": "2026-09-18T19:54:39Z",
+            "conditions": [
+                {"type": "PodScheduled", "status": "True"},
+                {"type": "Ready", "status": "True"},
+            ],
+            "containerStatuses": [
+                {
+                    "name": "inference",
+                    "ready": True,
+                    "restartCount": 1,
+                    "state": {"running": {"startedAt": "2026-09-18T20:03:47Z"}},
+                    "lastState": {
+                        "terminated": {
+                            "reason": "Completed",
+                            "exitCode": 0,
+                            "startedAt": "2026-09-18T20:00:22Z",
+                            "finishedAt": "2026-09-18T20:03:46Z",
+                        }
+                    },
+                }
+            ],
+        },
+    }
+
+
+class TestRestartAudit:
+    """A leg that restarted on its way to serving is a failed leg, however ready it looks."""
+
+    def _runner(self, tmp_path: Path) -> tuple[Any, Any, dict[str, Any], _DiagnosticsKubectl]:
+        settings = _settings(tmp_path)
+        plans, _ = initialize_run_state(_ctx(tmp_path, None), settings)
+        kubectl = _DiagnosticsKubectl(plans[0].name)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings, kubectl=kubectl)
+        return runner, plans[0], records[0], kubectl
+
+    def test_serving_pods_with_no_restarts_pass_and_are_recorded(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        pod = _probe_killed_pod(plan.name)
+        pod["status"]["containerStatuses"][0]["restartCount"] = 0
+        del pod["status"]["containerStatuses"][0]["lastState"]
+        kubectl.pods = {"items": [pod]}
+
+        runner.verify_no_container_restarts(plan, record)
+
+        assert record["phase"] == "restart-audited"
+        assert record["restart_audit"] == {
+            "pods": [f"{plan.name}-5cd6678d9-rvl79"],
+            "restarted": [],
+        }
+        assert record["workload_diagnostics"][-1]["reason"] == "restart-audit"
+
+    def test_a_probe_killed_container_fails_the_leg_and_names_the_cause(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": [_probe_killed_pod(plan.name)]}
+        kubectl.nodes["i-node-g5"] = {
+            "metadata": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g5.xlarge",
+                    "eks.amazonaws.com/instance-gpu-name": "a10g",
+                }
+            }
+        }
+        kubectl.logs[(f"{plan.name}-5cd6678d9-rvl79", "inference", True)] = (
+            "SIGTERM received. signum=None frame=None. Draining requests and shutting down...\n"
+        )
+        kubectl.events = {
+            "items": [
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-5cd6678d9-rvl79"},
+                    "type": "Warning",
+                    "reason": "Unhealthy",
+                    "count": 5,
+                    "lastTimestamp": "2026-09-18T20:03:41Z",
+                    "message": (
+                        'Liveness probe failed: Get "http://10.0.11.96:30000/health": '
+                        "context deadline exceeded"
+                    ),
+                },
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-5cd6678d9-rvl79"},
+                    "type": "Normal",
+                    "reason": "Killing",
+                    "count": 1,
+                    "lastTimestamp": "2026-09-18T20:03:41Z",
+                    "message": "Container inference failed liveness probe, will be restarted",
+                },
+            ]
+        }
+
+        with pytest.raises(ManagedInferenceValidationError) as excinfo:
+            runner.verify_no_container_restarts(plan, record)
+
+        message = str(excinfo.value)
+        assert f"{plan.name}-5cd6678d9-rvl79/inference restarted 1x" in message
+        assert "last exit 0 Completed (restarts=1), on g5.xlarge/a10g" in message
+        assert record["restart_audit"]["restarted"] == [
+            f"{plan.name}-5cd6678d9-rvl79/inference restarted 1x"
+        ]
+        assert record["phase"] != "restart-audited"
+        snapshot = record["workload_diagnostics"][-1]
+        assert snapshot["reason"] == "restart-audit"
+        (container,) = snapshot["pods"][0]["containers"]
+        assert "SIGTERM received" in container["previous_log_tail"]
+        assert [event["reason"] for event in snapshot["events"]] == ["Unhealthy", "Killing"]
+
+    def test_the_audit_fails_closed_when_pods_cannot_be_listed(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.failures["pods"] = (1, "", "forbidden")
+
+        with pytest.raises(ManagedInferenceValidationError, match="could not list"):
+            runner.verify_no_container_restarts(plan, record)
+        assert "restart_audit" not in record
+
+    def test_the_audit_fails_closed_when_no_pods_exist(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": []}
+
+        with pytest.raises(ManagedInferenceValidationError, match="found no pods"):
+            runner.verify_no_container_restarts(plan, record)
+
+    def test_run_endpoint_audits_restarts_last_so_the_whole_leg_is_covered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        order: list[str] = []
+        for method in (
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_hpa_stability",
+            "verify_backend_probes",
+            "invoke",
+            "verify_no_container_restarts",
+        ):
+            monkeypatch.setattr(
+                runner,
+                method,
+                lambda plan, record, _name=method: order.append(_name),
+            )
+
+        assert runner.run_endpoint(plans[1], records[1]) is True
+
+        assert plans[1].autoscaling is True
+        assert order == [
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_hpa_stability",
+            "verify_backend_probes",
+            "invoke",
+            "verify_no_container_restarts",
+        ]
+        assert records[1]["validation_steps_complete"] is True

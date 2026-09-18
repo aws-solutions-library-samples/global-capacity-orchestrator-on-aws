@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 from kubernetes.client.rest import ApiException
 
+from gco.models.inference_models import INFERENCE_PROBE_TIMEOUT_SECONDS
 from gco.services.inference_monitor import (
     AWS_CLI_IMAGE,
     MOONCAKE_BOOTSTRAP_BASE_PORT,
@@ -1799,6 +1800,59 @@ def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
 def test_pre_ampere_affinity_is_only_rendered_for_sglang_on_nvidia(spec: dict) -> None:
     deployment = _build_deployment(_make_monitor(), spec)
     assert deployment.spec.template.spec.affinity is None
+
+
+def test_sglang_probes_outlast_the_health_endpoints_one_second_generation_floor() -> None:
+    """Every SGLang probe states a timeout above the floor; the kubelet default fails by construction.
+
+    sglang 0.5.19's ``/health`` generates one token and polls for it after
+    ``asyncio.sleep(1)``, so a healthy server answers in 1.00-1.03 s. With the
+    Kubernetes default timeout readiness flapped and liveness killed a healthy
+    A10G container every ~3 minutes in the live release validation
+    (2026-09-18): the leg still passed between restarts, which is why the
+    harness now audits restarts as well.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+    )
+    (container,) = deployment.spec.template.spec.containers
+    for probe in (container.startup_probe, container.liveness_probe, container.readiness_probe):
+        assert probe is not None
+        assert probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+        # Wider than the floor, narrower than the readiness period, so probes
+        # never queue behind each other and a hung engine is still caught.
+        assert 1 < probe.timeout_seconds < container.readiness_probe.period_seconds
+    assert INFERENCE_PROBE_TIMEOUT_SECONDS == 5
+
+
+def test_vllm_probes_state_the_same_timeout_instead_of_the_kubelet_default() -> None:
+    """vLLM's ``/health`` is immediate, but an unset timeout is the silent 1 s default.
+
+    tests/test_workload_probe_timing_contract.py holds the platform manifests to
+    "every probe declares its timeout"; the renderer's output is held to the
+    same rule there, and this pins the value it renders.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "vllm/vllm-openai:v0.11.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "facebook/opt-125m"},
+        },
+    )
+    (container,) = deployment.spec.template.spec.containers
+    assert container.startup_probe is None
+    assert container.liveness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+    assert container.readiness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
 
 
 def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
