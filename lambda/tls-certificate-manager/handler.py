@@ -33,8 +33,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.png``)
@@ -894,7 +894,7 @@ def _ensure_certificate(
     imported_arn = str(response["CertificateArn"])
     try:
         _write_certificate_registry(config, region, imported_arn)
-    except Exception:  # noqa: BLE001 - compensate every failed registry write
+    except Exception:  # compensate every failed registry write
         # A first import has no stable ARN until the registry write succeeds.
         # Delete only that newly-created certificate so a retry cannot leak an
         # undiscoverable managed certificate or create another orphan. A
@@ -902,7 +902,7 @@ def _ensure_certificate(
         if certificate_arn is None:
             try:
                 acm_client.delete_certificate(CertificateArn=imported_arn)
-            except Exception:  # noqa: BLE001 - retain the original SSM failure
+            except Exception:  # retain the original SSM failure
                 LOGGER.exception(
                     "Could not remove unregistered backend leaf certificate in %s",
                     region,

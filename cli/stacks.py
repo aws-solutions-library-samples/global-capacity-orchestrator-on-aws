@@ -74,8 +74,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -1026,7 +1026,7 @@ class StackManager:
     def _find_project_root(self) -> Path:
         """Find the project root by looking for cdk.json."""
         current = Path.cwd()
-        for parent in [current] + list(current.parents):
+        for parent in [current, *current.parents]:
             if (parent / "cdk.json").exists():
                 return parent
         return current
@@ -1400,6 +1400,7 @@ class StackManager:
                 ],
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -1482,6 +1483,7 @@ class StackManager:
                     capture_output=True,
                     text=True,
                     timeout=30,
+                    check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError("Unable to verify the npm packaging version") from exc
@@ -1507,6 +1509,7 @@ class StackManager:
                 cwd=staging_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -2507,7 +2510,7 @@ class StackManager:
         }
         try:
             from cli.images import ImageManager
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("ImageManager import failed during preflight: %s", exc)
             return inventory
 
@@ -2524,7 +2527,7 @@ class StackManager:
                 short = repo_name.removeprefix(repo_prefix)
                 try:
                     tags = manager.list_tags(short)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.debug("list_tags failed for %s: %s", repo_name, exc)
                     continue
                 inventory["tag_count"] += len(tags)
@@ -2534,13 +2537,13 @@ class StackManager:
                         inventory["total_bytes"] += size
             try:
                 inventory["endpoint_refs"] = len(manager._collect_inference_image_refs())
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("inference ref collection failed: %s", exc)
             try:
                 inventory["job_refs"] = len(manager._collect_recent_job_image_refs())
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("job ref collection failed: %s", exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Image registry inventory failed: %s", exc)
         return inventory
 
@@ -3922,7 +3925,7 @@ class StackManager:
                     repository_tags=repository_tags,
                     on_repository_created=on_repository_created,
                 )
-            except Exception as exc:  # noqa: BLE001 - surface a clear, actionable failure
+            except Exception as exc:  # surface a clear, actionable failure
                 raise RuntimeError(
                     f"Image mirror failed for region {region}: {exc}\n"
                     "volcano_image_mirror is enabled but the images could not be "
@@ -5427,7 +5430,7 @@ class StackManager:
                         continue
                     logger.warning("Could not inspect bastion ENI %s: %s", eni_id, exc)
                     return remaining
-                except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                except Exception as exc:  # cleanup is best-effort
                     logger.warning("Could not inspect bastion ENI %s: %s", eni_id, exc)
                     return remaining
 
@@ -5445,7 +5448,7 @@ class StackManager:
                             remaining.discard(eni_id)
                         else:
                             logger.debug("Delete of bastion ENI %s failed: %s", eni_id, exc)
-                    except Exception as exc:  # noqa: BLE001 - retry until timeout
+                    except Exception as exc:  # retry until timeout
                         logger.debug("Delete of bastion ENI %s failed: %s", eni_id, exc)
 
             if not remaining or _time.monotonic() >= deadline:
@@ -5517,7 +5520,7 @@ class StackManager:
                         names.extend(self._implicit_log_group_names(resource_type, physical_id))
                 if names:
                     collected[stack_name] = {"region": region, "log_groups": sorted(set(names))}
-            except Exception as exc:  # noqa: BLE001 - best-effort collection
+            except Exception as exc:  # best-effort collection
                 logger.warning("Could not derive implicit log groups for %s: %s", stack_name, exc)
         return collected
 
@@ -5556,7 +5559,7 @@ class StackManager:
                         outcome["missing"].append(f"{region}:{name}")
                     else:
                         outcome["errors"].append(f"{region}:{name}: {code}")
-                except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                except Exception as exc:  # best-effort cleanup
                     outcome["errors"].append(f"{region}:{name}: {type(exc).__name__}: {exc}")
         if outcome["deleted"]:
             print(
@@ -5585,7 +5588,7 @@ class StackManager:
         outcome: dict[str, Any] = {"deleted": [], "errors": []}
         try:
             outcome["deleted"] = TrafficDialManager(self.config).purge_runtime_parameters()
-        except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+        except Exception as exc:  # best-effort cleanup
             outcome["errors"].append(f"{type(exc).__name__}: {exc}")
         if outcome["deleted"]:
             print(
@@ -5627,7 +5630,7 @@ class StackManager:
                 profile_name,
                 self.config.global_region,
             )
-        except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+        except Exception as exc:  # best-effort cleanup
             outcome["errors"].append(f"{type(exc).__name__}: {exc}")
             return outcome
         for step in steps:
@@ -5736,7 +5739,7 @@ class StackManager:
             vpcs = ec2.describe_vpcs(
                 Filters=[{"Name": "tag:aws:cloudformation:stack-name", "Values": [stack_name]}]
             ).get("Vpcs", [])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("ENI sweep: VPC lookup failed for %s: %s", stack_name, e)
             return summary
 
@@ -5747,7 +5750,7 @@ class StackManager:
                 enis = ec2.describe_network_interfaces(
                     Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
                 ).get("NetworkInterfaces", [])
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug("ENI sweep: describe ENIs failed for %s: %s", vpc_id, e)
                 continue
 
@@ -5761,7 +5764,7 @@ class StackManager:
                         ec2.delete_network_interface(NetworkInterfaceId=eni_id)
                         summary["deleted"] += 1
                         logger.debug("ENI sweep: deleted detached ENI %s in %s", eni_id, vpc_id)
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         logger.debug("ENI sweep: delete of %s failed: %s", eni_id, e)
         return summary
 
@@ -6440,7 +6443,7 @@ _FSX_DEFAULTS: dict[str, Any] = {
 def _find_cdk_json() -> Path | None:
     """Find cdk.json in current or parent directories."""
     current = Path.cwd()
-    for parent in [current] + list(current.parents):
+    for parent in [current, *current.parents]:
         cdk_path = parent / "cdk.json"
         if cdk_path.exists():
             return cdk_path
@@ -6688,7 +6691,7 @@ _CLUSTER_OBSERVABILITY_DEFAULTS: dict[str, Any] = {
     "grafana": {
         "persistence_size": "10Gi",
         "admin_user": "admin",
-        "admin_password_rotation_schedule": "0 4 1 * *",
+        "admin_password_rotation_schedule": "0 4 1 * *",  # nosec B105  # cron schedule, not a password
     },
     "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
     "alertmanager": {"enabled": True, "persistence_size": "5Gi"},

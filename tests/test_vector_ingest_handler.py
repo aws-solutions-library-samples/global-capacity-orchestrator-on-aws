@@ -7,6 +7,7 @@
 import hashlib
 import io
 import json
+import re
 
 import pytest
 
@@ -54,7 +55,7 @@ class _FakeBedrock:
         return {"body": io.BytesIO(json.dumps({"embedding": vector}).encode())}
 
 
-@pytest.fixture()
+@pytest.fixture
 def handler(monkeypatch):
     module = load_lambda_module("vector-ingest")
     monkeypatch.setenv("VECTOR_STORE_TABLE_NAME", _TABLE)
@@ -254,7 +255,7 @@ class TestLambdaHandler:
         key = f"{_PREFIX}binary.md"
         _, dynamo, _ = _wire(handler, objects={key: b"\xff\xfe\x01"})
 
-        with pytest.raises(RuntimeError, match="binary.md"):
+        with pytest.raises(RuntimeError, match=re.escape("binary.md")):
             handler.lambda_handler(_event(key), context=None)
         assert dynamo.items == []
 

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
-_TEST_SIGNING_KEY = "test-backend-signing-key"  # nosec B105 - test fixture
+_TEST_SIGNING_KEY = "test-backend-signing-key"  # nosec B105  # test fixture
 
 
 @contextmanager

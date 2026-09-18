@@ -9,12 +9,19 @@ This directory contains Dockerfiles for the Kubernetes services deployed to the 
 
 ## Files
 
-- `health-monitor-dockerfile` - Health monitoring service that tracks cluster resource utilization
-- `manifest-processor-dockerfile` - Manifest processing service that validates and applies Kubernetes manifests
-- `inference-monitor-dockerfile` - Inference endpoint reconciliation controller that manages K8s resources from [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) state
-- `inference-proxy-dockerfile` - In-cluster proxy that routes authenticated inference requests to endpoint backends
-- `queue-processor-dockerfile` - [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) consumer that processes manifests submitted via `gco jobs submit-sqs` (KEDA ScaledJob)
-- `cost-monitor-dockerfile` - Cost reporting service that writes scheduled [OpenCost](https://opencost.io/) allocation reports (Parquet) to the central cost report bucket and serves the `/api/v1/cost/*` surface
+Every file here is named `Dockerfile.<service>`, and that name is the catalog:
+`gco/service_images.py` discovers this directory at runtime, so the regional
+stack's image assets, the CLI's shipped-image inventory and the CI build/scan
+matrix all follow from the filename with no list to keep in sync. The prefix
+also makes the files recognizable to Dockerfile tooling (`checkov`, `hadolint`)
+that keys on `Dockerfile*`.
+
+- `Dockerfile.health-monitor` - Health monitoring service that tracks cluster resource utilization
+- `Dockerfile.manifest-processor` - Manifest processing service that validates and applies Kubernetes manifests
+- `Dockerfile.inference-monitor` - Inference endpoint reconciliation controller that manages K8s resources from [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) state
+- `Dockerfile.inference-proxy` - In-cluster proxy that routes authenticated inference requests to endpoint backends
+- `Dockerfile.queue-processor` - [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) consumer that processes manifests submitted via `gco jobs submit-sqs` (KEDA ScaledJob)
+- `Dockerfile.cost-monitor` - Cost reporting service that writes scheduled [OpenCost](https://opencost.io/) allocation reports (Parquet) to the central cost report bucket and serves the `/api/v1/cost/*` surface
 
 ## Usage
 
@@ -30,3 +37,8 @@ To modify a service:
 2. Update only its matching `image-*` group in `pyproject.toml` if runtime dependencies changed.
 3. Regenerate `requirements-lock.txt` when dependency versions changed.
 4. Run `gco stacks deploy-all -y` to rebuild and deploy.
+
+To add a service, add `Dockerfile.<service>` here and its `image-<service>`
+dependency group, then build the asset in `gco/stacks/regional_stack.py` with
+`self._service_image_asset(...)`. Discovery picks the file up from there:
+`tests/test_service_images.py` and the CI container-scan matrix need no edit.

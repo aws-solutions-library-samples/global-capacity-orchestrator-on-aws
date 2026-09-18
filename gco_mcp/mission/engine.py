@@ -52,7 +52,7 @@ modules make for tools that take an injected context.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -79,8 +79,8 @@ from .types import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-03T18:56:22Z
-# Generated from Git commit: 37fd4384775eeebf18fea3e5e085cef9645077be
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``MissionEngine.run_iteration`` -> ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.png``)
@@ -159,8 +159,11 @@ SamplingCallable = Callable[..., Awaitable[Any]]
 #: optional ``children`` key lands on the Observation verbatim and whose
 #: optional ``metrics`` dict merges via ``metrics.update(...)`` — the same
 #: contract tool results use. Synchronous and pure-by-convention so the
-#: determinism suite can pin its output byte-for-byte.
-ObservationAugmenter = Callable[[SessionState], dict[str, Any]]
+#: determinism suite can pin its output byte-for-byte. The return is typed
+#: ``object`` because augmenters are caller-supplied plugins:
+#: ``_apply_observation_augmenters`` checks the shape at runtime and ignores
+#: a non-dict contribution, which the type must leave room for.
+ObservationAugmenter = Callable[[SessionState], object]
 SandboxRunner = Callable[
     [str, Any, ToolDispatcher],
     Awaitable[tuple[dict[str, Any], list[ToolCallRecord]]],
@@ -1072,7 +1075,7 @@ class MissionEngine:
         for augmenter in self.observation_augmenters:
             try:
                 contribution = augmenter(session)
-            except Exception as exc:  # noqa: BLE001 — degrade, never fail the phase
+            except Exception as exc:  # degrade, never fail the phase
                 obs.setdefault("errors", []).append(
                     {
                         "tool_name": "_observation_augmenter",
@@ -1305,7 +1308,11 @@ class MissionEngine:
     ) -> CriterionResult:
         """Dispatch to the right evaluator and produce a result row."""
         criterion_id = criterion["criterion_id"]
-        kind = criterion["kind"]
+        # Read ``kind`` as a plain ``str`` rather than the ``CriterionKind``
+        # literal: the criteria come back from the persisted session, and a
+        # malformed file can carry a kind the validator never saw. Keeping
+        # the wider type is what makes the fallback branch below reachable.
+        kind: str = criterion["kind"]
         evaluated_at = self.now().isoformat()
 
         if kind == "metric_threshold":
@@ -1323,10 +1330,10 @@ class MissionEngine:
         elif kind == "tool_call_succeeded":
             status, evidence = self._evaluate_tool_call_succeeded(criterion, observation, session)
         else:
-            # Unreachable when the validator has run — but if a
-            # malformed session somehow lands here, surface the bad
-            # kind as inconclusive rather than raising and tearing
-            # down the entire iteration.
+            # Never taken once the validator has run — but if a malformed
+            # session somehow lands here, surface the bad kind as
+            # inconclusive rather than raising and tearing down the
+            # entire iteration.
             status = "inconclusive"
             evidence = f"unknown_criterion_kind:{kind!r}"
 
@@ -1647,11 +1654,14 @@ class MissionEngine:
         return None
 
     @staticmethod
-    def _criteria_improved(
-        prior: list[CriterionResult],
-        current: list[CriterionResult],
-    ) -> bool:
-        """Return True iff any criterion went from not-met to met."""
+    def _criteria_improved(prior: Iterable[object], current: Iterable[object]) -> bool:
+        """Return True iff any criterion went from not-met to met.
+
+        Both lists are ``criteria_evaluation`` rows read back from the
+        persisted session, so they are typed as ``object`` entries and
+        every row is shape-checked: a non-dict entry (a corrupt file) is
+        skipped rather than crashing the stagnation cascade.
+        """
         prior_status = {
             result["criterion_id"]: result["status"]
             for result in prior

@@ -386,7 +386,7 @@ async def generate_sampled_plan(
             # downgrading to the deterministic plan (criteria-scaffold
             # precedent).
             raise
-        except Exception as exc:  # noqa: BLE001 — transport-agnostic catch
+        except Exception as exc:  # transport-agnostic catch
             raise SwarmScaffoldError(
                 "transport_error",
                 message=f"sampling backend raised {type(exc).__name__}: {exc}",
@@ -465,5 +465,5 @@ async def sample_revised_directive(
         raw = str(await backend.sample(_PromptAdapter("\n".join(sections))))
         candidate = raw.strip().splitlines()[0].strip() if raw.strip() else ""
         return validate_directive(candidate)
-    except Exception:  # noqa: BLE001 — advisory path degrades, never raises
+    except Exception:  # advisory path degrades, never raises
         return None

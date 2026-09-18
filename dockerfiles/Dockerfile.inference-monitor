@@ -1,13 +1,6 @@
-# Dockerfile for Queue Processor Service
-#
-# Consumes Kubernetes manifests from the regional SQS job queue and applies
-# them to the cluster. Runs as a KEDA ScaledJob pod — one pod per SQS message.
-#
-# This image is built by CDK during `gco stacks deploy` and pushed to ECR.
-# The KEDA ScaledJob manifest (post-helm-sqs-consumer.yaml) references the image URI.
-#
-# To disable the built-in queue processor, set queue_processor.enabled = false
-# in cdk.json. See docs/CUSTOMIZATION.md for details.
+# Inference Monitor Service
+# Reconciliation controller that polls DynamoDB for desired inference
+# endpoint state and creates/updates/deletes K8s resources accordingly.
 #
 # Two-stage distroless build: the pinned python slim builder installs the
 # locked dependency set and applies Debian security patches, then
@@ -16,19 +9,18 @@
 # zoneinfo, dpkg scanner metadata) that the FROM scratch runtime stage copies
 # wholesale. The deployed image contains no shell, package manager, or
 # coreutils. See the script's module docstring for the full rationale.
+# checkov:skip=CKV_DOCKER_2:Kubernetes owns this service's health contract — the
+# liveness/readiness probes in lambda/kubectl-applier-simple/manifests/ are the
+# real check, and the distroless runtime stage has no shell for a Docker
+# HEALTHCHECK to exec anyway.
 FROM python:3.14.7-slim AS builder
 
-# Set working directory
-WORKDIR /app
-
-# Apply Debian security patches at build time.
-# APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
-# trixie-security patch isn't masked by a stale cached upgrade layer;
-# bump the date when a new fix needs pulling. The patched libraries are
-# exactly what build_scratch_rootfs.py copies into the runtime rootfs, so
-# this remains the mechanism that ships fresh glibc/OpenSSL fixes.
-#
-# No OS packages are installed beyond the patched base.
+# Apply Debian security patches at build time. APT_SECURITY_EPOCH busts
+# the CI layer cache so a freshly-published trixie-security patch isn't
+# masked by a stale cached upgrade layer; bump the date when needed. The
+# patched libraries are exactly what build_scratch_rootfs.py copies into
+# the runtime rootfs, so this remains the mechanism that ships fresh
+# glibc/OpenSSL fixes.
 ARG APT_SECURITY_EPOCH=2026-09-12
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
@@ -36,16 +28,18 @@ RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
 # Install only this service's direct runtime roots. The roots live in the
-# image-queue-processor optional-dependency group; Python 3.14's tomllib emits
-# a temporary requirements file so pyproject.toml remains the sole direct-pin
-# source. requirements-lock.txt constrains the complete transitive graph.
+# image-inference-monitor optional-dependency group; Python 3.14's tomllib
+# emits a temporary requirements file so pyproject.toml remains the sole
+# direct-pin source. requirements-lock.txt constrains the transitive graph.
 #
 # pip flags + bash retry loop guard against transient PyPI/CDN drops
 # (see Dockerfile.dev for the rationale; same pattern across every
 # image build in the repo).
 COPY pyproject.toml requirements-lock.txt ./
-RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")); dependencies = config["project"]["optional-dependencies"]["image-queue-processor"]; pathlib.Path("requirements-runtime.txt").write_text("-c requirements-lock.txt\n" + "\n".join(dependencies) + "\n", encoding="utf-8")' \
+RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")); dependencies = config["project"]["optional-dependencies"]["image-inference-monitor"]; pathlib.Path("requirements-runtime.txt").write_text("-c requirements-lock.txt\n" + "\n".join(dependencies) + "\n", encoding="utf-8")' \
     && for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
@@ -72,11 +66,14 @@ RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyp
 # Keep source-only edits from invalidating the expensive dependency layer.
 COPY gco/ ./gco/
 
-# Precompile the application tree. This pod runs with
-# readOnlyRootFilesystem AND is a KEDA ScaledJob — one pod per SQS message —
-# so without build-time compilation every message paid a full from-source
-# recompile of the tree before any work started. (site-packages is already
-# compiled by pip at install time.)
+# Precompile the application tree. The pod runs with
+# readOnlyRootFilesystem, so import-time .pyc writes fail silently and
+# every pod start would otherwise re-compile every module from source;
+# compiling at build converts that recurring cost into a one-time one.
+# (site-packages is already compiled by pip at install time. Health
+# checking is owned by the kubelet exec probes in the deployment manifest —
+# ["python", "-c", ...], which needs no shell; a Docker HEALTHCHECK would
+# never be read by Kubernetes.)
 RUN python -m compileall -q ./gco
 
 # Assemble the minimal runtime rootfs under /rootfs. Fails the build loudly
@@ -90,16 +87,16 @@ RUN python /opt/build/build_scratch_rootfs.py
 
 # ---------------------------------------------------------------------------
 # Runtime stage: distroless. Only the staged rootfs ships — no shell, no
-# apt/dpkg tooling, no coreutils. The ScaledJob defines no probes or
-# lifecycle hooks, so nothing ever needs to exec into this pod.
+# apt/dpkg tooling, no coreutils. The deployment's exec probes already use
+# ["python", "-c", ...], which keeps working here.
 FROM scratch
 
 COPY --from=builder /rootfs/ /
 
 # scratch provides no environment at all, so PATH is set explicitly — CMD
-# resolves `python` through it. HOME matches the synthesized passwd entry
-# for uid 1000 (no login machinery exists to derive it).
-# PYTHONDONTWRITEBYTECODE documents that runtime bytecode writes are
+# and the kubelet exec probes resolve `python` through it. HOME matches the
+# synthesized passwd entry for uid 1000 (no login machinery exists to derive
+# it). PYTHONDONTWRITEBYTECODE documents that runtime bytecode writes are
 # neither needed (everything is precompiled) nor possible (read-only root
 # filesystem). PYTHONUNBUFFERED keeps log lines ordered and complete
 # through container runtimes and crashes.
@@ -108,6 +105,8 @@ ENV PATH=/usr/local/bin:/usr/bin:/bin \
     PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+ENV RECONCILE_INTERVAL_SECONDS=15
+ENV INFERENCE_NAMESPACE=gco-inference
 
 WORKDIR /app
 
@@ -126,7 +125,7 @@ USER gco
 # tooling; a delete in a later layer would merely hide it, layers being
 # additive.
 RUN --mount=type=bind,from=builder,source=/opt/build,target=/opt/build \
-    ["python", "/opt/build/runtime_smoke.py", "gco.services.queue_processor"]
+    ["python", "/opt/build/runtime_smoke.py", "gco.services.inference_monitor"]
 
-# Run the queue processor
-CMD ["python", "-m", "gco.services.queue_processor"]
+# Run the inference monitor
+CMD ["python", "-m", "gco.services.inference_monitor"]

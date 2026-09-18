@@ -174,7 +174,7 @@ class _MonitoringStack:
         self.destroyed = True
 
 
-@pytest.fixture()
+@pytest.fixture
 def monitoring_stacks(verified_floci_endpoint):
     """Factory for monitoring stacks; every stack it made is destroyed after the test."""
     created: list[_MonitoringStack] = []
@@ -199,7 +199,7 @@ class _OpenCostStub(BaseHTTPRequestHandler):
         "data": [{"gco-jobs": {"name": "gco-jobs", "cpuCost": 1.5, "totalCost": 1.5}}],
     }
 
-    def do_GET(self):  # noqa: N802 - http.server API
+    def do_GET(self):  # http.server API
         body = json.dumps(self.payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -211,7 +211,7 @@ class _OpenCostStub(BaseHTTPRequestHandler):
         return
 
 
-@pytest.fixture()
+@pytest.fixture
 def opencost_stub():
     server = HTTPServer(("127.0.0.1", 0), _OpenCostStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

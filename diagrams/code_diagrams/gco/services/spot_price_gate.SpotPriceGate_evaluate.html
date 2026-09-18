@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="410bcd6ed308fe9b">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="793e71a338dda1ad">
         <title>Spot price gate (unknown/malformed/above-cap dispatch policy)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,52 +208,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op8151=>operation: "Evaluate one queue record's gate; ``None`` means the job is ungated.\n\n        Malformed gate fields on a stored record gate the job closed (with a\n        descriptive reason) rather than dispatching a job whose cap cannot be\n        honored.\n        "
-op8153=>operation: raw_price = job.get('spot_max_price')
-op8155=>operation: instance_type = job.get('spot_instance_type')
-cond8158=>condition: if raw_price is None and instance_type is None
-io8165=>inputoutput: output: None
-e8163=>end: end function return
-op8174=>operation: max_price = float(str(raw_price))
-cond8171=>condition: exception raised?
-cond8176=>condition: except (TypeError, ValueError)
-op8180=>operation: max_price = float('nan')
-cond8186=>condition: if not isinstance(instance_type, str) or not instance_type or (not math.isfinite(max_price))
-io8193=>inputoutput: output: SpotGateDecision(gated=True, instance_type=str(instance_type or ''), max_price=0.0, observed_price=None, reason='spot gate fields are malformed; refusing to dispatch')
-e8191=>end: end function return
-op8199=>operation: observed = self.current_min_spot_price(instance_type)
-cond8202=>condition: if observed is None
-io8209=>inputoutput: output: SpotGateDecision(gated=True, instance_type=instance_type, max_price=max_price, observed_price=None, reason=f'current spot price for {instance_type} in {self.region} is unavailable; deferring')
-e8207=>end: end function return
-cond8216=>condition: if observed > max_price
-io8223=>inputoutput: output: SpotGateDecision(gated=True, instance_type=instance_type, max_price=max_price, observed_price=observed, reason=f'spot price {observed:.4f} USD/h for {instance_type} in {self.region} is above the {max_price:.4f} USD/h cap')
-e8221=>end: end function return
-io8232=>inputoutput: output: SpotGateDecision(gated=False, instance_type=instance_type, max_price=max_price, observed_price=observed, reason=f'spot price {observed:.4f} USD/h for {instance_type} in {self.region} clears the {max_price:.4f} USD/h cap')
-e8230=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op5678=>operation: "Evaluate one queue record's gate; ``None`` means the job is ungated.\n\n        Malformed gate fields on a stored record gate the job closed (with a\n        descriptive reason) rather than dispatching a job whose cap cannot be\n        honored.\n        "
+op5680=>operation: raw_price = job.get('spot_max_price')
+op5682=>operation: instance_type = job.get('spot_instance_type')
+cond5685=>condition: if raw_price is None and instance_type is None
+io5692=>inputoutput: output: None
+e5690=>end: end function return
+op5701=>operation: max_price = float(str(raw_price))
+cond5698=>condition: exception raised?
+cond5703=>condition: except (TypeError, ValueError)
+op5707=>operation: max_price = float('nan')
+cond5713=>condition: if not isinstance(instance_type, str) or not instance_type or (not math.isfinite(max_price))
+io5720=>inputoutput: output: SpotGateDecision(gated=True, instance_type=str(instance_type or ''), max_price=0.0, observed_price=None, reason='spot gate fields are malformed; refusing to dispatch')
+e5718=>end: end function return
+op5726=>operation: observed = self.current_min_spot_price(instance_type)
+cond5729=>condition: if observed is None
+io5736=>inputoutput: output: SpotGateDecision(gated=True, instance_type=instance_type, max_price=max_price, observed_price=None, reason=f'current spot price for {instance_type} in {self.region} is unavailable; deferring')
+e5734=>end: end function return
+cond5743=>condition: if observed > max_price
+io5750=>inputoutput: output: SpotGateDecision(gated=True, instance_type=instance_type, max_price=max_price, observed_price=observed, reason=f'spot price {observed:.4f} USD/h for {instance_type} in {self.region} is above the {max_price:.4f} USD/h cap')
+e5748=>end: end function return
+io5759=>inputoutput: output: SpotGateDecision(gated=False, instance_type=instance_type, max_price=max_price, observed_price=observed, reason=f'spot price {observed:.4f} USD/h for {instance_type} in {self.region} clears the {max_price:.4f} USD/h cap')
+e5757=>end: end function return
 
-op8151->op8153
-op8153->op8155
-op8155->cond8158
-cond8158(yes)->io8165
-io8165->e8163
-cond8158(no)->op8174
-op8174->cond8171
-cond8171(yes)->cond8176
-cond8176(yes)->op8180
-op8180->cond8186
-cond8186(yes)->io8193
-io8193->e8191
-cond8186(no)->op8199
-op8199->cond8202
-cond8202(yes)->io8209
-io8209->e8207
-cond8202(no)->cond8216
-cond8216(yes)->io8223
-io8223->e8221
-cond8216(no)->io8232
-io8232->e8230
-cond8176(no)->cond8186
-cond8171(no)->cond8186
+op5678->op5680
+op5680->op5682
+op5682->cond5685
+cond5685(yes)->io5692
+io5692->e5690
+cond5685(no)->op5701
+op5701->cond5698
+cond5698(yes)->cond5703
+cond5703(yes)->op5707
+op5707->cond5713
+cond5713(yes)->io5720
+io5720->e5718
+cond5713(no)->op5726
+op5726->cond5729
+cond5729(yes)->io5736
+io5736->e5734
+cond5729(no)->cond5743
+cond5743(yes)->io5750
+io5750->e5748
+cond5743(no)->io5759
+io5759->e5757
+cond5703(no)->cond5713
+cond5698(no)->cond5713
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -263,17 +263,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>410bcd6ed308fe9b</code>
+            Flow content SHA-256: <code>793e71a338dda1ad</code>
           </p>
           <div id="canvas"></div>
         </div>

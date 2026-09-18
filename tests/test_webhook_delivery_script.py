@@ -41,7 +41,7 @@ import pytest
 
 # Import the module under test.
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-import test_webhook_delivery as harness  # noqa: E402 - sys.path set above
+import test_webhook_delivery as harness  # sys.path set above
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +93,7 @@ class TestWebhookHandler:
                 method="POST",
             )
             # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 - loopback only
+            with urllib.request.urlopen(req, timeout=5) as resp:  # loopback only
                 assert resp.status == 200
                 assert resp.headers["Content-Type"] == "application/json"
                 assert json.loads(resp.read()) == {"status": "received"}
@@ -130,7 +130,7 @@ class TestWebhookHandler:
                 method="POST",
             )
             # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 assert resp.status == 200
         finally:
             server.shutdown()
@@ -500,7 +500,7 @@ class TestLocalServerFlow:
 
 class TestExternalUrlFlow:
     @pytest.fixture(autouse=True)
-    def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    def no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         """The flow pauses one second between events; make that instantaneous."""
         sleep = AsyncMock(return_value=None)
         monkeypatch.setattr(harness, "asyncio", SimpleNamespace(sleep=sleep))
@@ -510,7 +510,7 @@ class TestExternalUrlFlow:
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        _no_real_sleep: AsyncMock,
+        no_real_sleep: AsyncMock,
     ) -> None:
         url = "https://webhook.example.invalid/abc"
         results = {
@@ -546,8 +546,8 @@ class TestExternalUrlFlow:
         assert failed["conditions"] == ["Failed"] and failed["failed"] == 1
         assert failed["completion_time"] is not None
 
-        assert _no_real_sleep.await_count == 3
-        _no_real_sleep.assert_awaited_with(1)
+        assert no_real_sleep.await_count == 3
+        no_real_sleep.assert_awaited_with(1)
 
         out = capsys.readouterr().out
         assert "WEBHOOK DELIVERY TEST - EXTERNAL URL" in out

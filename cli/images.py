@@ -38,6 +38,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from gco.service_images import discover_service_dockerfiles
+
 from ._container_runtime import detect_container_runtime
 from ._image_uri import (
     aws_partition,
@@ -49,8 +51,8 @@ from ._image_uri import (
 from .config import GCOConfig, _load_cdk_json, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-13T13:44:22Z
-# Generated from Git commit: c49331669c66625fecfecf44ae6ab5f95afbfcb4
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)
@@ -83,23 +85,15 @@ _TAG_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$")
 # one account+region get isolated ECR namespaces (#139). Resolved per-instance
 # from ``config.project_name`` into ``self._repo_prefix`` in ``__init__``.
 
-# First-party images that GCO builds and ships itself, as opposed to
-# the user images pushed through ``build``/``push``. Each entry pairs
-# the logical image name (which becomes the ``gco/<name>`` ECR
-# repository suffix) with the Dockerfile under ``dockerfiles/`` that
-# produces it. Listing these here lets callers enumerate the shipped
-# images and resolve any one of them to its registry URI by name,
-# the same way the platform services (health-monitor,
-# manifest-processor, queue-processor, inference-monitor,
-# inference-proxy) are built from their matching
-# ``dockerfiles/<name>-dockerfile``.
-_MAINTAINED_IMAGES: dict[str, str] = {
-    "health-monitor": "dockerfiles/health-monitor-dockerfile",
-    "manifest-processor": "dockerfiles/manifest-processor-dockerfile",
-    "queue-processor": "dockerfiles/queue-processor-dockerfile",
-    "inference-monitor": "dockerfiles/inference-monitor-dockerfile",
-    "inference-proxy": "dockerfiles/inference-proxy-dockerfile",
-}
+# First-party images that GCO builds and ships itself, as opposed to the user
+# images pushed through ``build``/``push``. Each entry pairs the logical image
+# name (which becomes the ``gco/<name>`` ECR repository suffix) with the
+# Dockerfile that produces it, and the mapping is *discovered* from
+# ``dockerfiles/Dockerfile.<name>`` rather than typed out: the previous
+# hand-kept list had already drifted (it was missing cost-monitor), so the
+# filenames are the single source of truth shared with the regional stack and
+# the CI build/scan matrix. See ``gco.service_images``.
+_MAINTAINED_IMAGES: dict[str, str] = discover_service_dockerfiles()
 
 # Default image served by disaggregated prefill/decode deployments when the
 # operator does not supply one. As of this tag the upstream vLLM OpenAI server
@@ -437,10 +431,11 @@ class ImageManager:
         build_cmd.append(str(ctx))
 
         logger.info("Building image: %s", " ".join(build_cmd))
-        build_run_kwargs: dict[str, Any] = {"check": True, "cwd": str(ctx)}
+        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx)}
         if quiet:
             build_run_kwargs.update(capture_output=True, text=True)
-        subprocess.run(build_cmd, **build_run_kwargs)
+        # check=True: a failed build must not fall through to the push below.
+        subprocess.run(build_cmd, check=True, **build_run_kwargs)
 
         push_result = subprocess.run(
             [runtime, "push", full_uri],
@@ -494,10 +489,11 @@ class ImageManager:
 
         full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
-        tag_run_kwargs: dict[str, Any] = {"check": True}
+        tag_run_kwargs: dict[str, Any] = {}
         if quiet:
             tag_run_kwargs.update(capture_output=True, text=True)
-        subprocess.run([runtime, "tag", local_image, full_uri], **tag_run_kwargs)
+        # check=True: a failed tag must not fall through to the push below.
+        subprocess.run([runtime, "tag", local_image, full_uri], check=True, **tag_run_kwargs)
         push_result = subprocess.run(
             [runtime, "push", full_uri],
             capture_output=True,
@@ -535,7 +531,7 @@ class ImageManager:
                 size = details[0].get("imageSizeInBytes")
                 if isinstance(size, int):
                     return size
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("describe_images for size lookup failed: %s", e)
         return None
 
@@ -574,7 +570,7 @@ class ImageManager:
             for page in paginator.paginate(repositoryName=repository_name):
                 count += len(page.get("imageDetails", []))
             return count
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("describe_images count for %s failed: %s", repository_name, e)
             return 0
 
@@ -1110,13 +1106,13 @@ class ImageManager:
         """Return every image URI referenced by a registered inference endpoint."""
         try:
             from .inference import InferenceManager
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("InferenceManager unavailable: %s", e)
             return set()
         try:
             manager = InferenceManager(self.config)
             endpoints = manager.list_endpoints()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("list_endpoints failed: %s", e)
             return set()
         refs: set[str] = set()
@@ -1147,19 +1143,19 @@ class ImageManager:
         """
         try:
             from .jobs import JobManager
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("JobManager unavailable: %s", e)
             return set()
 
         try:
             manager = JobManager(self.config)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("JobManager init failed: %s", e)
             return set()
 
         try:
             jobs = manager.list_jobs(all_regions=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("list_jobs(all_regions=True) failed: %s", e)
             return set()
 

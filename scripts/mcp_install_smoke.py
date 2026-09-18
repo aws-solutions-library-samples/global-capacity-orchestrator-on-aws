@@ -19,7 +19,7 @@ import gco_mcp.cli_runner as cli_runner
 import gco_mcp.run_mcp as run_mcp
 
 bindir = str(Path(sys.executable).parent)
-pkg = gco_mcp.__file__ or (list(gco_mcp.__path__)[0] if gco_mcp.__path__ else "")
+pkg = gco_mcp.__file__ or (next(iter(gco_mcp.__path__)) if gco_mcp.__path__ else "")
 mcp_file = mcp.__file__ or ""
 gco_exe = cli_runner._gco_executable()
 

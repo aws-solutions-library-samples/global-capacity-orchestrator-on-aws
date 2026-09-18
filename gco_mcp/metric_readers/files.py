@@ -306,7 +306,7 @@ def _handle_parquet(content: bytes, field: str, mode: str) -> float:
 
     try:
         frame = pd.read_parquet(io.BytesIO(content))
-    except Exception as exc:  # noqa: BLE001 - any pandas/pyarrow read failure is a malformed file
+    except Exception as exc:  # any pandas/pyarrow read failure is a malformed file
         raise shape.MetricReaderError(
             shape.ErrorCode.MALFORMED_FILE,
             {"format": "parquet"},
@@ -355,7 +355,7 @@ def _handle_tfevents(content: bytes, field: str, mode: str) -> float:
             handle.write(content)
         try:
             frame = SummaryReader(event_path, pivot=False).scalars
-        except Exception as exc:  # noqa: BLE001 - any tbparse read failure is a malformed file
+        except Exception as exc:  # any tbparse read failure is a malformed file
             raise shape.MetricReaderError(
                 shape.ErrorCode.MALFORMED_FILE,
                 {"format": "tfevents"},

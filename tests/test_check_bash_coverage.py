@@ -28,7 +28,8 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
-import subprocess  # nosec B404 - fixed argv, no shell: builds a throwaway git repo
+import re
+import subprocess  # fixed argv, no shell: builds a throwaway git repo
 import sys
 import tomllib
 from pathlib import Path
@@ -77,7 +78,7 @@ def _fake_repo(tmp_path: Path, scripts: dict[str, str]) -> Path:
         [GIT, "config", "user.name", "t"],
         [GIT, "add", "-A"],
     ):
-        subprocess.run(argv, cwd=root, check=True, capture_output=True)  # nosec B603
+        subprocess.run(argv, cwd=root, check=True, capture_output=True)
     return root
 
 
@@ -131,7 +132,7 @@ def test_find_report_rejects_a_missing_path(tmp_path: Path) -> None:
 
 
 def test_find_report_rejects_a_directory_with_no_resultset(tmp_path: Path) -> None:
-    with pytest.raises(checker.ReportError, match="no .resultset.json"):
+    with pytest.raises(checker.ReportError, match=re.escape("no .resultset.json")):
         checker.find_report(tmp_path)
 
 
@@ -537,7 +538,7 @@ def test_classify_scripts_rejects_a_tracked_script_it_cannot_read(tmp_path: Path
     inventory = checker.tracked_shell_scripts(root)
     assert inventory == ["a.sh"]
     (root / "a.sh").unlink()
-    with pytest.raises(checker.ReportError, match="could not read tracked script a.sh"):
+    with pytest.raises(checker.ReportError, match=re.escape("could not read tracked script a.sh")):
         checker.classify_scripts(root, inventory)
 
 

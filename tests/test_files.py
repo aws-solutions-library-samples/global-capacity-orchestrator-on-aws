@@ -8,7 +8,7 @@ DataSync transfers, and error paths lives in test_files_extended.py.
 """
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -61,7 +61,7 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         "remote_path",
-        ("../var/run/secrets", "results/../../etc", "./results"),
+        ["../var/run/secrets", "results/../../etc", "./results"],
     )
     def test_storage_path_rejects_non_descendant_segments(self, remote_path: str):
         from cli.files import _storage_remote_path
@@ -71,7 +71,7 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         "remote_path",
-        (r"..\..\etc", r"folder\file"),
+        [r"..\..\etc", r"folder\file"],
     )
     def test_storage_path_rejects_kubectl_backslash_reinterpretation(self, remote_path: str):
         from cli.files import _storage_remote_path
@@ -81,11 +81,11 @@ class TestStorageHelperHardening:
 
     @pytest.mark.parametrize(
         ("value", "field", "allow_subdomains"),
-        (
+        [
             ("gco-jobs\nspec: {}", "namespace", False),
             ("pod:name", "pod_name", True),
             ("UPPERCASE", "pvc_name", True),
-        ),
+        ],
     )
     def test_kubernetes_names_reject_manifest_and_file_spec_injection(
         self, value: str, field: str, allow_subdomains: bool
@@ -150,7 +150,7 @@ class TestFileSystemInfo:
             mount_target_ip="10.0.1.100",
             size_bytes=1200 * 1024 * 1024 * 1024,
             status="available",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
             tags={"Environment": "production"},
         )
 
@@ -205,7 +205,8 @@ class TestFileSystemClient:
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 client = FileSystemClient()
-                assert client.config is not None
+                assert client.config is mock_config.return_value
+                assert client._aws_client is mock_aws.return_value
 
     def test_get_file_systems_empty(self):
         """Test getting file systems when none exist."""
@@ -301,7 +302,7 @@ class TestFileSystemClientEFS:
                                 "FileSystemId": "fs-12345678",
                                 "LifeCycleState": "available",
                                 "SizeInBytes": {"Value": 1024000},
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                             }
                         ]
                     }
@@ -366,7 +367,7 @@ class TestFileSystemClientFSx:
                                 "DNSName": "fs-abcdef12.fsx.us-east-1.amazonaws.com",
                                 "StorageCapacity": 1200,
                                 "Lifecycle": "AVAILABLE",
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                                 "Tags": [{"Key": "Name", "Value": "test-fsx"}],
                             }
                         ]
@@ -507,7 +508,7 @@ class TestFileSystemClientEFSDetailed:
                                 "FileSystemId": "fs-12345",
                                 "LifeCycleState": "available",
                                 "SizeInBytes": {"Value": 1024000},
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                             }
                         ]
                     }
@@ -553,7 +554,7 @@ class TestFileSystemClientFSxDetailed:
                                 "DNSName": "fs-lustre-123.fsx.us-east-1.amazonaws.com",
                                 "Lifecycle": "AVAILABLE",
                                 "StorageCapacity": 1200,
-                                "CreationTime": datetime(2024, 1, 1),
+                                "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
                                 "Tags": [{"Key": "Name", "Value": "gco-fsx"}],
                             }
                         ]
@@ -679,7 +680,7 @@ class TestFileSystemInfoDataclass:
 
         from cli.files import FileSystemInfo
 
-        now = datetime.now()
+        now = datetime.now(UTC)
         info = FileSystemInfo(
             file_system_id="fs-123",
             file_system_type="fsx",

@@ -125,7 +125,7 @@ class _CallableCollector(Collector):
         )
         try:
             reported = self._metrics_fn() or {}
-        except Exception:  # noqa: BLE001 - a scrape must never crash the service
+        except Exception:  # a scrape must never crash the service
             reported = {}
         for key, value in reported.items():
             if isinstance(value, bool):

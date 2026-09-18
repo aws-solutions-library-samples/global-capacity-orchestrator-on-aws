@@ -430,24 +430,24 @@ if is_enabled(FLAG_SWARM):
         plan: list[dict[str, Any]] | None = None
         fallback_reason: str | None = None
         if use_resolved:
+            # Bedrock is the only sampling transport, so resolving a backend
+            # always succeeds; an unreachable model surfaces from the sample
+            # call itself and lands in the scaffold error below.
             backend_obj = mission_sampling.select_sampling_backend(None)
-            if backend_obj is not None:
-                try:
-                    plan = await swarm_scaffold.generate_sampled_plan(
-                        backend_obj,
-                        directive_clean,
-                        config=config,
-                        registered_tools=registered_tools,
-                        registered_tags=registered_tags,
-                        tool_docstrings=docstrings,
-                        max_children=max_children,
-                        tool_allowlist=(None if allow_all_tools else tool_allowlist or None),
-                        retries=retries,
-                    )
-                except swarm_scaffold.SwarmScaffoldError as err:
-                    fallback_reason = err.last_reason
-            else:
-                fallback_reason = "sampling_backend_unavailable"
+            try:
+                plan = await swarm_scaffold.generate_sampled_plan(
+                    backend_obj,
+                    directive_clean,
+                    config=config,
+                    registered_tools=registered_tools,
+                    registered_tags=registered_tags,
+                    tool_docstrings=docstrings,
+                    max_children=max_children,
+                    tool_allowlist=(None if allow_all_tools else tool_allowlist or None),
+                    retries=retries,
+                )
+            except swarm_scaffold.SwarmScaffoldError as err:
+                fallback_reason = err.last_reason
         if plan is None:
             try:
                 plan = swarm_scaffold.generate_deterministic_plan(

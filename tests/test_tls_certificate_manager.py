@@ -572,7 +572,10 @@ def test_cleanup_rejects_malformed_registry_before_mutation(invalid_entry: str) 
         patch.object(handler, "_load_root_state", return_value=None),
         patch.object(handler.boto3, "client", return_value=ssm),
         patch.object(handler, "_delete_regional_certificate") as delete_region,
-        pytest.raises(ValueError),
+        pytest.raises(
+            ValueError,
+            match=r"Invalid ACM certificate ARN stored for eu-west-1|Malformed certificate registry parameter name",
+        ),
     ):
         handler._cleanup(config)
 
@@ -582,14 +585,14 @@ def test_cleanup_rejects_malformed_registry_before_mutation(invalid_entry: str) 
 
 @pytest.mark.parametrize(
     "tags",
-    (
+    [
         [],
         [{"Key": "Project", "Value": "another-project"}],
         [
             {"Key": "Project", "Value": "gco-test"},
             {"Key": "ManagedBy", "Value": "another-manager"},
         ],
-    ),
+    ],
     ids=("absent", "wrong-project", "wrong-manager"),
 )
 def test_cleanup_rejects_unowned_registry_before_any_mutation(tags) -> None:
@@ -929,10 +932,10 @@ def test_from_event_falls_back_to_environment_for_scheduled_events() -> None:
 
 @pytest.mark.parametrize(
     ("regions", "message"),
-    (
+    [
         ("us-west-2", "Regions must be a list"),
         (["us-west-2", "not a region"], "valid AWS workload region names"),
-    ),
+    ],
     ids=("string", "invalid-entry"),
 )
 def test_from_event_rejects_invalid_region_lists(regions, message: str) -> None:
@@ -979,7 +982,7 @@ def test_from_event_falls_back_to_the_environment_region_list() -> None:
 
 @pytest.mark.parametrize(
     ("overrides", "message"),
-    (
+    [
         ({"server_name": "not a dns name"}, "ServerName must be a valid private DNS name"),
         ({"registry_region": "nowhere"}, "RegistryRegion must be a valid AWS region"),
         ({"project_name": ""}, "ProjectName is required"),
@@ -1004,7 +1007,7 @@ def test_from_event_falls_back_to_the_environment_region_list() -> None:
             "RootValidityDays must exceed LeafValidityDays",
         ),
         ({"root_overlap_days": 30}, "RootOverlapDays must exceed LeafValidityDays"),
-    ),
+    ],
     ids=(
         "server-name",
         "registry-region",
@@ -1027,7 +1030,7 @@ def test_validate_rejects_unsafe_certificate_policy(overrides, message: str) -> 
 
 
 @pytest.mark.parametrize(
-    "value", ("abc", None, "0", -4, 0), ids=("text", "none", "zero-str", "negative", "zero")
+    "value", ["abc", None, "0", -4, 0], ids=("text", "none", "zero-str", "negative", "zero")
 )
 def test_positive_int_rejects_non_positive_values(value) -> None:
     """Policy integers must be strictly positive whatever their source type."""
@@ -1073,11 +1076,11 @@ def test_now_returns_timezone_aware_utc() -> None:
 
 @pytest.mark.parametrize(
     ("value", "message"),
-    (
+    [
         (None, "pending.activate_after is missing"),
         (12345, "pending.activate_after is missing"),
         ("yesterday", "pending.activate_after is not an ISO timestamp"),
-    ),
+    ],
     ids=("none", "number", "text"),
 )
 def test_parse_iso_rejects_malformed_timestamps(value, message: str) -> None:
@@ -1103,7 +1106,7 @@ def test_parse_iso_normalises_naive_and_offset_timestamps_to_utc() -> None:
 def test_certificate_not_after_falls_back_to_naive_attribute() -> None:
     """Certificates without ``not_valid_after_utc`` are treated as UTC."""
     handler = load_lambda_module("tls-certificate-manager")
-    certificate = SimpleNamespace(not_valid_after=datetime(2028, 6, 1, 8, 30))
+    certificate = SimpleNamespace(not_valid_after=datetime(2028, 6, 1, 8, 30, tzinfo=UTC))
 
     assert handler._certificate_not_after(certificate) == datetime(2028, 6, 1, 8, 30, tzinfo=UTC)
 
@@ -1198,11 +1201,11 @@ def test_load_root_state_propagates_unexpected_secret_errors() -> None:
 
 @pytest.mark.parametrize(
     ("secret_string", "message"),
-    (
+    [
         ("{not json", "Root CA secret contains invalid JSON"),
         (json.dumps(["list"]), "Root CA secret has an unsupported schema"),
         (json.dumps({"schema_version": 99, "current": {}}), "unsupported schema"),
-    ),
+    ],
     ids=("invalid-json", "not-an-object", "wrong-schema-version"),
 )
 def test_load_root_state_rejects_unreadable_secrets(secret_string: str, message: str) -> None:
@@ -1221,7 +1224,7 @@ def test_load_root_state_rejects_unreadable_secrets(secret_string: str, message:
 
 @pytest.mark.parametrize(
     ("pending_generation", "published"),
-    ((None, False), (2, False), (2, True)),
+    [(None, False), (2, False), (2, True)],
     ids=("no-pending", "pending-unpublished", "pending-published"),
 )
 def test_load_root_state_returns_validated_state(pending_generation, published: bool) -> None:
@@ -1252,14 +1255,14 @@ def test_load_root_state_returns_validated_state(pending_generation, published: 
 
 @pytest.mark.parametrize(
     ("mutation", "message"),
-    (
+    [
         ({"previous": "none"}, "previous must be a list"),
         ({"previous": [{"retire_after": "2027-01-01T00:00:00Z"}]}, r"previous\[0\]"),
         ({"retired_regions": "eu-west-1"}, "retired_regions"),
         ({"retired_regions": ["eu-west-1", "eu-west-1"]}, "retired_regions"),
         ({"retired_regions": ["not-a-region"]}, "retired_regions"),
         ({"pending": {"generation": 2}}, "pending key or certificate is missing"),
-    ),
+    ],
     ids=(
         "previous-not-list",
         "previous-entry-without-pem",
@@ -1304,7 +1307,7 @@ def test_save_root_state_writes_compact_json_to_the_root_secret() -> None:
     )
 
 
-@pytest.mark.parametrize("with_pending", (False, True), ids=("current-only", "with-pending"))
+@pytest.mark.parametrize("with_pending", [False, True], ids=("current-only", "with-pending"))
 def test_publish_trust_bundle_concatenates_public_roots_only(with_pending: bool) -> None:
     """The SSM bundle lists current, pending, and previous roots; never a key."""
     handler = load_lambda_module("tls-certificate-manager")
@@ -1564,7 +1567,7 @@ def test_generate_leaf_never_outlives_the_root() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    (None, 42, "arn:aws:acm:us-east-1:123456789012:certificate/wrong-region", "certificate/x"),
+    [None, 42, "arn:aws:acm:us-east-1:123456789012:certificate/wrong-region", "certificate/x"],
     ids=("none", "number", "other-region", "not-an-arn"),
 )
 def test_validated_certificate_arn_rejects_foreign_values(value) -> None:
@@ -1589,7 +1592,7 @@ def test_validated_certificate_arn_strips_surrounding_whitespace() -> None:
 
 @pytest.mark.parametrize(
     ("tags", "message"),
-    (
+    [
         ({"Key": "Project"}, "malformed certificate tags"),
         (["Project=gco-test"], "malformed certificate tag"),
         ([{"Key": 1, "Value": "gco-test"}], "malformed certificate tag"),
@@ -1598,7 +1601,7 @@ def test_validated_certificate_arn_strips_surrounding_whitespace() -> None:
             [{"Key": "Project", "Value": "a"}, {"Key": "Project", "Value": "b"}],
             "malformed certificate tag",
         ),
-    ),
+    ],
     ids=("not-a-list", "entry-not-object", "key-not-str", "value-not-str", "duplicate-key"),
 )
 def test_certificate_tags_rejects_malformed_acm_responses(tags, message: str) -> None:
@@ -1647,14 +1650,14 @@ def test_managed_root_certificates_includes_pending_and_previous_roots() -> None
 
 @pytest.mark.parametrize(
     ("previous", "message"),
-    (
+    [
         (["pem"], r"previous\[0\]$"),
         ([{"certificate_pem": None}], r"previous\[0\]$"),
         (
             [{"certificate_pem": "-----BEGIN CERTIFICATE-----\nnope\n"}],
             r"previous\[0\] certificate",
         ),
-    ),
+    ],
     ids=("entry-not-object", "pem-not-str", "pem-malformed"),
 )
 def test_managed_root_certificates_rejects_malformed_previous_roots(previous, message) -> None:
@@ -1945,7 +1948,7 @@ def test_registered_certificate_rejects_missing_certificate_body() -> None:
         handler._registered_certificate(config, "us-west-2")
 
 
-@pytest.mark.parametrize("defect", ("foreign-root", "wrong-server-name"))
+@pytest.mark.parametrize("defect", ["foreign-root", "wrong-server-name"])
 def test_registered_certificate_refuses_unproven_legacy_leaf(defect: str) -> None:
     """Legacy leaves are tagged only when both SAN and signature match."""
     handler = load_lambda_module("tls-certificate-manager")
@@ -2162,14 +2165,14 @@ def test_unsupported_request_type_is_rejected_after_config_validation() -> None:
 
 @pytest.mark.parametrize(
     ("properties", "message"),
-    (
+    [
         (None, "OldResourceProperties must be an object"),
         ({}, r"OldResourceProperties\.Regions must be a list"),
         ({"Regions": "us-west-2"}, r"Regions must be a list"),
         ({"Regions": ["us-west-2", 7]}, "contains an invalid region"),
         ({"Regions": ["us-west-2", "US-WEST-2"]}, "contains an invalid region"),
         ({"Regions": ["us-west-2", " us-west-2 "]}, "contains a duplicate region"),
-    ),
+    ],
     ids=(
         "not-object",
         "missing-regions",
@@ -2244,7 +2247,7 @@ def test_delete_parameter_ignores_missing_but_raises_other_errors() -> None:
 
 @pytest.mark.parametrize(
     ("responses", "message"),
-    (
+    [
         ([{"Parameters": "nope"}], "returned malformed parameters"),
         ([{"Parameters": ["nope"]}], "contains a malformed entry"),
         ([{"Parameters": [{"Name": 7, "Value": "x"}]}], "outside the project prefix"),
@@ -2275,7 +2278,7 @@ def test_delete_parameter_ignores_missing_but_raises_other_errors() -> None:
             [{"Parameters": [], "NextToken": "page"}, {"Parameters": [], "NextToken": "page"}],
             "invalid pagination token",
         ),
-    ),
+    ],
     ids=(
         "parameters-not-list",
         "entry-not-object",
@@ -2378,7 +2381,7 @@ def test_delete_regional_certificate_tolerates_already_deleted_certificate() -> 
 
 @pytest.mark.parametrize(
     ("code", "defer_in_use"),
-    (("ResourceInUseException", False), ("AccessDeniedException", True)),
+    [("ResourceInUseException", False), ("AccessDeniedException", True)],
     ids=("in-use-on-delete-event", "unexpected-error"),
 )
 def test_delete_regional_certificate_raises_when_it_cannot_defer(

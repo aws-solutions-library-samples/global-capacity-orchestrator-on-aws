@@ -23,7 +23,7 @@ from scripts.live_release_validation.emulator import (
 from scripts.live_release_validation.runner import require_local_execution
 
 
-@pytest.fixture()
+@pytest.fixture
 def emulator_env(monkeypatch):
     monkeypatch.setenv("AWS_ENDPOINT_URL", "http://127.0.0.1:4566")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "911111111111")

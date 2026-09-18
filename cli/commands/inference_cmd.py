@@ -22,7 +22,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def inference(config: Any) -> None:
     """Manage multi-region inference endpoints."""
-    pass
 
 
 @inference.command("deploy")
@@ -879,7 +878,7 @@ def inference_invoke(
                                 models_data = models_resp.json().get("data", [])
                                 if models_data:
                                     model_name = models_data[0]["id"]
-                        except Exception:
+                        except Exception:  # nosec B110  # discovery is best-effort
                             pass  # Fall through to endpoint_name as model
                 body = {
                     "model": model_name,

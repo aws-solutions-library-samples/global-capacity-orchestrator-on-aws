@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
-from tools import _long_task as long_task  # noqa: E402
+from tools import _long_task as long_task
 
 
 class _ChunkStream:
@@ -448,7 +448,7 @@ class TestMockedRunnerLifecycle:
         monkeypatch.setattr(long_task, "make_task_id", lambda _tool: "pid-failed")
         monkeypatch.setattr(long_task.asyncio, "create_subprocess_exec", fake_spawn)
 
-        with pytest.raises(RuntimeError, match="x{20}"):
+        with pytest.raises(RuntimeError, match=r"x{20}"):
             await long_task._run_long_task(
                 ["command"],
                 ctx=_Context(),

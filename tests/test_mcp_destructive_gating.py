@@ -30,7 +30,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring the other test modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 # Names that should appear when ``GCO_ENABLE_ALL_TOOLS=true`` is the only
 # flag set. Sourced from the design's enumeration table — every gated tool

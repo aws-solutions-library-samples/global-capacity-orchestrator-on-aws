@@ -27,7 +27,7 @@ Key capabilities:
 - DynamoDB-backed desired state with continuous reconciliation
 - Rolling updates, scaling, stop/start without losing configuration
 - Global Accelerator routing to the nearest healthy region
-- Support for [vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [TorchServe](https://pytorch.org/serve/), and [SGLang](https://docs.sglang.ai/) out of the box
+- Support for [vLLM](https://docs.vllm.ai/en/latest/), [TGI](https://huggingface.co/docs/text-generation-inference), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html), [TorchServe](https://docs.pytorch.org/serve/), and [SGLang](https://docs.sglang.ai/) out of the box
 
 ## Architecture
 
@@ -277,11 +277,11 @@ GCO works with any containerized inference server. These frameworks have example
 
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
-| vLLM | `vllm/vllm-openai:v0.29.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
-| TGI | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
-| Triton | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
-| TorchServe | `pytorch/torchserve:latest-gpu` | 8080 | `/ping` | PyTorch model serving |
-| SGLang | `lmsysorg/sglang:v0.5.19` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
+| [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.29.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
+| [TGI](https://huggingface.co/docs/text-generation-inference) ([example](../examples/inference-tgi.yaml)) | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
+| [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
+| [TorchServe](https://docs.pytorch.org/serve/) ([example](../examples/inference-torchserve.yaml)) | `pytorch/torchserve:0.12.0-gpu` | 8080 | `/ping` | PyTorch model serving |
+| [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.19` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 
 ### vLLM Example
 
@@ -322,7 +322,7 @@ gco inference deploy triton-models \
 
 ```bash
 gco inference deploy torchserve-resnet \
-  -i pytorch/torchserve:latest-gpu \
+  -i pytorch/torchserve:0.12.0-gpu \
   --port 8080 \
   --health-path /ping \
   --gpu-count 1 \

@@ -80,7 +80,7 @@ async def _scheduled_report_loop(monitor: CostMonitor, stop: asyncio.Event) -> N
             await asyncio.to_thread(monitor.run_scheduled_once)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 - the loop must survive any pass failure
+        except Exception as exc:  # the loop must survive any pass failure
             logger.warning("Scheduled cost report pass failed: %s", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=_SCHEDULER_TICK_SECONDS)
@@ -164,7 +164,7 @@ async def list_reports(
         reports = await asyncio.to_thread(monitor.list_reports, adhoc=adhoc, limit=limit)
     except CostReportBucketUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - surface S3 failures as 502
+    except Exception as exc:  # surface S3 failures as 502
         raise HTTPException(status_code=502, detail=f"Failed to list reports: {exc}") from exc
     return {
         "timestamp": datetime.now(UTC).isoformat(),
@@ -221,7 +221,7 @@ def _run_server() -> None:
     """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
+    host = os.getenv("HOST", "0.0.0.0")  # container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     graceful_shutdown_seconds = int(

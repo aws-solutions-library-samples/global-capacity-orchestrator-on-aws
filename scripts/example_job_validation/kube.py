@@ -235,6 +235,7 @@ def ensure_cluster_access_entry(
         text=True,
         env=_environment_with_kubeconfig(kubeconfig_path),
         shell=False,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"gco stacks access failed for {region}: {result.stderr.strip()[:500]}")
@@ -293,6 +294,9 @@ def cluster_session(
                 kubeconfig_path,
                 caller_environment,
             )
+            # The runner returns (code, stdout, stderr) and callers branch on
+            # the code, so a non-zero exit is data here, never an exception.
+            kwargs.pop("check", None)
             result = subprocess.run(
                 command,
                 capture_output=True,
@@ -300,6 +304,7 @@ def cluster_session(
                 timeout=timeout,
                 env=environment,
                 shell=False,
+                check=False,
                 **kwargs,
             )
             return result.returncode, result.stdout, result.stderr

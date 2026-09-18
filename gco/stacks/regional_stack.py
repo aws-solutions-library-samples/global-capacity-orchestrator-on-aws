@@ -61,7 +61,8 @@ Dependencies:
 
 Modification Guide:
     - To add a new NodePool: add a YAML manifest in lambda/kubectl-applier-simple/manifests/ (40-49 range)
-    - To add a new service: add ECR image build here, Dockerfile in dockerfiles/, manifest in manifests/
+    - To add a new service: add dockerfiles/Dockerfile.<service> (discovery picks it up),
+      call ``self._service_image_asset`` here, add a manifest in manifests/
     - To add a new optional feature: add a cdk.json context toggle, guard with if/else in this file
     - To change EKS version: update KUBERNETES_VERSION in constants.py
 """
@@ -75,7 +76,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import aws_cdk.aws_eks_v2 as eks
 import yaml
@@ -118,6 +119,7 @@ from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
+from gco.service_images import discover_service_dockerfiles, service_dockerfile
 from gco.stacks.aws_load_balancer_controller_policy import (
     aws_load_balancer_controller_policy_document,
 )
@@ -142,8 +144,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T06:04:03Z
-# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -290,14 +292,10 @@ def _mlflow_allowed_hosts(vpc_endpoint_cidrs: list[str]) -> str:
     return ",".join(dict.fromkeys([*_MLFLOW_SERVICE_HOSTS, *_MLFLOW_TUNNEL_HOSTS, *patterns]))
 
 
-_SERVICE_IMAGE_BUILD_INPUTS = (
-    "dockerfiles/health-monitor-dockerfile",
-    "dockerfiles/manifest-processor-dockerfile",
-    "dockerfiles/inference-proxy-dockerfile",
-    "dockerfiles/inference-monitor-dockerfile",
-    "dockerfiles/queue-processor-dockerfile",
-    "dockerfiles/cost-monitor-dockerfile",
-)
+#: Every service Dockerfile in the tree, discovered rather than listed, so a
+#: new ``dockerfiles/Dockerfile.<service>`` is excluded from the *other*
+#: services' asset hashes without anyone remembering to add it here.
+_SERVICE_IMAGE_BUILD_INPUTS = tuple(discover_service_dockerfiles().values())
 _SERVICE_IMAGE_COMMON_EXCLUDES = (
     "cli/**",
     "gco/stacks/**",
@@ -305,11 +303,10 @@ _SERVICE_IMAGE_COMMON_EXCLUDES = (
 )
 
 
-def _service_image_asset_excludes(*included_paths: str) -> list[str]:
+def _service_image_asset_excludes(included_path: str) -> list[str]:
     """Exclude inputs that cannot affect one production service image."""
-    included = set(included_paths)
     return list(_SERVICE_IMAGE_COMMON_EXCLUDES) + [
-        path for path in _SERVICE_IMAGE_BUILD_INPUTS if path not in included
+        path for path in _SERVICE_IMAGE_BUILD_INPUTS if path != included_path
     ]
 
 
@@ -1260,6 +1257,25 @@ class GCORegionalStack(Stack):
         reader.node.add_dependency(self.aws_custom_resource_role)
         return str(reader.get_response_field("Parameter.Value"))
 
+    def _service_image_asset(self, construct_id: str, service: str) -> ecr_assets.DockerImageAsset:
+        """Build one platform service image from ``dockerfiles/Dockerfile.<service>``.
+
+        The build context is the repository root because every service image
+        ``COPY``s shared ``gco/`` code, and the exclude list drops the inputs
+        that cannot affect this service so an unrelated edit does not churn
+        its asset hash. All images target AMD64 (x86_64) to match EKS Auto
+        Mode's default system nodepool.
+        """
+        dockerfile = service_dockerfile(service)
+        return ecr_assets.DockerImageAsset(
+            self,
+            construct_id,
+            directory=".",
+            file=dockerfile,
+            platform=ecr_assets.Platform.LINUX_AMD64,
+            exclude=_service_image_asset_excludes(dockerfile),
+        )
+
     def _create_container_images(self) -> None:
         """Build the platform service images as CDK Docker image assets.
 
@@ -1272,45 +1288,17 @@ class GCORegionalStack(Stack):
         and delete on every deploy.
         """
 
-        # All Docker images target AMD64 (x86_64) to match EKS Auto Mode's
-        # default system nodepool.
-
-        # Build and push health monitor Docker image
-        self.health_monitor_image = ecr_assets.DockerImageAsset(
-            self,
-            "HealthMonitorImage",
-            directory=".",  # Root directory
-            file="dockerfiles/health-monitor-dockerfile",
-            platform=ecr_assets.Platform.LINUX_AMD64,
-            exclude=_service_image_asset_excludes(
-                "dockerfiles/health-monitor-dockerfile",
-            ),
+        self.health_monitor_image = self._service_image_asset(
+            "HealthMonitorImage", "health-monitor"
         )
-
-        # Build and push manifest processor Docker image
-        self.manifest_processor_image = ecr_assets.DockerImageAsset(
-            self,
-            "ManifestProcessorImage",
-            directory=".",
-            file="dockerfiles/manifest-processor-dockerfile",
-            platform=ecr_assets.Platform.LINUX_AMD64,
-            exclude=_service_image_asset_excludes(
-                "dockerfiles/manifest-processor-dockerfile",
-            ),
+        self.manifest_processor_image = self._service_image_asset(
+            "ManifestProcessorImage", "manifest-processor"
         )
-
-        # Build the inference-only data-plane proxy image. Keeping this
-        # separate from manifest-processor prevents model traffic from
-        # sharing its Kubernetes API/RBAC and queue-worker process surface.
-        self.inference_proxy_image = ecr_assets.DockerImageAsset(
-            self,
-            "InferenceProxyImage",
-            directory=".",
-            file="dockerfiles/inference-proxy-dockerfile",
-            platform=ecr_assets.Platform.LINUX_AMD64,
-            exclude=_service_image_asset_excludes(
-                "dockerfiles/inference-proxy-dockerfile",
-            ),
+        # The inference-only data-plane proxy is its own image. Keeping it
+        # separate from manifest-processor prevents model traffic from sharing
+        # its Kubernetes API/RBAC and queue-worker process surface.
+        self.inference_proxy_image = self._service_image_asset(
+            "InferenceProxyImage", "inference-proxy"
         )
 
         # Output image URIs for reference
@@ -1335,16 +1323,8 @@ class GCORegionalStack(Stack):
             description="Inference Proxy Docker image URI",
         )
 
-        # Build and push inference monitor Docker image
-        self.inference_monitor_image = ecr_assets.DockerImageAsset(
-            self,
-            "InferenceMonitorImage",
-            directory=".",
-            file="dockerfiles/inference-monitor-dockerfile",
-            platform=ecr_assets.Platform.LINUX_AMD64,
-            exclude=_service_image_asset_excludes(
-                "dockerfiles/inference-monitor-dockerfile",
-            ),
+        self.inference_monitor_image = self._service_image_asset(
+            "InferenceMonitorImage", "inference-monitor"
         )
 
         CfnOutput(
@@ -1363,15 +1343,8 @@ class GCORegionalStack(Stack):
         self.queue_processor_enabled = queue_processor_config.get("enabled", True)
 
         if self.queue_processor_enabled:
-            self.queue_processor_image = ecr_assets.DockerImageAsset(
-                self,
-                "QueueProcessorImage",
-                directory=".",
-                file="dockerfiles/queue-processor-dockerfile",
-                platform=ecr_assets.Platform.LINUX_AMD64,
-                exclude=_service_image_asset_excludes(
-                    "dockerfiles/queue-processor-dockerfile",
-                ),
+            self.queue_processor_image = self._service_image_asset(
+                "QueueProcessorImage", "queue-processor"
             )
 
             CfnOutput(
@@ -1386,16 +1359,7 @@ class GCORegionalStack(Stack):
         # deployments' synth/deploy time unchanged (same gating rationale as
         # the queue processor above).
         if self._cost_monitoring_active():
-            self.cost_monitor_image = ecr_assets.DockerImageAsset(
-                self,
-                "CostMonitorImage",
-                directory=".",
-                file="dockerfiles/cost-monitor-dockerfile",
-                platform=ecr_assets.Platform.LINUX_AMD64,
-                exclude=_service_image_asset_excludes(
-                    "dockerfiles/cost-monitor-dockerfile",
-                ),
-            )
+            self.cost_monitor_image = self._service_image_asset("CostMonitorImage", "cost-monitor")
 
             CfnOutput(
                 self,
@@ -1740,7 +1704,7 @@ class GCORegionalStack(Stack):
     # validation run sched241-350ffc7d caught exactly that (two g4dn.xlarge
     # NodeClaims requesting ``nvidia.com/gpu: "0"``, churned mid-install,
     # failing GPU DaemonSet convergence checks).
-    _ADDON_NODE_TOLERATIONS = [
+    _ADDON_NODE_TOLERATIONS: ClassVar[list[dict[str, str]]] = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "vpc.amazonaws.com/efa", "operator": "Exists", "effect": "NoSchedule"},

@@ -134,7 +134,7 @@ def _make_ga_endpoint(endpoint_id: str, *, healthy: bool = True) -> dict:
 
 class TestEksAuthentication:
     @pytest.mark.parametrize(
-        "region,sts_endpoint,signed_url",
+        ("region", "sts_endpoint", "signed_url"),
         [
             (
                 "cn-north-1",
@@ -254,7 +254,7 @@ class TestGatewayStatusDiscovery:
         )
 
     @pytest.mark.parametrize(
-        "status,payload",
+        ("status", "payload"),
         [
             (404, {}),
             (200, _gateway_payload()),
@@ -558,7 +558,7 @@ class TestExactTagFallback:
         assert result == (None, None, None)
 
     @pytest.mark.parametrize(
-        "lb_type,scheme",
+        ("lb_type", "scheme"),
         [("network", "internal"), ("application", "internet-facing")],
     )
     def test_rejects_non_internal_albs(self, ga_module, lb_type, scheme):

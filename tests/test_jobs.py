@@ -46,8 +46,8 @@ class TestJobInfo:
             namespace="gco-jobs",
             region="us-east-1",
             status="succeeded",
-            start_time=datetime(2024, 1, 1, 10, 0, 0),
-            completion_time=datetime(2024, 1, 1, 10, 30, 0),
+            start_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
+            completion_time=datetime(2024, 1, 1, 10, 30, 0, tzinfo=UTC),
             succeeded_pods=1,
         )
 
@@ -110,7 +110,10 @@ class TestJobManager:
             with patch("cli.jobs.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 manager = JobManager()
-                assert manager.config is not None
+                assert manager.config is mock_config.return_value
+                # The AWS client is built for the resolved config, not a fresh lookup.
+                mock_aws.assert_called_once_with(mock_config.return_value)
+                assert manager._aws_client is mock_aws.return_value
 
 
 class TestJobManagerManifestLoading:
@@ -838,8 +841,8 @@ class TestJobInfoProperties:
 
         from cli.jobs import JobInfo
 
-        start = datetime(2024, 1, 1, 0, 0, 0)
-        end = datetime(2024, 1, 1, 0, 5, 0)  # 5 minutes later
+        start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 0, 5, 0, tzinfo=UTC)  # 5 minutes later
 
         job = JobInfo(
             name="test-job",
@@ -1476,26 +1479,19 @@ class TestJobManagerQueryJobsInRegion:
 
         assert result == []
 
-    def test_query_jobs_in_region_list_response(self):
-        """Test querying jobs when API returns list directly."""
+    def test_query_jobs_in_region_envelope_without_jobs_key(self):
+        """An envelope that carries no ``jobs`` key (an empty page) yields no jobs."""
         from unittest.mock import MagicMock
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        # Some APIs might return a list directly instead of {"jobs": [...]}
-        manager._aws_client.get_jobs.return_value = [
-            {
-                "metadata": {"name": "job1", "namespace": "default"},
-                "spec": {},
-                "status": {"active": 1},
-            }
-        ]
+        manager._aws_client.get_jobs.return_value = {"total": 0, "count": 0}
 
         result = manager._query_jobs_in_region("us-east-1", None, None)
 
-        assert len(result) == 1
+        assert result == []
 
 
 # =============================================================================

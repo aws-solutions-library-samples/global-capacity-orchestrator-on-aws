@@ -9,7 +9,7 @@ every Kubernetes client used by the handlers. Authentication is bypassed
 explicitly because its cryptographic behavior has dedicated tests.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -61,8 +61,8 @@ class TestGetJobEventsEndpoint:
         mock_event.reason = "SuccessfulCreate"
         mock_event.message = "Created pod: test-job-abc123"
         mock_event.count = 1
-        mock_event.first_timestamp = datetime(2024, 1, 1, 0, 0, 0)
-        mock_event.last_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_event.first_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        mock_event.last_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_event.source.component = "job-controller"
         mock_event.source.host = None
         mock_event.involved_object.kind = "Job"
@@ -150,7 +150,7 @@ class TestGetJobPodsEndpoint:
         mock_pod = MagicMock()
         mock_pod.metadata.name = "test-job-abc123"
         mock_pod.metadata.namespace = "default"
-        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_pod.metadata.labels = {"job-name": "test-job"}
         mock_pod.metadata.uid = "pod-uid"
         mock_pod.spec.node_name = "node-1"
@@ -159,7 +159,7 @@ class TestGetJobPodsEndpoint:
         mock_pod.status.phase = "Running"
         mock_pod.status.host_ip = "10.0.0.1"
         mock_pod.status.pod_ip = "10.0.1.1"
-        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_pod.status.container_statuses = []
         mock_pod.status.init_container_statuses = []
 
@@ -1301,7 +1301,7 @@ class TestHelperFunctions:
         mock_pod = MagicMock()
         mock_pod.metadata.name = "test-pod"
         mock_pod.metadata.namespace = "default"
-        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_pod.metadata.labels = {"app": "test"}
         mock_pod.metadata.uid = "pod-uid"
         mock_pod.spec.node_name = "node-1"
@@ -1310,7 +1310,7 @@ class TestHelperFunctions:
         mock_pod.status.phase = "Running"
         mock_pod.status.host_ip = "10.0.0.1"
         mock_pod.status.pod_ip = "10.0.1.1"
-        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_pod.status.container_statuses = []
         mock_pod.status.init_container_statuses = []
 
@@ -1327,7 +1327,7 @@ class TestHelperFunctions:
         mock_pod = MagicMock()
         mock_pod.metadata.name = "test-pod"
         mock_pod.metadata.namespace = "default"
-        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_pod.metadata.labels = {}
         mock_pod.metadata.uid = "pod-uid"
         mock_pod.spec.node_name = "node-1"
@@ -1336,7 +1336,7 @@ class TestHelperFunctions:
         mock_pod.status.phase = "Running"
         mock_pod.status.host_ip = "10.0.0.1"
         mock_pod.status.pod_ip = "10.0.1.1"
-        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0)
+        mock_pod.status.start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
 
         # Mock container status
         mock_cs = MagicMock()
@@ -1345,7 +1345,7 @@ class TestHelperFunctions:
         mock_cs.restart_count = 0
         mock_cs.image = "test:latest"
         mock_cs.state.running = MagicMock()
-        mock_cs.state.running.started_at = datetime(2024, 1, 1, 0, 0, 0)
+        mock_cs.state.running.started_at = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_cs.state.waiting = None
         mock_cs.state.terminated = None
         mock_pod.status.container_statuses = [mock_cs]
@@ -1366,8 +1366,8 @@ class TestHelperFunctions:
         mock_event.reason = "Created"
         mock_event.message = "Created pod"
         mock_event.count = 1
-        mock_event.first_timestamp = datetime(2024, 1, 1, 0, 0, 0)
-        mock_event.last_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_event.first_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        mock_event.last_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_event.source.component = "kubelet"
         mock_event.source.host = "node-1"
         mock_event.involved_object.kind = "Pod"

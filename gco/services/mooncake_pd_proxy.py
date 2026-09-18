@@ -55,8 +55,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: affbf6eccf3773dc3cfeac202e2cc6cbf92d4fc7
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``_dispatch`` -> ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.png``)
@@ -166,7 +166,7 @@ async def _prime_prefill(path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp.raise_for_status()
         data = resp.json()
         return data.get("kv_transfer_params") or {}
-    except Exception as exc:  # noqa: BLE001 - priming is best-effort
+    except Exception as exc:  # priming is best-effort
         logger.warning("prefill priming failed; decode will serve directly: %s", exc)
         return {}
 

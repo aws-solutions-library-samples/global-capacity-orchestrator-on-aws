@@ -52,8 +52,8 @@ from server import mcp
 # metric_readers`` resolves the same way regardless of entrypoint.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from metric_readers import aggregate, cloudwatch, files, localfs, logs  # noqa: E402
-from metric_readers.shape import (  # noqa: E402
+from metric_readers import aggregate, cloudwatch, files, localfs, logs
+from metric_readers.shape import (
     ErrorCode,
     MetricReaderError,
     default_metric_key,
@@ -161,7 +161,7 @@ async def metrics_cloudwatch_get(
         )
     except MetricReaderError as err:
         return error_envelope(err.code, **(err.details or {}))
-    except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
+    except Exception as exc:  # no exception may escape the tool boundary
         # Catch-all for the CloudWatch reader maps to the unreachable class so
         # the criterion is left inconclusive rather than crashing the loop.
         return error_envelope(
@@ -316,7 +316,7 @@ async def metrics_from_job_logs(
         )
     except MetricReaderError as err:
         return error_envelope(err.code, **(err.details or {}))
-    except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
+    except Exception as exc:  # no exception may escape the tool boundary
         return error_envelope(
             ErrorCode.LOG_RETRIEVAL_FAILED,
             kind="unreachable",
@@ -444,7 +444,7 @@ async def metrics_from_shared_storage_file(
         )
     except MetricReaderError as err:
         return error_envelope(err.code, **(err.details or {}))
-    except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
+    except Exception as exc:  # no exception may escape the tool boundary
         # Catch-all for the file reader maps to the unreadable class.
         return error_envelope(
             ErrorCode.FILE_NOT_FOUND,
@@ -584,7 +584,7 @@ if is_enabled(FLAG_LOCAL_METRICS):
             )
         except MetricReaderError as err:
             return error_envelope(err.code, **(err.details or {}))
-        except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
+        except Exception as exc:  # no exception may escape the tool boundary
             # Catch-all for the local-file reader maps to the unreadable class
             # so the criterion is left inconclusive rather than crashing
             # the loop.

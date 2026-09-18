@@ -31,7 +31,7 @@ pytestmark = floci_test_markers()
 _REGION = "us-east-1"
 
 
-@pytest.fixture()
+@pytest.fixture
 def project(verified_floci_endpoint):
     """A uniquely named GCO config whose regional stack name is ``<project>-us-east-1``."""
     from cli.config import GCOConfig
@@ -46,7 +46,7 @@ def project(verified_floci_endpoint):
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def ec2(verified_floci_endpoint):
     return boto3.client("ec2", region_name=_REGION)
 

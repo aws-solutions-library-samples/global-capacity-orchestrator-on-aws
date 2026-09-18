@@ -87,8 +87,8 @@ from gco.services.leader_lease import (
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T22:27:39Z
-# Generated from Git commit: 5d1a9122b6630246e01cafdaf458d11c2da8b4ae
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``WebhookDispatcher._deliver_webhook`` -> ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.png``)
@@ -564,7 +564,7 @@ class WebhookDispatcher:
             self._deliveries_failed += 1
             logger.info("Webhook delivery cancelled: webhook_id=%s", webhook_id)
             raise
-        except Exception as exc:  # noqa: BLE001 — sanitize the logical delivery boundary
+        except Exception as exc:  # sanitize the logical delivery boundary
             last_error = f"Delivery failure: {type(exc).__name__}"
             logger.error(
                 "Webhook delivery raised: webhook_id=%s error_type=%s",
@@ -781,10 +781,13 @@ class WebhookDispatcher:
                 # Run the synchronous watch in a thread executor
                 events = await asyncio.to_thread(self._sync_watch_jobs)
 
-                # Process collected events
+                # Process collected events. ``stop()`` flips ``_running`` from
+                # another task while this one is awaiting the watch thread, so
+                # the flag is re-read per event; mypy still sees the ``while``
+                # condition's narrowing and calls the re-check unreachable.
                 for event_type, job in events:
                     if not self._running:
-                        break
+                        break  # type: ignore[unreachable]
 
                     try:
                         await self._process_job_event(event_type, job)

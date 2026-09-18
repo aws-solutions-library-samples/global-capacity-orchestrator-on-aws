@@ -501,9 +501,9 @@ gco jobs policy --region us-east-1
 
 # 3. Narrow to a specific layer (all three must pass: front-door caps,
 #    per-container LimitRange, aggregate ResourceQuota)
-gco jobs policy -r us-east-1 -o json | jq '.policy.manifest_caps'
-gco jobs policy -r us-east-1 -o json | jq '.policy.allowed_namespaces'
-gco jobs policy -r us-east-1 -o json | jq '.cluster_enforcement'
+gco -o json jobs policy -r us-east-1 | jq '.policy.manifest_caps'
+gco -o json jobs policy -r us-east-1 | jq '.policy.allowed_namespaces'
+gco -o json jobs policy -r us-east-1 | jq '.cluster_enforcement'
 ```
 
 **Resolution:**

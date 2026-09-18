@@ -26,9 +26,9 @@ import pytest
 # Match the import pattern used by every other Mission test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import validation  # noqa: E402
-from mission.engine import MissionEngine  # noqa: E402
-from mission.validation import MissionValidationError  # noqa: E402
+from mission import validation
+from mission.engine import MissionEngine
+from mission.validation import MissionValidationError
 
 
 def _session_with_metric_iterations(values: list[float | str], key: str = "loss") -> dict:

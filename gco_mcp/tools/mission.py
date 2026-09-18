@@ -14,7 +14,7 @@ import contextlib
 import json
 import secrets
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -118,9 +118,7 @@ if is_enabled(FLAG_MISSION):
         """
         return mission_validation.strip_private_fields(session)
 
-    def _strip_private_fields_iterations(
-        iterations: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
+    def _strip_private_fields_iterations(iterations: Iterable[object]) -> list[Any]:
         """Strip private keys from each iteration's ``criteria_evaluation`` shape.
 
         Thin alias over
@@ -137,7 +135,7 @@ if is_enabled(FLAG_MISSION):
     # ``GCO_ENABLE_MISSION`` gate. We keep a thin alias here so call
     # sites in this module stay readable without having to spell out
     # the long import path.
-    from mission._engine_factory import build_mission_engine as _build_engine  # noqa: PLC0415
+    from mission._engine_factory import build_mission_engine as _build_engine
 
     # ------------------------------------------------------------------ #
     # mission_start
@@ -638,7 +636,7 @@ if is_enabled(FLAG_MISSION):
         when the table/index is absent or still backfilling,
         ``mission_memory_search_failed`` for anything else.
         """
-        from mission.memory import (  # noqa: PLC0415
+        from mission.memory import (
             MissionMemoryStore,
             MissionMemoryUnavailableError,
         )
@@ -654,7 +652,7 @@ if is_enabled(FLAG_MISSION):
                     "details": {"message": str(err)},
                 }
             )
-        except Exception as err:  # noqa: BLE001 — tool surface must envelope, not raise
+        except Exception as err:  # tool surface must envelope, not raise
             return json.dumps(
                 {
                     "code": "mission_memory_search_failed",

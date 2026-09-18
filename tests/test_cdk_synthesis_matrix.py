@@ -171,7 +171,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         api_gateway_stack.add_stack_dependency(analytics_stack)
 
 
-@pytest.mark.parametrize("config_name,overrides", CONFIGS, ids=[c[0] for c in CONFIGS])
+@pytest.mark.parametrize(("config_name", "overrides"), CONFIGS, ids=[c[0] for c in CONFIGS])
 def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
     """Every config in the shared matrix must synthesize without raising."""
     from cli.stacks import cdk_asset_consumer

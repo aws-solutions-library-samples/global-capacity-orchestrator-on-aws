@@ -17,9 +17,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from mission.final_report import build_deterministic_report  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from test_swarm_runner import (  # noqa: E402
+from mission.final_report import build_deterministic_report
+from mission.state import FilesystemBackend
+from test_swarm_runner import (
     child_request,
     make_orchestrator,
     make_runner,

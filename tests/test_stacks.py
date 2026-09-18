@@ -12,6 +12,7 @@ module-level runtime cache so tests run in any order.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -312,10 +313,10 @@ class TestStackManager:
             with (
                 patch("os.path.exists", return_value=False),
                 patch("pathlib.Path.is_file", return_value=False),
-                pytest.raises(CdkToolchainError, match="npm ci"),
             ):
                 manager = StackManager(config)
-                manager._find_cdk()
+                with pytest.raises(CdkToolchainError, match="npm ci"):
+                    manager._find_cdk()
 
 
 class TestCdkAssetConsumerLocking:
@@ -648,7 +649,7 @@ class TestStackInfo:
 
     def test_stack_info_creation(self):
         """Test creating StackInfo."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackInfo
 
@@ -656,7 +657,7 @@ class TestStackInfo:
             name="test-stack",
             status="CREATE_COMPLETE",
             region="us-east-1",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
         )
 
         assert info.name == "test-stack"
@@ -665,7 +666,7 @@ class TestStackInfo:
 
     def test_stack_info_to_dict(self):
         """Test StackInfo to_dict method."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackInfo
 
@@ -673,7 +674,7 @@ class TestStackInfo:
             name="test-stack",
             status="CREATE_COMPLETE",
             region="us-east-1",
-            created_time=datetime(2024, 1, 1, 10, 0, 0),
+            created_time=datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC),
             outputs={"OutputKey": "OutputValue"},
             tags={"Environment": "test"},
         )
@@ -745,7 +746,7 @@ class TestFsxConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             get_fsx_config()
 
@@ -806,7 +807,7 @@ class TestFsxConfig:
 
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             update_fsx_config({"enabled": True})
 
@@ -1062,7 +1063,7 @@ class TestStackManagerOperations:
 
     @pytest.mark.parametrize(
         "command",
-        (["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]),
+        [["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]],
     )
     def test_run_cdk_prepares_assets_for_app_commands(self, command):
         """Every CDK subcommand that evaluates app.py prepares ignored assets."""
@@ -1707,7 +1708,7 @@ class TestStackManagerOrchestrated:
             mock_preflight.return_value = True  # preflight passes
 
             manager = StackManager(config)
-            success, successful, failed = manager.destroy_orchestrated(force=True)
+            success, _successful, _failed = manager.destroy_orchestrated(force=True)
 
             assert success is True
             assert mock_destroy.call_count >= 2
@@ -2104,7 +2105,7 @@ class TestParallelDeployment:
             mock_deploy.return_value = True
 
             manager = StackManager(config)
-            success, successful, failed = manager.deploy_orchestrated(
+            success, _successful, _failed = manager.deploy_orchestrated(
                 require_approval=False,
                 parallel=True,  # Even with parallel=True
             )
@@ -2528,31 +2529,38 @@ class TestDiagnoseDeployFailure:
         assert "delete-stack" in output
         assert "gco-monitoring" in output
 
-    def test_handles_api_error_gracefully(self):
+    def test_handles_api_error_gracefully(self, capsys):
+        """A CloudFormation client failure is swallowed: no exception, no partial diagnostics."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager.__new__(StackManager)
         manager.config = config
         manager.project_root = Path(".")
-
         with (
             patch.object(manager, "_get_deploy_region", return_value="us-east-2"),
-            patch("boto3.client", side_effect=Exception("API error")),
+            patch("boto3.client", side_effect=Exception("API error")) as client,
         ):
-            # Should not raise
-            manager._diagnose_deploy_failure("gco-monitoring")
+            assert manager._diagnose_deploy_failure("gco-monitoring") is None
+        # The diagnosis was attempted against the resolved Region and gave up
+        # quietly: best-effort diagnostics never add noise to the CDK error.
+        client.assert_called_once_with("cloudformation", region_name="us-east-2")
+        assert capsys.readouterr().out == ""
 
     def test_skips_when_no_region(self):
+        """Without a resolvable Region there is nothing to query, so no client is built."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager.__new__(StackManager)
         manager.config = config
         manager.project_root = Path(".")
-
-        with patch.object(manager, "_get_deploy_region", return_value=None):
-            manager._diagnose_deploy_failure("unknown-stack")
+        with (
+            patch.object(manager, "_get_deploy_region", return_value=None),
+            patch("boto3.client") as client,
+        ):
+            assert manager._diagnose_deploy_failure("unknown-stack") is None
+        client.assert_not_called()
 
     @staticmethod
     def _rolled_back_create_events(stack_name: str) -> list[dict]:
@@ -3050,7 +3058,7 @@ class TestStackManagerDeployWithOptions:
                 parameters={"Param1": "Value1"},
                 tags={"Env": "test"},
                 progress="bar",
-                output_dir="/tmp/cdk-out",  # nosec B108 - test fixture using temp directory
+                output_dir="/tmp/cdk-out",  # nosec B108  # test fixture using temp directory
             )
 
             assert result is True
@@ -3102,7 +3110,7 @@ class TestStackManagerDestroyWithOptions:
             result = manager.destroy(
                 stack_name="test-stack",
                 force=True,
-                output_dir="/tmp/cdk-out",  # nosec B108 - test fixture using temp directory
+                output_dir="/tmp/cdk-out",  # nosec B108  # test fixture using temp directory
             )
 
             assert result is True
@@ -3662,7 +3670,7 @@ class TestStackManagerOrchestratedParallel:
             mock_deploy.side_effect = deploy_side_effect
 
             manager = StackManager(config)
-            success, successful, failed = manager.deploy_orchestrated(
+            success, _successful, failed = manager.deploy_orchestrated(
                 require_approval=False,
                 parallel=True,
             )
@@ -3676,7 +3684,7 @@ class TestStackManagerGetStackStatus:
 
     def test_get_stack_status_success(self):
         """Test successful stack status retrieval."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from cli.stacks import StackManager
 
@@ -3690,8 +3698,8 @@ class TestStackManagerGetStackStatus:
                     {
                         "StackName": "test-stack",
                         "StackStatus": "CREATE_COMPLETE",
-                        "CreationTime": datetime(2024, 1, 1),
-                        "LastUpdatedTime": datetime(2024, 1, 2),
+                        "CreationTime": datetime(2024, 1, 1, tzinfo=UTC),
+                        "LastUpdatedTime": datetime(2024, 1, 2, tzinfo=UTC),
                         "Outputs": [{"OutputKey": "Key1", "OutputValue": "Value1"}],
                         "Tags": [{"Key": "Env", "Value": "test"}],
                     }

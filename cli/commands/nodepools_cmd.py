@@ -15,7 +15,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def nodepools(config: Any) -> None:
     """Manage Karpenter NodePools with ODCR/Capacity Reservation support."""
-    pass
 
 
 @nodepools.command("create-odcr")

@@ -19,7 +19,6 @@ def templates(config: Any) -> None:
     Templates are reusable job configurations stored in DynamoDB.
     They support parameter substitution using {{parameter}} syntax.
     """
-    pass
 
 
 @templates.command("list")

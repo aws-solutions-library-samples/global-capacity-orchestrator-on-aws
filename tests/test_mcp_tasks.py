@@ -33,8 +33,8 @@ import pytest
 # tests/test_mcp_feature_flags.py.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import cli_runner  # noqa: E402
-from tools._long_task import _run_long_task  # noqa: E402
+import cli_runner
+from tools._long_task import _run_long_task
 
 
 class _FakeProgress(dict):
@@ -165,15 +165,13 @@ async def test_run_long_task_cancellation_includes_disclaimer() -> None:
     await asyncio.sleep(0.5)
     coro_task.cancel()
 
-    try:
+    with pytest.raises(asyncio.CancelledError) as excinfo:
         await coro_task
-    except asyncio.CancelledError as e:
-        assert e.args, "expected CancelledError to carry a disclaimer message"
-        msg = str(e.args[0])
-        assert "Partial CloudFormation state may remain" in msg, msg
-        assert "stack_status" in msg, msg
-    else:
-        pytest.fail("expected CancelledError, got clean completion")
+    e = excinfo.value
+    assert e.args, "expected CancelledError to carry a disclaimer message"
+    msg = str(e.args[0])
+    assert "Partial CloudFormation state may remain" in msg, msg
+    assert "stack_status" in msg, msg
 
 
 # Path-traversal rejection test

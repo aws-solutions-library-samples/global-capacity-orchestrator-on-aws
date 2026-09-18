@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 from cli.main import cli
+from gco.service_images import discover_service_dockerfiles
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -139,17 +140,17 @@ def test_image_dependency_groups_match_dockerfiles_one_to_one() -> None:
     groups = {
         name for name in config["project"]["optional-dependencies"] if name.startswith("image-")
     }
-    dockerfiles = sorted((ROOT / "dockerfiles").glob("*-dockerfile"))
-    dockerfile_groups = {f"image-{path.name.removesuffix('-dockerfile')}" for path in dockerfiles}
+    services = discover_service_dockerfiles(ROOT)
+    dockerfile_groups = {f"image-{service}" for service in services}
     assert len(groups) == len(dockerfile_groups) == 6
     assert groups == dockerfile_groups
 
     selector = re.compile(r'optional-dependencies"\]\["(image-[a-z0-9-]+)"\]')
-    for path in dockerfiles:
-        expected = f"image-{path.name.removesuffix('-dockerfile')}"
-        selected = selector.findall(path.read_text(encoding="utf-8"))
+    for service, dockerfile in services.items():
+        expected = f"image-{service}"
+        selected = selector.findall((ROOT / dockerfile).read_text(encoding="utf-8"))
         assert selected == [expected], (
-            f"{path.relative_to(ROOT)} must select exactly {expected}, got {selected}"
+            f"{dockerfile} must select exactly {expected}, got {selected}"
         )
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")

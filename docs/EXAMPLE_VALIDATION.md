@@ -10,6 +10,11 @@ and reuses the [live release validation](LIVE_RELEASE_VALIDATION.md)
 machinery (preflight, baseline, deploy, destroy, final inventory,
 checkpoint/resume, private reports).
 
+This page is the operator runbook. To change the harness itself — add an
+example, a submission path, a success criterion — read
+[`scripts/example_job_validation/README.md`](../scripts/example_job_validation/README.md),
+the developer guide to its layout and layering.
+
 ## Table of Contents
 
 - [When You Must Run It](#when-you-must-run-it)

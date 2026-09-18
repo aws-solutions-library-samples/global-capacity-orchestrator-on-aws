@@ -5,6 +5,8 @@
 # the one-way-door fields (dimensions, distance_function) that cannot be
 # corrected after the vector index exists.
 
+import re
+
 import aws_cdk as cdk
 import pytest
 
@@ -71,7 +73,7 @@ class TestOverrides:
 
 class TestValidationErrors:
     def test_non_bool_enabled(self, valid_cdk_context):
-        with pytest.raises(ConfigValidationError, match="mission_memory.enabled"):
+        with pytest.raises(ConfigValidationError, match=re.escape("mission_memory.enabled")):
             _loader(valid_cdk_context, {"enabled": "yes"})
 
     @pytest.mark.parametrize("field", ["retention_days", "top_k"])
@@ -82,7 +84,7 @@ class TestValidationErrors:
 
     @pytest.mark.parametrize("bad", [0, -1, 4097, "1024", True])
     def test_dimensions_bounds(self, valid_cdk_context, bad):
-        with pytest.raises(ConfigValidationError, match="mission_memory.dimensions"):
+        with pytest.raises(ConfigValidationError, match=re.escape("mission_memory.dimensions")):
             _loader(valid_cdk_context, {"dimensions": bad})
 
     def test_dimensions_error_names_the_one_way_door(self, valid_cdk_context):
@@ -91,7 +93,9 @@ class TestValidationErrors:
 
     @pytest.mark.parametrize("bad", ["cosine", "L2", "", 3])
     def test_distance_function_membership(self, valid_cdk_context, bad):
-        with pytest.raises(ConfigValidationError, match="mission_memory.distance_function"):
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("mission_memory.distance_function")
+        ):
             _loader(valid_cdk_context, {"distance_function": bad})
 
     def test_non_dict_block_is_ignored(self, valid_cdk_context):

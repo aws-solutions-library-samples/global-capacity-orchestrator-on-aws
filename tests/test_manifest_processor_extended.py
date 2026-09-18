@@ -9,6 +9,7 @@ _get_job_status derivation for pending state. Pulls in Hypothesis for
 a couple of property-based sweeps over the validator.
 """
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -188,7 +189,7 @@ class TestManifestValidationErrors:
             "spec": None,  # This will cause issues during validation
         }
 
-        is_valid, error = manifest_processor.validate_manifest(manifest)
+        is_valid, _error = manifest_processor.validate_manifest(manifest)
         # Should handle gracefully
         assert is_valid is False or is_valid is True  # Either outcome is valid
 
@@ -225,7 +226,9 @@ class TestListJobsNamespaceValidation:
     @pytest.mark.asyncio
     async def test_list_jobs_invalid_namespace(self, manifest_processor):
         """Test list_jobs raises error for invalid namespace."""
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(
+            ValueError, match=re.escape("Namespace 'unauthorized-namespace' not allowed")
+        ) as exc_info:
             await manifest_processor.list_jobs(namespace="unauthorized-namespace")
 
         assert "not allowed" in str(exc_info.value)
@@ -844,7 +847,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{untrusted_domain}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, _error = self.processor._validate_image_sources(manifest)
 
         assert is_valid is False, (
             f"Image '{image}' from untrusted domain '{untrusted_domain}' should be "

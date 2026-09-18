@@ -21,6 +21,7 @@ Covered:
 
 from __future__ import annotations
 
+import re
 import sys
 
 import pytest
@@ -139,11 +140,17 @@ class TestInputValidation:
         # The ``..secret-rotation`` case is intentionally the edge — the
         # string has no ``/`` and no ``..`` component, so the validator
         # lets it through but the file-exists check rejects it.
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=r"lambda_dir must be a single directory name under lambda/|No file at ",
+        ):
             load_lambda_module(bad_dir)
 
     def test_rejects_path_traversal_in_shared_dirs(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape("shared_dirs entries must be single directory names under lambda/"),
+        ):
             load_lambda_module(
                 "api-gateway-proxy",
                 shared_dirs=["../other-lambda"],

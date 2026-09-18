@@ -146,7 +146,7 @@ def _get(url: str, auth: tuple[str, str] | None = None, timeout: float = 10.0) -
     """GET a Grafana API URL, returning (status, parsed JSON or None)."""
     if not url.startswith(("http://", "https://")):
         raise ValidationError(f"refusing non-HTTP URL {url!r}")
-    request = urllib.request.Request(url)  # noqa: S310 - scheme validated above
+    request = urllib.request.Request(url)  # scheme validated above
     if auth is not None:
         token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
         request.add_header("Authorization", f"Basic {token}")

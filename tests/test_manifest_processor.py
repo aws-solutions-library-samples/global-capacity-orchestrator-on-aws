@@ -10,6 +10,7 @@ processor with mocked Kubernetes config plus sample valid Deployment
 and Job manifests so each test starts from a known-good baseline.
 """
 
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -165,13 +166,13 @@ class TestNamespaceValidation:
     def test_allowed_namespace_default(self, processor, valid_deployment):
         """Test default namespace is allowed."""
         valid_deployment["metadata"]["namespace"] = "default"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_allowed_namespace_gco_jobs(self, processor, valid_deployment):
         """Test gco-jobs namespace is allowed."""
         valid_deployment["metadata"]["namespace"] = "gco-jobs"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_disallowed_namespace(self, processor, valid_deployment):
@@ -189,7 +190,7 @@ class TestNamespaceValidation:
             "metadata": {"name": "test-config"},
             "data": {"key": "value"},
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -198,7 +199,7 @@ class TestResourceLimitValidation:
 
     def test_within_cpu_limits(self, processor, valid_deployment):
         """Test CPU within limits passes validation."""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_exceeds_cpu_limits(self, processor, valid_deployment):
@@ -258,7 +259,7 @@ class TestSecurityContextValidation:
 
     def test_non_privileged_passes(self, processor, valid_deployment):
         """Test non-privileged container passes validation."""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_privileged_container_fails(self, processor, valid_deployment):
@@ -295,7 +296,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "docker.io/nginx:latest"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_gcr_allowed(self, processor, valid_deployment):
@@ -303,7 +304,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "gcr.io/project/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_public_ecr_allowed(self, processor, valid_deployment):
@@ -311,7 +312,7 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "public.ecr.aws/test/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_quay_allowed(self, processor, valid_deployment):
@@ -319,13 +320,13 @@ class TestImageSourceValidation:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "quay.io/test/image:v1"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_official_image_allowed(self, processor, valid_deployment):
         """Test official images without registry prefix are allowed."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = "nginx:latest"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_untrusted_registry_fails(self, processor, valid_deployment):
@@ -367,7 +368,7 @@ class TestCronJobValidation:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_cronjob_exceeds_limits(self, processor):
@@ -396,7 +397,7 @@ class TestCronJobValidation:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is False
 
 
@@ -418,7 +419,7 @@ class TestValidationDisabled:
             "kind": "Deployment",
             "metadata": {"name": "test", "namespace": "kube-system"},
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -546,7 +547,7 @@ class TestCreateManifestProcessorFromEnv:
 
     @pytest.mark.parametrize(
         "name",
-        (
+        [
             "BLOCK_PRIVILEGED",
             "BLOCK_PRIVILEGE_ESCALATION",
             "BLOCK_HOST_NETWORK",
@@ -557,7 +558,7 @@ class TestCreateManifestProcessorFromEnv:
             "BLOCK_RUN_AS_ROOT",
             "REQUIRE_ACCELERATOR_TOLERATION",
             "VALIDATION_ENABLED",
-        ),
+        ],
     )
     def test_create_from_env_rejects_malformed_booleans(self, name):
         """Typos and unresolved substitutions stop REST service startup."""
@@ -1116,7 +1117,8 @@ class TestGetExistingResource:
             namespace="default",
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-job"}}
+        mock_resource.get.assert_called_once_with(name="test-job", namespace="default")
 
     @pytest.mark.asyncio
     async def test_get_existing_configmap(self, processor_with_mocks):
@@ -1136,7 +1138,8 @@ class TestGetExistingResource:
             namespace="default",
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-cm"}}
+        mock_resource.get.assert_called_once_with(name="test-cm", namespace="default")
 
     @pytest.mark.asyncio
     async def test_get_existing_secret(self, processor_with_mocks):
@@ -1322,7 +1325,7 @@ class TestResourceLimitEdgeCases:
                 ]
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_statefulset(self, processor):
@@ -1348,7 +1351,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_daemonset(self, processor):
@@ -1372,7 +1375,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_validate_uses_requests_when_no_limits(self, processor):
@@ -1397,7 +1400,7 @@ class TestResourceLimitEdgeCases:
                 },
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -1429,7 +1432,7 @@ class TestImageValidationEdgeCases:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "registry.k8s.io/pause:3.9"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_k8s_gcr_io_allowed(self, processor, valid_deployment):
@@ -1437,19 +1440,19 @@ class TestImageValidationEdgeCases:
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
             "k8s.gcr.io/pause:3.9"
         )
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_gco_registry_allowed(self, processor, valid_deployment):
         """Test gco registry images are allowed."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = "gco/worker:v1"
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
     def test_empty_image_allowed(self, processor, valid_deployment):
         """Test empty image is allowed (will fail at apply time)."""
         valid_deployment["spec"]["template"]["spec"]["containers"][0]["image"] = ""
-        is_valid, error = processor.validate_manifest(valid_deployment)
+        is_valid, _error = processor.validate_manifest(valid_deployment)
         assert is_valid is True
 
 
@@ -1533,12 +1536,12 @@ class TestListJobs:
 
     def _create_mock_job(self, name, namespace, active=0, succeeded=0, failed=0, conditions=None):
         """Helper to create a mock Kubernetes Job object."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = name
         mock_job.metadata.namespace = namespace
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.uid = f"uid-{name}"
         mock_job.spec.parallelism = 1
@@ -1547,8 +1550,12 @@ class TestListJobs:
         mock_job.status.active = active
         mock_job.status.succeeded = succeeded
         mock_job.status.failed = failed
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1) if active or succeeded else None
-        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0) if succeeded else None
+        mock_job.status.start_time = (
+            datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC) if active or succeeded else None
+        )
+        mock_job.status.completion_time = (
+            datetime(2024, 1, 1, 0, 1, 0, tzinfo=UTC) if succeeded else None
+        )
         mock_job.status.conditions = conditions or []
         return mock_job
 
@@ -1591,7 +1598,9 @@ class TestListJobs:
     @pytest.mark.asyncio
     async def test_list_jobs_disallowed_namespace(self, processor_with_mocks):
         """Test listing jobs from disallowed namespace raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(
+            ValueError, match=re.escape("Namespace 'kube-system' not allowed")
+        ) as exc_info:
             await processor_with_mocks.list_jobs(namespace="kube-system")
 
         assert "not allowed" in str(exc_info.value)
@@ -1769,12 +1778,12 @@ class TestJobToDictAndGetJobStatus:
 
     def test_job_to_dict_complete(self, processor_with_mocks):
         """Test _job_to_dict converts job to dictionary correctly."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = {"app": "test"}
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 2
@@ -1783,7 +1792,7 @@ class TestJobToDictAndGetJobStatus:
         mock_job.status.active = 1
         mock_job.status.succeeded = 2
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
         mock_job.status.completion_time = None
         mock_job.status.conditions = []
 
@@ -1799,12 +1808,12 @@ class TestJobToDictAndGetJobStatus:
 
     def test_job_to_dict_with_conditions(self, processor_with_mocks):
         """Test _job_to_dict includes conditions."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         mock_job = MagicMock()
         mock_job.metadata.name = "test-job"
         mock_job.metadata.namespace = "default"
-        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0)
+        mock_job.metadata.creation_timestamp = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
         mock_job.metadata.labels = None
         mock_job.metadata.uid = "test-uid"
         mock_job.spec.parallelism = 1
@@ -1813,8 +1822,8 @@ class TestJobToDictAndGetJobStatus:
         mock_job.status.active = 0
         mock_job.status.succeeded = 1
         mock_job.status.failed = 0
-        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1)
-        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0)
+        mock_job.status.start_time = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
+        mock_job.status.completion_time = datetime(2024, 1, 1, 0, 1, 0, tzinfo=UTC)
 
         mock_condition = MagicMock()
         mock_condition.type = "Complete"
@@ -1842,7 +1851,7 @@ class TestValidationEdgeCases:
             "metadata": {"name": "test", "namespace": "default"},
             "spec": None,  # This will cause issues when accessing spec
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         # Should handle gracefully - either pass or return validation error
         assert isinstance(is_valid, bool)
 
@@ -1864,7 +1873,7 @@ class TestValidationEdgeCases:
                 ],
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_container_without_resources(self, processor):
@@ -1887,7 +1896,7 @@ class TestValidationEdgeCases:
                 }
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
     def test_container_with_only_requests(self, processor):
@@ -1912,7 +1921,7 @@ class TestValidationEdgeCases:
                 }
             },
         }
-        is_valid, error = processor.validate_manifest(manifest)
+        is_valid, _error = processor.validate_manifest(manifest)
         assert is_valid is True
 
 
@@ -1968,7 +1977,7 @@ class TestGetExistingResourceExtended:
             "v1", "Service", "test-svc", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-svc"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_job(self, processor_with_mocks):
@@ -1979,7 +1988,7 @@ class TestGetExistingResourceExtended:
             "batch/v1", "Job", "test-job", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-job"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_configmap(self, processor_with_mocks):
@@ -1990,7 +1999,7 @@ class TestGetExistingResourceExtended:
             "v1", "ConfigMap", "test-cm", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-cm"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_secret(self, processor_with_mocks):
@@ -2001,7 +2010,7 @@ class TestGetExistingResourceExtended:
             "v1", "Secret", "test-secret", "default"
         )
 
-        assert result is not None
+        assert result == {"metadata": {"name": "test-secret"}}
 
     @pytest.mark.asyncio
     async def test_get_existing_resource_not_found(self, processor_with_mocks):
@@ -2087,11 +2096,8 @@ class TestCreateAndUpdateResource:
             "metadata": {"name": "test", "namespace": "default"},
         }
 
-        try:
+        with pytest.raises(Exception, match="Creation failed"):
             await processor_with_mocks._create_resource(manifest)
-            pytest.fail("Should have raised exception")
-        except Exception as e:
-            assert "Creation failed" in str(e)
 
     @pytest.mark.asyncio
     async def test_update_resource_success(self, processor_with_mocks):
@@ -2129,11 +2135,8 @@ class TestCreateAndUpdateResource:
             "metadata": {"name": "test", "namespace": "default"},
         }
 
-        try:
+        with pytest.raises(Exception, match="Update failed"):
             await processor_with_mocks._update_resource(manifest)
-            pytest.fail("Should have raised exception")
-        except Exception as e:
-            assert "Update failed" in str(e)
 
 
 # =========================================================================
@@ -2285,7 +2288,7 @@ class TestValidateSecurityContextExceptionPath:
                 },
             }
             result = processor._validate_security_context(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 
@@ -2311,7 +2314,7 @@ class TestValidateImageSourcesExceptionPath:
                 "spec": {"template": {"spec": {"containers": "not-a-list"}}},
             }
             result = processor._validate_image_sources(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 
@@ -2347,7 +2350,7 @@ class TestImageSourceUntrustedDockerHubOrg:
                 },
             }
             result = processor._validate_image_sources(manifest)
-            is_valid, error = result
+            is_valid, _error = result
             assert is_valid is False
 
 

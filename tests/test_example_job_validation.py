@@ -10,6 +10,7 @@ registry — without any AWS access.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -205,6 +206,136 @@ class TestActionRegistry:
                 "network-posture",
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Package structure: the developer README and the import layering it promises
+# ---------------------------------------------------------------------------
+
+PACKAGE = REPO_ROOT / "scripts" / "example_job_validation"
+DEVELOPER_README = PACKAGE / "README.md"
+
+#: What each module in this package may import from it. The offline half is the
+#: constrained one: `static_checks` runs in CI with no AWS and no cluster, so it
+#: may reach for the spec data and production validators but never a driver or
+#: a cluster session. `specs` is data and imports nothing.
+ALLOWED_INTRA_PACKAGE_IMPORTS = {
+    "__init__": set(),
+    "specs": set(),
+    "static_checks": {"specs"},
+    "models": {"specs"},
+    "kube": set(),
+    "drivers": {"kube", "specs", "static_checks"},
+    "actions": {"drivers", "kube", "specs", "static_checks"},
+    "registry": {"actions"},
+    "__main__": {"models", "registry", "specs", "static_checks"},
+}
+
+
+class TestPackageStructure:
+    """The layering and documentation a contributor navigates by."""
+
+    def test_every_module_is_covered_by_the_layering_rules(self) -> None:
+        modules = {path.stem for path in PACKAGE.glob("*.py")}
+        assert modules == set(ALLOWED_INTRA_PACKAGE_IMPORTS), (
+            "A new module needs an entry in ALLOWED_INTRA_PACKAGE_IMPORTS (and a "
+            "row in the README's Layout table)"
+        )
+
+    def test_intra_package_imports_flow_one_way(self) -> None:
+        """The offline half must stay importable without AWS or a cluster."""
+        import ast
+
+        violations: list[str] = []
+        for path in sorted(PACKAGE.glob("*.py")):
+            allowed = ALLOWED_INTRA_PACKAGE_IMPORTS[path.stem]
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or node.level != 1:
+                    continue
+                # `from . import drivers, kube` and `from .kube import X`.
+                imported = (
+                    {alias.name for alias in node.names} if node.module is None else {node.module}
+                )
+                for name in imported - allowed:
+                    violations.append(f"{path.name} imports .{name} (allowed: {sorted(allowed)})")
+        assert not violations, "Intra-package imports broke the layering:\n  " + "\n  ".join(
+            violations
+        )
+
+    def test_the_offline_half_never_reaches_for_a_cluster_or_boto(self) -> None:
+        """`static_checks` is the CI gate; an AWS or cluster import would break that.
+
+        Checked on the import graph rather than the text: the module names
+        submission paths like ``kubectl-apply`` in strings, which is data about
+        an example, not a dependency on a cluster.
+        """
+        import ast
+
+        tree = ast.parse((PACKAGE / "static_checks.py").read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+        forbidden = imported & {"boto3", "botocore", "kubernetes", "subprocess", "socket"}
+        assert not forbidden, (
+            f"static_checks.py imports {sorted(forbidden)}; it must stay runnable in CI "
+            "with no AWS access and no cluster"
+        )
+
+    def test_the_readme_documents_every_module(self) -> None:
+        readme = DEVELOPER_README.read_text(encoding="utf-8")
+        missing = [
+            f"`{path.name}`"
+            for path in sorted(PACKAGE.glob("*.py"))
+            if path.stem != "__init__" and f"`{path.name}`" not in readme
+        ]
+        assert not missing, (
+            "scripts/example_job_validation/README.md does not document:\n  " + "\n  ".join(missing)
+        )
+
+    def test_the_readme_documents_every_action(self) -> None:
+        readme = DEVELOPER_README.read_text(encoding="utf-8")
+        missing = [name for name in build_action_registry() if f"`{name}`" not in readme]
+        assert not missing, (
+            "scripts/example_job_validation/README.md does not document actions:\n  "
+            + "\n  ".join(missing)
+        )
+
+    def test_the_readme_answers_where_does_my_change_go(self) -> None:
+        readme = DEVELOPER_README.read_text(encoding="utf-8")
+        required = [
+            "## Table of Contents",
+            "## Layout",
+            "## How a run executes",
+            "## The static half is the CI gate",
+            "## Adding an example",
+            "## Adding a submission path",
+            "## Adding a success criterion",
+            "## Adding a setup driver",
+            "## Layering rules",
+            "## Testing your change",
+        ]
+        missing = [section for section in required if section not in readme]
+        assert not missing, (
+            "The developer README lost the sections a contributor needs:\n  " + "\n  ".join(missing)
+        )
+
+    def test_the_readme_table_of_contents_matches_its_headings(self) -> None:
+        """A TOC that has drifted is worse than none: it hides sections."""
+        import re
+
+        readme = DEVELOPER_README.read_text(encoding="utf-8")
+        headings = re.findall(r"^## (.+)$", readme, flags=re.MULTILINE)
+        anchors = re.findall(r"^- \[.+?\]\(#(.+?)\)$", readme, flags=re.MULTILINE)
+        expected = [
+            re.sub(r"[^a-z0-9 -]", "", heading.lower()).replace(" ", "-")
+            for heading in headings
+            if heading != "Table of Contents"
+        ]
+        assert anchors == expected, f"TOC anchors {anchors} do not match headings {expected}"
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +800,9 @@ class TestReadinessWaiters:
     def test_trainer_missing_crd_error_is_actionable(self, monkeypatch) -> None:
         monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
         kubectl = self._kubectl({"get crd": (1, "", "NotFound")})
-        with pytest.raises(drivers.ExampleValidationError, match="helm.kubeflow_trainer"):
+        with pytest.raises(
+            drivers.ExampleValidationError, match=re.escape("helm.kubeflow_trainer")
+        ):
             drivers.wait_trainer_runtime_ready(kubectl, timeout=0)
 
     def test_trainer_missing_runtime_error_is_actionable(self, monkeypatch) -> None:
@@ -695,7 +828,9 @@ class TestReadinessWaiters:
     def test_mlflow_missing_error_is_actionable(self, monkeypatch) -> None:
         monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
         kubectl = self._kubectl({"get deployment mlflow": (1, "", "NotFound")})
-        with pytest.raises(drivers.ExampleValidationError, match="cluster_observability.mlflow"):
+        with pytest.raises(
+            drivers.ExampleValidationError, match=re.escape("cluster_observability.mlflow")
+        ):
             drivers.wait_mlflow_ready(kubectl, timeout=0)
 
 
@@ -1476,6 +1611,7 @@ class TestRunCli:
             "capture_output": True,
             "text": True,
             "timeout": 7,
+            "check": False,
         }
 
 
@@ -1534,7 +1670,8 @@ class TestMutationChannels:
         )
         parsed = _synthetic_parsed("synthetic-bad", spec, [self._deployment([])])
         with pytest.raises(
-            ValueError, match="Unsupported mutation channel in 'Deployment.volumes.MODEL'"
+            ValueError,
+            match=re.escape("Unsupported mutation channel in 'Deployment.volumes.MODEL'"),
         ):
             drivers.apply_mutations(parsed)
 

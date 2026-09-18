@@ -52,8 +52,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-13T13:44:22Z
-# Generated from Git commit: c49331669c66625fecfecf44ae6ab5f95afbfcb4
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -345,7 +345,7 @@ PD_PROXY_PORT = 8000
 # container through a Secret reference at pod start — it is never written to the
 # endpoint spec or passed as a command-line argument.
 PD_PROXY_ADMIN_API_KEY_ENV = "ADMIN_API_KEY"
-ADMIN_API_KEY_SECRET_DATA_KEY = "ADMIN_API_KEY"
+ADMIN_API_KEY_SECRET_DATA_KEY = "ADMIN_API_KEY"  # nosec B105  # Secret data key name, not the key value
 
 # The proxy program (gco/services/mooncake_pd_proxy.py) is shipped to the proxy
 # pod as a ConfigMap and run from this mount path. The prefill/decode backend
@@ -1344,7 +1344,7 @@ class InferenceMonitor:
         if authority is None:
             return resource
         self._assert_current_leadership()
-        metadata, annotations, _uid, resource_version = self._object_metadata(resource)
+        _metadata, annotations, _uid, resource_version = self._object_metadata(resource)
         if getattr(self, "_lease_name", None) is None and resource_version is None:
             # Historical method-level fixtures use metadata-less MagicMocks.
             # Production reconciliation always has a Lease and real metadata.
@@ -1505,11 +1505,12 @@ class InferenceMonitor:
         # simply retries from the next scan. Direct method-level test fixtures
         # without a persistence timestamp remain outside this production path.
         normalized_endpoints: list[dict[str, Any]] = []
-        for endpoint in endpoints:
-            if not self._lifecycle_metadata_complete(endpoint) and isinstance(
-                endpoint.get("updated_at"), str
+        for stored in endpoints:
+            endpoint = stored
+            if not self._lifecycle_metadata_complete(stored) and isinstance(
+                stored.get("updated_at"), str
             ):
-                upgraded = self.store.ensure_lifecycle_metadata(endpoint)
+                upgraded = self.store.ensure_lifecycle_metadata(stored)
                 if not isinstance(upgraded, dict):
                     continue
                 endpoint = upgraded
@@ -2782,7 +2783,7 @@ class InferenceMonitor:
         try:
             bucket = get_ssm_parameter_optional(param_name, region=self.region)
             return bucket if isinstance(bucket, str) and bucket else None
-        except Exception as e:  # noqa: BLE001 - any read failure means "unresolved"
+        except Exception as e:  # any read failure means "unresolved"
             logger.warning(
                 "Failed to resolve general-purpose regional bucket for %s: %s",
                 self.region,
@@ -3512,7 +3513,7 @@ class InferenceMonitor:
         if not command and runtime_framework == "vllm":
             if args:
                 if "--root-path" not in args:
-                    args = list(args) + ["--root-path", serving_prefix]
+                    args = [*args, "--root-path", serving_prefix]
             else:
                 args = ["--root-path", serving_prefix]
 
@@ -5044,7 +5045,7 @@ class InferenceMonitor:
         return (
             labels == cls._generated_admin_secret_labels(expected_name)
             and lifecycle_annotation is None
-            and secret_type == "Opaque"
+            and secret_type == "Opaque"  # nosec B105  # Kubernetes Secret type, not a credential
             and cls._secret_has_admin_api_key(secret)
         )
 

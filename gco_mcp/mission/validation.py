@@ -33,7 +33,7 @@ Design notes:
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping
 from typing import Any, Final, cast
 
 from . import predicate
@@ -859,7 +859,7 @@ def validate_strategy(
                 },
             )
         try:
-            from mission.sandbox import (  # noqa: PLC0415 — lazy: sandbox is an optional runtime dep
+            from mission.sandbox import (  # lazy: sandbox is an optional runtime dep
                 ScriptRejected,
                 validate_script_ast,
             )
@@ -991,8 +991,8 @@ def strip_private_fields(session: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def strip_private_fields_iterations(
-    iterations: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
+    iterations: Iterable[object],
+) -> list[Any]:
     """Strip private keys from each iteration's ``criteria_evaluation`` shape.
 
     The Decide_Phase appends ``CriterionResult`` entries under
@@ -1002,19 +1002,21 @@ def strip_private_fields_iterations(
     history is JSON-safe.
 
     Args:
-        iterations: A sequence of iteration dicts. Non-dict entries
-            (which shouldn't appear in a typed iteration list, but
-            could surface from a corrupt on-disk file) pass through
-            verbatim so the caller can still observe the corruption.
+        iterations: The iteration entries as read back — usually
+            :class:`IterationRecord` dicts, but typed as ``object``
+            because a corrupt on-disk file can put anything in the
+            list. Non-mapping entries pass through verbatim so the
+            caller can still observe the corruption.
 
     Returns:
-        A new list of shallow-copied iteration dicts. The originals
-        are never mutated.
+        A new list with each mapping entry shallow-copied and cleaned
+        and every other entry unchanged. The originals are never
+        mutated.
     """
-    out: list[dict[str, Any]] = []
+    out: list[Any] = []
     for iteration in iterations:
         if not isinstance(iteration, Mapping):
-            out.append(cast("dict[str, Any]", iteration))
+            out.append(iteration)
             continue
         copy = dict(iteration)
         evals = copy.get("criteria_evaluation")

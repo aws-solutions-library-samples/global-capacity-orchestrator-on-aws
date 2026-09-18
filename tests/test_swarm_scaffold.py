@@ -15,10 +15,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import json  # noqa: E402
+import json
 
-from mission.swarm import validate_spawn, validate_swarm_config  # noqa: E402
-from mission.swarm_scaffold import (  # noqa: E402
+from mission.swarm import validate_spawn, validate_swarm_config
+from mission.swarm_scaffold import (
     SwarmScaffoldError,
     build_plan_prompt,
     generate_deterministic_plan,
@@ -26,7 +26,7 @@ from mission.swarm_scaffold import (  # noqa: E402
     sample_revised_directive,
     validate_plan,
 )
-from mission.validation import MissionValidationError  # noqa: E402
+from mission.validation import MissionValidationError
 
 REGISTERED_TOOLS: dict[str, Any] = {
     "find_docs": object(),

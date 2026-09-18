@@ -24,7 +24,7 @@ import requests
 
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
 DEFAULT_NAMESPACE = "monitoring"
-DEFAULT_ADMIN_SECRET = "kube-prometheus-stack-grafana"
+DEFAULT_ADMIN_SECRET = "kube-prometheus-stack-grafana"  # nosec B105  # Kubernetes Secret name, not its contents
 
 _HTTP_TIMEOUT_SECONDS = 15
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
@@ -52,7 +52,10 @@ def read_grafana_admin_credentials(
     cmd = ["kubectl", "get", "secret", secret_name, "-n", namespace, "-o", "json"]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )  # nosemgrep: dangerous-subprocess-use-audit - inputs validated above; list form, no shell=True
     except FileNotFoundError as exc:
         raise RuntimeError(

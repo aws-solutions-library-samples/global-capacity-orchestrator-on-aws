@@ -101,7 +101,7 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
     result: dict[str, Any] = {"started_at": utc_now(), "errors": []}
     try:
         result["cloudwatch_logs"] = _cleanup_owned_log_groups(ctx)
-    except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+    except Exception as exc:  # preserve partial evidence
         if isinstance(exc, _LogGroupCleanupError):
             result["cloudwatch_logs"] = copy.deepcopy(exc.details)
         result["errors"].append(
@@ -109,17 +109,17 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
         )
     try:
         result["ecr_images"] = _cleanup_new_ecr_images(ctx)
-    except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+    except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "ecr-images", "error": f"{type(exc).__name__}: {exc}"})
     try:
         result["ecr_repositories"] = _cleanup_new_ecr_repositories(ctx)
-    except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+    except Exception as exc:  # preserve partial evidence
         result["errors"].append(
             {"phase": "ecr-repositories", "error": f"{type(exc).__name__}: {exc}"}
         )
     try:
         result["kms"] = _schedule_retained_kms_keys(ctx)
-    except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+    except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "kms", "error": f"{type(exc).__name__}: {exc}"})
     result["ended_at"] = utc_now()
     ctx.checkpoint.state.setdefault("retained_cleanup_attempts", []).append(result)

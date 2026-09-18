@@ -2806,7 +2806,7 @@ class TestRetainedKmsScheduling:
             records=[self._record("cloudformation-delete")], states=["Enabled"]
         )
         with pytest.raises(
-            RuntimeError, match="Expected cloudformation-delete KMS key .* found Enabled"
+            RuntimeError, match=r"Expected cloudformation-delete KMS key .* found Enabled"
         ):
             self._schedule(ctx)
         kms.schedule_key_deletion.assert_not_called()

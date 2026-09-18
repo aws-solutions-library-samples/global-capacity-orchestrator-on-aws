@@ -21,7 +21,7 @@ import contextlib
 import importlib
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -32,7 +32,7 @@ import pytest
 # import the same way they do in production, matching the sibling tool tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 _LOCAL_FILE_TOOL = "metrics_from_local_file"
 
@@ -48,7 +48,7 @@ def _import_metrics_tool_module():
     try:
         import run_mcp  # noqa: F401 - import-time side effect registers the tools
         import tools.metrics as metrics_module
-    except Exception as exc:  # noqa: BLE001 - any import-surface failure -> skip
+    except Exception as exc:  # any import-surface failure -> skip
         pytest.skip(f"tools.metrics not importable in this environment: {exc}")
     return metrics_module
 
@@ -69,7 +69,7 @@ def test_cloudwatch_explicit_window_is_parsed_and_returns_canonical_shape() -> N
     """Explicit ISO ``start_time``/``end_time`` are parsed and drive a successful read."""
     metrics_module = _import_metrics_tool_module()
     client = _cloudwatch_client_returning(
-        [{"Timestamp": datetime(2024, 3, 1, 0, 0, 0), "Average": 0.5}]
+        [{"Timestamp": datetime(2024, 3, 1, 0, 0, 0, tzinfo=UTC), "Average": 0.5}]
     )
     with patch("boto3.client", return_value=client):
         result = asyncio.run(

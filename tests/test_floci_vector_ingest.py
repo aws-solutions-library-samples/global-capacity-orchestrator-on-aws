@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 
 import boto3
 import pytest
@@ -62,7 +63,7 @@ def dynamodb(verified_floci_endpoint: str):
     return boto3.client("dynamodb")
 
 
-@pytest.fixture()
+@pytest.fixture
 def corpus_bucket(s3):
     bucket = unique_name("gco-cluster-shared")
     s3.create_bucket(Bucket=bucket)
@@ -73,7 +74,7 @@ def corpus_bucket(s3):
     s3.delete_bucket(Bucket=bucket)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store_table(dynamodb):
     """A vector-store-shaped table, minus the index the emulator lacks."""
     table_name = unique_name("gco-vector-store")
@@ -88,7 +89,7 @@ def store_table(dynamodb):
     dynamodb.delete_table(TableName=table_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def handler(monkeypatch, store_table):
     """The production handler wired to the emulator, Bedrock stubbed."""
     module = load_lambda_module("vector-ingest")
@@ -164,7 +165,7 @@ class TestIngestOverTheRealWire:
     def test_missing_object_fails_that_object_over_the_real_wire(self, handler, corpus_bucket):
         # The real emulator answers NoSuchKey; per-object isolation turns
         # it into a summary failure and a batch-level raise.
-        with pytest.raises(RuntimeError, match="ghost.md"):
+        with pytest.raises(RuntimeError, match=re.escape("ghost.md")):
             handler.lambda_handler(_event(corpus_bucket, f"{_PREFIX}ghost.md"), context=None)
 
 

@@ -49,8 +49,8 @@ from typing import Any
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-10T23:26:44Z
-# Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.png``)
@@ -78,7 +78,7 @@ def _describe_repository(ecr: Any, repository_name: str) -> dict[str, Any] | Non
         resp = ecr.describe_repositories(repositoryNames=[repository_name])
     except ecr.exceptions.RepositoryNotFoundException:
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Some boto3 stubs surface RepositoryNotFoundException via the
         # generic ClientError shape rather than the typed exception. Sniff
         # the error code and translate consistently.
@@ -125,7 +125,7 @@ def _has_retain_tag(ecr: Any, repository_arn: str) -> bool:
     """Return True when ``gco:retain=true`` is present on the repository."""
     try:
         resp = ecr.list_tags_for_resource(resourceArn=repository_arn)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("list_tags_for_resource failed for %s: %s", repository_arn, exc)
         raise RuntimeError(
             f"Unable to verify retention tags for {repository_arn}; refusing deletion"

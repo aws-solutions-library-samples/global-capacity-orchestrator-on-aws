@@ -23,6 +23,11 @@ from typing import Any
 
 ADVISORY_RE = re.compile(r"^https://github\.com/advisories/(GHSA-[0-9a-z-]+)$")
 SEVERITY = {"info": 0, "low": 1, "moderate": 2, "high": 3, "critical": 4}
+# Findings at this severity or above fail the job unless suppressed. Moderate
+# is where npm's advisories stop being mostly ReDoS-in-a-dev-tool noise and
+# start describing things a proxy or CLI could actually be hit with; every
+# owned graph is clean here, so the gate costs nothing until an advisory lands.
+FAIL_AT = "moderate"
 
 
 @dataclass(frozen=True)
@@ -117,7 +122,7 @@ def check_report(report: dict[str, Any], package_dir: str, suppressions: list[Su
         if not isinstance(finding, dict):
             failures.append(f"{package}: malformed vulnerability record")
             continue
-        if SEVERITY.get(str(finding.get("severity", "")), -1) < SEVERITY["high"]:
+        if SEVERITY.get(str(finding.get("severity", "")), -1) < SEVERITY[FAIL_AT]:
             continue
 
         advisories = _advisories(finding.get("via"))
@@ -168,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        suppressions = _load_suppressions(args.ignore_file, dt.date.today())
+        suppressions = _load_suppressions(args.ignore_file, dt.datetime.now(dt.UTC).date())
         report = _load_report(args.report)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -1829,7 +1829,7 @@ at plan time instead of after a region has been provisioned and billed.
 
 ```bash
 gco jobs policy --region us-east-1
-gco jobs policy --region us-east-1 -o json | jq '.policy.trusted_registries'
+gco -o json jobs policy --region us-east-1 | jq '.policy.trusted_registries'
 ```
 
 The response reads the live `ManifestProcessor` instance, so it reflects what

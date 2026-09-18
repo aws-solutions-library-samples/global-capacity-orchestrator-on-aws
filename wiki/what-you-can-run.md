@@ -4,7 +4,10 @@ GCO runs accelerated and CPU workloads of most shapes: batch jobs,
 gang-scheduled distributed training, Ray clusters, Slurm workloads,
 multi-region inference endpoints, and multi-step DAG pipelines. Every
 category below ships with a ready-to-submit manifest in
-[examples/](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/README.md).
+[examples/](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/README.md)
+— once the platform is [deployed](get-started.md), each one runs as-is; the
+examples README's quick-reference table names the category, whether it needs
+a GPU, and whether it depends on an opt-in feature.
 
 ## Schedulers for every workload pattern
 
@@ -12,11 +15,17 @@ GCO ships six scheduling and orchestration tools — KEDA, Volcano, KubeRay,
 and Kueue enabled by default, Slurm (Slinky) and YuniKorn opt-in:
 
 - **Volcano** — gang scheduling for distributed training
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/volcano-gang-job.yaml))
 - **Kueue** — resource quotas, fair sharing, priority admission
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/kueue-job.yaml))
 - **KubeRay** — Ray clusters for distributed computing and hyperparameter tuning
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/ray-cluster.yaml))
 - **KEDA** — event-driven autoscaling and scale-to-zero (SQS and 60+ sources)
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/keda-scaled-job.yaml))
 - **Slurm (Slinky)** — sbatch/srun workflows and HPC migration
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/slurm-cluster-job.yaml))
 - **YuniKorn** — multi-tenant queues and hierarchical quotas
+  ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/yunikorn-job.yaml))
 
 They operate at different layers (admission, scaling, pod scheduling, node
 provisioning) and can be combined — the
@@ -35,18 +44,29 @@ workloads, and active Jobs.*
 ## Distributed training
 
 Kubeflow Trainer v2 is included and enabled by default: you submit a
-`TrainJob`, and the trainer compiles it into a JobSet with the correct
-`torchrun` rendezvous wiring, indexed pods, and restart semantics. TrainJobs
-pass the same security validation pipeline as every other submission. Plain
-Kubernetes Jobs, hand-rolled indexed Jobs, and EFA-enabled multi-node
-training are all supported alternatives — see
+`TrainJob` ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/kubeflow-trainjob.yaml)), and the trainer
+compiles it into a JobSet with the correct `torchrun` rendezvous wiring,
+indexed pods, and restart semantics. TrainJobs pass the same security
+validation pipeline as every other submission. Plain Kubernetes Jobs,
+hand-rolled indexed Jobs ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/multi-gpu-training.yaml)),
+and EFA-enabled multi-node training
+([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/efa-distributed-training.yaml)) are all supported
+alternatives — see
 [docs/DISTRIBUTED_TRAINING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/DISTRIBUTED_TRAINING.md).
+AWS Trainium and Inferentia workloads have their own manifests too
+([Trainium](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/trainium-job.yaml),
+[Inferentia](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inferentia-job.yaml)).
 
 ## Inference serving
 
-Deploy endpoints to one or more regions with a single command: vLLM, TGI,
-Triton, TorchServe, and SGLang work out of the box, with model weights
-synced automatically from S3 to each region. Desired state lives in
+Deploy endpoints to one or more regions with a single command:
+[vLLM](https://docs.vllm.ai/en/latest/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-vllm.yaml)),
+[TGI](https://huggingface.co/docs/text-generation-inference) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-tgi.yaml)),
+[Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-triton.yaml)),
+[TorchServe](https://docs.pytorch.org/serve/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-torchserve.yaml)),
+and [SGLang](https://docs.sglang.ai/) ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/inference-sglang.yaml))
+work out of the box, with model weights synced automatically from S3 to each
+region. Desired state lives in
 DynamoDB with continuous reconciliation, so rolling updates, scaling, and
 stop/start never lose configuration. Disaggregated prefill/decode serving
 (Mooncake), streaming responses, canary deployments, and spot GPUs are all

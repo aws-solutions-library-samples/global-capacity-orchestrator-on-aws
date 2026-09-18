@@ -44,7 +44,7 @@ import click
 # imports below resolve regardless of how this module is loaded.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
 
-from gco.bedrock import BedrockFTUFormNotAcceptedError  # noqa: E402
+from gco.bedrock import BedrockFTUFormNotAcceptedError
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from mission.types import SessionState
@@ -85,7 +85,7 @@ def _strip_private_criteria(session: Mapping[str, Any]) -> dict[str, Any]:
     ``_strip_private_criteria`` name so the call sites in this file
     don't churn while the underlying logic is consolidated.
     """
-    from mission.validation import strip_private_fields  # noqa: PLC0415
+    from mission.validation import strip_private_fields
 
     cleaned: dict[str, Any] = strip_private_fields(session)
     return cleaned
@@ -100,7 +100,7 @@ def _strip_iteration(iteration: Any) -> Any:
     """
     if not isinstance(iteration, Mapping):
         return iteration
-    from mission.validation import strip_private_fields_iterations  # noqa: PLC0415
+    from mission.validation import strip_private_fields_iterations
 
     return strip_private_fields_iterations([iteration])[0]
 
@@ -157,7 +157,7 @@ def _make_stub_dispatcher() -> Any:
     :func:`_build_engine` which decides between the live FastMCP
     dispatcher and this stub based on ``--dry-run`` opt-in.
     """
-    from mission._engine_factory import make_stub_dispatcher  # noqa: PLC0415
+    from mission._engine_factory import make_stub_dispatcher
 
     return make_stub_dispatcher()
 
@@ -325,7 +325,7 @@ def mission_start(
     is printed as one JSON line to stderr; the final stdout is the
     Final_Report JSON.
     """
-    from mission import (  # noqa: PLC0415 — lazy: avoids cost when help-only
+    from mission import (  # lazy: avoids cost when help-only
         sampling as mission_sampling,
     )
     from mission import (
@@ -488,10 +488,10 @@ def _run_to_completion(session_id: str, *, dry_run: bool = False) -> None:
     stdout is the Final_Report JSON when present, falling back to the
     persisted session JSON otherwise.
     """
-    from mission import state as mission_state  # noqa: PLC0415
-    from mission._engine_factory import build_mission_engine  # noqa: PLC0415
-    from mission.engine import MissionEngineError  # noqa: PLC0415
-    from mission.state import FilesystemBackend  # noqa: PLC0415
+    from mission import state as mission_state
+    from mission._engine_factory import build_mission_engine
+    from mission.engine import MissionEngineError
+    from mission.state import FilesystemBackend
 
     backend = mission_state.get_backend()
     session_for_runner = backend.load_session(session_id)
@@ -557,7 +557,7 @@ def _ensure_tool_registry() -> None:
     decorators only fire on the first import.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
-    from tools import register_all_tools  # noqa: PLC0415
+    from tools import register_all_tools
 
     register_all_tools()
 
@@ -574,7 +574,7 @@ def _resolve_registered_tools_for_cli() -> tuple[dict[str, Any], set[str]]:
     which the resolver then rejects as ``allow_all_tools_empty_registry``.
     """
     _ensure_tool_registry()
-    from server import mcp  # noqa: PLC0415 — lazy
+    from server import mcp  # lazy
 
     async def _list() -> list[Any]:
         return list(await mcp._list_tools())
@@ -595,8 +595,8 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
     :class:`MissionValidationError` the structured envelope is emitted and the
     process exits 1 — before the caller builds or persists a session.
     """
-    from mission import validation as mission_validation  # noqa: PLC0415
-    from mission.validation import MissionValidationError  # noqa: PLC0415
+    from mission import validation as mission_validation
+    from mission.validation import MissionValidationError
 
     if allow_all_tools:
         registered_tools, control_tools = _resolve_registered_tools_for_cli()
@@ -632,7 +632,7 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
 )
 def mission_status_cmd(session_id: str, output: str) -> None:
     """Get the full state of a Mission session."""
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.state import get_backend
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -696,9 +696,9 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, dry_run: bool, out
     disable sampling — useful for smoke-testing the bookkeeping
     without spending Bedrock or AWS credits.
     """
-    from mission._engine_factory import build_mission_engine  # noqa: PLC0415
-    from mission.engine import MissionEngineError  # noqa: PLC0415
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission._engine_factory import build_mission_engine
+    from mission.engine import MissionEngineError
+    from mission.state import get_backend
 
     if max_iterations <= 0:
         # This is the per-call iteration count (how many iterations to
@@ -776,8 +776,8 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, dry_run: bool, out
 )
 def mission_checkpoint_cmd(session_id: str, output: str) -> None:
     """Re-run the verdict cascade on the latest iteration of a session."""
-    from mission.decide import decide_verdict  # noqa: PLC0415
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.decide import decide_verdict
+    from mission.state import get_backend
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -817,8 +817,8 @@ def mission_checkpoint_cmd(session_id: str, output: str) -> None:
 )
 def mission_complete_cmd(session_id: str, output: str) -> None:
     """Force a Mission session into ``completed`` status."""
-    from mission.state import get_backend  # noqa: PLC0415
-    from mission.types import TERMINAL_STATES  # noqa: PLC0415
+    from mission.state import get_backend
+    from mission.types import TERMINAL_STATES
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -868,8 +868,8 @@ def mission_abort_cmd(session_id: str, pause: bool, output: str) -> None:
     Without ``--pause``, transitions to ``terminated`` and stamps the
     final verdict.
     """
-    from mission.state import get_backend  # noqa: PLC0415
-    from mission.types import TERMINAL_STATES  # noqa: PLC0415
+    from mission.state import get_backend
+    from mission.types import TERMINAL_STATES
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -912,7 +912,7 @@ def mission_abort_cmd(session_id: str, pause: bool, output: str) -> None:
 )
 def mission_resume_cmd(session_id: str, output: str) -> None:
     """Resume a paused Mission session."""
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.state import get_backend
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -967,7 +967,7 @@ def mission_resume_cmd(session_id: str, output: str) -> None:
 )
 def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: str) -> None:
     """Get the iteration history of a Mission session."""
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.state import get_backend
 
     backend = get_backend()
     session = backend.load_session(session_id)
@@ -1049,7 +1049,7 @@ def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: st
 )
 def mission_list_cmd(status: str | None, output: str) -> None:
     """List Mission sessions."""
-    from mission.state import get_backend  # noqa: PLC0415
+    from mission.state import get_backend
 
     backend = get_backend()
     filter_dict = {"status": status} if status else None
@@ -1157,7 +1157,7 @@ def mission_scaffold_criteria_cmd(
     resulting file is immediately usable with ``mission start
     --criteria-file``.
     """
-    import mission.criteria_scaffold as criteria_scaffold  # noqa: PLC0415 — lazy: avoids cost when help-only
+    import mission.criteria_scaffold as criteria_scaffold  # lazy: avoids cost when help-only
     from mission import (
         sampling as mission_sampling,
     )
@@ -1387,7 +1387,7 @@ def mission_run_cmd(
     also written to ``PATH`` so the operator can inspect / re-use it
     without re-running the scaffold step.
     """
-    import mission.criteria_scaffold as criteria_scaffold  # noqa: PLC0415 — lazy
+    import mission.criteria_scaffold as criteria_scaffold  # lazy
     from mission import (
         sampling as mission_sampling,
     )
@@ -1550,7 +1550,7 @@ _MEMORY_UNAVAILABLE_HINT = (
 
 def _build_memory_store() -> Any:
     """Construct the mission-memory store (SSM-lazy; free until first use)."""
-    from mission.memory import MissionMemoryStore  # noqa: PLC0415
+    from mission.memory import MissionMemoryStore
 
     return MissionMemoryStore()
 
@@ -1597,7 +1597,7 @@ def mission_memory_cmd() -> None:
 )
 def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, output: str) -> None:
     """Search mission memory for missions similar to DIRECTIVE."""
-    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
+    from mission.memory import MissionMemoryUnavailableError
 
     try:
         results = _build_memory_store().search_similar(
@@ -1605,7 +1605,7 @@ def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, o
         )
     except MissionMemoryUnavailableError as err:
         _exit_memory_unavailable(err)
-    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+    except Exception as err:  # CLI boundary: envelope, don't traceback
         _emit_error("mission_memory_search_failed", {"message": str(err)})
         raise SystemExit(1) from None
 
@@ -1640,13 +1640,13 @@ def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, o
 )
 def mission_memory_list_cmd(limit: int, output: str) -> None:
     """List what mission memory currently holds."""
-    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
+    from mission.memory import MissionMemoryUnavailableError
 
     try:
         memories = _build_memory_store().list_memories(limit=limit)
     except MissionMemoryUnavailableError as err:
         _exit_memory_unavailable(err)
-    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+    except Exception as err:  # CLI boundary: envelope, don't traceback
         _emit_error("mission_memory_list_failed", {"message": str(err)})
         raise SystemExit(1) from None
 
@@ -1684,8 +1684,8 @@ def mission_memory_backfill_cmd(root: str | None) -> None:
     Re-running is safe: writes are keyed on ``session_id`` and simply
     overwrite (re-embedding the same directive).
     """
-    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
-    from mission.state import FilesystemBackend  # noqa: PLC0415
+    from mission.memory import MissionMemoryUnavailableError
+    from mission.state import FilesystemBackend
 
     report_root = Path(root) if root is not None else FilesystemBackend().root
     reports = sorted(report_root.glob("*.report.json"))
@@ -1722,7 +1722,7 @@ def mission_memory_backfill_cmd(root: str | None) -> None:
         except MissionMemoryUnavailableError as err:
             # Infrastructure absent: no later report can succeed either.
             _exit_memory_unavailable(err)
-        except Exception as err:  # noqa: BLE001 — per-report isolation
+        except Exception as err:  # per-report isolation
             failures.append({"file": report_path.name, "error": str(err)})
 
     payload: dict[str, Any] = {

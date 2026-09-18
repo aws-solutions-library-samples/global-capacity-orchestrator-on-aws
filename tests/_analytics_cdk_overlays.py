@@ -120,7 +120,7 @@ def _mock_helm_installer(stack: Any) -> None:
     """
     stack.helm_installer_lambda = MagicMock()
     stack.helm_installer_provider = MagicMock()
-    # nosec B106 — test fixture ARN, not a real credential.
+    # nosec B106  # test fixture ARN, not a real credential.
     stack.helm_installer_provider.service_token = (
         "arn:aws:lambda:us-east-1:123456789012:function:mock"
     )

@@ -21,6 +21,7 @@ import requests
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.exceptions import ClientError
+from botocore.regions import EndpointResolver
 from botocore.session import get_session as get_botocore_session
 
 from .config import GCOConfig, get_config
@@ -82,8 +83,13 @@ def _safe_aws_error_message(error: dict[str, Any]) -> str:
 
 
 def _execute_api_service_hostname(region: str) -> str:
-    """Resolve the partition-correct execute-api hostname from botocore data."""
-    resolver = get_botocore_session().get_component("endpoint_resolver")
+    """Resolve the partition-correct execute-api hostname from botocore data.
+
+    Builds an :class:`EndpointResolver` over the bundled ``endpoints`` data
+    file rather than fetching the session's resolver through
+    ``get_component``, which botocore deprecated as an internal interface.
+    """
+    resolver = EndpointResolver(get_botocore_session().get_data("endpoints"))
     endpoint = resolver.construct_endpoint("execute-api", region)
     hostname = endpoint.get("hostname") if isinstance(endpoint, dict) else None
     if not isinstance(hostname, str):
@@ -763,7 +769,7 @@ class GCOAWSClient:
         region: str | None = None,
         namespace: str | None = None,
         status: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """
         Get jobs from GCO clusters.
 
@@ -773,7 +779,10 @@ class GCOAWSClient:
             status: Filter by status (running, completed, failed)
 
         Returns:
-            List of job information dictionaries
+            The ``GET /api/v1/jobs`` envelope: the Job objects under
+            ``"jobs"`` plus the page metadata (``total``, ``count``,
+            ``limit``, ``offset``, ``has_more``) and the answering
+            cluster's ``cluster_id`` / ``region``.
         """
         params = []
         if namespace:
@@ -788,7 +797,7 @@ class GCOAWSClient:
         )
 
         response.raise_for_status()
-        result: list[dict[str, Any]] = response.json()
+        result: dict[str, Any] = response.json()
         return result
 
     def get_job_details(

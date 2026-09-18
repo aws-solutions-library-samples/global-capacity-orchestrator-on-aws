@@ -67,7 +67,7 @@ def history_table(verified_floci_endpoint):
     dynamodb.delete_table(TableName=table_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(history_table):
     from cli.capacity.history import CapacityHistoryStore
 
@@ -114,7 +114,7 @@ class TestSnapshotsOverTheWire:
 
 
 class TestWindowedQueries:
-    @pytest.fixture()
+    @pytest.fixture
     def series(self, store):
         """Six hourly snapshots ending now, plus one far outside any window."""
         instance_type = unique_name("p5.48xlarge")

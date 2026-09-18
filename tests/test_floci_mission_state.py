@@ -106,7 +106,7 @@ def missions_table(verified_floci_endpoint):
     dynamodb.delete_table(TableName=table_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def backend(missions_table):
     from mission.state import DynamoDBBackend
 

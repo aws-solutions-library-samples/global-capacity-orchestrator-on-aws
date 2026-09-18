@@ -155,7 +155,7 @@ class TestCloudWatchLogsFallback:
 
         with (
             patch("time.sleep"),
-            pytest.raises(RuntimeError, match="No logs found.*last 24 hours"),
+            pytest.raises(RuntimeError, match=r"No logs found.*last 24 hours"),
         ):
             manager.get_job_logs("my-job", "gco-jobs")
 
@@ -252,7 +252,7 @@ class TestCloudWatchLogsFallback:
 
         with (
             patch("time.sleep"),
-            pytest.raises(RuntimeError, match="query did not complete.*Running"),
+            pytest.raises(RuntimeError, match=r"query did not complete.*Running"),
         ):
             manager.get_job_logs("my-job", "gco-jobs")
 

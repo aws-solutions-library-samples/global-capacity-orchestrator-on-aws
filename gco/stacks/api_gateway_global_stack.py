@@ -81,8 +81,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
@@ -680,7 +680,7 @@ class GCOApiGatewayGlobalStack(Stack):
         secret = secretsmanager.Secret(
             self,
             "GCOAuthSecret",
-            secret_name=api_gateway_auth_secret_name(self.project_name),  # nosec B106 — this is the secret path, not a password
+            secret_name=api_gateway_auth_secret_name(self.project_name),  # nosec B106  # this is the secret path, not a password
             description="HMAC signing key for API Gateway backend requests (auto-rotated)",
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template=json.dumps({"description": "GCO backend HMAC signing key"}),

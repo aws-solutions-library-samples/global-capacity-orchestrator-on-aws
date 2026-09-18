@@ -15,8 +15,8 @@ from pathlib import Path
 # Ensure gco_mcp/ is importable, mirroring the other MCP test modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402  -- side effect: registers tools and resources
-from resources import docs as docs_mod  # noqa: E402
+import run_mcp  # side effect: registers tools and resources
+from resources import docs as docs_mod
 
 mcp = run_mcp.mcp
 

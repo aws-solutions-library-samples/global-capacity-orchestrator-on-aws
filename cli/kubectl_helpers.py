@@ -123,7 +123,10 @@ def update_kubeconfig(cluster_name: str, region: str) -> None:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )  # nosemgrep: dangerous-subprocess-use-audit - inputs validated above; list form, no shell=True
         if result.returncode != 0:
             raise RuntimeError(f"Failed to update kubeconfig: {result.stderr}")
@@ -228,7 +231,10 @@ def describe_cluster_access(cluster_name: str, region: str) -> dict[str, object]
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )  # nosemgrep: dangerous-subprocess-use-audit - inputs validated above; list form, no shell=True
     except FileNotFoundError as exc:
         raise RuntimeError(

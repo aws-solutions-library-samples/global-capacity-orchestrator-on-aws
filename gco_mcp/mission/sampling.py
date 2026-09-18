@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -60,8 +60,8 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)
@@ -73,12 +73,10 @@ __all__ = [
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
     "DEFAULT_BEDROCK_REGION",
+    "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "ENV_BEDROCK_MODEL_ID",
     "ENV_BEDROCK_REGION",
-    "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "FINAL_LESSONS_SCHEMA",
-    "BedrockSamplingBackend",
-    "MissionValidationError",
     "OBSERVATION_FIELD_BYTE_CAP",
     "OBSERVATION_FIELD_TRUNCATE_TO",
     "PRIOR_MISSIONS_BYTE_CAP",
@@ -86,12 +84,14 @@ __all__ = [
     "RECENT_ITERATIONS_LIMIT",
     "STRATEGY_REVISION_SCHEMA",
     "STRATEGY_SHAPE_SCHEMA",
+    "TRUNCATION_MARKER",
+    "BedrockSamplingBackend",
+    "MissionValidationError",
     "SamplingBackend",
     "SamplingFallback",
     "SamplingPrompt",
     "SamplingTransportError",
     "SamplingUsed",
-    "TRUNCATION_MARKER",
     "maybe_sample_final_lessons",
     "maybe_sample_strategy_revision",
     "resolve_sampling_state",
@@ -511,7 +511,7 @@ def _summarise_iteration_for_lessons(
 
 def _pair_criteria_with_status(
     criteria: Sequence[Criterion],
-    statuses: Sequence[CriterionResult],
+    statuses: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return ``criteria`` annotated with their most recent status entry.
 
@@ -522,11 +522,16 @@ def _pair_criteria_with_status(
     ``status`` set to ``{"status": "inconclusive", "evidence": null}``
     so the model always sees a stable shape.
 
+    ``statuses`` is normally the persisted ``criteria_evaluation`` list
+    of :class:`CriterionResult` rows, but it is read back from disk, so
+    the helper takes any mappings and skips an entry that lacks a
+    ``criterion_id`` rather than trusting the row shape.
+
     The ``_parsed_ast`` private key on a ``predicate`` criterion is
     stripped — it is a Python ``ast.Expression`` object that is not
     JSON-serialisable and that the model has no use for.
     """
-    by_id: dict[str, CriterionResult] = {}
+    by_id: dict[str, Mapping[str, Any]] = {}
     for s in statuses:
         cid = s.get("criterion_id")
         if cid is None:
@@ -1194,7 +1199,7 @@ def _extract_tool_json_schemas(
             # Pydantic v2 models expose model_json_schema() as a classmethod.
             json_schema = model.model_json_schema()
             schemas[name] = json_schema
-        except Exception:
+        except Exception:  # nosec B112  # a tool without a schema has none to render
             # Non-Pydantic schema, or a mock that doesn't support it.
             continue
     return schemas
@@ -1311,7 +1316,7 @@ def validate_strategy_against_catalog(
                 )
             try:
                 schema.model_validate(args)
-            except Exception as exc:  # noqa: BLE001 - pydantic ValidationError + similar
+            except Exception as exc:  # pydantic ValidationError + similar
                 # Pydantic v2 ValidationError exposes ``.errors()`` as a
                 # list of structured dicts. Tolerate any other exception
                 # type (e.g. older Pydantic, custom validators) by
@@ -1320,7 +1325,7 @@ def validate_strategy_against_catalog(
                 if callable(errors_method):
                     try:
                         errors_payload: Any = errors_method()
-                    except Exception:  # noqa: BLE001 - defensive
+                    except Exception:  # defensive
                         errors_payload = [{"type": "unknown", "msg": str(exc)}]
                 else:
                     errors_payload = [{"type": "unknown", "msg": str(exc)}]

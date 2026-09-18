@@ -938,8 +938,9 @@ class TestInferenceImageRefs:
 
         from cli.jobs import JobInfo
 
-        # Naive datetime — caller didn't attach tzinfo.
-        naive_recent = datetime.now()
+        # Deliberately naive — the branch under test is a caller that did not
+        # attach tzinfo, which the collector must still compare against now().
+        naive_recent = datetime.now()  # noqa: DTZ005
         fake_jm = MagicMock()
         fake_jm.list_jobs.return_value = [
             JobInfo(
@@ -1036,7 +1037,7 @@ class TestEcrLoginAndCollision:
                 "cli.images.subprocess.run",
                 return_value=MagicMock(returncode=1, stderr=b"denied"),
             ),
-            pytest.raises(RuntimeError, match="login.*failed"),
+            pytest.raises(RuntimeError, match=r"login.*failed"),
         ):
             manager._ecr_login("docker")
 

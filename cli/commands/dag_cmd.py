@@ -15,7 +15,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def dag(config: Any) -> None:
     """Run multi-step job pipelines with dependencies."""
-    pass
 
 
 @dag.command("run")

@@ -87,7 +87,7 @@ def test_sandbox_rejects_augassign_target_walrus_and_operator_paths() -> None:
         assert rejected.value.reason == reason
 
 
-def test_sandbox_annassign_defensive_shape_and_reject_fallthrough() -> None:
+def test_sandbox_annassign_defensive_shape() -> None:
     validator = sandbox._ScriptValidator(["tool"])
     synthetic = ast.AnnAssign(
         target=ast.Name(id="x", ctx=ast.Store()),
@@ -97,10 +97,13 @@ def test_sandbox_annassign_defensive_shape_and_reject_fallthrough() -> None:
     )
     validator.visit(synthetic)
 
-    fallthrough = sandbox._ScriptValidator(["tool"])
-    fallthrough._reject = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+def test_sandbox_collect_target_names_rejects_attribute_target() -> None:
+    validator = sandbox._ScriptValidator(["tool"])
     target = ast.Attribute(value=ast.Name(id="x", ctx=ast.Load()), attr="field")
-    assert fallthrough._collect_target_names(target) == []
+    with pytest.raises(sandbox.ScriptRejected) as exc_info:
+        validator._collect_target_names(target)
+    assert exc_info.value.reason == "invalid_target"
 
 
 def test_sandbox_function_decorator_loop_and_format_spec(
@@ -197,12 +200,15 @@ def test_sandbox_observation_shape_loops_and_runtime_snapshot(
     assert runtime.allowlist == ["tool"]
 
 
-def test_predicate_defensive_target_fallthrough_and_operator_rejections() -> None:
+def test_predicate_collect_target_names_rejects_attribute_target() -> None:
     validator = predicate._PredicateValidator()
-    validator._reject = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     target = ast.Attribute(value=ast.Name(id="obs", ctx=ast.Load()), attr="field")
-    assert validator._collect_target_names(target) == []
+    with pytest.raises(predicate.PredicateRejected) as exc_info:
+        validator._collect_target_names(target)
+    assert exc_info.value.reason == "invalid_comprehension_target"
 
+
+def test_predicate_operator_rejections() -> None:
     nodes_and_reasons: list[tuple[ast.AST, str]] = [
         (
             ast.BinOp(left=ast.Constant(1), op=ast.LShift(), right=ast.Constant(2)),

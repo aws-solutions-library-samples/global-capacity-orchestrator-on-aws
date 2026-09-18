@@ -53,8 +53,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.png``)
@@ -105,12 +105,16 @@ _POSIX_ID_OFFSET = 100000
 # ==========================================================================
 
 
-def _parse_claims(event: dict[str, Any]) -> dict[str, Any]:
+def _parse_claims(event: object) -> dict[str, Any]:
     """Extract the Cognito claims dict from an API Gateway proxy event.
 
     Returns an empty dict if ``event["requestContext"]["authorizer"]["claims"]``
     is not present or not a dict. The caller decides whether an empty
     result warrants a 401 -- see :func:`lambda_handler`.
+
+    ``event`` is typed ``object`` because every layer of the path is
+    shape-checked here, the event itself included; the helper makes no
+    assumption about what API Gateway (or a test) hands it.
     """
     if not isinstance(event, dict):
         return {}
@@ -393,7 +397,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         url = response.get("AuthorizedUrl", "")
         return _format_success(url, URL_EXPIRES_SECONDS)
 
-    except Exception as exc:  # noqa: BLE001 -- outer catch-all so every failure returns an opaque error token
+    except Exception as exc:  # outer catch-all so every failure returns an opaque error token
         # Log with exception info so CloudWatch captures the stack trace,
         # but never leak the message to the HTTP response body.
         logger.error("Presigned URL generation failed: %s", exc, exc_info=True)

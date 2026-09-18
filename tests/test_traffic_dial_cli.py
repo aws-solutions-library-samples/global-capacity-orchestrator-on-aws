@@ -54,7 +54,7 @@ def _registry_pages(ssm, *, groups=True, overrides=(), extra_page=False):
         ]
     second_page = [{"Name": "/gco/endpoint-group-us-west-2-arn", "Value": WEST_ARN}]
 
-    def by_path(Path, Recursive, NextToken=None):  # noqa: N803 - boto3 kwargs
+    def by_path(Path, Recursive, NextToken=None):  # boto3 kwargs
         if Path == "/gco":
             if extra_page and NextToken is None:
                 return {"Parameters": registry, "NextToken": "page2"}
@@ -73,7 +73,7 @@ def _registry_pages(ssm, *, groups=True, overrides=(), extra_page=False):
 
 
 def _describe_groups(ga, dials, health_state="HEALTHY"):
-    def describe(EndpointGroupArn):  # noqa: N803 - boto3 kwargs
+    def describe(EndpointGroupArn):  # boto3 kwargs
         return {
             "EndpointGroup": {
                 "TrafficDialPercentage": dials[EndpointGroupArn],
@@ -305,7 +305,7 @@ class TestPurgeRuntimeParameters:
             {"Name": "/gco/traffic-dial/state"},
         ]
 
-        def by_path(Path, Recursive, NextToken=None):  # noqa: N803 - boto3 kwargs
+        def by_path(Path, Recursive, NextToken=None):  # boto3 kwargs
             assert Path == "/gco/traffic-dial"
             assert Recursive is True
             if NextToken is None:
@@ -314,7 +314,7 @@ class TestPurgeRuntimeParameters:
             return {"Parameters": second_page}
 
         ssm.get_parameters_by_path.side_effect = by_path
-        ssm.delete_parameters.side_effect = lambda Names: {  # noqa: N803 - boto3 kwargs
+        ssm.delete_parameters.side_effect = lambda Names: {  # boto3 kwargs
             "DeletedParameters": Names
         }
 

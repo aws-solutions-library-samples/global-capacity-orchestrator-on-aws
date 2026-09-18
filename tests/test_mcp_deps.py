@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402  -- registers tools on the shared server
+import run_mcp  # registers tools on the shared server
 
 
 def _run(coro):

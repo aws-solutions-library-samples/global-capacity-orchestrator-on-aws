@@ -212,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.opencost_url:
             written.append(capture_opencost_ui(args.opencost_url, args.output_dir))
-    except Exception as exc:  # noqa: BLE001 — surface any Playwright/login failure
+    except Exception as exc:  # surface any Playwright/login failure
         print(f"screenshot capture failed: {exc}", file=sys.stderr)
         return 1
 

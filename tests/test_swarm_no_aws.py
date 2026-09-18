@@ -27,12 +27,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission._engine_factory import EngineDependencies  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.swarm import validate_swarm_config  # noqa: E402
-from mission.swarm_runner import SwarmRunner  # noqa: E402
-from mission.swarm_scaffold import validate_plan  # noqa: E402
-from mission.types import SCHEMA_VERSION  # noqa: E402
+from mission._engine_factory import EngineDependencies
+from mission.state import FilesystemBackend
+from mission.swarm import validate_swarm_config
+from mission.swarm_runner import SwarmRunner
+from mission.swarm_scaffold import validate_plan
+from mission.types import SCHEMA_VERSION
 
 _DIRECTIVE = "Search the documentation and example catalogs and surface at least one hit from each."
 

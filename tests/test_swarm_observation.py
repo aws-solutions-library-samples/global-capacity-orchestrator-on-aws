@@ -18,9 +18,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission.engine import MissionEngine  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.types import SCHEMA_VERSION  # noqa: E402
+from mission.engine import MissionEngine
+from mission.state import FilesystemBackend
+from mission.types import SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Harness

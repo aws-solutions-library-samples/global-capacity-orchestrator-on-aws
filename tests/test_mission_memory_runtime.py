@@ -38,10 +38,10 @@ from gco.bedrock import (
 # ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but tests
 # have to do the same before importing ``mission.*``.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-from mission import embeddings as embeddings_module  # noqa: E402
-from mission import memory as memory_module  # noqa: E402
-from mission.embeddings import EmbeddingError, embed_text  # noqa: E402
-from mission.memory import (  # noqa: E402
+from mission import embeddings as embeddings_module
+from mission import memory as memory_module
+from mission.embeddings import EmbeddingError, embed_text
+from mission.memory import (
     DEFAULT_DIMENSIONS,
     DEFAULT_RETENTION_DAYS,
     DEFAULT_TOP_K,

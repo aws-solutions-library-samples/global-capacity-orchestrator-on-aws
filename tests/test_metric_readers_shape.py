@@ -31,7 +31,7 @@ from hypothesis import strategies as st
 # in production, matching the convention used by the sibling Mission tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.shape import (  # noqa: E402
+from metric_readers.shape import (
     is_numeric_value,
     metrics_result,
     validate_metric_name,

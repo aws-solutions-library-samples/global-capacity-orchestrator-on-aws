@@ -353,7 +353,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                     absence_before_completion,
                     source="destroy-completion",
                 )
-        except Exception as exc:  # noqa: BLE001 - retry and preserve teardown evidence
+        except Exception as exc:  # retry and preserve teardown evidence
             overall = False
             if "attempt" not in locals() or attempt.get("sequence") != sequence:
                 attempt = {
@@ -369,7 +369,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
         if not overall:
             try:
                 attempt["log_cleanup_helper_cleanup"] = _delete_log_cleanup_helper(ctx)
-            except Exception as helper_exc:  # noqa: BLE001 - retain both teardown failures
+            except Exception as helper_exc:  # retain both teardown failures
                 helper_error = f"{type(helper_exc).__name__}: {helper_exc}"
                 attempt["log_cleanup_helper_cleanup_error"] = helper_error
                 previous_error = str(attempt.get("error") or "")

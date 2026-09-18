@@ -607,7 +607,7 @@ class TestCertManagerCRDs:
 
     @pytest.mark.parametrize(
         ("kind", "plural"),
-        (("Issuer", "issuers"), ("Certificate", "certificates")),
+        [("Issuer", "issuers"), ("Certificate", "certificates")],
     )
     def test_tls_resource_applied_as_namespaced_custom_object(
         self,
@@ -2296,7 +2296,7 @@ class TestAuthoritativeManifestPlanner:
         """The outage shape is a planning error naming both objects."""
         self._write_hardened_sa_fixture(tmp_path, rbac_bound=True, project_token=False)
 
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(ValueError, match=re.escape("Manifest planning failed: ")) as error:
             handler_module.plan_manifests(str(tmp_path), {})
 
         message = str(error.value)
@@ -2350,7 +2350,7 @@ class TestAuthoritativeManifestPlanner:
         del worker["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
         (tmp_path / "post-helm-worker.yaml").write_text(yaml.safe_dump(worker))
 
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(ValueError, match=re.escape("Manifest planning failed: ")) as error:
             handler_module.plan_manifests(str(tmp_path), {})
 
         assert "Deployment/gco-system/worker" in str(error.value)
@@ -2382,7 +2382,7 @@ class TestAuthoritativeManifestPlanner:
             )
         )
 
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(ValueError, match=re.escape("Manifest planning failed: ")) as error:
             handler_module.plan_manifests(str(tmp_path), {})
 
         assert "Deployment/gco-system/worker" in str(error.value)
@@ -2444,7 +2444,7 @@ class TestAuthoritativeManifestPlanner:
         (tmp_path / "10-base.yaml").write_text(manifest)
         (tmp_path / "post-helm-duplicate.yaml").write_text(manifest)
 
-        with pytest.raises(ValueError, match="duplicate.*first declared"):
+        with pytest.raises(ValueError, match=r"duplicate.*first declared"):
             handler_module.plan_manifests(str(tmp_path), {})
 
     @pytest.mark.parametrize(
@@ -2886,15 +2886,18 @@ class TestManifestReadinessValidation:
     @pytest.mark.parametrize(
         "resource",
         [
+            # Each kind reads a different counter set (Deployment:
+            # availableReplicas, StatefulSet: currentReplicas, DaemonSet:
+            # numberReady); the omitted-when-zero tolerance is asserted per set.
             {
                 "metadata": {"generation": 1},
                 "spec": {"replicas": 0},
-                "status": {"observedGeneration": 1},
+                "status": {"observedGeneration": 1, "replicas": 0, "updatedReplicas": 0},
             },
             {
                 "metadata": {"generation": 1},
                 "spec": {"replicas": 0},
-                "status": {"observedGeneration": 1},
+                "status": {"observedGeneration": 1, "currentReplicas": 0},
             },
             {
                 "metadata": {"generation": 1},
@@ -3546,7 +3549,7 @@ class TestPlannerInputValidation:
         ]
         (tmp_path / "10-mysteries.yaml").write_text(yaml.safe_dump_all(documents))
 
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(ValueError, match=re.escape("Manifest planning failed: ")) as error:
             handler_module.plan_manifests(str(tmp_path), {})
 
         message = str(error.value)

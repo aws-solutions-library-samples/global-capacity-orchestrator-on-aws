@@ -722,7 +722,7 @@ class TestStartLifecycleRotation:
             }
         }
 
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             store.start_endpoint("ep")
 
         mock_table.update_item.assert_not_called()

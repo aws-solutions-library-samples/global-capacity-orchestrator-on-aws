@@ -289,25 +289,74 @@ select = [
     "UP",     # pyupgrade
     "ARG",    # flake8-unused-arguments
     "SIM",    # flake8-simplify
+    # Rules whose whole value is that they are boring: each one catches a
+    # specific mistake that is invisible in review and cheap to prevent.
+    "T10",    # flake8-debugger: a forgotten breakpoint() would hang CI
+    "PGH",    # pygrep-hooks: blanket `# type: ignore` / `# noqa` with no code
+    "YTT",    # flake8-2020: version checks that break on Python 3.10+/4.x
+    "PLE",    # Pylint errors: only the genuinely-broken subset
+    "LOG",    # flake8-logging: misuse of the logging API itself
+    "EXE",    # flake8-executable: a shebang that cannot be executed
+    "PIE",    # flake8-pie: dead placeholders and reimplemented builtins
+    "RUF",    # Ruff's own rules, incl. RUF100: a `# noqa` that suppresses nothing
+    # Test-quality rules. PT011/PT012/PT017 are the ones with teeth: a broad
+    # `pytest.raises(ValueError)` passes on the wrong ValueError, a multi-line
+    # raises block passes when the *setup* raises, and `assert` inside `except`
+    # passes when nothing is raised at all.
+    "PT",     # flake8-pytest-style
+    "PLW1510",  # subprocess.run without an explicit check= (say which you meant)
+    "PLW2901",  # loop variable overwritten inside the loop
+    # Naive datetimes mean "whatever zone this process happens to run in"; the
+    # services stamp records that cross regions and containers, so every
+    # datetime carries a tzinfo. A test that needs a naive value to exercise a
+    # naive-input branch says so with a per-line noqa.
+    "DTZ",    # flake8-datetimez
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)
     "B008",   # do not perform function calls in argument defaults
     "ARG001", # unused function argument
     "ARG002", # unused method argument
+    # `assert a and b` is one assertion of one invariant; pytest's assertion
+    # rewriting already shows which operand was false, so splitting it buys
+    # nothing and doubles the assertion count on ~280 sites.
+    "PT018",
 ]
+# Typography this project uses on purpose in prose, plus one glyph it prints.
+# RUF001-003 exist to catch a homoglyph smuggled into an identifier or a string
+# comparison; an en dash in a sentence, a multiplication sign in
+# "3 × g5.4xlarge", and the ℹ prefix on informational CLI lines are none of
+# those. Every other confusable stays reported.
+allowed-confusables = ["–", "×", "ℹ"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gco", "cli"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG", "S101"]
+# RUF012 (mutable class default) guards production classes against shared
+# state between instances. Test classes are pytest containers that are never
+# instantiated twice, and their class-level fixtures/tables are the readable
+# way to share data between cases, so the rule is noise there. S101 (assert)
+# is not in the enabled set, so it needs no exemption.
+"tests/*" = ["ARG", "RUF012"]
 "lambda/*" = ["ARG"]
 
 [tool.mypy]
 python_version = "3.14"
-# --strict equivalent: every option enabled except "warn_unreachable" which has
-# false positives on platform-conditional branches. Keep these in sync with CI.
+# --strict plus warn_unreachable. Keep these in sync with CI.
+#
+# warn_unreachable fails the build on code the types say can never run: a
+# guard on a value whose type rules the guarded case out, an `or {}` fallback
+# on a value that is always truthy, a branch after an always-taken return.
+# Each is either dead code or a type annotation that is lying about what the
+# function accepts; both are worth a build break. Platform-conditional code is
+# exempt as long as it is written as `if sys.platform ...: ... else: ...`
+# (mypy skips the branch that does not apply to the checking platform without
+# calling it unreachable); only code *after* a platform-conditional return is
+# flagged. A check that mypy genuinely cannot model, such as a flag another
+# task flips while this one awaits, carries a per-line
+# `# type: ignore[unreachable]` that says so.
+warn_unreachable = true
 warn_return_any = true
 warn_unused_configs = true
 check_untyped_defs = true
@@ -400,8 +449,15 @@ check_untyped_defs = true
 minversion = "7.0"
 # -v + short tracebacks match the prior effective (pytest.ini) behavior;
 # --strict-markers turns a typo'd/unregistered marker into an error instead of
-# a silent skip (every marker used in the suite is registered below).
-addopts = "-v --tb=short --strict-markers"
+# a silent skip (every marker used in the suite is registered below);
+# --strict-config does the same for this block, so a misspelled option here
+# fails the run instead of being ignored.
+addopts = "-v --tb=short --strict-markers --strict-config"
+# An xfail that starts passing is news: either the bug it tracked is fixed and
+# the marker must go, or the test no longer exercises the bug. Fail the run
+# rather than reporting XPASS and moving on. (The suite currently carries no
+# xfails; this is the fence for the first one.)
+xfail_strict = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -421,9 +477,25 @@ markers = [
     "helm_online: Helm chart resolve/render check (opt-in via GCO_HELM_CHART_VALIDATION=1; needs helm + network)",
     "kubeconform_online: K8s manifest schema validation (opt-in via GCO_KUBECONFORM_VALIDATION=1; needs kubeconform + network)",
 ]
+# Deprecation warnings fail the test that raised them. A DeprecationWarning is
+# a library telling us an API we call is going away; ignoring the whole
+# category (the previous setting) meant the first place it got noticed was the
+# upgrade that removed the API. Two were hiding under the old blanket ignore:
+# botocore's internal endpoint-resolver component fetched via get_component()
+# (cli/_image_uri.py, cli/aws_client.py) and class-scoped fixtures defined as
+# instance methods (PytestRemovedIn10Warning, twelve test classes). Both are
+# fixed; the filter keeps the next one from hiding. Third-party warnings that
+# are not ours to fix go below as narrow ignores — match on message and
+# module, never the bare category — with a note on where upstream stands.
 filterwarnings = [
-    "ignore::DeprecationWarning",
-    "ignore::PendingDeprecationWarning",
+    "error::DeprecationWarning",
+    "error::PendingDeprecationWarning",
+    # fastmcp 4.0.x still sends MCP log notifications through the SDK's
+    # deprecated logging capability (SEP-2577) "per compat directive"; the
+    # warning is raised inside fastmcp, and ctx.info()/ctx.debug() callers
+    # cannot avoid it. UserWarning subclass, so it never failed a test; the
+    # ignore keeps the summary clean so a new warning stands out.
+    "ignore:The logging capability is deprecated:mcp.shared.exceptions.MCPDeprecationWarning",
 ]
 
 [tool.coverage.run]
@@ -511,8 +583,24 @@ exclude_dirs = [
     "/lambda/helm-installer-build/",
     "/lambda/inference-streaming-proxy-build/",
 ]
-skips = ["B101", "B104", "B113", "B311"]
+# CI runs at --severity-level low, so every finding bandit can raise fails
+# the build unless the line carries a `# nosec Bxxx  # <why>` that names the
+# rule and says why it does not apply. The second `#` matters: bandit reads
+# every word after `nosec` up to the next `#` as a test name, so a reason
+# written after a plain dash is parsed as ids and logged as noise. The low
+# threshold is deliberate: a hard-coded credential or a shell=True call added
+# tomorrow trips the gate on the first push instead of hiding below a
+# threshold. The only rules skipped outright
+# are the ones that fire on *every* use of a feature the project is built on
+# (a CLI that orchestrates kubectl / helm / docker / the AWS CLI) and carry no
+# signal of their own:
+skips = ["B101", "B104", "B113", "B311", "B404", "B603", "B607"]
 # B101: assert used in tests and CDK constructs (harmless)
 # B104: bind to 0.0.0.0 required for container services
 # B113: false positives on dict.get() calls named "requests" (all HTTP calls have timeouts)
 # B311: random not used for security purposes
+# B404: "consider the implications of importing subprocess" — every subprocess import
+# B603: "subprocess call, check for untrusted input" — every argv-list call without a
+#       shell. The dangerous variant, shell=True (B602), is NOT skipped.
+# B607: "partial executable path" — running `kubectl` / `helm` from PATH is the
+#       intended behaviour of a CLI; pinning absolute paths would break it.

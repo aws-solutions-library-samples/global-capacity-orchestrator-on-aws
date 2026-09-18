@@ -44,8 +44,8 @@ from typing import Any
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/vector-ingest/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/vector-ingest/handler.lambda_handler.png``)
@@ -352,7 +352,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         try:
             results.append(_ingest_object(bucket, key))
-        except Exception as err:  # noqa: BLE001 — per-object isolation, re-raised below
+        except Exception as err:  # per-object isolation, re-raised below
             logger.exception("vector-ingest failed for s3://%s/%s", bucket, key)
             failures.append({"key": key, "status": "failed", "error": str(err)})
 

@@ -198,11 +198,11 @@ GCO works with any containerized inference server. These have example manifests 
 
 | Framework | Use Case | Example |
 |-----------|----------|---------|
-| [vLLM](https://docs.vllm.ai/en/latest/) | OpenAI-compatible LLM serving | `examples/inference-vllm.yaml` |
-| [SGLang](https://docs.sglang.ai/) | High-throughput serving with RadixAttention | `examples/inference-sglang.yaml` |
-| TGI | HuggingFace optimized inference | `examples/inference-tgi.yaml` |
-| Triton | Multi-framework model serving | `examples/inference-triton.yaml` |
-| [TorchServe](https://pytorch.org/serve/) | PyTorch native serving | `examples/inference-torchserve.yaml` |
+| [vLLM](https://docs.vllm.ai/en/latest/) | OpenAI-compatible LLM serving | [`examples/inference-vllm.yaml`](../examples/inference-vllm.yaml) |
+| [SGLang](https://docs.sglang.ai/) | High-throughput serving with RadixAttention | [`examples/inference-sglang.yaml`](../examples/inference-sglang.yaml) |
+| [TGI](https://huggingface.co/docs/text-generation-inference) | HuggingFace optimized inference | [`examples/inference-tgi.yaml`](../examples/inference-tgi.yaml) |
+| [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) | Multi-framework model serving | [`examples/inference-triton.yaml`](../examples/inference-triton.yaml) |
+| [TorchServe](https://docs.pytorch.org/serve/) | PyTorch native serving | [`examples/inference-torchserve.yaml`](../examples/inference-torchserve.yaml) |
 
 See [Inference Guide](INFERENCE.md) for the full deep dive including model weight management, canary deployments, and production EFA setup.
 

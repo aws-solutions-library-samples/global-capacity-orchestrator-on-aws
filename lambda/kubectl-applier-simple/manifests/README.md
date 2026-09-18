@@ -106,6 +106,15 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 ### NodePools (40–49)
 
+The family lists below are scheduling *policy*; whether a family can launch on
+a given day is decided by the
+[EKS Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances).
+Newer families (for example `g7`/`g7e`) are listed ahead of Auto Mode support
+on purpose, so existing deployments start using them the moment AWS adds
+support — no GCO update required. Until then those families simply contribute
+no candidate instance types (see
+[Which instance types can actually launch](../../../docs/CUSTOMIZATION.md#which-instance-types-can-actually-launch)).
+
 | File | Contents |
 |------|----------|
 | `40-nodepool-gpu-x86.yaml` | x86_64 GPU pool (g4dn, g5, g6, g6e, g6f, gr6, gr6f, g7, g7e) — on-demand + spot; deprecated V100 p3/p3dn families are observation-only and excluded from new scheduling |

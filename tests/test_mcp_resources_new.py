@@ -222,12 +222,17 @@ class TestModuleStructure:
     """Tests that the refactored module structure is correct."""
 
     def test_tools_are_importable(self):
-        """All tool modules should be importable."""
-        from tools import capacity, costs, inference, jobs, models, stacks, storage  # noqa: F401
+        """Every tool module imports and contributes registered tools to the server."""
+        from tools import capacity, costs, inference, jobs, models, stacks, storage
+
+        registered = asyncio.run(run_mcp.mcp._list_tools())
+        by_module = {tool.fn.__module__ for tool in registered if getattr(tool, "fn", None)}
+        for module in (capacity, costs, inference, jobs, models, stacks, storage):
+            assert module.__name__ in by_module, f"{module.__name__} registered no tools"
 
     def test_resources_are_importable(self):
-        """All resource modules should be importable."""
-        from resources import (  # noqa: F401
+        """Every resource module imports and registers at least one resource or template."""
+        from resources import (
             ci,
             clients,
             config,
@@ -241,13 +246,44 @@ class TestModuleStructure:
             tests,
         )
 
+        registered = list(asyncio.run(run_mcp.mcp._list_resources())) + list(
+            asyncio.run(run_mcp.mcp._list_resource_templates())
+        )
+        by_module = {item.fn.__module__ for item in registered if getattr(item, "fn", None)}
+        for module in (
+            ci,
+            clients,
+            config,
+            demos,
+            docs,
+            iam_policies,
+            infra,
+            k8s,
+            scripts,
+            source,
+            tests,
+        ):
+            assert module.__name__ in by_module, f"{module.__name__} registered no resources"
+
     def test_audit_module_importable(self):
-        from audit import _sanitize_arguments, audit_logged  # noqa: F401
+        """The audit helpers import and redact secrets rather than echoing them."""
+        from audit import _sanitize_arguments, audit_logged
+
+        assert callable(audit_logged)
+        sanitized = _sanitize_arguments({"password": "hunter2", "region": "us-east-1"})
+        assert sanitized["region"] == "us-east-1"
+        assert sanitized["password"] != "hunter2"
 
     def test_cli_runner_importable(self):
-        from cli_runner import _run_cli  # noqa: F401
+        """The CLI runner seam is an ordinary callable the tools can patch."""
+        import inspect
+
+        from cli_runner import _run_cli
+
+        assert callable(_run_cli)
+        assert "args" in inspect.signature(_run_cli).parameters
 
     def test_version_module_importable(self):
-        from version import get_project_version  # noqa: F401
+        from version import get_project_version
 
         assert get_project_version() != "unknown"

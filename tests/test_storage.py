@@ -475,7 +475,7 @@ class TestDownloadSync:
     def test_download_name_validation_for_windows(self) -> None:
         with patch("cli.storage.sys.platform", "win32"):
             for key in ("bad. ", "a<b", "CON", "com1.txt", "LPT¹.log"):
-                with pytest.raises(ValueError, match="Windows|Reserved"):
+                with pytest.raises(ValueError, match=r"Windows|Reserved"):
                     StorageManager._download_relative_parts(key, key)
             assert StorageManager._download_relative_parts("safe/name.txt", "safe/name.txt") == (
                 "safe",
@@ -805,7 +805,7 @@ class TestConfinedSync:
         outside.mkdir()
         (root / "link").symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(ValueError, match="symbolic link|non-directory"):
+        with pytest.raises(ValueError, match=r"symbolic link|non-directory"):
             _sync_with(
                 manager,
                 FakeS3(),

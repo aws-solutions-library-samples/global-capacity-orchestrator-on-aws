@@ -38,8 +38,8 @@ from hypothesis import strategies as st
 # before the import below resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import validation  # noqa: E402
-from mission.validation import MissionValidationError  # noqa: E402
+from mission import validation
+from mission.validation import MissionValidationError
 
 # A single shared settings profile keeps every property test bounded.
 _PBT_SETTINGS = settings(

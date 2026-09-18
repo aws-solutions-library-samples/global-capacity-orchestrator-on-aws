@@ -329,7 +329,7 @@ class TestCapacityChecker:
         with patch("cli.capacity.checker.get_config") as mock_config:
             mock_config.return_value = MagicMock()
             checker = CapacityChecker()
-            assert checker.config is not None
+            assert checker.config is mock_config.return_value
 
     def test_get_instance_info_known_type(self):
         """A GPU type is described from EC2, including its region.
@@ -1519,7 +1519,7 @@ class TestCapacityCheckerRecommendCapacityTypeEdgeCases:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "medium"
                 )
 
@@ -1780,7 +1780,7 @@ class TestCapacityCheckerEstimateExtended:
                     return_value=InstanceTypeInfo("m5.large", 2, 8, 0, None, 0),
                 ),
             ):
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "m5.large", "us-east-1", "high"
                 )
 
@@ -2207,7 +2207,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "medium"
                 )
 
@@ -2245,7 +2245,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "high"
                 )
 
@@ -2274,7 +2274,7 @@ class TestCapacityCheckerRecommendCapacityTypeExtended:
                     ),
                 ]
 
-                capacity_type, explanation = checker.recommend_capacity_type(
+                capacity_type, _explanation = checker.recommend_capacity_type(
                     "g4dn.xlarge", "us-east-1", "high"
                 )
 
@@ -2650,11 +2650,10 @@ class TestBedrockCapacityAdvisor:
                     "on_demand_data": {},
                 }
 
-                try:
+                with pytest.raises(RuntimeError) as excinfo:
                     advisor.get_recommendation()
-                    pytest.fail("Should have raised RuntimeError")
-                except RuntimeError as e:
-                    assert "Access denied" in str(e)
+                e = excinfo.value
+                assert "Access denied" in str(e)
 
     @patch("cli.capacity.advisor.get_config")
     def test_get_recommendation_invalid_json(self, mock_config):
@@ -2688,14 +2687,11 @@ class TestBedrockCapacityAdvisor:
                     "on_demand_data": {},
                 }
 
-                try:
+                with pytest.raises(RuntimeError) as excinfo:
                     advisor.get_recommendation()
-                    pytest.fail("Should have raised RuntimeError")
-                except RuntimeError as e:
-                    # The failure names the problem and quotes the response
-                    # head so the operator can see what the model actually said.
-                    assert "No JSON object found" in str(e)
-                    assert "This is not valid JSON" in str(e)
+                e = excinfo.value
+                assert "No JSON object found" in str(e)
+                assert "This is not valid JSON" in str(e)
 
 
 class TestGetBedrockCapacityAdvisor:
@@ -2984,7 +2980,7 @@ class TestCapacityBlockTrend:
 
             # Create a clear upward ramp: week N gets N offerings
             offerings = []
-            for week in range(0, 26):
+            for week in range(26):
                 for _ in range(week):
                     offerings.append({"StartDate": now + timedelta(weeks=week, days=1)})
 
@@ -3012,7 +3008,7 @@ class TestCapacityBlockTrend:
 
             # Create a clear downward ramp: week N gets (25 - N) offerings
             offerings = []
-            for week in range(0, 26):
+            for week in range(26):
                 for _ in range(25 - week):
                     offerings.append({"StartDate": now + timedelta(weeks=week, days=1)})
 

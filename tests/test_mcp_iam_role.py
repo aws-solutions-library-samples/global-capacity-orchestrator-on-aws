@@ -49,7 +49,7 @@ def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
             config=config,
             region="us-east-1",
             auth_secret_arn=(
-                "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret"  # nosec B106 - test fixture ARN
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret"  # nosec B106  # test fixture ARN
             ),
             env=cdk.Environment(account="123456789012", region="us-east-1"),
         )

@@ -19,8 +19,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import feature_flags  # noqa: E402
-from mission.validation import (  # noqa: E402
+import feature_flags
+from mission.validation import (
     SUPERVISOR_TOOLS,
     SWARM_EXCLUDED_TOOLS,
     SWARM_MCP_TOOLS,

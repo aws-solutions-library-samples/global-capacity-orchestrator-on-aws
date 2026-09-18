@@ -45,7 +45,6 @@ def _cooperative_storage_sigterm() -> Iterator[None]:
 @pass_config
 def storage(config: Any) -> None:
     """Discover and sync user-facing GCO S3 buckets."""
-    pass
 
 
 @storage.command("list")

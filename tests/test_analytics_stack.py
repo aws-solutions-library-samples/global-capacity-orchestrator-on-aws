@@ -1005,7 +1005,7 @@ class TestSageMakerExecutionRole:
             f"global region; attached statements={statements!r}"
         )
 
-    @pytest.mark.parametrize("region", ("cn-north-1", "us-gov-west-1"))
+    @pytest.mark.parametrize("region", ["cn-north-1", "us-gov-west-1"])
     def test_noncommercial_policies_retain_partition_and_url_suffix_tokens(
         self,
         region: str,

@@ -10,7 +10,8 @@ manifests). On success the message is deleted; on failure it returns to the
 queue after the visibility timeout (5 min) and eventually lands in the DLQ
 after 3 failed attempts.
 
-Message format (produced by `gco jobs submit-sqs`):
+Message format — the shared envelope in ``gco.job_envelope``, which
+``gco jobs submit-sqs`` builds and this service reads:
     {
         "job_id": "abc123",
         "manifests": [<k8s manifest dicts>],
@@ -85,6 +86,7 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
+from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
@@ -100,8 +102,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-05T22:58:10Z
-# Generated from Git commit: 745b3fa3a9af9380bfe2797a5d9716fe8ce3a557
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)
@@ -632,14 +634,14 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
                 res = c.get("resources", {}) or {}
                 limits = res.get("limits", {}) or {}
                 requests = res.get("requests", {}) or {}
-                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113  # dict.get(), not HTTP requests
                 total_gpu += multiplier * int(gpu)
-                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113 - dict.get(), not HTTP requests
+                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get(), not HTTP requests
                 if isinstance(cpu_str, str) and cpu_str.endswith("m"):
                     total_cpu += multiplier * int(cpu_str[:-1])
                 else:
                     total_cpu += multiplier * int(float(cpu_str) * 1000)
-                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113 - dict.get(), not HTTP requests
+                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113  # dict.get(), not HTTP requests
                 mem_bytes = _parse_memory_string(str(mem_str))
                 total_memory += multiplier * mem_bytes
 
@@ -1021,7 +1023,7 @@ def _record_failure_on_final_receive(
     submitted_at = body.get("submitted_at")
     _record_job_failure(
         job_id,
-        namespace=str(body.get("namespace", "gco-jobs")),
+        namespace=str(body.get("namespace", DEFAULT_JOB_NAMESPACE)),
         error=error,
         message=message,
         priority=priority,
@@ -1081,7 +1083,7 @@ def drain_one_message_after_config_failure(reason: str) -> bool:
     submitted_at = body.get("submitted_at")
     recorded = _record_job_failure(
         job_id,
-        namespace=str(body.get("namespace", "gco-jobs")),
+        namespace=str(body.get("namespace", DEFAULT_JOB_NAMESPACE)),
         error=f"queue processor could not initialize Kubernetes credentials: {reason}",
         message="Queue processor configuration failure",
         priority=priority if isinstance(priority, int) else 0,

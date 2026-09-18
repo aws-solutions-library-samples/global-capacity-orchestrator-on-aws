@@ -21,6 +21,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -488,7 +489,9 @@ class TestRunnerActionResolution:
     def test_unknown_actions_are_listed_with_the_available_names(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        with pytest.raises(ValueError, match="Unknown actions: bogus, zed. Available: preflight"):
+        with pytest.raises(
+            ValueError, match=re.escape("Unknown actions: bogus, zed. Available: preflight")
+        ):
             _build_runner(
                 tmp_path,
                 monkeypatch,
@@ -1571,7 +1574,7 @@ class TestRunContextJobRecords:
         ctx = self._ctx(tmp_path)
         self._register(ctx)
 
-        with pytest.raises(RuntimeError, match="identity changed .*: transport_region"):
+        with pytest.raises(RuntimeError, match=r"identity changed .*: transport_region"):
             self._register(ctx, transport_region=None)
 
     def test_prepare_submission_requires_an_object_envelope(self, tmp_path: Path) -> None:
@@ -2702,7 +2705,7 @@ class TestActionConvergence:
 
     @contextlib.contextmanager
     def _clock(self) -> Iterator[list[int]]:
-        ticks = iter(range(0, 10_000))
+        ticks = iter(range(10_000))
         sleeps: list[int] = []
         with (
             patch.object(actions_convergence.time, "monotonic", side_effect=lambda: next(ticks)),
@@ -3210,12 +3213,12 @@ class TestActionDestroy:
         ctx = self._ctx()
         ctx.stack_manager.destroy_orchestrated.side_effect = RuntimeError("cdk exploded")
 
-        with (
-            self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers,
-            pytest.raises(RuntimeError, match="last failure: RuntimeError: cdk exploded; cleanup"),
-        ):
+        with self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers:
             helpers["delete_helper"].side_effect = ValueError("helper gone")
-            actions_destroy.destroy_deployment(ctx)
+            with pytest.raises(
+                RuntimeError, match="last failure: RuntimeError: cdk exploded; cleanup"
+            ):
+                actions_destroy.destroy_deployment(ctx)
 
         attempt = ctx.checkpoint.state["destroy_attempts"][0]
         assert attempt["overall_success"] is False
@@ -3915,7 +3918,7 @@ class TestActionPreflight:
 
         with (
             self._boundaries(dirty=" M cdk.json"),
-            pytest.raises(RuntimeError, match="requires a clean worktree.*\n M cdk.json"),
+            pytest.raises(RuntimeError, match=r"requires a clean worktree.*\n M cdk.json"),
         ):
             actions_preflight.action_preflight(ctx)
 
@@ -3976,7 +3979,7 @@ class TestActionPreflight:
         with (
             self._boundaries(),
             patch.object(actions_preflight.shutil, "disk_usage", side_effect=usage),
-            pytest.raises(RuntimeError, match="below the 20 GiB floor.*report_dir.*3.0 GiB free"),
+            pytest.raises(RuntimeError, match=r"below the 20 GiB floor.*report_dir.*3.0 GiB free"),
         ):
             actions_preflight.action_preflight(ctx)
         # Fails before the first AWS call, like the other local prerequisites.
@@ -4108,7 +4111,7 @@ class TestActionPreflight:
             self._boundaries(),
             pytest.raises(
                 RuntimeError,
-                match='Could not resolve target stack Regions: {"gco-live-global": null',
+                match=re.escape('Could not resolve target stack Regions: {"gco-live-global": null'),
             ),
         ):
             actions_preflight.action_preflight(ctx)
@@ -4377,9 +4380,10 @@ class TestActionTopology:
     def test_convergence_errors_are_bounded_and_re_raised(self) -> None:
         ctx = self._ctx()
 
-        with self._checks() as checks, pytest.raises(TimeoutError, match="add-ons still running"):
+        with self._checks() as checks:
             checks["converge"].side_effect = TimeoutError("add-ons still running")
-            actions_topology.action_topology(ctx)
+            with pytest.raises(TimeoutError, match="add-ons still running"):
+                actions_topology.action_topology(ctx)
 
         evidence = ctx.checkpoint.state["topology_convergence"]["regions"]["us-east-1"]
         assert evidence["error"] == "TimeoutError: add-ons still running"
@@ -4416,7 +4420,7 @@ class TestActionTopology:
         with (
             self._checks(),
             pytest.raises(
-                RuntimeError, match='Fresh queue in us-east-1 is not empty: {.*"delayed": 2'
+                RuntimeError, match=r'Fresh queue in us-east-1 is not empty: {.*"delayed": 2'
             ),
         ):
             actions_topology.action_topology(ctx)

@@ -5,6 +5,7 @@
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -105,7 +106,7 @@ class TestTargetCapacityParsing:
         ],
     )
     def test_malformed_mapping_raises(self, handler, raw):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("SPOT_SCORE_TARGET_CAPACITIES ")):
             handler._parse_target_capacities(raw)
 
 
@@ -143,7 +144,7 @@ class TestInstancePoolParsing:
     def test_malformed_pools_raise(self, handler, raw):
         # A two-member pool (including one padded with a duplicate) would
         # silently reintroduce the depressed-score bug, so parsing fails loud.
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("INSTANCE_POOLS ")):
             handler._parse_instance_pools(raw)
 
     def test_duplicate_pool_name_raises(self, handler):
@@ -796,7 +797,10 @@ class TestLambdaHandler:
         monkeypatch.delenv("CAPACITY_HISTORY_TABLE_NAME", raising=False)
         monkeypatch.setenv("WATCH_INSTANCE_TYPES", "g5.xlarge")
         monkeypatch.setenv("ENABLED_REGIONS", "us-east-1")
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape("CAPACITY_HISTORY_TABLE_NAME environment variable is required"),
+        ):
             handler.lambda_handler({}, None)
 
     def test_malformed_pool_env_raises(self, handler, monkeypatch):

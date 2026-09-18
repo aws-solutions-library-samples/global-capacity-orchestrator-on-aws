@@ -33,7 +33,7 @@ def dynamodb(verified_floci_endpoint: str):
 
 
 class TestTemplateStore:
-    @pytest.fixture()
+    @pytest.fixture
     def store(self, dynamodb):
         from gco.services.template_store import TemplateStore
 
@@ -79,7 +79,7 @@ class TestTemplateStore:
 
 
 class TestWebhookStore:
-    @pytest.fixture()
+    @pytest.fixture
     def store(self, dynamodb):
         from gco.services.template_store import WebhookStore
 
@@ -115,7 +115,7 @@ class TestWebhookStore:
 
 
 class TestJobStore:
-    @pytest.fixture()
+    @pytest.fixture
     def store(self, dynamodb):
         from gco.services.template_store import JobStore
 
@@ -197,7 +197,7 @@ class TestJobStore:
 
 
 class TestInferenceEndpointStore:
-    @pytest.fixture()
+    @pytest.fixture
     def store(self, dynamodb):
         from gco.services.inference_store import InferenceEndpointStore
 

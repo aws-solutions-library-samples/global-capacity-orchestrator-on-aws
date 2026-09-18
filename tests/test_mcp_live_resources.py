@@ -29,7 +29,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring the other test modules.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 _EKS_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 
@@ -79,12 +79,12 @@ class TestEksContextResolution:
     def test_rejects_invalid_sts_account(self):
         sts = MagicMock()
         sts.get_caller_identity.return_value = {"Account": "not-an-account"}
+        from resources._eks import eks_context_for_region
+
         with (
             patch("resources._eks.boto3.client", return_value=sts),
             pytest.raises(ValueError, match="account ID"),
         ):
-            from resources._eks import eks_context_for_region
-
             eks_context_for_region("us-east-1", project_name="gco")
 
     def test_rejects_invalid_project_before_aws_calls(self):

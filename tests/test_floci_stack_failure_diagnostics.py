@@ -39,7 +39,7 @@ pytestmark = floci_test_markers()
 _CASCADE_WIDTH = 12
 
 
-@pytest.fixture()
+@pytest.fixture
 def manager(verified_floci_endpoint):
     from cli.config import GCOConfig
     from cli.stacks import StackManager
@@ -56,7 +56,7 @@ def manager(verified_floci_endpoint):
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def rolled_back_stack(manager):
     """A ``<project>-monitoring`` stack that rolled back on a bucket-name collision."""
     stack_name = f"{manager.config.project_name}-monitoring"
@@ -117,9 +117,13 @@ def _stack_exists(cloudformation, stack_name: str) -> bool:
     try:
         cloudformation.describe_stacks(StackName=stack_name)
     except ClientError as exc:
+        # Not a `pytest.raises` site: absence is one of this helper's two
+        # legitimate answers, and the asserts only pin that the *kind* of
+        # failure is "no such stack" rather than a throttle or a permission
+        # error being mistaken for absence.
         error = exc.response.get("Error", {})
-        assert error.get("Code") == "ValidationError", exc
-        assert "does not exist" in str(error.get("Message")), exc
+        assert error.get("Code") == "ValidationError", exc  # noqa: PT017
+        assert "does not exist" in str(error.get("Message")), exc  # noqa: PT017
         return False
     return True
 

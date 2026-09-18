@@ -47,12 +47,12 @@ import pytest
 # module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import SCHEMA_VERSION  # noqa: E402
-from mission.engine import MissionEngine  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.types import ToolCallRecord  # noqa: E402
-from mission_judge.rubric import RUBRIC_VERSION  # noqa: E402
-from mission_judge.shape import error_envelope, metrics_result  # noqa: E402
+from mission import SCHEMA_VERSION
+from mission.engine import MissionEngine
+from mission.state import FilesystemBackend
+from mission.types import ToolCallRecord
+from mission_judge.rubric import RUBRIC_VERSION
+from mission_judge.shape import error_envelope, metrics_result
 
 # The metric key the judge emits and the criterion reads back by dot-path.
 _METRIC_KEY = "progress_score"

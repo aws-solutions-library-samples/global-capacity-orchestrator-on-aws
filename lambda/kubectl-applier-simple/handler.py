@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T12:46:59Z
-# Generated from Git commit: d77e920379da4b3fd56a9cf0b58cbd1fc45c1802
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -441,7 +441,7 @@ def _log_service_account_automount_flip(
 
 def plan_manifests(
     manifests_dir: str,
-    replacements: dict[str, str],
+    replacements: object,
 ) -> dict[str, Any]:
     """Plan the complete raw-manifest inventory without mutating the cluster.
 
@@ -449,6 +449,11 @@ def plan_manifests(
     replacements, then an unresolved UPPER_SNAKE placeholder gates the entire
     file out. Every remaining nonempty YAML document must have an exact,
     supported identity and be unique across both apply phases.
+
+    ``replacements`` is the ``ImageReplacements`` value exactly as it
+    arrived in the CloudFormation / Step Functions event, so it is typed
+    ``object`` and validated here: anything but a string-to-string mapping
+    is reported as a planning failure rather than trusted.
     """
     phases: dict[str, list[dict[str, Any]]] = {"base": [], "post-helm": []}
     skipped: dict[str, list[str]] = {"base": [], "post-helm": []}

@@ -72,8 +72,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
@@ -2269,7 +2269,6 @@ class GCOMonitoringStack(Stack):
         """
         # GA alarms skipped - metrics only available in us-west-2
         # Dashboard widgets use region parameter to display GA metrics correctly
-        pass
 
     def _create_api_gateway_alarms(self) -> None:
         """Create API Gateway alarms"""
@@ -2554,7 +2553,6 @@ class GCOMonitoringStack(Stack):
         # The test suite explicitly documents that the ALB alarm count is
         # currently zero (test_alb_unhealthy_hosts_alarm_skipped); update
         # that test when adding real alarms.
-        pass
 
     def _create_application_alarms(self) -> None:
         """Create application-specific alarms"""

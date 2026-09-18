@@ -60,7 +60,7 @@ def _ga_stub(east_dial: float = 100.0, west_dial: float = 100.0) -> MagicMock:
 
 
 class TestTrafficDialController:
-    @pytest.fixture()
+    @pytest.fixture
     def project(self, verified_floci_endpoint: str):
         """A per-test project prefix plus SSM cleanup of the dial tree."""
         project = f"gco{uuid.uuid4().hex[:8]}"
@@ -78,7 +78,7 @@ class TestTrafficDialController:
             except ssm.exceptions.ParameterNotFound:
                 continue
 
-    @pytest.fixture()
+    @pytest.fixture
     def dial_environment(self, project, monkeypatch):
         monkeypatch.setenv("LISTENER_ARN", LISTENER_ARN)
         monkeypatch.setenv("PROJECT_NAME", project)

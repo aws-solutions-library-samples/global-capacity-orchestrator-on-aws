@@ -63,6 +63,16 @@ GCO separates three concerns that must not be conflated:
 The checked-in catalog makes the first two concerns complete and deterministic;
 NodePool family lists keep the third concern deliberate.
 
+A fourth concern is outside GCO's control: **which of those families EKS Auto
+Mode can provision right now** is decided by the
+[Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances).
+That is why NodePool family lists intentionally run ahead of it — a reviewed
+family such as `g7`/`g7e` is added to the pools as soon as EC2 advertises it,
+so deployments pick it up the day Auto Mode supports it without waiting for a
+GCO release. Adding a family that Auto Mode does not support yet is therefore
+expected, not a mistake; do not remove one for that reason alone (see
+[Which instance types can actually launch](CUSTOMIZATION.md#which-instance-types-can-actually-launch)).
+
 ### Sources of truth
 
 | Purpose | Authoritative file(s) | Contract |
@@ -284,7 +294,7 @@ rebuild that pulls the latest fixes. The dependency scan flags an epoch older
 than 45 days; Trivy's container scan is the backstop.
 
 - `APT_SECURITY_EPOCH` (Debian images): `Dockerfile.dev` and the six
-  `dockerfiles/*-dockerfile` service images.
+  `dockerfiles/Dockerfile.*` service images.
 - `DNF_SECURITY_EPOCH` (Amazon Linux 2023): `lambda/helm-installer/Dockerfile`.
 
 Set the ARG default to today's date (`YYYY-MM-DD`), rebuild, and re-run the
@@ -682,7 +692,15 @@ closing it.
 - `tests/` — the pytest suite. Markers are declared in `pyproject.toml`
   `[tool.pytest.ini_options]` (`slow`, `integration`, `unit`, `mission_e2e`,
   `mooncake_image`, `helm_online`, `asyncio`), and `addopts` includes
-  `--strict-markers` so a typo'd marker fails instead of silently skipping.
+  `--strict-markers` so a typo'd marker fails instead of silently skipping
+  (and `--strict-config` so a typo'd option in that block does too).
+  `filterwarnings` turns every `DeprecationWarning` and
+  `PendingDeprecationWarning` into a test failure: a dependency announcing
+  that an API we call is going away gets fixed when it is announced, not when
+  the upgrade removes it. A third-party warning that is not ours to fix gets a
+  narrow ignore there, matched on message and module, with a note on where
+  upstream stands. See [Gate thresholds](../.github/CI.md#gate-thresholds) for
+  the same rule across every other gate.
 - Heavy tests are opt-in via env vars so the default run stays fast:
   `GCO_MOONCAKE_IMAGE_TEST=1` (pulls the ~9 GB [vLLM](https://docs.vllm.ai/en/latest/) image) and
   `GCO_HELM_CHART_VALIDATION=1` (needs `helm` + network).

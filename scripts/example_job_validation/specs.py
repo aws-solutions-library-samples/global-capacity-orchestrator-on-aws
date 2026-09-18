@@ -15,8 +15,8 @@ catalog). Each spec answers, for its example:
   (e.g. replacing a gated HuggingFace model with an ungated one) — every
   mutation is disclosed in the report.
 
-Keep this table boring and declarative: the drivers in
-``checks/examples.py`` interpret it.
+Keep this table boring and declarative: ``drivers.py`` interprets it and
+``actions.py`` orchestrates it.
 """
 
 from __future__ import annotations
@@ -62,8 +62,8 @@ class ExampleSpec:
     feature_overrides: tuple[str, ...] = ()
     #: Accelerator requirement: "" (none), "nvidia", "neuron", or "efa".
     accelerator: str = ""
-    #: Named setup/teardown driver hooks (implemented in checks/examples.py):
-    #: "keda-demo-queue".
+    #: Named setup/teardown driver hook, implemented in ``drivers.py`` and
+    #: listed in its ``KNOWN_SETUP_DRIVERS`` registry, e.g. "keda-demo-queue".
     setup_driver: str = ""
     #: Deliberate, report-disclosed manifest mutations applied before
     #: submission, as (json-path-ish description, replacement) pairs.

@@ -1,6 +1,7 @@
 # Tests for cli/capacity/history.py -- Historical Capacity Surface storage layer.
 # Pure helpers plus CapacityHistoryStore DynamoDB methods against a MagicMock table.
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -91,7 +92,9 @@ class TestTargetCapacityNaming:
 
     @pytest.mark.parametrize("capacity", [0, -1, 7, 100, True])
     def test_unsupported_capacity_names_value_and_supported_set(self, capacity):
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(
+            ValueError, match=re.escape("unsupported Spot Placement Score target capacity ")
+        ) as excinfo:
             hist.metric_field_for_target_capacity(capacity)
         message = str(excinfo.value)
         assert repr(capacity) in message

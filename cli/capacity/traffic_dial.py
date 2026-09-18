@@ -183,7 +183,7 @@ class TrafficDialManager:
             statuses.append(
                 RegionDialStatus(
                     region=region,
-                    traffic_dial=int(round(float(group.get("TrafficDialPercentage", 100.0)))),
+                    traffic_dial=round(float(group.get("TrafficDialPercentage", 100.0))),
                     endpoint_health=self._summarize_endpoint_health(group),
                     override=overrides.get(region),
                     controller_reason=decision.get("reason"),
@@ -257,7 +257,7 @@ class TrafficDialManager:
 
         return RegionDialStatus(
             region=region,
-            traffic_dial=int(round(float(updated.get("TrafficDialPercentage", percentage)))),
+            traffic_dial=round(float(updated.get("TrafficDialPercentage", percentage))),
             endpoint_health=self._summarize_endpoint_health(updated),
             override=str(percentage),
             endpoint_group_arn=groups[region],

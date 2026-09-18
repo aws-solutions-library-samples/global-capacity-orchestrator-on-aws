@@ -601,6 +601,11 @@ class TestInferenceEndpointStore:
         created = store.create_endpoint("scale-ep", {"image": "img", "replicas": 1}, ["us-east-1"])
         result = store.scale_endpoint("scale-ep", 5, expected_lifecycle_id=created["lifecycle_id"])
         assert result is not None
+        # The conditional write returns the new item: replicas moved, the
+        # lifecycle fence held, and the rest of the spec survived untouched.
+        assert result["spec"]["replicas"] == 5
+        assert result["spec"]["image"] == "img"
+        assert result["lifecycle_id"] == created["lifecycle_id"]
 
     def test_scale_endpoint_not_found(self, store):
         result = store.scale_endpoint("missing", 3, expected_lifecycle_id="missing-life")
@@ -1952,7 +1957,8 @@ class TestInferenceManager:
 
     def test_get_endpoint_found(self, manager, mock_store_instance):
         mock_store_instance.get_endpoint.return_value = {"endpoint_name": "ep"}
-        assert manager.get_endpoint("ep") is not None
+        assert manager.get_endpoint("ep") == {"endpoint_name": "ep"}
+        mock_store_instance.get_endpoint.assert_called_once_with("ep")
 
     def test_get_endpoint_not_found(self, manager, mock_store_instance):
         mock_store_instance.get_endpoint.return_value = None
@@ -1984,7 +1990,7 @@ class TestInferenceManager:
             "lifecycle_id": "life-scale",
             "spec": {"autoscaling": {"enabled": True}},
         }
-        with pytest.raises(ValueError, match="autoscaled.*min/max"):
+        with pytest.raises(ValueError, match=r"autoscaled.*min/max"):
             manager.scale("ep", 5)
         mock_store_instance.scale_endpoint.assert_not_called()
 
@@ -2007,7 +2013,7 @@ class TestInferenceManager:
             "desired_state": "deleted",
             "spec": {"replicas": 1},
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.scale("ep", 5)
         mock_store_instance.scale_endpoint.assert_not_called()
 
@@ -2036,7 +2042,7 @@ class TestInferenceManager:
             "lifecycle_id": "life-stop",
             "desired_state": "deleted",
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.stop("ep")
         mock_store_instance.update_desired_state.assert_not_called()
 
@@ -2118,7 +2124,7 @@ class TestInferenceManager:
             "desired_state": "deleted",
             "spec": {"image": "old:v1"},
         }
-        with pytest.raises(ValueError, match="deleted.*redeploy"):
+        with pytest.raises(ValueError, match=r"deleted.*redeploy"):
             manager.update_image("ep", "new:v2")
         mock_store_instance.update_spec.assert_not_called()
 

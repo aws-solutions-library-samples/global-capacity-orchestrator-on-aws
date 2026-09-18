@@ -366,8 +366,8 @@ def get_default_mission_model_id(cdk_json_path: Path | None = None) -> str:
 def get_default_capacity_advisor_model_id(cdk_json_path: Path | None = None) -> str:
     """Return the checked-in capacity-advisor model default from ``cdk.json``.
 
-    This is the model ``gco capacity advise`` (and its historical variant)
-    uses when no ``--model`` override is supplied. Mission sampling resolves
+    This is the model ``gco capacity ai-recommend`` and ``gco capacity predict``
+    use when no ``--model`` override is supplied. Mission sampling resolves
     its own default through :func:`get_default_mission_model_id`, and
     ``gco autopilot`` through :func:`get_default_claude_code_model_id`.
     """

@@ -116,7 +116,7 @@ async def test_with_local_server() -> bool:
     port = 8888
     server = start_local_server(port)
     webhook_url = f"http://localhost:{port}/webhook"
-    webhook_secret = "test-secret-key"  # nosec B105 — local test fixture, not a real secret
+    webhook_secret = "test-secret-key"  # nosec B105  # local test fixture, not a real secret
 
     # Create mock webhook store
     mock_store = MagicMock()
@@ -206,7 +206,12 @@ async def test_with_local_server() -> bool:
     return len(results) > 0 and all(r.success for r in results)
 
 
-async def test_with_external_url(url: str, secret: str | None = None) -> bool:
+async def test_with_external_url(
+    url: str,
+    # Not a collected test (pytest's testpaths is tests/): this is the manual
+    # harness's CLI entry point, and the default mirrors its optional --secret.
+    secret: str | None = None,  # noqa: PT028
+) -> bool:
     """Test webhook delivery with an external URL (e.g., webhook.site)."""
     from gco.services.webhook_dispatcher import WebhookDispatcher, WebhookEvent
 

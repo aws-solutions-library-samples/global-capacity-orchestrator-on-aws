@@ -375,8 +375,8 @@ Run them from your dev-container shell (the recommended path — see
 [Using the Dev Container (Recommended)](#using-the-dev-container-recommended)):
 
 ```bash
-ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff format --check .   # CI lints the whole checkout, not a directory list
+ruff check .
 mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
 python scripts/accelerator_catalog.py validate
 pytest tests/test_accelerator_catalog.py -q
@@ -460,8 +460,8 @@ You can simulate the CI pipeline locally:
 pip install -e ".[dev]"
 
 # Run linters (matches lint.yml jobs)
-ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff format --check .   # CI lints the whole checkout, not a directory list
+ruff check .
 yamllint -c .github/config/.yamllint.yml --strict .
 
 # Install locked tooling and the isolated production-Lambda graph.
@@ -479,8 +479,9 @@ pip install -e ".[cdk,typecheck]"
 mypy gco/stacks/ app.py diagrams/
 mypy .github/oidc_provider/  # separate run: two modules named "app"
 
-# Run security scans
-bandit -r . -c pyproject.toml --severity-level medium
+# Run security scans (every finding fails; annotate a genuine false positive
+# with `# nosec Bxxx  # <why>` on the offending line)
+bandit -r . -c pyproject.toml --severity-level low
 
 # Run tests with coverage (matches unit:pytest:core)
 pytest tests/ --cov --cov-report=html --cov-fail-under=100 \

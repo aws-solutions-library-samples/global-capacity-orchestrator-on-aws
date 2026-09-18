@@ -10,6 +10,7 @@ cost pipeline off without a synthesis error).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -113,7 +114,7 @@ class TestCostMonitoringDefaults:
 
 class TestCostMonitoringValidation:
     def test_non_bool_enabled_fails_synth(self):
-        with pytest.raises(ConfigValidationError, match="cost_monitoring.enabled"):
+        with pytest.raises(ConfigValidationError, match=re.escape("cost_monitoring.enabled")):
             _loader({"cost_monitoring": {"enabled": "true"}})
 
     @pytest.mark.parametrize(

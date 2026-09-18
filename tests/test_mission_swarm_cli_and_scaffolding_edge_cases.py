@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -375,7 +376,7 @@ def test_run_to_completion_failure_envelopes(
 
 
 def test_mission_scaffold_ftu_and_table_file_paths(
-    backend: FilesystemBackend,  # noqa: ARG001 - forces hermetic fixture
+    backend: FilesystemBackend,  # forces hermetic fixture
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -540,7 +541,7 @@ def test_mission_run_ftu_validation_and_threshold_failures(
 
 
 def test_mission_memory_list_maps_unexpected_store_failure(
-    backend: FilesystemBackend,  # noqa: ARG001
+    backend: FilesystemBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SimpleNamespace(list_memories=MagicMock(side_effect=RuntimeError("index broke")))
@@ -690,19 +691,6 @@ def test_swarm_scaffold_plan_sampling_paths(
     assert fallback["sampling_path"] is False
     assert fallback["fallback_reason"] == "invalid_spawn"
     assert "falling back" in capsys.readouterr().err
-
-    monkeypatch.setattr(sampling, "select_sampling_backend", lambda _value: None)
-    unavailable = swarm_cmd_mod._scaffold_plan(
-        directive="Find docs.",
-        swarm_config=_swarm_config(),
-        tool_allowlist=("find_docs",),
-        allow_all_tools=False,
-        max_children=None,
-        use_sampling=True,
-        retries=1,
-    )
-    assert unavailable["sampling_path"] is False
-    assert unavailable["fallback_reason"] == "sampling_backend_unavailable"
 
 
 def test_swarm_scaffold_plan_maps_ftu_and_validation(
@@ -1064,7 +1052,7 @@ def test_terminal_filesystem_resource_without_report_is_not_found(
     resource = importlib.import_module("resources.mission")
     session = _mission_session(backend, session_id="mission-no-report", status="completed")
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(Exception, match=re.escape("terminal but report not found")) as exc_info:
         resource._session_report_resource(session["session_id"])
 
     assert "terminal but report not found" in str(exc_info.value)

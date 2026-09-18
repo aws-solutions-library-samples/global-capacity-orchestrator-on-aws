@@ -461,7 +461,7 @@ class TestAdmissionLoggingIsQuiet:
         from cli.job_policy import evaluate_manifests
 
         issues = evaluate_manifests(
-            [_job(namespace="nope"), "not-a-manifest", None, 42],  # type: ignore[list-item]
+            [_job(namespace="nope"), "not-a-manifest", None, 42],
             _region("r").policy,  # type: ignore[arg-type]
         )
 

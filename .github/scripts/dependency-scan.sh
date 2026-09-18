@@ -1931,7 +1931,7 @@ echo ""
 echo "=== Checking base-image security epochs ==="
 
 EPOCH_RESULTS="$(mktemp)"
-EPOCH_FILES=(dockerfiles/*-dockerfile Dockerfile.dev lambda/helm-installer/Dockerfile)
+EPOCH_FILES=(dockerfiles/Dockerfile.* Dockerfile.dev lambda/helm-installer/Dockerfile)
 for df in "${EPOCH_FILES[@]}"; do
   [ -f "$df" ] || continue
   extract_security_epochs "$df" | while IFS='|' read -r epoch_arg epoch_date; do

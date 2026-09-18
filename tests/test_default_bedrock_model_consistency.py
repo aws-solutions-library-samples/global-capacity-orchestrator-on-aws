@@ -13,6 +13,7 @@ models must each have a complete captured scaffolder fixture.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -552,10 +553,10 @@ def test_ftu_form_error_is_detected_through_the_exception_chain() -> None:
     )
     assert is_bedrock_ftu_form_error(ftu_error) is True
 
-    try:
+    with pytest.raises(RuntimeError) as excinfo:
         raise RuntimeError("wrapped") from ftu_error
-    except RuntimeError as wrapped:
-        assert is_bedrock_ftu_form_error(wrapped) is True
+    wrapped = excinfo.value
+    assert is_bedrock_ftu_form_error(wrapped) is True
 
     unrelated = ClientError(
         {"Error": {"Code": "AccessDeniedException", "Message": "nope"}},
@@ -760,7 +761,7 @@ def test_canonical_config_errors_when_no_owned_path_exists(monkeypatch: Any) -> 
 
     with pytest.raises(
         bedrock_config.BedrockModelConfigurationError,
-        match="Could not locate canonical cdk.json",
+        match=re.escape("Could not locate canonical cdk.json"),
     ):
         bedrock_config._canonical_cdk_json_path()
 

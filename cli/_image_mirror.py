@@ -61,7 +61,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
-import subprocess  # nosec B404 - invokes container CLI / skopeo with fixed, non-shell argv
+import subprocess  # invokes container CLI / skopeo with fixed, non-shell argv
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,8 +73,8 @@ import yaml
 from ._image_uri import ecr_registry_host
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``read_mirror_config`` -> ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.html``
 #     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.png``)
@@ -304,8 +304,11 @@ def _runtime_has_buildx(runtime: str) -> bool:
     """True if ``<runtime> buildx version`` succeeds (Docker Buildx present)."""
     try:
         return (
-            subprocess.run(  # nosec B603 - fixed argv, no shell
-                [runtime, "buildx", "version"], capture_output=True, timeout=15
+            subprocess.run(  # fixed argv, no shell
+                [runtime, "buildx", "version"],
+                capture_output=True,
+                timeout=15,
+                check=False,
             ).returncode
             == 0
         )
@@ -316,8 +319,12 @@ def _runtime_has_buildx(runtime: str) -> bool:
 def _runtime_supports_all_platforms(runtime: str) -> bool:
     """True if ``<runtime> pull`` advertises ``--all-platforms`` (Finch/nerdctl)."""
     try:
-        out = subprocess.run(  # nosec B603 - fixed argv, no shell
-            [runtime, "pull", "--help"], capture_output=True, text=True, timeout=15
+        out = subprocess.run(  # fixed argv, no shell
+            [runtime, "pull", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
     except OSError, subprocess.SubprocessError:
         return False
@@ -411,7 +418,7 @@ def runtime_login(
     runtime: str, registry_host: str, username: str, password: str, log: LogFn = print
 ) -> None:
     """Authenticate the container runtime against the ECR registry."""
-    result = subprocess.run(  # nosec B603 - fixed argv, no shell
+    result = subprocess.run(  # fixed argv, no shell
         [runtime, "login", "--username", username, "--password-stdin", registry_host],
         input=password.encode(),
         capture_output=True,
@@ -460,7 +467,7 @@ def copy_image(
     item: MirrorItem,
     runtime: str = "docker",
     strategy: str = "buildx",
-    password: str = "",
+    password: str = "",  # nosec B107  # empty means "no registry login"; callers pass the real token
     log: LogFn = print,
 ) -> None:
     """Copy one image registry-to-registry, preserving the full manifest list.
@@ -471,7 +478,7 @@ def copy_image(
     """
     log(f"  copying {item.source_ref} -> {item.dest_ref}  [{strategy}]")
     for cmd in _copy_commands(item, runtime, strategy, password):
-        result = subprocess.run(  # nosec B603 - fixed argv, no shell
+        result = subprocess.run(  # fixed argv, no shell
             cmd, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:

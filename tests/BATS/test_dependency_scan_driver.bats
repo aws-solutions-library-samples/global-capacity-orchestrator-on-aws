@@ -662,7 +662,7 @@ YAML
     printf '3.14\n' > "$root/.python-version"
     printf '4.0.1\n' > "$root/.ruby-version"
     printf 'v24.21.0\n' > "$root/.nvmrc"
-    printf 'FROM python:3.14.7-slim\nARG APT_SECURITY_EPOCH=%s\n' "$today" > "$root/dockerfiles/api-dockerfile"
+    printf 'FROM python:3.14.7-slim\nARG APT_SECURITY_EPOCH=%s\n' "$today" > "$root/dockerfiles/Dockerfile.api"
 }
 
 # run_scan <root> [VAR=value ...] — the driver from <root>, faked PATH, the

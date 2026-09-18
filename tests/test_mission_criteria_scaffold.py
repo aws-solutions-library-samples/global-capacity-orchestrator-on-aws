@@ -29,8 +29,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gco_mcp"))
 
-from mission import criteria_scaffold  # noqa: E402
-from mission import validation as mission_validation  # noqa: E402
+from mission import criteria_scaffold
+from mission import validation as mission_validation
 
 # ---------------------------------------------------------------------------
 # Deterministic generator

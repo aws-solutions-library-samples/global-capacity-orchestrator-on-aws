@@ -586,6 +586,7 @@ class TestRuntimeCapabilities:
             ["docker", "buildx", "version"],
             capture_output=True,
             timeout=15,
+            check=False,
         )
 
     @pytest.mark.parametrize(
@@ -616,6 +617,7 @@ class TestRuntimeCapabilities:
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
 
     @pytest.mark.parametrize(

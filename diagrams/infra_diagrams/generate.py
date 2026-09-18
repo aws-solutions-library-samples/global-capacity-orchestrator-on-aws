@@ -139,7 +139,7 @@ def _run_cdk_dia(
         cmd.append("--no-collapse")
     if include:
         cmd += ["--include", *include]
-    subprocess.run(cmd, check=True)  # noqa: S603 — fixed argv, no shell, paths we control
+    subprocess.run(cmd, check=True)  # fixed argv, no shell, paths we control
     # cdk-dia writes a Graphviz ``.dot`` sidecar next to the target. It's a
     # transient intermediate (and its AWS-icon ``image=`` refs are absolute
     # local npx-cache paths, so it isn't portable) — drop it. The PNG has the

@@ -25,7 +25,7 @@ from hypothesis import strategies as st
 # Ensure gco_mcp/ is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 
 class TestSanitizeArguments:

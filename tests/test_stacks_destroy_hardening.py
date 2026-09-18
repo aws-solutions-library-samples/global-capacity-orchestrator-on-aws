@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from botocore.exceptions import ClientError
 
 
@@ -1157,7 +1158,7 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
     def test_full_success_sweeps_collected_groups(self):
         collected = {"gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]}}
-        (ok, successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
+        (ok, _successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
             destroy_results=[True, True],
             collected=collected,
         )
@@ -1530,12 +1531,10 @@ class TestDetachMonitoringFromRegions:
             patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
             patch.object(StackManager, "deploy", side_effect=RuntimeError("cdk failed")),
         ):
-            try:
+            with pytest.raises(RuntimeError) as excinfo:
                 manager.detach_monitoring_from_regions()
-            except RuntimeError as exc:
-                assert str(exc) == "cdk failed"
-            else:  # pragma: no cover - the deploy must raise
-                raise AssertionError("expected the deploy failure to propagate")
+            exc = excinfo.value
+            assert str(exc) == "cdk failed"
         assert manager._extra_cdk_context == {}
 
     def test_an_absent_monitoring_stack_has_nothing_to_detach(self):

@@ -28,7 +28,7 @@ def _deploy_stack(cloudformation, stack_name: str, template: dict) -> None:
     cloudformation.get_waiter("stack_create_complete").wait(StackName=stack_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def project(verified_floci_endpoint):
     """A uniquely named GCO project with its config object."""
     from cli.config import GCOConfig

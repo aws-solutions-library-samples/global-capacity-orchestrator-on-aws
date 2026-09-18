@@ -267,7 +267,7 @@ class TestGenerationTimestamp:
         monkeypatch.setenv("GCO_DIAGRAM_SOURCE_COMMIT", "A" * 40)
         assert generation_source_commit() == "a" * 40
 
-    @pytest.mark.parametrize("value", ("", "abc", "g" * 40, "a" * 39))
+    @pytest.mark.parametrize("value", ["", "abc", "g" * 40, "a" * 39])
     def test_invalid_source_commit_fails_closed(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
@@ -762,7 +762,7 @@ class TestSourceCommitVerification:
 
     @pytest.mark.parametrize(
         ("committed", "working"),
-        (
+        [
             (
                 b"def f():\n    return True\n\ndef g():\n    return True\n",
                 b"def f():\n    return True\n\n\ndef g():\n    return True\n",
@@ -775,7 +775,7 @@ class TestSourceCommitVerification:
                 b"def f():\n    return True\n",
                 b"def f():\n    return False\n",
             ),
-        ),
+        ],
     )
     def test_any_uncommitted_source_byte_is_rejected(
         self,
@@ -1209,7 +1209,7 @@ class TestMarkerAllowedSources:
         assert set(copies) <= allowed
 
     def test_uncharted_canonical_contributes_nothing(self) -> None:
-        canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
+        _canonical, copies = next(iter(LAMBDA_SHARED_SOURCE_TARGETS.items()))
         allowed = generate_mod.marker_allowed_sources(
             [Target(source="cli/unrelated.py", function="f")]
         )
@@ -2162,7 +2162,7 @@ class TestSourceCommitVerificationGitFailures:
 
         with pytest.raises(
             RuntimeError,
-            match="cannot read example.py from GCO_DIAGRAM_SOURCE_COMMIT .*does not exist",
+            match=r"cannot read example.py from GCO_DIAGRAM_SOURCE_COMMIT .*does not exist",
         ):
             _verify_targets_match_source_commit(
                 project_root=tmp_path,

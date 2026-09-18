@@ -72,9 +72,9 @@ from audit import (  # noqa: E402, F401
     audit_logger,
     emit_startup_log,
 )
-from iam import assume_mcp_role  # noqa: E402, F401
-from server import mcp  # noqa: E402, F401
-from version import get_project_version  # noqa: E402, F401
+from iam import assume_mcp_role  # noqa: E402
+from server import mcp  # noqa: E402
+from version import get_project_version  # noqa: E402
 
 # Re-export the project version for tests that check run_mcp._PROJECT_VERSION
 _PROJECT_VERSION = get_project_version()
@@ -310,10 +310,10 @@ with _contextlib.suppress(ImportError):
     from tools.capacity import cancel_reservation  # noqa: F401
 
 with _contextlib.suppress(ImportError):
-    from tools.jobs import delete_job  # noqa: F401
+    from tools.jobs import delete_job
 
 with _contextlib.suppress(ImportError):
-    from tools.inference import delete_inference  # noqa: F401
+    from tools.inference import delete_inference
 
 with _contextlib.suppress(ImportError):
     from tools.templates import delete_template  # noqa: F401
@@ -351,13 +351,13 @@ with _contextlib.suppress(ImportError):
 # import-time gates. The imports are no-ops when disabled; the explicit reload
 # compatibility blocks below rebind them only during ``importlib.reload``.
 with _contextlib.suppress(ImportError):
-    from tools.metrics import metrics_from_local_file  # noqa: F401
+    from tools.metrics import metrics_from_local_file
 
 with _contextlib.suppress(ImportError):
     from tools.storage import sync_storage_bucket  # noqa: F401
 
 with _contextlib.suppress(ImportError):
-    from tools.semantic_progress import metrics_semantic_progress  # noqa: F401
+    from tools.semantic_progress import metrics_semantic_progress
 
 with _contextlib.suppress(ImportError):
     from tools.mission import (  # noqa: F401
@@ -391,7 +391,7 @@ if _IS_RELOAD and (
     _feature_flags.is_enabled(_feature_flags.FLAG_CAPACITY_PURCHASE)
     or _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
 ):
-    from tools import capacity as _cap_mod  # noqa: E402
+    from tools import capacity as _cap_mod
 
     _importlib.reload(_cap_mod)
     for _name in ("reserve_capacity", "create_reservation", "cancel_reservation"):
@@ -405,7 +405,7 @@ if _IS_RELOAD and (
     _feature_flags.is_enabled(_feature_flags.FLAG_IMAGE_PUBLISH)
     or _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
 ):
-    from tools import images as _img_mod  # noqa: E402
+    from tools import images as _img_mod
 
     _importlib.reload(_img_mod)
     for _name in (
@@ -429,7 +429,7 @@ if _IS_RELOAD and (
     or _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DESTROY)
     or _feature_flags.is_enabled(_feature_flags.FLAG_CONFIG_MANAGEMENT)
 ):
-    from tools import stacks as _stacks_mod  # noqa: E402
+    from tools import stacks as _stacks_mod
 
     _importlib.reload(_stacks_mod)
     for _name in (
@@ -460,47 +460,47 @@ _DESTRUCTIVE_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE
 _MODEL_UPLOAD_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_MODEL_UPLOAD)
 
 if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
-    from tools import jobs as _jobs_mod  # noqa: E402
+    from tools import jobs as _jobs_mod
 
     _importlib.reload(_jobs_mod)
-    delete_job = _jobs_mod.delete_job  # noqa: F811
+    delete_job = _jobs_mod.delete_job
 
-    from tools import inference as _inf_mod  # noqa: E402
+    from tools import inference as _inf_mod
 
     _importlib.reload(_inf_mod)
-    delete_inference = _inf_mod.delete_inference  # noqa: F811
+    delete_inference = _inf_mod.delete_inference
 
-    from tools import templates as _tpl_mod  # noqa: E402
+    from tools import templates as _tpl_mod
 
     _importlib.reload(_tpl_mod)
     globals()["delete_template"] = _tpl_mod.delete_template
 
-    from tools import webhooks as _wh_mod  # noqa: E402
+    from tools import webhooks as _wh_mod
 
     _importlib.reload(_wh_mod)
     globals()["delete_webhook"] = _wh_mod.delete_webhook
 
-    from tools import nodepools as _np_mod  # noqa: E402
+    from tools import nodepools as _np_mod
 
     _importlib.reload(_np_mod)
     globals()["delete_nodepool"] = _np_mod.delete_nodepool
 
-    from tools import analytics as _an_mod  # noqa: E402
+    from tools import analytics as _an_mod
 
     _importlib.reload(_an_mod)
     globals()["analytics_user_remove"] = _an_mod.analytics_user_remove
 
-    from tools import queue as _q_mod  # noqa: E402
+    from tools import queue as _q_mod
 
     _importlib.reload(_q_mod)
     globals()["cancel_queue_job"] = _q_mod.cancel_queue_job
 
-    from tools import monitoring as _mon_mod  # noqa: E402
+    from tools import monitoring as _mon_mod
 
     _importlib.reload(_mon_mod)
     globals()["monitoring_user_remove"] = _mon_mod.monitoring_user_remove
 
-    from tools import tasks as _tasks_mod  # noqa: E402
+    from tools import tasks as _tasks_mod
 
     _importlib.reload(_tasks_mod)
     globals()["task_prune"] = _tasks_mod.task_prune
@@ -509,7 +509,7 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
 # or the model-upload flag (models_upload) is set, so do it once here
 # regardless of which (or both) flipped.
 if _IS_RELOAD and (_DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON):
-    from tools import models as _models_mod  # noqa: E402
+    from tools import models as _models_mod
 
     _importlib.reload(_models_mod)
     for _name in ("delete_model", "models_upload"):
@@ -519,7 +519,7 @@ if _IS_RELOAD and (_DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON):
 if _IS_RELOAD and (
     _MODEL_UPLOAD_FLAG_ON or _feature_flags.is_enabled(_feature_flags.FLAG_LOCAL_STORAGE_SYNC)
 ):
-    from tools import storage as _storage_mod  # noqa: E402
+    from tools import storage as _storage_mod
 
     _importlib.reload(_storage_mod)
     for _name in ("upload_to_regional_bucket", "sync_storage_bucket"):
@@ -527,19 +527,19 @@ if _IS_RELOAD and (
             globals()[_name] = getattr(_storage_mod, _name)
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_LOCAL_METRICS):
-    from tools import metrics as _metrics_mod  # noqa: E402
+    from tools import metrics as _metrics_mod
 
     _importlib.reload(_metrics_mod)
     metrics_from_local_file = _metrics_mod.metrics_from_local_file
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SEMANTIC_PROGRESS):
-    from tools import semantic_progress as _semantic_progress_mod  # noqa: E402
+    from tools import semantic_progress as _semantic_progress_mod
 
     _importlib.reload(_semantic_progress_mod)
     metrics_semantic_progress = _semantic_progress_mod.metrics_semantic_progress
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
-    from tools import mission as _mission_tools_mod  # noqa: E402
+    from tools import mission as _mission_tools_mod
 
     _importlib.reload(_mission_tools_mod)
     # Unlike the images/models/storage reload blocks above, every name here is
@@ -561,7 +561,7 @@ if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
         globals()[_name] = getattr(_mission_tools_mod, _name)
 
 if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SWARM):
-    from tools import swarm as _swarm_tools_mod  # noqa: E402
+    from tools import swarm as _swarm_tools_mod
 
     _importlib.reload(_swarm_tools_mod)
     # Same reasoning as the mission block above: every name is defined under

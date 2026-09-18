@@ -171,7 +171,8 @@ class TestParseDateInput:
         assert dt == datetime(2026, 7, 1, 11, 30, tzinfo=UTC)
 
     def test_naive_datetime_gets_utc(self):
-        dt = blocks.parse_date_input(datetime(2026, 7, 1, 9, 0))
+        # Deliberately naive: the branch under test is "assume UTC when absent".
+        dt = blocks.parse_date_input(datetime(2026, 7, 1, 9, 0))  # noqa: DTZ001
         assert dt.tzinfo is UTC
 
     def test_aware_datetime_passthrough(self):

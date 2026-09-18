@@ -45,25 +45,25 @@ from pathlib import Path
 # ``pip install -e .``. The project root is two parents up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from diagrams.code_diagrams._renderer import (  # noqa: E402
+from diagrams.code_diagrams._renderer import (
     RenderedTarget,
     _output_stem_for,
     prune_orphaned_artifacts,
     render_all,
     write_readme,
 )
-from diagrams.code_diagrams._source_marker import (  # noqa: E402
+from diagrams.code_diagrams._source_marker import (
     SENTINEL,
     strip_all_markers,
     strip_markers_from,
     upsert_markers,
 )
-from diagrams.code_diagrams._targets import TARGETS, Target  # noqa: E402
-from diagrams.code_diagrams._timestamp import (  # noqa: E402
+from diagrams.code_diagrams._targets import TARGETS, Target
+from diagrams.code_diagrams._timestamp import (
     generation_source_commit,
     generation_timestamp_utc,
 )
-from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS  # noqa: E402
+from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 
 _MARKER_BYTES_RE = re.compile(
     rb"(?:\r?\n)?# <" + re.escape(SENTINEL.encode()) + rb"> BEGIN[^\r\n]*\r?\n.*?"
@@ -265,7 +265,7 @@ def _verify_targets_match_source_commit(
     *, project_root: Path, targets: list[Target], source_commit: str
 ) -> None:
     """Require marker-excluded target bytes to equal a real Git commit."""
-    object_type = subprocess.run(  # noqa: S603 — fixed Git command, hex-only ref
+    object_type = subprocess.run(  # fixed Git command, hex-only ref
         ["git", "cat-file", "-t", source_commit],
         cwd=project_root,
         capture_output=True,
@@ -282,7 +282,7 @@ def _verify_targets_match_source_commit(
 
     mismatches: list[str] = []
     for source in sorted({target.source for target in targets}):
-        result = subprocess.run(  # noqa: S603 — fixed Git command and catalog paths
+        result = subprocess.run(  # fixed Git command and catalog paths
             ["git", "show", f"{source_commit}:{source}"],
             cwd=project_root,
             capture_output=True,

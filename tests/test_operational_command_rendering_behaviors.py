@@ -224,7 +224,7 @@ def test_codex_validator_leaves_dangling_or_nonassignment_config_for_codex() -> 
     ],
 )
 def test_codex_validator_rejects_malformed_or_broadened_gco_policy(assignment: str) -> None:
-    with pytest.raises(ValueError, match="owned by Autopilot|cannot override"):
+    with pytest.raises(ValueError, match=r"owned by Autopilot|cannot override"):
         _validate_codex_engine_args(("-c", assignment))
 
 
@@ -574,7 +574,7 @@ def test_dag_run_ignores_unknown_progress_and_returns_success(
 ) -> None:
     dag_file = tmp_path / "dag.yaml"
     dag_file.write_text("name: demo\nsteps: []\n", encoding="utf-8")
-    dag_definition = SimpleNamespace(name="demo", steps=[], validate=lambda: [])
+    dag_definition = SimpleNamespace(name="demo", steps=[], validate=list)
     completed = SimpleNamespace(has_failures=lambda: False)
     fake_runner = MagicMock()
 

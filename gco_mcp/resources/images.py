@@ -27,7 +27,7 @@ def images_index() -> str:
     """List every gco/* repository in ECR with summary metadata."""
     try:
         repos = _get_manager().list_repos()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return f"# Image Registry\n\nFailed to list repositories: {e}\n"
 
     lines = ["# Image Registry — `gco/*` repositories\n"]
@@ -69,7 +69,7 @@ def images_tags_resource(name: str) -> str:
     """
     try:
         rows = _get_manager().list_tags(name)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return f"# Tags for `gco/{name}`\n\nFailed to list tags: {e}\n"
 
     lines = [f"# Tags for `gco/{name}`\n"]
@@ -108,7 +108,7 @@ def images_describe_resource(name: str, tag: str) -> str:
     """
     try:
         result = _get_manager().describe(name, tag)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return json.dumps({"error": str(e), "name": f"gco/{name}", "tag": tag}, indent=2)
 
     if not result:
@@ -121,7 +121,7 @@ def images_replication_status_resource() -> str:
     """Registry-wide replication state across regions."""
     try:
         rows = _get_manager().replication_status()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return f"# Replication Status\n\nFailed to read replication state: {e}\n"
 
     lines = ["# Replication Status — `gco/*` repositories\n"]

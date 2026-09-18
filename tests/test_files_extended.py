@@ -126,7 +126,7 @@ class TestFileSystemClientDataSync:
 
     @pytest.mark.parametrize(
         ("region", "partition"),
-        (("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")),
+        [("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")],
     )
     def test_datasync_arns_use_target_partition(self, region, partition):
         """EFS and S3 DataSync ARNs follow China and GovCloud metadata."""

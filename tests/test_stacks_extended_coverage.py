@@ -728,7 +728,7 @@ class TestCleanupBackupVault:
         assert "Cleaned up 2 backup recovery points" in capsys.readouterr().out
 
     def test_missing_exact_stack_resource_short_circuits(self, manager: Any) -> None:
-        cloudformation, backup, client = self._clients(resources=[])
+        _cloudformation, backup, client = self._clients(resources=[])
         with patch("boto3.client", side_effect=client):
             result = manager._cleanup_backup_vault()
         assert result["status"] == "vault-resource-absent"
@@ -1579,7 +1579,7 @@ class TestStrictPreparedChangeSets:
 
     @pytest.mark.parametrize(
         ("stack_id", "change_set_id", "message"),
-        (
+        [
             ("not-an-arn", _CHANGE_SET_ID, "stack identity"),
             (
                 _STACK_ID,
@@ -1597,7 +1597,7 @@ class TestStrictPreparedChangeSets:
                 ),
                 "different AWS authorities",
             ),
-        ),
+        ],
     )
     def test_rejects_unrelated_prepared_identities(
         self,
@@ -1750,7 +1750,7 @@ class TestStrictPreparedChangeSets:
                 timeout=42,
             )
 
-    @pytest.mark.parametrize("preparation_failure", ("nonzero", "timeout"))
+    @pytest.mark.parametrize("preparation_failure", ["nonzero", "timeout"])
     def test_deploy_replays_persisted_failed_empty_after_preparation_failure(
         self,
         manager: Any,
@@ -1950,7 +1950,7 @@ class TestStrictPreparedChangeSets:
         )
         cfn.execute_change_set.assert_called_once_with(ChangeSetName=self._CHANGE_SET_ID)
 
-    @pytest.mark.parametrize("expected_stack_id", (None, _STACK_ID))
+    @pytest.mark.parametrize("expected_stack_id", [None, _STACK_ID])
     def test_executed_change_set_without_prior_checkpoint_is_rejected(
         self,
         manager: Any,
@@ -2136,7 +2136,7 @@ class TestStrictOrchestrationPreflight:
             change_set_name,
         ]
 
-    @pytest.mark.parametrize("expected_stack_id", (None, _GLOBAL_ID))
+    @pytest.mark.parametrize("expected_stack_id", [None, _GLOBAL_ID])
     def test_preexisting_uncheckpointed_change_set_blocks_before_local_mutation(
         self,
         manager: Any,
@@ -2194,8 +2194,8 @@ class TestStrictOrchestrationPreflight:
         mirror.assert_not_called()
         run.assert_not_called()
 
-    @pytest.mark.parametrize("expected_stack_id", (None, _GLOBAL_ID))
-    @pytest.mark.parametrize("outcome", ("nonzero", "timeout"))
+    @pytest.mark.parametrize("expected_stack_id", [None, _GLOBAL_ID])
+    @pytest.mark.parametrize("outcome", ["nonzero", "timeout"])
     def test_failed_preparation_cannot_mint_available_authority(
         self,
         manager: Any,

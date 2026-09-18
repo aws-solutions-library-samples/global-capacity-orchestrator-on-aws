@@ -38,7 +38,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -60,13 +60,13 @@ logger = logging.getLogger(__name__)
 
 # A sampler callable supplies LLM-derived ``lessons`` /
 # ``recommended_followups`` overlays for the report. It receives the
-# session and the terminal verdict tuple, and returns a dict carrying the
-# two keys — or ``None`` when the call failed and the deterministic
-# templates should be kept.
-Sampler = Callable[
-    [SessionState, VerdictLabel, VerdictReason],
-    "dict[str, Any] | None",
-]
+# session and the terminal verdict tuple, and is expected to return a dict
+# carrying the two keys — or ``None`` when the call failed and the
+# deterministic templates should be kept. The return is typed ``object``
+# because the sampler is a caller-supplied plugin whose output
+# ``_safely_invoke_sampler`` validates at runtime (a non-dict is logged and
+# ignored); promising a dict here would make that check dead code.
+Sampler = Callable[[SessionState, VerdictLabel, VerdictReason], object]
 
 
 # Private cache key written by ``validate_criteria`` onto every
@@ -120,12 +120,10 @@ def build_deterministic_report(
     report: dict[str, Any] = {
         "session_id": session["session_id"],
         "directive_text": session["directive_text"],
-        "criteria": _strip_parsed_ast_from_criteria(
-            cast("list[dict[str, Any]]", list(session.get("criteria") or []))
-        ),
-        "budget": dict(session.get("budget") or {}),
+        "criteria": _strip_parsed_ast_from_criteria(session.get("criteria") or []),
+        "budget": dict(session["budget"]),
         "tool_allowlist": list(session.get("tool_allowlist") or []),
-        "checkpoint_cadence": dict(session.get("checkpoint_cadence") or {}),
+        "checkpoint_cadence": dict(session["checkpoint_cadence"]),
         "stagnation_threshold": session.get("stagnation_threshold"),
         "created_at": session.get("created_at"),
         "started_at": session.get("started_at"),
@@ -355,7 +353,7 @@ def _build_followups_template(
 # --------------------------------------------------------------------------
 
 
-def _strip_parsed_ast_from_criteria(criteria: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _strip_parsed_ast_from_criteria(criteria: Iterable[object]) -> list[Any]:
     """Return a shallow copy of ``criteria`` with private parser caches removed.
 
     The ``validate_criteria`` validator caches the parsed AST under
@@ -364,8 +362,13 @@ def _strip_parsed_ast_from_criteria(criteria: list[dict[str, Any]]) -> list[dict
     serialisation. The strip is also defensive: the report dict is
     later passed through ``json.dumps``, and an ``ast.Expression``
     object would raise there with a less obvious error than this.
+
+    ``criteria`` is typed as ``object`` entries because the list is read
+    back from the persisted session: a corrupt file can put a non-dict
+    there, and such an entry passes through verbatim so the corruption
+    stays visible in the report rather than crashing its assembly.
     """
-    cleaned: list[dict[str, Any]] = []
+    cleaned: list[Any] = []
     for criterion in criteria:
         if not isinstance(criterion, dict):
             cleaned.append(criterion)

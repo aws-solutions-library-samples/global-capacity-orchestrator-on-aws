@@ -60,7 +60,6 @@ def _trusted_registry_env(monkeypatch):
         "ALLOWED_NAMESPACES",
         "default,gco-jobs,gco-inference,gco-system",
     )
-    yield
 
 
 @pytest.fixture

@@ -18,10 +18,10 @@ import pytest
 # ``mission.*`` resolves regardless of how pytest is invoked.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import criteria_scaffold  # noqa: E402
-from mission.validation import validate_criteria  # noqa: E402
+from mission import criteria_scaffold
+from mission.validation import validate_criteria
 
-from tests._scaffold_replay import (  # noqa: E402
+from tests._scaffold_replay import (
     CANONICAL_CAPTURE_SLUGS,
     FIXTURES,
     FIXTURES_BY_MODEL,

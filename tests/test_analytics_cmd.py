@@ -650,7 +650,7 @@ class TestStudioLogin:
         # Use a captured-value container so the stub can mutate it.
         captured: dict[str, str] = {}
 
-        def _fake_srp_authenticate(**kwargs):  # noqa: ANN001 — duck-typed
+        def _fake_srp_authenticate(**kwargs):  # duck-typed
             captured["username"] = kwargs["username"]
             captured["pool_id"] = kwargs["pool_id"]
             captured["client_id"] = kwargs["client_id"]
@@ -676,7 +676,7 @@ class TestStudioLogin:
             def __exit__(self, *exc) -> None:
                 return None
 
-        def _fake_urlopen(request, timeout=None):  # noqa: ANN001 — duck-typed
+        def _fake_urlopen(request, timeout=None):  # duck-typed
             captured["login_url"] = request.full_url
             captured["authorization"] = request.headers.get("Authorization")
             return _FakeResponse(

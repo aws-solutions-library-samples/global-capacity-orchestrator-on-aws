@@ -35,8 +35,8 @@ from hypothesis import strategies as st
 # in production, matching the convention used by the sibling tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.localfs import resolve_within_root  # noqa: E402
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers.localfs import resolve_within_root
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 # The stable codes that signal a path was refused for containment reasons.
 # Any one of them is an acceptable, safe outcome; a returned out-of-root path
@@ -132,7 +132,10 @@ def test_resolve_within_root_returns_in_root_path_or_containment_error(
         try:
             result = resolve_within_root(supplied, str(root))
         except MetricReaderError as exc:
-            assert exc.code in _CONTAINMENT_CODES
+            # Property test: either outcome is valid. A rejection must carry
+            # a containment code, and an acceptance must land inside the
+            # root — `pytest.raises` cannot express "one of these two".
+            assert exc.code in _CONTAINMENT_CODES  # noqa: PT017
         else:
             # A successful return must be a path genuinely inside the root.
             assert isinstance(result, Path)

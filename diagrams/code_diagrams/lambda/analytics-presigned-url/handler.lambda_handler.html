@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="b42e220aab7bde7b">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="cd04cfa699c5ee54">
         <title>Analytics Presigned-URL Lambda (SageMaker Studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,8 +208,8 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op103=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
-op106=>operation: claims = _parse_claims(event)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
+op5=>operation: claims = _parse_claims(event)
 username = claims.get('cognito:username') or claims.get('username')
 if not isinstance(username, str) or not username:
     logger.warning('Request missing Cognito username claim')
@@ -225,18 +225,18 @@ _ensure_access_point(username, STUDIO_EFS_ID)
 response = sagemaker.create_presigned_domain_url(DomainId=domain_id, UserProfileName=username, SessionExpirationDurationInSeconds=SESSION_EXPIRES_SECONDS, ExpiresInSeconds=URL_EXPIRES_SECONDS)
 url = response.get('AuthorizedUrl', '')
 return _format_success(url, URL_EXPIRES_SECONDS)
-cond105=>condition: exception raised?
-cond108=>condition: except Exception as exc
-sub112=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
-io117=>inputoutput: output: _format_error(500, _ERR_GENERIC)
-e115=>end: end function return
+cond4=>condition: exception raised?
+cond7=>condition: except Exception as exc
+sub11=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
+io16=>inputoutput: output: _format_error(500, _ERR_GENERIC)
+e14=>end: end function return
 
-op103->op106
-op106->cond105
-cond105(yes)->cond108
-cond108(yes)->sub112
-sub112->io117
-io117->e115
+op2->op5
+op5->cond4
+cond4(yes)->cond7
+cond7(yes)->sub11
+sub11->io16
+io16->e14
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,17 +246,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b42e220aab7bde7b</code>
+            Flow content SHA-256: <code>cd04cfa699c5ee54</code>
           </p>
           <div id="canvas"></div>
         </div>

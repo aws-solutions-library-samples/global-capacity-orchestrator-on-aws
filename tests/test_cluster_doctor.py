@@ -242,7 +242,10 @@ class TestEndpointDrift:
 
     def test_configured_public_but_live_private(self) -> None:
         drift = endpoint_drift("PUBLIC_AND_PRIVATE", ["203.0.113.7/32"], {"public": False})
-        assert drift is not None
+        assert drift == (
+            "cdk.json eks_cluster.endpoint_access=PUBLIC_AND_PRIVATE but the live "
+            "endpoint is PRIVATE"
+        )
 
     def test_private_converged(self) -> None:
         assert endpoint_drift("PRIVATE", [], {"public": False, "public_cidrs": []}) is None
@@ -291,7 +294,7 @@ class TestProbes:
         )
         recorded: list[list[str]] = []
 
-        def fake_run(args, capture_output, text):  # noqa: ANN001
+        def fake_run(args, capture_output, text, check):
             recorded.append(args)
             return _completed(stdout=payload)
 
@@ -317,7 +320,7 @@ class TestProbes:
         assert cluster_doctor.caller_principal_arn() is None
 
     def test_caller_principal_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -328,7 +331,7 @@ class TestProbes:
         monkeypatch.setattr(
             cluster_doctor.subprocess,
             "run",
-            lambda args, capture_output, text: _completed(stdout=payload),
+            lambda args, capture_output, text, check: _completed(stdout=payload),
         )
         assert cluster_doctor.list_access_entries("gco-us-east-1", "us-east-1") == [
             _ROLE,
@@ -341,7 +344,7 @@ class TestProbes:
         assert cluster_doctor.list_access_entries("c", "r") is None
 
     def test_list_access_entries_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -360,7 +363,7 @@ class TestProbes:
         monkeypatch.setattr(
             cluster_doctor.subprocess,
             "run",
-            lambda args, capture_output, text: _completed(stdout=payload),
+            lambda args, capture_output, text, check: _completed(stdout=payload),
         )
         assert cluster_doctor.list_associated_access_policies("c", "us-east-1", _ROLE) == [
             "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
@@ -372,7 +375,7 @@ class TestProbes:
         assert cluster_doctor.list_associated_access_policies("c", "r", _ROLE) is None
 
     def test_list_associated_policies_without_aws_cli_returns_none(self, monkeypatch) -> None:
-        def raise_missing(args):  # noqa: ANN001
+        def raise_missing(args):
             raise FileNotFoundError("aws")
 
         monkeypatch.setattr(cluster_doctor, "_run_aws", raise_missing)
@@ -463,7 +466,7 @@ class TestProbeCluster:
         assert probe.kubeconfig_server == _ENDPOINT
 
     def test_missing_cluster_skips_the_dependent_probes(self, monkeypatch) -> None:
-        def raise_not_found(cluster, region):  # noqa: ANN001
+        def raise_not_found(cluster, region):
             raise RuntimeError("ResourceNotFoundException: no cluster")
 
         monkeypatch.setattr(

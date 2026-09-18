@@ -48,7 +48,7 @@ def _job_manifest(name: str, namespace: str | None) -> dict:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def project(verified_floci_endpoint):
     """A uniquely named GCO project with its config object."""
     from cli.config import GCOConfig
@@ -69,7 +69,7 @@ def project(verified_floci_endpoint):
             cloudformation.delete_stack(StackName=summary["StackName"])
 
 
-@pytest.fixture()
+@pytest.fixture
 def regional_stack_queue(project):
     """A regional GCO stack whose JobQueueUrl output names a real queue.
 

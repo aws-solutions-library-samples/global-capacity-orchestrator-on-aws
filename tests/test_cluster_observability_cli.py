@@ -13,6 +13,7 @@ tunnel to work.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from click.testing import CliRunner
@@ -60,15 +61,18 @@ class TestPortForwardCommand:
         assert "ABC123.gr7.us-east-1.eks.amazonaws.com" in cmd
 
     def test_rejects_bad_namespace(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid namespace 'Bad NS'")):
             build_port_forward_command("Bad NS", "svc/x", 3000, 80)
 
     def test_rejects_bad_target(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid port-forward target 'grafana'")):
             build_port_forward_command("monitoring", "grafana", 3000, 80)
 
     def test_rejects_non_https_server(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape("Invalid --server 'http://localhost:8443': must start with https://"),
+        ):
             build_port_forward_command(
                 "monitoring", "svc/x", 3000, 80, server="http://localhost:8443"
             )
@@ -86,7 +90,7 @@ class TestPortForwardCommand:
 
     @pytest.mark.parametrize("port", [0, 70000, "abc", -1])
     def test_rejects_bad_ports(self, port: object) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid local port ")):
             build_port_forward_command("monitoring", "svc/x", port, 80)
 
 
@@ -130,32 +134,34 @@ class TestSsmTunnelCommand:
         assert ssm_tunnel.endpoint_host("ABC.example.com") == "ABC.example.com"
 
     def test_rejects_bad_instance_id(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid SSM target 'not-an-instance'")):
             ssm_tunnel.build_remote_host_port_forward_command(
                 "not-an-instance", "h.example.com", 8443, "us-east-1"
             )
 
     def test_rejects_bad_region(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid AWS region 'not_a_region'")):
             ssm_tunnel.build_remote_host_port_forward_command(
                 "i-0123456789abcdef0", "h.example.com", 8443, "not_a_region"
             )
 
     def test_rejects_bad_host(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid remote host 'bad host!'")):
             ssm_tunnel.build_remote_host_port_forward_command(
                 "i-0123456789abcdef0", "bad host!", 8443, "us-east-1"
             )
 
     @pytest.mark.parametrize("port", [0, 70000, "nope"])
     def test_rejects_bad_local_port(self, port: object) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid local port ")):
             ssm_tunnel.build_remote_host_port_forward_command(
                 "i-0123456789abcdef0", "h.example.com", port, "us-east-1"
             )
 
     def test_endpoint_host_rejects_empty(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("Could not parse a hostname from endpoint 'https://'")
+        ):
             ssm_tunnel.endpoint_host("https://")
 
 
@@ -482,7 +488,7 @@ class TestStartApiTunnel:
         monkeypatch.setattr(ssm_tunnel.socket, "create_connection", refused)
         monkeypatch.setattr(ssm_tunnel.time, "sleep", lambda _seconds: None)
 
-        with pytest.raises(RuntimeError, match="exit code 23.*Session Manager channel failed"):
+        with pytest.raises(RuntimeError, match=r"exit code 23.*Session Manager channel failed"):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
                 "https://ABC.gr7.us-east-1.eks.amazonaws.com",

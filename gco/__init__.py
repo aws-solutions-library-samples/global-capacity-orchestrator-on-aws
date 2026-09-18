@@ -20,7 +20,7 @@ Package Structure:
 - gco.config: Configuration loader from cdk.json
 """
 
-from gco._version import __version__ as __version__  # noqa: F401
+from gco._version import __version__ as __version__
 
 __author__ = "Jacob Mevorach (@Jmevorach)"
 __description__ = "Multi-region EKS Auto Mode platform for AI/ML workload orchestration"

@@ -69,12 +69,12 @@ def _safe_get_checker() -> MultiRegionCapacityChecker | None:
     ``None`` — the caller treats that as "skip the env section".
     """
     try:
-        from cli.capacity.multi_region import (  # noqa: PLC0415
+        from cli.capacity.multi_region import (
             get_multi_region_capacity_checker,
         )
 
         return get_multi_region_capacity_checker()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("environment context gather: checker init failed: %s", exc)
         return None
 
@@ -97,10 +97,10 @@ def _summarise_reservations(
     shape is stable regardless of which probe succeeded.
     """
     try:
-        from cli.capacity.checker import CapacityChecker  # noqa: PLC0415
+        from cli.capacity.checker import CapacityChecker
 
         capacity_checker = CapacityChecker(checker.config)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("environment context gather: reservation checker init failed: %s", exc)
         return {"active_count": 0, "by_region": {}, "_error": "reservation_probe_failed"}
 
@@ -110,7 +110,7 @@ def _summarise_reservations(
         try:
             reservations = capacity_checker.list_capacity_reservations(region, state="active")
             count = len(reservations)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(
                 "environment context gather: reservation list failed for %s: %s", region, exc
             )
@@ -155,7 +155,7 @@ def gather_session_environment(
 
     try:
         capacities = checker.get_all_regions_capacity()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("environment context gather: get_all_regions_capacity failed: %s", exc)
         return None
 

@@ -10,6 +10,8 @@ the existing global-stack synthesis tests in ``test_cdk_stacks.py``.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from gco.stacks.global_stack import _parse_images_config
@@ -100,19 +102,19 @@ class TestImagesConfigValidation:
 
     @pytest.mark.parametrize("bad_value", ["RETAIN", "DESTROY", "keep", "delete", "", "true", None])
     def test_invalid_removal_policy_raises(self, bad_value):
-        with pytest.raises(ValueError, match="images.removal_policy"):
+        with pytest.raises(ValueError, match=re.escape("images.removal_policy")):
             _parse_images_config({"removal_policy": bad_value})
 
     def test_invalid_replication_destinations_string_raises(self):
-        with pytest.raises(ValueError, match="images.replication.destinations"):
+        with pytest.raises(ValueError, match=re.escape("images.replication.destinations")):
             _parse_images_config({"replication": {"destinations": "every-region"}})
 
     def test_invalid_replication_destinations_dict_raises(self):
-        with pytest.raises(ValueError, match="images.replication.destinations"):
+        with pytest.raises(ValueError, match=re.escape("images.replication.destinations")):
             _parse_images_config({"replication": {"destinations": {"us-east-1": True}}})
 
     def test_invalid_replication_destinations_int_raises(self):
-        with pytest.raises(ValueError, match="images.replication.destinations"):
+        with pytest.raises(ValueError, match=re.escape("images.replication.destinations")):
             _parse_images_config({"replication": {"destinations": 1}})
 
     def test_replication_destinations_list_with_non_string_raises(self):
@@ -120,9 +122,9 @@ class TestImagesConfigValidation:
             _parse_images_config({"replication": {"destinations": ["us-east-1", 42, "eu-west-1"]}})
 
     def test_lifecycle_block_must_be_mapping(self):
-        with pytest.raises(ValueError, match="images.lifecycle"):
+        with pytest.raises(ValueError, match=re.escape("images.lifecycle")):
             _parse_images_config({"lifecycle": ["keep_tagged", 20]})
 
     def test_replication_block_must_be_mapping(self):
-        with pytest.raises(ValueError, match="images.replication"):
+        with pytest.raises(ValueError, match=re.escape("images.replication")):
             _parse_images_config({"replication": "all"})

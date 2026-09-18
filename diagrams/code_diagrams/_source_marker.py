@@ -77,7 +77,7 @@ def _ruff_format(paths: list[Path], *, project_root: Path) -> None:
 
     rels = [str(p.relative_to(project_root)) for p in paths]
     # Invoke ruff directly so we inherit its exit code + stdout.
-    subprocess.run(  # noqa: S603 — args are fully-known paths we just generated
+    subprocess.run(  # args are fully-known paths we just generated
         [sys.executable, "-m", "ruff", "format", "--quiet", *rels],
         cwd=str(project_root),
         check=True,

@@ -180,7 +180,7 @@ Or deploy a single region:
 gco stacks deploy gco-us-east-1 -y
 ```
 
-> **Note:** The CLI automatically detects Docker or Finch. If you need to override, set `CDK_DOCKER=docker` or `CDK_DOCKER=finch`.
+> **Note:** The CLI automatically detects Docker, Finch, or Podman (in that order). If you need to override, set `CDK_DOCKER=docker`, `CDK_DOCKER=finch`, or `CDK_DOCKER=podman`.
 
 **What's being created:**
 
@@ -202,7 +202,7 @@ If you do want kubectl — for debugging or manual operations — you need two t
 gco stacks access -r us-east-1
 
 # 2. Reachability: reach the private endpoint from your laptop over SSM
-gco cluster tunnel --via-ssm auto -r us-east-1   # holds the tunnel open; prints the kubectl flags
+gco cluster tunnel --via-ssm auto --region us-east-1   # holds the tunnel open; prints the kubectl flags
 ```
 
 The tunnel provisions a self-terminating bastion in the cluster VPC and tears it down on exit. If you would rather expose the endpoint, `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32` edits `cdk.json` and the next `gco stacks deploy` applies it; see [EKS Cluster Configuration](docs/CUSTOMIZATION.md#eks-cluster-configuration) for the trade-offs.
@@ -349,7 +349,7 @@ gco stacks deploy-all -y
 
 ### "Unauthorized" when using kubectl
 
-Make sure you ran the cluster access setup script (Step 5) and that the endpoint mode is set to `PUBLIC_AND_PRIVATE` in `cdk.json`.
+`Unauthorized` is an authentication failure, not a reachability one: your IAM principal has no EKS access entry. Run `gco stacks access -r <region>` ([Step 5](#step-5-configure-cluster-access-optional)); with the default `PRIVATE` endpoint, reach the API through `gco cluster tunnel --via-ssm auto --region <region>` (or expose it with `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32` and redeploy). `gco cluster doctor --region <region>` reports which layer is failing.
 
 ### Pods not starting
 

@@ -61,7 +61,7 @@ import glob
 import json
 import re
 import shutil
-import subprocess  # nosec B404 - used only to invoke the pinned `kubeconform` binary with fixed argv
+import subprocess  # used only to invoke the pinned `kubeconform` binary with fixed argv
 import sys
 import tempfile
 from pathlib import Path

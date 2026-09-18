@@ -27,8 +27,8 @@ import pytest
 # production, matching the convention used by the sibling metric-reader tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers import files  # noqa: E402
-from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
+from metric_readers import files
+from metric_readers.shape import ErrorCode, MetricReaderError
 
 # ---------------------------------------------------------------------------
 # _maybe_number — best-effort cell coercion

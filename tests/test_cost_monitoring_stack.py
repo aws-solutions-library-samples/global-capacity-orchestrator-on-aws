@@ -212,7 +212,8 @@ class TestNoRegionalCostMonitors:
     """
 
     @pytest.fixture(scope="class")
-    def lonely_template(self) -> assertions.Template:
+    @staticmethod
+    def lonely_template() -> assertions.Template:
         return _synth(regions=())
 
     def test_bucket_and_key_grants_are_omitted(self, lonely_template):

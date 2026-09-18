@@ -31,8 +31,8 @@ from hypothesis import strategies as st
 # in production, matching the convention used by the sibling tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers.aggregate import VALID_MODES, reduce_sequence  # noqa: E402
-from metric_readers.shape import (  # noqa: E402
+from metric_readers.aggregate import VALID_MODES, reduce_sequence
+from metric_readers.shape import (
     ErrorCode,
     MetricReaderError,
     is_numeric_value,

@@ -20,7 +20,6 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @pass_config
 def capacity(config: Any) -> None:
     """Check EC2 capacity availability."""
-    pass
 
 
 @capacity.command("check")
@@ -810,7 +809,7 @@ def _print_find_blocks_report(result: dict[str, Any]) -> None:
         gpu_hr = b.get("price_per_gpu_hour")
         gpu_hr_str = f"${gpu_hr:,.2f}" if isinstance(gpu_hr, int | float) else "-"
         print(
-            f"  {str(b.get('region') or ''):<13} {str(b.get('availability_zone') or ''):<17} "
+            f"  {b.get('region') or ''!s:<13} {b.get('availability_zone') or ''!s:<17} "
             f"{start:<17} {dur:>6} {fee_str:>11} {gpu_hr_str:>10}"
         )
     print()
@@ -1039,8 +1038,8 @@ def _print_find_reservations_report(result: dict[str, Any]) -> None:
         gpu_hr = r.get("price_per_gpu_hour")
         gpu_hr_str = f"${gpu_hr:,.2f}" if isinstance(gpu_hr, int | float) else "-"
         print(
-            f"  {str(r.get('instance_type') or ''):<18} {str(r.get('region') or ''):<13} "
-            f"{str(r.get('availability_zone') or ''):<17} "
+            f"  {r.get('instance_type') or ''!s:<18} {r.get('region') or ''!s:<13} "
+            f"{r.get('availability_zone') or ''!s:<17} "
             f"{r.get('available_instances', 0):>6} {r.get('total_instances', 0):>6} "
             f"{gpu_hr_str:>10}"
         )
@@ -1668,7 +1667,6 @@ def traffic_dial(config: Any) -> None:
     controller honors; `clear` removes the override so the controller (when
     enabled in enforce mode) resumes managing the region.
     """
-    pass
 
 
 @traffic_dial.command("show")

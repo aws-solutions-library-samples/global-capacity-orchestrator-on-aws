@@ -14,16 +14,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission.engine import MissionEngine  # noqa: E402
-from mission.sandbox import (  # noqa: E402
+from mission.engine import MissionEngine
+from mission.sandbox import (
     _build_script_observation,
     _make_tool_wrapper,
     validate_script_ast,
 )
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.swarm_runner import _strip_parsed_asts  # noqa: E402
+from mission.state import FilesystemBackend
+from mission.swarm_runner import _strip_parsed_asts
 
-from tests.test_swarm_runner import (  # noqa: E402
+from tests.test_swarm_runner import (
     child_request,
     load,
     make_orchestrator,

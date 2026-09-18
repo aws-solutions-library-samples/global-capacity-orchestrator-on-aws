@@ -63,8 +63,8 @@ def _render_stacks(data: dict[str, Any]) -> list[str]:
     for entry, marker in [(e, "") for e in entries] + [(e, "  (optional)") for e in optional]:
         status_text = entry.get("status") or "-"
         lines.append(
-            f"{str(entry.get('name')):<{width}}  {status_text:<25}  "
-            f"{str(entry.get('health')):<12}  {entry.get('region')}{marker}"
+            f"{entry.get('name')!s:<{width}}  {status_text:<25}  "
+            f"{entry.get('health')!s:<12}  {entry.get('region')}{marker}"
         )
     return lines
 

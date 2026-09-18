@@ -28,12 +28,12 @@ from tests._floci import create_job_queue, floci_test_markers, unique_name
 pytestmark = floci_test_markers()
 
 
-@pytest.fixture()
+@pytest.fixture
 def sqs(verified_floci_endpoint: str):
     return boto3.client("sqs")
 
 
-@pytest.fixture()
+@pytest.fixture
 def job_queue(sqs):
     queues = create_job_queue(sqs, unique_name("gco-jobs"), max_receive_count=2)
     yield queues
@@ -41,7 +41,7 @@ def job_queue(sqs):
         sqs.delete_queue(QueueUrl=url)
 
 
-@pytest.fixture()
+@pytest.fixture
 def fast_retry_job_queue(sqs):
     """Queue pair whose retained messages are immediately receivable again.
 

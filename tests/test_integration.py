@@ -107,7 +107,7 @@ def _load_trusted_config() -> tuple[list[str], list[str]]:
 
 TRUSTED_REGISTRIES, TRUSTED_DOCKERHUB_ORGS = _load_trusted_config()
 # Add "library" for official Docker Hub images
-TRUSTED_DOCKERHUB_ORGS = list(TRUSTED_DOCKERHUB_ORGS) + ["library"]
+TRUSTED_DOCKERHUB_ORGS = [*TRUSTED_DOCKERHUB_ORGS, "library"]
 
 
 # =============================================================================
@@ -1338,8 +1338,8 @@ class TestDependencyVersionConsistency:
         """Extract pinned dependency versions from a requirements.txt file."""
         deps = {}
         with open(req_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+            for raw_line in f:
+                line = raw_line.strip()
                 if line and not line.startswith("#") and "==" in line:
                     name, version = line.split("==")
                     deps[name.strip().lower().replace("-", "_")] = version.strip()

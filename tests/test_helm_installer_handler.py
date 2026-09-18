@@ -1284,7 +1284,7 @@ class TestReleaseConvergenceValidation:
                 "run_kubectl",
                 return_value=(0, self._live_list(self._live_deployment()), ""),
             ),
-            pytest.raises(RuntimeError, match="missing=.*ConfigMap"),
+            pytest.raises(RuntimeError, match=r"missing=.*ConfigMap"),
         ):
             helm_handler.validate_releases(self._event(), "/tmp/kubeconfig")
 
@@ -3091,7 +3091,7 @@ class TestValidationFileCleanup:
         assert not target.exists()
 
     def test_directory_removal_error_propagates(self, tmp_path):
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match=r"Operation not permitted|Is a directory"):
             helm_handler._remove_validation_file(str(tmp_path))
 
 
@@ -3471,7 +3471,6 @@ class TestStaleWebhookCleanup:
 
     def test_removes_only_webhooks_whose_service_has_no_endpoints(self, caplog):
         with (
-            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
             patch.object(helm_handler.subprocess, "run") as mock_run,
             caplog.at_level(logging.WARNING),
         ):
@@ -3510,7 +3509,6 @@ class TestStaleWebhookCleanup:
 
     def test_listing_failure_aborts_without_touching_webhooks(self, caplog):
         with (
-            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
             patch.object(
                 helm_handler.subprocess,
                 "run",
@@ -3525,7 +3523,6 @@ class TestStaleWebhookCleanup:
 
     def test_unexpected_errors_are_non_fatal(self, caplog):
         with (
-            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
             patch.object(
                 helm_handler.subprocess, "run", side_effect=FileNotFoundError("kubectl: not found")
             ),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import types
 from dataclasses import dataclass, field
@@ -393,7 +394,7 @@ def test_catalog_load_reports_unreadable_or_invalid_json(tmp_path: Path) -> None
 
     broken = tmp_path / "broken.json"
     broken.write_text("{not json")
-    with pytest.raises(CatalogError, match="cannot read accelerator catalog .*Expecting"):
+    with pytest.raises(CatalogError, match=r"cannot read accelerator catalog .*Expecting"):
         Catalog.load(broken)
 
     listed = tmp_path / "list.json"
@@ -543,7 +544,9 @@ def test_load_nodepools_rejects_non_list_requirements(tmp_path: Path) -> None:
         )
     )
 
-    with pytest.raises(CatalogError, match="spec.template.spec.requirements must be a list"):
+    with pytest.raises(
+        CatalogError, match=re.escape("spec.template.spec.requirements must be a list")
+    ):
         load_nodepools(tmp_path)
 
 

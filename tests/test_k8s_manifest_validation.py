@@ -1067,7 +1067,7 @@ class TestMainOffline:
         seen: dict[str, list[str]] = {}
         real_run = validator.subprocess.run
 
-        def spy(cmd, **kwargs):  # noqa: ANN001, ANN202
+        def spy(cmd, **kwargs):
             seen["cmd"] = list(cmd)
             return real_run(cmd, **kwargs)
 
@@ -1175,7 +1175,7 @@ class TestRunKubeconformArguments:
         """An empty ``-skip`` would be passed as a literal empty string."""
         seen: dict[str, list[str]] = {}
 
-        def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        def fake_run(cmd, **kwargs):
             seen["cmd"] = list(cmd)
 
             class _Done:

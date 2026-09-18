@@ -44,7 +44,7 @@ GATE_PLACEHOLDER = "{{CLUSTER_OBSERVABILITY_ENABLED}}"
 # Test fixture: the literal is a fake "current" password used only to build the
 # mock Secret payload the rotator reads back; it is not a real credential.
 # nosemgrep: hardcoded-password-default-argument
-def _secret(user: str = "admin", password: str = "old-password") -> MagicMock:  # noqa: S107
+def _secret(user: str = "admin", password: str = "old-password") -> MagicMock:
     """A fake read_namespaced_secret return with base64 data, like the API."""
     secret = MagicMock()
     secret.data = {

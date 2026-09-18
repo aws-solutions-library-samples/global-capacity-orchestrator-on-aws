@@ -14,14 +14,14 @@ import hashlib
 import hmac
 import secrets
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # Signing key used by tests that hit authenticated endpoints. The autouse
 # fixture seeds the middleware cache; each request gets a fresh nonce.
-_TEST_SIGNING_KEY = "test-health-api-signing-key"  # nosec B105 - test fixture
+_TEST_SIGNING_KEY = "test-health-api-signing-key"  # nosec B105  # test fixture
 
 
 def _auth_headers(method: str, request_target: str, body: bytes = b"") -> dict[str, str]:
@@ -100,7 +100,7 @@ def _create_mock_health_monitor():
     mock_status = HealthStatus(
         cluster_id="test-cluster",
         region="us-east-1",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(UTC),
         status="healthy",
         resource_utilization=ResourceUtilization(cpu=50.0, memory=60.0, gpu=30.0),
         thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),
@@ -264,7 +264,7 @@ class TestBackgroundHealthMonitor:
         mock_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=ResourceUtilization(cpu=50.0, memory=60.0, gpu=30.0),
             thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),
@@ -290,7 +290,8 @@ class TestBackgroundHealthMonitor:
                 await task
 
             # Verify status was updated
-            assert health_api_module.current_health_status is not None
+            assert health_api_module.current_health_status is mock_status
+            mock_monitor.get_health_status.assert_awaited()
         finally:
             health_api_module.health_monitor = original_monitor
 

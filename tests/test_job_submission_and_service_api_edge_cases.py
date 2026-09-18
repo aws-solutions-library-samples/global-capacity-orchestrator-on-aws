@@ -927,7 +927,7 @@ def test_queue_processor_poison_messages_are_retained(
 def test_jobs_selector_rejects_malformed_keys_and_values(selector: str) -> None:
     from gco.services.api_routes.jobs import _parse_exact_label_selector
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("Invalid label ")):
         _parse_exact_label_selector(selector)
 
 
@@ -1620,7 +1620,7 @@ async def test_health_monitor_all_thresholds_can_be_disabled() -> None:
     [
         (None, None),
         ("other", None),
-        ("other", datetime.now() - timedelta(seconds=120)),
+        ("other", datetime.now(UTC) - timedelta(seconds=120)),
     ],
 )
 def test_health_monitor_lease_acquires_unowned_missing_or_naive_expired(
@@ -1775,7 +1775,7 @@ async def test_health_api_uncached_health_and_dispatcher_status_metrics() -> Non
     status = HealthStatus(
         cluster_id="cluster",
         region="us-east-1",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(UTC),
         status="healthy",
         resource_utilization=ResourceUtilization(1, 2, 3),
         thresholds=ResourceThresholds(80, 80, 80),
@@ -2007,7 +2007,7 @@ def test_webhook_sync_watch_stops_before_buffering_when_not_running() -> None:
 async def test_request_size_middleware_replays_mixed_messages_and_falls_back() -> None:
     from gco.services.request_size_middleware import RequestSizeLimitMiddleware
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("max_body_bytes must be non-negative")):
         RequestSizeLimitMiddleware(AsyncMock(), -1)
 
     received_by_app: list[dict[str, Any]] = []
@@ -2358,9 +2358,10 @@ def _manager() -> Any:
 
 
 def test_cli_identity_namespace_resource_mapping_and_image_shape_helpers() -> None:
-    from cli.jobs import _extract_image_refs, _first_manifest_namespace, resolve_submission_identity
+    from cli.jobs import _extract_image_refs, resolve_submission_identity
+    from gco.job_envelope import first_manifest_namespace
 
-    assert _first_manifest_namespace([{}, {"metadata": {"namespace": "ml"}}]) == "ml"
+    assert first_manifest_namespace([{}, {"metadata": {"namespace": "ml"}}]) == "ml"
     assert resolve_submission_identity(
         {"resources": {"kind": "Job", "name": "trainer", "namespace": "ml"}}
     ) == ("trainer", "ml")

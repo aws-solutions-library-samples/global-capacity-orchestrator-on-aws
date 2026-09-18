@@ -196,8 +196,8 @@ class TestParseJobToDict:
         ct = datetime(2024, 1, 15, 10, 5, 0, tzinfo=UTC)
         job = self._make_job(succeeded=1, conditions=[], start_time=st, completion_time=ct)
         result = _parse_job_to_dict(job)
-        assert result["status"]["startTime"] is not None
-        assert result["status"]["completionTime"] is not None
+        assert result["status"]["startTime"] == "2024-01-15T10:01:00+00:00"
+        assert result["status"]["completionTime"] == "2024-01-15T10:05:00+00:00"
 
     def test_status_defaults_zero(self):
         job = self._make_job(active=None, succeeded=None, failed=None, conditions=[])
@@ -421,8 +421,8 @@ class TestParseEventToDict:
     def test_timestamps(self):
         event = self._make_event()
         result = _parse_event_to_dict(event)
-        assert result["firstTimestamp"] is not None
-        assert result["lastTimestamp"] is not None
+        assert result["firstTimestamp"] == "2024-01-15T10:00:00+00:00"
+        assert result["lastTimestamp"] == "2024-01-15T10:00:00+00:00"
 
     def test_source(self):
         event = self._make_event()

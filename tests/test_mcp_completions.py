@@ -13,13 +13,13 @@ from mcp_types import CompletionArgument, PromptReference, ResourceTemplateRefer
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402  -- side-effect registers tools/resources/completions
-from completions import (  # noqa: E402
+import run_mcp  # side-effect registers tools/resources/completions
+from completions import (
     _MAX_COMPLETIONS,
     _complete_argument,
     _match,
 )
-from resources.docs import DOC_METADATA, EXAMPLE_METADATA  # noqa: E402
+from resources.docs import DOC_METADATA, EXAMPLE_METADATA
 
 
 def _template_ref(uri: str) -> ResourceTemplateReference:

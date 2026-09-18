@@ -40,7 +40,9 @@ DEPLOYMENT_FILES = (
 )
 SCALED_JOB_FILE = "post-helm-sqs-consumer.yaml"
 TLS_SIDECAR = "api-tls-proxy"
-IRSA_TOKEN_PATH = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"  # noqa: S105 - a mount path, not a secret
+IRSA_TOKEN_PATH = (
+    "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"  # a mount path, not a secret
+)
 
 #: Typed placeholder rendering: bare integers where Kubernetes wants integers,
 #: quantities where it wants quantities. Everything else becomes a string.
@@ -262,7 +264,7 @@ class TestPodShape:
             budget = startup["periodSeconds"] * startup["failureThreshold"]
             assert budget >= STARTUP_BUDGET_SECONDS, f"{where}: startup budget {budget}s"
 
-    @pytest.mark.parametrize("filename", (*DEPLOYMENT_FILES, SCALED_JOB_FILE))
+    @pytest.mark.parametrize("filename", [*DEPLOYMENT_FILES, SCALED_JOB_FILE])
     def test_every_scratch_volume_is_bounded(self, filename):
         docs = _documents(filename)
         pod_specs = [_pod_spec(doc) for doc in docs if doc["kind"] == "Deployment"] + [
@@ -450,7 +452,8 @@ class TestServiceWiring:
 
 class TestQueueProcessorTemplate:
     @pytest.fixture(scope="class")
-    def scaled_job(self) -> dict[str, Any]:
+    @staticmethod
+    def scaled_job() -> dict[str, Any]:
         (scaled_job,) = [doc for doc in _documents(SCALED_JOB_FILE) if doc["kind"] == "ScaledJob"]
         return scaled_job
 

@@ -28,7 +28,7 @@
 #   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
-#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
+#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer apply
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
@@ -500,7 +500,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/cost-monitor-dockerfile
+          file: dockerfiles/Dockerfile.cost-monitor
           tags: cost-monitor:ci
           load: true
           cache-from: type=gha,scope=cost-monitor
@@ -548,7 +548,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/health-monitor-dockerfile
+          file: dockerfiles/Dockerfile.health-monitor
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
@@ -631,7 +631,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/manifest-processor-dockerfile
+          file: dockerfiles/Dockerfile.manifest-processor
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
@@ -697,7 +697,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-monitor-dockerfile
+          file: dockerfiles/Dockerfile.inference-monitor
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
@@ -763,7 +763,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-proxy-dockerfile
+          file: dockerfiles/Dockerfile.inference-proxy
           tags: inference-proxy:ci
           load: true
           cache-from: type=gha,scope=inference-proxy
@@ -825,7 +825,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/queue-processor-dockerfile
+          file: dockerfiles/Dockerfile.queue-processor
           tags: queue-processor:ci
           load: true
           cache-from: type=gha,scope=queue-processor
@@ -1327,6 +1327,14 @@ jobs:
   # on, every PDB has the one-at-a-time shape, and the policies admit and
   # deny exactly the documented paths (probed both ways).
   #
+  # It also closes the SQS submission loop, which no other job could: a job is
+  # submitted with the CLI's own envelope builder to an in-cluster SQS
+  # emulator, and the shipped ScaledJob template runs as a Job — same image,
+  # ServiceAccount, projected tokens and validation policy — until the
+  # submitted manifest exists in gco-jobs and the message is acknowledged.
+  # integration:docker:queue-processor covers that image's failure modes
+  # against a stub kubeconfig; the apply path needs this real API server.
+  #
   # The inference monitor and cost monitor need AWS credentials to become
   # Ready (DynamoDB, S3/OpenCost) and are scaled away after their pods are
   # admitted; the image-level "integration:docker:*" jobs above cover their
@@ -1346,20 +1354,45 @@ jobs:
       # env block at the top of this file.
       METRICS_SERVER_VERSION: "v0.9.0"
       METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
+      # The SQS wire API the queue-processor end-to-end test consumes from,
+      # running inside the cluster as the regional queue's stand-in. Same
+      # digest-pinned emulator the floci suites and
+      # integration:docker:queue-processor use; tests/test_pinned_floci_version.py
+      # requires every workflow occurrence to carry the identical tag+digest.
+      CI_SQS_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      # Tag the emulator is loaded into the kind node under. Digest-pinned
+      # references cannot be addressed by `kind load`, and the pod must never
+      # reach a registry, so the pinned image is retagged locally and the
+      # Deployment pulls with imagePullPolicy: Never.
+      CI_SQS_LOCAL_IMAGE: "gco-ci-sqs-emulator:local"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project
+        # The render steps below import the production helpers rather than
+        # reimplementing them — the inference-proxy TLS renderer the regional
+        # stack calls, and the SQS job envelope `gco jobs submit-sqs` builds —
+        # and parse manifests with PyYAML, so the project supplies its own
+        # dependencies to this job.
+        run: pip install -e .
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
       - name: Pre-pull Kind bootstrap images with retry
         # kind-action otherwise pulls the node image implicitly with no retry,
         # and the NetworkPolicy probes would leave BusyBox to kubelet backoff.
-        # Pull both through the repository's bounded registry retry helper;
-        # the probe image is loaded into the node immediately after creation.
+        # Pull all three through the repository's bounded registry retry
+        # helper; the probe image and the SQS emulator are loaded into the node
+        # immediately after creation.
         uses: ./.github/actions/docker-pull-with-retry
         with:
           images: |
             ${{ env.KIND_NODE_IMAGE }}
             busybox:1.38.0
+            ${{ env.CI_SQS_EMULATOR_IMAGE }}
       - name: Create kind cluster (no default CNI)
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
         with:
@@ -1465,7 +1498,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/health-monitor-dockerfile
+          file: dockerfiles/Dockerfile.health-monitor
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
@@ -1474,7 +1507,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/cost-monitor-dockerfile
+          file: dockerfiles/Dockerfile.cost-monitor
           tags: cost-monitor:ci
           load: true
           cache-from: type=gha,scope=cost-monitor
@@ -1483,7 +1516,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/manifest-processor-dockerfile
+          file: dockerfiles/Dockerfile.manifest-processor
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
@@ -1492,7 +1525,7 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-monitor-dockerfile
+          file: dockerfiles/Dockerfile.inference-monitor
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
@@ -1501,18 +1534,36 @@ jobs:
         uses: ./.github/actions/build-image-with-retry
         with:
           context: .
-          file: dockerfiles/inference-proxy-dockerfile
+          file: dockerfiles/Dockerfile.inference-proxy
           tags: inference-proxy:ci
           load: true
           cache-from: type=gha,scope=inference-proxy
           cache-to: type=gha,mode=max,scope=inference-proxy,ignore-error=true
+      - name: Build queue-processor image
+        # integration:docker:queue-processor proves this image's failure modes
+        # against a stub kubeconfig; the success path needs a real API server,
+        # so the same image runs here as the KEDA ScaledJob would.
+        uses: ./.github/actions/build-image-with-retry
+        with:
+          context: .
+          file: dockerfiles/Dockerfile.queue-processor
+          tags: queue-processor:ci
+          load: true
+          cache-from: type=gha,scope=queue-processor
+          cache-to: type=gha,mode=max,scope=queue-processor,ignore-error=true
       - name: Load images into kind
         run: |
+          set -euo pipefail
           kind load docker-image health-monitor:ci --name gco-ci
           kind load docker-image cost-monitor:ci --name gco-ci
           kind load docker-image manifest-processor:ci --name gco-ci
           kind load docker-image inference-monitor:ci --name gco-ci
           kind load docker-image inference-proxy:ci --name gco-ci
+          kind load docker-image queue-processor:ci --name gco-ci
+          # The emulator was pulled by digest; retag so `kind load` can address
+          # it and the in-cluster Deployment can pull it with policy Never.
+          docker tag "${CI_SQS_EMULATOR_IMAGE}" "${CI_SQS_LOCAL_IMAGE}"
+          kind load docker-image "${CI_SQS_LOCAL_IMAGE}" --name gco-ci
       - name: Apply namespaces + RBAC
         # 05-priority-classes.yaml must land before the deployments: pod
         # admission rejects an unresolvable priorityClassName, and every
@@ -2129,6 +2180,350 @@ jobs:
               )
           PY
           echo "ResourceQuota and LimitRange admission defaults verified"
+      - name: Deploy the CI SQS emulator in its own namespace
+        # The queue processor's success path — receive, validate, apply, delete
+        # — needs both an SQS wire API and a real API server.
+        # integration:docker:queue-processor supplies the first with a stub
+        # kubeconfig for the second, so the apply half has never run. Give the
+        # emulator a namespace of its own: gco-system's shipped default-deny
+        # rules are the posture under test, and a namespace with no policies
+        # keeps the emulator reachable without loosening them for anything but
+        # the one egress rule below.
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: gco-ci-sqs
+            labels:
+              gco.aws/ci-only: "true"
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sqs
+            namespace: gco-ci-sqs
+            labels:
+              app: sqs
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: sqs
+            template:
+              metadata:
+                labels:
+                  app: sqs
+              spec:
+                containers:
+                  - name: emulator
+                    image: ${CI_SQS_LOCAL_IMAGE}
+                    imagePullPolicy: Never
+                    env:
+                      - name: FLOCI_STORAGE_MODE
+                        value: memory
+                    ports:
+                      - containerPort: 4566
+                    readinessProbe:
+                      tcpSocket:
+                        port: 4566
+                      initialDelaySeconds: 2
+                      periodSeconds: 2
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sqs
+            namespace: gco-ci-sqs
+          spec:
+            selector:
+              app: sqs
+            ports:
+              - protocol: TCP
+                port: 4566
+                targetPort: 4566
+          EOF
+          kubectl -n gco-ci-sqs rollout status deployment/sqs --timeout=3m
+      - name: Allow the queue processor to reach the CI SQS emulator
+        # gco-system egress ships as DNS + HTTPS-to-AWS only, which is correct
+        # for production: the real queue is reached over TLS on 443. The
+        # emulator speaks plaintext on 4566 inside the cluster, so this CI-only
+        # rule admits exactly that — from the queue-processor pods, to that one
+        # namespace, on that one port. Everything else stays denied, including
+        # this path for every other workload in gco-system.
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<'EOF'
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: ci-allow-sqs-emulator-egress
+            namespace: gco-system
+            labels:
+              gco.aws/ci-only: "true"
+          spec:
+            podSelector:
+              matchLabels:
+                app: queue-processor
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: gco-ci-sqs
+                ports:
+                  - protocol: TCP
+                    port: 4566
+          EOF
+      - name: Submit a job through the real CLI envelope
+        # The message is built by gco.job_envelope.build_job_message — the same
+        # code path `gco jobs submit-sqs` uses — from the CPU Job in
+        # examples/sqs-job-submission.yaml, the manifest the docs tell users to
+        # submit. A hand-written JSON blob here would only prove the consumer
+        # can read what this workflow writes.
+        #
+        # The queue is created through a port-forward because the emulator has
+        # no ingress from the runner. The URL it returns names the forwarded
+        # loopback address, so the authority is rewritten to the in-cluster
+        # Service for the consumer, which reaches it by DNS.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-ci-sqs port-forward svc/sqs 4566:4566 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+          export AWS_ENDPOINT_URL_SQS="http://127.0.0.1:4566"
+          export AWS_ACCESS_KEY_ID=testing
+          export AWS_SECRET_ACCESS_KEY=testing
+          export AWS_REGION=us-east-1
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${AWS_ENDPOINT_URL_SQS}" || true)
+            if [ "${code}" = "200" ] || [ "${code}" = "404" ]; then
+              echo "Emulator is answering HTTP (${code}) through the port-forward."
+              break
+            fi
+            sleep 1
+          done
+          local_url="$(aws sqs create-queue --queue-name gco-ci-jobs \
+            --query QueueUrl --output text)"
+          if [ -z "${local_url}" ] || [ "${local_url}" = "None" ]; then
+            echo "::error::emulator did not return a queue URL"
+            exit 1
+          fi
+          cluster_url="$(LOCAL_URL="${local_url}" python3 -c '
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+
+          parts = urlsplit(os.environ["LOCAL_URL"])
+          print(urlunsplit(parts._replace(netloc="sqs.gco-ci-sqs.svc.cluster.local:4566")))
+          ')"
+          echo "queue on the runner: ${local_url}"
+          echo "queue in the cluster: ${cluster_url}"
+          python3 - <<'PY' > "${RUNNER_TEMP}/job-message.json"
+          from pathlib import Path
+
+          import yaml
+
+          from gco.job_envelope import build_job_message
+
+          documents = [
+              doc
+              for doc in yaml.safe_load_all(
+                  Path("examples/sqs-job-submission.yaml").read_text(encoding="utf-8")
+              )
+              if doc
+          ]
+          # By name, not by position: a reordered example must not silently
+          # switch this test to the GPU job (unschedulable on a kind node).
+          job = next(
+              doc for doc in documents if doc.get("metadata", {}).get("name") == "sqs-submitted-job"
+          )
+          print(build_job_message([job], job_id="ci-e2e01").json())
+          PY
+          aws sqs send-message \
+            --queue-url "${local_url}" \
+            --message-body "file://${RUNNER_TEMP}/job-message.json" \
+            --query MessageId --output text
+          depth="$(aws sqs get-queue-attributes --queue-url "${local_url}" \
+            --attribute-names ApproximateNumberOfMessages \
+            --query 'Attributes.ApproximateNumberOfMessages' --output text)"
+          if [ "${depth}" != "1" ]; then
+            echo "::error::expected 1 queued message before consuming, got ${depth}"
+            exit 1
+          fi
+          echo "CI_JOB_QUEUE_URL=${cluster_url}" >> "$GITHUB_ENV"
+          echo "CI_LOCAL_QUEUE_URL=${local_url}" >> "$GITHUB_ENV"
+      - name: Run the queue processor as the KEDA ScaledJob would
+        # The pod spec is not written here: it is lifted out of the shipped
+        # post-helm-sqs-consumer.yaml ScaledJob's jobTargetRef, so the
+        # projected token pair, the non-root/read-only security context, the
+        # manifest-processor ServiceAccount and the whole validation-policy env
+        # block are the production ones. KEDA is not installed on kind (it
+        # arrives through Helm, which this raw-manifest job deliberately does
+        # not run), so the same template is applied as a batch/v1 Job — which
+        # is what KEDA would have created.
+        #
+        # Two substitutions are CI-specific: AWS credentials and the SQS
+        # endpoint replace the IRSA variables that only resolve on EKS, and
+        # JOBS_TABLE_NAME is empty because there is no DynamoDB here (it feeds
+        # the failure-record path only, and this is the success path).
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "${RUNNER_TEMP}/ci-queue-processor-job.yaml"
+          import os
+          import re
+          from pathlib import Path
+
+          import yaml
+
+          values = {
+              "{{QUEUE_PROCESSOR_IMAGE}}": "queue-processor:ci",
+              "{{JOB_QUEUE_URL}}": os.environ["CI_JOB_QUEUE_URL"],
+              "{{REGION}}": "us-east-1",
+              "{{DYNAMODB_REGION}}": "us-east-1",
+              # No DynamoDB in kind: an empty table name disables the terminal
+              # failure record, which the success path never writes anyway.
+              "{{JOBS_TABLE_NAME}}": "",
+              # The validation policy the REST processor is rendered with in
+              # this same job, so both paths enforce one policy here too.
+              "{{QP_ALLOWED_NAMESPACES}}": "gco-jobs",
+              "{{QP_ALLOWED_KINDS}}": "Job,CronJob,Deployment,StatefulSet,DaemonSet,Service,ConfigMap,Pod",
+              "{{QP_MAX_CPU_PER_MANIFEST}}": "384",
+              "{{QP_MAX_MEMORY_PER_MANIFEST}}": "4096Gi",
+              "{{QP_MAX_GPU_PER_MANIFEST}}": "16",
+              "{{QP_TRUSTED_REGISTRIES}}": "docker.io,public.ecr.aws",
+              "{{QP_TRUSTED_DOCKERHUB_ORGS}}": "library",
+              "{{QP_BLOCK_PRIVILEGED}}": "true",
+              "{{QP_BLOCK_PRIVILEGE_ESCALATION}}": "true",
+              "{{QP_BLOCK_HOST_NETWORK}}": "true",
+              "{{QP_BLOCK_HOST_PID}}": "true",
+              "{{QP_BLOCK_HOST_IPC}}": "true",
+              "{{QP_BLOCK_HOST_PATH}}": "true",
+              "{{QP_BLOCK_ADDED_CAPABILITIES}}": "true",
+              "{{QP_BLOCK_RUN_AS_ROOT}}": "true",
+              "{{QP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
+              # KEDA-side numbers: unused by the Job below, substituted so the
+              # rendered ScaledJob still parses as the shipped document.
+              "{{QP_POLLING_INTERVAL}}": "30",
+              "{{QP_SUCCESSFUL_JOBS_HISTORY}}": "3",
+              "{{QP_FAILED_JOBS_HISTORY}}": "3",
+              "{{QP_MAX_CONCURRENT_JOBS}}": "5",
+              "{{QP_MESSAGES_PER_JOB}}": "1",
+          }
+          manifest = Path(
+              "lambda/kubectl-applier-simple/manifests/post-helm-sqs-consumer.yaml"
+          ).read_text(encoding="utf-8")
+          for token, value in values.items():
+              manifest = manifest.replace(token, value)
+          # Role ARNs are the only tokens left; the Job drops them below.
+          manifest = re.sub(r"\{\{[A-Z0-9_]+\}\}", "ci-stub", manifest)
+          scaled_job = yaml.safe_load(manifest)
+          assert scaled_job["kind"] == "ScaledJob", scaled_job["kind"]
+
+          target = scaled_job["spec"]["jobTargetRef"]
+          container = target["template"]["spec"]["containers"][0]
+          # IRSA cannot resolve off EKS. Static test credentials plus the
+          # endpoint override are what botocore needs to reach the emulator.
+          irsa = {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
+          container["env"] = [entry for entry in container["env"] if entry["name"] not in irsa] + [
+              {"name": "AWS_ENDPOINT_URL_SQS", "value": "http://sqs.gco-ci-sqs.svc.cluster.local:4566"},
+              {"name": "AWS_ACCESS_KEY_ID", "value": "testing"},
+              {"name": "AWS_SECRET_ACCESS_KEY", "value": "testing"},
+          ]
+          assert container["image"] == "queue-processor:ci", container["image"]
+          # IfNotPresent in production (content-hash tags); the kind node has
+          # no registry to fall back to, so require the loaded image.
+          container["imagePullPolicy"] = "Never"
+
+          print(
+              yaml.safe_dump(
+                  {
+                      "apiVersion": "batch/v1",
+                      "kind": "Job",
+                      "metadata": {
+                          "name": "ci-queue-processor",
+                          "namespace": "gco-system",
+                          "labels": {"app": "queue-processor", "gco.aws/ci-only": "true"},
+                      },
+                      "spec": target,
+                  },
+                  sort_keys=False,
+              )
+          )
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/ci-queue-processor-job.yaml"
+          # Poll both terminal conditions: waiting only for `complete` would
+          # burn the whole timeout on a Job that has already failed.
+          for _ in $(seq 1 90); do
+            complete="$(kubectl -n gco-system get job ci-queue-processor \
+              -o 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')"
+            failed="$(kubectl -n gco-system get job ci-queue-processor \
+              -o 'jsonpath={.status.conditions[?(@.type=="Failed")].status}')"
+            [ "${complete}" = "True" ] && break
+            if [ "${failed}" = "True" ]; then
+              echo "::error::the queue-processor Job failed"
+              kubectl -n gco-system logs job/ci-queue-processor --tail=200 || true
+              kubectl -n gco-system describe job ci-queue-processor || true
+              exit 1
+            fi
+            sleep 2
+          done
+          kubectl -n gco-system logs job/ci-queue-processor --tail=200
+          if [ "$(kubectl -n gco-system get job ci-queue-processor \
+              -o 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')" != "True" ]; then
+            echo "::error::the queue-processor Job did not complete within 3 minutes"
+            kubectl -n gco-system describe job ci-queue-processor || true
+            kubectl -n gco-system get pods -l app=queue-processor -o wide || true
+            exit 1
+          fi
+      - name: Verify the submitted job was applied and the message acknowledged
+        # What the ScaledJob exists to do: the manifest a user submitted over
+        # SQS is now a real object in gco-jobs, created by the consumer through
+        # the manifest-processor ServiceAccount's RBAC — and the message is
+        # gone, which is the consumer's only success signal.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-jobs get job sqs-submitted-job -o yaml > "${RUNNER_TEMP}/applied-job.yaml"
+          python3 - "${RUNNER_TEMP}/applied-job.yaml" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          job = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          labels = job["metadata"]["labels"]
+          # The example's own labels must survive the round trip through the
+          # envelope and the consumer's validation.
+          assert labels["gco.io/submission-method"] == "sqs", labels
+          assert labels["app"] == "ml-training", labels
+          image = job["spec"]["template"]["spec"]["containers"][0]["image"]
+          assert image == "python:3.14.7-slim", image
+          print(f"applied {job['metadata']['namespace']}/{job['metadata']['name']} from SQS")
+          PY
+          kubectl -n gco-ci-sqs port-forward svc/sqs 4566:4566 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+          sleep 2
+          export AWS_ENDPOINT_URL_SQS="http://127.0.0.1:4566"
+          export AWS_ACCESS_KEY_ID=testing
+          export AWS_SECRET_ACCESS_KEY=testing
+          export AWS_REGION=us-east-1
+          attrs="$(aws sqs get-queue-attributes --queue-url "${CI_LOCAL_QUEUE_URL}" \
+            --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+            --query 'Attributes' --output json)"
+          printf '%s\n' "${attrs}"
+          total="$(printf '%s' "${attrs}" | python3 -c '
+          import json, sys
+
+          attrs = json.load(sys.stdin)
+          print(int(attrs["ApproximateNumberOfMessages"]) + int(attrs["ApproximateNumberOfMessagesNotVisible"]))
+          ')"
+          if [ "${total}" -ne 0 ]; then
+            echo "::error::the processed message was not deleted (total=${total})"
+            exit 1
+          fi
+          echo "queue drained: the consumer acknowledged the message it applied"
       - name: Verify all namespaces exist
         run: |
           set -euo pipefail
@@ -2166,6 +2561,9 @@ jobs:
           echo ""
           echo "ServiceAccounts:"
           kubectl -n gco-jobs get sa --no-headers 2>/dev/null || echo "  (none)"
+          echo ""
+          echo "Jobs applied through the SQS consumer:"
+          kubectl -n gco-jobs get jobs --no-headers 2>/dev/null || echo "  (none)"
       - name: Collect diagnostics on failure
         if: failure()
         run: |
@@ -2177,6 +2575,14 @@ jobs:
           kubectl -n gco-system logs deploy/inference-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-proxy --tail=200 || true
           kubectl -n gco-system logs deploy/cost-monitor --tail=200 || true
+          # Queue-processor end-to-end path: the consumer Job, what it applied,
+          # and the emulator it consumed from.
+          kubectl -n gco-system describe job ci-queue-processor || true
+          kubectl -n gco-system logs job/ci-queue-processor --tail=200 || true
+          kubectl -n gco-jobs get jobs,pods -o wide || true
+          kubectl -n gco-jobs get events --sort-by=.lastTimestamp | tail -30 || true
+          kubectl -n gco-ci-sqs describe deploy sqs || true
+          kubectl -n gco-ci-sqs logs deploy/sqs --tail=100 || true
 
   integration-kind-examples-smoke:
     name: "integration:kind:examples-smoke"

@@ -40,8 +40,8 @@ from hypothesis import strategies as st
 # production, matching the convention used by the sibling metric-reader tests.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from metric_readers import files  # noqa: E402
-from metric_readers.shape import ErrorCode, MetricReaderError, is_numeric_value  # noqa: E402
+from metric_readers import files
+from metric_readers.shape import ErrorCode, MetricReaderError, is_numeric_value
 
 # Every Aggregation_Mode the reducer accepts. The property exercises all of
 # them against each generated sequence.
@@ -408,7 +408,7 @@ def _import_metrics_tool_module():
     """
     try:
         import tools.metrics as metrics_module
-    except Exception as exc:  # noqa: BLE001 - any import-surface failure -> skip
+    except Exception as exc:  # any import-surface failure -> skip
         pytest.skip(f"tools.metrics not importable in this environment: {exc}")
     return metrics_module
 

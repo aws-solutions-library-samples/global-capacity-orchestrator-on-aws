@@ -161,7 +161,7 @@ class TestResolvers:
         assert ct.resolve_region(_Cfg(), None) == "ap-south-1"
 
     def test_resolve_region_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cli.config._load_cdk_json", lambda: {})
+        monkeypatch.setattr("cli.config._load_cdk_json", dict)
 
         class _Cfg:
             default_region = "us-east-2"

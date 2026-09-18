@@ -253,7 +253,7 @@ class CostTracker:
                     # Get GPU requests
                     for container in pod.spec.containers or []:
                         requests = container.resources.requests or {}
-                        gpu_req = requests.get(  # nosec B113 - dict.get(), not HTTP requests
+                        gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
                             "nvidia.com/gpu", "0"
                         )
                         gpu_count += int(gpu_req)

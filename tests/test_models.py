@@ -9,7 +9,8 @@ ResourceStatus. Each dataclass enforces invariants in __post_init__,
 and these tests pin the error messages so callers can rely on them.
 """
 
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 
 import pytest
 
@@ -113,7 +114,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -127,7 +128,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=utilization,
             thresholds=thresholds,
@@ -142,7 +143,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -155,7 +156,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="gco-us-east-1",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="unknown",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -168,7 +169,7 @@ class TestHealthStatus:
             HealthStatus(
                 cluster_id="gco-us-east-1",
                 region="us-east-1",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="healthy",
                 resource_utilization=utilization,
                 thresholds=thresholds,
@@ -181,7 +182,7 @@ class TestHealthStatus:
         status = HealthStatus(
             cluster_id="gco-us-east-1",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=high_util,
             thresholds=thresholds,
@@ -483,11 +484,21 @@ class TestDisabledThresholds:
         assert not t.is_disabled("gpu_threshold")
 
     def test_invalid_negative_not_minus_one(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "cpu_threshold must be an integer between 0 and 100 (or -1 to disable), got -5"
+            ),
+        ):
             ResourceThresholds(cpu_threshold=-5, memory_threshold=80, gpu_threshold=90)
 
     def test_invalid_pending_negative_not_minus_one(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "pending_pods_threshold must be a non-negative integer (or -1 to disable), got -3"
+            ),
+        ):
             ResourceThresholds(
                 cpu_threshold=80,
                 memory_threshold=80,

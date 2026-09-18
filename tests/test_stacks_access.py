@@ -145,7 +145,7 @@ class TestStacksAccessCommand:
 
     @pytest.mark.parametrize(
         ("region", "partition"),
-        (("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")),
+        [("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")],
     )
     def test_access_arns_follow_target_partition(self, runner, region, partition):
         """Assumed-role and managed access-policy ARNs use Region metadata."""

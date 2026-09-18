@@ -409,7 +409,7 @@ class TestDeletedCanaryTerminality:
 
         with (
             patch.object(manager, "_get_store", return_value=mock_store),
-            pytest.raises(ValueError, match="deleted.*redeploy"),
+            pytest.raises(ValueError, match=r"deleted.*redeploy"),
         ):
             getattr(manager, method_name)("my-llm", *args)
 
@@ -910,7 +910,16 @@ class TestInferenceManagerUpdateImage:
         with patch.object(manager, "_get_store", return_value=mock_store):
             result = manager.update_image("ep1", "new:v2")
 
-        assert result is not None
+        # The store's conditional write is the behavior under test: the new
+        # image lands in the spec, the write is fenced on the lifecycle the
+        # manager loaded, and the store's answer is returned untouched.
+        mock_store.update_spec.assert_called_once_with(
+            "ep1",
+            {"image": "new:v2"},
+            expected_lifecycle_id="life-test",
+            expected_updated_at="snapshot",
+        )
+        assert result == {"spec": {"image": "new:v2"}}
 
     @patch("cli.inference.get_aws_client")
     def test_update_image_not_found(self, mock_aws):
@@ -1033,7 +1042,23 @@ class TestInferenceManagerRegions:
         with patch.object(manager, "_get_store", return_value=mock_store):
             result = manager.add_region("ep1", "us-west-2")
 
-        assert result is not None
+        mock_store.update_target_regions.assert_called_once()
+        args, kwargs = mock_store.update_target_regions.call_args
+        name, regions, cleanup_regions, generations = args
+        assert (name, regions, cleanup_regions) == (
+            "ep1",
+            ["us-east-1", "us-west-2"],
+            ["us-east-1", "us-west-2"],
+        )
+        # Every Region in cleanup history carries a generation token, and the
+        # newly added Region gets a fresh 32-byte hex token.
+        assert set(generations) == {"us-east-1", "us-west-2"}
+        assert len(generations["us-west-2"]) == 64
+        assert kwargs == {
+            "expected_lifecycle_id": "life-1",
+            "expected_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        assert result is mock_store.update_target_regions.return_value
 
     @patch("cli.inference.get_aws_client")
     def test_add_region_not_found(self, mock_aws):
@@ -1069,7 +1094,24 @@ class TestInferenceManagerRegions:
         with patch.object(manager, "_get_store", return_value=mock_store):
             result = manager.remove_region("ep1", "us-west-2")
 
-        assert result is not None
+        mock_store.update_target_regions.assert_called_once()
+        args, kwargs = mock_store.update_target_regions.call_args
+        name, regions, cleanup_regions, generations = args
+        # The Region leaves the target list but stays in cleanup history with a
+        # fresh generation token, so the regional monitor must acknowledge THIS
+        # removal rather than any earlier remove/re-add cycle.
+        assert (name, regions, cleanup_regions) == (
+            "ep1",
+            ["us-east-1"],
+            ["us-east-1", "us-west-2"],
+        )
+        assert set(generations) == {"us-east-1", "us-west-2"}
+        assert len(generations["us-west-2"]) == 64
+        assert kwargs == {
+            "expected_lifecycle_id": "life-1",
+            "expected_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        assert result is mock_store.update_target_regions.return_value
 
     @patch("cli.inference.get_aws_client")
     def test_remove_region_not_found(self, mock_aws):

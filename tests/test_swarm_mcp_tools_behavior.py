@@ -21,10 +21,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
-from mission import state as mission_state  # noqa: E402
-from mission.state import FilesystemBackend  # noqa: E402
-from mission.types import SCHEMA_VERSION  # noqa: E402
+import run_mcp
+from mission import state as mission_state
+from mission.state import FilesystemBackend
+from mission.types import SCHEMA_VERSION
 
 _TOOL_NAMES = (
     "swarm_start",
@@ -463,12 +463,10 @@ class TestSwarmPlan:
         assert generator.await_args.kwargs["retries"] == 2
         deterministic.assert_not_called()
 
-    @pytest.mark.parametrize("backend_available", [True, False])
     async def test_plan_falls_back_deterministically(
         self,
         tools_module: Any,
         monkeypatch: pytest.MonkeyPatch,
-        backend_available: bool,
     ) -> None:
         monkeypatch.setattr(
             tools_module.mission_sampling,
@@ -478,7 +476,7 @@ class TestSwarmPlan:
         monkeypatch.setattr(
             tools_module.mission_sampling,
             "select_sampling_backend",
-            lambda *_args: object() if backend_available else None,
+            lambda *_args: object(),
         )
         sampled = AsyncMock(
             side_effect=tools_module.swarm_scaffold.SwarmScaffoldError("invalid_spawn")
@@ -498,13 +496,8 @@ class TestSwarmPlan:
 
         assert payload["plan"] == deterministic_plan
         assert payload["sampling_path"] is False
-        assert payload["fallback_reason"] == (
-            "invalid_spawn" if backend_available else "sampling_backend_unavailable"
-        )
-        if backend_available:
-            sampled.assert_awaited_once()
-        else:
-            sampled.assert_not_awaited()
+        assert payload["fallback_reason"] == "invalid_spawn"
+        sampled.assert_awaited_once()
         assert deterministic.call_args.kwargs["allow_all_tools"] is True
 
     async def test_plan_maps_validation_failures_from_input_and_fallback(

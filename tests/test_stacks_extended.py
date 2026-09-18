@@ -166,8 +166,8 @@ class TestStackManagerGetStackStatus:
         from cli.stacks import StackManager
 
         config = MagicMock()
-        created_time = datetime(2024, 1, 1, 10, 0, 0)
-        updated_time = datetime(2024, 1, 15, 14, 30, 0)
+        created_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC)
+        updated_time = datetime(2024, 1, 15, 14, 30, 0, tzinfo=UTC)
 
         with patch("boto3.client") as mock_boto:
             mock_cf = MagicMock()
@@ -287,7 +287,7 @@ class TestStackManagerDeployOptions:
             manager = StackManager(config)
             result = manager.deploy(
                 "test-stack",
-                outputs_file="/tmp/outputs.json",  # nosec B108 - test fixture using temp directory
+                outputs_file="/tmp/outputs.json",  # nosec B108  # test fixture using temp directory
                 require_approval=False,
             )
 
@@ -295,7 +295,7 @@ class TestStackManagerDeployOptions:
             call_args = mock_run.call_args[0][0]
             assert "--outputs-file" in call_args
             assert (
-                "/tmp/outputs.json" in call_args  # nosec B108 - test fixture using temp directory
+                "/tmp/outputs.json" in call_args  # nosec B108  # test fixture using temp directory
             )
 
     def test_deploy_with_parameters(self):
@@ -609,7 +609,7 @@ class TestIsBootstrapped:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -680,7 +680,7 @@ class TestStrictBootstrapValidation:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -708,7 +708,7 @@ class TestStrictBootstrapValidation:
 
     @pytest.mark.parametrize(
         ("stack_name", "stack_id", "status", "message"),
-        (
+        [
             ("Replacement", _STACK_ID, "CREATE_COMPLETE", "identity changed"),
             (
                 "CDKToolkit",
@@ -717,7 +717,7 @@ class TestStrictBootstrapValidation:
                 "identity changed",
             ),
             ("CDKToolkit", _STACK_ID, "UPDATE_COMPLETE", "status changed"),
-        ),
+        ],
     )
     @patch("boto3.client")
     def test_rejects_changed_identity_or_status(
@@ -755,7 +755,7 @@ class TestEnsureBootstrapped:
         config = MagicMock()
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
@@ -802,48 +802,48 @@ class TestGetDeployRegion:
         config.monitoring_region = "us-east-2"
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_global_stack_uses_config(self, _mock_cdk):
+    def test_global_stack_uses_config(self, mock_cdk):
         """gco-global → config.global_region when cdk.json has no override."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-global") == "us-east-2"
 
     @patch("cli.config._load_cdk_json", return_value={"global": "eu-central-1"})
-    def test_global_stack_cdk_json_override(self, _mock_cdk):
+    def test_global_stack_cdk_json_override(self, mock_cdk):
         """gco-global → cdk.json global region when set."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-global") == "eu-central-1"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_api_gateway_stack(self, _mock_cdk):
+    def test_api_gateway_stack(self, mock_cdk):
         """gco-api-gateway → config.api_gateway_region."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-api-gateway") == "us-east-1"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_monitoring_stack(self, _mock_cdk):
+    def test_monitoring_stack(self, mock_cdk):
         """gco-monitoring → config.monitoring_region."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-monitoring") == "us-east-2"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_regional_stack_us_east_1(self, _mock_cdk):
+    def test_regional_stack_us_east_1(self, mock_cdk):
         """gco-us-east-1 → us-east-1."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-us-east-1") == "us-east-1"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_regional_stack_eu_west_1(self, _mock_cdk):
+    def test_regional_stack_eu_west_1(self, mock_cdk):
         """gco-eu-west-1 → eu-west-1."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-eu-west-1") == "eu-west-1"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_regional_stack_ap_southeast_1(self, _mock_cdk):
+    def test_regional_stack_ap_southeast_1(self, mock_cdk):
         """gco-ap-southeast-1 → ap-southeast-1."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-ap-southeast-1") == "ap-southeast-1"
@@ -852,7 +852,7 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1", "eu-west-1"]},
     )
-    def test_regional_api_bridge_uses_configured_aws_region(self, _mock_cdk):
+    def test_regional_api_bridge_uses_configured_aws_region(self, mock_cdk):
         """Bridge IDs resolve to their AWS region, not regional-api-<region>."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-regional-api-us-east-1") == "us-east-1"
@@ -862,7 +862,7 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1"]},
     )
-    def test_regional_api_bridge_rejects_unconfigured_region(self, _mock_cdk):
+    def test_regional_api_bridge_rejects_unconfigured_region(self, mock_cdk):
         """Bridge-shaped typos cannot become malformed CDK/AWS regions."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("gco-regional-api-us-west-2") is None
@@ -871,7 +871,7 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1"]},
     )
-    def test_destroy_resolves_unconfigured_orphan_bridge_region(self, _mock_cdk, tmp_path):
+    def test_destroy_resolves_unconfigured_orphan_bridge_region(self, mock_cdk, tmp_path):
         """Destroy still finds an orphan bridge after its Region leaves config."""
         (tmp_path / "cdk.json").write_text(
             json.dumps(
@@ -903,7 +903,7 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1"]},
     )
-    def test_destroy_rejects_bridge_with_non_region_suffix(self, _mock_cdk):
+    def test_destroy_rejects_bridge_with_non_region_suffix(self, mock_cdk):
         """An exact project bridge prefix cannot turn ``bar`` into a Region."""
         mgr = self._make_manager()
         mgr.config.project_name = "foo"
@@ -918,7 +918,7 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1"]},
     )
-    def test_bridge_resolution_handles_project_containing_marker(self, _mock_cdk):
+    def test_bridge_resolution_handles_project_containing_marker(self, mock_cdk):
         """An embedded regional-api marker in project_name stays unambiguous."""
         mgr = self._make_manager()
         mgr.config.project_name = "foo-regional-api-bar"
@@ -926,7 +926,7 @@ class TestGetDeployRegion:
         assert mgr._get_deploy_region("foo-regional-api-bar-regional-api-us-east-1") == "us-east-1"
 
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_unknown_stack_returns_none(self, _mock_cdk):
+    def test_unknown_stack_returns_none(self, mock_cdk):
         """Unrecognized stack name without gco- prefix → None."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("some-other-stack") is None
@@ -973,13 +973,13 @@ class TestDeployCallsEnsureBootstrapped:
         config.global_region = "us-east-2"
         with patch(
             "cli.stacks.StackManager._find_project_root",
-            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+            return_value=Path("/tmp"),  # nosec B108  # test fixture using temp directory
         ):
             return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
 
     @patch("cli.stacks._detect_container_runtime", return_value="docker")
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_deploy_calls_ensure_bootstrapped(self, _mock_cdk, _mock_runtime):
+    def test_deploy_calls_ensure_bootstrapped(self, mock_cdk, mock_runtime):
         """deploy() calls ensure_bootstrapped with the resolved region."""
         mgr = self._make_manager()
         mgr._sync_lambda_sources = MagicMock()
@@ -992,7 +992,7 @@ class TestDeployCallsEnsureBootstrapped:
 
     @patch("cli.stacks._detect_container_runtime", return_value="docker")
     @patch("cli.config._load_cdk_json", return_value={})
-    def test_deploy_raises_on_bootstrap_failure(self, _mock_cdk, _mock_runtime):
+    def test_deploy_raises_on_bootstrap_failure(self, mock_cdk, mock_runtime):
         """deploy() raises RuntimeError when ensure_bootstrapped returns False."""
         import pytest
 
@@ -1004,7 +1004,7 @@ class TestDeployCallsEnsureBootstrapped:
             mgr.deploy(stack_name="gco-global", require_approval=False)
 
     @patch("cli.stacks._detect_container_runtime", return_value="docker")
-    def test_deploy_skips_bootstrap_when_no_stack_name(self, _mock_runtime):
+    def test_deploy_skips_bootstrap_when_no_stack_name(self, mock_runtime):
         """deploy() with all_stacks=True skips bootstrap check."""
         mgr = self._make_manager()
         mgr._sync_lambda_sources = MagicMock()
@@ -1086,10 +1086,10 @@ class TestDestroyTimeoutAndReconciliation:
 
     @pytest.mark.parametrize(
         ("control_region", "configured_region", "candidate_region"),
-        (
+        [
             ("us-east-1", "us-west-2", "cn-north-1"),
             ("cn-north-1", "cn-northwest-1", "us-west-2"),
-        ),
+        ],
     )
     def test_destroy_never_probes_a_cross_partition_orphan_candidate(
         self,
@@ -1187,7 +1187,7 @@ class TestDestroyTimeoutAndReconciliation:
 
     @pytest.mark.parametrize(
         "stack_name",
-        ("acme-regional-api-bar", "acme-regional-api-us-east-1"),
+        ["acme-regional-api-bar", "acme-regional-api-us-east-1"],
     )
     def test_destroy_does_not_bypass_cdk_for_invalid_or_configured_bridge(
         self, stack_name, tmp_path
@@ -1222,7 +1222,7 @@ class TestDestroyTimeoutAndReconciliation:
 
     @pytest.mark.parametrize(
         "contents",
-        (
+        [
             None,
             "{not-json",
             json.dumps({"context": {}}),
@@ -1272,7 +1272,7 @@ class TestDestroyTimeoutAndReconciliation:
                     }
                 }
             ),
-        ),
+        ],
     )
     def test_orphan_detection_fails_closed_without_valid_root_config(self, contents, tmp_path):
         """Missing, malformed, and incomplete root config never authorize deletion."""
@@ -1538,14 +1538,14 @@ class TestDestroyCloudFormationConvergence:
 
     @pytest.mark.parametrize(
         ("field", "value"),
-        (
+        [
             ("timeout", float("nan")),
             ("timeout", float("inf")),
             ("poll_interval", float("nan")),
             ("poll_interval", float("inf")),
             ("heartbeat_interval", float("nan")),
             ("heartbeat_interval", float("inf")),
-        ),
+        ],
     )
     def test_delete_convergence_rejects_non_finite_budgets(self, field, value):
         """NaN/Infinity can never disable the bounded delete deadline."""
@@ -1561,7 +1561,7 @@ class TestDestroyCloudFormationConvergence:
         with pytest.raises(ValueError, match="positive and finite"):
             manager._wait_for_stack_delete_convergence("gco-us-east-1", **kwargs)
 
-    @pytest.mark.parametrize("regional_destroy_succeeded", (False, True))
+    @pytest.mark.parametrize("regional_destroy_succeeded", [False, True])
     def test_regional_barrier_prevents_api_and_global_destroy(
         self,
         regional_destroy_succeeded,
@@ -2036,7 +2036,7 @@ class TestInferenceStreamingProxyBuild:
 
     @pytest.mark.parametrize(
         "relative_path",
-        ("handler.py", "requirements.txt", "manifests/00-namespaces.yaml"),
+        ["handler.py", "requirements.txt", "manifests/00-namespaces.yaml"],
     )
     def test_kubectl_freshness_tracks_every_canonical_input(
         self, tmp_path: Path, relative_path: str
@@ -2065,7 +2065,7 @@ class TestInferenceStreamingProxyBuild:
 
     @pytest.mark.parametrize(
         "relative_path",
-        ("Dockerfile", "charts.yaml", "handler.py", "requirements.txt", "teardown_provider.py"),
+        ["Dockerfile", "charts.yaml", "handler.py", "requirements.txt", "teardown_provider.py"],
     )
     def test_helm_freshness_tracks_complete_docker_context(
         self, tmp_path: Path, relative_path: str

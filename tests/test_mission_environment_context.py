@@ -31,8 +31,8 @@ from unittest.mock import MagicMock
 # without the ``mcp.`` package prefix that fastmcp would shadow.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission import _environment  # noqa: E402
-from mission.sampling import (  # noqa: E402
+from mission import _environment
+from mission.sampling import (
     ENVIRONMENT_CONTEXT_BYTE_CAP,
     PROMPT_BYTE_BUDGET,
     SamplingPrompt,

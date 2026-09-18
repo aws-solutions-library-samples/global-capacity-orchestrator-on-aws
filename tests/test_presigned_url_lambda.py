@@ -126,7 +126,7 @@ def handler_module(monkeypatch: pytest.MonkeyPatch):
         ]
     }
 
-    yield handler, sagemaker_mock, efs_mock
+    return handler, sagemaker_mock, efs_mock
 
 
 # ---------------------------------------------------------------------------

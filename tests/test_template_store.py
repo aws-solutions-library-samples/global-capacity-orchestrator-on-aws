@@ -329,7 +329,7 @@ class TestWebhookStore:
             url="https://example.com/webhook",
             events=["job.completed"],
             namespace="default",
-            secret="my-secret",  # nosec B106 - test fixture value for webhook HMAC secret, not a real credential
+            secret="my-secret",  # nosec B106  # test fixture value for webhook HMAC secret, not a real credential
         )
 
         assert result["id"] == "wh-new"

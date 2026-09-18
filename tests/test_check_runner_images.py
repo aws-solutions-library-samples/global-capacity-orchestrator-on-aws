@@ -272,7 +272,7 @@ def test_evaluate_reports_a_newer_ga_image_as_drift() -> None:
 def test_evaluate_reports_a_newer_preview_image_as_a_note_only() -> None:
     """The core distinction: a preview is context, never something to act on."""
     images = checker.parse_catalog(CATALOG)
-    drift, notes, unknown = checker.evaluate({"ubuntu-latest": 70}, images)
+    drift, notes, _unknown = checker.evaluate({"ubuntu-latest": 70}, images)
 
     assert drift == []
     assert [finding.as_row() for finding in notes] == ["ubuntu-latest|Ubuntu 24.04|ubuntu-26.04"]

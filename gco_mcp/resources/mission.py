@@ -1,9 +1,10 @@
-"""Mission session resources (``mission://sessions/{session_id}`` and ``.../report``).
+"""Mission session resources (``mission://sessions/{session_id}``, ``.../report``, ``.../audit-replay``).
 
 [gated by GCO_ENABLE_MISSION]
 
-Two resource templates that surface live Mission_Session state and the
-durable Final_Report artifact through the FastMCP resource layer:
+Three resource templates that surface live Mission_Session state, the
+durable Final_Report artifact, and the in-process audit trail through the
+FastMCP resource layer:
 
 * ``mission://sessions/{session_id}`` — returns the JSON-serialised live
   session payload. Returns a JSON error envelope when the session is
@@ -15,8 +16,11 @@ durable Final_Report artifact through the FastMCP resource layer:
   session is missing, not yet terminal, or its report has not been
   written; FastMCP maps that exception to the MCP ``-32002 Resource
   not found`` code on the wire.
+* ``mission://sessions/{session_id}/audit-replay`` — reconstructs the
+  session's iteration history from the in-process audit collector
+  (installed at registration time so the buffer always exists).
 
-Both templates are gated by :data:`feature_flags.FLAG_MISSION` at
+All three templates are gated by :data:`feature_flags.FLAG_MISSION` at
 registration time. When the flag is unset, :func:`register` is a no-op
 so importing this module from ``resources/__init__.py`` is always safe.
 """

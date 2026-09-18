@@ -3,8 +3,9 @@
 # =============================================================================
 #
 # Read by .github/scripts/check_npm_audit.py. npm has no native advisory
-# ignore-file support, so the checker compares each HIGH/CRITICAL finding with
-# every field below and fails closed when any field differs.
+# ignore-file support, so the checker compares each finding of MODERATE
+# severity or above with every field below and fails closed when any field
+# differs.
 #
 # Rules:
 #   1. Scope every entry to one package graph, package, advisory, and node path.

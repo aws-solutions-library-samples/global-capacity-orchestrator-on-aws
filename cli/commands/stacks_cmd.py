@@ -61,7 +61,6 @@ def _apply_enable_overrides(formatter: Any, manager: Any, enable: Mapping[str, s
 @pass_config
 def stacks(config: Any) -> None:
     """Deploy and manage GCO CDK stacks."""
-    pass
 
 
 @stacks.command("list")
@@ -566,7 +565,7 @@ def destroy_all_orchestrated(
                 else:
                     formatter.print_error(f"  ✗ {stack_name} failed")
 
-            success, successful, failed = manager.destroy_orchestrated(
+            success, _successful, failed = manager.destroy_orchestrated(
                 force=True,
                 on_stack_start=on_start,
                 on_stack_complete=on_complete,
@@ -938,6 +937,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             ["kubectl", "get", "nodes", "--request-timeout=10s"],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             node_count = len(
@@ -1111,7 +1111,6 @@ def regions_cmd(config: Any) -> None:
     enforces, atomic, idempotent, and audited. They never deploy — run
     'gco stacks deploy' afterwards to apply the change.
     """
-    pass
 
 
 @regions_cmd.command("list")
@@ -1293,7 +1292,6 @@ def bedrock_cmd(config: Any) -> None:
     Every edit uses the shared managed-config engine: validated, atomic,
     idempotent, and audited.
     """
-    pass
 
 
 @bedrock_cmd.command("show")
@@ -1365,8 +1363,8 @@ def bedrock_set_capacity_advisor_model(
 ) -> None:
     """Set context.bedrock.capacity_advisor_default_model_id.
 
-    This is the default `gco capacity advise` (and its historical variant)
-    uses; Mission sampling and `gco autopilot` have their own keys (see
+    This is the default `gco capacity ai-recommend` and `gco capacity predict`
+    use; Mission sampling and `gco autopilot` have their own keys (see
     set-mission-model and set-claude-code-model). Model and inference-profile
     IDs are free-form (custom profiles, marketplace models), so validation
     mirrors the runtime reader: a non-empty string without surrounding
@@ -1547,7 +1545,6 @@ def bedrock_set_codex_reasoning_effort(
 @pass_config
 def fsx_cmd(config: Any) -> None:
     """Manage FSx for Lustre configuration."""
-    pass
 
 
 @fsx_cmd.command("status")
@@ -1706,7 +1703,6 @@ def fsx_disable(config: Any, region: Any, yes: Any) -> None:
 @pass_config
 def valkey_cmd(config: Any) -> None:
     """Manage Valkey Serverless cache configuration."""
-    pass
 
 
 @valkey_cmd.command("status")
@@ -1816,7 +1812,6 @@ def valkey_disable(config: Any, yes: Any) -> None:
 @pass_config
 def aurora_cmd(config: Any) -> None:
     """Manage Aurora PostgreSQL (pgvector) configuration."""
-    pass
 
 
 @aurora_cmd.command("status")
@@ -1987,7 +1982,6 @@ def addons_cmd(config: Any) -> None:
     chart that fails to install never rolls back the cluster. Use these commands
     to see per-chart status and re-run the installer without a full redeploy.
     """
-    pass
 
 
 @addons_cmd.command("status")

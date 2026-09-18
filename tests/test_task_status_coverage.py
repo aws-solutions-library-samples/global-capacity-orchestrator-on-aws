@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -25,8 +26,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
-from tools import _task_status as task_status_module  # noqa: E402
-from tools._task_status import (  # noqa: E402 (sys.path insert above)
+from tools import _task_status as task_status_module
+from tools._task_status import (  # sys.path insert above
     TaskStatusWriter,
     _is_pid_alive,
     _prune_old_tasks,
@@ -616,7 +617,7 @@ class TestWriterDegradationBranches:
             )
 
             assert writer._log_fp is None
-            with pytest.raises(OSError):
+            with pytest.raises(OSError, match=re.escape("Bad file descriptor")):
                 os.fstat(borrowed_fd)
             writer.finish(state="succeeded", exit_code=0)
             assert (status_root / "fdopen-failed.json").is_file()

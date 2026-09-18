@@ -25,7 +25,7 @@ Usage:
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import boto3
@@ -44,8 +44,8 @@ from gco.services.leader_lease import (
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T22:27:39Z
-# Generated from Git commit: 5d1a9122b6630246e01cafdaf458d11c2da8b4ae
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``HealthMonitor.get_health_status`` -> ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.png``)
@@ -188,7 +188,7 @@ class HealthMonitor:
         """Get node metrics from Kubernetes metrics server"""
         try:
             # Check cache first
-            now = datetime.now()
+            now = datetime.now(UTC)
             if (
                 self._cached_metrics
                 and self._last_metrics_time
@@ -559,7 +559,7 @@ class HealthMonitor:
             health_status = HealthStatus(
                 cluster_id=self.cluster_id,
                 region=self.region,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status=status,
                 resource_utilization=resource_utilization,
                 thresholds=self.thresholds,
@@ -578,7 +578,7 @@ class HealthMonitor:
             return HealthStatus(
                 cluster_id=self.cluster_id,
                 region=self.region,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 status="unhealthy",
                 resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0),
                 thresholds=self.thresholds,
@@ -625,7 +625,7 @@ class HealthMonitor:
         if not self._try_acquire_alb_sync_lease():
             return
 
-        now = datetime.now()
+        now = datetime.now(UTC)
         if (
             self._last_alb_sync
             and (now - self._last_alb_sync).total_seconds() < self._alb_sync_interval

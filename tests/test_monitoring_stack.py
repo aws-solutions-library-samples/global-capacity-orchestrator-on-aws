@@ -100,7 +100,7 @@ def create_mock_api_gateway_stack():
     mock_api_gw_stack.api.rest_api_name = "gco-global-api"
     mock_api_gw_stack.proxy_lambda.function_name = "gco-test-proxy"
     mock_api_gw_stack.rotation_lambda.function_name = "gco-test-rotation"
-    mock_api_gw_stack.secret.secret_name = "gco/api-gateway-auth-token"  # nosec B105 - test fixture mock value, not a real secret
+    mock_api_gw_stack.secret.secret_name = "gco/api-gateway-auth-token"  # nosec B105  # test fixture mock value, not a real secret
     return mock_api_gw_stack
 
 
@@ -160,7 +160,7 @@ class TestMonitoringStackImports:
         """Test that GCOMonitoringStack can be imported."""
         from gco.stacks.monitoring_stack import GCOMonitoringStack
 
-        assert GCOMonitoringStack is not None
+        assert issubclass(GCOMonitoringStack, cdk.Stack)
 
 
 class TestMonitoringStackSynthesis:
@@ -381,7 +381,7 @@ class TestMonitoringStackDashboardWidgets:
         assert len(dashboards) == 1
 
         # Get the dashboard body
-        dashboard_key = list(dashboards.keys())[0]
+        dashboard_key = next(iter(dashboards.keys()))
         dashboard_body = dashboards[dashboard_key]["Properties"]["DashboardBody"]
         assert dashboard_body is not None
 

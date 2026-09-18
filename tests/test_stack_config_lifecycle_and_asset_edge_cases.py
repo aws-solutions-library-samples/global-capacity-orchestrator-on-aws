@@ -16,6 +16,7 @@ import io
 import itertools
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -2314,7 +2315,7 @@ def test_inference_streaming_builder_handles_pin_read_and_npm_failures(
     with (
         patch.object(stacks, "_prepare_lambda_asset", side_effect=run_builder),
         patch.object(stacks.shutil, "which", return_value=None),
-        pytest.raises(RuntimeError, match="npm 10.9.2 is required"),
+        pytest.raises(RuntimeError, match=re.escape("npm 10.9.2 is required")),
     ):
         stack_manager._build_inference_streaming_proxy_lambda()
 
@@ -3709,7 +3710,7 @@ def test_inference_builder_rejects_wrong_installed_npm_version(
             "run",
             return_value=SimpleNamespace(returncode=0, stdout="9.9.9\n", stderr=""),
         ),
-        pytest.raises(RuntimeError, match="found 9.9.9"),
+        pytest.raises(RuntimeError, match=re.escape("found 9.9.9")),
     ):
         stack_manager._build_inference_streaming_proxy_lambda()
 
@@ -4492,7 +4493,7 @@ def test_regional_stack_unknown_kubernetes_version_uses_custom_version() -> None
         return value
 
     with patch.object(helper.FeatureConfig, "get_cluster_config", unknown_version):
-        stack, template = helper._synthesize(
+        _stack, template = helper._synthesize(
             feature_rich=False,
             global_accelerator=False,
             logical_name="coverage-100-regional-custom-k8s-version",
@@ -4654,7 +4655,7 @@ def test_public_analytics_destroy_requires_configuration_file(
 ) -> None:
     with (
         patch("cli.stacks._find_cdk_json", return_value=None),
-        pytest.raises(RuntimeError, match="cdk.json not found"),
+        pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
     ):
         stack_manager.destroy(stack_name="gco-analytics")
 
@@ -5139,6 +5140,12 @@ def test_regional_stack_single_lbc_chart_skips_non_lbc_chain() -> None:
             logical_name="coverage-100-regional-single-lbc",
         )
     assert stack.helm_teardown_state_machine is not None
+    # With only the LBC chart configured, the teardown definition carries the
+    # LBC uninstall task and no per-chart uninstall chain for anything else.
+    definition = json.dumps(_template.to_json())
+    assert "HelmUninstallChart-aws-load-balancer-controller" in definition
+    assert "HelmUninstallChart-keda" not in definition
+    assert "HelmUninstallChart-volcano" not in definition
 
 
 def test_global_vector_ingest_without_discoverable_notification_handler() -> None:

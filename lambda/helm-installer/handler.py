@@ -42,8 +42,8 @@ import urllib3
 import yaml
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-11T00:12:12Z
-# Generated from Git commit: bd31986c8f0f54a6fd0f1bfe7f4c409c2ef0d6c7
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png``)
@@ -379,14 +379,14 @@ def run_helm(
     provable bound than create/update without changing the latter's 13-minute
     allowance.
     """
-    cmd = ["helm"] + args
+    cmd = ["helm", *args]
 
     helm_env = os.environ.copy()
     helm_env["KUBECONFIG"] = kubeconfig
     # Lambda has read-only filesystem except /tmp
-    helm_env["HELM_CACHE_HOME"] = "/tmp/.helm/cache"  # nosec B108 - Lambda runtime requires /tmp for writable storage
-    helm_env["HELM_CONFIG_HOME"] = "/tmp/.helm/config"  # nosec B108 - Lambda runtime requires /tmp for writable storage
-    helm_env["HELM_DATA_HOME"] = "/tmp/.helm/data"  # nosec B108 - Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_CACHE_HOME"] = "/tmp/.helm/cache"  # nosec B108  # Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_CONFIG_HOME"] = "/tmp/.helm/config"  # nosec B108  # Lambda runtime requires /tmp for writable storage
+    helm_env["HELM_DATA_HOME"] = "/tmp/.helm/data"  # nosec B108  # Lambda runtime requires /tmp for writable storage
     if env:
         helm_env.update(env)
 
@@ -412,6 +412,7 @@ def run_helm(
             text=True,
             env=helm_env,
             timeout=cmd_timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning(f"helm subprocess timed out after {exc.timeout}s: {' '.join(cmd)}")
@@ -490,6 +491,7 @@ def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bo
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
         )
     except subprocess.TimeoutExpired:
@@ -508,6 +510,7 @@ def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bo
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"kubectl delete timed out for {secret}")
@@ -681,6 +684,7 @@ def _strip_custom_resource_finalizers(
                 text=True,
                 env=env,
                 timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             return f"Timed out listing {resource_type} instances for finalizer removal"
@@ -704,6 +708,7 @@ def _strip_custom_resource_finalizers(
                     text=True,
                     env=env,
                     timeout=CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return f"Timed out removing finalizers from {line}"
@@ -750,6 +755,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                     text=True,
                     env=env,
                     timeout=KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return False, f"Timed out discovering {api_group} custom resources"
@@ -786,6 +792,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                 text=True,
                 env=env,
                 timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+                check=False,
             )
             if deletion.returncode != 0:
                 failure = (deletion.stderr or deletion.stdout).strip()
@@ -812,6 +819,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                     text=True,
                     env=env,
                     timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 return False, (
@@ -894,6 +902,7 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             text=True,
             env=env,
             timeout=30,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out scaling health-monitor deployment to zero"
@@ -932,6 +941,7 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             text=True,
             env=env,
             timeout=135,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out waiting for health-monitor pods to terminate"
@@ -987,6 +997,7 @@ def run_kubectl(
                 text=True,
                 env=env,
                 timeout=command_timeout_seconds,
+                check=False,
             )
         )
     except subprocess.TimeoutExpired as exc:
@@ -1880,13 +1891,11 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
     The webhook will be recreated when its chart is successfully reinstalled.
     """
     try:
-        # Use kubectl to check for stale webhooks (simpler than kubernetes Python client)
-        code, stdout, _ = run_helm(
-            ["--kubeconfig", kubeconfig],  # dummy — we just need the env
-            kubeconfig,
-        )
-
-        # Get all mutating webhook configs
+        # Use kubectl to check for stale webhooks (simpler than kubernetes
+        # Python client). Everything below builds its own KUBECONFIG env; an
+        # earlier revision also spawned a throwaway `helm --kubeconfig` here
+        # "for the env" and discarded every result, which was one helm
+        # process per cleanup for nothing.
         import subprocess
 
         env = os.environ.copy()
@@ -1904,6 +1913,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
             text=True,
             env=env,
             timeout=30,
+            check=False,
         )
         if result.returncode != 0:
             logger.warning(f"Failed to list webhooks: {result.stderr}")
@@ -1927,6 +1937,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
             if svc_result.returncode != 0 or "/" not in svc_result.stdout:
                 continue
@@ -1949,6 +1960,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                 text=True,
                 env=env,
                 timeout=15,
+                check=False,
             )
 
             if not ep_result.stdout.strip():
@@ -1962,6 +1974,7 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
                     text=True,
                     env=env,
                     timeout=15,
+                    check=False,
                 )
 
     except Exception as e:

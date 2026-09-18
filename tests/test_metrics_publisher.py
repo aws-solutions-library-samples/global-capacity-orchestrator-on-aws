@@ -406,19 +406,16 @@ class TestMetricsPublisherEdgeCases:
         with patch("boto3.client") as mock_client:
             mock_client.side_effect = Exception("AWS credentials not found")
 
-            try:
+            with pytest.raises(Exception, match="AWS credentials not found"):
                 MetricsPublisher(
                     namespace="Test/Namespace",
                     cluster_name="test-cluster",
                     region="us-east-1",
                 )
-                pytest.fail("Should have raised exception")
-            except Exception as e:
-                assert "AWS credentials not found" in str(e)
 
     def test_put_metric_with_timestamp(self):
         """Test metric put with custom timestamp."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from gco.services.metrics_publisher import MetricsPublisher
 
@@ -432,7 +429,7 @@ class TestMetricsPublisherEdgeCases:
                 region="us-east-1",
             )
 
-            custom_time = datetime(2026, 1, 1, 12, 0, 0)
+            custom_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
             result = publisher.put_metric("TestMetric", 42.0, "Count", timestamp=custom_time)
 
             assert result is True
@@ -460,7 +457,7 @@ class TestMetricsPublisherEdgeCases:
 
     def test_put_metrics_batch_with_timestamp(self):
         """Test batch metric put with timestamps."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         from gco.services.metrics_publisher import MetricsPublisher
 
@@ -474,7 +471,7 @@ class TestMetricsPublisherEdgeCases:
                 region="us-east-1",
             )
 
-            custom_time = datetime(2026, 1, 1, 12, 0, 0)
+            custom_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
             metrics = [
                 {"name": "Metric1", "value": 10.0, "unit": "Count", "timestamp": custom_time},
                 {"name": "Metric2", "value": 20.0, "dimensions": {"Env": "test"}},

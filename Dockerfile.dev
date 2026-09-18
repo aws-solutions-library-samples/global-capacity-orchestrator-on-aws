@@ -67,6 +67,11 @@
 #             -v ~/.colima/default/docker.sock:/var/run/docker.sock
 #       See https://github.com/abiosoft/colima for current defaults.
 
+# checkov:skip=CKV_DOCKER_2:An interactive contributor shell has no service to
+# health-check.
+# checkov:skip=CKV_DOCKER_3:Contributors bind-mount their own checkout and AWS
+# credentials and run host-side gco/cdk/kubectl commands inside this image, so it
+# has to run as the invoking host user. It is never deployed.
 FROM python:3.14.7-slim
 
 # Multi-arch build args. BuildKit auto-populates TARGETARCH with the build

@@ -67,7 +67,7 @@ def test_final_report_nonfilesystem_attach_and_strip_helpers() -> None:
     assert session["final_report"]["final_verdict"] == "terminate"
 
     malformed: list[Any] = ["keep", {"criterion_id": "c", "_parsed_ast": object()}]
-    cleaned = final_report._strip_parsed_ast_from_criteria(malformed)  # type: ignore[arg-type]
+    cleaned = final_report._strip_parsed_ast_from_criteria(malformed)
     assert cleaned[0] == "keep"
     assert "_parsed_ast" not in cleaned[1]
 

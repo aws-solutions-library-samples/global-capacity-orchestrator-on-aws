@@ -114,7 +114,7 @@ _ACCEL_CASES = [
 ]
 
 
-@pytest.mark.parametrize("resource_key,taint_key", _ACCEL_CASES)
+@pytest.mark.parametrize(("resource_key", "taint_key"), _ACCEL_CASES)
 def test_accelerator_without_toleration_rejected(manifest_processor, qp, resource_key, taint_key):
     """A job requesting an accelerator but with no toleration is rejected by both paths."""
     manifest = _job(container_overrides={"resources": {"limits": {resource_key: "1"}}})
@@ -127,7 +127,7 @@ def test_accelerator_without_toleration_rejected(manifest_processor, qp, resourc
     assert taint_key in qp_err
 
 
-@pytest.mark.parametrize("resource_key,taint_key", _ACCEL_CASES)
+@pytest.mark.parametrize(("resource_key", "taint_key"), _ACCEL_CASES)
 def test_accelerator_with_exists_toleration_admitted(
     manifest_processor, qp, resource_key, taint_key
 ):

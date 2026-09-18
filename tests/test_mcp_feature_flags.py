@@ -21,7 +21,7 @@ from hypothesis import strategies as st
 # Ensure gco_mcp/ is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import feature_flags  # noqa: E402
+import feature_flags
 
 
 class TestFeatureFlags:

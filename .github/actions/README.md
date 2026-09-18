@@ -74,7 +74,7 @@ Retrying the whole action keeps the GHA layer-cache semantics identical on every
   uses: ./.github/actions/build-image-with-retry
   with:
     context: .
-    file: dockerfiles/cost-monitor-dockerfile
+    file: dockerfiles/Dockerfile.cost-monitor
     tags: cost-monitor:ci
     load: true
     cache-from: type=gha,scope=cost-monitor
@@ -248,7 +248,7 @@ Behaviour matches `docker/setup-buildx-action` for every successful path; the on
 - uses: ./.github/actions/setup-buildx-with-retry
 - uses: ./.github/actions/build-image-with-retry
   with:
-    file: dockerfiles/my-image-dockerfile
+    file: dockerfiles/Dockerfile.my-image
     tags: my-image:ci
     cache-from: type=gha,scope=my-image
 ```

@@ -10,20 +10,20 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
-from metric_readers.logs import coerce_scalar  # noqa: E402
-from metric_readers.shape import (  # noqa: E402
+from metric_readers.logs import coerce_scalar
+from metric_readers.shape import (
     ErrorCode as ReaderErrorCode,
 )
-from metric_readers.shape import (  # noqa: E402
+from metric_readers.shape import (
     MetricReaderError,
     default_metric_key,
     validate_metric_name,
 )
-from mission_judge.prompt import TRUNCATION_MARKER, truncate_context  # noqa: E402
-from mission_judge.shape import (  # noqa: E402
+from mission_judge.prompt import TRUNCATION_MARKER, truncate_context
+from mission_judge.shape import (
     ErrorCode as JudgeErrorCode,
 )
-from mission_judge.shape import (  # noqa: E402
+from mission_judge.shape import (
     JudgeError,
     validate_output_name,
 )

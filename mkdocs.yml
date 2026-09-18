@@ -2,7 +2,7 @@
 # mkdocs.yml — the GCO orientation wiki (GitHub Pages site root)
 # =============================================================================
 #
-# Builds the seven-page wiki under wiki/ into the site served at
+# Builds the eight-page wiki under wiki/ into the site served at
 # https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/. The wiki is
 # an orientation and routing layer ABOVE the reference docs: pages summarize
 # and link to README/docs/package READMEs on GitHub, never restate them
@@ -77,6 +77,7 @@ nav:
   - Home: index.md
   - How it works: how-it-works.md
   - For users:
+      - Get started: get-started.md
       - Evaluating & deploying: evaluating-and-deploying.md
       - What you can run: what-you-can-run.md
   - For developers:

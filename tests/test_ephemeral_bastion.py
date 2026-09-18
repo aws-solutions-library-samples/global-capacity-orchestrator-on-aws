@@ -12,6 +12,7 @@ contract that keeps a forgotten teardown from becoming a paid orphan.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -27,7 +28,7 @@ class TestValidators:
         assert eb._validate("us-east-1", eb._REGION_RE, "region") == "us-east-1"
 
     @pytest.mark.parametrize(
-        "value,pattern",
+        ("value", "pattern"),
         [
             ("not_a_region", eb._REGION_RE),
             ("i-xyz", eb._INSTANCE_RE),
@@ -38,7 +39,7 @@ class TestValidators:
         ],
     )
     def test_validate_rejects_bad_value(self, value: str, pattern: object) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid thing: '")):
             eb._validate(value, pattern, "thing")  # type: ignore[arg-type]
 
     def test_validate_ttl_bounds(self) -> None:
@@ -48,7 +49,7 @@ class TestValidators:
 
     @pytest.mark.parametrize("bad", [4, 0, -1, 1441, "abc"])
     def test_validate_ttl_rejects(self, bad: object) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid ttl-minutes ")):
             eb._validate_ttl(bad)  # type: ignore[arg-type]
 
     def test_render_user_data_schedules_shutdown(self) -> None:
@@ -57,7 +58,9 @@ class TestValidators:
         assert "shutdown -h +90" in script
 
     def test_render_user_data_validates_ttl(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=re.escape("Invalid ttl-minutes 3: must be between 5 and 1440")
+        ):
             eb.render_user_data(3)
 
 
@@ -194,7 +197,7 @@ class TestBuilders:
         assert "--associate-public-ip-address" not in cmd
 
     def test_run_instances_rejects_bad_inputs(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid AMI id: 'not-an-ami'")):
             eb.build_run_instances_command(
                 ami_id="not-an-ami",
                 instance_type="t3.micro",
@@ -204,7 +207,7 @@ class TestBuilders:
                 region="us-east-1",
                 user_data="x",
             )
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid instance type 'bogus_type'")):
             eb.build_run_instances_command(
                 ami_id="ami-0123456789abcdef0",
                 instance_type="bogus_type",
@@ -672,7 +675,7 @@ class TestProjectScopedNaming:
 
     @pytest.mark.parametrize("bad", ["", "-bad", "bad name", "a/b", "x" * 64])
     def test_rejects_bad_project(self, bad: str) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=re.escape("Invalid project name: '")):
             eb.bastion_role_name(bad)
 
     def test_ensure_iam_uses_project_scoped_role(self, monkeypatch: pytest.MonkeyPatch) -> None:

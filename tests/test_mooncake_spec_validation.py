@@ -13,6 +13,7 @@ while a well-formed one writes exactly once.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -85,25 +86,27 @@ class TestShapeRejections:
 
     def test_non_mapping_store_is_rejected(self):
         block = {"mode": "store", "store": "nope"}
-        with pytest.raises(ValueError, match="mooncake.store must be a mapping"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.store must be a mapping")):
             validate_mooncake_spec(block)
 
     def test_non_mapping_transfer_is_rejected(self):
         block = _valid_disaggregated()
         block["transfer"] = "nope"
-        with pytest.raises(ValueError, match="mooncake.transfer must be a mapping"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.transfer must be a mapping")):
             validate_mooncake_spec(block)
 
     def test_non_mapping_autoscaling_is_rejected(self):
         block = _valid_disaggregated()
         block["autoscaling"] = "nope"
-        with pytest.raises(ValueError, match="mooncake.autoscaling must be a mapping"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.autoscaling must be a mapping")):
             validate_mooncake_spec(block)
 
     def test_non_mapping_role_block_is_rejected(self):
         block = _valid_disaggregated()
         block["autoscaling"] = {"enabled": True, "prefill": "nope"}
-        with pytest.raises(ValueError, match="mooncake.autoscaling.prefill must be a mapping"):
+        with pytest.raises(
+            ValueError, match=re.escape("mooncake.autoscaling.prefill must be a mapping")
+        ):
             validate_mooncake_spec(block)
 
 
@@ -117,14 +120,18 @@ class TestTransferRejections:
     def test_unsupported_protocol_is_rejected(self, bad_protocol):
         block = _valid_disaggregated()
         block["transfer"] = {"protocol": bad_protocol}
-        with pytest.raises(ValueError, match="mooncake.transfer.protocol must be one of"):
+        with pytest.raises(
+            ValueError, match=re.escape("mooncake.transfer.protocol must be one of")
+        ):
             validate_mooncake_spec(block)
 
     @pytest.mark.parametrize("bad_device", [None, 1, True, ["eth0"]])
     def test_non_string_device_is_rejected(self, bad_device):
         block = _valid_disaggregated()
         block["transfer"] = {"device_name": bad_device}
-        with pytest.raises(ValueError, match="mooncake.transfer.device_name must be a string"):
+        with pytest.raises(
+            ValueError, match=re.escape("mooncake.transfer.device_name must be a string")
+        ):
             validate_mooncake_spec(block)
 
 
@@ -136,11 +143,16 @@ class TestTransferRejections:
 class TestModeRejection:
     @pytest.mark.parametrize("bad_mode", ["", "disagg", "Store", "BOTH", None, 1])
     def test_unsupported_mode_is_rejected(self, bad_mode):
-        with pytest.raises(ValueError, match="mooncake.mode must be one of"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.mode must be one of")):
             validate_mooncake_spec({"mode": bad_mode})
 
     def test_mode_error_lists_the_allowed_values(self):
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.mode must be one of {both, disaggregated, store}, got 'nope'"
+            ),
+        ) as exc:
             validate_mooncake_spec({"mode": "nope"})
         message = str(exc.value)
         assert "disaggregated" in message
@@ -160,13 +172,13 @@ class TestByteSizeRejections:
     )
     def test_bad_global_segment_size_is_rejected(self, bad_value):
         block = {"mode": "store", "store": {"enabled": True, "global_segment_size": bad_value}}
-        with pytest.raises(ValueError, match="mooncake.store.global_segment_size"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.store.global_segment_size")):
             validate_mooncake_spec(block)
 
     @pytest.mark.parametrize("bad_value", [-1, "1.5", "nope", MOONCAKE_BYTE_SIZE_MAX + 1])
     def test_bad_local_buffer_size_is_rejected(self, bad_value):
         block = {"mode": "store", "store": {"enabled": True, "local_buffer_size": bad_value}}
-        with pytest.raises(ValueError, match="mooncake.store.local_buffer_size"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.store.local_buffer_size")):
             validate_mooncake_spec(block)
 
 
@@ -178,7 +190,7 @@ class TestByteSizeRejections:
 class TestTopologyRejections:
     @pytest.mark.parametrize("mode", ["disaggregated", "both"])
     def test_missing_topology_is_rejected(self, mode):
-        with pytest.raises(ValueError, match="mooncake.topology is required"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.topology is required")):
             validate_mooncake_spec({"mode": mode})
 
     @pytest.mark.parametrize("mode", ["disaggregated", "both"])
@@ -224,7 +236,12 @@ class TestColdTierRejection:
 
     def test_cold_tier_error_names_both_conflicting_fields(self):
         block = {"mode": "store", "store": {"enabled": False, "cold_tier_enabled": True}}
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.store.cold_tier_enabled requires mooncake.store.enabled to be true"
+            ),
+        ) as exc:
             validate_mooncake_spec(block)
         message = str(exc.value)
         assert "cold_tier_enabled" in message
@@ -243,7 +260,7 @@ class TestAutoscalingRejections:
             "store": {"enabled": True},
             "autoscaling": {"enabled": True},
         }
-        with pytest.raises(ValueError, match="autoscaling.enabled requires"):
+        with pytest.raises(ValueError, match=re.escape("autoscaling.enabled requires")):
             validate_mooncake_spec(block)
 
     @pytest.mark.parametrize("role", ["prefill", "decode"])
@@ -279,7 +296,7 @@ class TestAutoscalingRejections:
         # still violates the lower bound.
         block = _valid_disaggregated()
         block["autoscaling"] = {"enabled": True, "decode": {"max_replicas": 0}}
-        with pytest.raises(ValueError, match="mooncake.autoscaling.decode.max_replicas"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.autoscaling.decode.max_replicas")):
             validate_mooncake_spec(block)
 
 
@@ -307,7 +324,12 @@ def manager_with_spy_store():
 class TestDeployValidateBeforeWrite:
     def test_invalid_mooncake_mode_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "mooncake.mode must be one of {both, disaggregated, store}, got 'turbo'"
+            ),
+        ) as exc:
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],
@@ -322,7 +344,7 @@ class TestDeployValidateBeforeWrite:
 
     def test_out_of_range_topology_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError, match="mooncake.topology.prefill"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.topology.prefill")):
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],
@@ -334,7 +356,7 @@ class TestDeployValidateBeforeWrite:
 
     def test_bad_store_byte_size_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError, match="mooncake.store.global_segment_size"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.store.global_segment_size")):
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],
@@ -358,7 +380,7 @@ class TestDeployValidateBeforeWrite:
         self, manager_with_spy_store
     ):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError, match="autoscaling.enabled requires"):
+        with pytest.raises(ValueError, match=re.escape("autoscaling.enabled requires")):
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],
@@ -388,7 +410,7 @@ class TestDeployValidateBeforeWrite:
 
     def test_bad_transfer_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
-        with pytest.raises(ValueError, match="mooncake.transfer.protocol"):
+        with pytest.raises(ValueError, match=re.escape("mooncake.transfer.protocol")):
             mgr.deploy(
                 "ep",
                 target_regions=["us-east-1"],

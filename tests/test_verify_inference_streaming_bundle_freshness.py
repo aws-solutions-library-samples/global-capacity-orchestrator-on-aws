@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -219,7 +220,7 @@ def test_assert_fresh_rejects_a_bundle_that_is_fresh_but_missing_a_package_file(
     manager.project_root = root
     monkeypatch.setattr(manager, "_inference_streaming_build_is_fresh", lambda s, b: True)
 
-    with pytest.raises(AssertionError, match="did not restore package-lock.json"):
+    with pytest.raises(AssertionError, match=re.escape("did not restore package-lock.json")):
         freshness._assert_fresh(manager, source, build)
 
 
@@ -280,7 +281,7 @@ def test_main_fails_if_synth_does_not_route_through_the_real_cdk_call(
 ) -> None:
     """The mocked ``_run_cdk`` must be called with the production argv, once."""
 
-    def wrong_synth(self: StackManager, stack_name=None, quiet=True) -> str:  # noqa: ANN001
+    def wrong_synth(self: StackManager, stack_name=None, quiet=True) -> str:
         self._ensure_lambda_build()
         return "something else"
 
@@ -316,7 +317,7 @@ def test_main_fails_if_a_deleted_transitive_marker_is_accepted_as_fresh(
 def test_main_fails_if_diff_does_not_route_through_the_real_cdk_call(
     project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def wrong_diff(self: StackManager, stack_name=None) -> str:  # noqa: ANN001
+    def wrong_diff(self: StackManager, stack_name=None) -> str:
         self._ensure_lambda_build()
         return "something else"
 
@@ -335,7 +336,7 @@ def test_main_fails_if_the_transitive_marker_is_not_restored(
     real_assert = freshness._assert_fresh
     seen = {"n": 0}
 
-    def assert_fresh_then_delete_marker(manager, source_dir, build_dir) -> None:  # noqa: ANN001
+    def assert_fresh_then_delete_marker(manager, source_dir, build_dir) -> None:
         seen["n"] += 1
         real_assert(manager, source_dir, build_dir)
         if seen["n"] == 3:
@@ -345,7 +346,9 @@ def test_main_fails_if_the_transitive_marker_is_not_restored(
 
     monkeypatch.setattr(freshness, "_assert_fresh", assert_fresh_then_delete_marker)
 
-    with pytest.raises(AssertionError, match="did not restore node_modules/tslib/package.json"):
+    with pytest.raises(
+        AssertionError, match=re.escape("did not restore node_modules/tslib/package.json")
+    ):
         freshness.main()
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -324,7 +325,7 @@ def test_verified_root_fd_rejects_replaced_root_and_closes_descriptor(
             local_data._verified_root_fd(contract)
 
     assert len(opened) == 1
-    with pytest.raises(OSError) as closed:
+    with pytest.raises(OSError, match=re.escape("Bad file descriptor")) as closed:
         os.fstat(opened[0])
     assert closed.value.errno == errno.EBADF
     assert (retained_root / "payload.bin").read_bytes() == b"payload"
@@ -533,10 +534,10 @@ def test_stage_upload_path_regular_file_keeps_descriptor_valid_and_cleans_up(
         assert os.get_inheritable(stage_fd) is False
         assert stat.S_IMODE(stage_root.stat().st_mode) == 0o700
 
-    with pytest.raises(OSError) as closed:
+    with pytest.raises(OSError, match=re.escape("Bad file descriptor")) as closed:
         os.fstat(stage_fd)
     assert closed.value.errno == errno.EBADF
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=re.escape("No such file or directory")):
         os.stat(stage_argument, follow_symlinks=False)
     assert stage_root is not None
     assert not stage_root.exists()
@@ -585,7 +586,7 @@ def test_stage_upload_path_recursively_snapshots_directory(local_root: Path) -> 
             )
             assert original_stat.st_nlink == copied_stat.st_nlink == 2
 
-    with pytest.raises(OSError) as closed:
+    with pytest.raises(OSError, match=re.escape("Bad file descriptor")) as closed:
         os.fstat(stage_fd)
     assert closed.value.errno == errno.EBADF
     _assert_no_stage_directories(local_root)
@@ -679,19 +680,21 @@ def test_stage_upload_path_cleans_up_when_context_body_raises(local_root: Path) 
     stage_fd = -1
     stage_argument = ""
 
-    with (
-        pytest.raises(RuntimeError, match="consumer failed"),
-        local_data.stage_upload_path(contract) as staged,
-    ):
-        stage_fd = staged.directory_fd
-        stage_argument = staged.argument
-        assert Path(stage_argument).read_bytes() == b"payload"
-        raise RuntimeError("consumer failed")
+    def failing_consumer() -> None:
+        nonlocal stage_fd, stage_argument
+        with local_data.stage_upload_path(contract) as staged:
+            stage_fd = staged.directory_fd
+            stage_argument = staged.argument
+            assert Path(stage_argument).read_bytes() == b"payload"
+            raise RuntimeError("consumer failed")
 
-    with pytest.raises(OSError) as closed:
+    with pytest.raises(RuntimeError, match="consumer failed"):
+        failing_consumer()
+
+    with pytest.raises(OSError, match=re.escape("Bad file descriptor")) as closed:
         os.fstat(stage_fd)
     assert closed.value.errno == errno.EBADF
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=re.escape("No such file or directory")):
         os.stat(stage_argument, follow_symlinks=False)
     _assert_no_stage_directories(local_root)
     assert os.stat(source, follow_symlinks=False).st_nlink == 1
@@ -879,7 +882,7 @@ def test_stage_directory_rejects_entry_replaced_while_opening_and_closes_fd(
                 )
 
         assert len(opened_entries) == 1
-        with pytest.raises(OSError) as closed:
+        with pytest.raises(OSError, match=re.escape("Bad file descriptor")) as closed:
             os.fstat(opened_entries[0])
         assert closed.value.errno == errno.EBADF
 
@@ -996,7 +999,7 @@ class TestResidualResolutionFailures:
             return real_resolve(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "resolve", resolve)
-        with pytest.raises(OSError) as exc_info:
+        with pytest.raises(PermissionError) as exc_info:
             local_data.resolve_local_path("payload", require_exists=False)
 
         assert exc_info.value is expected

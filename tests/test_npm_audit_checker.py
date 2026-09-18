@@ -291,15 +291,31 @@ class TestCheckReport:
         assert captured.out.count("::warning::Temporarily suppressing") == 4
         assert captured.err == ""
 
-    def test_moderate_finding_is_below_gate(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_moderate_finding_fails_the_gate(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = checker.check_report(
             _report({PACKAGE: _finding(severity="moderate")}), PACKAGE_DIR, []
         )
 
         captured = capsys.readouterr()
+        assert rc == 1
+        assert f"{PACKAGE}: unsuppressed moderate finding" in captured.err
+
+    def test_low_finding_is_below_gate(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = checker.check_report(_report({PACKAGE: _finding(severity="low")}), PACKAGE_DIR, [])
+
+        captured = capsys.readouterr()
         assert rc == 0
         assert captured.out == ""
         assert captured.err == ""
+
+    def test_gate_is_pinned_at_moderate(self) -> None:
+        """The workflow's ``--audit-level`` and the checker must agree."""
+        assert checker.FAIL_AT == "moderate"
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "security.yml"
+        ).read_text(encoding="utf-8")
+        assert "--audit-level=moderate" in workflow
+        assert "--audit-level=high" not in workflow
 
     def test_stale_scoped_suppression_fails(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = checker.check_report(_report(), PACKAGE_DIR, [_suppression(line=7)])

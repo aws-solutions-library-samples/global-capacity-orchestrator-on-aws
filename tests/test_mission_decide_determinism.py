@@ -46,9 +46,9 @@ from hypothesis import strategies as st
 # pytest has to do it itself before the import below resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gco_mcp"))
 
-from mission.decide import decide_verdict  # noqa: E402
+from mission.decide import decide_verdict
 
-from tests.strategies.mission import (  # noqa: E402
+from tests.strategies.mission import (
     decide_verdict_inputs,
     iteration_records,
     session_states,
@@ -121,8 +121,8 @@ class TestVerdictSamplingIndependence:
         session=session_states(min_prior_iterations=1, max_prior_iterations=3),
         in_progress=iteration_records(),
         now=st.datetimes(
-            min_value=datetime(2025, 1, 1),
-            max_value=datetime(2030, 1, 1),
+            min_value=datetime(2025, 1, 1, tzinfo=UTC),
+            max_value=datetime(2030, 1, 1, tzinfo=UTC),
             timezones=st.just(UTC),
         ),
         sampling_outputs=st.tuples(
@@ -267,8 +267,8 @@ class TestVerdictUnaffectedBySamplerMode:
         session=session_states(min_prior_iterations=1, max_prior_iterations=3),
         in_progress=iteration_records(),
         now=st.datetimes(
-            min_value=datetime(2025, 1, 1),
-            max_value=datetime(2030, 1, 1),
+            min_value=datetime(2025, 1, 1, tzinfo=UTC),
+            max_value=datetime(2030, 1, 1, tzinfo=UTC),
             timezones=st.just(UTC),
         ),
     )

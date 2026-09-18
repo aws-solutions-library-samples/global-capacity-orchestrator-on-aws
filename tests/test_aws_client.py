@@ -101,7 +101,12 @@ class TestGCOAWSClient:
                 cache_ttl_seconds=300,
             )
             client = GCOAWSClient()
-            assert client.config is not None
+            # The default constructor resolves the process-wide config and starts
+            # with cold caches; a MagicMock config never opts into regional mode.
+            assert client.config is mock_config.return_value
+            assert client._use_regional_api is False
+            assert client._api_endpoint_cache is None
+            assert client._regional_stacks_cache is None
 
     def test_cache_validity_no_timestamp(self):
         """Test cache validity when no timestamp set."""
@@ -437,7 +442,7 @@ class TestGCOAWSClientRequests:
                 )
                 client._cache_timestamp = time.time()
 
-                with pytest.raises(RuntimeError, match="my-job.*already exists"):
+                with pytest.raises(RuntimeError, match=r"my-job.*already exists"):
                     client.submit_manifests(
                         manifests=[{"apiVersion": "batch/v1", "kind": "Job"}],
                         namespace="default",
@@ -496,7 +501,11 @@ class TestGCOAWSClientRequests:
 
                 mock_response = MagicMock()
                 mock_response.status_code = 200
-                mock_response.json.return_value = [{"name": "job1", "status": "running"}]
+                mock_response.json.return_value = {
+                    "jobs": [{"name": "job1", "status": "running"}],
+                    "total": 1,
+                    "count": 1,
+                }
                 mock_request.return_value = mock_response
 
                 client = GCOAWSClient()
@@ -507,10 +516,10 @@ class TestGCOAWSClientRequests:
                 )
                 client._cache_timestamp = time.time()
 
-                jobs = client.get_jobs(namespace="default")
+                envelope = client.get_jobs(namespace="default")
 
-                assert len(jobs) == 1
-                assert jobs[0]["name"] == "job1"
+                assert envelope["total"] == 1
+                assert envelope["jobs"][0]["name"] == "job1"
 
     def test_get_job_details(self):
         """Test getting job details."""
@@ -1036,7 +1045,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
             client.get_regional_api_endpoint = MagicMock()
             client.get_api_endpoint = MagicMock()
 
-            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+            with pytest.raises(ValueError, match=r"requires a non-empty.*AWS region"):
                 client.make_authenticated_request(
                     "GET",
                     "/api/v1/jobs",
@@ -1057,7 +1066,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
             client.get_regional_api_endpoint = MagicMock()
             client.get_api_endpoint = MagicMock()
 
-            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+            with pytest.raises(ValueError, match=r"requires a non-empty.*AWS region"):
                 client.make_authenticated_request("GET", "/api/v1/jobs")
 
         client.get_regional_api_endpoint.assert_not_called()
@@ -1102,7 +1111,7 @@ class TestGCOAWSClientGetJobs:
 
                 mock_response = MagicMock()
                 mock_response.status_code = 200
-                mock_response.json.return_value = []
+                mock_response.json.return_value = {"jobs": [], "total": 0, "count": 0}
                 mock_request.return_value = mock_response
 
                 client = GCOAWSClient()
@@ -1114,9 +1123,11 @@ class TestGCOAWSClientGetJobs:
                 client._cache_timestamp = time.time()
                 _cache_regional_endpoint(client, "us-west-2")
 
-                jobs = client.get_jobs(region="us-west-2", namespace="gco-jobs", status="running")
+                envelope = client.get_jobs(
+                    region="us-west-2", namespace="gco-jobs", status="running"
+                )
 
-                assert jobs == []
+                assert envelope["jobs"] == []
                 # Verify query string was built correctly
                 call_args = mock_request.call_args
                 assert "namespace=gco-jobs" in call_args[1]["url"]

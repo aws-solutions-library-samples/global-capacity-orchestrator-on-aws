@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import importlib
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -47,7 +48,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring every other test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402
+import run_mcp
 
 # Canonical roster of the ten tools surfaced by ``gco_mcp/tools/mission.py``.
 # Frozen so accidental in-test mutation is impossible.
@@ -710,7 +711,7 @@ class TestMissionResources:
             # re-raises an ``McpError`` on this side. ``Exception``
             # is the broadest match that survives FastMCP swapping
             # the concrete class between minor releases.
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(Exception, match=re.escape("Mission session")) as exc_info:
                 await client.read_resource(f"mission://sessions/{session_id}/report")
 
         # The handler stamps "not terminal" into the message so the
@@ -960,7 +961,7 @@ class TestMissionResourceFallbacks:
 
     def test_session_resource_returns_envelope_for_unknown_id(
         self,
-        isolated_backend,  # noqa: ARG002
+        isolated_backend,
     ):
         """``_session_resource`` returns a JSON error envelope for unknown ids.
 
@@ -981,7 +982,7 @@ class TestMissionResourceFallbacks:
         self,
         isolated_backend,
         tmp_path,
-        monkeypatch,  # noqa: ARG002
+        monkeypatch,
     ):
         """``_session_report_resource`` reads ``session["final_report"]`` for non-filesystem backends.
 
@@ -996,7 +997,7 @@ class TestMissionResourceFallbacks:
         # A minimal non-filesystem backend: returns whatever session
         # we hand it, advertises itself as not-FilesystemBackend.
         class _StubBackend:
-            def load_session(self, session_id):  # noqa: ARG002
+            def load_session(self, session_id):
                 return {
                     "session_id": "mission-stub",
                     "status": "completed",
@@ -1021,7 +1022,7 @@ class TestMissionResourceFallbacks:
     def test_report_resource_raises_when_embedded_report_missing(
         self,
         isolated_backend,
-        monkeypatch,  # noqa: ARG002
+        monkeypatch,
     ):
         """The handler raises not-found when the terminal session has no embedded report.
 
@@ -1032,7 +1033,7 @@ class TestMissionResourceFallbacks:
         from resources.mission import _session_report_resource
 
         class _BareTerminalBackend:
-            def load_session(self, session_id):  # noqa: ARG002
+            def load_session(self, session_id):
                 return {
                     "session_id": "mission-bare",
                     "status": "completed",
@@ -1043,7 +1044,7 @@ class TestMissionResourceFallbacks:
 
         monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", _BareTerminalBackend())
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(Exception, match=re.escape("terminal but report not found")) as exc_info:
             _session_report_resource("mission-bare")
         # The raised exception's string mentions the not-found shape.
         assert "report not found" in str(exc_info.value).lower()

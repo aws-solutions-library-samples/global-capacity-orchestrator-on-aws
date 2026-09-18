@@ -329,8 +329,9 @@ def should_respawn(entry: ChildRegistryEntry, final_status: str) -> tuple[bool, 
     """Deterministic restart-policy table for a slot whose session ended.
 
     ``final_status`` is the child session's terminal
-    :data:`~.types.StatusLabel`. Returns ``(decision, reason)`` where the
-    reason token lands in the child-lifecycle audit event:
+    :data:`~.types.StatusLabel`. Returns ``(decision, reason)``; the reason
+    token names which row of the table fired, so tests can assert the policy
+    rather than just the boolean (the runner acts on the decision alone):
 
     * non-terminal status → ``(False, "not_terminal")`` (caller bug guard)
     * ``completed`` → ``(False, "completed_no_respawn")``

@@ -32,7 +32,6 @@ def _resolve_result_job_name(result: Any) -> str | None:
 @pass_config
 def jobs(config: Any) -> None:
     """Manage jobs across GCO clusters."""
-    pass
 
 
 @jobs.command("submit")

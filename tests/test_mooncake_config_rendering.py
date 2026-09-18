@@ -20,6 +20,7 @@ and the store-on/store-off and cold-tier-on/off choices.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -112,7 +113,7 @@ def test_disaggregated_tcp_intent_uses_tcp_without_dropping_device() -> None:
 
 
 @pytest.mark.parametrize(
-    "mode, role",
+    ("mode", "role"),
     [
         ("disaggregated", "single"),  # store-only role on a disaggregated mode
         ("store", "prefill"),  # split role on a store-only mode
@@ -124,7 +125,7 @@ def test_disaggregated_tcp_intent_uses_tcp_without_dropping_device() -> None:
 )
 def test_unsupported_mode_role_pair_is_rejected_without_config(mode: str, role: str) -> None:
     """An unsupported ``(mode, role)`` pair raises and emits no configuration."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape("Unsupported (mode, role) pair: (")):
         build_kv_transfer_config({"mode": mode}, role)
 
 

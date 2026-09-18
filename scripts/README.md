@@ -34,8 +34,8 @@ Utility scripts for development, testing, and operations.
 | `setup-dev-alias.sh` | Builds the dev image and installs the shell function that runs `gco` through the containerized toolchain. |
 | `split_tests.py` | Collects and deterministically balances the core pytest suite across CI shards. |
 | `test_webhook_delivery.py` | Sends sample lifecycle events and verifies webhook delivery, signatures, and retries. |
-| `example_job_validation/` | Static and authorized live validation harness for every shipped example manifest. |
-| `live_release_validation/` | Checkpointed, explicitly authorized live deployment/recovery validation and sanitized reporting harness. |
+| `example_job_validation/` | Static and authorized live validation harness for every shipped example manifest. See its [README](example_job_validation/README.md) for the layout and where a new example belongs. |
+| `live_release_validation/` | Checkpointed, explicitly authorized live deployment/recovery validation and sanitized reporting harness. See its [README](live_release_validation/README.md) for the layout and where a new check belongs. |
 
 > CI-only scripts live under [`.github/scripts/`](../.github/scripts/). In particular, [`.github/scripts/dependency-scan.sh`](../.github/scripts/dependency-scan.sh) powers the monthly `deps-scan` workflow and invokes `accelerator_catalog.py` for the offline and online accelerator maintenance tiers — see [`.github/CI.md`](../.github/CI.md#dependency-scan-script) for its full reference.
 

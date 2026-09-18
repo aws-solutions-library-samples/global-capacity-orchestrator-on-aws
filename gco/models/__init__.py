@@ -25,23 +25,20 @@ from .manifest_models import (
     ResourceStatus,
 )
 
+# Sorted (RUF022); the per-module grouping is visible in the imports above.
 __all__ = [
-    # Cluster configuration models
     "ClusterConfig",
-    "ResourceThresholds",
-    # Health monitoring models
-    "HealthStatus",
-    "RequestedResources",
-    "ResourceUtilization",
-    # Inference endpoint models
     "EndpointState",
+    "HealthStatus",
     "InferenceEndpoint",
     "InferenceEndpointSpec",
-    "RegionStatus",
-    "RegionSyncState",
-    # Manifest processing models
     "KubernetesManifest",
     "ManifestSubmissionRequest",
     "ManifestSubmissionResponse",
+    "RegionStatus",
+    "RegionSyncState",
+    "RequestedResources",
     "ResourceStatus",
+    "ResourceThresholds",
+    "ResourceUtilization",
 ]

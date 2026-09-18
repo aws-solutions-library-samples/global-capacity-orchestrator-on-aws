@@ -263,7 +263,7 @@ def _fetch_commit(
     # directly should fail loudly rather than issue an unconstrained request.
     if not url.startswith(f"{GITHUB_API}/repos/"):  # pragma: no cover - defensive
         return TagResolution(error="refusing to request a non-GitHub URL"), None
-    request = urllib.request.Request(  # noqa: S310 - constant https host, validated path
+    request = urllib.request.Request(  # constant https host, validated path
         url,
         headers={
             "Accept": "application/vnd.github+json",
@@ -282,7 +282,7 @@ def _fetch_commit(
     # in a script that has to run with no dependency install.
     try:
         # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         if error.code == 404:

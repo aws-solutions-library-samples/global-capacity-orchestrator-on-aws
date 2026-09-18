@@ -19,9 +19,9 @@ from hypothesis import strategies as st
 # Ensure gco_mcp/ is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402, F401  -- side effect: registers tools and resources
-from resources.docs import EXAMPLE_METADATA, EXAMPLES_DIR  # noqa: E402
-from tools.examples import find_examples  # noqa: E402
+import run_mcp  # side effect: registers tools and resources
+from resources.docs import EXAMPLE_METADATA, EXAMPLES_DIR
+from tools.examples import find_examples
 
 # The shared FastMCP instance with everything registered. Pulled from
 # ``run_mcp`` rather than ``server`` because importing ``server`` alone

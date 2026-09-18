@@ -316,7 +316,7 @@ class TestGetOwnedJob:
         ctx = _job_context(tmp_path)
         record = _register(ctx)
         ctx.aws_client.make_authenticated_request.return_value = _response(500, text="boom")
-        with pytest.raises(RuntimeError, match="Job lookup failed .*500 boom"):
+        with pytest.raises(RuntimeError, match=r"Job lookup failed .*500 boom"):
             checks_jobs._get_owned_job(ctx, record)
 
     @pytest.mark.parametrize(
@@ -1210,7 +1210,7 @@ class TestRegisterCentralJob:
 
     def test_registration_rejects_changed_identity_and_duplicates(self, tmp_path: Path) -> None:
         ctx, record, central_record, job_id = _central_fixture(tmp_path)
-        with pytest.raises(RuntimeError, match="identity changed for .*: marker"):
+        with pytest.raises(RuntimeError, match=r"identity changed for .*: marker"):
             checks_central_queue._register_central_job(
                 ctx,
                 job_id=job_id,
@@ -1262,7 +1262,7 @@ class TestReconcileCentralWorkloadIdentity:
         assert record["uid"] is None
 
     def test_wrong_name_or_namespace_is_refused(self, tmp_path: Path) -> None:
-        ctx, record, central_record, job_id = _central_fixture(tmp_path)
+        ctx, _record, central_record, job_id = _central_fixture(tmp_path)
         with pytest.raises(RuntimeError, match="unexpected Kubernetes Job name"):
             checks_central_queue._reconcile_central_workload_identity(
                 ctx, central_record, _persisted(job_id, k8s_job_name="foreign")
@@ -1962,7 +1962,7 @@ class TestHealthWarmupCheckpoint:
     def test_prior_non_retryable_failure_is_final(self) -> None:
         environment = _topology_environment()
         self._seed(environment, _warmup_sample(error="RuntimeError: 401", retryable=False))
-        with pytest.raises(RuntimeError, match="previously failed .*401"):
+        with pytest.raises(RuntimeError, match=r"previously failed .*401"):
             self._run(environment)
 
     def test_exhausted_budget_is_final(self) -> None:
@@ -2006,7 +2006,7 @@ class TestHealthWarmupCheckpoint:
             status_code = 401
 
         environment.ctx.aws_client.call_api.side_effect = ApiError("denied")
-        with pytest.raises(RuntimeError, match="warm-up call failed .* attempt 1: ApiError"):
+        with pytest.raises(RuntimeError, match=r"warm-up call failed .* attempt 1: ApiError"):
             self._run(environment)
         sample = environment.ctx.checkpoint.state["topology_health_warmup_samples"][0]
         assert sample["status_code"] == 401
@@ -2028,7 +2028,7 @@ class TestHealthStabilityAndMetricsProbes:
         environment = _topology_environment()
         environment.ctx.aws_client.call_api.side_effect = None
         environment.ctx.aws_client.call_api.return_value = {"status": "healthy"}
-        with pytest.raises(RuntimeError, match="Malformed health response .* round 1"):
+        with pytest.raises(RuntimeError, match=r"Malformed health response .* round 1"):
             checks_topology._health_stability_samples(
                 environment.ctx,
                 global_url="https://global.example.test",
@@ -2066,7 +2066,7 @@ class TestHealthStabilityAndMetricsProbes:
         probe = checks_topology._metrics_reachability_samples
         urls = {"global_url": "https://global.example.test", "regional_urls": {}}
         environment.ctx.aws_client.call_api.side_effect = RuntimeError("API request failed: 404")
-        with pytest.raises(RuntimeError, match="Metrics reachability call failed .* HTTPRoute"):
+        with pytest.raises(RuntimeError, match=r"Metrics reachability call failed .* HTTPRoute"):
             probe(environment.ctx, **urls)
         assert environment.ctx.checkpoint.state["topology_metrics_samples"][0]["payload"] is None
 
@@ -2140,7 +2140,7 @@ class TestAlbTlsEvidence:
         foreign = {**page["LoadBalancers"][0], "LoadBalancerArn": "arn:aws:elb:foreign"}
         paginator.paginate.return_value = [{"LoadBalancers": [foreign]}]
         with pytest.raises(
-            RuntimeError, match="Expected exactly one owned GCO Gateway ALB .* found 0"
+            RuntimeError, match=r"Expected exactly one owned GCO Gateway ALB .* found 0"
         ):
             self._evidence(environment)
 
@@ -2418,7 +2418,7 @@ class TestOpenCostReportResume:
             _completed_attempt(2, status_code=500, response_text="upstream exploded"),
             duplicate=True,
         )
-        with pytest.raises(RuntimeError, match="retry budget .* exhausted: 500 upstream exploded"):
+        with pytest.raises(RuntimeError, match=r"retry budget .* exhausted: 500 upstream exploded"):
             checks_opencost._generate_validation_report(ctx, "us-east-1")
 
     def test_non_timeout_failure_is_not_retryable(self) -> None:

@@ -67,7 +67,7 @@ def load_proxy_config() -> ProxyConfig:
     cert_file = Path(cert_value)
     key_file = Path(key_value)
     return ProxyConfig(
-        host=os.getenv("TLS_PROXY_HOST", "0.0.0.0"),  # nosec B104 — pod listener
+        host=os.getenv("TLS_PROXY_HOST", "0.0.0.0"),  # pod listener
         port=_positive_port("TLS_PROXY_PORT", 8443),
         upstream_host=os.getenv("TLS_PROXY_UPSTREAM_HOST", "127.0.0.1"),
         upstream_port=_positive_port("TLS_PROXY_UPSTREAM_PORT", 9000),

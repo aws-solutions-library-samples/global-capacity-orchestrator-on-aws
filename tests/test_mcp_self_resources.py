@@ -16,6 +16,7 @@ needed beyond what the server's startup wiring already does.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ import pytest
 # Ensure gco_mcp/ is importable, mirroring every other test module.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-import run_mcp  # noqa: E402, I001 — sys.path tweak above must run first
+import run_mcp  # noqa: I001 — sys.path tweak above must run first
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ class TestToolDetail:
         """An unknown tool name surfaces a not-found error."""
         # ResourceError / FastMCP wraps as a generic exception; assert
         # only that read failed rather than coupling to the concrete class.
-        with pytest.raises(Exception):  # noqa: B017 — generic upstream error type
+        with pytest.raises(Exception, match=re.escape("this_tool_does_not_exist_anywhere")):
             _read_resource_text("mcp://gco/tools/this_tool_does_not_exist_anywhere")
 
 

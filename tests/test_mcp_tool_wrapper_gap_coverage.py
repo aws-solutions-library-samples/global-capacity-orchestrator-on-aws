@@ -1166,7 +1166,6 @@ def test_inference_delete_allowed_paths(flag_enabled: bool, disaggregated: bool)
         ({"regional": ["us-east-1", "us-west-2"]}, 5),
         ({}, None),
         ({"regional": []}, 3),
-        ([], None),
         ({"regional": "us-east-1"}, None),
     ],
 )

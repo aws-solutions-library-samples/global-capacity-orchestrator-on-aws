@@ -34,7 +34,7 @@ class TestGenerateOdcrManifestEfa:
             efa=True,
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         assert nodepool["spec"]["disruption"]["consolidationPolicy"] == "WhenEmpty"
         assert nodepool["spec"]["disruption"]["consolidateAfter"] == "300s"
 
@@ -49,7 +49,7 @@ class TestGenerateOdcrManifestEfa:
             efa=True,
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         labels = nodepool["spec"]["template"]["metadata"]["labels"]
         assert labels["efa"] == "true"
         assert labels["workload-type"] == "gpu-efa"
@@ -65,7 +65,7 @@ class TestGenerateOdcrManifestEfa:
             efa=True,
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         taints = nodepool["spec"]["template"]["spec"]["taints"]
         taint_keys = [t["key"] for t in taints]
         assert "nvidia.com/gpu" in taint_keys
@@ -82,7 +82,7 @@ class TestGenerateOdcrManifestEfa:
             efa=False,
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         assert nodepool["spec"]["disruption"]["consolidationPolicy"] == "WhenEmptyOrUnderutilized"
 
 
@@ -99,7 +99,7 @@ class TestGenerateOdcrManifestNonGpu:
             instance_types=["m5.2xlarge"],
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         assert "taints" not in nodepool["spec"]["template"]["spec"]
 
     @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=8)
@@ -112,7 +112,7 @@ class TestGenerateOdcrManifestNonGpu:
             instance_types=["m5.2xlarge"],
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodepool = [d for d in docs if d and d.get("kind") == "NodePool"][0]
+        nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         labels = nodepool["spec"]["template"]["metadata"]["labels"]
         assert labels["workload-type"] == "reserved-capacity"
 
@@ -129,7 +129,7 @@ class TestGenerateOdcrManifestEc2NodeClass:
             capacity_reservation_id="cr-abc123",
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodeclass = [d for d in docs if d and d.get("kind") == "EC2NodeClass"][0]
+        nodeclass = next(d for d in docs if d and d.get("kind") == "EC2NodeClass")
         assert nodeclass["spec"]["capacityReservationSelectorTerms"] == [{"id": "cr-abc123"}]
 
     @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
@@ -141,7 +141,7 @@ class TestGenerateOdcrManifestEc2NodeClass:
             capacity_reservation_id="cr-123",
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodeclass = [d for d in docs if d and d.get("kind") == "EC2NodeClass"][0]
+        nodeclass = next(d for d in docs if d and d.get("kind") == "EC2NodeClass")
         subnet_tags = nodeclass["spec"]["subnetSelectorTerms"][0]["tags"]
         assert subnet_tags["karpenter.sh/discovery"] == "gco-eu-west-1"
 
@@ -160,7 +160,7 @@ class TestGenerateOdcrManifestEc2NodeClass:
             project_name="acme",
         )
         docs = list(yaml.safe_load_all(manifest))
-        nodeclass = [d for d in docs if d and d.get("kind") == "EC2NodeClass"][0]
+        nodeclass = next(d for d in docs if d and d.get("kind") == "EC2NodeClass")
         spec = nodeclass["spec"]
         assert spec["subnetSelectorTerms"][0]["tags"]["karpenter.sh/discovery"] == "acme-eu-west-1"
         assert (

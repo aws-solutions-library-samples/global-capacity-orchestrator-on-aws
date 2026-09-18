@@ -51,14 +51,15 @@ def _expected_stack_count_for_all() -> int | None:
     """
     try:
         from cli.config import _load_cdk_json
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:  # best-effort
         return None
     try:
         cdk_regions = _load_cdk_json()
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:  # best-effort
         return None
-    if not isinstance(cdk_regions, dict):
-        return None
+    # _load_cdk_json only ever returns a dict (it falls back to ``{}`` when
+    # the file is missing or the block is not a mapping), so a shape check
+    # here would be dead code; the keys are what need checking.
     if "regional" not in cdk_regions:
         return None
     regional = cdk_regions["regional"]
@@ -693,8 +694,8 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
 
         Set cdk.json bedrock.capacity_advisor_default_model_id.
 
-        The default model for gco capacity advise and its historical
-        variant. Config-only and idempotent; Mission sampling and gco
+        The default model for gco capacity ai-recommend and gco capacity
+        predict. Config-only and idempotent; Mission sampling and gco
         autopilot have their own keys (set_mission_default_model and
         set_claude_code_default_model). Validation mirrors the runtime
         reader (non-empty, no surrounding whitespace). Sibling settings

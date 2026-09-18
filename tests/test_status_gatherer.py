@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from botocore.exceptions import ClientError
 
 from cli.capacity.multi_region import RegionCapacity
@@ -483,12 +484,10 @@ def test_jobs_section_reraises_other_api_failures_for_the_boundary() -> None:
     client.call_api.side_effect = RuntimeError("API request failed: 500 oops")
 
     with patch("cli.aws_client.get_aws_client", return_value=client):
-        try:
+        with pytest.raises(RuntimeError) as excinfo:
             _gather_jobs(config, None)
-        except RuntimeError as e:
-            assert "500" in str(e)
-        else:
-            raise AssertionError("expected the unexpected failure to escape")
+        e = excinfo.value
+        assert "500" in str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -852,12 +851,10 @@ def test_costs_section_summary_failure_escapes_to_the_boundary() -> None:
     tracker.get_cost_summary.side_effect = RuntimeError("Cost Explorer query failed: denied")
 
     with patch("cli.costs.get_cost_tracker", return_value=tracker):
-        try:
+        with pytest.raises(RuntimeError) as excinfo:
             _gather_costs(_config(), True)
-        except RuntimeError as e:
-            assert "denied" in str(e)
-        else:
-            raise AssertionError("expected the Cost Explorer failure to escape")
+        e = excinfo.value
+        assert "denied" in str(e)
 
 
 # ---------------------------------------------------------------------------

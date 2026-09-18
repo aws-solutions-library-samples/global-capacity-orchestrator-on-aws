@@ -29,6 +29,7 @@ decoupled so each can be tested in isolation.
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -42,8 +43,8 @@ from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-08T17:29:55Z
-# Generated from Git commit: d90e024a1cf9e4e6aa80df5db9a888591c37625b
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``generate_sampled_criteria`` -> ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.png``)
@@ -464,7 +465,7 @@ def build_scaffold_prompt(
         "  any(k.startswith('val_') for k in obs['metrics'].keys())\n"
         "\n"
         "REJECTED predicate expressions (will fail validation):\n"
-        "  obs.metrics.val_loss < 0.1       # nested attribute walk; use obs['metrics']['val_loss']\n"  # noqa: E501
+        "  obs.metrics.val_loss < 0.1       # nested attribute walk; use obs['metrics']['val_loss']\n"
         "  obs['tool_results'].count('ok')  # ``.count`` is not on the method allowlist\n"
         "  obs['tool_results'].append(1)    # ``.append`` mutates and is not allowed\n"
         "  any(r.split(',') for r in obs['tool_results'])  # ``.split`` not on method allowlist\n"
@@ -650,7 +651,7 @@ class _AttributeToSubscriptRewriter(ast.NodeTransformer):
     untouched so the validator's other guards still apply.
     """
 
-    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:  # noqa: N802 - ast hook name
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:  # ast hook name
         # Recurse into the value first so a nested attribute walk gets
         # rewritten bottom-up: ``obs.metrics.val_loss`` -> visit
         # ``obs.metrics`` first (which becomes ``obs['metrics']``)
@@ -719,7 +720,7 @@ def _autofix_predicate(criterion: dict[str, Any]) -> dict[str, Any]:
     ast.fix_missing_locations(rewritten_tree)
     try:
         rewritten_src = ast.unparse(rewritten_tree)
-    except Exception:  # noqa: BLE001 - unparse failure leaves us no better off
+    except Exception:  # unparse failure leaves us no better off
         return criterion
 
     # Re-validate the rewrite. If the rewrite still doesn't validate
@@ -937,7 +938,7 @@ def _predicate_tool_references(criterion: Mapping[str, Any]) -> tuple[set[str], 
             # chain as unanalyzable rather than letting one literal leg mask a
             # computed or off-allowlist sibling.
             continue
-        for left, right in zip(operands, operands[1:], strict=False):
+        for left, right in itertools.pairwise(operands):
             if id(left) in accessor_ids:
                 literals, fully_literal = _literal_string_options(right)
                 if fully_literal:
@@ -1082,7 +1083,7 @@ async def generate_sampled_criteria(
             # below so the caller reports it instead of quietly scaffolding
             # deterministic criteria.
             raise
-        except Exception as exc:  # noqa: BLE001 - transport-agnostic catch
+        except Exception as exc:  # transport-agnostic catch
             # Transport-layer failures are not retriable from the
             # scaffolder's point of view — the backend itself decides
             # whether to recover. Surface as a sampling error so the
@@ -1151,7 +1152,7 @@ async def _call_backend(backend: SamplingBackend, prompt_str: str) -> str:
     """
     # Lazy import to avoid the import cycle: sampling imports validation
     # which would otherwise import this module.
-    from .sampling import SamplingPrompt  # noqa: PLC0415
+    from .sampling import SamplingPrompt
 
     # Wrap the prompt string in a dataclass that renders to itself.
     # The full SamplingPrompt has many required fields; the scaffolder

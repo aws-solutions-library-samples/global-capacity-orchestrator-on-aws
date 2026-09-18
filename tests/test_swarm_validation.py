@@ -20,7 +20,7 @@ import pytest
 # before the import below resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
-from mission.swarm import (  # noqa: E402
+from mission.swarm import (
     DEFAULT_MAX_CONCURRENT_CHILDREN,
     SWARM_EXCLUDED_TOOLS,
     compute_pool_balance,
@@ -31,7 +31,7 @@ from mission.swarm import (  # noqa: E402
     validate_spawn,
     validate_swarm_config,
 )
-from mission.validation import MissionValidationError  # noqa: E402
+from mission.validation import MissionValidationError
 
 # ---------------------------------------------------------------------------
 # Shared builders

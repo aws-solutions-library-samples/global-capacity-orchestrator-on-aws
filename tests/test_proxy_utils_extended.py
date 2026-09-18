@@ -420,7 +420,7 @@ class TestGetSecretTokenCaching:
         mock_sm.get_secret_value.reset_mock()
 
         token = pu.get_secret_token()
-        assert token == "test-token"  # nosec B105 - test assertion against fixture value, not a real credential
+        assert token == "test-token"  # nosec B105  # test assertion against fixture value, not a real credential
         mock_sm.get_secret_value.assert_not_called()
 
     def test_refreshes_after_ttl(self, proxy_module):
@@ -436,7 +436,7 @@ class TestGetSecretTokenCaching:
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps({"token": "new-token"})}
 
         token = pu.get_secret_token()
-        assert token == "new-token"  # nosec B105 - test assertion against fixture value, not a real credential
+        assert token == "new-token"  # nosec B105  # test assertion against fixture value, not a real credential
 
     def test_stale_cache_on_sm_failure(self, proxy_module):
         """SM failure with existing cache should return stale token."""
@@ -600,22 +600,22 @@ class TestGetSecretTokenDoubleCheckedLocking:
     def test_fresh_refresh_by_another_caller_is_reused_under_the_lock(self, proxy_module):
         pu, mock_sm = proxy_module
         # Expired from this caller's point of view before it takes the lock.
-        pu._cached_secret = "old-token"  # nosec B105 - fixture value, not a credential
+        pu._cached_secret = "old-token"  # nosec B105  # fixture value, not a credential
         pu._last_successful_refresh = time.monotonic() - pu._CACHE_TTL_SECONDS - 1
         pu._last_refresh_attempt = 0.0
 
         def other_caller_refreshed(module):
-            module._cached_secret = "refreshed-elsewhere"  # nosec B105 - fixture value
+            module._cached_secret = "refreshed-elsewhere"  # nosec B105  # fixture value
             module._last_successful_refresh = time.monotonic()
 
         pu._secret_lock = _LockThatLetsAnotherRefreshWin(pu, other_caller_refreshed)
 
-        assert pu.get_secret_token() == "refreshed-elsewhere"  # nosec B105 - fixture value
+        assert pu.get_secret_token() == "refreshed-elsewhere"  # nosec B105  # fixture value
         mock_sm.get_secret_value.assert_not_called()
 
     def test_recent_failed_attempt_by_another_caller_keeps_stale_key(self, proxy_module):
         pu, mock_sm = proxy_module
-        pu._cached_secret = "stale-token"  # nosec B105 - fixture value, not a credential
+        pu._cached_secret = "stale-token"  # nosec B105  # fixture value, not a credential
         pu._last_successful_refresh = time.monotonic() - pu._CACHE_TTL_SECONDS - 1
         pu._last_refresh_attempt = 0.0
 
@@ -624,7 +624,7 @@ class TestGetSecretTokenDoubleCheckedLocking:
 
         pu._secret_lock = _LockThatLetsAnotherRefreshWin(pu, other_caller_just_tried)
 
-        assert pu.get_secret_token() == "stale-token"  # nosec B105 - fixture value
+        assert pu.get_secret_token() == "stale-token"  # nosec B105  # fixture value
         mock_sm.get_secret_value.assert_not_called()
 
     def test_empty_token_in_secret_fails_closed(self, proxy_module):

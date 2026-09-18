@@ -116,7 +116,7 @@ async def _complete_argument(ref: Any, argument: Any, context: Any) -> list[str]
         return None
     try:
         candidates = provider()
-    except Exception:  # noqa: BLE001 — a completion must never break a session
+    except Exception:  # a completion must never break a session
         return None
     partial = getattr(argument, "value", "") or ""
     return _match(candidates, str(partial))

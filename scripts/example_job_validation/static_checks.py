@@ -6,8 +6,8 @@ spec registry's symmetry with the ``examples/`` directory and the
 submission paths — proves every document clears the exact transport gates
 (kind/GVK allowlist, image-source trust, target namespace) that the
 deployed services enforce. This is the half that runs in CI on every PR
-(``tests/test_example_job_validation.py``); the live half in
-``checks/examples.py`` builds on the same parse.
+(``tests/test_example_job_validation.py``); the live half in ``drivers.py``
+builds on the same parse.
 """
 
 from __future__ import annotations

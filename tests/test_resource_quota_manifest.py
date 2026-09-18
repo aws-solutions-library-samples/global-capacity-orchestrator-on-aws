@@ -12,6 +12,7 @@ test fails.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -357,13 +358,13 @@ class TestValidatedManifestCaps:
         # A manifest cap below the LimitRange container maximum means the
         # front door rejects manifests whose single container the namespace
         # would happily admit.
-        with pytest.raises(ValueError, match="below resource_quota.container_max_gpu"):
+        with pytest.raises(ValueError, match=re.escape("below resource_quota.container_max_gpu")):
             self._validate({"max_gpu_per_manifest": 4})
 
     def test_cap_above_namespace_quota_is_rejected(self):
         # A manifest cap above the namespace quota accepts manifests whose
         # pods can never all run.
-        with pytest.raises(ValueError, match="exceeds resource_quota.max_gpu"):
+        with pytest.raises(ValueError, match=re.escape("exceeds resource_quota.max_gpu")):
             self._validate({"max_gpu_per_manifest": 64})
 
     def test_custom_quota_moves_the_bounds(self):

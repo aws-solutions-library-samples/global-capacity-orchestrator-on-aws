@@ -369,7 +369,7 @@ class TestNodeMetricsCache:
 
         # Set up cached metrics
         health_monitor._cached_metrics = {"items": [{"test": "data"}]}
-        health_monitor._last_metrics_time = datetime.now()
+        health_monitor._last_metrics_time = datetime.now(UTC)
 
         result = await health_monitor._get_node_metrics()
 
@@ -679,7 +679,7 @@ class TestSyncAlbRegistration:
         """Should skip if last sync was less than 5 minutes ago."""
         from datetime import datetime
 
-        monitor._last_alb_sync = datetime.now()
+        monitor._last_alb_sync = datetime.now(UTC)
         await monitor.sync_alb_registration()
         # Gateway should not be read while the rate-limit window is active.
         monitor.metrics_v1beta1.get_namespaced_custom_object.assert_not_called()

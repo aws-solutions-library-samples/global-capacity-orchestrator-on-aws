@@ -9,7 +9,7 @@ attribute passthrough. Complements test_health_api.py which covers
 the route surface.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,7 +27,7 @@ class TestHealthAPILifespan:
         mock_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=ResourceUtilization(cpu=50.0, memory=60.0, gpu=30.0),
             thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),
@@ -50,7 +50,7 @@ class TestHealthAPILifespan:
             from gco.services.health_api import app, lifespan
 
             async with lifespan(app):
-                assert health_api_module.health_monitor is not None
+                assert health_api_module.health_monitor is mock_monitor
 
     @pytest.mark.asyncio
     async def test_lifespan_startup_failure(self):
@@ -79,7 +79,7 @@ class TestHealthCheckWithStaleStatus:
         from gco.models import HealthStatus, ResourceThresholds, ResourceUtilization
 
         # Create a status that's more than 2 minutes old
-        old_timestamp = datetime.now() - timedelta(minutes=3)
+        old_timestamp = datetime.now(UTC) - timedelta(minutes=3)
         old_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
@@ -93,7 +93,7 @@ class TestHealthCheckWithStaleStatus:
         new_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=ResourceUtilization(cpu=55.0, memory=65.0, gpu=35.0),
             thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),
@@ -134,7 +134,7 @@ class TestHealthCheckUnhealthy:
         unhealthy_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="unhealthy",
             resource_utilization=ResourceUtilization(cpu=95.0, memory=90.0, gpu=85.0),
             thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),
@@ -257,7 +257,7 @@ class TestMetricsEndpointSuccess:
         mock_status = HealthStatus(
             cluster_id="test-cluster",
             region="us-east-1",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             status="healthy",
             resource_utilization=ResourceUtilization(cpu=50.0, memory=60.0, gpu=30.0),
             thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=90),

@@ -93,9 +93,7 @@ def test_constants_expose_no_bucket_name_helper() -> None:
     import gco.stacks.constants as constants
 
     helpers = [
-        name
-        for name in dir(constants)
-        if name.endswith("_bucket_name") or name.endswith("_bucket_name_prefix")
+        name for name in dir(constants) if name.endswith(("_bucket_name", "_bucket_name_prefix"))
     ]
     assert helpers == [], f"bucket-name helpers must not exist: {helpers}"
 

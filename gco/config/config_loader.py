@@ -145,8 +145,6 @@ def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
 
-    pass
-
 
 class ConfigLoader:
     """
@@ -1528,7 +1526,7 @@ class ConfigLoader:
           policy the SQS queue processor enforces.
 
         Note: The 'image' field is a placeholder default. In practice, the actual
-        image is built from dockerfiles/manifest-processor-dockerfile and pushed
+        image is built from dockerfiles/Dockerfile.manifest-processor and pushed
         to ECR during CDK deployment. The {{MANIFEST_PROCESSOR_IMAGE}} placeholder
         in manifests is replaced with the ECR image URI.
         """
@@ -1952,7 +1950,7 @@ class ConfigLoader:
                 "admin_user": "admin",
                 # Monthly (04:00 on the 1st) rotation of the chart-generated
                 # Grafana admin password, run by an in-cluster CronJob.
-                "admin_password_rotation_schedule": "0 4 1 * *",
+                "admin_password_rotation_schedule": "0 4 1 * *",  # nosec B105  # cron schedule, not a password
             },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},

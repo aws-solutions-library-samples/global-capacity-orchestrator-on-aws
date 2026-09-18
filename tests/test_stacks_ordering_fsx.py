@@ -14,6 +14,7 @@ walker that locates the config relative to the caller's CWD.
 """
 
 import json
+import re
 from datetime import UTC
 from unittest.mock import patch
 
@@ -195,7 +196,7 @@ class TestGetFsxConfig:
         """Should raise RuntimeError when cdk.json not found."""
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             get_fsx_config()
 
@@ -267,7 +268,7 @@ class TestUpdateFsxConfig:
         """Should raise RuntimeError when cdk.json not found."""
         with (
             patch("cli.stacks._find_cdk_json", return_value=None),
-            pytest.raises(RuntimeError, match="cdk.json not found"),
+            pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             update_fsx_config({"enabled": True})
 
