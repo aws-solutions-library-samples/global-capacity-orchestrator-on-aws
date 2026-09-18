@@ -60,8 +60,8 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)

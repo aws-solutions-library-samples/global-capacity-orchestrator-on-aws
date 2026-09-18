@@ -31,8 +31,8 @@ import feature_flags
 from version import get_project_version
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``audit_logged`` -> ``diagrams/code_diagrams/gco_mcp/audit.audit_logged.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/audit.audit_logged.png``)

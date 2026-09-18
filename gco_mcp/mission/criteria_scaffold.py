@@ -43,8 +43,8 @@ from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-08T17:29:55Z
-# Generated from Git commit: d90e024a1cf9e4e6aa80df5db9a888591c37625b
+# Generated at (UTC): 2026-09-18T02:11:36Z
+# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
 # Flowchart(s) generated from this file:
 #   * ``generate_sampled_criteria`` -> ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/criteria_scaffold.generate_sampled_criteria.png``)

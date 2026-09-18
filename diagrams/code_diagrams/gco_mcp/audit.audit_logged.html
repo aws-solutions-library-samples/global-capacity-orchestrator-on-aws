@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="c86123fa3b57b5d2">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="6acf58e60c950ba5">
         <title>MCP audit_logged decorator (sync + async dispatch, Context capture)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,70 +208,70 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5110=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``.\n    '
-cond5113=>condition: if inspect.iscoroutinefunction(func)
-st5118=>start: start async_wrapper
-io5120=>inputoutput: input:
-op5123=>operation: start = time.time()
-op5125=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op5128=>operation: result = await func(*args, **kwargs)
+        <div><textarea id="code" style="width: 100%;" rows="11">op3035=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``.\n    '
+cond3038=>condition: if inspect.iscoroutinefunction(func)
+st3043=>start: start async_wrapper
+io3045=>inputoutput: input:
+op3048=>operation: start = time.time()
+op3050=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op3053=>operation: result = await func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond5127=>condition: exception raised?
-cond5130=>condition: except Exception as e
-op5134=>operation: duration_ms = (time.time() - start) * 1000
-sub5136=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub5138=>subroutine: raise
-e5143=>end: end async_wrapper
-io5149=>inputoutput: output: async_wrapper
-e5147=>end: end function return
-st5156=>start: start sync_wrapper
-io5158=>inputoutput: input:
-op5161=>operation: start = time.time()
-op5163=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op5166=>operation: result = func(*args, **kwargs)
+cond3052=>condition: exception raised?
+cond3055=>condition: except Exception as e
+op3059=>operation: duration_ms = (time.time() - start) * 1000
+sub3061=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub3063=>subroutine: raise
+e3068=>end: end async_wrapper
+io3074=>inputoutput: output: async_wrapper
+e3072=>end: end function return
+st3081=>start: start sync_wrapper
+io3083=>inputoutput: input:
+op3086=>operation: start = time.time()
+op3088=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op3091=>operation: result = func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond5165=>condition: exception raised?
-cond5168=>condition: except Exception as e
-op5172=>operation: duration_ms = (time.time() - start) * 1000
-sub5174=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub5176=>subroutine: raise
-e5181=>end: end sync_wrapper
-io5187=>inputoutput: output: sync_wrapper
-e5185=>end: end function return
+cond3090=>condition: exception raised?
+cond3093=>condition: except Exception as e
+op3097=>operation: duration_ms = (time.time() - start) * 1000
+sub3099=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub3101=>subroutine: raise
+e3106=>end: end sync_wrapper
+io3112=>inputoutput: output: sync_wrapper
+e3110=>end: end function return
 
-op5110->cond5113
-cond5113(yes)->st5118
-st5118->io5120
-io5120->op5123
-op5123->op5125
-op5125->op5128
-op5128->cond5127
-cond5127(yes)->cond5130
-cond5130(yes)->op5134
-op5134->sub5136
-sub5136->sub5138
-cond5130(no)->e5143
-e5143->io5149
-io5149->e5147
-cond5127(no)->e5143
-cond5113(no)->st5156
-st5156->io5158
-io5158->op5161
-op5161->op5163
-op5163->op5166
-op5166->cond5165
-cond5165(yes)->cond5168
-cond5168(yes)->op5172
-op5172->sub5174
-sub5174->sub5176
-cond5168(no)->e5181
-e5181->io5187
-io5187->e5185
-cond5165(no)->e5181
+op3035->cond3038
+cond3038(yes)->st3043
+st3043->io3045
+io3045->op3048
+op3048->op3050
+op3050->op3053
+op3053->cond3052
+cond3052(yes)->cond3055
+cond3055(yes)->op3059
+op3059->sub3061
+sub3061->sub3063
+cond3055(no)->e3068
+e3068->io3074
+io3074->e3072
+cond3052(no)->e3068
+cond3038(no)->st3081
+st3081->io3083
+io3083->op3086
+op3086->op3088
+op3088->op3091
+op3091->cond3090
+cond3090(yes)->cond3093
+cond3093(yes)->op3097
+op3097->sub3099
+sub3099->sub3101
+cond3093(no)->e3106
+e3106->io3112
+io3112->e3110
+cond3090(no)->e3106
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -281,17 +281,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>c86123fa3b57b5d2</code>
+            Flow content SHA-256: <code>6acf58e60c950ba5</code>
           </p>
           <div id="canvas"></div>
         </div>

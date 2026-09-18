@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="255989d25c48271a">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="33fe524dae3dc478">
         <title>Container runtime detection (docker > finch > podman)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,24 +208,24 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4817=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
-op4819=>operation: global _container_runtime_cache
-cond4822=>condition: if _container_runtime_cache is not _UNCHECKED
-io4829=>inputoutput: output: _container_runtime_cache
-e4827=>end: end function return
-op4835=>operation: result = _detect_container_runtime_uncached()
-op4837=>operation: _container_runtime_cache = result
-io4842=>inputoutput: output: result
-e4840=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2742=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
+op2744=>operation: global _container_runtime_cache
+cond2747=>condition: if _container_runtime_cache is not _UNCHECKED
+io2754=>inputoutput: output: _container_runtime_cache
+e2752=>end: end function return
+op2760=>operation: result = _detect_container_runtime_uncached()
+op2762=>operation: _container_runtime_cache = result
+io2767=>inputoutput: output: result
+e2765=>end: end function return
 
-op4817->op4819
-op4819->cond4822
-cond4822(yes)->io4829
-io4829->e4827
-cond4822(no)->op4835
-op4835->op4837
-op4837->io4842
-io4842->e4840
+op2742->op2744
+op2744->cond2747
+cond2747(yes)->io2754
+io2754->e2752
+cond2747(no)->op2760
+op2760->op2762
+op2762->io2767
+io2767->e2765
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -235,17 +235,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>255989d25c48271a</code>
+            Flow content SHA-256: <code>33fe524dae3dc478</code>
           </p>
           <div id="canvas"></div>
         </div>

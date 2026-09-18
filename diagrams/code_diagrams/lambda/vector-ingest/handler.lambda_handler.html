@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="8e636b7113f87485">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="b1c55446a77004f1">
         <title>Vector-store corpus ingest (S3 notification -> chunk, embed, write items)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,73 +208,73 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op7503=>operation: 'Process one S3 notification event, object by object.\n\n    Every record is attempted (per-object isolation); a summary line is\n    logged either way; any failure re-raises afterwards so the async\n    retry/DLQ machinery sees the invocation as failed. Retries are safe:\n    ``doc_id`` is deterministic, so already-ingested objects overwrite\n    in place.\n    '
-op7505=>operation: corpus_prefix = _require_env('CORPUS_PREFIX')
-op7507=>operation: results: list[dict[str, Any]] = []
-op7509=>operation: failures: list[dict[str, Any]] = []
-cond7512=>condition: for record in event.get('Records', [])
-op7516=>operation: s3_info = record.get('s3') or {}
-op7518=>operation: bucket = (s3_info.get('bucket') or {}).get('name')
-op7520=>operation: raw_key = (s3_info.get('object') or {}).get('key')
-cond7523=>condition: if not bucket or not raw_key
-sub7527=>subroutine: failures.append({'key': raw_key, 'status': 'malformed_record'})
-sub7529=>subroutine: continue
-op7534=>operation: key = urllib.parse.unquote_plus(raw_key)
-cond7537=>condition: if not key.startswith(corpus_prefix)
-sub7541=>subroutine: results.append({'key': key, 'status': 'skipped_outside_prefix', 'chunks': 0})
-sub7543=>subroutine: continue
-cond7549=>condition: if key.endswith('/')
-sub7553=>subroutine: results.append({'key': key, 'status': 'skipped_folder_marker', 'chunks': 0})
-sub7555=>subroutine: continue
-op7560=>operation: lowered = key.lower()
-cond7563=>condition: if not lowered.endswith(TEXT_SUFFIXES) and (not lowered.endswith(JSONL_SUFFIX))
-sub7567=>subroutine: results.append({'key': key, 'status': 'skipped_unsupported_suffix', 'chunks': 0})
-sub7569=>subroutine: continue
-sub7577=>subroutine: results.append(_ingest_object(bucket, key))
-cond7574=>condition: exception raised?
-cond7579=>condition: except Exception as err
-sub7583=>subroutine: logger.exception('vector-ingest failed for s3://%s/%s', bucket, key)
-sub7585=>subroutine: failures.append({'key': key, 'status': 'failed', 'error': str(err)})
-op7592=>operation: summary = {'message': 'vector-ingest summary', 'ingested_objects': sum((1 for r in results if r['status'] == 'ingested')), 'ingested_chunks': sum((r.get('chunks', 0) for r in results)), 'skipped': [r for r in results if r['status'].startswith('skipped')], 'failures': failures}
-sub7594=>subroutine: logger.info(json.dumps(summary, default=str))
-cond7597=>operation: raise RuntimeError(f'vector-ingest failed for {len(failures)} object(s): ' + ', '.join((str(f['key']) for f in failures))) if  failures
-io7610=>inputoutput: output: summary
-e7608=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op5194=>operation: 'Process one S3 notification event, object by object.\n\n    Every record is attempted (per-object isolation); a summary line is\n    logged either way; any failure re-raises afterwards so the async\n    retry/DLQ machinery sees the invocation as failed. Retries are safe:\n    ``doc_id`` is deterministic, so already-ingested objects overwrite\n    in place.\n    '
+op5196=>operation: corpus_prefix = _require_env('CORPUS_PREFIX')
+op5198=>operation: results: list[dict[str, Any]] = []
+op5200=>operation: failures: list[dict[str, Any]] = []
+cond5203=>condition: for record in event.get('Records', [])
+op5207=>operation: s3_info = record.get('s3') or {}
+op5209=>operation: bucket = (s3_info.get('bucket') or {}).get('name')
+op5211=>operation: raw_key = (s3_info.get('object') or {}).get('key')
+cond5214=>condition: if not bucket or not raw_key
+sub5218=>subroutine: failures.append({'key': raw_key, 'status': 'malformed_record'})
+sub5220=>subroutine: continue
+op5225=>operation: key = urllib.parse.unquote_plus(raw_key)
+cond5228=>condition: if not key.startswith(corpus_prefix)
+sub5232=>subroutine: results.append({'key': key, 'status': 'skipped_outside_prefix', 'chunks': 0})
+sub5234=>subroutine: continue
+cond5240=>condition: if key.endswith('/')
+sub5244=>subroutine: results.append({'key': key, 'status': 'skipped_folder_marker', 'chunks': 0})
+sub5246=>subroutine: continue
+op5251=>operation: lowered = key.lower()
+cond5254=>condition: if not lowered.endswith(TEXT_SUFFIXES) and (not lowered.endswith(JSONL_SUFFIX))
+sub5258=>subroutine: results.append({'key': key, 'status': 'skipped_unsupported_suffix', 'chunks': 0})
+sub5260=>subroutine: continue
+sub5268=>subroutine: results.append(_ingest_object(bucket, key))
+cond5265=>condition: exception raised?
+cond5270=>condition: except Exception as err
+sub5274=>subroutine: logger.exception('vector-ingest failed for s3://%s/%s', bucket, key)
+sub5276=>subroutine: failures.append({'key': key, 'status': 'failed', 'error': str(err)})
+op5283=>operation: summary = {'message': 'vector-ingest summary', 'ingested_objects': sum((1 for r in results if r['status'] == 'ingested')), 'ingested_chunks': sum((r.get('chunks', 0) for r in results)), 'skipped': [r for r in results if r['status'].startswith('skipped')], 'failures': failures}
+sub5285=>subroutine: logger.info(json.dumps(summary, default=str))
+cond5288=>operation: raise RuntimeError(f'vector-ingest failed for {len(failures)} object(s): ' + ', '.join((str(f['key']) for f in failures))) if  failures
+io5301=>inputoutput: output: summary
+e5299=>end: end function return
 
-op7503->op7505
-op7505->op7507
-op7507->op7509
-op7509->cond7512
-cond7512(yes)->op7516
-op7516->op7518
-op7518->op7520
-op7520->cond7523
-cond7523(yes)->sub7527
-sub7527->sub7529
-cond7523(no)->op7534
-op7534->cond7537
-cond7537(yes)->sub7541
-sub7541->sub7543
-cond7537(no)->cond7549
-cond7549(yes)->sub7553
-sub7553->sub7555
-cond7549(no)->op7560
-op7560->cond7563
-cond7563(yes)->sub7567
-sub7567->sub7569
-cond7563(no)->sub7577
-sub7577->cond7574
-cond7574(yes)->cond7579
-cond7579(yes)->sub7583
-sub7583->sub7585
-sub7585->cond7512
-cond7579(no)->cond7512
-cond7574(no)->cond7512
-cond7512(no)->op7592
-op7592->sub7594
-sub7594->cond7597
-cond7597->io7610
-io7610->e7608
+op5194->op5196
+op5196->op5198
+op5198->op5200
+op5200->cond5203
+cond5203(yes)->op5207
+op5207->op5209
+op5209->op5211
+op5211->cond5214
+cond5214(yes)->sub5218
+sub5218->sub5220
+cond5214(no)->op5225
+op5225->cond5228
+cond5228(yes)->sub5232
+sub5232->sub5234
+cond5228(no)->cond5240
+cond5240(yes)->sub5244
+sub5244->sub5246
+cond5240(no)->op5251
+op5251->cond5254
+cond5254(yes)->sub5258
+sub5258->sub5260
+cond5254(no)->sub5268
+sub5268->cond5265
+cond5265(yes)->cond5270
+cond5270(yes)->sub5274
+sub5274->sub5276
+sub5276->cond5203
+cond5270(no)->cond5203
+cond5265(no)->cond5203
+cond5203(no)->op5283
+op5283->sub5285
+sub5285->cond5288
+cond5288->io5301
+io5301->e5299
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -284,17 +284,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>8e636b7113f87485</code>
+            Flow content SHA-256: <code>b1c55446a77004f1</code>
           </p>
           <div id="canvas"></div>
         </div>

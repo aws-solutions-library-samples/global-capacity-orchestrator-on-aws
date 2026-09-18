@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="b601c858be75909b">
+        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
+        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
+        <meta name="gco-flow-digest" content="0e21d268b54ad763">
         <title>Deterministic queued Job create-or-adopt path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,127 +208,127 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4087=>operation: 'Create or adopt exactly one deterministic ``batch/v1`` Job.\n\n        This path deliberately bypasses generic manifest upsert semantics: it\n        never deletes, renames, or replaces an existing Job. An ambiguous API\n        result is safe to retry because the same queue ID always resolves to the\n        same Kubernetes name and adoption requires the full queue ID annotation.\n        '
-op4089=>operation: manifest = copy.deepcopy(manifest_data)
-cond4092=>operation: raise QueuedJobNotCreatedError("Central queue accepts only apiVersion 'batch/v1', kind 'Job'") if  manifest.get('apiVersion') != 'batch/v1' or manifest.get('kind') != 'Job'
-op4102=>operation: metadata = manifest.get('metadata')
-cond4105=>operation: raise QueuedJobNotCreatedError('Queued Job metadata must be an object') if  not isinstance(metadata, dict)
-op4115=>operation: declared_namespace = metadata.get('namespace')
-cond4118=>operation: raise QueuedJobNotCreatedError('Queued Job namespace does not match the queue envelope') if  declared_namespace is not None and declared_namespace != namespace
-op4128=>operation: original_name = metadata.get('name')
-cond4131=>operation: raise QueuedJobNotCreatedError('Queued Job metadata.name is required') if  not isinstance(original_name, str) or not original_name
-op4141=>operation: deterministic_name = self.queued_job_name(original_name, queue_job_id)
-op4143=>operation: metadata['name'] = deterministic_name
-op4145=>operation: metadata['namespace'] = namespace
-op4147=>operation: labels = metadata.setdefault('labels', {})
-op4149=>operation: annotations = metadata.setdefault('annotations', {})
-cond4152=>operation: raise QueuedJobNotCreatedError('Queued Job metadata labels and annotations must be objects') if  not isinstance(labels, dict) or not isinstance(annotations, dict)
-op4162=>operation: labels['gco.io/managed-by'] = 'central-queue'
-op4164=>operation: labels['gco.io/queue-job-key'] = hashlib.sha256(queue_job_id.encode('utf-8')).hexdigest()[:32]
-op4166=>operation: annotations['gco.io/queue-job-id'] = queue_job_id
-op4168=>operation: annotations['gco.io/original-job-name'] = original_name
-op4170=>operation: is_valid, validation_error = self.validate_manifest(manifest, namespace)
-cond4173=>operation: raise QueuedJobNotCreatedError(f'Queued Job validation failed: {validation_error}') if  not is_valid
-sub4183=>subroutine: self._inject_security_defaults(manifest)
-op4186=>operation: job = self.batch_v1.read_namespaced_job(name=deterministic_name, namespace=namespace, _request_timeout=self._k8s_timeout)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2306=>operation: 'Create or adopt exactly one deterministic ``batch/v1`` Job.\n\n        This path deliberately bypasses generic manifest upsert semantics: it\n        never deletes, renames, or replaces an existing Job. An ambiguous API\n        result is safe to retry because the same queue ID always resolves to the\n        same Kubernetes name and adoption requires the full queue ID annotation.\n        '
+op2308=>operation: manifest = copy.deepcopy(manifest_data)
+cond2311=>operation: raise QueuedJobNotCreatedError("Central queue accepts only apiVersion 'batch/v1', kind 'Job'") if  manifest.get('apiVersion') != 'batch/v1' or manifest.get('kind') != 'Job'
+op2321=>operation: metadata = manifest.get('metadata')
+cond2324=>operation: raise QueuedJobNotCreatedError('Queued Job metadata must be an object') if  not isinstance(metadata, dict)
+op2334=>operation: declared_namespace = metadata.get('namespace')
+cond2337=>operation: raise QueuedJobNotCreatedError('Queued Job namespace does not match the queue envelope') if  declared_namespace is not None and declared_namespace != namespace
+op2347=>operation: original_name = metadata.get('name')
+cond2350=>operation: raise QueuedJobNotCreatedError('Queued Job metadata.name is required') if  not isinstance(original_name, str) or not original_name
+op2360=>operation: deterministic_name = self.queued_job_name(original_name, queue_job_id)
+op2362=>operation: metadata['name'] = deterministic_name
+op2364=>operation: metadata['namespace'] = namespace
+op2366=>operation: labels = metadata.setdefault('labels', {})
+op2368=>operation: annotations = metadata.setdefault('annotations', {})
+cond2371=>operation: raise QueuedJobNotCreatedError('Queued Job metadata labels and annotations must be objects') if  not isinstance(labels, dict) or not isinstance(annotations, dict)
+op2381=>operation: labels['gco.io/managed-by'] = 'central-queue'
+op2383=>operation: labels['gco.io/queue-job-key'] = hashlib.sha256(queue_job_id.encode('utf-8')).hexdigest()[:32]
+op2385=>operation: annotations['gco.io/queue-job-id'] = queue_job_id
+op2387=>operation: annotations['gco.io/original-job-name'] = original_name
+op2389=>operation: is_valid, validation_error = self.validate_manifest(manifest, namespace)
+cond2392=>operation: raise QueuedJobNotCreatedError(f'Queued Job validation failed: {validation_error}') if  not is_valid
+sub2402=>subroutine: self._inject_security_defaults(manifest)
+op2405=>operation: job = self.batch_v1.read_namespaced_job(name=deterministic_name, namespace=namespace, _request_timeout=self._k8s_timeout)
 operation = 'unchanged'
 message = 'Existing deterministic Kubernetes Job adopted'
-cond4185=>condition: exception raised?
-cond4188=>condition: except ApiException as error
-cond4193=>condition: if error.status != 404
-cond4198=>operation: raise RetryableQueuedJobApplyError('Kubernetes Job lookup was inconclusive; retry deterministic adoption') from error if  _is_retryable_kubernetes_api_error(error)
-sub4208=>subroutine: raise
-op4214=>operation: job = self.batch_v1.create_namespaced_job(namespace=namespace, body=manifest, _request_timeout=self._k8s_timeout)
+cond2404=>condition: exception raised?
+cond2407=>condition: except ApiException as error
+cond2412=>condition: if error.status != 404
+cond2417=>operation: raise RetryableQueuedJobApplyError('Kubernetes Job lookup was inconclusive; retry deterministic adoption') from error if  _is_retryable_kubernetes_api_error(error)
+sub2427=>subroutine: raise
+op2433=>operation: job = self.batch_v1.create_namespaced_job(namespace=namespace, body=manifest, _request_timeout=self._k8s_timeout)
 operation = 'created'
 message = 'Deterministic Kubernetes Job created'
-cond4213=>condition: exception raised?
-cond4216=>condition: except ApiException as create_error
-cond4221=>condition: if create_error.status == 409
-op4228=>operation: job = self.batch_v1.read_namespaced_job(name=deterministic_name, namespace=namespace, _request_timeout=self._k8s_timeout)
-cond4225=>condition: exception raised?
-cond4230=>condition: except ApiException as adoption_error
-cond4235=>operation: raise RetryableQueuedJobApplyError('Concurrent Kubernetes Job adoption was inconclusive') from adoption_error if  adoption_error.status == 404 or _is_retryable_kubernetes_api_error(adoption_error)
-sub4245=>subroutine: raise
-cond4247=>condition: except Exception as adoption_error
-sub4251=>subroutine: raise RetryableQueuedJobApplyError('Concurrent Kubernetes Job adoption was inconclusive') from adoption_error
-op4256=>operation: operation = 'unchanged'
-op4258=>operation: message = 'Concurrent deterministic Kubernetes Job adopted'
-op4293=>operation: actual_annotations = getattr(job.metadata, 'annotations', None) or {}
-cond4296=>operation: raise RuntimeError(f'Kubernetes Job name collision for {namespace}/{deterministic_name}') if  actual_annotations.get('gco.io/queue-job-id') != queue_job_id
-op4306=>operation: uid = str(getattr(job.metadata, 'uid', '') or '')
-op4308=>operation: actual_name = str(getattr(job.metadata, 'name', '') or deterministic_name)
-op4310=>operation: actual_namespace = str(getattr(job.metadata, 'namespace', '') or namespace)
-cond4313=>operation: raise RuntimeError('Kubernetes API returned a queued Job without a UID') if  not uid
-io4326=>inputoutput: output: ResourceStatus(api_version='batch/v1', kind='Job', name=actual_name, namespace=actual_namespace, status=operation, message=message, uid=uid)
-e4324=>end: end function return
-cond4263=>condition: if _is_retryable_kubernetes_api_error(create_error)
-sub4267=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job create result was inconclusive; retry deterministic adoption') from create_error
-sub4271=>subroutine: raise
-cond4275=>condition: except Exception as create_error
-sub4279=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job create result was inconclusive; retry deterministic adoption') from create_error
-cond4284=>condition: except Exception as read_error
-sub4288=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job lookup was inconclusive; retry deterministic adoption') from read_error
+cond2432=>condition: exception raised?
+cond2435=>condition: except ApiException as create_error
+cond2440=>condition: if create_error.status == 409
+op2447=>operation: job = self.batch_v1.read_namespaced_job(name=deterministic_name, namespace=namespace, _request_timeout=self._k8s_timeout)
+cond2444=>condition: exception raised?
+cond2449=>condition: except ApiException as adoption_error
+cond2454=>operation: raise RetryableQueuedJobApplyError('Concurrent Kubernetes Job adoption was inconclusive') from adoption_error if  adoption_error.status == 404 or _is_retryable_kubernetes_api_error(adoption_error)
+sub2464=>subroutine: raise
+cond2466=>condition: except Exception as adoption_error
+sub2470=>subroutine: raise RetryableQueuedJobApplyError('Concurrent Kubernetes Job adoption was inconclusive') from adoption_error
+op2475=>operation: operation = 'unchanged'
+op2477=>operation: message = 'Concurrent deterministic Kubernetes Job adopted'
+op2512=>operation: actual_annotations = getattr(job.metadata, 'annotations', None) or {}
+cond2515=>operation: raise RuntimeError(f'Kubernetes Job name collision for {namespace}/{deterministic_name}') if  actual_annotations.get('gco.io/queue-job-id') != queue_job_id
+op2525=>operation: uid = str(getattr(job.metadata, 'uid', '') or '')
+op2527=>operation: actual_name = str(getattr(job.metadata, 'name', '') or deterministic_name)
+op2529=>operation: actual_namespace = str(getattr(job.metadata, 'namespace', '') or namespace)
+cond2532=>operation: raise RuntimeError('Kubernetes API returned a queued Job without a UID') if  not uid
+io2545=>inputoutput: output: ResourceStatus(api_version='batch/v1', kind='Job', name=actual_name, namespace=actual_namespace, status=operation, message=message, uid=uid)
+e2543=>end: end function return
+cond2482=>condition: if _is_retryable_kubernetes_api_error(create_error)
+sub2486=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job create result was inconclusive; retry deterministic adoption') from create_error
+sub2490=>subroutine: raise
+cond2494=>condition: except Exception as create_error
+sub2498=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job create result was inconclusive; retry deterministic adoption') from create_error
+cond2503=>condition: except Exception as read_error
+sub2507=>subroutine: raise RetryableQueuedJobApplyError('Kubernetes Job lookup was inconclusive; retry deterministic adoption') from read_error
 
-op4087->op4089
-op4089->cond4092
-cond4092->op4102
-op4102->cond4105
-cond4105->op4115
-op4115->cond4118
-cond4118->op4128
-op4128->cond4131
-cond4131->op4141
-op4141->op4143
-op4143->op4145
-op4145->op4147
-op4147->op4149
-op4149->cond4152
-cond4152->op4162
-op4162->op4164
-op4164->op4166
-op4166->op4168
-op4168->op4170
-op4170->cond4173
-cond4173->sub4183
-sub4183->op4186
-op4186->cond4185
-cond4185(yes)->cond4188
-cond4188(yes)->cond4193
-cond4193(yes)->cond4198
-cond4198->sub4208
-cond4193(no)->op4214
-op4214->cond4213
-cond4213(yes)->cond4216
-cond4216(yes)->cond4221
-cond4221(yes)->op4228
-op4228->cond4225
-cond4225(yes)->cond4230
-cond4230(yes)->cond4235
-cond4235->sub4245
-cond4230(no)->cond4247
-cond4247(yes)->sub4251
-cond4247(no)->op4256
-op4256->op4258
-op4258->op4293
-op4293->cond4296
-cond4296->op4306
-op4306->op4308
-op4308->op4310
-op4310->cond4313
-cond4313->io4326
-io4326->e4324
-cond4225(no)->op4256
-cond4221(no)->cond4263
-cond4263(yes)->sub4267
-cond4263(no)->sub4271
-cond4216(no)->cond4275
-cond4275(yes)->sub4279
-cond4275(no)->op4293
-cond4213(no)->op4293
-cond4188(no)->cond4284
-cond4284(yes)->sub4288
-cond4284(no)->op4293
-cond4185(no)->op4293
+op2306->op2308
+op2308->cond2311
+cond2311->op2321
+op2321->cond2324
+cond2324->op2334
+op2334->cond2337
+cond2337->op2347
+op2347->cond2350
+cond2350->op2360
+op2360->op2362
+op2362->op2364
+op2364->op2366
+op2366->op2368
+op2368->cond2371
+cond2371->op2381
+op2381->op2383
+op2383->op2385
+op2385->op2387
+op2387->op2389
+op2389->cond2392
+cond2392->sub2402
+sub2402->op2405
+op2405->cond2404
+cond2404(yes)->cond2407
+cond2407(yes)->cond2412
+cond2412(yes)->cond2417
+cond2417->sub2427
+cond2412(no)->op2433
+op2433->cond2432
+cond2432(yes)->cond2435
+cond2435(yes)->cond2440
+cond2440(yes)->op2447
+op2447->cond2444
+cond2444(yes)->cond2449
+cond2449(yes)->cond2454
+cond2454->sub2464
+cond2449(no)->cond2466
+cond2466(yes)->sub2470
+cond2466(no)->op2475
+op2475->op2477
+op2477->op2512
+op2512->cond2515
+cond2515->op2525
+op2525->op2527
+op2527->op2529
+op2529->cond2532
+cond2532->io2545
+io2545->e2543
+cond2444(no)->op2475
+cond2440(no)->cond2482
+cond2482(yes)->sub2486
+cond2482(no)->sub2490
+cond2435(no)->cond2494
+cond2494(yes)->sub2498
+cond2494(no)->op2512
+cond2432(no)->op2512
+cond2407(no)->cond2503
+cond2503(yes)->sub2507
+cond2503(no)->op2512
+cond2404(no)->op2512
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -338,17 +338,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
+        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b601c858be75909b</code>
+            Flow content SHA-256: <code>0e21d268b54ad763</code>
           </p>
           <div id="canvas"></div>
         </div>
