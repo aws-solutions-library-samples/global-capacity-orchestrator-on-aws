@@ -246,7 +246,7 @@ jobs:
             # on the first attempt.
             attempt=1
             while true; do
-              npm audit --prefix "$package_dir" --audit-level=high \
+              npm audit --prefix "$package_dir" --audit-level=moderate \
                 --json > "npm-audit-reports/${report_name}.json" || true
               is_operational_error=0
               python3 -c "
@@ -277,7 +277,7 @@ jobs:
               --ignore-file .github/config/.npm-audit-ignore; then
               audit_status=1
             fi
-            npm audit --prefix "$package_dir" --audit-level=high || true
+            npm audit --prefix "$package_dir" --audit-level=moderate || true
           done < <(list_npm_package_dirs .)
           exit "$audit_status"
       - name: Upload npm audit reports

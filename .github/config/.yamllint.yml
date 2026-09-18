@@ -12,8 +12,13 @@ rules:
     indent-sequences: whatever  # Allow both styles for K8s compatibility
     check-multi-line-strings: false
 
+  # Booleans are spelled `true` / `false`, nothing else. YAML 1.1 parsers
+  # (PyYAML, Go's yaml.v2 behind kubectl and Helm) read `yes` / `no` / `on` /
+  # `off` as booleans while YAML 1.2 parsers read them as strings, so a
+  # manifest carrying `enabled: yes` means different things to different
+  # tools. Keys are exempt because GitHub Actions' `on:` trigger key is one.
   truthy:
-    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+    allowed-values: ['true', 'false']
     check-keys: false
 
   comments:
