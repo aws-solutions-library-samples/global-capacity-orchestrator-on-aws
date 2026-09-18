@@ -3330,16 +3330,22 @@ jobs:
         # /internal/status performs the live one-hour allocation probe the
         # release validation gates on: opencost_healthy is OpenCost's
         # /healthz through the shipped egress rule; opencost_returning_data
-        # is a real /allocation/compute answer with at least one namespace.
-        # Bounded, because OpenCost needs a few Prometheus scrape intervals
-        # of cAdvisor and its own series before it can price anything.
+        # is a real /allocation/compute answer with at least one allocation.
+        # That flag is satisfied by OpenCost's synthetic rows alone — on this
+        # job's first run the hour held only `__unmounted__` (the Prometheus
+        # PVC's cost) while no pod had accumulated a full query-resolution
+        # interval yet — so the wait also requires a real namespace among the
+        # allocation names before the report step reads them back. Bounded,
+        # because OpenCost needs a few Prometheus scrape intervals of cAdvisor
+        # and its own series, at its 300s query resolution, before it can
+        # price a pod.
         run: |
           set -euo pipefail
           kubectl -n gco-system port-forward svc/cost-monitor 18080:8080 >/dev/null 2>&1 &
           pf_pid=$!
           trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
           sleep 3
-          deadline=$((SECONDS + 600))
+          deadline=$((SECONDS + 900))
           until python3 - <<'PY'
           import json
           import sys
@@ -3355,11 +3361,18 @@ jobs:
           if not status["opencost_healthy"]:
               print("OpenCost /healthz not yet reachable through allow-cost-monitor-to-opencost")
               sys.exit(1)
-          sys.exit(0 if status["opencost_returning_data"] else 1)
+          if not status["opencost_returning_data"]:
+              sys.exit(1)
+          real = [name for name in status["allocation_names"] if not name.startswith("__")]
+          if not real:
+              print("OpenCost returns only synthetic allocations so far; waiting for a pod allocation")
+              sys.exit(1)
+          print(f"OpenCost prices {len(real)} namespace(s): {', '.join(real)}")
+          sys.exit(0)
           PY
           do
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "::error::cost-monitor never reported opencost_returning_data within 600s"
+              echo "::error::cost-monitor never reported a real namespace allocation within 900s"
               kubectl -n gco-system logs deploy/cost-monitor --tail=100 || true
               kubectl -n monitoring logs deploy/opencost -c opencost --tail=100 || true
               exit 1
@@ -3450,9 +3463,12 @@ jobs:
           rows = table.to_pylist()
           assert all(row["cluster"] == cluster_id for row in rows), sorted({row["cluster"] for row in rows})
           namespaces = sorted(row["namespace"] for row in rows)
-          # Real allocations for real namespaces: the monitoring stack has been
-          # running longest, so OpenCost must have priced it.
-          assert "monitoring" in namespaces, namespaces
+          # Real allocations for real namespaces, not only OpenCost's synthetic
+          # __idle__ / __unmounted__ rows: the system and monitoring pods have
+          # been running longest, so at least one of those must be priced.
+          real = [name for name in namespaces if not name.startswith("__")]
+          assert real, namespaces
+          assert {"kube-system", "monitoring"} & set(real), namespaces
           priced = [row for row in rows if row["total_cost"] > 0]
           assert priced, "OpenCost returned allocations but priced none of them"
           print(f"parquet ok: {table.num_rows} rows x {len(table.column_names)} columns, {len(priced)} priced")
