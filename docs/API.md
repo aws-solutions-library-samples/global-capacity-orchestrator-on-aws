@@ -25,7 +25,16 @@ Gateway exposes it, and which authentication applies.
 > against the running applications by
 > [`tests/test_api_docs_coverage.py`](../tests/test_api_docs_coverage.py), which
 > fails if a route is added, removed, or renamed without updating this file.
-> Machine-readable OpenAPI documents live in [`docs/openapi/`](openapi/).
+> Machine-readable OpenAPI documents live in [`docs/openapi/`](openapi/), and
+> the same documents are rendered into per-service **spec sheets** — every
+> operation's parameters, request body, responses and schemas — under
+> [`diagrams/api_specs/`](../diagrams/api_specs/README.md):
+> [manifest-processor](../diagrams/api_specs/manifest-processor.md),
+> [inference-proxy](../diagrams/api_specs/inference-proxy.md),
+> [health-monitor](../diagrams/api_specs/health-monitor.md),
+> [cost-monitor](../diagrams/api_specs/cost-monitor.md). FastAPI's Swagger UI
+> console for each service is published on the project site at
+> [`/swagger/`](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/).
 
 ## Table of Contents
 

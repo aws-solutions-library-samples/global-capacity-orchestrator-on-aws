@@ -923,9 +923,12 @@ surfaces version drift as a single rolling issue.
 
 ### Keep the diagrams current
 
-`diagrams/generate.py` is the canonical driver for the per-stack CDK views and
-per-function code flowcharts. Refresh both catalogues whenever architecture or
-a charted flow changes, then run the read-only contract:
+`diagrams/generate.py` is the canonical driver for the per-stack CDK views,
+the per-function code flowcharts, and the API spec sheets. Refresh the
+catalogues whenever architecture, a charted flow, or an HTTP route or model
+changes (for the API sheets, `python scripts/generate_openapi.py` first, then
+`python diagrams/generate.py --api-only` — no timestamp or commit is needed
+for that catalogue), then run the read-only contract:
 
 ```bash
 SOURCE_DATE_EPOCH=1788091200 \

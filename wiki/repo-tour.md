@@ -62,8 +62,11 @@ capacity, and pulling the logs — without leaving the editor.*
   documented in `.github/CI.md` (see
   [How we build & test](build-and-test.md)).
 - [`diagrams/`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/tree/main/diagrams)
-  — auto-generated architecture diagrams and code flowcharts, regenerated
-  from the CDK app and source so they track reality.
+  — auto-generated architecture diagrams, code flowcharts, and the API spec
+  sheets, regenerated from the CDK app, the source, and the FastAPI
+  applications so they track reality. The spec sheets are this wiki's
+  [API reference](api/README.md); the interactive Swagger UI consoles live at
+  [/swagger/](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/).
 
 ## Suggested first hour
 

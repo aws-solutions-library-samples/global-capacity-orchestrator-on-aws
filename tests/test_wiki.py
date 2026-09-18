@@ -47,6 +47,16 @@ _HTML_TARGET = re.compile(r"(?:src|href)=\"([^\"]+)\"")
 _ASSETS_PREFIX = "assets/images/"
 _IMAGES_DIR = PROJECT_ROOT / "images"
 
+#: The API-spec-sheet injection mapping from scripts/mkdocs_hooks.py: the
+#: Markdown files diagrams/api_specs/generate.py renders become api/<name>.md.
+_API_PREFIX = "api/"
+_API_SPECS_DIR = PROJECT_ROOT / "diagrams" / "api_specs"
+
+#: Where pages.yml builds FastAPI's Swagger UI consoles into the site
+#: (diagrams/api_specs/generate.py --swagger-ui-dir); the nav's one non-coverage
+#: external entry.
+SWAGGER_SITE_PATH = "swagger/"
+
 
 def _nav_entries(node: object) -> list[str]:
     """Flatten the mkdocs nav tree into its string leaves (pages + URLs)."""
@@ -71,6 +81,11 @@ def _wiki_pages() -> dict[str, str]:
     return {path.name: path.read_text(encoding="utf-8") for path in sorted(WIKI_DIR.glob("*.md"))}
 
 
+def _injected_api_pages() -> set[str]:
+    """The nav entries the hook's api/ injection makes valid."""
+    return {f"{_API_PREFIX}{path.name}" for path in _API_SPECS_DIR.glob("*.md")}
+
+
 def _link_targets(text: str) -> set[str]:
     return set(_MD_TARGET.findall(text)) | set(_HTML_TARGET.findall(text))
 
@@ -89,39 +104,58 @@ def test_mkdocs_yml_is_safe_loadable_with_a_nav() -> None:
 
 
 def test_nav_and_wiki_pages_are_one_to_one() -> None:
-    """Every wiki page is reachable from the nav, and the nav lists no ghosts."""
+    """Every wiki page is reachable from the nav, and the nav lists no ghosts.
+
+    The api/ pages are not files under wiki/: they are the generated spec
+    sheets the hook injects, so the nav must list exactly those too — a sheet
+    left out of the nav is unreachable, and a nav entry without a sheet fails
+    the strict build.
+    """
     nav_pages = {entry for entry in _load_nav() if entry.endswith(".md")}
-    wiki_pages = set(_wiki_pages())
-    assert nav_pages == wiki_pages, (
-        f"nav/wiki mismatch — pages missing from nav: {sorted(wiki_pages - nav_pages)}, "
-        f"nav entries with no file: {sorted(nav_pages - wiki_pages)}"
+    expected = set(_wiki_pages()) | _injected_api_pages()
+    assert _injected_api_pages(), "diagrams/api_specs/ ships generated sheets"
+    assert nav_pages == expected, (
+        f"nav/wiki mismatch — pages missing from nav: {sorted(expected - nav_pages)}, "
+        f"nav entries with no file: {sorted(nav_pages - expected)}"
     )
 
 
 #: Where pages.yml merges each stack's coverage report into the site, in nav
-#: order. The three are the nav's only external entries.
+#: order. With the Swagger consoles these are the nav's only external entries.
 COVERAGE_REPORT_PATHS = ("python-coverage/", "bash-coverage/", "nodejs-coverage/")
 
 
-def test_nav_coverage_entries_are_the_canonical_pages_urls() -> None:
-    """The coverage reports are merged by pages.yml at /python-coverage/,
-    /bash-coverage/ and /nodejs-coverage/ — the nav's external entries must
-    keep pointing exactly there, on the canonical origin, or a report silently
-    falls out of the site's navigation."""
+def test_nav_external_entries_are_the_canonical_pages_urls() -> None:
+    """Everything pages.yml adds outside the MkDocs build — the Swagger UI
+    consoles at /swagger/ and the coverage reports at /python-coverage/,
+    /bash-coverage/ and /nodejs-coverage/ — is reached through external nav
+    entries, which must keep pointing exactly there, on the canonical origin,
+    or a tree silently falls out of the site's navigation."""
     external = [entry for entry in _load_nav() if entry.startswith("http")]
-    expected = [f"{PAGES_ORIGIN}{path}" for path in COVERAGE_REPORT_PATHS]
+    expected = [f"{PAGES_ORIGIN}{path}" for path in (SWAGGER_SITE_PATH, *COVERAGE_REPORT_PATHS)]
     assert external == expected, (
-        f"expected exactly the three coverage-report nav entries {expected}, got {external}"
+        f"expected exactly the external nav entries {expected}, got {external}"
     )
 
 
-def test_pages_workflow_serves_every_coverage_report_the_nav_links() -> None:
-    """The nav promises three report addresses; pages.yml must place a tree at each."""
+def test_pages_workflow_serves_every_tree_the_nav_links() -> None:
+    """The nav promises four addresses outside the build; pages.yml must place a tree at each."""
     pages = (PROJECT_ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
     for path in COVERAGE_REPORT_PATHS:
         assert re.search(rf"^\s*mv \S+ site/{re.escape(path.rstrip('/'))}$", pages, re.M), (
             f"pages.yml does not move a report into site/{path}"
         )
+    assert re.search(
+        rf"diagrams/api_specs/generate\.py.*--swagger-ui-dir site/{re.escape(SWAGGER_SITE_PATH.rstrip('/'))}\b",
+        pages,
+    ), f"pages.yml does not build the Swagger UI consoles into site/{SWAGGER_SITE_PATH}"
+
+
+def test_every_generated_spec_sheet_is_in_the_nav_and_nothing_else_under_api() -> None:
+    """api/ nav entries and diagrams/api_specs/*.md are the same set, README included."""
+    nav_api = {entry for entry in _load_nav() if entry.startswith(_API_PREFIX)}
+    assert nav_api == _injected_api_pages()
+    assert f"{_API_PREFIX}README.md" in nav_api, "the catalogue index serves /api/"
 
 
 # =============================================================================
@@ -152,6 +186,9 @@ def test_relative_links_resolve_to_wiki_pages_or_injected_assets() -> None:
             if path.startswith(_ASSETS_PREFIX):
                 if not (_IMAGES_DIR / path.removeprefix(_ASSETS_PREFIX)).is_file():
                     problems.append(f"{name} -> {target} (no matching images/ file)")
+            elif path.startswith(_API_PREFIX):
+                if not (_API_SPECS_DIR / path.removeprefix(_API_PREFIX)).is_file():
+                    problems.append(f"{name} -> {target} (no matching generated spec sheet)")
             elif not (WIKI_DIR / path).is_file():
                 problems.append(f"{name} -> {target} (not a wiki page)")
     assert not problems, f"unresolvable relative links: {problems}"

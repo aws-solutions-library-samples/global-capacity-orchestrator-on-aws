@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from diagrams.api_specs.generate import api_contract_issues  # noqa: E402
 from diagrams.code_diagrams._renderer import _output_stem_for  # noqa: E402
 from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
@@ -320,13 +321,22 @@ def check_diagram_contract(
     *,
     code: bool = True,
     infra: bool = True,
+    api: bool = True,
 ) -> list[str]:
-    """Return structural catalogue violations without modifying the checkout."""
+    """Return structural catalogue violations without modifying the checkout.
+
+    The API spec sheets are a deterministic rendering of the committed OpenAPI
+    documents, so their contract is a re-render compared byte for byte
+    (``diagrams.api_specs.generate.api_contract_issues``) rather than a
+    stamp check.
+    """
     issues: list[str] = []
     if code:
         issues.extend(_code_artifact_contract(project_root))
     if infra:
         issues.extend(_infra_artifact_contract(project_root))
+    if api:
+        issues.extend(api_contract_issues(project_root))
     return issues
 
 
@@ -335,17 +345,19 @@ def main() -> None:
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--code-only", action="store_true")
     selection.add_argument("--infra-only", action="store_true")
+    selection.add_argument("--api-only", action="store_true")
     parser.add_argument(
         "--check",
         action="store_true",
         help="Verify artifact/index/marker structure without rendering",
     )
     args = parser.parse_args()
-    code = not args.infra_only
-    infra = not args.code_only
+    code = not (args.infra_only or args.api_only)
+    infra = not (args.code_only or args.api_only)
+    api = not (args.code_only or args.infra_only)
 
     if args.check:
-        issues = check_diagram_contract(code=code, infra=infra)
+        issues = check_diagram_contract(code=code, infra=infra, api=api)
         if issues:
             for issue in issues:
                 print(f"ERROR: {issue}", file=sys.stderr)
@@ -369,8 +381,14 @@ def main() -> None:
             cwd=ROOT,
             check=True,
         )
+    if api:
+        subprocess.run(
+            [sys.executable, "diagrams/api_specs/generate.py"],
+            cwd=ROOT,
+            check=True,
+        )
 
-    issues = check_diagram_contract(code=code, infra=infra)
+    issues = check_diagram_contract(code=code, infra=infra, api=api)
     if issues:
         raise RuntimeError(
             "diagram generation completed with structural drift: " + "; ".join(issues)

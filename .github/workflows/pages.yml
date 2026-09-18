@@ -1,11 +1,19 @@
 # =============================================================================
-# pages.yml — Publish the wiki + the three coverage reports to GitHub Pages
+# pages.yml — Publish the wiki, the API consoles + the three coverage reports to GitHub Pages
 # =============================================================================
 #
 # Deploys ONE Pages artifact containing:
 #   /                    — the orientation wiki, built with MkDocs from wiki/
 #                          and mkdocs.yml at the exact commit the triggering
 #                          Unit Tests run measured (workflow_run.head_sha)
+#   /api/                — the API spec sheets (diagrams/api_specs/*.md, one
+#                          per FastAPI service), injected into that same
+#                          MkDocs build by scripts/mkdocs_hooks.py
+#   /swagger/            — FastAPI's Swagger UI console per service, built by
+#                          diagrams/api_specs/generate.py --swagger-ui-dir from
+#                          the committed docs/openapi/*.json with the pinned
+#                          swagger-ui-dist served from /swagger/assets/ (no
+#                          CDN: the site makes zero third-party requests)
 #   /python-coverage/    — coverage.py's HTML report (htmlcov/) from that run,
 #                          copied as-is (no pytest re-run, no regeneration)
 #   /bash-coverage/      — the statement-level shell report that
@@ -127,7 +135,29 @@ jobs:
         # Identical build to the PR-side lint:mkdocs:strict job. strict mode
         # fails the deploy on any broken link or nav entry rather than
         # publishing a damaged site; the previous deployment keeps serving.
+        # The API spec sheets under diagrams/api_specs/ are injected as
+        # /api/ pages by scripts/mkdocs_hooks.py during this build.
         run: mkdocs build --strict
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - name: Install locked repository Node tooling
+        # Brings in the pinned swagger-ui-dist the consoles are served from.
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the Swagger UI consoles into the site
+        # FastAPI's own /docs page per service (fastapi.openapi.docs), pointing
+        # at a copy of the committed OpenAPI document and at the self-hosted
+        # swagger-ui-dist bundle under site/swagger/assets/, so the published
+        # site still makes zero third-party requests. The generator refuses a
+        # page that references a remote resource.
+        run: |
+          python diagrams/api_specs/generate.py --check
+          python diagrams/api_specs/generate.py --swagger-ui-dir site/swagger \
+            --swagger-assets node_modules/swagger-ui-dist
       - name: Download the Python coverage artifact from the Unit Tests run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:

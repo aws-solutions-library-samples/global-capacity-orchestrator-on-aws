@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 import diagrams.generate as diagrams_generate
+from diagrams.api_specs import generate as api_specs
 from diagrams.code_diagrams import generate as generate_mod
 from diagrams.code_diagrams._source_marker import SENTINEL
 from diagrams.code_diagrams._targets import TARGETS
@@ -283,7 +284,7 @@ class TestMixedVintageCatalogue:
     def test_two_vintages_are_accepted(self, tmp_path, monkeypatch) -> None:
         targets = _write_catalogue(tmp_path, {"alpha.py": _STAMP_A, "beta.py": _STAMP_B})
         monkeypatch.setattr(diagrams_generate, "TARGETS", targets)
-        assert diagrams_generate.check_diagram_contract(tmp_path, infra=False) == []
+        assert diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False) == []
 
     def test_marker_stamp_drift_is_reported_with_the_file_and_remedy(
         self, tmp_path, monkeypatch
@@ -296,7 +297,7 @@ class TestMixedVintageCatalogue:
             source.read_text(encoding="utf-8").replace(_STAMP_B[0], "2026-09-03T12:00:00Z"),
             encoding="utf-8",
         )
-        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False)
+        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False)
         assert any("beta.py" in issue and "marker block's stamp" in issue for issue in issues)
         assert any("python diagrams/generate.py --code-only" in issue for issue in issues)
 
@@ -308,7 +309,7 @@ class TestMixedVintageCatalogue:
             html.read_text(encoding="utf-8").replace(_STAMP_A[0], "2026-09-04T12:00:00Z"),
             encoding="utf-8",
         )
-        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False)
+        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False)
         assert any(
             "alpha.f.html" in issue and "alpha.py" in issue and "stamp disagrees" in issue
             for issue in issues
@@ -321,7 +322,7 @@ class TestMixedVintageCatalogue:
             index_stamp=_STAMP_A,  # stale: alpha is older than beta
         )
         monkeypatch.setattr(diagrams_generate, "TARGETS", targets)
-        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False)
+        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False)
         assert any("README.md" in issue and "newest provenance entry" in issue for issue in issues)
 
     def test_substantive_source_change_is_reported_with_remedy(self, tmp_path, monkeypatch) -> None:
@@ -332,7 +333,7 @@ class TestMixedVintageCatalogue:
             source.read_text(encoding="utf-8").replace("return True", "return False"),
             encoding="utf-8",
         )
-        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False)
+        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False)
         assert any("alpha.py" in issue and "no longer describe them" in issue for issue in issues)
         assert any("--target alpha.py:<function>" in issue for issue in issues)
 
@@ -340,7 +341,7 @@ class TestMixedVintageCatalogue:
         targets = _write_catalogue(tmp_path, {"alpha.py": _STAMP_A})
         monkeypatch.setattr(diagrams_generate, "TARGETS", targets)
         (tmp_path / "diagrams" / "code_diagrams" / "provenance.json").unlink()
-        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False)
+        issues = diagrams_generate.check_diagram_contract(tmp_path, infra=False, api=False)
         assert any("provenance.json" in issue and "To fix:" in issue for issue in issues)
 
 
@@ -536,12 +537,12 @@ class TestCodeCatalogueViolations:
     def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         targets = _write_catalogue(tmp_path, {"alpha.py": _STAMP_A})
         monkeypatch.setattr(diagrams_generate, "TARGETS", targets)
-        assert check_diagram_contract(tmp_path, infra=False) == []
+        assert check_diagram_contract(tmp_path, infra=False, api=False) == []
         return tmp_path
 
     @staticmethod
     def _issues(root: Path) -> list[str]:
-        return check_diagram_contract(root, infra=False)
+        return check_diagram_contract(root, infra=False, api=False)
 
     def test_missing_and_orphan_artifacts_are_named_by_repository_path(self, root: Path) -> None:
         """A deleted PNG and a stray HTML are reported relative to the project root."""
@@ -685,10 +686,10 @@ class TestInfrastructureCatalogue:
 
     def test_complete_catalogue_is_clean(self, tmp_path: Path) -> None:
         _write_infra_catalogue(tmp_path)
-        assert check_diagram_contract(tmp_path, code=False) == []
+        assert check_diagram_contract(tmp_path, code=False, api=False) == []
 
     def test_absent_catalogue_reports_every_expected_png(self, tmp_path: Path) -> None:
-        assert check_diagram_contract(tmp_path, code=False) == [
+        assert check_diagram_contract(tmp_path, code=False, api=False) == [
             f"missing infrastructure artifact: {name}"
             for name in sorted(f"{name}.png" for name in INFRA_DIAGRAM_NAMES)
         ]
@@ -698,7 +699,7 @@ class TestInfrastructureCatalogue:
         output_dir = _write_infra_catalogue(tmp_path)
         (output_dir / "stray.png").write_bytes(_PNG_SIGNATURE)
         (output_dir / "global-stack.dot").write_text("digraph {}\n", encoding="utf-8")
-        assert check_diagram_contract(tmp_path, code=False) == [
+        assert check_diagram_contract(tmp_path, code=False, api=False) == [
             "orphan infrastructure artifact: stray.png",
             "transient Graphviz sidecar: global-stack.dot",
         ]
@@ -710,6 +711,25 @@ class TestInfrastructureCatalogue:
 
 _CODE_GENERATOR_ARGV = [sys.executable, "diagrams/code_diagrams/generate.py", "--require-png"]
 _INFRA_GENERATOR_ARGV = [sys.executable, "diagrams/infra_diagrams/generate.py", "--stack", "all"]
+_API_GENERATOR_ARGV = [sys.executable, "diagrams/api_specs/generate.py"]
+
+_API_DOCUMENT = {
+    "openapi": "3.1.0",
+    "info": {"title": "Fake API", "version": "1.0.0"},
+    "paths": {"/ping": {"get": {"summary": "Ping", "responses": {"200": {"description": "OK"}}}}},
+}
+_API_MKDOCS = "site_url: https://example.test/site/\nrepo_url: https://example.test/org/repo\n"
+
+
+def _write_api_catalogue(root: Path) -> Path:
+    """One committed OpenAPI document plus the sheets rendered from it."""
+    (root / "docs" / "openapi").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "openapi" / "fake-service.json").write_text(
+        json.dumps(_API_DOCUMENT, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (root / "mkdocs.yml").write_text(_API_MKDOCS, encoding="utf-8")
+    api_specs.write_outputs(root)
+    return root / "diagrams" / "api_specs"
 
 
 class _CliHarness:
@@ -751,6 +771,9 @@ class _CliHarness:
     def with_infra_catalogue(self) -> Path:
         return _write_infra_catalogue(self.root)
 
+    def with_api_catalogue(self) -> Path:
+        return _write_api_catalogue(self.root)
+
     def with_generation_env(self) -> None:
         self._monkeypatch.setenv("SOURCE_DATE_EPOCH", "1767225600")
         self._monkeypatch.setenv("GCO_DIAGRAM_SOURCE_COMMIT", "a" * 40)
@@ -771,6 +794,7 @@ class TestCliCheck:
     ) -> None:
         cli.with_code_catalogue()
         cli.with_infra_catalogue()
+        cli.with_api_catalogue()
         cli.main("--check")
         out, err = capsys.readouterr()
         assert out == "Diagram artifact contract is current\n"
@@ -782,8 +806,10 @@ class TestCliCheck:
     ) -> None:
         cli.with_code_catalogue()
         infra = cli.with_infra_catalogue()
+        api = cli.with_api_catalogue()
         (infra / "global-stack.png").unlink()
         (infra / "regional-stack.dot").write_text("digraph {}\n", encoding="utf-8")
+        (api / "fake-service.md").write_text("# edited by hand\n", encoding="utf-8")
         with pytest.raises(SystemExit) as exc:
             cli.main("--check")
         assert exc.value.code == 1
@@ -792,6 +818,8 @@ class TestCliCheck:
         assert err == (
             "ERROR: missing infrastructure artifact: global-stack.png\n"
             "ERROR: transient Graphviz sidecar: regional-stack.dot\n"
+            "ERROR: stale API spec sheet: diagrams/api_specs/fake-service.md\n"
+            f"ERROR: regenerate with `{api_specs.REGENERATION_COMMAND}`\n"
         )
         assert cli.calls == []
 
@@ -811,12 +839,34 @@ class TestCliCheck:
         cli.main("--check", "--infra-only")
         assert capsys.readouterr().out == "Diagram artifact contract is current\n"
 
+    def test_api_only_ignores_the_other_catalogues(
+        self, cli: _CliHarness, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Neither a code nor an infrastructure catalogue exists, yet ``--api-only`` passes."""
+        cli.with_api_catalogue()
+        cli.main("--check", "--api-only")
+        assert capsys.readouterr().out == "Diagram artifact contract is current\n"
+
+    def test_an_unrenderable_api_catalogue_is_one_issue_not_a_traceback(
+        self, cli: _CliHarness, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A root with no OpenAPI documents reports why, alongside the other catalogues."""
+        cli.with_code_catalogue()
+        cli.with_infra_catalogue()
+        with pytest.raises(SystemExit) as exc:
+            cli.main("--check")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("ERROR: API spec sheets cannot be rendered: ")
+        assert err.count("ERROR:") == 1
+
     def test_check_needs_no_provenance_environment(
         self, cli: _CliHarness, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Verification must work in any clone without generation-time variables."""
         cli.with_code_catalogue()
         cli.with_infra_catalogue()
+        cli.with_api_catalogue()
         cli.main("--check")
         assert capsys.readouterr().out == "Diagram artifact contract is current\n"
 
@@ -867,11 +917,13 @@ class TestCliGeneration:
         """Both children run from the project root with ``check=True``; a clean tree returns."""
         cli.with_code_catalogue()
         cli.with_infra_catalogue()
+        cli.with_api_catalogue()
         cli.with_generation_env()
         assert cli.main() is None
         assert cli.calls == [
             (_CODE_GENERATOR_ARGV, {"cwd": cli.root, "check": True}),
             (_INFRA_GENERATOR_ARGV, {"cwd": cli.root, "check": True}),
+            (_API_GENERATOR_ARGV, {"cwd": cli.root, "check": True}),
         ]
         assert capsys.readouterr() == ("", "")
 
@@ -887,10 +939,17 @@ class TestCliGeneration:
         cli.main("--infra-only")
         assert cli.calls == [(_INFRA_GENERATOR_ARGV, {"cwd": cli.root, "check": True})]
 
+    def test_api_only_needs_no_provenance_environment(self, cli: _CliHarness) -> None:
+        """The spec sheets are a deterministic render of committed documents: nothing to stamp."""
+        cli.with_api_catalogue()
+        cli.main("--api-only")
+        assert cli.calls == [(_API_GENERATOR_ARGV, {"cwd": cli.root, "check": True})]
+
     def test_failing_generator_surfaces_as_called_process_error(self, cli: _CliHarness) -> None:
         """A non-zero child aborts before the infra generator or the re-check run."""
         cli.with_code_catalogue()
         cli.with_infra_catalogue()
+        cli.with_api_catalogue()
         cli.with_generation_env()
         cli.child_returncode = 3
         with pytest.raises(subprocess.CalledProcessError) as exc:
@@ -903,6 +962,7 @@ class TestCliGeneration:
         """Successful children followed by a stale tree fail with every issue joined."""
         cli.with_code_catalogue()
         infra = cli.with_infra_catalogue()
+        cli.with_api_catalogue()
         (infra / "global-stack.png").unlink()
         (infra / "global-stack.dot").write_text("digraph {}\n", encoding="utf-8")
         cli.with_generation_env()
@@ -913,4 +973,8 @@ class TestCliGeneration:
             "missing infrastructure artifact: global-stack.png; "
             "transient Graphviz sidecar: global-stack.dot"
         )
-        assert [argv for argv, _ in cli.calls] == [_CODE_GENERATOR_ARGV, _INFRA_GENERATOR_ARGV]
+        assert [argv for argv, _ in cli.calls] == [
+            _CODE_GENERATOR_ARGV,
+            _INFRA_GENERATOR_ARGV,
+            _API_GENERATOR_ARGV,
+        ]
