@@ -27,7 +27,7 @@ one source.
 
 ```bash
 python scripts/generate_openapi.py        # refresh docs/openapi/*.json from the apps
-python diagrams/generate.py --api-only                     # rewrite these sheets and this index
+python diagrams/generate.py --api-only    # rewrite these sheets and this index
 python diagrams/generate.py --check       # fail if anything here is stale
 ```
 
