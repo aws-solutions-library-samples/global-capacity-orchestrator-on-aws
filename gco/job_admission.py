@@ -73,9 +73,10 @@ DEFAULT_TRUSTED_REGISTRIES = (
     "k8s.gcr.io",
     "public.ecr.aws",
     "nvcr.io",
-    # Org-scoped GHCR prefix (matched via the startswith branch) for the
-    # HuggingFace TGI image shipped in examples/inference-tgi.yaml. Scoped to
-    # the org rather than all of ghcr.io on purpose.
+    # Org-scoped GHCR prefix (matched via the startswith branch) for Hugging
+    # Face images, including the archived TGI image that endpoints deployed
+    # before SGLang replaced it still run. Scoped to the org rather than all
+    # of ghcr.io on purpose.
     "ghcr.io/huggingface",
 )
 DEFAULT_TRUSTED_DOCKERHUB_ORGS = (

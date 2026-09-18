@@ -158,7 +158,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "stage HuggingFace weights on EFS",
             "warm a model cache before serving",
         ],
-        "related": ["inference-vllm", "inference-tgi", "efs-output-job"],
+        "related": ["inference-vllm", "inference-sglang", "efs-output-job"],
     },
     "sqs-job-submission": {
         "category": "Jobs & Training",
@@ -229,21 +229,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "high-throughput LLM inference",
             "deploy a chat completions endpoint",
         ],
-        "related": ["inference-tgi", "inference-sglang", "inference-triton", "model-download-job"],
-    },
-    "inference-tgi": {
-        "category": "Inference Serving",
-        "summary": "HuggingFace Text Generation Inference — optimized transformer serving.",
-        "gpu": "NVIDIA",
-        "opt_in": "",
-        "submission": "gco jobs submit-direct examples/inference-tgi.yaml -r us-east-1",
-        "keywords": ["tgi", "huggingface", "text generation", "llm serving"],
-        "instance_types": ["g5.xlarge", "g5.12xlarge", "g6.xlarge"],
-        "use_cases": [
-            "serve HuggingFace LLMs with TGI",
-            "transformer text-generation endpoint",
-        ],
-        "related": ["inference-vllm", "inference-sglang", "inference-torchserve"],
+        "related": ["inference-sglang", "inference-triton", "model-download-job"],
     },
     "inference-triton": {
         "category": "Inference Serving",
@@ -284,7 +270,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "high-throughput LLM serving with prefix caching",
             "serve LLMs with structured output",
         ],
-        "related": ["inference-vllm", "inference-tgi"],
+        "related": ["inference-vllm", "inference-triton", "model-download-job"],
     },
     "efs-output-job": {
         "category": "Storage & Persistence",
@@ -925,10 +911,9 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "keywords": [
             "vllm",
-            "tgi",
+            "sglang",
             "triton",
             "torchserve",
-            "sglang",
             "endpoints",
             "canary",
             "rolling update",

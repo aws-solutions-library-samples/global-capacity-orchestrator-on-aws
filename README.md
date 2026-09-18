@@ -466,7 +466,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 ### Inference Serving
 
-- **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework ships with a ready-to-run example manifest: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [TGI](https://huggingface.co/docs/text-generation-inference) ([example](examples/inference-tgi.yaml)), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml)), [TorchServe](https://docs.pytorch.org/serve/) ([example](examples/inference-torchserve.yaml)), and [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml))
+- **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework ships with a ready-to-run example manifest: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml)), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml)), and [TorchServe](https://docs.pytorch.org/serve/) ([example](examples/inference-torchserve.yaml))
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
 - **Model weight management**: [Central S3 bucket](./docs/CLUSTER_SHARED_BUCKET.md) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings

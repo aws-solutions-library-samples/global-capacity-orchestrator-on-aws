@@ -22,7 +22,7 @@ FastAPI route modules for GCO's in-cluster APIs. Management modules are mounted 
 
 ## Route Prefixes
 
-The management APIs use `/api/v1` and are mounted by `manifest_api.py`. Managed model-serving traffic uses `/inference/{endpoint_name}` and is mounted only by `inference_api.py`, so it does not share the manifest processor's Kubernetes RBAC, queue worker, or replica capacity. OpenAI-, TGI-, Triton-, and native runtime paths follow the endpoint name. Router modules own these prefixes directly.
+The management APIs use `/api/v1` and are mounted by `manifest_api.py`. Managed model-serving traffic uses `/inference/{endpoint_name}` and is mounted only by `inference_api.py`, so it does not share the manifest processor's Kubernetes RBAC, queue worker, or replica capacity. OpenAI-, SGLang-, Triton-, legacy TGI-, and other native runtime paths follow the endpoint name. Router modules own these prefixes directly.
 
 ## Adding a New Route Module
 

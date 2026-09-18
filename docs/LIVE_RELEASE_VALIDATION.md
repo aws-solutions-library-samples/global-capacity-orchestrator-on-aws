@@ -63,7 +63,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state |
 | `deploy` | `baseline` | Deploy the checked-in GCO topology, then prune the local CDK asset images it built |
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB; require the owned internal ALB to materialize exactly one tagged HTTPS/IP target group for health-monitor, manifest-processor, and inference-proxy, each with HTTPS `/healthz` checks and only port-8443 traffic/health registrations (stale wrong-port draining targets must disappear), recording bounded ELBv2 convergence samples |
-| `inference` | `topology` | Verify the deployed `api-tls-proxy` CPU request and active `ContainerResource` HPA target, then sequentially run vLLM baseline/HPA and TGI baseline/HPA endpoints from separate digest-pinned images and immutable model commits. Require exact framework request/response schemas, authenticated health and model identity (`/v1/models` or `/info`), HPA ownership/stability, and two strong DynamoDB/full-Kubernetes absence observations for every incarnation. |
+| `inference` | `topology` | Verify the deployed `api-tls-proxy` CPU request and active `ContainerResource` HPA target, then sequentially run vLLM baseline/HPA and SGLang baseline/HPA endpoints from separate digest-pinned images and immutable model commits. Require exact framework request/response schemas (vLLM's OpenAI `/v1/completions`, SGLang's native `/generate`), authenticated health and model identity (`/v1/models` or `/server_info`), HPA ownership/stability, and two strong DynamoDB/full-Kubernetes absence observations for every incarnation. |
 | `policy` | `topology` | `GET /api/v1/policy` reports all three admission layers per Region: the front-door caps, the per-container `LimitRange`, and the namespace `ResourceQuota`. Asserted on the response body, because a Kubernetes read failure degrades to HTTP 200 with a per-namespace `status` and is invisible to a transport-level check. Also requires the project's own ECR hostnames in `trusted_registries`, which CDK appends at synth time. |
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
@@ -130,9 +130,9 @@ export INFERENCE_REGION="us-east-1"
 export INFERENCE_VLLM_IMAGE="registry.example/vllm@sha256:<64-lowercase-hex-digest>"
 export INFERENCE_VLLM_MODEL_ID="publisher/vllm-model"
 export INFERENCE_VLLM_MODEL_REVISION="<40-lowercase-hex-model-commit>"
-export INFERENCE_TGI_IMAGE="registry.example/tgi@sha256:<64-lowercase-hex-digest>"
-export INFERENCE_TGI_MODEL_ID="publisher/tgi-model"
-export INFERENCE_TGI_MODEL_REVISION="<40-lowercase-hex-model-commit>"
+export INFERENCE_SGLANG_IMAGE="registry.example/sglang@sha256:<64-lowercase-hex-digest>"
+export INFERENCE_SGLANG_MODEL_ID="publisher/sglang-model"
+export INFERENCE_SGLANG_MODEL_REVISION="<40-lowercase-hex-model-commit>"
 
 python -m scripts.live_release_validation \
   --repo-root "$PWD" \
@@ -145,9 +145,9 @@ python -m scripts.live_release_validation \
   --inference-vllm-image "$INFERENCE_VLLM_IMAGE" \
   --inference-vllm-model-id "$INFERENCE_VLLM_MODEL_ID" \
   --inference-vllm-model-revision "$INFERENCE_VLLM_MODEL_REVISION" \
-  --inference-tgi-image "$INFERENCE_TGI_IMAGE" \
-  --inference-tgi-model-id "$INFERENCE_TGI_MODEL_ID" \
-  --inference-tgi-model-revision "$INFERENCE_TGI_MODEL_REVISION" \
+  --inference-sglang-image "$INFERENCE_SGLANG_IMAGE" \
+  --inference-sglang-model-id "$INFERENCE_SGLANG_MODEL_ID" \
+  --inference-sglang-model-revision "$INFERENCE_SGLANG_MODEL_REVISION" \
   --confirm-inference-deployment \
   --run-id "$RUN_ID" \
   --report-dir "$REPORT_DIR" \
@@ -157,7 +157,7 @@ python -m scripts.live_release_validation \
 
 This command performs real AWS deployment and deletion. Reading this runbook or copying the command is not authorization to execute it.
 
-The `inference` action has no mutable image or model defaults. Supply separately verified vLLM and TGI image digests, model IDs, and full model commits. The fixed adapter matrix, exact request bodies and response schemas, official runtime ports, health/model-info probes, endpoint/HPA shape, shared TLS-sidecar CPU/HPA expectations from checked-in `cdk.json`, timeouts, and consent all belong to the main `RunSettings` identity. The action checkpoints a cryptographically random owner nonce before creation, verifies the deployed `gco-system/inference-proxy` sidecar request and active TLS `ContainerResource` metric, then runs four endpoints with peak concurrency one: vLLM baseline, vLLM CPU-HPA, TGI baseline, and TGI CPU-HPA. vLLM must expose the configured model through `/v1/models`; TGI `/info` must report both the exact model ID and immutable revision. Each generation response must match only its selected framework schema. Cleanup binds both the nonce and immutable endpoint lifecycle, inventories Deployments, ReplicaSets, Pods, Services, Endpoints, EndpointSlices, native and KEDA HPAs, ScaledObjects, ConfigMaps, the owned generated Secret, and legacy Ingress/HTTPRoute objects, and requires two complete absent sweeps separated by a monitor interval. A cleaned pre-invocation resume re-proves absence, archives that closed lifecycle, and rotates to a new incarnation before redeploying. Invocation intent and outcome are checkpointed as a non-replay journal: a durable success is parsed into evidence without another request, while a started/ambiguous/failed outcome fails closed and proceeds to cleanup. An invoked incarnation is never recreated or reinvoked. All four endpoint cleanups are attempted before an error returns.
+The `inference` action has no mutable image or model defaults. Supply separately verified vLLM and SGLang image digests, model IDs, and full model commits. The fixed adapter matrix, exact request bodies and response schemas, official runtime ports, health/model-info probes, endpoint/HPA shape, shared TLS-sidecar CPU/HPA expectations from checked-in `cdk.json`, timeouts, and consent all belong to the main `RunSettings` identity. The action checkpoints a cryptographically random owner nonce before creation, verifies the deployed `gco-system/inference-proxy` sidecar request and active TLS `ContainerResource` metric, then runs four endpoints with peak concurrency one: vLLM baseline, vLLM CPU-HPA, SGLang baseline, and SGLang CPU-HPA. vLLM must expose the configured model through `/v1/models`; SGLang `/server_info` must report both the exact `model_path` and the immutable `revision` the launcher was started with. Each generation response must match only its selected framework schema: vLLM is driven through its OpenAI-compatible `/v1/completions` and SGLang through its native `/generate`, so a response that only satisfies the OpenAI shape cannot pass for both. Cleanup binds both the nonce and immutable endpoint lifecycle, inventories Deployments, ReplicaSets, Pods, Services, Endpoints, EndpointSlices, native and KEDA HPAs, ScaledObjects, ConfigMaps, the owned generated Secret, and legacy Ingress/HTTPRoute objects, and requires two complete absent sweeps separated by a monitor interval. A cleaned pre-invocation resume re-proves absence, archives that closed lifecycle, and rotates to a new incarnation before redeploying. Invocation intent and outcome are checkpointed as a non-replay journal: a durable success is parsed into evidence without another request, while a started/ambiguous/failed outcome fails closed and proceeds to cleanup. An invoked incarnation is never recreated or reinvoked. All four endpoint cleanups are attempted before an error returns.
 
 Add `--optional-schedulers all` (or a comma list of `yunikorn`, `slurm`) when the release touches scheduler charts, the helm installer, or scheduler-adjacent manifests: the run then force-enables the off-by-default schedulers through a run-scoped CDK context override (`helm_enabled_overrides`) — never by editing `cdk.json` — so the `schedulers` action proves them too. The override becomes part of the checkpoint identity, so a `--resume` must repeat it exactly. Without the flag, off-by-default schedulers are reported as skipped with their configuration source, which is valid evidence for releases that do not touch them.
 

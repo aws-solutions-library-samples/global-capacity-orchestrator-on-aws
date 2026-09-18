@@ -420,8 +420,8 @@ def invoke_inference(
     """Send a prompt to an inference endpoint and return the generated text.
 
     Automatically discovers the endpoint's ingress path, detects the serving
-    framework (vLLM, TGI, Triton), and routes the request through the API
-    Gateway with SigV4 authentication.
+    framework (vLLM, SGLang, Triton, plus legacy TGI endpoints), and routes
+    the request through the API Gateway with SigV4 authentication.
 
     Use this for single-turn text completions. For multi-turn conversations
     with chat models, use chat_inference instead.
@@ -458,7 +458,7 @@ def chat_inference(
     """Send a multi-turn chat conversation to an inference endpoint.
 
     Sends an OpenAI-compatible /v1/chat/completions request. Works with
-    vLLM, TGI (with --api-protocol openai), and any OpenAI-compatible server.
+    vLLM, SGLang, and any OpenAI-compatible server.
 
     Each message in the list should have 'role' (system/user/assistant) and
     'content' keys.
