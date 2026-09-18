@@ -9,6 +9,7 @@ and the friendly "AWS CLI not found" message when the binary is missing.
 
 import os
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -181,3 +182,13 @@ class TestTunnelPreservation:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_called_once()
+
+    def test_unset_kubeconfig_env_means_the_default_file(self, tmp_path, monkeypatch):
+        """With ``KUBECONFIG`` unset entirely the default ``~/.kube/config`` is
+        used. The suite's autouse fixture pins ``KUBECONFIG`` for every test,
+        so this is the one place the unset branch is exercised."""
+        from cli.kubectl_helpers import _kubeconfig_file
+
+        monkeypatch.delenv("KUBECONFIG", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        assert _kubeconfig_file() == tmp_path / ".kube" / "config"
