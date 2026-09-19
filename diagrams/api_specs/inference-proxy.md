@@ -6,9 +6,9 @@
 
 Authenticated streaming reverse proxy for managed GCO inference endpoints
 
-- **Machine-readable document:** [`docs/openapi/inference-proxy.json`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/openapi/inference-proxy.json) — the FastAPI `app.openapi()` export this sheet is rendered from
+- **Machine-readable document:** [`docs/openapi/inference-proxy.json`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/openapi/inference-proxy.json) — the FastAPI `app.openapi()` export (`scripts/generate_openapi.py`) this sheet is rendered from
 - **Interactive console (Swagger UI):** <https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/inference-proxy/>
-- **Catalogue index:** [README.md](README.md)
+- **Catalogue index:** [README.md](README.md) · [interaction diagram](README.md#how-the-surfaces-fit-together)
 
 ## Endpoints
 

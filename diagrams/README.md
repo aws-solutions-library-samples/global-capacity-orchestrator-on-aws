@@ -16,7 +16,7 @@ stay out of each other's way:
 |-----------|---------------|---------------------|
 | [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) topologies synthesised from the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/generate.py --infra-only` |
 | [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only` |
-| [`api_specs/`](api_specs/README.md) | One API spec sheet per FastAPI service — endpoint table, every operation's parameters, request body and responses, every component schema — rendered from the OpenAPI documents FastAPI generates (`docs/openapi/*.json`, the same documents behind each service's Swagger `/docs` page). Markdown for GitHub and the wiki; the generator also builds FastAPI's Swagger UI console per service for the project site. | `python diagrams/generate.py --api-only` |
+| [`api_specs/`](api_specs/README.md) | One API spec sheet per HTTP surface — the two AWS API Gateways (read out of the synthesized CDK stacks), the in-cluster Gateway (composed from its HTTPRoute) and the four FastAPI services (their own `app.openapi()` exports) — with the endpoint table, every operation's parameters, request body and responses, every component schema, and for the gateways the servers, deployment, routing and backend hops; plus `api-topology.svg`, the interaction diagram drawn from the same documents (`docs/openapi/*.json`). Markdown for GitHub and the wiki; the generator also builds a Swagger UI console per document for the project site. | `python diagrams/generate.py --api-only` |
 
 Use `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py` to reconcile
 all three catalogues in one run, or `python diagrams/generate.py --check` for the
@@ -87,11 +87,25 @@ and commit that produced its artifacts. Two consequences worth knowing:
 ## Prerequisites
 
 The three generators have independent dependency chains — only install
-what you need. The API spec sheets need nothing beyond the standard library
-(`python diagrams/generate.py --api-only`); only the optional Swagger UI
-consoles need the project's FastAPI and the locked `swagger-ui-dist` package
-(`npm ci --ignore-scripts --no-audit --no-fund`, then
+what you need. The API spec sheets and the interaction diagram need nothing
+beyond the standard library (`python diagrams/generate.py --api-only`); only
+the optional Swagger UI consoles need the project's FastAPI and the locked
+`swagger-ui-dist` package (`npm ci --ignore-scripts --no-audit --no-fund`, then
 `python diagrams/api_specs/generate.py --swagger-ui-dir <dir> --swagger-assets node_modules/swagger-ui-dist`).
+Refreshing the documents the sheets are rendered from is a separate step:
+`python scripts/generate_openapi.py` (the services),
+`python scripts/generate_api_gateway_openapi.py` (the API Gateways; needs the
+CDK toolchain below) and `python scripts/generate_cluster_gateway_openapi.py`
+(the cluster gateway).
+
+The interaction diagram is the repository's one tracked SVG, and every tracked
+SVG is published as its own document on the Pages origin — so besides the
+byte-exact `--check`, `.github/scripts/validate_svg_assets.py` (run by the
+security workflow and by `tests/test_validate_svg_assets.py`) holds it to a
+content policy: an explicit path allowlist, drawing primitives, text and
+same-site `<a href>` links only, the default SVG namespace only, no DOCTYPE.
+A renderer change that needs a new element or attribute widens that policy in
+the same PR.
 
 **Infrastructure diagrams** ([cdk-dia](https://github.com/pistazie/cdk-dia) + Graphviz + Node):
 

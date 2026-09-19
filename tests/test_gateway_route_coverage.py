@@ -131,14 +131,22 @@ def _resolve(path: str, rules: list[tuple[str, str]]) -> tuple[str, str] | None:
 
 
 def _live_paths() -> dict[str, set[str]]:
-    """``{path: {app, ...}}`` from the committed OpenAPI documents."""
+    """``{path: {app, ...}}`` from the committed FastAPI OpenAPI documents.
+
+    ``docs/openapi/`` also holds the API Gateway documents and the cluster
+    gateway document derived from these (they carry an ``x-gco-source`` block);
+    those describe front doors, not Services, so they are not "live paths".
+    """
     documents = sorted(OPENAPI_DIR.glob("*.json"))
     assert documents, f"no OpenAPI documents found in {OPENAPI_DIR}"
     by_path: dict[str, set[str]] = {}
     for document in documents:
         schema = json.loads(document.read_text(encoding="utf-8"))
+        if "x-gco-source" in schema:
+            continue
         for path in schema.get("paths", {}):
             by_path.setdefault(path, set()).add(document.stem)
+    assert by_path, "no FastAPI service documents found"
     return by_path
 
 
