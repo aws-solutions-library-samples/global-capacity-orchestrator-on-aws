@@ -330,7 +330,7 @@ class TestRegistryDrift:
         assert ecr_augmentation([_region("r", trusted_registries=[host])]) == {"r": [host]}
 
     @pytest.mark.parametrize(
-        "host", ["docker.io", "public.ecr.aws", "ghcr.io/huggingface", "quay.io"]
+        "host", ["docker.io", "public.ecr.aws", "ghcr.io/example-org", "quay.io"]
     )
     def test_non_ecr_hosts_are_not_stripped(self, host: str) -> None:
         assert ecr_augmentation([_region("r", trusted_registries=[host])]) == {"r": []}

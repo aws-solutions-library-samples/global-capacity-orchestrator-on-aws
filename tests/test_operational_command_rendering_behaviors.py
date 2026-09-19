@@ -514,24 +514,24 @@ def _release_inference_args() -> list[str]:
         "test/vllm",
         "--inference-vllm-model-revision",
         "b" * 40,
-        "--inference-tgi-image",
-        "registry.example/tgi@sha256:" + "c" * 64,
-        "--inference-tgi-model-id",
-        "test/tgi",
-        "--inference-tgi-model-revision",
+        "--inference-sglang-image",
+        "registry.example/sglang@sha256:" + "c" * 64,
+        "--inference-sglang-model-id",
+        "test/sglang",
+        "--inference-sglang-model-revision",
         "d" * 40,
     ]
 
 
 def test_release_inference_reports_all_missing_required_options(runner: CliRunner) -> None:
     args = _release_inference_args()
-    option = args.index("--inference-tgi-model-revision")
+    option = args.index("--inference-sglang-model-revision")
     del args[option : option + 2]
 
     result = runner.invoke(release, ["validate", *args])
 
     assert result.exit_code == 1
-    assert "inference action requires --inference-tgi-model-revision" in result.output
+    assert "inference action requires --inference-sglang-model-revision" in result.output
 
 
 def test_release_inference_rejects_non_lowercase_full_revision(runner: CliRunner) -> None:

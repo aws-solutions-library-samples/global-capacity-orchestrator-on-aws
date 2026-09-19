@@ -197,8 +197,7 @@
         "registry.k8s.io",
         "k8s.gcr.io",
         "public.ecr.aws",
-        "nvcr.io",
-        "ghcr.io/huggingface"
+        "nvcr.io"
       ],
       "trusted_dockerhub_orgs": [
         "nvidia",

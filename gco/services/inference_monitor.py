@@ -48,12 +48,17 @@ from kubernetes import client, config
 from kubernetes.client.models import V1Deployment
 from kubernetes.client.rest import ApiException
 
+from gco.models.inference_models import (
+    GPU_NAME_NODE_LABEL,
+    INFERENCE_PROBE_TIMEOUT_SECONDS,
+    SGLANG_UNSUPPORTED_GPU_NAMES,
+)
 from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-18T20:22:59Z
+# Generated from Git commit: ff3928a0113e10c48e392d386f56aafbace92cd2
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -3496,18 +3501,19 @@ class InferenceMonitor:
         container_env = [client.V1EnvVar(name=k, value=str(v)) for k, v in env_vars.items()]
 
         # Runtime behavior is persisted explicitly by callers that need a
-        # strict adapter. Legacy endpoints without the field retain vLLM image
-        # detection, but TGI is never given vLLM's unsupported --root-path:
-        # the authenticated platform proxy strips /inference/{name} before
-        # forwarding /health, /generate, or /info to the model Service.
+        # strict adapter. Legacy endpoints without the field retain image
+        # detection. Only vLLM is given --root-path: the authenticated platform
+        # proxy strips /inference/{name} before forwarding /health, /generate
+        # or /server_info to the model Service, so SGLang serves its documented
+        # unprefixed paths.
         serving_prefix = f"/inference/{name}"
         runtime_framework = spec.get("framework")
-        if runtime_framework not in ("vllm", "tgi"):
+        if runtime_framework not in ("vllm", "sglang"):
             image_lower = image.lower()
             if "vllm" in image_lower:
                 runtime_framework = "vllm"
-            elif "text-generation-inference" in image_lower or "/tgi" in image_lower:
-                runtime_framework = "tgi"
+            elif "sglang" in image_lower:
+                runtime_framework = "sglang"
             else:
                 runtime_framework = None
         if not command and runtime_framework == "vllm":
@@ -3516,6 +3522,23 @@ class InferenceMonitor:
                     args = [*args, "--root-path", serving_prefix]
             else:
                 args = ["--root-path", serving_prefix]
+        if not command and runtime_framework == "sglang":
+            # The lmsysorg/sglang image has no entrypoint (its CMD is a shell),
+            # so the renderer supplies the official launcher. The launcher
+            # binds 127.0.0.1:30000 by default, which the pod's Service could
+            # never reach, so the host and the spec's port are pinned unless
+            # the operator passed them explicitly. The model comes from
+            # ``--model-path`` in the args when given; otherwise from the
+            # ``MODEL`` environment convention every GCO renderer shares,
+            # expanded by the kubelet at container start.
+            command = ["python3", "-m", "sglang.launch_server"]
+            args = list(args) if args else []
+            if "--host" not in args:
+                args.extend(["--host", "0.0.0.0"])  # container listener
+            if "--port" not in args:
+                args.extend(["--port", str(port)])
+            if "--model-path" not in args and "--model" not in args and "MODEL" in env_vars:
+                args.extend(["--model-path", "$(MODEL)"])
 
         # Append caller-supplied arguments (for example the rendered
         # --kv-transfer-config) after any root-path injection so they survive
@@ -3630,6 +3653,12 @@ class InferenceMonitor:
         uses_root_path = args is not None and "--root-path" in args
         probe_health = f"{serving_prefix}{health_path}" if uses_root_path else health_path
 
+        # Every probe states its timeout; the kubelet's silent 1 s default is
+        # what killed a healthy SGLang container every ~3 minutes (its /health
+        # generates a token and polls at one-second steps, so it answers in
+        # just over a second and never faster). See INFERENCE_PROBE_TIMEOUT_SECONDS.
+        probe_timeout = INFERENCE_PROBE_TIMEOUT_SECONDS
+
         container = client.V1Container(
             name="inference",
             image=image,
@@ -3639,13 +3668,18 @@ class InferenceMonitor:
             volume_mounts=volume_mounts if volume_mounts else None,
             command=command,
             args=args,
+            # SGLang answers /health only once the model is loaded, which for a
+            # multi-gigabyte checkpoint outlasts the liveness budget below; the
+            # startup probe holds liveness off for up to 20 minutes while that
+            # happens.
             startup_probe=(
                 client.V1Probe(
                     http_get=client.V1HTTPGetAction(path=health_path, port=port),
                     period_seconds=15,
                     failure_threshold=80,
+                    timeout_seconds=probe_timeout,
                 )
-                if runtime_framework == "tgi"
+                if runtime_framework == "sglang"
                 else None
             ),
             liveness_probe=client.V1Probe(
@@ -3653,11 +3687,13 @@ class InferenceMonitor:
                 initial_delay_seconds=120,
                 period_seconds=15,
                 failure_threshold=5,
+                timeout_seconds=probe_timeout,
             ),
             readiness_probe=client.V1Probe(
                 http_get=client.V1HTTPGetAction(path=probe_health, port=port),
                 initial_delay_seconds=30,
                 period_seconds=10,
+                timeout_seconds=probe_timeout,
             ),
         )
 
@@ -3694,6 +3730,33 @@ class InferenceMonitor:
         if capacity_type in ("spot", "on-demand"):
             node_selector["karpenter.sh/capacity-type"] = capacity_type
 
+        # SGLang's prebuilt kernels need compute capability >= 8.0; the
+        # shipped inference NodePool's cheapest fit is a T4 (g4dn), where the
+        # server crash-loops with "no kernel image is available for execution
+        # on the device". A required NotIn affinity keeps SGLang pods off
+        # pre-Ampere GPUs while composing with any operator node selector
+        # (a plain map cannot express "anything but"). Nodes without the
+        # label are unaffected, so self-managed node groups keep working.
+        affinity = None
+        if runtime_framework == "sglang" and accelerator != "neuron" and gpu_count > 0:
+            affinity = client.V1Affinity(
+                node_affinity=client.V1NodeAffinity(
+                    required_during_scheduling_ignored_during_execution=client.V1NodeSelector(
+                        node_selector_terms=[
+                            client.V1NodeSelectorTerm(
+                                match_expressions=[
+                                    client.V1NodeSelectorRequirement(
+                                        key=GPU_NAME_NODE_LABEL,
+                                        operator="NotIn",
+                                        values=list(SGLANG_UNSUPPORTED_GPU_NAMES),
+                                    )
+                                ]
+                            )
+                        ]
+                    )
+                )
+            )
+
         labels = {
             "app": app_label,
             "project": "gco",
@@ -3726,6 +3789,7 @@ class InferenceMonitor:
                         init_containers=init_containers if init_containers else None,
                         tolerations=tolerations,
                         node_selector=node_selector if node_selector else None,
+                        affinity=affinity,
                         volumes=volumes if volumes else None,
                     ),
                 ),

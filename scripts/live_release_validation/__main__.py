@@ -137,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--inference-region",
         help="Deployed Region used by the inference action",
     )
-    for framework, default_port in (("vllm", 8000), ("tgi", 8080)):
+    for framework, default_port in (("vllm", 8000), ("sglang", 30000)):
         parser.add_argument(
             f"--inference-{framework}-image",
             help=f"Immutable {framework} image reference containing @sha256:",
@@ -157,7 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Explicitly authorize the inference action to create and delete "
-            "four strictly sequential vLLM/TGI endpoint scenarios"
+            "four strictly sequential vLLM/SGLang endpoint scenarios"
         ),
     )
     parser.epilog = "Actions: " + ", ".join(registry)
@@ -209,9 +209,9 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             "inference_vllm_image",
             "inference_vllm_model_id",
             "inference_vllm_model_revision",
-            "inference_tgi_image",
-            "inference_tgi_model_id",
-            "inference_tgi_model_revision",
+            "inference_sglang_image",
+            "inference_sglang_model_id",
+            "inference_sglang_model_revision",
         )
         for option in required:
             if not getattr(args, option):
@@ -276,11 +276,11 @@ def _settings_from_args(
                 port=8000,
             ),
             InferenceRuntimeSpec(
-                framework="tgi",
-                image=args.inference_tgi_image or "",
-                model_id=args.inference_tgi_model_id or "",
-                model_revision=args.inference_tgi_model_revision or "",
-                port=8080,
+                framework="sglang",
+                image=args.inference_sglang_image or "",
+                model_id=args.inference_sglang_model_id or "",
+                model_revision=args.inference_sglang_model_revision or "",
+                port=30000,
             ),
         )
         if inference_enabled

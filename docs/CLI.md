@@ -2475,12 +2475,12 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--image` | `-i` | Container image (required) |
-| `--framework` | | Explicit serving runtime (`vllm` or `tgi`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. |
+| `--framework` | | Explicit serving runtime (`vllm` or `sglang`). Persists the adapter contract used for renderer arguments, probes, and model metadata; Mooncake requires `vllm`. `sglang` renders the official launcher (`python3 -m sglang.launch_server`) bound to `0.0.0.0:<--port>` with `--model-path` taken from `-e MODEL=...` unless it is passed through `--extra-args`, and keeps its pods off pre-Ampere GPUs (T4/g4dn, V100/p3, M60/g3, K80/p2), whose compute capability its prebuilt kernels do not target — a `--node-selector` pinning one is refused. `tgi` is no longer accepted: Hugging Face archived TGI on 2026-03-21 and its adapter was removed, so an endpoint still running TGI has to be redeployed as `sglang` or `vllm`. |
 | `--region` | `-r` | Target region(s), repeatable (default: all deployed regions) |
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |
 | `--gpu-type` | | GPU instance type hint (e.g. g5.xlarge) |
-| `--port` | | Container port (default: 8000) |
+| `--port` | | Container port (default: 8000; SGLang's documented default is 30000) |
 | `--model-path` | | EFS path for model weights |
 | `--model-source` | | S3 URI for model weights (auto-synced via init container) |
 | `--health-path` | | Health check endpoint path (default: /health) |
@@ -2522,6 +2522,13 @@ gco inference deploy my-llm \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
+
+# Deploy with SGLang: the renderer supplies the official launcher and the
+# model comes from -e MODEL=...
+gco inference deploy my-sglang \
+  -i lmsysorg/sglang:v0.5.19 \
+  --framework sglang --port 30000 --gpu-count 1 \
+  -e MODEL=microsoft/Phi-3.5-mini-instruct
 ```
 
 #### `gco inference list`
@@ -2657,7 +2664,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.29.0
 
 #### `gco inference invoke`
 
-Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, TGI, Triton) and builds the appropriate request body.
+Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images, SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`, and Triton's `/v2/models`.
 
 ```bash
 gco inference invoke ENDPOINT_NAME [OPTIONS]
@@ -2678,10 +2685,10 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 | `--max-tokens` | | Max tokens to generate (default: 100) |
 | `--stream/--no-stream` | | Enable or disable incremental response streaming; when omitted, raw JSON with `"stream": true` enables it automatically |
 
-`--stream` forces the OpenAI-compatible `"stream": true` field and prints bytes
-as they arrive. `--no-stream` forces buffered model output even if raw JSON asks
-for streaming. TGI streaming automatically uses `/generate_stream`; request
-bodies remain buffered because API Gateway supports response streaming only.
+`--stream` forces the `"stream": true` body field (OpenAI-compatible and SGLang
+native requests alike) and prints bytes as they arrive. `--no-stream` forces
+buffered model output even if raw JSON asks for streaming. Request bodies
+remain buffered because API Gateway supports response streaming only.
 
 **Example:**
 
@@ -2735,7 +2742,7 @@ gco inference health my-llm -r us-east-1
 
 #### `gco inference models`
 
-Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; TGI uses the read-only `/info` contract and reports both model ID and revision. The persisted `--framework` from deploy is used by default.
+Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
 
 ```bash
 gco inference models ENDPOINT_NAME [OPTIONS]
@@ -2749,7 +2756,7 @@ gco inference models ENDPOINT_NAME [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--framework` | | Runtime metadata contract (`vllm` or `tgi`); defaults to the persisted endpoint framework, then vLLM for legacy records. |
+| `--framework` | | Runtime metadata contract (`vllm` or `sglang`); defaults to the persisted endpoint framework, then vLLM for legacy records. |
 | `--region` | `-r` | Target region to query |
 
 **Example:**
@@ -4308,7 +4315,7 @@ Release validation lifecycle.
 
 #### `gco release validate`
 
-Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and TGI images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and SGLang images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
 ```bash
 gco release validate --expected-account 123456789012 \
@@ -4318,9 +4325,9 @@ gco release validate --expected-account 123456789012 \
   --inference-vllm-image 'registry.example/vllm@sha256:<64-lowercase-hex-digest>' \
   --inference-vllm-model-id publisher/vllm-model \
   --inference-vllm-model-revision '<40-lowercase-hex-model-commit>' \
-  --inference-tgi-image 'registry.example/tgi@sha256:<64-lowercase-hex-digest>' \
-  --inference-tgi-model-id publisher/tgi-model \
-  --inference-tgi-model-revision '<40-lowercase-hex-model-commit>'
+  --inference-sglang-image 'registry.example/sglang@sha256:<64-lowercase-hex-digest>' \
+  --inference-sglang-model-id publisher/sglang-model \
+  --inference-sglang-model-revision '<40-lowercase-hex-model-commit>'
 ```
 
 **Options:**
@@ -4332,9 +4339,9 @@ gco release validate --expected-account 123456789012 \
 | `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required whenever the `deploy` action is selected. |
 | `--actions` | Harness actions to run (default `all`); dependencies are added automatically. `all` includes first-class `inference` immediately after `topology`. A subset run reports `PARTIAL`, never `PASSED`. |
 | `--inference-region` | Required when `inference` runs. One deployed Region used for all four strictly sequential scenarios. |
-| `--inference-vllm-image` / `--inference-tgi-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. |
-| `--inference-vllm-model-id` / `--inference-tgi-model-id` | Required. Exact model identifiers checked through framework-specific model-info APIs. |
-| `--inference-vllm-model-revision` / `--inference-tgi-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
+| `--inference-vllm-image` / `--inference-sglang-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. |
+| `--inference-vllm-model-id` / `--inference-sglang-model-id` | Required. Exact model identifiers checked through framework-specific model-info APIs (vLLM `/v1/models`, SGLang `/server_info`). |
+| `--inference-vllm-model-revision` / `--inference-sglang-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |
 | `--optional-schedulers` | Force-enable the off-by-default schedulers (`yunikorn`, `slurm`, or `all`) for this run's deploy so the `schedulers` action proves them too. |
 | `--profile` | Topology profile to validate against cdk.json: `configured` (default), `single-region`, or `multi-region`. |

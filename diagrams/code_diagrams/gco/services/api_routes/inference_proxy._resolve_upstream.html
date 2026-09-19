@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="abd5b8f65501a65e">
+        <meta name="gco-generated-at" content="2026-09-18T14:22:22Z">
+        <meta name="gco-source-commit" content="90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b">
+        <meta name="gco-flow-digest" content="b10378565908ce91">
         <title>Authenticated inference target resolution (region, readiness, namespace, canary)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,46 +208,46 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4331=>operation: 'Resolve the authorized Service, namespace, and configured health path.'
-op4333=>operation: endpoint_name = _validate_label(endpoint_name, 'name')
-op4335=>operation: endpoint = await asyncio.to_thread(_get_inference_store().get_endpoint, endpoint_name)
-cond4338=>operation: raise HTTPException(status_code=404, detail=f"Inference endpoint '{endpoint_name}' not found") if  not endpoint
-op4348=>operation: namespace = _validate_label(endpoint.get('namespace', 'gco-inference'), 'namespace')
-op4350=>operation: allowed_namespace = os.getenv('INFERENCE_NAMESPACE', 'gco-inference')
-cond4353=>operation: raise HTTPException(status_code=503, detail='Inference endpoint namespace is not routable') if  namespace != allowed_namespace
-op4363=>operation: region = os.getenv('REGION', '')
-op4365=>operation: target_regions = endpoint.get('target_regions')
-cond4368=>operation: raise HTTPException(status_code=404, detail='Inference endpoint is not deployed in this region') if  not region or not isinstance(target_regions, list) or region not in target_regions
-op4378=>operation: desired_state = endpoint.get('desired_state')
-op4380=>operation: region_status = endpoint.get('region_status')
-op4382=>operation: local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
-op4384=>operation: local_state = local_status.get('state') if isinstance(local_status, dict) else None
-cond4387=>operation: raise HTTPException(status_code=503, detail='Inference endpoint is not ready in this region') if  desired_state != 'running' or local_state != 'running'
-op4397=>operation: spec = endpoint.get('spec')
-op4399=>operation: configured_health_path = spec.get('health_check_path', '/health') if isinstance(spec, dict) else '/health'
-cond4402=>operation: configured_health_path = '/health' if  not isinstance(configured_health_path, str) or not configured_health_path.startswith('/')
-io4415=>inputoutput: output: (_target_service(endpoint, endpoint_name), namespace, configured_health_path)
-e4413=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op389=>operation: 'Resolve the authorized Service, namespace, and configured health path.'
+op391=>operation: endpoint_name = _validate_label(endpoint_name, 'name')
+op393=>operation: endpoint = await asyncio.to_thread(_get_inference_store().get_endpoint, endpoint_name)
+cond396=>operation: raise HTTPException(status_code=404, detail=f"Inference endpoint '{endpoint_name}' not found") if  not endpoint
+op406=>operation: namespace = _validate_label(endpoint.get('namespace', 'gco-inference'), 'namespace')
+op408=>operation: allowed_namespace = os.getenv('INFERENCE_NAMESPACE', 'gco-inference')
+cond411=>operation: raise HTTPException(status_code=503, detail='Inference endpoint namespace is not routable') if  namespace != allowed_namespace
+op421=>operation: region = os.getenv('REGION', '')
+op423=>operation: target_regions = endpoint.get('target_regions')
+cond426=>operation: raise HTTPException(status_code=404, detail='Inference endpoint is not deployed in this region') if  not region or not isinstance(target_regions, list) or region not in target_regions
+op436=>operation: desired_state = endpoint.get('desired_state')
+op438=>operation: region_status = endpoint.get('region_status')
+op440=>operation: local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
+op442=>operation: local_state = local_status.get('state') if isinstance(local_status, dict) else None
+cond445=>operation: raise HTTPException(status_code=503, detail='Inference endpoint is not ready in this region') if  desired_state != 'running' or local_state != 'running'
+op455=>operation: spec = endpoint.get('spec')
+op457=>operation: configured_health_path = spec.get('health_check_path', '/health') if isinstance(spec, dict) else '/health'
+cond460=>operation: configured_health_path = '/health' if  not isinstance(configured_health_path, str) or not configured_health_path.startswith('/')
+io473=>inputoutput: output: (_target_service(endpoint, endpoint_name), namespace, configured_health_path)
+e471=>end: end function return
 
-op4331->op4333
-op4333->op4335
-op4335->cond4338
-cond4338->op4348
-op4348->op4350
-op4350->cond4353
-cond4353->op4363
-op4363->op4365
-op4365->cond4368
-cond4368->op4378
-op4378->op4380
-op4380->op4382
-op4382->op4384
-op4384->cond4387
-cond4387->op4397
-op4397->op4399
-op4399->cond4402
-cond4402->io4415
-io4415->e4413
+op389->op391
+op391->op393
+op393->cond396
+cond396->op406
+op406->op408
+op408->cond411
+cond411->op421
+op421->op423
+op423->cond426
+cond426->op436
+op436->op438
+op438->op440
+op440->op442
+op442->cond445
+cond445->op455
+op455->op457
+op457->cond460
+cond460->io473
+io473->e471
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -257,17 +257,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-18T14:22:22Z -->
+        <!-- Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-18T14:22:22Z">2026-09-18T14:22:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>abd5b8f65501a65e</code>
+            Flow content SHA-256: <code>b10378565908ce91</code>
           </p>
           <div id="canvas"></div>
         </div>

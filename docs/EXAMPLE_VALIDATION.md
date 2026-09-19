@@ -137,12 +137,11 @@ skip):
   Available first, since its backend volume lands one applier pass after
   the chart on a fresh install (readiness wait; nothing to revert).
 
-Disclosed mutations: inference examples whose default model is
-HuggingFace-gated (vLLM's Llama 3.1, TGI's Mistral) are validated with the
-ungated `facebook/opt-125m` substituted (and TGI's AWQ quantization flag
-removed — it is checkpoint-specific). The serving path itself runs
-unchanged, and every mutation appears in the report row. Examples whose
-defaults are ungated (SGLang's Phi-3.5) run verbatim.
+Disclosed mutations: the inference example whose default model is
+HuggingFace-gated (vLLM's Llama 3.1) is validated with the ungated
+`facebook/opt-125m` substituted. The serving path itself runs unchanged, and
+every mutation appears in the report row. Examples whose defaults are
+ungated (SGLang's Phi-3.5) run verbatim.
 
 Capacity-gated examples (`efa-distributed-training` on P-family,
 inferentia/trainium on Inf/Trn) check the account's service quota first

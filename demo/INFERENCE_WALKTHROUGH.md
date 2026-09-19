@@ -125,8 +125,9 @@ gco inference invoke vllm-demo \
 
 Raw JSON with `"stream": true` also enables incremental transport when no
 explicit flag is present. `--no-stream` overrides it and keeps the friendly
-buffered JSON/text rendering. TGI images automatically switch from `/generate`
-to `/generate_stream`. Request bodies remain buffered; only responses stream.
+buffered JSON/text rendering. SGLang endpoints stream through the same native
+`/generate` path (the CLI sets the `stream` body flag). Request bodies remain
+buffered; only responses stream.
 
 ## Step 5: Scale the Endpoint
 

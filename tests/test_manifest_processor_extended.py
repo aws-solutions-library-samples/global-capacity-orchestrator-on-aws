@@ -2087,8 +2087,8 @@ class TestTrustedImageSourceLockstep:
     are the fail-closed fallbacks both services use when deployment wiring is
     absent. Divergence produces environment-dependent acceptance of the same
     manifest — the exact drift that let ``lmsysorg`` be trusted at deploy time
-    but rejected by the fallback (and ``vllm``/``ghcr.io/huggingface``, used by
-    shipped inference examples, be rejected everywhere).
+    but rejected by the fallback (and ``vllm``, used by a shipped inference
+    example, be rejected everywhere).
     """
 
     @staticmethod

@@ -79,7 +79,7 @@ def build_action_registry() -> dict[str, ActionDefinition]:
         ),
         ActionDefinition(
             "inference",
-            "Run vLLM/TGI baseline and HPA matrix, then prove stable absence",
+            "Run vLLM/SGLang baseline and HPA matrix, then prove stable absence",
             ("topology",),
             action_inference,
         ),

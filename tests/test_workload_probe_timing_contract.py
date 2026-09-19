@@ -288,3 +288,120 @@ def test_startup_probes_are_not_stricter_than_liveness(
         f"({probe['timeoutSeconds']}s) is tighter than its liveness timeout "
         f"({liveness['timeoutSeconds']}s), but startup runs when the process is slowest"
     )
+
+
+# ─── Rendered inference endpoints ─────────────────────────────────────────────
+#
+# The managed inference Deployments are not manifests in MANIFEST_DIR; the
+# inference monitor renders them from the DDB record. They bit the same way:
+# every probe omitted ``timeoutSeconds``, and SGLang's ``/health`` — a
+# one-token generation polled at one-second steps — answers in just over a
+# second and never faster, so under the 1 s default readiness flapped and
+# liveness killed a healthy container every ~3 minutes (live release
+# validation, 2026-09-18). The rendered probes are held to the same rules.
+
+INFERENCE_FRAMEWORK_SPECS: dict[str, dict[str, Any]] = {
+    "vllm": {
+        "image": "vllm/vllm-openai:v0.11.0",
+        "framework": "vllm",
+        "port": 8000,
+        "health_check_path": "/health",
+        "env": {"MODEL": "facebook/opt-125m"},
+    },
+    "sglang": {
+        "image": "lmsysorg/sglang:v0.5.19",
+        "framework": "sglang",
+        "port": 30000,
+        "health_check_path": "/health",
+        "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+    },
+}
+
+#: SGLang's ``/health`` sleeps a full second before its first look at the
+#: generation it submitted, so any probe timeout at or under this fails a
+#: healthy server by construction.
+SGLANG_HEALTH_FLOOR_SECONDS = 1
+
+
+def _rendered_probes(framework: str) -> list[tuple[str, Any]]:
+    """Render the inference Deployment for ``framework`` and return its (kind, probe) pairs."""
+    from unittest.mock import MagicMock, patch
+
+    from gco.services.inference_monitor import InferenceMonitor
+
+    with (
+        patch("gco.services.inference_monitor.config.load_incluster_config"),
+        patch("gco.services.inference_monitor.client.AppsV1Api"),
+        patch("gco.services.inference_monitor.client.CoreV1Api"),
+        patch("gco.services.inference_monitor.client.NetworkingV1Api"),
+        patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+    ):
+        monitor = InferenceMonitor(
+            cluster_id="probe-contract",
+            region="us-east-1",
+            store=MagicMock(),
+            namespace="gco-inference",
+            reconcile_interval=5,
+        )
+    deployment = monitor._build_inference_deployment_object(
+        name="chat",
+        deploy_name="chat-worker",
+        app_label="chat-worker",
+        namespace="gco-inference",
+        spec=INFERENCE_FRAMEWORK_SPECS[framework],
+        replicas=1,
+    )
+    (container,) = deployment.spec.template.spec.containers
+    probes = [
+        ("startupProbe", container.startup_probe),
+        ("livenessProbe", container.liveness_probe),
+        ("readinessProbe", container.readiness_probe),
+    ]
+    present = [(kind, probe) for kind, probe in probes if probe is not None]
+    assert len(present) >= 2, f"{framework}: expected liveness and readiness probes at least"
+    return present
+
+
+@pytest.mark.parametrize("framework", sorted(INFERENCE_FRAMEWORK_SPECS))
+def test_rendered_inference_probes_declare_their_timeout(framework: str) -> None:
+    """The renderer's probes are subject to the same silent 1 s default as a manifest's."""
+    for kind, probe in _rendered_probes(framework):
+        assert isinstance(probe.timeout_seconds, int) and probe.timeout_seconds >= 1, (
+            f"{framework} {kind}: timeout_seconds is {probe.timeout_seconds!r}; unset means "
+            "the kubelet's 1 s default"
+        )
+
+
+def test_rendered_sglang_probes_clear_the_health_generation_floor() -> None:
+    """Above the one-second floor, below the readiness period, startup no tighter than liveness."""
+    probes = dict(_rendered_probes("sglang"))
+    assert set(probes) == {"startupProbe", "livenessProbe", "readinessProbe"}
+    for kind, probe in probes.items():
+        assert probe.timeout_seconds > SGLANG_HEALTH_FLOOR_SECONDS, (
+            f"sglang {kind}: timeout_seconds={probe.timeout_seconds} cannot outlast the "
+            f"{SGLANG_HEALTH_FLOOR_SECONDS} s /health floor"
+        )
+        assert probe.timeout_seconds < probes["readinessProbe"].period_seconds, (
+            f"sglang {kind}: a timeout at or above the readiness period queues probes"
+        )
+    assert probes["startupProbe"].timeout_seconds >= probes["livenessProbe"].timeout_seconds
+
+
+@pytest.mark.parametrize("framework", sorted(INFERENCE_FRAMEWORK_SPECS))
+def test_rendered_inference_liveness_restarts_only_after_a_minute(framework: str) -> None:
+    probes = dict(_rendered_probes(framework))
+    liveness = probes["livenessProbe"]
+    window = liveness.period_seconds * liveness.failure_threshold
+    assert window >= MINIMUM_LIVENESS_RESTART_WINDOW_SECONDS, (
+        f"{framework} liveness restarts after {window}s of failure; allow at least "
+        f"{MINIMUM_LIVENESS_RESTART_WINDOW_SECONDS}s"
+    )
+
+
+def test_rendered_sglang_startup_probe_budgets_for_the_model_download() -> None:
+    probes = dict(_rendered_probes("sglang"))
+    startup = probes["startupProbe"]
+    budget = startup.period_seconds * startup.failure_threshold
+    assert budget >= MINIMUM_STARTUP_BUDGET_SECONDS, (
+        f"sglang startup budget is only {budget}s; allow at least {MINIMUM_STARTUP_BUDGET_SECONDS}s"
+    )

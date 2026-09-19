@@ -8,15 +8,19 @@
 #   - GPU node
 #   - HF_TOKEN env var if switching to a gated model
 #
-# Usage (recommended, multi-region aware):
+# Usage (recommended, multi-region aware). ``--framework sglang`` makes the
+# renderer supply the official launcher (python3 -m sglang.launch_server)
+# bound to 0.0.0.0:--port with --model-path taken from -e MODEL=...:
 #   gco inference deploy sglang-phi3 \
 #     -i lmsysorg/sglang:v0.5.19 \
+#     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 1 \
 #     -e MODEL=microsoft/Phi-3.5-mini-instruct
 #
 # Usage with autoscaling:
 #   gco inference deploy sglang-phi3 \
 #     -i lmsysorg/sglang:v0.5.19 \
+#     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \

@@ -231,28 +231,6 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             notes="default model (microsoft/Phi-3.5-mini-instruct) is ungated; runs verbatim",
         ),
         ExampleSpec(
-            "inference-tgi",
-            SUBMIT_DIRECT,
-            DEPLOYMENT_AVAILABLE,
-            accelerator="nvidia",
-            mutations={
-                "Deployment.env.MODEL_ID": "facebook/opt-125m",
-                # AWQ requires an AWQ-quantized checkpoint; the substitute
-                # model is served unquantized.
-                "Deployment.env.QUANTIZE": REMOVE_VALUE,
-            },
-            timeout_seconds=2400,
-            notes=_GATED_MODEL_MUTATION_NOTE,
-        ),
-        ExampleSpec(
-            "inference-torchserve",
-            SUBMIT_DIRECT,
-            DEPLOYMENT_AVAILABLE,
-            accelerator="nvidia",
-            timeout_seconds=2400,
-            notes="serves from an (empty) EFS model store; readiness with no models is the documented initial state",
-        ),
-        ExampleSpec(
             "inference-triton",
             SUBMIT_DIRECT,
             DEPLOYMENT_AVAILABLE,

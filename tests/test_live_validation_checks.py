@@ -2594,14 +2594,20 @@ class _FakeCli:
             payload = (
                 {"data": [{"id": plan.runtime.model_id}]}
                 if framework == "vllm"
-                else {"model_id": plan.runtime.model_id, "model_sha": plan.runtime.model_revision}
+                else {
+                    "model_path": plan.runtime.model_id,
+                    "served_model_name": plan.runtime.model_id,
+                    "revision": plan.runtime.model_revision,
+                    "tokenizer_path": plan.runtime.model_id,
+                    "version": "0.5.19",
+                }
             )
             return _completed(command, 0, "log line\n" + json.dumps(payload))
         if stage == "invoke":
             payload = (
                 {"choices": [{"text": " generated "}]}
                 if framework == "vllm"
-                else {"generated_text": "generated"}
+                else {"text": "generated", "meta_info": {"finish_reason": {"type": "length"}}}
             )
             return _completed(command, 0, json.dumps(payload))
         assert stage == "delete"
@@ -2788,6 +2794,14 @@ class TestItemContract:
         [
             (lambda item: item.update(spec="broken"), "stored spec is malformed"),
             (lambda item: item["spec"].update(port=1), "contract does not match this run"),
+            # A record that lost (or never carried) the immutable launcher
+            # arguments is not an endpoint this run deployed.
+            (lambda item: item["spec"].pop("args"), "contract does not match this run"),
+            (
+                lambda item: item["spec"].update(args=["--model", "test/vllm-model"]),
+                "contract does not match this run",
+            ),
+            (lambda item: item["spec"].update(env={}), "contract does not match this run"),
             (lambda item: item.update(target_regions=["eu-west-1"]), "target region"),
             (lambda item: item.update(namespace="other"), "namespace does not match"),
             (
@@ -2795,7 +2809,16 @@ class TestItemContract:
                 "baseline unexpectedly has autoscaling",
             ),
         ],
-        ids=["spec", "port", "region", "namespace", "baseline-autoscaling"],
+        ids=[
+            "spec",
+            "port",
+            "missing-args",
+            "unpinned-args",
+            "env",
+            "region",
+            "namespace",
+            "baseline-autoscaling",
+        ],
     )
     def test_baseline_contract_guards(self, tmp_path: Path, mutate: Any, message: str) -> None:
         runner, plan, record, item = self._runner(tmp_path)
@@ -3067,22 +3090,24 @@ class TestHealthProbeGuards:
             runner.verify_backend_probes(plans[0], records[0])
         assert "omitted the configured model" in records[0]["failures"][-1]["error"]
 
-    def test_tgi_info_must_match_model_and_revision(
+    def test_sglang_server_info_must_match_model_path_and_revision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner, plans, records, _ = _lifecycle(tmp_path)
         _inference_clock(monkeypatch)
-        tgi_plan, tgi_record = plans[2], records[2]
-        assert tgi_plan.runtime.framework == "tgi"
-        runner.table.item = _owned_item(runner.settings, tgi_plan, runner.owner_nonce)
+        sglang_plan, sglang_record = plans[2], records[2]
+        assert sglang_plan.runtime.framework == "sglang"
+        runner.table.item = _owned_item(runner.settings, sglang_plan, runner.owner_nonce)
         cli = _FakeCli(runner, plans, runner.table)
         cli.overrides["models"] = lambda plan, command: _completed(
-            command, 0, json.dumps({"model_id": plan.runtime.model_id, "model_sha": "0" * 40})
+            command,
+            0,
+            json.dumps({"model_path": plan.runtime.model_id, "revision": "0" * 40}),
         )
         monkeypatch.setattr(lifecycle_module.subprocess, "run", cli)
         with pytest.raises(ManagedInferenceValidationError, match="health/model probe failed"):
-            runner.verify_backend_probes(tgi_plan, tgi_record)
-        assert "exact model id and revision" in tgi_record["failures"][-1]["error"]
+            runner.verify_backend_probes(sglang_plan, sglang_record)
+        assert "exact model path and revision" in sglang_record["failures"][-1]["error"]
 
 
 class TestInvokeJournal:
@@ -3110,7 +3135,7 @@ class TestInvokeJournal:
         ("journal", "message"),
         [
             ("corrupt", "invoke journal is invalid"),
-            ({"framework": "tgi", "request_path": "/x", "argv": []}, "journal identity changed"),
+            ({"framework": "sglang", "request_path": "/x", "argv": []}, "journal identity changed"),
             ("__valid_with_status__weird", "journal status is invalid"),
         ],
         ids=["type", "identity", "status"],
@@ -3308,7 +3333,7 @@ class TestExecuteMatrix:
         assert evidence["invocations"]["completed"] == 4
         assert evidence["frameworks"] == {
             "vllm": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
-            "tgi": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
         }
         assert cli.stages == [
             f"{stage}:{ordinal}"
@@ -3338,7 +3363,7 @@ class TestExecuteMatrix:
         assert evidence["invocations"]["completed"] == 0
         assert evidence["frameworks"] == {
             "vllm": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
-            "tgi": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
         }
         assert all(record["absence_proven"] is True for record in records)
         inventory_reads = [call for call in kubectl.calls if call[0] == "get"]

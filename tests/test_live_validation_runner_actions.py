@@ -2236,11 +2236,11 @@ def _inference_argv(*extra: str) -> list[str]:
         "publisher/vllm-model",
         "--inference-vllm-model-revision",
         "c" * 40,
-        "--inference-tgi-image",
-        "registry.example/tgi@sha256:" + "d" * 64,
-        "--inference-tgi-model-id",
-        "publisher/tgi-model",
-        "--inference-tgi-model-revision",
+        "--inference-sglang-image",
+        "registry.example/sglang@sha256:" + "d" * 64,
+        "--inference-sglang-model-id",
+        "publisher/sglang-model",
+        "--inference-sglang-model-revision",
         "e" * 40,
         *extra,
         actions="inference",
@@ -2306,7 +2306,7 @@ class TestMainArgumentValidation:
         assert parser.epilog is not None
         assert parser.epilog.startswith("Actions: preflight, baseline, deploy")
         assert args.inference_vllm_port == 8000
-        assert args.inference_tgi_port == 8080
+        assert args.inference_sglang_port == 30000
 
 
 class TestMainSettings:
@@ -2589,7 +2589,7 @@ class TestInferenceContractValidation:
     def test_validate_runtime_rejects_unknown_frameworks(self) -> None:
         runtime = dataclasses.replace(_runtime("vllm"), framework="triton")
 
-        with pytest.raises(ValueError, match="must be 'vllm' or 'tgi'"):
+        with pytest.raises(ValueError, match="must be 'vllm' or 'sglang'"):
             inference_contract._validate_runtime(runtime)
 
     @pytest.mark.parametrize(
@@ -2597,29 +2597,35 @@ class TestInferenceContractValidation:
         [
             ({"selected_region": "US-EAST-1"}, "lowercase AWS Region name"),
             ({"selected_region": "useast1"}, "lowercase AWS Region name"),
-            ({"inference_runtimes": [_runtime("vllm"), _runtime("tgi")]}, "vLLM then TGI"),
-            ({"inference_runtimes": (_runtime("tgi"), _runtime("vllm"))}, "vLLM then TGI"),
+            ({"inference_runtimes": [_runtime("vllm"), _runtime("sglang")]}, "vLLM then SGLang"),
+            ({"inference_runtimes": (_runtime("sglang"), _runtime("vllm"))}, "vLLM then SGLang"),
+            ({"inference_runtimes": (_runtime("vllm"), _runtime("vllm"))}, "vLLM then SGLang"),
             (
-                {"inference_runtimes": (_runtime("vllm", model_id=" padded"), _runtime("tgi"))},
+                {
+                    "inference_runtimes": (
+                        _runtime("vllm", model_id=" padded"),
+                        _runtime("sglang"),
+                    )
+                },
                 "vllm model_id must be a non-empty trimmed value",
             ),
             (
                 {
                     "inference_runtimes": (
                         _runtime("vllm"),
-                        dataclasses.replace(_runtime("tgi"), model_id=""),
+                        dataclasses.replace(_runtime("sglang"), model_id=""),
                     )
                 },
-                "tgi model_id must be a non-empty trimmed value",
+                "sglang model_id must be a non-empty trimmed value",
             ),
             (
                 {
                     "inference_runtimes": (
                         _runtime("vllm"),
-                        dataclasses.replace(_runtime("tgi"), port=8000),
+                        dataclasses.replace(_runtime("sglang"), port=8080),
                     )
                 },
-                "tgi live validation port must be 8080",
+                "sglang live validation port must be 30000",
             ),
             ({"request_prompt": "   "}, "request_prompt must be non-empty"),
             ({"namespace": "Bad_Namespace"}, "DNS-safe Kubernetes name"),
@@ -2651,23 +2657,39 @@ class TestInferenceContractValidation:
         self, tmp_path: Path
     ) -> None:
         settings = _inference_settings(tmp_path)
-        vllm, tgi = settings.inference_runtimes
+        vllm, sglang = settings.inference_runtimes
 
+        # Both runtimes share GCO's ``MODEL`` environment convention; each
+        # launcher receives the immutable model on argv under its own flag.
         assert settings.framework_env(vllm) == {"MODEL": "test/vllm-model"}
-        assert settings.framework_env(tgi) == {
-            "MODEL_ID": "test/tgi-model",
-            "PORT": "8080",
-            "REVISION": "d" * 40,
-        }
+        assert settings.framework_env(sglang) == {"MODEL": "test/sglang-model"}
         assert settings.deploy_extra_args(vllm) == (
             "--model",
             "test/vllm-model",
             "--revision",
             "c" * 40,
         )
-        assert settings.deploy_extra_args(tgi) == ()
+        assert settings.deploy_extra_args(sglang) == (
+            "--model-path",
+            "test/sglang-model",
+            "--revision",
+            "d" * 40,
+        )
         assert vllm.model_info_path == "/v1/models"
-        assert tgi.model_info_path == "/info"
+        assert sglang.model_info_path == "/server_info"
+        assert vllm.request_path == "/v1/completions"
+        assert sglang.request_path == "/generate"
+        assert settings.request_body(sglang) == {
+            "sampling_params": {"max_new_tokens": settings.request_max_tokens, "temperature": 0},
+            "text": settings.request_prompt,
+        }
+        assert settings.request_body(vllm) == {
+            "max_tokens": settings.request_max_tokens,
+            "model": "test/vllm-model",
+            "prompt": settings.request_prompt,
+            "stream": False,
+            "temperature": 0,
+        }
         assert settings.kubeconfig_path == settings.report_dir / "kubeconfig"
 
 

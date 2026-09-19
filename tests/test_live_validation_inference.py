@@ -50,15 +50,15 @@ from scripts.live_release_validation.runner import LiveValidationRunner
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VLLM_IMAGE = "registry.example/vllm@sha256:" + "a" * 64
-TGI_IMAGE = "registry.example/tgi@sha256:" + "b" * 64
+SGLANG_IMAGE = "registry.example/sglang@sha256:" + "b" * 64
 VLLM_REVISION = "c" * 40
-TGI_REVISION = "d" * 40
+SGLANG_REVISION = "d" * 40
 OWNER_NONCE = "e" * 64
 LIFECYCLE_ID = "f" * 64
 
 
 def _runtime(
-    framework: Literal["vllm", "tgi"],
+    framework: Literal["vllm", "sglang"],
     *,
     image: str | None = None,
     model_id: str | None = None,
@@ -73,16 +73,16 @@ def _runtime(
             port=8000,
         )
     return InferenceRuntimeSpec(
-        framework="tgi",
-        image=image or TGI_IMAGE,
-        model_id=model_id or "test/tgi-model",
-        model_revision=revision or TGI_REVISION,
-        port=8080,
+        framework="sglang",
+        image=image or SGLANG_IMAGE,
+        model_id=model_id or "test/sglang-model",
+        model_revision=revision or SGLANG_REVISION,
+        port=30000,
     )
 
 
 def _runtime_matrix() -> tuple[InferenceRuntimeSpec, ...]:
-    return (_runtime("vllm"), _runtime("tgi"))
+    return (_runtime("vllm"), _runtime("sglang"))
 
 
 def _settings(tmp_path: Path, **changes: Any) -> RunSettings:
@@ -232,16 +232,16 @@ class TestStrictSettings:
                 "inference_runtimes",
                 (
                     _runtime("vllm", image="registry.example/vllm@sha256:" + "9" * 64),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", model_id="other/model"), _runtime("tgi")),
+                (_runtime("vllm", model_id="other/model"), _runtime("sglang")),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", revision="8" * 40), _runtime("tgi")),
+                (_runtime("vllm", revision="8" * 40), _runtime("sglang")),
             ),
             ("request_prompt", "A different deterministic prompt"),
             ("gpu_count", 1),
@@ -272,7 +272,7 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="@sha256"):
             _settings(
                 tmp_path,
-                inference_runtimes=(_runtime("vllm", image=image), _runtime("tgi")),
+                inference_runtimes=(_runtime("vllm", image=image), _runtime("sglang")),
             )
 
     def test_digest_parser_is_linear_on_repeated_slash_prefixes(self, tmp_path: Path) -> None:
@@ -283,7 +283,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", image=adversarial),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -294,7 +294,7 @@ class TestStrictSettings:
             tmp_path,
             inference_runtimes=(
                 _runtime("vllm", image=image),
-                _runtime("tgi"),
+                _runtime("sglang"),
             ),
         )
         assert settings.inference_runtimes[0].image == image
@@ -322,7 +322,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", image=image),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -337,8 +337,8 @@ class TestStrictSettings:
                         image="registry.example/vllm@sha256:" + same_digest,
                     ),
                     _runtime(
-                        "tgi",
-                        image="registry.example/tgi@sha256:" + same_digest,
+                        "sglang",
+                        image="registry.example/sglang@sha256:" + same_digest,
                     ),
                 ),
             )
@@ -350,7 +350,7 @@ class TestStrictSettings:
                 tmp_path,
                 inference_runtimes=(
                     _runtime("vllm", revision=revision),
-                    _runtime("tgi"),
+                    _runtime("sglang"),
                 ),
             )
 
@@ -366,7 +366,7 @@ class TestStrictSettings:
 
     def test_request_contracts_are_literal_and_distinct(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm, tgi = settings.inference_runtimes
+        vllm, sglang = settings.inference_runtimes
         assert vllm.request_path == "/v1/completions"
         assert settings.request_body(vllm) == {
             "max_tokens": 8,
@@ -375,15 +375,23 @@ class TestStrictSettings:
             "stream": False,
             "temperature": 0,
         }
-        assert tgi.request_path == "/generate"
-        assert settings.request_body(tgi) == {
-            "inputs": "Reply with a short deterministic validation response.",
-            "parameters": {"do_sample": False, "max_new_tokens": 8},
+        # SGLang is driven through its native API on purpose: its
+        # OpenAI-compatible surface would collapse into the vLLM contract and
+        # let one response shape satisfy both adapters.
+        assert sglang.request_path == "/generate"
+        assert settings.request_body(sglang) == {
+            "sampling_params": {"max_new_tokens": 8, "temperature": 0},
+            "text": "Reply with a short deterministic validation response.",
         }
         identities = settings.identity()["inference"]["runtimes"]
         assert identities[0]["request_contract"]["body"] == settings.request_body(vllm)
-        assert identities[1]["request_contract"]["body"] == settings.request_body(tgi)
+        assert identities[1]["request_contract"]["body"] == settings.request_body(sglang)
         assert identities[0]["request_contract"] != identities[1]["request_contract"]
+        assert identities[0]["request_contract"]["response"] == "choices[0].text:non-empty-string"
+        assert identities[1]["request_contract"]["response"] == "text:non-empty-string"
+        assert set(identities[0]["request_contract"]["body"]).isdisjoint(
+            identities[1]["request_contract"]["body"]
+        )
 
 
 class TestNamesAndOwnership:
@@ -407,8 +415,8 @@ class TestNamesAndOwnership:
         assert [(plan.runtime.framework, plan.role) for plan in plans] == [
             ("vllm", "baseline"),
             ("vllm", "hpa"),
-            ("tgi", "baseline"),
-            ("tgi", "hpa"),
+            ("sglang", "baseline"),
+            ("sglang", "hpa"),
         ]
         assert state["phase"] == "planned"
         assert re.fullmatch(r"[0-9a-f]{64}", state["owner_nonce"])
@@ -480,11 +488,13 @@ class TestNamesAndOwnership:
 class TestCommandsAndResponses:
     def test_commands_are_argument_arrays_with_noninteractive_delete(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm_baseline, vllm_hpa, tgi_baseline, tgi_hpa = build_endpoint_plans(settings, OWNER_NONCE)
+        vllm_baseline, vllm_hpa, sglang_baseline, sglang_hpa = build_endpoint_plans(
+            settings, OWNER_NONCE
+        )
         baseline_command = build_deploy_command(settings, vllm_baseline, OWNER_NONCE)
         hpa_command = build_deploy_command(settings, vllm_hpa, OWNER_NONCE)
-        tgi_command = build_deploy_command(settings, tgi_baseline, OWNER_NONCE)
-        tgi_hpa_command = build_deploy_command(settings, tgi_hpa, OWNER_NONCE)
+        sglang_command = build_deploy_command(settings, sglang_baseline, OWNER_NONCE)
+        sglang_hpa_command = build_deploy_command(settings, sglang_hpa, OWNER_NONCE)
         invoke_command = build_invoke_command(settings, vllm_baseline)
         health_command = build_health_command(settings, vllm_baseline)
         models_command = build_models_command(settings, vllm_baseline)
@@ -498,8 +508,8 @@ class TestCommandsAndResponses:
         for command in (
             baseline_command,
             hpa_command,
-            tgi_command,
-            tgi_hpa_command,
+            sglang_command,
+            sglang_hpa_command,
             invoke_command,
             health_command,
             models_command,
@@ -522,13 +532,32 @@ class TestCommandsAndResponses:
         assert hpa_command[hpa_command.index("--autoscale-metric") + 1] == "cpu:70"
         assert hpa_command[hpa_command.index("--min-replicas") + 1] == "2"
         assert hpa_command[hpa_command.index("--max-replicas") + 1] == "2"
-        assert tgi_command[tgi_command.index("--framework") + 1] == "tgi"
-        assert tgi_command[tgi_command.index("--port") + 1] == "8080"
-        assert "MODEL_ID=test/tgi-model" in tgi_command
-        assert f"REVISION={TGI_REVISION}" in tgi_command
-        assert "PORT=8080" in tgi_command
-        assert "HF_MODEL_ID=test/tgi-model" not in tgi_command
-        assert "--root-path" not in tgi_command
+        assert baseline_command[baseline_command.index("--port") + 1] == "8000"
+        assert "MODEL=test/vllm-model" in baseline_command
+        assert baseline_command[baseline_command.index("--extra-args=--model") + 1 :][:5] == [
+            "--extra-args",
+            "test/vllm-model",
+            "--extra-args=--revision",
+            "--extra-args",
+            VLLM_REVISION,
+        ]
+        assert sglang_command[sglang_command.index("--framework") + 1] == "sglang"
+        assert sglang_command[sglang_command.index("--port") + 1] == "30000"
+        # SGLang shares the ``MODEL`` environment convention with vLLM; the
+        # launcher itself receives the immutable model on argv.
+        assert "MODEL=test/sglang-model" in sglang_command
+        assert sglang_command[sglang_command.index("--extra-args=--model-path") + 1 :][:5] == [
+            "--extra-args",
+            "test/sglang-model",
+            "--extra-args=--revision",
+            "--extra-args",
+            SGLANG_REVISION,
+        ]
+        assert "--extra-args=--model" not in sglang_command
+        assert "--root-path" not in sglang_command
+        assert not any(value.startswith("MODEL_ID=") for value in sglang_command)
+        assert not any(value.startswith("PORT=") for value in sglang_command)
+        assert sglang_hpa_command[sglang_hpa_command.index("--autoscale-metric") + 1] == "cpu:70"
         assert json.loads(invoke_command[invoke_command.index("--data") + 1]) == (
             settings.request_body(vllm_baseline.runtime)
         )
@@ -582,7 +611,7 @@ class TestCommandsAndResponses:
         ("framework", "payload", "expected"),
         [
             ("vllm", {"choices": [{"text": " generated "}]}, "generated"),
-            ("tgi", {"generated_text": " tgi "}, "tgi"),
+            ("sglang", {"text": " sglang ", "meta_info": {"finish_reason": "x"}}, "sglang"),
         ],
     )
     def test_exact_invoke_response_schemas(
@@ -594,14 +623,18 @@ class TestCommandsAndResponses:
     @pytest.mark.parametrize(
         ("framework", "payload"),
         [
-            ("vllm", {"generated_text": "wrong-framework"}),
+            ("vllm", {"text": "wrong-framework"}),
+            ("vllm", {"generated_text": "retired-contract"}),
             ("vllm", {"choices": [{"message": {"content": "chat"}}]}),
-            ("tgi", {"choices": [{"text": "wrong-framework"}]}),
-            ("tgi", [{"generated_text": "list-is-not-the-selected-contract"}]),
+            ("sglang", {"choices": [{"text": "wrong-framework"}]}),
+            ("sglang", [{"text": "list-is-not-the-selected-contract"}]),
+            ("sglang", {"generated_text": "retired-contract"}),
             ("vllm", {"choices": []}),
             ("vllm", {"choices": [{"text": "  "}]}),
-            ("tgi", {"generated_text": ""}),
-            ("tgi", {"not_text": "value"}),
+            ("sglang", {"text": ""}),
+            ("sglang", {"text": "   "}),
+            ("sglang", {"text": ["not", "a", "string"]}),
+            ("sglang", {"not_text": "value"}),
         ],
     )
     def test_cross_framework_empty_or_alternate_schemas_are_rejected(
@@ -648,7 +681,7 @@ class TestSequentialAndFinallyBehavior:
         assert summary["execution"] == "strictly-sequential"
         assert summary["frameworks"] == {
             "vllm": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
-            "tgi": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
         }
         assert summary["all_endpoints_absent"] is True
         serialized = json.dumps(summary)
@@ -662,6 +695,7 @@ class TestSequentialAndFinallyBehavior:
             ("wait_for_kubernetes_ready", 1),
             ("verify_backend_probes", 1),
             ("invoke", 1),
+            ("verify_no_container_restarts", 1),
             ("verify_hpa_stability", 2),
         ],
     )
@@ -686,6 +720,7 @@ class TestSequentialAndFinallyBehavior:
             "wait_for_kubernetes_ready",
             "verify_backend_probes",
             "invoke",
+            "verify_no_container_restarts",
             "verify_hpa_stability",
         ):
             monkeypatch.setattr(
@@ -883,10 +918,24 @@ class TestSequentialAndFinallyBehavior:
             if waiter == "ddb-running"
             else runner._wait_for_owned_record
         )
-        with pytest.raises(ManagedInferenceValidationError, match="before timeout"):
+        with pytest.raises(ManagedInferenceValidationError, match="before timeout") as excinfo:
             wait(plans[0], records[0])
 
-        assert calls == [{"timeout": 2.0}]
+        if waiter == "ddb-running":
+            # The heartbeat, then the timeout diagnosis (pods, events) on the
+            # command budget — the expired phase deadline does not gate it.
+            assert calls == [{"timeout": 2.0}, {"timeout": 2.0}, {"timeout": 2.0}]
+            (snapshot,) = records[0]["workload_diagnostics"]
+            assert snapshot["reason"] == "ddb-running-timeout"
+            # This fake answers every read with the heartbeat's "ok": the
+            # snapshot records that the pod list could not be decoded instead
+            # of masking the timeout, and the error still names the outcome.
+            assert snapshot["pods_error"].startswith("kubectl returned non-JSON output")
+            assert snapshot["summary"].startswith("no pods observed (kubectl returned non-JSON")
+            assert str(excinfo.value).endswith(f"({snapshot['summary']})")
+            assert records[0]["last_ddb_observation"]["regional"] == {"state": "pending"}
+        else:
+            assert calls == [{"timeout": 2.0}]
         assert sleeps == [2.0]
         assert clock.now == 3.0
 
@@ -1770,7 +1819,7 @@ class TestAdditionalResumeAndDeadlineSafety:
 
 
 class TestWireContractAndHpaDeadline:
-    @pytest.mark.parametrize("framework", ["vllm", "tgi"])
+    @pytest.mark.parametrize("framework", ["vllm", "sglang"])
     def test_real_invoke_cli_sends_exact_identity_body(
         self,
         tmp_path: Path,
@@ -1803,8 +1852,8 @@ class TestWireContractAndHpaDeadline:
 
             @staticmethod
             def json() -> Any:
-                if framework == "tgi":
-                    return {"generated_text": "ok"}
+                if framework == "sglang":
+                    return {"text": "ok", "meta_info": {}}
                 return {"choices": [{"text": "ok"}]}
 
         class Client:
@@ -1942,15 +1991,74 @@ class TestBackendProbeContracts:
             },
         }
 
-    def test_tgi_requires_health_and_exact_info_identity(
+    def test_sglang_requires_health_and_exact_server_info_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         settings = _settings(tmp_path)
         runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
         plan = plans[2]
         record = records[2]
+        assert plan.runtime.framework == "sglang"
         runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
         stages: list[str] = []
+        commands: list[list[str]] = []
+
+        def run_command(
+            checkpoint: dict[str, Any],
+            stage: str,
+            command: list[str],
+            **kwargs: Any,
+        ) -> str:
+            del checkpoint, kwargs
+            stages.append(stage)
+            commands.append(command)
+            if stage == "health":
+                return json.dumps({"status": "healthy", "http_status": 200})
+            # ``gco inference models --framework sglang`` projects the identity
+            # keys of ``/server_info``; the launcher reports the model path and
+            # revision it was actually started with.
+            return json.dumps(
+                {
+                    "model_path": plan.runtime.model_id,
+                    "served_model_name": plan.runtime.model_id,
+                    "revision": plan.runtime.model_revision,
+                    "tokenizer_path": plan.runtime.model_id,
+                    "version": "0.5.19",
+                }
+            )
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        runner.verify_backend_probes(plan, record)
+
+        assert stages == ["health", "model-info"]
+        assert commands[1][commands[1].index("--framework") + 1] == "sglang"
+        assert record["backend_probe_evidence"]["model_info"] == {
+            "path": "/server_info",
+            "configured_model_present": True,
+            "configured_revision_present": True,
+        }
+
+    @pytest.mark.parametrize(
+        "server_info",
+        [
+            {"model_path": "other/model", "revision": "d" * 40},
+            {"model_path": "test/sglang-model", "revision": "0" * 40},
+            {"model_path": "test/sglang-model"},
+            {"served_model_name": "test/sglang-model", "revision": "d" * 40},
+            ["test/sglang-model"],
+        ],
+    )
+    def test_sglang_server_info_must_match_model_path_and_revision(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        server_info: Any,
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
+        plan = plans[2]
+        record = records[2]
+        runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
 
         def run_command(
             checkpoint: dict[str, Any],
@@ -1959,25 +2067,18 @@ class TestBackendProbeContracts:
             **kwargs: Any,
         ) -> str:
             del checkpoint, command, kwargs
-            stages.append(stage)
             if stage == "health":
-                return json.dumps({"status": "healthy", "http_status": 204})
-            return json.dumps(
-                {
-                    "model_id": plan.runtime.model_id,
-                    "model_sha": plan.runtime.model_revision,
-                }
-            )
+                return json.dumps({"status": "healthy", "http_status": 200})
+            return json.dumps(server_info)
 
         monkeypatch.setattr(runner, "_run_command", run_command)
-        runner.verify_backend_probes(plan, record)
-
-        assert stages == ["health", "model-info"]
-        assert record["backend_probe_evidence"]["model_info"] == {
-            "path": "/info",
-            "configured_model_present": True,
-            "configured_revision_present": True,
-        }
+        with pytest.raises(ManagedInferenceValidationError, match="health/model probe failed"):
+            runner.verify_backend_probes(plan, record)
+        assert (
+            "SGLang /server_info did not report the exact model path and revision"
+            in record["failures"][-1]["error"]
+        )
+        assert "backend_probe_evidence" not in record
 
     def test_health_502_then_healthy_converges_and_records_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2403,3 +2504,583 @@ class TestSharedProxyAutoscalingProof:
         )
         with pytest.raises(ManagedInferenceValidationError, match="TLS autoscaling"):
             runner.verify_shared_proxy_autoscaling(runner.state)
+
+
+class _DiagnosticsKubectl:
+    """kubectl fake for the workload-diagnostics reads, dispatching on argv."""
+
+    def __init__(self, plan_name: str) -> None:
+        self.plan_name = plan_name
+        self.calls: list[tuple[str, ...]] = []
+        self.pods: Any = {"items": []}
+        self.events: Any = {"items": []}
+        self.nodes: dict[str, Any] = {}
+        self.logs: dict[tuple[str, str, bool], Any] = {}
+        self.failures: dict[str, Any] = {}
+
+    def __call__(self, *args: str, timeout: float) -> tuple[int, str, str]:
+        del timeout
+        self.calls.append(args)
+        kind = args[1] if args[0] == "get" else args[0]
+        failure = self.failures.get(kind)
+        if isinstance(failure, BaseException):
+            raise failure
+        if isinstance(failure, tuple):
+            return failure
+        if args[0] == "logs":
+            key = (args[1], args[args.index("--container") + 1], "--previous" in args)
+            return 0, str(self.logs.get(key, f"log of {key}")), ""
+        if kind == "pods":
+            return 0, json.dumps(self.pods), ""
+        if kind == "events":
+            return 0, json.dumps(self.events), ""
+        if kind == "node":
+            return 0, json.dumps(self.nodes.get(args[2], {})), ""
+        raise AssertionError(f"unexpected kubectl call {args}")
+
+
+def _crash_looping_pod(name: str, node: str = "i-node-a") -> dict[str, Any]:
+    return {
+        "metadata": {"name": f"{name}-6fb59fd4d4-tfdqf"},
+        "spec": {"nodeName": node},
+        "status": {
+            "phase": "Running",
+            "startTime": "2026-09-18T16:12:50Z",
+            "conditions": [
+                {"type": "PodScheduled", "status": "True"},
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "ContainersNotReady",
+                    "message": "containers with unready status: [inference]",
+                },
+                "not-a-dict",
+            ],
+            "containerStatuses": [
+                {
+                    "name": "inference",
+                    "ready": False,
+                    "restartCount": 8,
+                    "state": {
+                        "waiting": {
+                            "reason": "CrashLoopBackOff",
+                            "message": "back-off 5m0s restarting failed container",
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "reason": "Error",
+                            "exitCode": 1,
+                            "finishedAt": "2026-09-18T16:37:58Z",
+                        }
+                    },
+                },
+                {
+                    "name": "sidecar",
+                    "ready": False,
+                    "restartCount": 0,
+                    "state": {"running": {"startedAt": "2026-09-18T16:18:30Z"}},
+                },
+                {"name": "ready-helper", "ready": True, "restartCount": 0, "state": {}},
+                "corrupt-status",
+            ],
+        },
+    }
+
+
+class TestWorkloadDiagnostics:
+    """The checkpoint must explain a stalled endpoint, not just time it out."""
+
+    def _runner(
+        self, tmp_path: Path, **changes: Any
+    ) -> tuple[Any, Any, dict[str, Any], _DiagnosticsKubectl]:
+        settings = _settings(tmp_path, **changes)
+        plans, _ = initialize_run_state(_ctx(tmp_path, None), settings)
+        kubectl = _DiagnosticsKubectl(plans[0].name)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings, kubectl=kubectl)
+        return runner, plans[0], records[0], kubectl
+
+    def test_snapshot_names_the_crash_loop_its_output_and_the_gpu(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": [_crash_looping_pod(plan.name), "not-a-pod"]}
+        kubectl.nodes["i-node-a"] = {
+            "metadata": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g4dn.xlarge",
+                    "eks.amazonaws.com/instance-gpu-name": "t4",
+                    "eks.amazonaws.com/instance-family": "g4dn",
+                    "unrelated": "label",
+                }
+            },
+            "status": {"allocatable": {"nvidia.com/gpu": "1"}},
+        }
+        kubectl.logs[(f"{plan.name}-6fb59fd4d4-tfdqf", "inference", True)] = (
+            "RuntimeError: no kernel image is available for execution on the device\n"
+        )
+        kubectl.events = {
+            "items": [
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-6fb59fd4d4-tfdqf"},
+                    "type": "Warning",
+                    "reason": "BackOff",
+                    "count": 9,
+                    "lastTimestamp": "2026-09-18T16:40:00Z",
+                    "message": "Back-off restarting failed container inference",
+                },
+                {
+                    "involvedObject": {"kind": "Pod", "name": "some-other-workload-abc"},
+                    "reason": "Scheduled",
+                    "lastTimestamp": "2026-09-18T16:39:00Z",
+                    "message": "ignored: not this endpoint",
+                },
+                {
+                    "involvedObject": {"kind": "Deployment", "name": plan.name},
+                    "type": "Normal",
+                    "reason": "ScalingReplicaSet",
+                    "count": 1,
+                    "eventTime": "2026-09-18T16:12:46Z",
+                    "message": 42,
+                },
+                "corrupt-event",
+            ]
+        }
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        (pod,) = snapshot["pods"]
+        assert pod["node"] == "i-node-a"
+        assert pod["conditions"] == [
+            {
+                "type": "Ready",
+                "status": "False",
+                "reason": "ContainersNotReady",
+                "message": "containers with unready status: [inference]",
+            }
+        ]
+        crashed, sidecar, helper = pod["containers"]
+        assert crashed["state"] == {
+            "status": "waiting",
+            "reason": "CrashLoopBackOff",
+            "message": "back-off 5m0s restarting failed container",
+        }
+        assert crashed["last_state"] == {
+            "status": "terminated",
+            "reason": "Error",
+            "exitCode": 1,
+            "finishedAt": "2026-09-18T16:37:58Z",
+        }
+        assert "no kernel image is available" in crashed["previous_log_tail"]
+        assert crashed["log_tail"].startswith("log of")
+        # Unready without restarts: current output only. Ready: nothing fetched.
+        assert "log_tail" in sidecar and "previous_log_tail" not in sidecar
+        assert sidecar["state"] == {"status": "running", "startedAt": "2026-09-18T16:18:30Z"}
+        assert "log_tail" not in helper and helper["state"] is None
+        assert snapshot["nodes"] == {
+            "i-node-a": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g4dn.xlarge",
+                    "eks.amazonaws.com/instance-family": "g4dn",
+                    "eks.amazonaws.com/instance-gpu-name": "t4",
+                },
+                "allocatable_gpus": "1",
+            }
+        }
+        # Events: this endpoint's only, oldest first, message trimmed to text.
+        assert [event["reason"] for event in snapshot["events"]] == ["ScalingReplicaSet", "BackOff"]
+        assert snapshot["events"][0]["object"] == f"Deployment/{plan.name}"
+        assert snapshot["events"][0]["message"] == 42
+        assert snapshot["events"][1]["count"] == 9
+        assert snapshot["summary"] == (
+            f"{plan.name}-6fb59fd4d4-tfdqf: Running, "
+            "inference CrashLoopBackOff, last exit 1 Error (restarts=8), "
+            "sidecar running (restarts=0), ready-helper ? (restarts=0), on g4dn.xlarge/t4"
+        )
+        assert record["last_workload_summary"] == snapshot["summary"]
+        assert record["workload_diagnostics"] == [snapshot]
+        # Reads: pods, the crashed container's two log tails, the sidecar's
+        # current tail, the node, then events.
+        assert [call[0] for call in kubectl.calls] == ["get", "logs", "logs", "logs", "get", "get"]
+        assert kubectl.calls[1][-1] == "--tail=40"
+        assert kubectl.calls[2][-2:] == ("--tail=40", "--previous")
+
+    def test_snapshot_summarizes_an_unscheduled_pod_and_a_missing_node_read(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-pending"},
+                    "spec": {"nodeName": "i-node-b"},
+                    "status": {
+                        "phase": "Pending",
+                        "conditions": [
+                            {
+                                "type": "PodScheduled",
+                                "status": "False",
+                                "reason": "Unschedulable",
+                                "message": "0/3 nodes are available: insufficient nvidia.com/gpu",
+                            }
+                        ],
+                        "containerStatuses": "not-a-list",
+                    },
+                }
+            ]
+        }
+        kubectl.failures["node"] = (
+            1,
+            "",
+            'Error from server (NotFound): nodes "i-node-b" not found',
+        )
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        assert snapshot["pods"][0]["containers"] == []
+        assert snapshot["nodes"] == {
+            "i-node-b": {
+                "error": 'kubectl exited 1: Error from server (NotFound): nodes "i-node-b" not found'
+            }
+        }
+        assert snapshot["summary"] == f"{plan.name}-pending: Pending, unscheduled (Unschedulable)"
+
+    def test_snapshot_records_unavailable_reads_instead_of_raising(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.failures["pods"] = OSError("tunnel closed")
+        kubectl.failures["events"] = (1, "", "forbidden")
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        assert snapshot["pods"] == []
+        assert snapshot["pods_error"] == "OSError: tunnel closed"
+        assert snapshot["events"] == "<unavailable: kubectl exited 1: forbidden>"
+        assert snapshot["summary"] == "no pods observed (OSError: tunnel closed)"
+
+    def test_log_tail_reports_its_own_failure_and_payload_shapes_are_tolerated(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-x"},
+                    "spec": {},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [
+                            {"name": "inference", "ready": False, "restartCount": 1}
+                        ],
+                    },
+                }
+            ]
+        }
+        kubectl.failures["logs"] = RuntimeError("logs unavailable")
+        kubectl.events = {"items": "corrupt"}
+        record["workload_diagnostics"] = "corrupt-ring"
+
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+
+        (container,) = snapshot["pods"][0]["containers"]
+        assert container["log_tail"] == "<unavailable: RuntimeError: logs unavailable>"
+        assert container["previous_log_tail"] == "<unavailable: RuntimeError: logs unavailable>"
+        assert container["state"] is None and container["last_state"] is None
+        assert snapshot["nodes"] == {}  # no nodeName: nothing to look up
+        assert snapshot["events"] == []
+        assert snapshot["summary"] == f"{plan.name}-x: Running, inference ? (restarts=1)"
+        assert record["workload_diagnostics"] == [snapshot]
+
+    def test_events_payload_that_is_not_an_object_yields_no_events(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.events = ["not", "an", "object"]
+        kubectl.pods = ["not", "an", "object"]
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+        assert snapshot["events"] == []
+        assert snapshot["pods"] == []
+        assert snapshot["summary"] == "no pods observed"
+
+    def test_ring_keeps_the_most_recent_snapshots_only(self, tmp_path: Path) -> None:
+        runner, plan, record, _ = self._runner(tmp_path)
+        for index in range(runtime_module._DIAGNOSTICS_RING_SIZE + 3):
+            runner.capture_workload_diagnostics(plan, record, reason=f"capture-{index}")
+        ring = record["workload_diagnostics"]
+        assert len(ring) == runtime_module._DIAGNOSTICS_RING_SIZE
+        assert ring[0]["reason"] == "capture-3"
+        assert ring[-1]["reason"] == f"capture-{runtime_module._DIAGNOSTICS_RING_SIZE + 2}"
+
+    def test_periodic_capture_fires_once_per_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, _ = self._runner(tmp_path)
+        clock = SimpleNamespace(now=1000.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        mark = runner._diagnostics_due(record, plan, 1000.0, "wait")
+        assert mark == 1000.0 and "workload_diagnostics" not in record
+        clock.now += runtime_module._DIAGNOSTICS_INTERVAL_SECONDS
+        mark = runner._diagnostics_due(record, plan, mark, "wait")
+        assert mark == clock.now
+        assert [snap["reason"] for snap in record["workload_diagnostics"]] == ["wait"]
+
+    def test_ddb_running_wait_takes_periodic_snapshots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(
+            tmp_path, readiness_timeout_seconds=1200, poll_interval_seconds=200
+        )
+        kubectl.pods = {"items": [_crash_looping_pod(plan.name)]}
+        pending = _owned_item(runner.settings, plan, runner.owner_nonce)
+        pending["region_status"] = {
+            runner.settings.selected_region: {"state": "creating", "message": "rolling out"}
+        }
+        monkeypatch.setattr(runner, "_strong_get", lambda record: pending)
+        monkeypatch.setattr(runner, "keep_cluster_tunnel_alive", lambda *a, **k: 0.0)
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(
+            runtime_module.time,
+            "sleep",
+            lambda seconds: setattr(clock, "now", clock.now + float(seconds)),
+        )
+
+        with pytest.raises(ManagedInferenceValidationError, match="before timeout") as excinfo:
+            runner.wait_for_ddb_running(plan, record)
+
+        reasons = [snap["reason"] for snap in record["workload_diagnostics"]]
+        # 1200s wait, 200s polls, 300s interval: periodic captures on the
+        # polls at 400 and 800 seconds, then the capture the timeout takes.
+        assert reasons == ["ddb-running-wait", "ddb-running-wait", "ddb-running-timeout"]
+        assert record["last_ddb_observation"]["regional"] == {
+            "state": "creating",
+            "message": "rolling out",
+        }
+        assert "inference CrashLoopBackOff, last exit 1 Error (restarts=8)" in str(excinfo.value)
+
+    def test_kubernetes_ready_timeout_carries_the_diagnosis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(
+            tmp_path, readiness_timeout_seconds=2, poll_interval_seconds=1
+        )
+        crash_pod = _crash_looping_pod(plan.name)
+        kubectl.pods = {"items": [crash_pod]}
+        monkeypatch.setattr(
+            runner,
+            "_deployment_ready_snapshot",
+            lambda *args, **kwargs: (False, {"desired": 1, "ready": 0, "ready_pods": 0}),
+        )
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(
+            runtime_module.time,
+            "sleep",
+            lambda seconds: setattr(clock, "now", clock.now + float(seconds)),
+        )
+
+        with pytest.raises(ManagedInferenceValidationError, match="readiness was not") as excinfo:
+            runner.wait_for_kubernetes_ready(plan, record)
+
+        assert record["workload_diagnostics"][-1]["reason"] == "kubernetes-ready-timeout"
+        assert "CrashLoopBackOff" in str(excinfo.value)
+
+    def test_bare_conditions_and_reasonless_exits_are_summarized_plainly(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {
+            "items": [
+                {
+                    "metadata": {"name": f"{plan.name}-y"},
+                    "spec": {},
+                    "status": {
+                        "phase": "Running",
+                        "conditions": [{"type": "Initialized", "status": "False"}],
+                        "containerStatuses": [
+                            {
+                                "name": "inference",
+                                "ready": True,
+                                "restartCount": 2,
+                                "state": {"running": {}},
+                                "lastState": {"terminated": {"exitCode": 137}},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="unit-test")
+        assert snapshot["pods"][0]["conditions"] == [{"type": "Initialized", "status": "False"}]
+        (container,) = snapshot["pods"][0]["containers"]
+        # Restarted but currently ready: the previous attempt's output is the
+        # interesting part, and the current one is fetched alongside it.
+        assert set(container) >= {"log_tail", "previous_log_tail"}
+        assert (
+            snapshot["summary"]
+            == f"{plan.name}-y: Running, inference running, last exit 137 (restarts=2)"
+        )
+
+
+def _probe_killed_pod(name: str, node: str = "i-node-g5") -> dict[str, Any]:
+    """A serving pod that liveness killed once: Running, ready, restartCount 1, exit 0.
+
+    The shape observed on 2026-09-18: SGLang's ``/health`` took 1.0 s, the
+    probe timeout was 1 s, so the kubelet sent SIGTERM and the server exited
+    cleanly — nothing about the pod's *current* state says anything is wrong.
+    """
+    return {
+        "metadata": {"name": f"{name}-5cd6678d9-rvl79"},
+        "spec": {"nodeName": node},
+        "status": {
+            "phase": "Running",
+            "startTime": "2026-09-18T19:54:39Z",
+            "conditions": [
+                {"type": "PodScheduled", "status": "True"},
+                {"type": "Ready", "status": "True"},
+            ],
+            "containerStatuses": [
+                {
+                    "name": "inference",
+                    "ready": True,
+                    "restartCount": 1,
+                    "state": {"running": {"startedAt": "2026-09-18T20:03:47Z"}},
+                    "lastState": {
+                        "terminated": {
+                            "reason": "Completed",
+                            "exitCode": 0,
+                            "startedAt": "2026-09-18T20:00:22Z",
+                            "finishedAt": "2026-09-18T20:03:46Z",
+                        }
+                    },
+                }
+            ],
+        },
+    }
+
+
+class TestRestartAudit:
+    """A leg that restarted on its way to serving is a failed leg, however ready it looks."""
+
+    def _runner(self, tmp_path: Path) -> tuple[Any, Any, dict[str, Any], _DiagnosticsKubectl]:
+        settings = _settings(tmp_path)
+        plans, _ = initialize_run_state(_ctx(tmp_path, None), settings)
+        kubectl = _DiagnosticsKubectl(plans[0].name)
+        runner, plans, records, _ = _lifecycle(tmp_path, settings=settings, kubectl=kubectl)
+        return runner, plans[0], records[0], kubectl
+
+    def test_serving_pods_with_no_restarts_pass_and_are_recorded(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        pod = _probe_killed_pod(plan.name)
+        pod["status"]["containerStatuses"][0]["restartCount"] = 0
+        del pod["status"]["containerStatuses"][0]["lastState"]
+        kubectl.pods = {"items": [pod]}
+
+        runner.verify_no_container_restarts(plan, record)
+
+        assert record["phase"] == "restart-audited"
+        assert record["restart_audit"] == {
+            "pods": [f"{plan.name}-5cd6678d9-rvl79"],
+            "restarted": [],
+        }
+        assert record["workload_diagnostics"][-1]["reason"] == "restart-audit"
+
+    def test_a_probe_killed_container_fails_the_leg_and_names_the_cause(
+        self, tmp_path: Path
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": [_probe_killed_pod(plan.name)]}
+        kubectl.nodes["i-node-g5"] = {
+            "metadata": {
+                "labels": {
+                    "node.kubernetes.io/instance-type": "g5.xlarge",
+                    "eks.amazonaws.com/instance-gpu-name": "a10g",
+                }
+            }
+        }
+        kubectl.logs[(f"{plan.name}-5cd6678d9-rvl79", "inference", True)] = (
+            "SIGTERM received. signum=None frame=None. Draining requests and shutting down...\n"
+        )
+        kubectl.events = {
+            "items": [
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-5cd6678d9-rvl79"},
+                    "type": "Warning",
+                    "reason": "Unhealthy",
+                    "count": 5,
+                    "lastTimestamp": "2026-09-18T20:03:41Z",
+                    "message": (
+                        'Liveness probe failed: Get "http://10.0.11.96:30000/health": '
+                        "context deadline exceeded"
+                    ),
+                },
+                {
+                    "involvedObject": {"kind": "Pod", "name": f"{plan.name}-5cd6678d9-rvl79"},
+                    "type": "Normal",
+                    "reason": "Killing",
+                    "count": 1,
+                    "lastTimestamp": "2026-09-18T20:03:41Z",
+                    "message": "Container inference failed liveness probe, will be restarted",
+                },
+            ]
+        }
+
+        with pytest.raises(ManagedInferenceValidationError) as excinfo:
+            runner.verify_no_container_restarts(plan, record)
+
+        message = str(excinfo.value)
+        assert f"{plan.name}-5cd6678d9-rvl79/inference restarted 1x" in message
+        assert "last exit 0 Completed (restarts=1), on g5.xlarge/a10g" in message
+        assert record["restart_audit"]["restarted"] == [
+            f"{plan.name}-5cd6678d9-rvl79/inference restarted 1x"
+        ]
+        assert record["phase"] != "restart-audited"
+        snapshot = record["workload_diagnostics"][-1]
+        assert snapshot["reason"] == "restart-audit"
+        (container,) = snapshot["pods"][0]["containers"]
+        assert "SIGTERM received" in container["previous_log_tail"]
+        assert [event["reason"] for event in snapshot["events"]] == ["Unhealthy", "Killing"]
+
+    def test_the_audit_fails_closed_when_pods_cannot_be_listed(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.failures["pods"] = (1, "", "forbidden")
+
+        with pytest.raises(ManagedInferenceValidationError, match="could not list"):
+            runner.verify_no_container_restarts(plan, record)
+        assert "restart_audit" not in record
+
+    def test_the_audit_fails_closed_when_no_pods_exist(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.pods = {"items": []}
+
+        with pytest.raises(ManagedInferenceValidationError, match="found no pods"):
+            runner.verify_no_container_restarts(plan, record)
+
+    def test_run_endpoint_audits_restarts_last_so_the_whole_leg_is_covered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        order: list[str] = []
+        for method in (
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_hpa_stability",
+            "verify_backend_probes",
+            "invoke",
+            "verify_no_container_restarts",
+        ):
+            monkeypatch.setattr(
+                runner,
+                method,
+                lambda plan, record, _name=method: order.append(_name),
+            )
+
+        assert runner.run_endpoint(plans[1], records[1]) is True
+
+        assert plans[1].autoscaling is True
+        assert order == [
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_hpa_stability",
+            "verify_backend_probes",
+            "invoke",
+            "verify_no_container_restarts",
+        ]
+        assert records[1]["validation_steps_complete"] is True

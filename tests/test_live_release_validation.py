@@ -5067,11 +5067,11 @@ class TestLocalOnlyRuntime:
                 "publisher/vllm-model",
                 "--inference-vllm-model-revision",
                 "c" * 40,
-                "--inference-tgi-image",
-                "registry.example/tgi@sha256:" + "d" * 64,
-                "--inference-tgi-model-id",
-                "publisher/tgi-model",
-                "--inference-tgi-model-revision",
+                "--inference-sglang-image",
+                "registry.example/sglang@sha256:" + "d" * 64,
+                "--inference-sglang-model-id",
+                "publisher/sglang-model",
+                "--inference-sglang-model-revision",
                 "e" * 40,
                 "--inference-gpu-count",
                 "1",
@@ -5102,7 +5102,8 @@ class TestLocalOnlyRuntime:
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
-        assert [runtime["framework"] for runtime in identity["runtimes"]] == ["vllm", "tgi"]
+        assert [runtime["framework"] for runtime in identity["runtimes"]] == ["vllm", "sglang"]
+        assert identity["contract_version"] == 3
         assert identity["runtimes"][0]["image"].endswith("b" * 64)
         assert identity["runtimes"][0]["model"] == {
             "id": "publisher/vllm-model",
@@ -5110,8 +5111,16 @@ class TestLocalOnlyRuntime:
         }
         assert identity["runtimes"][1]["image"].endswith("d" * 64)
         assert identity["runtimes"][1]["model"] == {
-            "id": "publisher/tgi-model",
+            "id": "publisher/sglang-model",
             "revision": "e" * 40,
+        }
+        assert identity["runtimes"][1]["server"]["port"] == 30000
+        assert identity["runtimes"][1]["request_contract"]["path"] == "/generate"
+        assert identity["runtimes"][1]["request_contract"]["response"] == "text:non-empty-string"
+        assert identity["runtimes"][1]["probe_contract"]["model_info_path"] == "/server_info"
+        assert identity["runtimes"][1]["deploy_contract"] == {
+            "framework_env": {"MODEL": "publisher/sglang-model"},
+            "extra_args": ["--model-path", "publisher/sglang-model", "--revision", "e" * 40],
         }
         assert identity["endpoint_contract"]["gpu_count"] == 1
         assert identity["shared_proxy_contract"]["tls_cpu_request"] == "125m"
@@ -5149,11 +5158,11 @@ class TestLocalOnlyRuntime:
                 "publisher/vllm-model",
                 "--inference-vllm-model-revision",
                 "c" * 40,
-                "--inference-tgi-image",
-                "registry.example/tgi@sha256:" + "d" * 64,
-                "--inference-tgi-model-id",
-                "publisher/tgi-model",
-                "--inference-tgi-model-revision",
+                "--inference-sglang-image",
+                "registry.example/sglang@sha256:" + "d" * 64,
+                "--inference-sglang-model-id",
+                "publisher/sglang-model",
+                "--inference-sglang-model-revision",
                 "e" * 40,
                 "--confirm-inference-deployment",
             ]

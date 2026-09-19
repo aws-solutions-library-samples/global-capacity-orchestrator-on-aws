@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 from kubernetes.client.rest import ApiException
 
+from gco.models.inference_models import INFERENCE_PROBE_TIMEOUT_SECONDS
 from gco.services.inference_monitor import (
     AWS_CLI_IMAGE,
     MOONCAKE_BOOTSTRAP_BASE_PORT,
@@ -1575,7 +1576,13 @@ class TestKubernetesLifecycleFencing:
         monitor._renew_current_lease.assert_called_once()
 
 
-def test_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance() -> None:
+def test_sglang_renderer_supplies_launcher_listener_and_model_from_env() -> None:
+    """``--framework sglang`` renders the official launcher on the spec's port.
+
+    The ``lmsysorg/sglang`` image has no entrypoint and the launcher binds
+    127.0.0.1 by default, so the renderer must own the command, the listener
+    address and port, and hand the ``MODEL`` convention to ``--model-path``.
+    """
     monitor = _make_monitor()
     monitor._active_authority = ReconcileAuthority(
         endpoint_name="chat",
@@ -1586,26 +1593,33 @@ def test_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance()
     deployment = _build_deployment(
         monitor,
         {
-            "image": "ghcr.io/huggingface/text-generation-inference@sha256:" + "a" * 64,
-            "framework": "tgi",
-            "port": 8080,
+            "image": "registry.example/team/private-server@sha256:" + "a" * 64,
+            "framework": "sglang",
+            "port": 30000,
             "health_check_path": "/health",
-            "env": {
-                "MODEL_ID": "test/model",
-                "REVISION": "b" * 40,
-                "PORT": "8080",
-            },
+            "env": {"MODEL": "microsoft/Phi-3.5-mini-instruct"},
         },
     )
 
     container = deployment.spec.template.spec.containers[0]
-    assert not container.args or "--root-path" not in container.args
-    assert container.ports[0].container_port == 8080
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "30000",
+        "--model-path",
+        "$(MODEL)",
+    ]
+    assert container.ports[0].container_port == 30000
     assert container.startup_probe.http_get.path == "/health"
-    assert container.startup_probe.http_get.port == 8080
+    assert container.startup_probe.http_get.port == 30000
     assert container.startup_probe.period_seconds == 15
     assert container.startup_probe.failure_threshold == 80
     assert container.readiness_probe.http_get.path == "/health"
+    assert container.liveness_probe.http_get.path == "/health"
+    env = {item.name: item.value for item in container.env}
+    assert env["MODEL"] == "microsoft/Phi-3.5-mini-instruct"
     expected = {
         "gco.io/lifecycle-id": LIFECYCLE_ID,
         "gco.io/region-generation": REGION_GENERATION,
@@ -1615,18 +1629,296 @@ def test_tgi_renderer_uses_official_unprefixed_startup_contract_and_provenance()
     assert deployment.spec.template.metadata.annotations == expected
 
 
-def test_legacy_official_tgi_image_infers_tgi_probe_contract() -> None:
+def test_sglang_renderer_never_duplicates_operator_supplied_launcher_flags() -> None:
+    """Explicit ``--host``/``--port``/``--model-path`` args win over the injected defaults."""
     monitor = _make_monitor()
     deployment = _build_deployment(
         monitor,
         {
-            "image": "ghcr.io/huggingface/text-generation-inference:3.3.7",
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+            "args": [
+                "--model-path",
+                "test/model",
+                "--revision",
+                "b" * 40,
+                "--host",
+                "::",
+                "--port",
+                "30000",
+            ],
+        },
+        extra_args=["--log-level", "warning"],
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == [
+        "--model-path",
+        "test/model",
+        "--revision",
+        "b" * 40,
+        "--host",
+        "::",
+        "--port",
+        "30000",
+        "--log-level",
+        "warning",
+    ]
+    assert container.args.count("--host") == 1
+    assert container.args.count("--port") == 1
+    assert container.args.count("--model-path") == 1
+    assert "$(MODEL)" not in container.args
+    assert "--root-path" not in container.args
+
+
+def test_sglang_renderer_accepts_the_short_model_alias_and_skips_env_injection() -> None:
+    """``--model`` is SGLang's alias for ``--model-path``; no second model flag is added."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "args": ["--model", "test/model"],
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.args == ["--model", "test/model", "--host", "0.0.0.0", "--port", "30000"]
+
+
+def test_sglang_renderer_without_model_env_leaves_the_model_to_the_operator() -> None:
+    """Without ``MODEL`` there is nothing to expand; the launcher gets only the listener."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"HF_TOKEN": "x"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == ["--host", "0.0.0.0", "--port", "30000"]
+
+
+def test_sglang_renderer_respects_an_operator_supplied_command() -> None:
+    """A spec that carries its own ``command`` (raw manifest style) is rendered verbatim."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "command": ["/bin/bash", "-c"],
+            "args": ["python3 -m sglang.launch_server --model-path $MODEL --port 30000"],
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["/bin/bash", "-c"]
+    assert container.args == ["python3 -m sglang.launch_server --model-path $MODEL --port 30000"]
+    # The startup probe still follows the persisted framework.
+    assert container.startup_probe is not None
+
+
+def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
+    """SGLang pods carry a required NotIn affinity for GPUs its kernels do not target.
+
+    The shipped inference NodePool's cheapest fit is a T4 (g4dn); SGLang's
+    prebuilt sgl-kernel/FlashInfer binaries need compute capability >= 8.0 and
+    crash-loop there ("no kernel image is available for execution on the
+    device"). The affinity composes with the operator's node selector, which
+    stays exactly as given.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+            "node_selector": {"eks.amazonaws.com/instance-family": "g6"},
+        },
+    )
+    pod_spec = deployment.spec.template.spec
+    assert pod_spec.node_selector == {"eks.amazonaws.com/instance-family": "g6"}
+    terms = pod_spec.affinity.node_affinity.required_during_scheduling_ignored_during_execution
+    (term,) = terms.node_selector_terms
+    (requirement,) = term.match_expressions
+    assert requirement.key == "eks.amazonaws.com/instance-gpu-name"
+    assert requirement.operator == "NotIn"
+    assert "t4" in requirement.values
+    assert set(requirement.values) == {"k80", "m60", "v100", "t4"}
+    # No preferred terms: an Ampere-or-newer GPU is a hard requirement.
+    assert terms is not None
+    assert (
+        pod_spec.affinity.node_affinity.preferred_during_scheduling_ignored_during_execution is None
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # vLLM ships sm_70+ kernels: a T4 is a valid, cheaper placement.
+        {
+            "image": "vllm/vllm-openai:v0.11.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "facebook/opt-125m"},
+        },
+        # The GPU-name label is meaningless for Neuron devices.
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "accelerator": "neuron",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+        # No accelerator requested at all: nothing to steer.
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "gpu_count": 0,
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+    ],
+    ids=["vllm", "sglang-neuron", "sglang-no-gpu"],
+)
+def test_pre_ampere_affinity_is_only_rendered_for_sglang_on_nvidia(spec: dict) -> None:
+    deployment = _build_deployment(_make_monitor(), spec)
+    assert deployment.spec.template.spec.affinity is None
+
+
+def test_sglang_probes_outlast_the_health_endpoints_one_second_generation_floor() -> None:
+    """Every SGLang probe states a timeout above the floor; the kubelet default fails by construction.
+
+    sglang 0.5.19's ``/health`` generates one token and polls for it after
+    ``asyncio.sleep(1)``, so a healthy server answers in 1.00-1.03 s. With the
+    Kubernetes default timeout readiness flapped and liveness killed a healthy
+    A10G container every ~3 minutes in the live release validation
+    (2026-09-18): the leg still passed between restarts, which is why the
+    harness now audits restarts as well.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "framework": "sglang",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
+        },
+    )
+    (container,) = deployment.spec.template.spec.containers
+    for probe in (container.startup_probe, container.liveness_probe, container.readiness_probe):
+        assert probe is not None
+        assert probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+        # Wider than the floor, narrower than the readiness period, so probes
+        # never queue behind each other and a hung engine is still caught.
+        assert 1 < probe.timeout_seconds < container.readiness_probe.period_seconds
+    assert INFERENCE_PROBE_TIMEOUT_SECONDS == 5
+
+
+def test_vllm_probes_state_the_same_timeout_instead_of_the_kubelet_default() -> None:
+    """vLLM's ``/health`` is immediate, but an unset timeout is the silent 1 s default.
+
+    tests/test_workload_probe_timing_contract.py holds the platform manifests to
+    "every probe declares its timeout"; the renderer's output is held to the
+    same rule there, and this pins the value it renders.
+    """
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "vllm/vllm-openai:v0.11.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "facebook/opt-125m"},
+        },
+    )
+    (container,) = deployment.spec.template.spec.containers
+    assert container.startup_probe is None
+    assert container.liveness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+    assert container.readiness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+
+
+def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
+    """Records written before ``framework`` existed resolve SGLang from the image name."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "lmsysorg/sglang:v0.5.19",
+            "port": 30000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command == ["python3", "-m", "sglang.launch_server"]
+    assert container.args == ["--host", "0.0.0.0", "--port", "30000", "--model-path", "$(MODEL)"]
+    assert container.startup_probe is not None
+
+
+def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "vllm/vllm-openai:v0.29.0",
+            "framework": "vllm",
+            "port": 8000,
+            "health_check_path": "/health",
+            "env": {"MODEL": "test/model"},
+        },
+    )
+    container = deployment.spec.template.spec.containers[0]
+    assert container.command is None
+    assert container.args == ["--root-path", "/inference/chat"]
+    assert container.startup_probe is None
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # A record persisted under the retired TGI contract, and a plain
+        # unknown image: neither gets a launcher, a root path, or the SGLang
+        # startup probe. Such an endpoint has to be redeployed as sglang/vllm.
+        {
+            "image": "ghcr.io/huggingface/text-generation-inference@sha256:" + "a" * 64,
+            "framework": "tgi",
             "port": 8080,
             "health_check_path": "/health",
             "env": {"MODEL_ID": "test/model", "PORT": "8080"},
         },
-    )
+        {
+            "image": "registry.example/team/private-server@sha256:" + "b" * 64,
+            "port": 9000,
+            "health_check_path": "/healthz",
+            "env": {"MODEL": "test/model"},
+        },
+    ],
+    ids=["retired-tgi-record", "unknown-image"],
+)
+def test_unrecognised_runtimes_get_no_adapter_behaviour(spec: dict) -> None:
+    monitor = _make_monitor()
+    deployment = _build_deployment(monitor, spec)
     container = deployment.spec.template.spec.containers[0]
-    assert container.startup_probe is not None
-    assert container.startup_probe.http_get.path == "/health"
-    assert not container.args or "--root-path" not in container.args
+    assert container.command is None
+    assert container.args is None
+    assert container.startup_probe is None
+    assert container.ports[0].container_port == spec["port"]
+    assert container.readiness_probe.http_get.path == spec["health_check_path"]

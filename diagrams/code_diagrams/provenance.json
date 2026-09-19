@@ -32,9 +32,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "cli/inference.py": {
-      "digest": "f3357fb5e19b50d4e5365f3d25e5b287231906da3b738db89d86278b16cfd03c",
-      "generated_at": "2026-09-13T13:44:22Z",
-      "source_commit": "c49331669c66625fecfecf44ae6ab5f95afbfcb4"
+      "digest": "ba48197d9dc7f422f6dd74e25b04d8279f42d2c4e7e538f56570d73986075d4b",
+      "generated_at": "2026-09-18T17:54:55Z",
+      "source_commit": "7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab"
     },
     "cli/jobs.py": {
       "digest": "92bf455c5ef34c0ab1fd01da277a013f6ae41eb8bc1c9e2ba77bf04ec0fc90f0",
@@ -47,9 +47,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "gco/services/api_routes/inference_proxy.py": {
-      "digest": "ae18182ce131a19615218376b735358c4daa7b042919b2253b6ef523326d9717",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "38342a10e123bd9c0123fcdc03a17cd320070cf66765d864635c78ddf1221871",
+      "generated_at": "2026-09-18T14:22:22Z",
+      "source_commit": "90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b"
     },
     "gco/services/auth_middleware.py": {
       "digest": "0a252aedb1541a79c973a9694d90d91ebae1f21fd17439b843307c20013b2fab",
@@ -67,9 +67,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "4dd91de63599515d6fb27927f2786e2669ceb46c511b7c6dd6b892a0481b472e",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "21acea4e959a30e72db4401a8ce06305e2b6dfe4a0ab132302f30cb454f48a10",
+      "generated_at": "2026-09-18T20:22:59Z",
+      "source_commit": "ff3928a0113e10c48e392d386f56aafbace92cd2"
     },
     "gco/services/manifest_api.py": {
       "digest": "a0eeaeb2696412bead7730935ba63f3bfc5661b8b070923d62a77156455d4cff",

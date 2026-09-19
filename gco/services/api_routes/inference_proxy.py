@@ -27,8 +27,8 @@ from fastapi.responses import StreamingResponse
 from gco.services.inference_store import InferenceEndpointStore, get_inference_endpoint_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-18T14:22:22Z
+# Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b
 # Flowchart(s) generated from this file:
 #   * ``_resolve_upstream`` -> ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.png``)
@@ -212,17 +212,20 @@ def _validate_upstream_path(
 
     method = method.upper()
     configured_health = configured_health_path.strip("/")
+    # ``server_info`` is SGLang's read-only identity document (the launcher
+    # arguments the running server resolved, including ``model_path`` and
+    # ``revision``); it is what ``gco inference models`` reads for that runtime.
     if (
         not normalized
         or normalized == "health"
         or (configured_health and normalized == configured_health)
-        or normalized == "info"
+        or normalized == "server_info"
         or _V1_MODELS_RE.fullmatch(normalized)
     ) and method in {"GET", "HEAD"}:
         return normalized
-    if (
-        _V1_GENERATION_RE.fullmatch(normalized) or normalized in {"generate", "generate_stream"}
-    ) and method == "POST":
+    # ``generate`` is SGLang's native generation API; streaming is a body flag
+    # on the same path.
+    if (_V1_GENERATION_RE.fullmatch(normalized) or normalized == "generate") and method == "POST":
         return normalized
     if _V2_MODELS_RE.fullmatch(normalized) and method in {"GET", "HEAD", "POST"}:
         return normalized

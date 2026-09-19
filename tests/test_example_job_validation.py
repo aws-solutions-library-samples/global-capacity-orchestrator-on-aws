@@ -1662,6 +1662,37 @@ class TestMutationChannels:
             "--trust-remote-code",
         ]
 
+    def test_env_channel_remove_sentinel_drops_only_the_targeted_entry(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """REMOVE_VALUE deletes one env var; siblings and other replacements survive."""
+        import dataclasses
+
+        import yaml
+
+        monkeypatch.setattr(drivers.tempfile, "tempdir", str(tmp_path))
+        spec = dataclasses.replace(
+            EXAMPLE_SPECS["inference-sglang"],
+            mutations={
+                "Deployment.env.QUANTIZE": REMOVE_VALUE,
+                "Deployment.env.MODEL": "facebook/opt-125m",
+            },
+        )
+        deployment = self._deployment([])
+        deployment["spec"]["template"]["spec"]["containers"][0]["env"] = [
+            {"name": "MODEL", "value": "meta/gated"},
+            {"name": "QUANTIZE", "value": "awq"},
+            {"name": "PORT", "value": "30000"},
+        ]
+        parsed = _synthetic_parsed("synthetic-env", spec, [deployment])
+        path, disclosed = drivers.apply_mutations(parsed)
+        assert disclosed == spec.mutations
+        documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        assert documents[0]["spec"]["template"]["spec"]["containers"][0]["env"] == [
+            {"name": "MODEL", "value": "facebook/opt-125m"},
+            {"name": "PORT", "value": "30000"},
+        ]
+
     def test_unknown_channel_is_a_spec_bug(self) -> None:
         import dataclasses
 

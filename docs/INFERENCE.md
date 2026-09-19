@@ -27,7 +27,7 @@ Key capabilities:
 - DynamoDB-backed desired state with continuous reconciliation
 - Rolling updates, scaling, stop/start without losing configuration
 - Global Accelerator routing to the nearest healthy region
-- Support for [vLLM](https://docs.vllm.ai/en/latest/), [TGI](https://huggingface.co/docs/text-generation-inference), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html), [TorchServe](https://docs.pytorch.org/serve/), and [SGLang](https://docs.sglang.ai/) out of the box
+- Support for [vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/), and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) out of the box
 
 ## Architecture
 
@@ -278,10 +278,28 @@ GCO works with any containerized inference server. These frameworks have example
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
 | [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.29.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
-| [TGI](https://huggingface.co/docs/text-generation-inference) ([example](../examples/inference-tgi.yaml)) | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
-| [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
-| [TorchServe](https://docs.pytorch.org/serve/) ([example](../examples/inference-torchserve.yaml)) | `pytorch/torchserve:0.12.0-gpu` | 8080 | `/ping` | PyTorch model serving |
 | [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.19` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
+| [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.08-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
+
+`gco inference deploy --framework` accepts `vllm` and `sglang`. These two are
+the runtimes with a strict adapter contract: the persisted framework selects
+the renderer arguments and probes, the request body `gco inference invoke`
+builds, and the model-identity document `gco inference models` reads. Triton
+and any other OpenAI-compatible server deploy without `--framework`; the CLI
+then falls back to OpenAI-compatible requests.
+
+PyTorch's TorchServe is not listed any more either: its project notice states
+it is no longer actively maintained, with no planned updates, bug fixes, new
+features, or security patches, so GCO no longer ships an example for it.
+
+Hugging Face's Text Generation Inference (TGI) was the second strict runtime
+until it entered maintenance mode on 2025-12-11 and its repository was
+archived read-only on 2026-03-21; SGLang replaced it and the TGI adapter was
+removed outright. `--framework tgi` is no longer a choice, the renderer,
+`gco inference invoke`, and `gco inference models` no longer recognise a
+record persisted as `tgi`, and the authenticated proxy no longer exposes TGI's
+`/info` and `/generate_stream` paths. An endpoint that is still running TGI
+has to be redeployed with `--framework sglang` or `vllm`.
 
 ### vLLM Example
 
@@ -293,19 +311,53 @@ gco inference deploy vllm-llama3 \
   -e MAX_MODEL_LEN=4096
 ```
 
-### TGI Example
+### SGLang Example
 
 ```bash
-gco inference deploy tgi-mistral \
-  -i ghcr.io/huggingface/text-generation-inference:3.3.7 \
-  --framework tgi \
-  --port 8080 \
-  --health-path /health \
+gco inference deploy sglang-phi3 \
+  -i lmsysorg/sglang:v0.5.19 \
+  --framework sglang \
+  --port 30000 \
   --gpu-count 1 \
-  -e MODEL_ID=mistralai/Mistral-7B-Instruct-v0.2 \
-  -e REVISION=<40-lowercase-hex-model-commit> \
-  -e PORT=8080
+  -e MODEL=microsoft/Phi-3.5-mini-instruct
 ```
+
+With `--framework sglang` the renderer supplies the official launcher itself
+(the `lmsysorg/sglang` image has no entrypoint): the container runs
+`python3 -m sglang.launch_server --host 0.0.0.0 --port <--port> --model-path
+$(MODEL)`, where `MODEL` is the same environment convention the vLLM renderer
+uses. Each `--extra-args` value is one launcher token, so pin an exact model
+revision with `--extra-args=--model-path --extra-args <id>
+--extra-args=--revision --extra-args <40-hex-commit>`; a `--host`, `--port`,
+or `--model-path` you pass this way is never duplicated. A deploy that names
+no model either way is refused before anything is persisted, because the pod
+could only crash-loop on the launcher's missing `--model-path`. SGLang answers
+`/health` with 503 until the model is loaded, so the renderer adds a startup
+probe that holds liveness off for up to 20 minutes while the checkpoint
+downloads. Once serving, SGLang's `/health` is a real check rather than a
+ping: it generates one token and polls for the result at one-second steps, so
+a healthy server answers in just over a second and never faster. The
+Kubernetes default probe timeout of 1 s therefore fails every probe —
+readiness flaps and liveness kills a healthy container every few minutes —
+so every probe the renderer places on an inference container states
+`timeoutSeconds: 5` (vLLM's included, so the silent kubelet default can never
+return): wide enough for the one-second floor and a busy CPU while still
+failing a hung engine, whose check runs to SGLang's own 20 s limit and
+returns 503. `tests/test_workload_probe_timing_contract.py` holds the
+rendered probes to the same rules as the platform manifests.
+
+SGLang's prebuilt kernels (`sgl-kernel`, FlashInfer) target NVIDIA compute
+capability 8.0 and newer: A10G (g5), L4 (g6/g6f/gr6), L40S (g6e), A100 (p4d),
+H100 (p5). On an older GPU the server crash-loops at startup with `no kernel
+image is available for execution on the device` — and the shipped inference
+NodePool's cheapest fit is exactly such a GPU, the T4 (g4dn). So the renderer
+adds a required node affinity that keeps `--framework sglang` pods off T4,
+V100, M60 and K80 nodes (read from the `eks.amazonaws.com/instance-gpu-name`
+label; nodes without the label are unaffected), and `gco inference deploy`
+refuses a `--node-selector` that pins one of those GPUs or families
+(`g4dn`, `p3`, `p2`, `g3`) with the reason. vLLM has no such constraint: it
+ships kernels down to compute capability 7.0, so a T4 remains a valid, cheaper
+placement for `--framework vllm`.
 
 ### Triton Example
 
@@ -316,17 +368,6 @@ gco inference deploy triton-models \
   --health-path /v2/health/ready \
   --gpu-count 1 \
   --model-source s3://your-bucket/models/triton-repo
-```
-
-### TorchServe Example
-
-```bash
-gco inference deploy torchserve-resnet \
-  -i pytorch/torchserve:0.12.0-gpu \
-  --port 8080 \
-  --health-path /ping \
-  --gpu-count 1 \
-  --model-source s3://your-bucket/models/torchserve-mar
 ```
 
 ## Disaggregated Inference (Mooncake)
@@ -704,10 +745,10 @@ gco inference invoke my-llm -p "Explain Kubernetes" --stream
 gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 ```
 
-The CLI auto-detects the serving framework from the container image and builds the appropriate request body:
+The CLI resolves the serving framework from the persisted `--framework` (falling back to the container image for older records) and builds the appropriate request body:
 
 - **vLLM** → `/v1/completions` (OpenAI-compatible; `--stream` sets `"stream": true`)
-- **TGI** → `/generate`, or `/generate_stream` when streaming
+- **SGLang** → `/generate` (native API: `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`; `--stream` sets `"stream": true` on the same path)
 - **Triton** → `/v2/models` (Triton HTTP API)
 
 `--no-stream` explicitly forces buffered output, including when raw JSON contains
@@ -997,10 +1038,8 @@ For development or quick testing, you can apply example manifests directly:
 gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1
 
 # Other available examples:
-# examples/inference-tgi.yaml
-# examples/inference-triton.yaml
-# examples/inference-torchserve.yaml
 # examples/inference-sglang.yaml
+# examples/inference-triton.yaml
 # examples/model-download-job.yaml
 ```
 

@@ -1,4 +1,11 @@
-"""Strict immutable runtime contracts for the live inference matrix."""
+"""Strict immutable runtime contracts for the live inference matrix.
+
+The matrix proves two serving runtimes end to end: vLLM through its
+OpenAI-compatible surface and SGLang through its native surface. Hugging
+Face Text Generation Inference used to be the second runtime; it entered
+maintenance mode on 2025-12-11 and its repository was archived read-only on
+2026-03-21, so it is no longer something a release should be proven against.
+"""
 
 from __future__ import annotations
 
@@ -8,23 +15,31 @@ from typing import Any, Literal
 
 from cli._image_reference import immutable_sha256_digest
 
-Framework = Literal["vllm", "tgi"]
+Framework = Literal["vllm", "sglang"]
 
 INFERENCE_OWNER_LABEL = "gco-managed-inference-validation-owner"
-INFERENCE_CONTRACT_VERSION = 2
-_FRAMEWORK_ORDER: tuple[Framework, ...] = ("vllm", "tgi")
-_DEFAULT_PORTS: dict[Framework, int] = {"vllm": 8000, "tgi": 8080}
+# Bump whenever the matrix below changes shape: the version is part of the
+# resume identity, so a checkpoint written under an older contract refuses to
+# resume against a newer one instead of silently mixing adapters.
+INFERENCE_CONTRACT_VERSION = 3
+_FRAMEWORK_ORDER: tuple[Framework, ...] = ("vllm", "sglang")
+# Each runtime's documented default listener: vLLM's OpenAI server and
+# ``sglang.launch_server`` (``--port`` default 30000).
+_DEFAULT_PORTS: dict[Framework, int] = {"vllm": 8000, "sglang": 30000}
 _DEFAULT_REQUEST_PATHS: dict[Framework, str] = {
     "vllm": "/v1/completions",
-    "tgi": "/generate",
+    "sglang": "/generate",
 }
 _RESPONSE_CONTRACTS: dict[Framework, str] = {
     "vllm": "choices[0].text:non-empty-string",
-    "tgi": "generated_text:non-empty-string",
+    "sglang": "text:non-empty-string",
 }
+# vLLM lists the served model through the OpenAI inventory; SGLang's
+# ``/server_info`` reports the resolved launcher arguments, so it carries
+# both ``model_path`` and the ``revision`` the server was started with.
 _MODEL_INFO_PATHS: dict[Framework, str] = {
     "vllm": "/v1/models",
-    "tgi": "/info",
+    "sglang": "/server_info",
 }
 
 
@@ -53,7 +68,7 @@ def _plain_positive_int(value: object) -> bool:
 
 def _validate_runtime(runtime: InferenceRuntimeSpec) -> None:
     if runtime.framework not in _FRAMEWORK_ORDER:
-        raise ValueError("inference runtime framework must be 'vllm' or 'tgi'")
+        raise ValueError("inference runtime framework must be 'vllm' or 'sglang'")
     if immutable_sha256_digest(runtime.image) is None:
         raise ValueError(
             f"{runtime.framework} image must be an immutable lowercase @sha256: reference"
@@ -77,14 +92,14 @@ def validate_inference_settings(settings: Any) -> None:
     runtimes = settings.inference_runtimes
     if not isinstance(runtimes, tuple) or tuple(runtime.framework for runtime in runtimes) != (
         "vllm",
-        "tgi",
+        "sglang",
     ):
-        raise ValueError("managed inference validation requires vLLM then TGI runtime specs")
+        raise ValueError("managed inference validation requires vLLM then SGLang runtime specs")
     for runtime in runtimes:
         _validate_runtime(runtime)
     image_digests = [runtime.image.rsplit("@sha256:", 1)[1] for runtime in runtimes]
     if len(set(image_digests)) != len(image_digests):
-        raise ValueError("vLLM and TGI runtime images must have distinct immutable digests")
+        raise ValueError("vLLM and SGLang runtime images must have distinct immutable digests")
     if not settings.request_prompt.strip():
         raise ValueError("request_prompt must be non-empty")
     if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", settings.namespace):
@@ -143,14 +158,21 @@ def validate_inference_settings(settings: Any) -> None:
 
 
 def inference_request_body(settings: Any, runtime: InferenceRuntimeSpec) -> dict[str, Any]:
-    """Return the deterministic request body for one exact framework adapter."""
-    if runtime.framework == "tgi":
+    """Return the deterministic request body for one exact framework adapter.
+
+    SGLang is driven through its native ``/generate`` API rather than its
+    OpenAI-compatible one on purpose: the two runtimes must exercise
+    different wire contracts, otherwise a response that only satisfies the
+    OpenAI shape would pass for both and the matrix would prove one adapter
+    twice.
+    """
+    if runtime.framework == "sglang":
         return {
-            "inputs": settings.request_prompt,
-            "parameters": {
-                "do_sample": False,
+            "sampling_params": {
                 "max_new_tokens": settings.request_max_tokens,
+                "temperature": 0,
             },
+            "text": settings.request_prompt,
         }
     return {
         "max_tokens": settings.request_max_tokens,
@@ -162,26 +184,30 @@ def inference_request_body(settings: Any, runtime: InferenceRuntimeSpec) -> dict
 
 
 def inference_framework_env(runtime: InferenceRuntimeSpec) -> dict[str, str]:
-    """Return only official launcher environment for the selected runtime."""
-    if runtime.framework == "tgi":
-        return {
-            "MODEL_ID": runtime.model_id,
-            "PORT": str(runtime.port),
-            "REVISION": runtime.model_revision,
-        }
+    """Return the environment the deploy carries for the selected runtime.
+
+    ``MODEL`` is the GCO convention every renderer and ``gco inference invoke``
+    understand; both launchers receive the model itself on argv (see
+    :func:`inference_deploy_extra_args`).
+    """
     return {"MODEL": runtime.model_id}
 
 
 def inference_deploy_extra_args(runtime: InferenceRuntimeSpec) -> tuple[str, ...]:
     """Return official immutable-model arguments for the selected runtime."""
-    if runtime.framework == "vllm":
+    if runtime.framework == "sglang":
         return (
-            "--model",
+            "--model-path",
             runtime.model_id,
             "--revision",
             runtime.model_revision,
         )
-    return ()
+    return (
+        "--model",
+        runtime.model_id,
+        "--revision",
+        runtime.model_revision,
+    )
 
 
 def _runtime_identity(settings: Any, runtime: InferenceRuntimeSpec) -> dict[str, Any]:

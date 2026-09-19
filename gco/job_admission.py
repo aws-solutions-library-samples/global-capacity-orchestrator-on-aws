@@ -73,10 +73,10 @@ DEFAULT_TRUSTED_REGISTRIES = (
     "k8s.gcr.io",
     "public.ecr.aws",
     "nvcr.io",
-    # Org-scoped GHCR prefix (matched via the startswith branch) for the
-    # HuggingFace TGI image shipped in examples/inference-tgi.yaml. Scoped to
-    # the org rather than all of ghcr.io on purpose.
-    "ghcr.io/huggingface",
+    # Org-scoped prefixes such as ``ghcr.io/<org>`` are honoured through the
+    # startswith branch of the matcher when an operator adds them to
+    # cdk.json job_validation_policy.trusted_registries; none ships by
+    # default since no example needs one.
 )
 DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
     "nvidia",

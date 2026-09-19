@@ -13,12 +13,20 @@ import secrets
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
 
+from gco.models.inference_models import (
+    GPU_NAME_NODE_LABEL,
+    INSTANCE_FAMILY_NODE_LABEL,
+    SGLANG_SUPPORTED_GPU_EXAMPLES,
+    SGLANG_UNSUPPORTED_GPU_FAMILIES,
+    SGLANG_UNSUPPORTED_GPU_NAMES,
+)
+
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-13T13:44:22Z
-# Generated from Git commit: c49331669c66625fecfecf44ae6ab5f95afbfcb4
+# Generated at (UTC): 2026-09-18T17:54:55Z
+# Generated from Git commit: 7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -554,10 +562,41 @@ class InferenceManager:
         Returns:
             Created endpoint record
         """
-        if framework not in (None, "vllm", "tgi"):
-            raise ValueError("framework must be 'vllm' or 'tgi'")
-        if mooncake_mode is not None and framework == "tgi":
+        if framework not in (None, "vllm", "sglang"):
+            raise ValueError("framework must be 'vllm' or 'sglang'")
+        if mooncake_mode is not None and framework == "sglang":
             raise ValueError("Mooncake serving requires the vllm framework")
+        if (
+            framework == "sglang"
+            and not (env or {}).get("MODEL")
+            and not {"--model-path", "--model"} & set(extra_args or [])
+        ):
+            # The renderer supplies the launcher and takes the model from the
+            # ``MODEL`` convention or an explicit launcher flag; without either
+            # the pod would only crash-loop on a missing --model-path.
+            raise ValueError(
+                "framework 'sglang' needs the model to serve: pass -e MODEL=<id-or-path> "
+                "or --extra-args=--model-path --extra-args <id-or-path>"
+            )
+        if framework == "sglang" and node_selector:
+            # The renderer keeps SGLang off pre-Ampere GPUs on its own; a
+            # selector that pins one would only make the pod unschedulable
+            # forever, so refuse it here with the reason instead.
+            pinned_gpu = str(node_selector.get(GPU_NAME_NODE_LABEL, "")).lower()
+            pinned_family = str(node_selector.get(INSTANCE_FAMILY_NODE_LABEL, "")).lower()
+            pinned = (
+                pinned_gpu
+                if pinned_gpu in SGLANG_UNSUPPORTED_GPU_NAMES
+                else pinned_family
+                if pinned_family in SGLANG_UNSUPPORTED_GPU_FAMILIES
+                else None
+            )
+            if pinned is not None:
+                raise ValueError(
+                    "framework 'sglang' needs an NVIDIA GPU with compute capability 8.0 or "
+                    f"newer ({SGLANG_SUPPORTED_GPU_EXAMPLES}); the node selector pins "
+                    f"'{pinned}', for which SGLang ships no prebuilt kernels"
+                )
         if mooncake_mode is not None and framework is None:
             framework = "vllm"
 
