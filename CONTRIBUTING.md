@@ -614,7 +614,7 @@ process.
 
 - Use clear, concise language
 - Include code examples
-- Add diagrams where helpful — GCO has two auto-generated diagram
+- Add diagrams where helpful — GCO has three auto-generated
   catalogues you can lean on or extend:
   - `diagrams/infra_diagrams/` — per-stack and full-architecture
     views synthesized from the CDK app via cdk-dia. Run
@@ -631,6 +631,14 @@ process.
     `code_diagrams/provenance.json` records each source's digest so the
     freshness contract holds without resolving commits through Git. Add new
     targets by editing `diagrams/code_diagrams/_targets.py`.
+  - `diagrams/api_specs/` — one API spec sheet per FastAPI service,
+    rendered from the OpenAPI documents in `docs/openapi/` (which
+    `scripts/generate_openapi.py` exports from the applications). After a
+    route or model change run `python scripts/generate_openapi.py` and then
+    `python diagrams/generate.py --api-only`; `--check` fails until both are
+    current. The sheets are injected into the wiki as `/api/`, and
+    `pages.yml` builds FastAPI's Swagger UI console per service at
+    `/swagger/` from the same documents — nothing to hand-write.
 - Keep it up-to-date with code changes
 
 ## Code Review Guidelines

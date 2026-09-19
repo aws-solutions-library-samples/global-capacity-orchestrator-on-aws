@@ -1,8 +1,8 @@
 # Diagrams
 
-Auto-generated diagrams for the GCO project. Split into two catalogues
-so infrastructure views and code control-flow views stay out of each
-other's way:
+Auto-generated views of the GCO project. Split into three catalogues so
+infrastructure topologies, code control-flow charts, and the HTTP API surface
+stay out of each other's way:
 
 ## Table of Contents
 
@@ -16,10 +16,15 @@ other's way:
 |-----------|---------------|---------------------|
 | [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) topologies synthesised from the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/generate.py --infra-only` |
 | [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only` |
+| [`api_specs/`](api_specs/README.md) | One API spec sheet per FastAPI service — endpoint table, every operation's parameters, request body and responses, every component schema — rendered from the OpenAPI documents FastAPI generates (`docs/openapi/*.json`, the same documents behind each service's Swagger `/docs` page). Markdown for GitHub and the wiki; the generator also builds FastAPI's Swagger UI console per service for the project site. | `python diagrams/generate.py --api-only` |
 
 Use `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py` to reconcile
-both catalogues in one run, or `python diagrams/generate.py --check` for the
-read-only artifact, index, marker, timestamp, and source-commit contract.
+all three catalogues in one run, or `python diagrams/generate.py --check` for the
+read-only artifact, index, marker, timestamp, and source-commit contract. The
+API spec sheets are a deterministic rendering of committed documents, so their
+part of the contract is a byte-for-byte re-render rather than a stamp: no
+timestamp or source commit is involved, and `--api-only` needs neither
+variable.
 Canonical code generation requires a fixed integer timestamp and an explicit
 clean source commit. Commit substantive source changes first, generate from
 that SHA, then commit derived artifacts separately; embedding the SHA of the
@@ -54,6 +59,7 @@ SOURCE_DATE_EPOCH=1788091200 \
 GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> \
 python diagrams/generate.py --code-only
 python diagrams/generate.py --infra-only
+python diagrams/generate.py --api-only   # after `python scripts/generate_openapi.py`
 
 # Force a full restamp of every code target (rarely needed — reach for
 # this only after changing the generator's own rendering or marker
@@ -80,8 +86,12 @@ and commit that produced its artifacts. Two consequences worth knowing:
 
 ## Prerequisites
 
-The two generators have independent dependency chains — only install
-what you need.
+The three generators have independent dependency chains — only install
+what you need. The API spec sheets need nothing beyond the standard library
+(`python diagrams/generate.py --api-only`); only the optional Swagger UI
+consoles need the project's FastAPI and the locked `swagger-ui-dist` package
+(`npm ci --ignore-scripts --no-audit --no-fund`, then
+`python diagrams/api_specs/generate.py --swagger-ui-dir <dir> --swagger-assets node_modules/swagger-ui-dist`).
 
 **Infrastructure diagrams** ([cdk-dia](https://github.com/pistazie/cdk-dia) + Graphviz + Node):
 

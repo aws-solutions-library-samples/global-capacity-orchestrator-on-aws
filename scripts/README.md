@@ -28,7 +28,7 @@ Utility scripts for development, testing, and operations.
 | `generate_openapi.py` | Writes or checks the committed OpenAPI documents for all four GCO HTTP services. |
 | `mcp_install_smoke.py` | Verifies a packaged install exposes a self-contained, version-matched `gco-mcp` server and bundled `gco` CLI. |
 | `migrate_fork.py` | Safely rewrites references owned by this repository when adopting GCO into a fork. See [`docs/FORKING.md`](../docs/FORKING.md). |
-| `mkdocs_hooks.py` | Injects tracked `images/` assets into the MkDocs wiki build without duplicating binaries. |
+| `mkdocs_hooks.py` | Injects tracked `images/` assets (as `assets/images/`) and the generated API spec sheets from `diagrams/api_specs/` (as `api/`) into the MkDocs wiki build without duplicating either. |
 | `preview_wiki.sh` | Runs the strict MkDocs build and optional local live-reload server used for wiki development. |
 | `setup-cluster-access.sh` | Configures kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. |
 | `setup-dev-alias.sh` | Builds the dev image and installs the shell function that runs `gco` through the containerized toolchain. |

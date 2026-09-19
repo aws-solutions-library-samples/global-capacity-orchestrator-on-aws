@@ -67,6 +67,13 @@ def _dispatch(config: MkDocsConfig, files: Files) -> Files:
     return config.plugins.on_files(files, config=config)
 
 
+def _empty_dir(tmp_path: Path) -> Path:
+    """A stand-in source directory with nothing to inject."""
+    path = tmp_path / "empty"
+    path.mkdir(exist_ok=True)
+    return path
+
+
 def test_on_files_injects_tracked_images_as_site_assets(
     tmp_path: Path, config: MkDocsConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -78,6 +85,7 @@ def test_on_files_injects_tracked_images_as_site_assets(
     (images / "nested").mkdir()
     (images / "nested" / "ignored.png").write_bytes(b"\x89PNG")
     monkeypatch.setattr(mkdocs_hooks, "_IMAGES_DIR", images)
+    monkeypatch.setattr(mkdocs_hooks, "_API_SPECS_DIR", _empty_dir(tmp_path))
     incoming = Files([_index_file(config)])
 
     result = _dispatch(config, incoming)
@@ -107,6 +115,7 @@ def test_on_files_with_no_eligible_images_leaves_the_collection_unchanged(
     images.mkdir()
     (images / "README.md").write_text("only notes\n", encoding="utf-8")
     monkeypatch.setattr(mkdocs_hooks, "_IMAGES_DIR", images)
+    monkeypatch.setattr(mkdocs_hooks, "_API_SPECS_DIR", _empty_dir(tmp_path))
 
     result = _dispatch(config, Files([_index_file(config)]))
 
@@ -122,6 +131,7 @@ def test_on_files_serves_bytes_from_the_tracked_file(
     payload = b"\x89PNG\r\n\x1a\nfake"
     (images / "shot.png").write_bytes(payload)
     monkeypatch.setattr(mkdocs_hooks, "_IMAGES_DIR", images)
+    monkeypatch.setattr(mkdocs_hooks, "_API_SPECS_DIR", _empty_dir(tmp_path))
 
     result = _dispatch(config, Files([]))
     file = result.get_file_from_path("assets/images/shot.png")
@@ -130,22 +140,68 @@ def test_on_files_serves_bytes_from_the_tracked_file(
     assert file.content_bytes == payload
 
 
-def test_hook_maps_every_tracked_repository_image(config: MkDocsConfig) -> None:
-    """Against the real ``images/`` directory: one asset per tracked image, no README."""
-    expected = sorted(
+def test_hook_maps_every_tracked_repository_image_and_spec_sheet(config: MkDocsConfig) -> None:
+    """Against the real repository: one asset per tracked image (no README), one page per sheet."""
+    expected_images = sorted(
         path.name
         for path in (REPO_ROOT / "images").iterdir()
         if path.is_file() and path.name != "README.md"
     )
-    assert expected, "the repository ships tracked images"
+    expected_sheets = sorted(
+        path.name for path in (REPO_ROOT / "diagrams" / "api_specs").glob("*.md")
+    )
+    assert expected_images, "the repository ships tracked images"
     assert (REPO_ROOT / "images" / "README.md").is_file()
+    assert "README.md" in expected_sheets and len(expected_sheets) > 1, "the catalogue ships sheets"
 
     result = _dispatch(config, Files([]))
 
-    assert [file.src_uri for file in result] == [f"assets/images/{name}" for name in expected]
+    assert [file.src_uri for file in result] == [
+        *(f"assets/images/{name}" for name in expected_images),
+        *(f"api/{name}" for name in expected_sheets),
+    ]
     for file in result:
         assert file.abs_src_path is not None
-        assert Path(file.abs_src_path).parent == REPO_ROOT / "images"
+        assert Path(file.abs_src_path).parent in {
+            REPO_ROOT / "images",
+            REPO_ROOT / "diagrams" / "api_specs",
+        }
         assert Path(file.abs_src_path).is_file()
     assert mkdocs_hooks._IMAGES_DIR == REPO_ROOT / "images"
     assert mkdocs_hooks._SITE_PREFIX == "assets/images"
+    assert mkdocs_hooks._API_SPECS_DIR == REPO_ROOT / "diagrams" / "api_specs"
+    assert mkdocs_hooks._API_SITE_PREFIX == "api"
+
+
+def test_on_files_injects_only_the_markdown_sheets_as_api_pages(
+    tmp_path: Path, config: MkDocsConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generator, its package marker and caches are not site content."""
+    specs = tmp_path / "api_specs"
+    specs.mkdir()
+    (specs / "README.md").write_text("# Index\n", encoding="utf-8")
+    (specs / "manifest-processor.md").write_text("# Sheet\n", encoding="utf-8")
+    (specs / "generate.py").write_text("print()\n", encoding="utf-8")
+    (specs / "__init__.py").write_text("", encoding="utf-8")
+    (specs / "__pycache__").mkdir()
+    monkeypatch.setattr(mkdocs_hooks, "_IMAGES_DIR", _empty_dir(tmp_path))
+    monkeypatch.setattr(mkdocs_hooks, "_API_SPECS_DIR", specs)
+
+    result = _dispatch(config, Files([_index_file(config)]))
+
+    assert [file.src_uri for file in result] == [
+        "index.md",
+        "api/README.md",
+        "api/manifest-processor.md",
+    ]
+    readme = result.get_file_from_path("api/README.md")
+    sheet = result.get_file_from_path("api/manifest-processor.md")
+    assert readme is not None and sheet is not None
+    assert readme.is_documentation_page() and sheet.is_documentation_page()
+    # README.md is the directory index: /api/ and /api/manifest-processor/.
+    assert readme.url == "api/"
+    assert sheet.url == "api/manifest-processor/"
+    assert sheet.abs_src_path == str(specs / "manifest-processor.md"), (
+        "served from disk, not a copy"
+    )
+    assert sheet.generated_by == "gco-images"

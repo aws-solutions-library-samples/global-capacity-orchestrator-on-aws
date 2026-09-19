@@ -364,6 +364,8 @@ Regenerate the full architecture and every per-stack view with [`python diagrams
 
 Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md). Regenerate them through the [canonical two-commit workflow](diagrams/README.md#quick-reference), which records an exact source commit without creating a self-referential SHA. Add newly charted functions to [`diagrams/code_diagrams/_targets.py`](./diagrams/code_diagrams/_targets.py).
 
+The HTTP API surface has its own catalogue: [`diagrams/api_specs/`](diagrams/api_specs/README.md) holds one spec sheet per FastAPI service — endpoint table, parameters, request bodies, responses, and component schemas — rendered from the OpenAPI documents the applications generate ([`docs/openapi/`](docs/openapi/README.md), the same documents behind each service's Swagger `/docs` page). The sheets are also the wiki's [API reference](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/), and FastAPI's own Swagger UI console for each service is published at [`/swagger/`](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/). Regenerate with `python diagrams/generate.py --api-only` after `python scripts/generate_openapi.py`; `python diagrams/generate.py --check` fails when a route or model changed without the sheets.
+
 > A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
 
 ## AWS Services in this Guidance
@@ -575,7 +577,7 @@ embedded.
 │
 ├── cli/                                 # GCO CLI (jobs, stacks, capacity, inference, costs, DAGs)
 ├── demo/                                # Recorded CLI demos (GIFs + asciinema sources) with walkthroughs and re-record scripts
-├── diagrams/                            # Auto-generated architecture diagrams (infra_diagrams/) and code flowcharts (code_diagrams/)
+├── diagrams/                            # Auto-generated architecture diagrams (infra_diagrams/), code flowcharts (code_diagrams/), API spec sheets (api_specs/)
 ├── dockerfiles/                         # Distroless container images for the in-cluster GCO services
 ├── docs/                                # Documentation (architecture, CLI, API, inference, customization, analytics)
 ├── examples/                            # Example manifests (jobs, inference, Ray, Volcano, Kueue, Slurm, YuniKorn)

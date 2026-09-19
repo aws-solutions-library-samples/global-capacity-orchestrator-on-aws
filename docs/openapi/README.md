@@ -14,11 +14,24 @@ These are committed so the API surface is reviewable in a diff: a pull request
 that changes a route, a parameter, or a request model shows the schema change
 alongside the code.
 
+Two human-facing renderings are generated from them and kept in lockstep by
+`python diagrams/generate.py --check`:
+
+- **Spec sheets** — one Markdown page per service under
+  [`diagrams/api_specs/`](../../diagrams/api_specs/README.md) (endpoint table,
+  parameters, request bodies, responses, component schemas), also served as
+  the wiki's [API reference](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/).
+- **Swagger UI** — FastAPI's own `/docs` console per service, built by
+  `pages.yml` into the project site at
+  [`/swagger/`](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/)
+  from these documents with a self-hosted `swagger-ui-dist`.
+
 ## Regenerating
 
 ```bash
 python scripts/generate_openapi.py           # rewrite the documents
 python scripts/generate_openapi.py --check   # fail if any document is stale
+python diagrams/generate.py --api-only       # re-render the spec sheets from them
 ```
 
 `--check` runs as part of the test suite via
