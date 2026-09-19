@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2225" height="654" viewBox="0 0 2225 654" role="img" aria-labelledby="title desc">
+  <title id="title">GCO API topology: API Gateways, Lambda proxies, the cluster Gateway and the services</title>
+  <desc id="desc">Clients sign requests with SigV4 to the global or regional API Gateway; Lambda proxies add the HMAC envelope and forward to the region's internal ALB, the Kubernetes Gateway whose HTTPRoute routes by path prefix to the FastAPI services.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/></marker>
+    <marker id="arrow-fanout" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/></marker>
+  </defs>
+  <rect width="2225" height="654" fill="#ffffff"/>
+  <path d="M 170 294.5 H 194 V 239 H 300" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="292" y="233" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">SigV4</text>
+  <path d="M 550 239 H 574 V 55 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/global/*</text>
+  <path d="M 725 78 H 701 V 387.5 H 550" fill="none" stroke="#6d28d9" stroke-width="1.4" stroke-dasharray="7 5" marker-end="url(#arrow-fanout)"/>
+  <text x="717" y="92" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#6d28d9">SigV4 fan-out</text>
+  <path d="M 550 387.5 H 574 V 439 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="433" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/{proxy+}</text>
+  <path d="M 950 439 H 974 V 295 H 1250" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M 1515 295 H 1539 V 391 H 1655" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="1647" y="385" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/</text>
+  <text x="1647" y="373" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/manifests</text>
+  <path d="M 1515 295 H 1539 V 199 H 1655" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="1647" y="193" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/healthz</text>
+  <text x="1647" y="181" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/metrics</text>
+  <text x="1647" y="169" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/health</text>
+  <path d="M 550 239 H 574 V 151 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/{proxy+} †</text>
+  <path d="M 950 151 H 974 V 294.5 H 1010" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M 1190 294.5 H 1214 V 295 H 1250" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M 550 239 H 574 V 247 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="241" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/inference/{proxy+} †</text>
+  <path d="M 950 247 H 974 V 294.5 H 1010" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M 1515 295 H 1539 V 295 H 1655" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="1647" y="289" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/inference</text>
+  <path d="M 1860 295 H 1884 V 342.5 H 1990" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="1982" y="336.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">by endpoint name</text>
+  <path d="M 550 239 H 574 V 343 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="337" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/studio/login †</text>
+  <path d="M 170 294.5 H 194 V 387.5 H 300" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+  <text x="292" y="381.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">SigV4 · opt-in</text>
+  <path d="M 550 387.5 H 574 V 535 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="717" y="529" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/inference/{proxy+}</text>
+  <path d="M 950 535 H 974 V 295 H 1250" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M 1860 391 H 1884 V 239 H 1990" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+  <text x="1982" y="233" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/api/v1/cost*</text>
+  <rect x="20" y="252" width="150" height="85" rx="8" fill="#ffffff" stroke="#334155" stroke-width="1.5"/>
+    <text x="30" y="271" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#334155">Clients</text>
+    <text x="30" y="290" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">AWS SigV4 (IAM)</text>
+    <text x="30" y="305" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">gco CLI, awscurl,</text>
+    <text x="30" y="320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">boto3, curl --aws-sigv4</text>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/cost-monitor/"><title>GCO Cost Monitor</title>
+    <rect x="1990" y="204" width="215" height="70" rx="8" fill="#ffffff" stroke="#64748b" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="2000" y="223" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#64748b">GCO Cost Monitor</text>
+    <text x="2000" y="242" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">5 endpoints</text>
+    <text x="2000" y="257" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Service cost-monitor</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/health-monitor/"><title>GCO Health Monitor API</title>
+    <rect x="1655" y="164" width="205" height="70" rx="8" fill="#f1f5f9" stroke="#334155" stroke-width="1.5"/>
+    <text x="1665" y="183" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#334155">GCO Health Monitor API</text>
+    <text x="1665" y="202" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">6 endpoints</text>
+    <text x="1665" y="217" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Service health-monitor</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/inference-proxy/"><title>GCO Inference Proxy API</title>
+    <rect x="1655" y="260" width="205" height="70" rx="8" fill="#f1f5f9" stroke="#334155" stroke-width="1.5"/>
+    <text x="1665" y="279" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#334155">GCO Inference Proxy API</text>
+    <text x="1665" y="298" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">9 endpoints</text>
+    <text x="1665" y="313" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Service inference-proxy</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/manifest-processor/"><title>GCO Manifest Processor API</title>
+    <rect x="1655" y="356" width="205" height="70" rx="8" fill="#f1f5f9" stroke="#334155" stroke-width="1.5"/>
+    <text x="1665" y="375" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#334155">GCO Manifest Processor API</text>
+    <text x="1665" y="394" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">37 endpoints</text>
+    <text x="1665" y="409" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Service manifest-processor</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/api-gateway-global/"><title>GCO Global API Gateway</title>
+    <rect x="300" y="159" width="250" height="160" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+    <text x="310" y="178" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1d4ed8">GCO Global API Gateway</text>
+    <text x="310" y="197" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET /api/v1/global/health</text>
+    <text x="310" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET DELETE /api/v1/global/jobs</text>
+    <text x="310" y="227" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET /api/v1/global/status</text>
+    <text x="310" y="242" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET POST PUT PATCH DELETE</text>
+    <text x="310" y="257" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">  /api/v1/{proxy+} †</text>
+    <text x="310" y="272" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET POST HEAD /inference/{proxy+} †</text>
+    <text x="310" y="287" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET /studio/callback †</text>
+    <text x="310" y="302" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET /studio/login †</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/api-gateway-regional/"><title>GCO Regional API Gateway</title>
+    <rect x="300" y="345" width="250" height="85" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+    <text x="310" y="364" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1d4ed8">GCO Regional API Gateway</text>
+    <text x="310" y="383" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET POST PUT PATCH DELETE HEAD</text>
+    <text x="310" y="398" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">  OPTIONS /api/v1/{proxy+}</text>
+    <text x="310" y="413" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">GET POST HEAD /inference/{proxy+}</text>
+  </a>
+  <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/cluster-gateway/"><title>GCO Cluster Gateway (internal ALB)</title>
+    <rect x="1250" y="215" width="265" height="160" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+    <text x="1260" y="234" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#15803d">GCO Cluster Gateway (internal ALB)</text>
+    <text x="1260" y="253" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Gateway gco-system/gco-gateway</text>
+    <text x="1260" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">HTTPRoute gco-routes (prefix → Service)</text>
+    <text x="1260" y="283" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/api/v1/health → health-monitor</text>
+    <text x="1260" y="298" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/api/v1/metrics → health-monitor</text>
+    <text x="1260" y="313" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/api/v1/manifests → manifest-processor</text>
+    <text x="1260" y="328" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/inference → inference-proxy</text>
+    <text x="1260" y="343" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/healthz → health-monitor</text>
+    <text x="1260" y="358" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">/ → manifest-processor</text>
+  </a>
+  <rect x="1990" y="300" width="215" height="85" rx="8" fill="#ffffff" stroke="#64748b" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="2000" y="319" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#64748b">Inference Endpoints</text>
+    <text x="2000" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">gco-inference/&lt;endpoint&gt;,</text>
+    <text x="2000" y="353" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">&lt;endpoint&gt;-canary or</text>
+    <text x="2000" y="368" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">&lt;endpoint&gt;-proxy Services</text>
+  <rect x="725" y="20" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="39" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">cross-region-aggregator</text>
+    <text x="735" y="58" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>
+    <text x="735" y="73" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.14</text>
+  <rect x="725" y="116" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="135" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">api-gateway-proxy</text>
+    <text x="735" y="154" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>
+    <text x="735" y="169" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.14</text>
+  <rect x="725" y="212" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="231" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">inference-streaming-proxy</text>
+    <text x="735" y="250" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · index.mjs</text>
+    <text x="735" y="265" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">nodejs24.x</text>
+  <rect x="725" y="308" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="327" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">analytics-presigned-url</text>
+    <text x="735" y="346" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>
+    <text x="735" y="361" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.13</text>
+  <rect x="725" y="404" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="423" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">regional-api-proxy</text>
+    <text x="735" y="442" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>
+    <text x="735" y="457" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.14</text>
+  <rect x="725" y="500" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+    <text x="735" y="519" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">inference-streaming-proxy</text>
+    <text x="735" y="538" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · index.mjs</text>
+    <text x="735" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">nodejs24.x</text>
+  <rect x="1010" y="252" width="180" height="85" rx="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.5"/>
+    <text x="1020" y="271" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#6d28d9">Global Accelerator</text>
+    <text x="1020" y="290" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">AWS Global Accelerator:</text>
+    <text x="1020" y="305" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">TCP/443 pass-through to</text>
+    <text x="1020" y="320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">the regional internal ALB</text>
+  <rect x="20" y="594" width="16" height="12" rx="3" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="42" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">AWS API Gateway (SigV4)</text>
+  <rect x="206" y="594" width="16" height="12" rx="3" fill="#fef3c7" stroke="#b45309" stroke-width="1.2"/>
+  <text x="228" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">Lambda proxy (HMAC envelope)</text>
+  <rect x="422" y="594" width="16" height="12" rx="3" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.2"/>
+  <text x="444" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">AWS transit</text>
+  <rect x="536" y="594" width="16" height="12" rx="3" fill="#dcfce7" stroke="#15803d" stroke-width="1.2"/>
+  <text x="558" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">Kubernetes Gateway (internal ALB)</text>
+  <rect x="782" y="594" width="16" height="12" rx="3" fill="#f1f5f9" stroke="#334155" stroke-width="1.2"/>
+  <text x="804" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">FastAPI service</text>
+  <rect x="920" y="594" width="16" height="12" rx="3" fill="#ffffff" stroke="#64748b" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text x="942" y="604" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">dynamic or internal-only</text>
+  <text x="20" y="624" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" text-anchor="start" fill="#334155">† route exists only under a deployment condition (see the sheet) · dashed arrow: opt-in or dynamic path · every box links to its spec sheet</text>
+  <text x="20" y="642" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" text-anchor="start" fill="#64748b">Generated by diagrams/api_specs/generate.py from docs/openapi/*.json; regenerate with `python diagrams/generate.py --api-only`.</text>
+</svg>

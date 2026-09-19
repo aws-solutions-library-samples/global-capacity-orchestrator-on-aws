@@ -25,19 +25,26 @@ Gateway exposes it, and which authentication applies.
 > against the running applications by
 > [`tests/test_api_docs_coverage.py`](../tests/test_api_docs_coverage.py), which
 > fails if a route is added, removed, or renamed without updating this file.
-> Machine-readable OpenAPI documents live in [`docs/openapi/`](openapi/), and
-> the same documents are rendered into per-service **spec sheets** — every
-> operation's parameters, request body, responses and schemas — under
+> Machine-readable OpenAPI documents live in [`docs/openapi/`](openapi/) for
+> every surface — the four services (exported by the applications), the two
+> API Gateways (read out of the synthesized CDK stacks) and the in-cluster
+> Gateway (composed from its HTTPRoute) — and the same documents are rendered
+> into **spec sheets** — every operation's parameters, request body, responses
+> and schemas, plus each gateway route's backend and hops — under
 > [`diagrams/api_specs/`](../diagrams/api_specs/README.md):
+> [api-gateway-global](../diagrams/api_specs/api-gateway-global.md),
+> [api-gateway-regional](../diagrams/api_specs/api-gateway-regional.md),
+> [cluster-gateway](../diagrams/api_specs/cluster-gateway.md),
 > [manifest-processor](../diagrams/api_specs/manifest-processor.md),
 > [inference-proxy](../diagrams/api_specs/inference-proxy.md),
 > [health-monitor](../diagrams/api_specs/health-monitor.md),
-> [cost-monitor](../diagrams/api_specs/cost-monitor.md). FastAPI's Swagger UI
-> console for each service is published on the project site at
+> [cost-monitor](../diagrams/api_specs/cost-monitor.md). A Swagger UI console
+> for each document is published on the project site at
 > [`/swagger/`](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/).
 
 ## Table of Contents
 
+- [How the Surfaces Fit Together](#how-the-surfaces-fit-together)
 - [API Surface at a Glance](#api-surface-at-a-glance)
 - [Base URLs](#base-urls)
 - [Authentication](#authentication)
@@ -86,6 +93,35 @@ Gateway exposes it, and which authentication applies.
 - [Examples](#examples)
 
 ---
+
+## How the Surfaces Fit Together
+
+![How the API Gateways, the cluster Gateway and the services interact](../diagrams/api_specs/api-topology.svg)
+
+A client signs a request with AWS SigV4 to one of the two API Gateways. A
+Lambda proxy adds the request-bound HMAC envelope and forwards it — over Global
+Accelerator from the global API, inside the VPC from the regional bridge — to
+the region's internal ALB: the Kubernetes Gateway `gco-system/gco-gateway`,
+whose HTTPRoute picks the Service by longest path prefix. `/api/v1/global/*` is
+answered by the cross-region aggregator, which fans out to every regional API
+Gateway with SigV4 instead. Dashed arrows are opt-in or dynamic paths; `†`
+marks routes that exist only under a deployment condition (Global Accelerator
+in the commercial `aws` partition, the analytics environment).
+
+The diagram is generated from the OpenAPI documents by
+`python diagrams/generate.py --api-only` and verified by `--check`, so it
+cannot drift from the stacks and manifests it describes. Every box has a spec
+sheet, a machine-readable document and a Swagger console:
+
+| Surface | Spec sheet | OpenAPI document | Swagger UI |
+|---------|------------|------------------|------------|
+| Global API Gateway (`<project>-global-api`, stack `<project>-api-gateway`) | [api-gateway-global](../diagrams/api_specs/api-gateway-global.md) | [`api-gateway-global.json`](openapi/api-gateway-global.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/api-gateway-global/) |
+| Regional API Gateway (`<project>-regional-api-<region>`) | [api-gateway-regional](../diagrams/api_specs/api-gateway-regional.md) | [`api-gateway-regional.json`](openapi/api-gateway-regional.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/api-gateway-regional/) |
+| Cluster Gateway — the internal ALB, Kubernetes Gateway `gco-system/gco-gateway` and HTTPRoute `gco-routes` | [cluster-gateway](../diagrams/api_specs/cluster-gateway.md) | [`cluster-gateway.json`](openapi/cluster-gateway.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/cluster-gateway/) |
+| `manifest-processor` — the control plane | [manifest-processor](../diagrams/api_specs/manifest-processor.md) | [`manifest-processor.json`](openapi/manifest-processor.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/manifest-processor/) |
+| `health-monitor` — cluster health, metrics and status | [health-monitor](../diagrams/api_specs/health-monitor.md) | [`health-monitor.json`](openapi/health-monitor.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/health-monitor/) |
+| `inference-proxy` — streaming access to model endpoints | [inference-proxy](../diagrams/api_specs/inference-proxy.md) | [`inference-proxy.json`](openapi/inference-proxy.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/inference-proxy/) |
+| `cost-monitor` — behind the manifest processor, not on the ALB | [cost-monitor](../diagrams/api_specs/cost-monitor.md) | [`cost-monitor.json`](openapi/cost-monitor.json) | [console](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/cost-monitor/) |
 
 ## API Surface at a Glance
 

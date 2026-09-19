@@ -925,10 +925,14 @@ surfaces version drift as a single rolling issue.
 
 `diagrams/generate.py` is the canonical driver for the per-stack CDK views,
 the per-function code flowcharts, and the API spec sheets. Refresh the
-catalogues whenever architecture, a charted flow, or an HTTP route or model
-changes (for the API sheets, `python scripts/generate_openapi.py` first, then
-`python diagrams/generate.py --api-only` — no timestamp or commit is needed
-for that catalogue), then run the read-only contract:
+catalogues whenever architecture, a charted flow, an HTTP route or model, an
+API Gateway method or an HTTPRoute rule changes (for the API sheets, refresh
+the documents first — `python scripts/generate_openapi.py`,
+`python scripts/generate_api_gateway_openapi.py`,
+`python scripts/generate_cluster_gateway_openapi.py` — then
+`python diagrams/generate.py --api-only`, which also redraws the interaction
+diagram; no timestamp or commit is needed for that catalogue), then run the
+read-only contract:
 
 ```bash
 SOURCE_DATE_EPOCH=1788091200 \

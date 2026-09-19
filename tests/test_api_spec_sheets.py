@@ -377,7 +377,12 @@ def test_sheet_header_banner_and_links(tmp_path: Path) -> None:
         in text
     )
     assert "<https://example.test/site/swagger/widget-service/>" in text
-    assert "- **Catalogue index:** [README.md](README.md)" in lines
+    assert (
+        "- **Catalogue index:** [README.md](README.md) · "
+        "[interaction diagram](README.md#how-the-surfaces-fit-together)"
+    ) in lines
+    assert "the FastAPI `app.openapi()` export (`scripts/generate_openapi.py`)" in text
+    assert "## Servers" not in text and "## Deployment" not in text and "## Routing" not in text
     assert text.endswith("\n") and not text.endswith("\n\n")
 
 
@@ -521,9 +526,11 @@ def test_index_lists_every_service_with_its_three_renderings(tmp_path: Path) -> 
     )
     rows = [line for line in text.splitlines() if line.startswith("| [")]
     assert rows == [
-        "| [`a-svc`](a-svc.md) | A | `9` | 5 | [`json`](https://example.test/org/repo/blob/main/docs/openapi/a-svc.json) | [`/docs`](https://example.test/site/swagger/a-svc/) |",
-        "| [`b-svc`](b-svc.md) | Widget API | `1.2.3` | 5 | [`json`](https://example.test/org/repo/blob/main/docs/openapi/b-svc.json) | [`/docs`](https://example.test/site/swagger/b-svc/) |",
+        "| [`a-svc`](a-svc.md) | Service | A | `9` | 5 | [`json`](https://example.test/org/repo/blob/main/docs/openapi/a-svc.json) | [`/docs`](https://example.test/site/swagger/a-svc/) |",
+        "| [`b-svc`](b-svc.md) | Service | Widget API | `1.2.3` | 5 | [`json`](https://example.test/org/repo/blob/main/docs/openapi/b-svc.json) | [`/docs`](https://example.test/site/swagger/b-svc/) |",
     ]
+    assert f"]({sheets.TOPOLOGY_FILE})" in text, "the index embeds the interaction diagram"
+    assert "## How the surfaces fit together" in text
     assert sheets.REGENERATION_COMMAND in text
     assert "--swagger-ui-dir /tmp/gco-swagger" in text
 
@@ -535,11 +542,13 @@ def test_contract_reports_missing_stale_and_orphan_sheets_then_the_remedy(tmp_pa
     root = _repo(tmp_path)
     assert sheets.api_contract_issues(root) == [
         "missing API spec sheet: diagrams/api_specs/README.md",
+        f"missing API spec sheet: diagrams/api_specs/{sheets.TOPOLOGY_FILE}",
         "missing API spec sheet: diagrams/api_specs/widget-service.md",
         f"regenerate with `{sheets.REGENERATION_COMMAND}`",
     ]
     assert sorted(sheets.write_outputs(root)) == [
         "diagrams/api_specs/README.md",
+        f"diagrams/api_specs/{sheets.TOPOLOGY_FILE}",
         "diagrams/api_specs/widget-service.md",
     ]
     assert sheets.api_contract_issues(root) == []
@@ -548,8 +557,10 @@ def test_contract_reports_missing_stale_and_orphan_sheets_then_the_remedy(tmp_pa
     sheet = root / "diagrams" / "api_specs" / "widget-service.md"
     sheet.write_text(sheet.read_text(encoding="utf-8") + "edited\n", encoding="utf-8")
     (root / "diagrams" / "api_specs" / "old-service.md").write_text("# gone\n", encoding="utf-8")
+    (root / "diagrams" / "api_specs" / "old-diagram.svg").write_text("<svg/>\n", encoding="utf-8")
     assert sheets.api_contract_issues(root) == [
         "stale API spec sheet: diagrams/api_specs/widget-service.md",
+        "orphan API spec sheet: diagrams/api_specs/old-diagram.svg",
         "orphan API spec sheet: diagrams/api_specs/old-service.md",
         f"regenerate with `{sheets.REGENERATION_COMMAND}`",
     ]
@@ -718,14 +729,27 @@ def test_generator_runs_as_a_script_without_site_packages(tmp_path: Path) -> Non
 # ─── the committed catalogue ─────────────────────────────────────────────────
 
 
-def _generate_openapi() -> ModuleType:
+def _script(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "gco_generate_openapi", REPO_ROOT / "scripts" / "generate_openapi.py"
+        f"gco_{name}", REPO_ROOT / "scripts" / f"{name}.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # Registered before executing so the scripts' postponed dataclass
+    # annotations resolve through ``sys.modules`` instead of raising.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _exported_documents() -> dict[str, str]:
+    """``{document name: kind}`` for every generator that writes into docs/openapi/."""
+    exported = dict.fromkeys(_script("generate_openapi").SERVICE_NAMES, "fastapi")
+    exported.update(
+        dict.fromkeys(_script("generate_api_gateway_openapi").DOCUMENT_NAMES, "aws-api-gateway")
+    )
+    exported[_script("generate_cluster_gateway_openapi").DOCUMENT_NAME] = "cluster-gateway"
+    return exported
 
 
 def test_committed_sheets_are_current() -> None:
@@ -733,25 +757,67 @@ def test_committed_sheets_are_current() -> None:
     assert sheets.api_contract_issues(REPO_ROOT) == []
 
 
-def test_committed_catalogue_covers_every_exported_service() -> None:
-    exported = set(_generate_openapi().SERVICE_NAMES)
-    assert set(sheets.service_names(REPO_ROOT / "docs" / "openapi")) == exported
-    for service in exported:
-        sheet = REPO_ROOT / "diagrams" / "api_specs" / f"{service}.md"
-        assert sheets.banner(service) in sheet.read_text(encoding="utf-8")
+def test_committed_catalogue_covers_every_exported_document() -> None:
+    """Every generator's documents, and nothing else, have a sheet of the right kind."""
+    exported = _exported_documents()
+    openapi_dir = REPO_ROOT / "docs" / "openapi"
+    assert set(sheets.service_names(openapi_dir)) == set(exported)
+    for name, kind in exported.items():
+        assert sheets.document_kind(sheets.load_document(name, openapi_dir)) == kind
+        sheet = REPO_ROOT / "diagrams" / "api_specs" / f"{name}.md"
+        assert sheets.banner(name) in sheet.read_text(encoding="utf-8")
+    assert sheets.catalogue_order(
+        {name: sheets.load_document(name, openapi_dir) for name in exported}
+    ) == [
+        "api-gateway-global",
+        "api-gateway-regional",
+        "cluster-gateway",
+        "cost-monitor",
+        "health-monitor",
+        "inference-proxy",
+        "manifest-processor",
+    ]
+
+
+def _headings(text: str) -> set[str]:
+    return {
+        sheets.slugify(line.lstrip("#").strip())
+        for line in text.splitlines()
+        if line.startswith("#")
+    }
 
 
 def test_committed_sheets_link_only_to_things_that_exist() -> None:
-    """Sibling links resolve in the catalogue; explicit anchors back every fragment link."""
+    """Sibling links resolve in the catalogue; every fragment has an anchor or heading behind it."""
     catalogue = REPO_ROOT / "diagrams" / "api_specs"
     for path in catalogue.glob("*.md"):
         text = path.read_text(encoding="utf-8")
         anchors = set(re.findall(r'<a id="([^"]+)"></a>', text))
         for target in re.findall(r"\]\(([^)\s]+)\)", text):
-            if target.startswith("#"):
-                assert target[1:] in anchors, f"{path.name}: dangling fragment {target}"
-            elif not target.startswith(("http://", "https://")):
-                assert (catalogue / target).is_file(), f"{path.name}: dangling link {target}"
+            if target.startswith(("http://", "https://")):
+                continue
+            file_part, _, fragment = target.partition("#")
+            if file_part:
+                sibling = catalogue / file_part
+                assert sibling.is_file(), f"{path.name}: dangling link {target}"
+                if fragment:
+                    sibling_text = sibling.read_text(encoding="utf-8")
+                    valid = _headings(sibling_text) | set(
+                        re.findall(r'<a id="([^"]+)"></a>', sibling_text)
+                    )
+                    assert fragment in valid, f"{path.name}: dangling fragment {target}"
+            else:
+                assert fragment in anchors, f"{path.name}: dangling fragment {target}"
+
+
+def test_committed_diagram_links_every_document_and_nothing_else() -> None:
+    """Every box of the interaction diagram that is a document links to its sheet on the site."""
+    site_url, _ = sheets.read_site_config(REPO_ROOT / "mkdocs.yml")
+    svg = (REPO_ROOT / "diagrams" / "api_specs" / sheets.TOPOLOGY_FILE).read_text(encoding="utf-8")
+    linked = set(re.findall(r'<a href="([^"]+)">', svg))
+    assert linked == {f"{site_url}api/{name}/" for name in _exported_documents()}
+    assert "†" in svg, "the global API has conditional routes, so the marker must appear"
+    assert "http://" not in svg.replace("http://www.w3.org/", ""), "no remote references"
 
 
 def test_committed_sheets_use_the_repository_urls_from_mkdocs() -> None:

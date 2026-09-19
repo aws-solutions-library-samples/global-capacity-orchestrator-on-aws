@@ -147,12 +147,14 @@ def test_hook_maps_every_tracked_repository_image_and_spec_sheet(config: MkDocsC
         for path in (REPO_ROOT / "images").iterdir()
         if path.is_file() and path.name != "README.md"
     )
+    catalogue = REPO_ROOT / "diagrams" / "api_specs"
     expected_sheets = sorted(
-        path.name for path in (REPO_ROOT / "diagrams" / "api_specs").glob("*.md")
+        path.name for path in catalogue.iterdir() if path.suffix in {".md", ".svg"}
     )
     assert expected_images, "the repository ships tracked images"
     assert (REPO_ROOT / "images" / "README.md").is_file()
     assert "README.md" in expected_sheets and len(expected_sheets) > 1, "the catalogue ships sheets"
+    assert "api-topology.svg" in expected_sheets, "the catalogue ships its interaction diagram"
 
     result = _dispatch(config, Files([]))
 
@@ -160,6 +162,9 @@ def test_hook_maps_every_tracked_repository_image_and_spec_sheet(config: MkDocsC
         *(f"assets/images/{name}" for name in expected_images),
         *(f"api/{name}" for name in expected_sheets),
     ]
+    diagram = result.get_file_from_path("api/api-topology.svg")
+    assert diagram is not None and diagram.is_media_file()
+    assert diagram.url == "api/api-topology.svg", "the index embeds it as a sibling image"
     for file in result:
         assert file.abs_src_path is not None
         assert Path(file.abs_src_path).parent in {
@@ -176,11 +181,12 @@ def test_hook_maps_every_tracked_repository_image_and_spec_sheet(config: MkDocsC
 def test_on_files_injects_only_the_markdown_sheets_as_api_pages(
     tmp_path: Path, config: MkDocsConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The generator, its package marker and caches are not site content."""
+    """The generator, its package marker and caches are not site content; the diagram is."""
     specs = tmp_path / "api_specs"
     specs.mkdir()
     (specs / "README.md").write_text("# Index\n", encoding="utf-8")
     (specs / "manifest-processor.md").write_text("# Sheet\n", encoding="utf-8")
+    (specs / "api-topology.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>\n")
     (specs / "generate.py").write_text("print()\n", encoding="utf-8")
     (specs / "__init__.py").write_text("", encoding="utf-8")
     (specs / "__pycache__").mkdir()
@@ -192,6 +198,7 @@ def test_on_files_injects_only_the_markdown_sheets_as_api_pages(
     assert [file.src_uri for file in result] == [
         "index.md",
         "api/README.md",
+        "api/api-topology.svg",
         "api/manifest-processor.md",
     ]
     readme = result.get_file_from_path("api/README.md")

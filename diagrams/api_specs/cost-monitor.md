@@ -6,9 +6,9 @@
 
 Scheduled and on-demand OpenCost allocation reporting
 
-- **Machine-readable document:** [`docs/openapi/cost-monitor.json`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/openapi/cost-monitor.json) — the FastAPI `app.openapi()` export this sheet is rendered from
+- **Machine-readable document:** [`docs/openapi/cost-monitor.json`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/openapi/cost-monitor.json) — the FastAPI `app.openapi()` export (`scripts/generate_openapi.py`) this sheet is rendered from
 - **Interactive console (Swagger UI):** <https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/cost-monitor/>
-- **Catalogue index:** [README.md](README.md)
+- **Catalogue index:** [README.md](README.md) · [interaction diagram](README.md#how-the-surfaces-fit-together)
 
 ## Endpoints
 

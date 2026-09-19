@@ -123,6 +123,13 @@ Each region contains:
 
 ### 3. Global API Gateway Layer
 
+The routes both API Gateways expose, the Lambda behind each one and the hops to
+the Service that answers are generated from the CDK stacks into
+[`docs/openapi/api-gateway-global.json`](openapi/api-gateway-global.json) and
+[`docs/openapi/api-gateway-regional.json`](openapi/api-gateway-regional.json),
+rendered as spec sheets and as the interaction diagram in
+[`diagrams/api_specs/`](../diagrams/api_specs/README.md#how-the-surfaces-fit-together).
+
 **Global API Gateway** (gco-api-gateway stack)
 
 - Single authenticated aggregation entry point in every partition

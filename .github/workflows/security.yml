@@ -13,7 +13,8 @@
 # Jobs (alphabetical by display name):
 #   - gate:security                      — the single required check: needs every job here
 #   - security:bandit:sast               — bandit on every authored Python file
-#                                          (repo root) + demo GIF validation
+#                                          (repo root) + demo GIF and SVG asset
+#                                          content validation
 #   - security:bundler-audit:deps        — bundler-audit on Gemfile.lock
 #   - security:checkov:iac               — checkov against the whole repo
 #   - security:codeql:javascript-code-analysis
@@ -76,6 +77,13 @@ jobs:
         # Decode untrusted media only in this ephemeral, read-only job. The
         # script also bounds file size, canvas dimensions, and frame count.
         run: timeout 120s python .github/scripts/validate_demo_gifs.py
+      - name: Validate tracked SVG assets
+        # SVG is XML with a scripting model, and every tracked SVG is published
+        # as its own document on the Pages origin. The script holds each one to
+        # an explicit path allowlist with a byte ceiling and an element and
+        # attribute allowlist: no script, event handlers, foreign content,
+        # DOCTYPE, foreign namespaces, or links that leave the documented site.
+        run: timeout 60s python .github/scripts/validate_svg_assets.py
       - name: Run bandit
         # Scans the whole repository, not just the application packages: Lambda
         # handlers, repo tooling under scripts/ and .github/, the CDK entry

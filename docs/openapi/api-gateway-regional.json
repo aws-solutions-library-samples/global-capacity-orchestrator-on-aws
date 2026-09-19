@@ -1,0 +1,777 @@
+{
+  "components": {
+    "securitySchemes": {
+      "sigv4": {
+        "description": "AWS Signature Version 4 for service `execute-api`, signed with IAM credentials of the deploying account that carry `execute-api:Invoke` on this API (for example `awscurl --service execute-api --region <region>`).",
+        "in": "header",
+        "name": "Authorization",
+        "type": "apiKey",
+        "x-amazon-apigateway-authtype": "awsSigv4"
+      }
+    }
+  },
+  "info": {
+    "description": "Direct regional API for gco in us-east-1\n\nOne IAM-authenticated REST API per deployment region, fronting that region's internal ALB through VPC Lambdas. Its first job is to be the aggregator's path into the region: the resource policy always admits the cross-region aggregator's execution role for the aggregate routes. Direct calls by other principals of the deploying account are an explicit opt-in (`api_gateway.regional_api_enabled`) in the commercial `aws` partition and the required ingress in partitions without Global Accelerator. The routes are the same control-plane and inference catch-alls as the global API, with the additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`.",
+    "title": "GCO Regional API Gateway",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/api/v1/{proxy+}": {
+      "delete": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "deleteApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Delete a control-plane resource",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "get": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "getApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Read a control-plane resource",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "head": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "headApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Probe a control-plane resource",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "options": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "optionsApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Describe the methods a control-plane path accepts",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "parameters": [
+        {
+          "description": "The remainder of the backend path (API Gateway greedy path variable).",
+          "in": "path",
+          "name": "proxy",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "patchApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Update a control-plane resource",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "post": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "postApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Create a control-plane resource or submit a job",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      },
+      "put": {
+        "description": "Catch-all for the control-plane API served by the in-cluster FastAPI services. `{proxy+}` is the rest of the path \u2014 for example `jobs`, `jobs/{namespace}/{name}`, `manifests`, `health`, `status` \u2014 so the operations available here are the `/api/v1/*` paths of the manifest-processor and health-monitor documents, minus `/api/v1/global/*`, which the aggregator serves. The request is forwarded unchanged (the stage prefix is not part of the backend path); the response is returned unchanged.",
+        "operationId": "putApiV1Proxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "403": {
+            "description": "Forbidden: the caller's IAM identity or the API's resource policy denied `execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Replace a control-plane resource",
+        "tags": [
+          "control-plane"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "timeoutInMillis": 29000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Buffered VPC Lambda. Resolves the internal ALB hostname registered in SSM /<project>/alb-hostname-<region>, verifies it is an account-owned internal ALB, signs the HMAC envelope and forwards inside the VPC within 28 s.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "manifest-processor",
+                "health-monitor"
+              ],
+              "id": "control-plane-services",
+              "label": "manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz)"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
+            "name": "regional-api-proxy",
+            "runtime": "python3.14",
+            "source": "lambda/regional-api-proxy/handler.py",
+            "timeoutSeconds": 29
+          }
+        }
+      }
+    },
+    "/inference/{proxy+}": {
+      "get": {
+        "description": "Streaming access to deployed inference endpoints. `{proxy+}` is `<endpoint-name>` or `<endpoint-name>/<serving-path>`; the in-cluster inference-proxy resolves the endpoint by name and allows only its serving and health paths (see the inference-proxy document). Bodies are limited to 1 MiB and the connection may stay open for API Gateway's full 15-minute streaming window.",
+        "operationId": "getInferenceProxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "404": {
+            "description": "Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          },
+          "502": {
+            "description": "Bad gateway: the in-cluster proxy or the model server did not answer."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Read an inference endpoint's health, info or model list",
+        "tags": [
+          "inference"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "responseTransferMode": "STREAM",
+          "timeoutInMillis": 900000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Node.js response-streaming VPC Lambda (ROUTING_MODE=regional): the same handler as the global route, reaching the ALB directly instead of through Global Accelerator.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "inference-proxy"
+              ],
+              "id": "inference-proxy",
+              "label": "inference-proxy Service: resolves the endpoint by name, enforces its state and the serving-path allowlist"
+            },
+            {
+              "documents": [],
+              "id": "inference-endpoint",
+              "label": "The endpoint's model-server Service in gco-inference (<name>, <name>-canary or <name>-proxy), streamed back through every hop"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "index.handler",
+            "memorySizeMb": 256,
+            "name": "inference-streaming-proxy",
+            "runtime": "nodejs24.x",
+            "source": "lambda/inference-streaming-proxy/index.mjs",
+            "timeoutSeconds": 900
+          }
+        }
+      },
+      "head": {
+        "description": "Streaming access to deployed inference endpoints. `{proxy+}` is `<endpoint-name>` or `<endpoint-name>/<serving-path>`; the in-cluster inference-proxy resolves the endpoint by name and allows only its serving and health paths (see the inference-proxy document). Bodies are limited to 1 MiB and the connection may stay open for API Gateway's full 15-minute streaming window.",
+        "operationId": "headInferenceProxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "404": {
+            "description": "Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          },
+          "502": {
+            "description": "Bad gateway: the in-cluster proxy or the model server did not answer."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Probe an inference endpoint",
+        "tags": [
+          "inference"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "responseTransferMode": "STREAM",
+          "timeoutInMillis": 900000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Node.js response-streaming VPC Lambda (ROUTING_MODE=regional): the same handler as the global route, reaching the ALB directly instead of through Global Accelerator.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "inference-proxy"
+              ],
+              "id": "inference-proxy",
+              "label": "inference-proxy Service: resolves the endpoint by name, enforces its state and the serving-path allowlist"
+            },
+            {
+              "documents": [],
+              "id": "inference-endpoint",
+              "label": "The endpoint's model-server Service in gco-inference (<name>, <name>-canary or <name>-proxy), streamed back through every hop"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "index.handler",
+            "memorySizeMb": 256,
+            "name": "inference-streaming-proxy",
+            "runtime": "nodejs24.x",
+            "source": "lambda/inference-streaming-proxy/index.mjs",
+            "timeoutSeconds": 900
+          }
+        }
+      },
+      "parameters": [
+        {
+          "description": "The remainder of the backend path (API Gateway greedy path variable).",
+          "in": "path",
+          "name": "proxy",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Streaming access to deployed inference endpoints. `{proxy+}` is `<endpoint-name>` or `<endpoint-name>/<serving-path>`; the in-cluster inference-proxy resolves the endpoint by name and allows only its serving and health paths (see the inference-proxy document). Bodies are limited to 1 MiB and the connection may stay open for API Gateway's full 15-minute streaming window.",
+        "operationId": "postInferenceProxy",
+        "responses": {
+          "200": {
+            "description": "Success; the backend's response is returned unchanged."
+          },
+          "400": {
+            "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
+          },
+          "404": {
+            "description": "Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist."
+          },
+          "500": {
+            "description": "Internal error in the proxy Lambda or the backend."
+          },
+          "502": {
+            "description": "Bad gateway: the in-cluster proxy or the model server did not answer."
+          }
+        },
+        "security": [
+          {
+            "sigv4": []
+          }
+        ],
+        "summary": "Generate: forward a completion request and stream the response",
+        "tags": [
+          "inference"
+        ],
+        "x-amazon-apigateway-integration": {
+          "httpMethod": "POST",
+          "responseTransferMode": "STREAM",
+          "timeoutInMillis": 900000,
+          "type": "aws_proxy"
+        },
+        "x-gco-backend": {
+          "description": "Node.js response-streaming VPC Lambda (ROUTING_MODE=regional): the same handler as the global route, reaching the ALB directly instead of through Global Accelerator.",
+          "hops": [
+            {
+              "documents": [
+                "cluster-gateway"
+              ],
+              "id": "cluster-gateway",
+              "label": "Internal ALB \u2014 the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix"
+            },
+            {
+              "documents": [
+                "inference-proxy"
+              ],
+              "id": "inference-proxy",
+              "label": "inference-proxy Service: resolves the endpoint by name, enforces its state and the serving-path allowlist"
+            },
+            {
+              "documents": [],
+              "id": "inference-endpoint",
+              "label": "The endpoint's model-server Service in gco-inference (<name>, <name>-canary or <name>-proxy), streamed back through every hop"
+            }
+          ],
+          "integration": "lambda",
+          "lambda": {
+            "handler": "index.handler",
+            "memorySizeMb": 256,
+            "name": "inference-streaming-proxy",
+            "runtime": "nodejs24.x",
+            "source": "lambda/inference-streaming-proxy/index.mjs",
+            "timeoutSeconds": 900
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Stage `prod` of the deployed REST API. The full URL is the `RegionalApiEndpoint` output of the `gco-regional-api-us-east-1` stack.",
+      "url": "https://{api_id}.execute-api.{region}.{url_suffix}/{stage}",
+      "variables": {
+        "api_id": {
+          "default": "<api-id>",
+          "description": "REST API id assigned at deploy time."
+        },
+        "region": {
+          "default": "us-east-1",
+          "description": "One API per entry of `deployment_regions.regional` in cdk.json."
+        },
+        "stage": {
+          "default": "prod",
+          "enum": [
+            "prod"
+          ]
+        },
+        "url_suffix": {
+          "default": "amazonaws.com",
+          "description": "The partition's DNS suffix (`${AWS::URLSuffix}`)."
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "description": "Manifests, jobs, templates, webhooks, cost and status \u2014 proxied to the cluster.",
+      "name": "control-plane"
+    },
+    {
+      "description": "Streaming access to deployed model endpoints.",
+      "name": "inference"
+    }
+  ],
+  "x-gco-endpoint-type": "REGIONAL",
+  "x-gco-resource-policy": [
+    {
+      "Action": "execute-api:Invoke",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${AWS::AccountId}:role/gco-cross-region-aggregator"
+      },
+      "Resource": [
+        "execute-api:/*/DELETE/api/v1/jobs",
+        "execute-api:/*/GET/api/v1/health",
+        "execute-api:/*/GET/api/v1/jobs",
+        "execute-api:/*/GET/api/v1/policy",
+        "execute-api:/*/GET/api/v1/status"
+      ]
+    }
+  ],
+  "x-gco-resource-policy-direct-access": [
+    {
+      "Action": "execute-api:Invoke",
+      "Condition": {
+        "ArnNotEquals": {
+          "aws:PrincipalArn": "arn:aws:iam::${AWS::AccountId}:role/gco-cross-region-aggregator"
+        },
+        "StringEquals": {
+          "aws:PrincipalAccount": "${AWS::AccountId}"
+        }
+      },
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "*"
+      },
+      "Resource": "execute-api:/*"
+    }
+  ],
+  "x-gco-source": {
+    "construct": "GCORegionalApiGatewayStack",
+    "generator": "scripts/generate_api_gateway_openapi.py",
+    "kind": "aws-api-gateway",
+    "restApiName": "gco-regional-api-us-east-1",
+    "stack": "gco/stacks/regional_api_gateway_stack.py",
+    "stackName": "gco-regional-api-us-east-1",
+    "synthesizedWith": {
+      "partition": "aws",
+      "region": "us-east-1",
+      "regionalApiEnabled": false
+    }
+  },
+  "x-gco-stage": {
+    "accessLogging": true,
+    "dataTraceEnabled": false,
+    "loggingLevel": "INFO",
+    "metricsEnabled": true,
+    "name": "prod",
+    "throttling": {
+      "burstLimit": 2000,
+      "rateLimit": 1000
+    },
+    "tracingEnabled": true
+  }
+}

@@ -12,9 +12,10 @@ injects two trees that live elsewhere in the repository into the build:
   the wiki automatically);
 * every Markdown file under ``diagrams/api_specs/`` as ``api/<name>``, so the
   API spec sheets that ``diagrams/api_specs/generate.py`` renders from the
-  FastAPI-generated OpenAPI documents are wiki pages (``/api/<service>/``,
-  with the catalogue's ``README.md`` serving ``/api/``) without a second copy
-  that could drift from the committed one.
+  committed OpenAPI documents are wiki pages (``/api/<document>/``, with the
+  catalogue's ``README.md`` serving ``/api/``) without a second copy that could
+  drift from the committed one — plus the catalogue's SVG interaction diagram,
+  which the index embeds, as ``api/<name>.svg``.
 
 Wired via the ``hooks:`` key in ``mkdocs.yml``. Both mappings are mirrored by
 ``tests/test_wiki.py``, which asserts every image referenced by a wiki page
@@ -64,6 +65,13 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
     """Inject the tracked images and the generated API spec sheets."""
     # The README inside images/ is documentation for contributors, not a site asset.
     _inject(files, config, _IMAGES_DIR, _SITE_PREFIX, lambda path: path.name != "README.md")
-    # Only the Markdown sheets: the generator and its package marker stay out of the site.
-    _inject(files, config, _API_SPECS_DIR, _API_SITE_PREFIX, lambda path: path.suffix == ".md")
+    # Only the Markdown sheets and the diagram they embed: the generator and its
+    # package marker stay out of the site.
+    _inject(
+        files,
+        config,
+        _API_SPECS_DIR,
+        _API_SITE_PREFIX,
+        lambda path: path.suffix in {".md", ".svg"},
+    )
     return files

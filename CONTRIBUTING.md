@@ -631,14 +631,31 @@ process.
     `code_diagrams/provenance.json` records each source's digest so the
     freshness contract holds without resolving commits through Git. Add new
     targets by editing `diagrams/code_diagrams/_targets.py`.
-  - `diagrams/api_specs/` — one API spec sheet per FastAPI service,
-    rendered from the OpenAPI documents in `docs/openapi/` (which
-    `scripts/generate_openapi.py` exports from the applications). After a
-    route or model change run `python scripts/generate_openapi.py` and then
-    `python diagrams/generate.py --api-only`; `--check` fails until both are
-    current. The sheets are injected into the wiki as `/api/`, and
-    `pages.yml` builds FastAPI's Swagger UI console per service at
-    `/swagger/` from the same documents — nothing to hand-write.
+  - `diagrams/api_specs/` — one API spec sheet per HTTP surface plus the
+    `api-topology.svg` interaction diagram, rendered from the OpenAPI
+    documents in `docs/openapi/`. Three generators own those documents:
+    `scripts/generate_openapi.py` exports the FastAPI services' own schemas,
+    `scripts/generate_api_gateway_openapi.py` synthesizes the two API Gateway
+    stacks in-process and reads their routes (needs the CDK toolchain), and
+    `scripts/generate_cluster_gateway_openapi.py` composes the in-cluster
+    Gateway from `post-helm-gateway.yaml` and the service documents. After a
+    route, API Gateway method, HTTPRoute rule or model change run the
+    affected generator(s) and then `python diagrams/generate.py --api-only`;
+    `--check` fails until everything is current (each generator has its own
+    `--check`, run by `tests/test_api_docs_coverage.py`,
+    `tests/test_api_gateway_openapi.py` and
+    `tests/test_cluster_gateway_openapi.py`). A new API Gateway route also
+    needs its prose in the generator's `ROUTE_DOCS`, and a new front-door
+    Lambda its `BACKENDS` entry — generation fails closed without them. The
+    sheets and diagram are injected into the wiki as `/api/`, and `pages.yml`
+    builds a Swagger UI console per document at `/swagger/` from the same
+    documents — nothing to hand-write. Every SVG in the repository is also
+    held to the content policy in `.github/scripts/validate_svg_assets.py`
+    (an explicit path allowlist; drawing primitives, text and same-site links
+    only; no script, foreign namespaces or DOCTYPE), because each one is
+    published as its own document on the Pages origin. A new SVG, or a
+    renderer change that needs a new element or attribute, is a reviewed
+    edit to that policy in the same PR.
 - Keep it up-to-date with code changes
 
 ## Code Review Guidelines
