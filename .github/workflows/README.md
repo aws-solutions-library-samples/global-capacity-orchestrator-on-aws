@@ -35,7 +35,9 @@ Eight workflows sit outside the four badged gates above. Most are schedule- or d
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the project site to GitHub Pages: the MkDocs wiki (`wiki/`) at the root, the Python, Bash and Node.js HTML coverage reports at `/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/` (the Node.js one fetched from the Inference Streaming Proxy run for the same commit), and the three shields.io badge JSONs at the site root. Split out of Unit Tests so a Pages outage (or wiki build failure) can't fail the test gate; `lint:mkdocs:strict` runs the same build on PRs |
 | `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
 | `pr-type-label.yml` | `pull_request` (`opened`, `edited`, `reopened`, `ready_for_review`) | Sync a pull request's type label to the "Type of change" box its author ticked, so `.github/release.yml` can group the generated notes without a second step anyone has to remember — v6.5.0 and v6.5.1 both shipped with every entry in "Other changes" for want of a label. Only the nine type labels are touched; ticking nothing is a no-op rather than a strip. Uses `pull_request`, never `pull_request_target`, and the body is fetched by the script through `gh` rather than interpolated into a `run:` script, so fork PRs get a read-only token and the job is skipped for them — fork contributions need the label applied at review time |
-| `grafana-dashboards.yml` | `push`: `main`, PR (paths-filtered), manual | Prove the exact Grafana image the pinned kube-prometheus-stack chart ships accepts the curated dashboard ConfigMaps: extract the payloads, resolve the image via `helm template` at the `charts.yaml` pin, boot it with sidecar-shaped file provisioning, and require every uid to answer with `meta.provisioned=true` and an error-free provisioning log. Runs only when the dashboards, the chart pin, or the check itself change |
+| `grafana-dashboards.yml` | `push`: `main`, PR, manual | Prove the exact Grafana image the pinned kube-prometheus-stack chart ships accepts the curated dashboard ConfigMaps: extract the payloads, resolve the image via `helm template` at the `charts.yaml` pin, boot it with sidecar-shaped file provisioning, and require every uid to answer with `meta.provisioned=true` and an error-free provisioning log. Not paths-filtered: its `gate:grafana-dashboards` job is a required check, and a filtered workflow never reports on a PR outside its paths |
+
+Every PR-triggered workflow except `pr-type-label.yml` ends in a `gate:<file>` job that `needs` every other job in the file and runs `../scripts/verify_gate_needs.py` under `always()`. Branch protection on `main` requires only those eight gates, so a job can be added, renamed or re-sharded without a ruleset edit — see [Required checks](../CI.md#required-checks).
 
 The accelerator check deliberately has two tiers: `unit-tests.yml` runs only the
 checked-in deterministic validator, while `deps-scan.yml` adds sequential,
@@ -45,8 +47,8 @@ failing the scheduled workflow.
 
 ## Naming Conventions
 
-- **Display names:** `category:tool:test_name` (e.g. `unit:pytest:core`, `security:trivy:container-scan`)
-- **Job IDs:** hyphen-delimited (e.g. `unit-pytest-core`)
+- **Display names:** `category:tool:test_name` (e.g. `unit:pytest:core`, `security:trivy:container-scan`); the per-workflow aggregator is `gate:<file stem>` (e.g. `gate:unit-tests`)
+- **Job IDs:** hyphen-delimited (e.g. `unit-pytest-core`, `gate-unit-tests`)
 
 ## Adding a New Workflow
 
@@ -54,5 +56,6 @@ failing the scheduled workflow.
 2. Set `permissions:` to the minimum required (default: `contents: read`)
 3. Add `concurrency` with `cancel-in-progress: true` for PR workflows
 4. For a PR workflow, add `types: [opened, synchronize, reopened, ready_for_review]` and gate **every** job on `github.event_name != 'pull_request' || github.event.pull_request.draft == false`, then add the file to `tests/test_workflow_draft_pr_gating_contract.py`
-5. Set `timeout-minutes` on every job
-6. Document the workflow in `../CI.md`
+5. For a PR workflow, end the file with a `gate-<file>` job named `gate:<file>` that `needs` every other job (alphabetically), carries the `always()` + draft-clause `if:`, and runs `../scripts/verify_gate_needs.py` — copy one from a sibling workflow; then add the file to `release.yml`'s dispatch list, the inventory in `tests/test_workflow_gate_contract.py`, the *Required checks* table in `../CI.md`, and the new `gate:<file>` context to the `main` ruleset. Never add a `paths` filter to a gated workflow
+6. Set `timeout-minutes` on every job
+7. Document the workflow in `../CI.md`

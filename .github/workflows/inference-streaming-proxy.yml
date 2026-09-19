@@ -72,3 +72,38 @@ jobs:
             lambda/inference-streaming-proxy/coverage/
           retention-days: 7
           if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # gate:inference-streaming-proxy — the one required status check this workflow reports.
+  #
+  # Branch protection on main requires the `gate:*` job of each PR workflow
+  # instead of every job by name, so adding, renaming, re-sharding or
+  # matrix-expanding a job never needs a ruleset edit. This job `needs` every
+  # other job in the file — tests/test_workflow_gate_contract.py fails when
+  # one is missing — and .github/scripts/verify_gate_needs.py refuses to pass
+  # unless each of them succeeded. See .github/CI.md "Required checks".
+  #
+  # `always()`: GitHub treats a skipped required check as passing, so the gate
+  # must run and fail explicitly whenever a needed job failed, was cancelled,
+  # or was skipped without an allowance — including when the run itself was
+  # cancelled. The draft clause is the one narrowing: a draft PR cannot
+  # merge, and `ready_for_review` re-runs the workflow with the clause true.
+  # --------------------------------------------------------------------------
+  gate-inference-streaming-proxy:
+    name: "gate:inference-streaming-proxy"
+    needs:
+      - unit-node-inference-streaming-proxy
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Only the verifier is needed; the rest of the tree stays out.
+          sparse-checkout: .github/scripts
+      - name: Require every needed job to have succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_gate_needs.py --needs "$NEEDS_JSON"

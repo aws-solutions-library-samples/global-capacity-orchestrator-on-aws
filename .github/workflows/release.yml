@@ -155,18 +155,19 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="release/v${NEW_VERSION}"
-          # Every workflow whose checks are required on main-bound PRs.
-          # grafana-dashboards.yml is deliberately absent: it is
-          # paths-filtered and not a required check, and a version-files-only
-          # diff can never touch its paths.
+          # Every workflow whose `gate:*` job is a required check on
+          # main-bound PRs — tests/test_workflow_gate_contract.py holds this
+          # list in lockstep with the gated workflows, so a new PR workflow
+          # cannot leave the release PR waiting on a check that never runs.
           for workflow in \
-            unit-tests.yml \
-            lint.yml \
-            security.yml \
-            integration-tests.yml \
             floci-tests.yml \
+            grafana-dashboards.yml \
             inference-streaming-proxy.yml \
-            mooncake-image.yml; do
+            integration-tests.yml \
+            lint.yml \
+            mooncake-image.yml \
+            security.yml \
+            unit-tests.yml; do
             gh workflow run "$workflow" --ref "$BRANCH"
             echo "Dispatched $workflow on $BRANCH"
           done

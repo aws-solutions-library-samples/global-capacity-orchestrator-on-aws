@@ -12,6 +12,7 @@
 #
 # Jobs (alphabetical by display name):
 #   - changes                       — PR dependency-path filter for lock/install jobs
+#   - gate:unit-tests               — the single required check: needs every job here
 #   - unit:bats:shell               — BATS shell tests
 #   - unit:cdk:config-matrix        — serial in-process config synthesis matrix
 #   - unit:cdk:nag-compliance       — cdk-nag compliance across full config matrix
@@ -1133,3 +1134,61 @@ jobs:
             cat "$RUNNER_TEMP/tool-mcp.log"
             exit 1
           }
+
+  # --------------------------------------------------------------------------
+  # gate:unit-tests — the one required status check this workflow reports.
+  #
+  # Branch protection on main requires the `gate:*` job of each PR workflow
+  # instead of every job by name, so adding, renaming, re-sharding or
+  # matrix-expanding a job never needs a ruleset edit. This job `needs` every
+  # other job in the file — tests/test_workflow_gate_contract.py fails when
+  # one is missing — and .github/scripts/verify_gate_needs.py refuses to pass
+  # unless each of them succeeded. See .github/CI.md "Required checks".
+  #
+  # `always()`: GitHub treats a skipped required check as passing, so the gate
+  # must run and fail explicitly whenever a needed job failed, was cancelled,
+  # or was skipped without an allowance — including when the run itself was
+  # cancelled. The draft clause is the one narrowing: a draft PR cannot
+  # merge, and `ready_for_review` re-runs the workflow with the clause true.
+  # --------------------------------------------------------------------------
+  gate-unit-tests:
+    name: "gate:unit-tests"
+    needs:
+      - changes
+      - unit-bats-shell
+      - unit-cdk-config-matrix
+      - unit-cdk-nag-compliance
+      - unit-cdk-nag-compliance-matrix
+      - unit-cdk-project-name-scoping
+      - unit-cdk-synth
+      - unit-cli-autopilot
+      - unit-cli-smoke
+      - unit-cli-smoke-windows
+      - unit-fresh-install
+      - unit-lockfile-freshness
+      - unit-mcp-install
+      - unit-pytest-core
+      - unit-pytest-core-shard
+      - unit-recorder-macos-bash32
+      - unit-workload-imports
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Only the verifier is needed; the rest of the tree stays out.
+          sparse-checkout: .github/scripts
+      - name: Require every needed job to have succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          # `changes` runs only on pull requests (push and workflow_dispatch skip
+          # it), and the two dependency-path jobs skip when it reports
+          # deps=false. Any other skip in this workflow is a broken `if:` and
+          # fails the gate.
+          python3 .github/scripts/verify_gate_needs.py --needs "$NEEDS_JSON" \
+            --allow-skipped changes \
+            --allow-skipped unit-lockfile-freshness=changes.deps=false \
+            --allow-skipped unit-fresh-install=changes.deps=false
