@@ -45,11 +45,11 @@ is a document in the table above, and each is a link to its sheet on the site.
 ## Regenerating
 
 ```bash
-python scripts/generate_openapi.py                # refresh the service documents from the apps
-python scripts/generate_api_gateway_openapi.py    # re-synthesize the API Gateway documents
-python scripts/generate_cluster_gateway_openapi.py # recompose the cluster gateway document
-python diagrams/generate.py --api-only            # rewrite these sheets, this index and the diagram
-python diagrams/generate.py --check               # fail if anything here is stale
+python scripts/generate_openapi.py                  # refresh the service documents from the apps
+python scripts/generate_api_gateway_openapi.py      # re-synthesize the API Gateway documents
+python scripts/generate_cluster_gateway_openapi.py  # recompose the cluster gateway document
+python diagrams/generate.py --api-only              # rewrite these sheets, this index and the diagram
+python diagrams/generate.py --check                 # fail if anything here is stale
 ```
 
 To browse the consoles locally, install the locked npm tooling and serve the

@@ -198,6 +198,16 @@ def table(headers: list[str], rows: list[list[str]]) -> list[str]:
     return lines
 
 
+def _aligned_commands(*entries: tuple[str, str]) -> list[str]:
+    """Shell lines whose trailing ``# comment`` starts in one column.
+
+    The column is the longest command plus two spaces, so a renamed or added
+    command re-aligns the whole block instead of overflowing a fixed width.
+    """
+    width = max(len(command) for command, _comment in entries)
+    return [f"{command:<{width}}  # {comment}" for command, comment in entries]
+
+
 # ─── schema rendering ────────────────────────────────────────────────────────
 
 
@@ -929,11 +939,19 @@ def render_index(documents: dict[str, dict[str, Any]], *, site_url: str, repo_ur
         "## Regenerating",
         "",
         "```bash",
-        f"{'python scripts/generate_openapi.py':<49} # refresh the service documents from the apps",
-        f"{'python scripts/generate_api_gateway_openapi.py':<49} # re-synthesize the API Gateway documents",
-        f"{'python scripts/generate_cluster_gateway_openapi.py':<49} # recompose the cluster gateway document",
-        f"{REGENERATION_COMMAND:<49} # rewrite these sheets, this index and the diagram",
-        f"{'python diagrams/generate.py --check':<49} # fail if anything here is stale",
+        *_aligned_commands(
+            ("python scripts/generate_openapi.py", "refresh the service documents from the apps"),
+            (
+                "python scripts/generate_api_gateway_openapi.py",
+                "re-synthesize the API Gateway documents",
+            ),
+            (
+                "python scripts/generate_cluster_gateway_openapi.py",
+                "recompose the cluster gateway document",
+            ),
+            (REGENERATION_COMMAND, "rewrite these sheets, this index and the diagram"),
+            ("python diagrams/generate.py --check", "fail if anything here is stale"),
+        ),
         "```",
         "",
         "To browse the consoles locally, install the locked npm tooling and serve the",
