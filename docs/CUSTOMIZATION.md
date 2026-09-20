@@ -2090,7 +2090,7 @@ remaining controls select an Autopilot engine/model for one environment:
 
 ```bash
 export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-6"
-export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
+export GCO_MISSION_BEDROCK_REGION="eu-west-1"                 # default: us-east-1
 export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # shared/Claude model
 export GCO_AUTOPILOT_ENGINE="codex"
 export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-5.6-sol"  # Codex-specific

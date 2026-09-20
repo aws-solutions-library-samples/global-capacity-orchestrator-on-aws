@@ -278,37 +278,37 @@ exclude = [
 
 [tool.ruff.lint]
 select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # Pyflakes
-    "I",      # isort
-    "B",      # flake8-bugbear
-    "C4",     # flake8-comprehensions
-    "UP",     # pyupgrade
-    "ARG",    # flake8-unused-arguments
-    "SIM",    # flake8-simplify
+    "E",        # pycodestyle errors
+    "W",        # pycodestyle warnings
+    "F",        # Pyflakes
+    "I",        # isort
+    "B",        # flake8-bugbear
+    "C4",       # flake8-comprehensions
+    "UP",       # pyupgrade
+    "ARG",      # flake8-unused-arguments
+    "SIM",      # flake8-simplify
     # Rules whose whole value is that they are boring: each one catches a
     # specific mistake that is invisible in review and cheap to prevent.
-    "T10",    # flake8-debugger: a forgotten breakpoint() would hang CI
-    "PGH",    # pygrep-hooks: blanket `# type: ignore` / `# noqa` with no code
-    "YTT",    # flake8-2020: version checks that break on Python 3.10+/4.x
-    "PLE",    # Pylint errors: only the genuinely-broken subset
-    "LOG",    # flake8-logging: misuse of the logging API itself
-    "EXE",    # flake8-executable: a shebang that cannot be executed
-    "PIE",    # flake8-pie: dead placeholders and reimplemented builtins
-    "RUF",    # Ruff's own rules, incl. RUF100: a `# noqa` that suppresses nothing
+    "T10",      # flake8-debugger: a forgotten breakpoint() would hang CI
+    "PGH",      # pygrep-hooks: blanket `# type: ignore` / `# noqa` with no code
+    "YTT",      # flake8-2020: version checks that break on Python 3.10+/4.x
+    "PLE",      # Pylint errors: only the genuinely-broken subset
+    "LOG",      # flake8-logging: misuse of the logging API itself
+    "EXE",      # flake8-executable: a shebang that cannot be executed
+    "PIE",      # flake8-pie: dead placeholders and reimplemented builtins
+    "RUF",      # Ruff's own rules, incl. RUF100: a `# noqa` that suppresses nothing
     # Test-quality rules. PT011/PT012/PT017 are the ones with teeth: a broad
     # `pytest.raises(ValueError)` passes on the wrong ValueError, a multi-line
     # raises block passes when the *setup* raises, and `assert` inside `except`
     # passes when nothing is raised at all.
-    "PT",     # flake8-pytest-style
+    "PT",       # flake8-pytest-style
     "PLW1510",  # subprocess.run without an explicit check= (say which you meant)
     "PLW2901",  # loop variable overwritten inside the loop
     # Naive datetimes mean "whatever zone this process happens to run in"; the
     # services stamp records that cross regions and containers, so every
     # datetime carries a tzinfo. A test that needs a naive value to exercise a
     # naive-input branch says so with a per-line noqa.
-    "DTZ",    # flake8-datetimez
+    "DTZ",      # flake8-datetimez
 ]
 ignore = [
     "E501",   # line too long (handled by ruff format)

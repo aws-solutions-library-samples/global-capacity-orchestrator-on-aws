@@ -200,13 +200,13 @@ Region's cost-monitor role through the bucket policy and the KMS key policy.
 
 ```text
 s3://<cost-report-bucket>/                # name from /<project>/cost-report-bucket/name
-├── reports/                          # scheduled reports (the Athena table)
+├── reports/                              # scheduled reports (the Athena table)
 │   └── region=us-east-1/
 │       └── date=2026-07-26/
 │           └── allocation-20260726T090000Z-20260726T100000Z.parquet
-├── adhoc/                            # user-requested reports (never aggregated)
+├── adhoc/                                # user-requested reports (never aggregated)
 │   └── region=us-east-1/date=2026-07-26/allocation-…-<nonce>.parquet
-└── athena-results/                   # workgroup-enforced query results
+└── athena-results/                       # workgroup-enforced query results
 ```
 
 The layout is Hive-partitioned (`region=…/date=…`) so the Glue table's

@@ -1812,7 +1812,7 @@ gco dag validate examples/pipeline-dag.yaml
 
 ```yaml
 name: my-pipeline
-region: us-east-1          # optional, auto-detects if omitted
+region: us-east-1      # optional, auto-detects if omitted
 namespace: gco-jobs    # optional, defaults to gco-jobs
 
 steps:
@@ -4642,8 +4642,8 @@ gco stacks eks endpoint set MODE [OPTIONS]
 
 ```bash
 gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr 203.0.113.7/32   # dev access from one IP
-gco stacks eks endpoint set PRIVATE -y                                  # back to production posture
-gco stacks deploy gco-us-east-1 -y                                      # apply the change
+gco stacks eks endpoint set PRIVATE -y                                 # back to production posture
+gco stacks deploy gco-us-east-1 -y                                     # apply the change
 ```
 
 #### `gco stacks regions`

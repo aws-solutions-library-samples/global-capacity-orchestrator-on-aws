@@ -277,7 +277,7 @@ pins, since a pin nothing bumps is a pin that rots.
 Run it locally:
 
 ```bash
-python .github/scripts/verify_action_pins.py                    # format + agreement
+python .github/scripts/verify_action_pins.py                      # format + agreement
 GH_TOKEN=$(gh auth token) \
   python .github/scripts/verify_action_pins.py --verify-upstream  # + resolve every tag
 ```
@@ -781,7 +781,7 @@ npm --prefix lambda/inference-streaming-proxy test
 # Type check (matches lint:mypy:strict and lint:mypy:stacks)
 mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
 mypy gco/stacks/ app.py diagrams/   # requires ".[cdk,typecheck]"
-mypy .github/oidc_provider/      # separate run: two modules named "app"
+mypy .github/oidc_provider/         # separate run: two modules named "app"
 
 # Unit tests — the whole core suite in one go. CI splits the same set across
 # `unit:pytest:core (shard N/M)` jobs and combines coverage in `unit:pytest:core`;
