@@ -11,6 +11,7 @@ import asyncio
 import importlib.util
 import json
 import runpy
+import ssl
 import sys
 import types
 import warnings
@@ -38,6 +39,7 @@ from gco.services.tls_proxy import (
     TLS_KEY_FILE_ENV,
     ProxyConfig,
     TlsProxy,
+    _loop_factory,
     _non_negative_number,
     _positive_port,
     load_proxy_config,
@@ -561,18 +563,43 @@ async def test_tls_connection_cancels_opposite_pump_and_closes_both_writers(tmp_
     assert proxy._connections == set()
 
 
-@pytest.mark.asyncio
-async def test_tls_reload_without_existing_acceptor_starts_replacement(tmp_path: Path) -> None:
+def test_tls_keypair_activation_needs_no_listener(tmp_path: Path) -> None:
+    """Activation is a context swap, so it never touches (or needs) the acceptor."""
     proxy = TlsProxy(_proxy_config(tmp_path))
-    replacement = MagicMock()
+    rotated_context = MagicMock(spec=ssl.SSLContext)
 
-    with patch(
-        "gco.services.tls_proxy.asyncio.start_server", AsyncMock(return_value=replacement)
-    ) as start_server:
-        await proxy._reload_certificate(MagicMock(), "digest-v2")
+    with patch("gco.services.tls_proxy.asyncio.start_server", AsyncMock()) as start_server:
+        proxy.activate_keypair(rotated_context, "digest-v2")
 
-    start_server.assert_awaited_once()
-    assert proxy._server is replacement
+    start_server.assert_not_called()
+    assert proxy._server is None
+    assert proxy._active_context is rotated_context
+    assert proxy._keypair_digest == "digest-v2"
+
+
+@pytest.mark.asyncio
+async def test_tls_watcher_activates_a_changed_keypair_then_stops(tmp_path: Path) -> None:
+    """A poll tick whose keypair digest differs activates the validated context."""
+    proxy = TlsProxy(_proxy_config(tmp_path))
+    proxy._keypair_digest = "digest-v1"
+    rotated_context = MagicMock(spec=ssl.SSLContext)
+
+    async def expire(awaitable: Any, *, timeout: float) -> Any:
+        del timeout
+        awaitable.close()
+        raise TimeoutError
+
+    def rotated(_config: ProxyConfig) -> tuple[Any, str]:
+        proxy._stop.set()
+        return rotated_context, "digest-v2"
+
+    with (
+        patch("gco.services.tls_proxy.asyncio.wait_for", side_effect=expire),
+        patch("gco.services.tls_proxy._ssl_context", side_effect=rotated),
+    ):
+        await proxy.watch_certificates()
+
+    assert proxy._active_context is rotated_context
     assert proxy._keypair_digest == "digest-v2"
 
 
@@ -609,7 +636,7 @@ async def test_tls_watcher_rejects_bad_rotated_keypair_then_stops(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_tls_watcher_skips_reload_when_digest_is_unchanged_then_stops(tmp_path: Path) -> None:
-    """A poll tick with an identical keypair digest loops without rebinding.
+    """A poll tick with an identical keypair digest loops without activating anything.
 
     This pins the ``digest == self._keypair_digest`` arc of the watcher loop
     deterministically. The live-rotation test only crosses that arc when the
@@ -633,11 +660,11 @@ async def test_tls_watcher_skips_reload_when_digest_is_unchanged_then_stops(tmp_
     with (
         patch("gco.services.tls_proxy.asyncio.wait_for", side_effect=expire),
         patch("gco.services.tls_proxy._ssl_context", side_effect=unchanged),
-        patch.object(proxy, "_reload_certificate", AsyncMock()) as reload_certificate,
+        patch.object(proxy, "activate_keypair") as activate_keypair,
     ):
         await proxy.watch_certificates()
 
-    reload_certificate.assert_not_awaited()
+    activate_keypair.assert_not_called()
     assert proxy._keypair_digest == "digest-v1"
 
 
@@ -717,12 +744,47 @@ async def test_run_proxy_drains_on_stop_and_propagates_watcher_failure(
     assert loop.add_signal_handler.call_count == 2
 
 
-def test_tls_main_and_module_entry_run_async_proxy() -> None:
-    with patch("gco.services.tls_proxy.asyncio.run") as async_run:
+@pytest.mark.asyncio
+async def test_run_proxy_silences_uvloop_signal_handler_deprecation_noise(tmp_path: Path) -> None:
+    """uvloop 0.22's add_signal_handler trips a 3.14 deprecation; the sidecar log stays clean."""
+    config = _proxy_config(tmp_path)
+    fake = _FakeRunProxy(config)
+    loop = MagicMock()
+
+    def noisy_add_signal_handler(_signum: int, _callback: Any) -> None:
+        warnings.warn(
+            "'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        warnings.warn("unrelated deprecation stays visible", DeprecationWarning, stacklevel=2)
+
+    loop.add_signal_handler.side_effect = noisy_add_signal_handler
+
+    with (
+        patch("gco.services.tls_proxy.TlsProxy", return_value=fake),
+        patch("gco.services.tls_proxy.asyncio.get_running_loop", return_value=loop),
+        warnings.catch_warnings(record=True) as recorded,
+    ):
+        warnings.simplefilter("always")
+        await run_proxy(config)
+
+    messages = [str(item.message) for item in recorded]
+    assert messages == ["unrelated deprecation stays visible"] * 2
+    assert loop.add_signal_handler.call_count == 2
+
+
+def test_tls_main_and_module_entry_run_async_proxy_on_the_selected_loop() -> None:
+    loop_factory = MagicMock(name="loop_factory")
+    with (
+        patch("gco.services.tls_proxy.asyncio.run") as async_run,
+        patch("gco.services.tls_proxy._loop_factory", return_value=loop_factory),
+    ):
         from gco.services.tls_proxy import main
 
         main()
         assert async_run.call_count == 1
+        assert async_run.call_args.kwargs == {"loop_factory": loop_factory}
         async_run.call_args.args[0].close()
 
     with patch("asyncio.run") as module_run, warnings.catch_warnings():
@@ -734,6 +796,17 @@ def test_tls_main_and_module_entry_run_async_proxy() -> None:
         runpy.run_module("gco.services.tls_proxy", run_name="__main__")
         assert module_run.call_count == 1
         module_run.call_args.args[0].close()
+
+
+def test_tls_loop_factory_prefers_uvloop_and_falls_back_to_the_stdlib_loop() -> None:
+    """The sidecar shares the service image with uvicorn, so it rides the same uvloop wheel."""
+    fake_uvloop = SimpleNamespace(new_event_loop=MagicMock(name="uvloop.new_event_loop"))
+    with patch.dict(sys.modules, {"uvloop": fake_uvloop}):
+        assert _loop_factory() is fake_uvloop.new_event_loop
+
+    # ``None`` in sys.modules makes ``import uvloop`` raise ImportError.
+    with patch.dict(sys.modules, {"uvloop": None}):
+        assert _loop_factory() is None
 
 
 # ---------------------------------------------------------------------------

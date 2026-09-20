@@ -14,11 +14,16 @@ against the code that has to keep the promise:
   probes hit the Prometheus endpoint; a loop that is wedged rather than
   crashed only shows in the exported ``seconds_since_last_pass`` gauge. The
   gauge exists from construction and resets on every completed iteration.
+* **Observable fast path.** The service images ship uvloop and httptools for
+  uvicorn's ``auto`` selection. Each entrypoint keeps the ``auto`` defaults
+  (so a checkout without the wheels still runs) and logs the implementations
+  uvicorn actually resolved, read from the objects uvicorn itself consults.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,6 +32,7 @@ import pytest
 import yaml
 
 from gco.services import cost_api, health_api, inference_api, manifest_api
+from gco.services.uvicorn_runtime import describe_uvicorn_runtime
 
 _MANIFEST_DIR = Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
 
@@ -75,6 +81,44 @@ def test_run_server_forwards_the_manifest_drain_budget_to_uvicorn(filename, app,
     assert kwargs["timeout_graceful_shutdown"] == default + 1
     assert kwargs["port"] == 8080
     assert kwargs["reload"] is False
+    # The loop and HTTP parser stay on uvicorn's ``auto`` selection: the images
+    # provide uvloop/httptools, a bare checkout may not, and both must serve.
+    assert "loop" not in kwargs
+    assert "http" not in kwargs
+
+
+@pytest.mark.parametrize(("filename", "app", "module"), _FASTAPI_SERVICES)
+def test_run_server_logs_the_resolved_uvicorn_loop_and_http_parser(filename, app, module, caplog):
+    """The startup line names the implementations uvicorn's auto mode resolved to."""
+    with (
+        patch("uvicorn.run"),
+        patch(
+            "gco.services.uvicorn_runtime.describe_uvicorn_runtime",
+            return_value=("fake.loop_factory", "fake.HttpProtocol"),
+        ),
+        caplog.at_level(logging.INFO, logger=module.__name__),
+    ):
+        module._run_server()
+
+    startup_lines = [record.getMessage() for record in caplog.records if "Starting" in record.msg]
+    assert startup_lines, caplog.text
+    assert "uvicorn loop=fake.loop_factory http=fake.HttpProtocol" in startup_lines[-1]
+
+
+def test_describe_uvicorn_runtime_reports_what_uvicorn_auto_mode_consults():
+    """The names come from uvicorn's own auto modules, so the log cannot disagree with the server."""
+    from uvicorn.loops.auto import auto_loop_factory
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+
+    loop_impl, http_impl = describe_uvicorn_runtime()
+
+    factory = auto_loop_factory()
+    assert loop_impl == f"{factory.__module__}.{factory.__qualname__}"
+    assert http_impl == f"{AutoHTTPProtocol.__module__}.{AutoHTTPProtocol.__qualname__}"
+    # The lock installs the image wheels, so the test environment resolves the
+    # same fast path the images do.
+    assert loop_impl == "uvloop.new_event_loop"
+    assert http_impl == "uvicorn.protocols.http.httptools_impl.HttpToolsProtocol"
 
 
 @pytest.mark.parametrize(("filename", "app", "module"), _FASTAPI_SERVICES)

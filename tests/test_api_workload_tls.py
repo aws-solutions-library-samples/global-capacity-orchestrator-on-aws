@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-import socket
 import ssl
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -164,11 +163,18 @@ async def test_tls_proxy_terminates_tls_and_forwards_only_to_loopback(tmp_path: 
     await upstream.wait_closed()
 
 
+def _peer_leaf_fingerprint(writer: asyncio.StreamWriter) -> str:
+    ssl_object = writer.get_extra_info("ssl_object")
+    assert ssl_object is not None
+    leaf = x509.load_der_x509_certificate(ssl_object.getpeercert(binary_form=True))
+    return leaf.fingerprint(hashes.SHA256()).hex()
+
+
 @pytest.mark.asyncio
 async def test_real_certificate_rotation_preserves_stream_and_updates_new_handshake(
     tmp_path: Path,
 ) -> None:
-    """A live stream survives acceptor replacement and new peers see the new leaf."""
+    """A live stream survives rotation, the listener never rebinds, new peers see the new leaf."""
 
     async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -181,21 +187,18 @@ async def test_real_certificate_rotation_preserves_stream_and_updates_new_handsh
 
     upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
     upstream_port = upstream.sockets[0].getsockname()[1]
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        fixed_tls_port = int(reservation.getsockname()[1])
     config = replace(
         _proxy_config(tmp_path),
-        port=fixed_tls_port,
+        port=0,
         upstream_port=upstream_port,
         poll_seconds=0.01,
     )
     first_fingerprint = _write_test_keypair(config, "rotation-a")
     proxy = TlsProxy(config)
     await proxy.start()
-    assert proxy._server is not None
-    first_port = proxy._server.sockets[0].getsockname()[1]
-    assert first_port == fixed_tls_port
+    listener = proxy._server
+    assert listener is not None
+    tls_port = listener.sockets[0].getsockname()[1]
     watcher = asyncio.create_task(proxy.watch_certificates())
 
     client_context = ssl.create_default_context()
@@ -203,19 +206,17 @@ async def test_real_certificate_rotation_preserves_stream_and_updates_new_handsh
     client_context.verify_mode = ssl.CERT_NONE
     old_reader, old_writer = await asyncio.open_connection(
         "127.0.0.1",
-        first_port,
+        tls_port,
         ssl=client_context,
         server_hostname="localhost",
     )
-    old_ssl = old_writer.get_extra_info("ssl_object")
-    assert old_ssl is not None
-    old_leaf = x509.load_der_x509_certificate(old_ssl.getpeercert(binary_form=True))
-    assert old_leaf.fingerprint(hashes.SHA256()).hex() == first_fingerprint
+    assert _peer_leaf_fingerprint(old_writer) == first_fingerprint
     old_writer.write(b"before-rotation")
     await old_writer.drain()
     assert await old_reader.readexactly(len(b"before-rotation")) == b"before-rotation"
 
     second_fingerprint = _write_test_keypair(config, "rotation-b")
+    assert second_fingerprint != first_fingerprint
     rotated_digest = _keypair_digest(config)
 
     async def wait_for_watcher_rotation() -> None:
@@ -223,34 +224,47 @@ async def test_real_certificate_rotation_preserves_stream_and_updates_new_handsh
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(wait_for_watcher_rotation(), timeout=2)
-    assert proxy._server is not None
 
-    # The accepted TLS session keeps forwarding even though its acceptor is gone.
+    # Rotation swapped the active keypair in place: the very same listening
+    # Server object is still bound, so there was no window in which a new
+    # connection could have been refused.
+    assert proxy._server is listener
+    assert listener.is_serving()
+    assert listener.sockets[0].getsockname()[1] == tls_port
+
+    # The accepted TLS session keeps forwarding with the leaf it negotiated.
     old_writer.write(b"after-rotation")
     await old_writer.drain()
     assert await old_reader.readexactly(len(b"after-rotation")) == b"after-rotation"
+    assert _peer_leaf_fingerprint(old_writer) == first_fingerprint
 
-    second_port = proxy._server.sockets[0].getsockname()[1]
-    assert second_port == fixed_tls_port == first_port
-    new_reader, new_writer = await asyncio.open_connection(
+    # A new handshake without SNI -- the ALB connects to pod IPs and sends
+    # none -- is routed to the rotated leaf ...
+    no_sni_reader, no_sni_writer = await asyncio.open_connection(
         "127.0.0.1",
-        second_port,
+        tls_port,
+        ssl=client_context,
+    )
+    assert _peer_leaf_fingerprint(no_sni_writer) == second_fingerprint
+    no_sni_writer.write(b"new-handshake")
+    await no_sni_writer.drain()
+    assert await no_sni_reader.readexactly(len(b"new-handshake")) == b"new-handshake"
+
+    # ... and so is one that does present a server name.
+    sni_reader, sni_writer = await asyncio.open_connection(
+        "127.0.0.1",
+        tls_port,
         ssl=client_context,
         server_hostname="localhost",
     )
-    new_ssl = new_writer.get_extra_info("ssl_object")
-    assert new_ssl is not None
-    new_leaf = x509.load_der_x509_certificate(new_ssl.getpeercert(binary_form=True))
-    assert new_leaf.fingerprint(hashes.SHA256()).hex() == second_fingerprint
-    assert second_fingerprint != first_fingerprint
-    new_writer.write(b"new-handshake")
-    await new_writer.drain()
-    assert await new_reader.readexactly(len(b"new-handshake")) == b"new-handshake"
+    assert _peer_leaf_fingerprint(sni_writer) == second_fingerprint
+    sni_writer.write(b"named-handshake")
+    await sni_writer.drain()
+    assert await sni_reader.readexactly(len(b"named-handshake")) == b"named-handshake"
 
-    new_writer.close()
-    old_writer.close()
-    await new_writer.wait_closed()
-    await old_writer.wait_closed()
+    for writer in (sni_writer, no_sni_writer, old_writer):
+        writer.close()
+        await writer.wait_closed()
     await proxy.shutdown()
     await asyncio.wait_for(watcher, timeout=1)
     upstream.close()
@@ -258,45 +272,51 @@ async def test_real_certificate_rotation_preserves_stream_and_updates_new_handsh
 
 
 @pytest.mark.asyncio
-async def test_tls_proxy_reloads_acceptor_without_closing_established_streams(
+async def test_tls_proxy_fails_closed_before_the_projected_keypair_is_activated(
+    tmp_path: Path,
+) -> None:
+    """Before start() the placeholder context holds no keypair, so no handshake can complete."""
+    proxy = TlsProxy(_proxy_config(tmp_path))
+    dispatcher = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    dispatcher.sni_callback = proxy._select_context
+    listener = await asyncio.start_server(
+        lambda _reader, _writer: None, "127.0.0.1", 0, ssl=dispatcher
+    )
+    tls_port = listener.sockets[0].getsockname()[1]
+
+    client_context = ssl.create_default_context()
+    client_context.check_hostname = False
+    client_context.verify_mode = ssl.CERT_NONE
+    # The server aborts the handshake (no certificate to offer); depending on
+    # timing the client observes the TLS alert or the reset that follows it.
+    with pytest.raises((ssl.SSLError, ConnectionResetError)):
+        await asyncio.open_connection("127.0.0.1", tls_port, ssl=client_context)
+
+    listener.close()
+    await listener.wait_closed()
+
+
+def test_tls_proxy_activates_rotated_keypair_without_touching_listener_or_streams(
     tmp_path: Path,
 ) -> None:
     proxy = TlsProxy(_proxy_config(tmp_path))
-    old_server = MagicMock()
-    old_server.wait_closed = AsyncMock()
-    new_server = MagicMock()
-    proxy._server = old_server
+    listener = MagicMock()
+    proxy._server = listener
     existing_connection = MagicMock()
     proxy._connections.add(existing_connection)
+    rotated_context = MagicMock(spec=ssl.SSLContext)
 
-    with patch("asyncio.start_server", new=AsyncMock(return_value=new_server)) as start_server:
-        await proxy._reload_certificate(MagicMock(), "new-digest")
+    proxy.activate_keypair(rotated_context, "new-digest")
 
-    old_server.close.assert_called_once_with()
-    await asyncio.sleep(0)
-    old_server.wait_closed.assert_awaited_once_with()
-    start_server.assert_awaited_once()
-    assert proxy._server is new_server
+    listener.close.assert_not_called()
+    assert proxy._server is listener
+    assert proxy._active_context is rotated_context
     assert proxy._keypair_digest == "new-digest"
     assert proxy._connections == {existing_connection}
 
-
-@pytest.mark.asyncio
-async def test_tls_proxy_rebind_failure_requests_container_restart(tmp_path: Path) -> None:
-    proxy = TlsProxy(_proxy_config(tmp_path))
-    old_server = MagicMock()
-    old_server.wait_closed = AsyncMock()
-    proxy._server = old_server
-
-    with (
-        patch("asyncio.start_server", new=AsyncMock(side_effect=OSError("address unavailable"))),
-        pytest.raises(OSError, match="address unavailable"),
-    ):
-        await proxy._reload_certificate(MagicMock(), "new-digest")
-
-    old_server.close.assert_called_once_with()
-    assert proxy._server is None
-    assert proxy._stop.is_set()
+    handshake = MagicMock(spec=ssl.SSLObject)
+    proxy._select_context(handshake, None, MagicMock(spec=ssl.SSLContext))
+    assert handshake.context is rotated_context
 
 
 @pytest.mark.parametrize(("filename", "identity"), _API_WORKLOADS.items())

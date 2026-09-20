@@ -507,12 +507,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=cost-monitor
           cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
-      - name: Verify image boots the module
+      - name: Verify image boots the module on the uvloop + httptools fast path
         # Crisp early signal: distinguishes "cannot even import" from a boot
-        # failure in the functional test below.
+        # failure in the functional test below. The second half proves the
+        # rootfs ships the compiled uvloop/httptools wheels and that uvicorn's
+        # auto selection resolves to them: a wheel silently missing from the
+        # image would otherwise degrade the service to asyncio + h11 with no
+        # error anywhere. Read through gco.services.uvicorn_runtime -- the
+        # same helper the service logs at startup.
+        env:
+          FAST_PATH_SNIPPET: >-
+            import gco.services.cost_api as m;
+            from gco.services.uvicorn_runtime import describe_uvicorn_runtime;
+            loop, http = describe_uvicorn_runtime();
+            assert loop == 'uvloop.new_event_loop', loop;
+            assert http == 'uvicorn.protocols.http.httptools_impl.HttpToolsProtocol', http;
+            print('cost-monitor import OK:', m.__name__, 'uvicorn loop=' + loop, 'http=' + http)
         run: |
           docker run --rm cost-monitor:ci \
-            python -c "import gco.services.cost_api as m; print('cost-monitor import OK:', m.__name__)"
+            python -c "${FAST_PATH_SNIPPET}"
       - name: Functional container test
         # Boots the image under the deployment manifest's pod-equivalent
         # constraints (read-only root, tmpfs /tmp, uid 1000, all caps
@@ -555,12 +568,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=health-monitor
           cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
-      - name: Verify image boots the module
+      - name: Verify image boots the module on the uvloop + httptools fast path
         # Crisp early signal: distinguishes "cannot even import" from a boot
-        # failure in the functional test below.
+        # failure in the functional test below. The second half proves the
+        # rootfs ships the compiled uvloop/httptools wheels and that uvicorn's
+        # auto selection resolves to them: a wheel silently missing from the
+        # image would otherwise degrade the service to asyncio + h11 with no
+        # error anywhere. Read through gco.services.uvicorn_runtime -- the
+        # same helper the service logs at startup.
+        env:
+          FAST_PATH_SNIPPET: >-
+            import gco.services.health_api as m;
+            from gco.services.uvicorn_runtime import describe_uvicorn_runtime;
+            loop, http = describe_uvicorn_runtime();
+            assert loop == 'uvloop.new_event_loop', loop;
+            assert http == 'uvicorn.protocols.http.httptools_impl.HttpToolsProtocol', http;
+            print('health-monitor import OK:', m.__name__, 'uvicorn loop=' + loop, 'http=' + http)
         run: |
           docker run --rm health-monitor:ci \
-            python -c "import gco.services.health_api as m; print('health-monitor import OK:', m.__name__)"
+            python -c "${FAST_PATH_SNIPPET}"
       - name: Write stub kubeconfig
         # lifespan() requires a loadable Kubernetes config. A static
         # kubeconfig pointing at an unreachable apiserver (port 9, discard —
@@ -638,12 +664,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=manifest-processor
           cache-to: type=gha,mode=max,scope=manifest-processor,ignore-error=true
-      - name: Verify image boots the module
+      - name: Verify image boots the module on the uvloop + httptools fast path
         # Crisp early signal: distinguishes "cannot even import" from a boot
-        # failure in the functional test below.
+        # failure in the functional test below. The second half proves the
+        # rootfs ships the compiled uvloop/httptools wheels and that uvicorn's
+        # auto selection resolves to them: a wheel silently missing from the
+        # image would otherwise degrade the service to asyncio + h11 with no
+        # error anywhere. Read through gco.services.uvicorn_runtime -- the
+        # same helper the service logs at startup.
+        env:
+          FAST_PATH_SNIPPET: >-
+            import gco.services.manifest_api as m;
+            from gco.services.uvicorn_runtime import describe_uvicorn_runtime;
+            loop, http = describe_uvicorn_runtime();
+            assert loop == 'uvloop.new_event_loop', loop;
+            assert http == 'uvicorn.protocols.http.httptools_impl.HttpToolsProtocol', http;
+            print('manifest-processor import OK:', m.__name__, 'uvicorn loop=' + loop, 'http=' + http)
         run: |
           docker run --rm manifest-processor:ci \
-            python -c "import gco.services.manifest_api as m; print('manifest-processor import OK:', m.__name__)"
+            python -c "${FAST_PATH_SNIPPET}"
       - name: Write stub kubeconfig
         # Same rationale as integration:docker:health-monitor — parseable
         # config, unreachable apiserver, no connection at load time.
@@ -770,12 +809,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=inference-proxy
           cache-to: type=gha,mode=max,scope=inference-proxy,ignore-error=true
-      - name: Verify image boots the module
+      - name: Verify image boots the module on the uvloop + httptools fast path
         # Crisp early signal: distinguishes "cannot even import" from a boot
-        # failure in the functional test below.
+        # failure in the functional test below. The second half proves the
+        # rootfs ships the compiled uvloop/httptools wheels and that uvicorn's
+        # auto selection resolves to them: a wheel silently missing from the
+        # image would otherwise degrade the service to asyncio + h11 with no
+        # error anywhere. Read through gco.services.uvicorn_runtime -- the
+        # same helper the service logs at startup.
+        env:
+          FAST_PATH_SNIPPET: >-
+            import gco.services.inference_api as m;
+            from gco.services.uvicorn_runtime import describe_uvicorn_runtime;
+            loop, http = describe_uvicorn_runtime();
+            assert loop == 'uvloop.new_event_loop', loop;
+            assert http == 'uvicorn.protocols.http.httptools_impl.HttpToolsProtocol', http;
+            print('inference-proxy import OK:', m.__name__, 'uvicorn loop=' + loop, 'http=' + http)
         run: |
           docker run --rm inference-proxy:ci \
-            python -c "import gco.services.inference_api as m; print('inference-proxy import OK:', m.__name__)"
+            python -c "${FAST_PATH_SNIPPET}"
       - name: Functional container test
         # The proxy has no startup dependencies (per-request resolution), so
         # it boots with no env at all. Asserts the serving contract under the

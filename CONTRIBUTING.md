@@ -121,12 +121,12 @@ GCO uses exact-pinned Python dependencies in `pyproject.toml` with a committed t
 | CDK | `pip install -e ".[cdk]"` | AWS CDK, cdk-nag, constructs (for stack synthesis) |
 | Dev | `pip install -e ".[dev]"` | Everything: CDK + lint + typecheck + test + security |
 | MCP | `pip install -e ".[mcp]"` | FastMCP server |
-| Image: health monitor | Docker reads `[image-health-monitor]` | Direct runtime roots for `gco.services.health_api` |
-| Image: manifest processor | Docker reads `[image-manifest-processor]` | Direct runtime roots for the manifest API and Grafana rotator |
-| Image: inference proxy | Docker reads `[image-inference-proxy]` | Direct runtime roots for `gco.services.inference_api` |
+| Image: health monitor | Docker reads `[image-health-monitor]` | Direct runtime roots for `gco.services.health_api` and its TLS sidecar, including uvloop + httptools for uvicorn |
+| Image: manifest processor | Docker reads `[image-manifest-processor]` | Direct runtime roots for the manifest API, its TLS sidecar, and the Grafana rotator, including uvloop + httptools for uvicorn |
+| Image: inference proxy | Docker reads `[image-inference-proxy]` | Direct runtime roots for `gco.services.inference_api` and its TLS sidecar, including uvloop + httptools for uvicorn |
 | Image: inference monitor | Docker reads `[image-inference-monitor]` | Direct runtime roots for the inference reconciler |
 | Image: queue processor | Docker reads `[image-queue-processor]` | Direct runtime roots for the SQS worker |
-| Image: cost monitor | Docker reads `[image-cost-monitor]` | Direct runtime roots for the cost API and report pipeline |
+| Image: cost monitor | Docker reads `[image-cost-monitor]` | Direct runtime roots for the cost API and report pipeline, including uvloop + httptools for uvicorn |
 
 CDK dependencies are in a separate `[cdk]` extras group so operators who only use the CLI don't need to install the full CDK toolchain. The six `image-*` groups are build metadata and the single source of direct dependency pins for production service images: each Dockerfile extracts only its own group with `tomllib`, constrains it with `requirements-lock.txt`, and deletes the generated requirements file in the same layer. Do not add per-image requirements files or install `.[image-*]` inside production images, because either approach introduces extra dependencies or another synchronization surface.
 
