@@ -430,7 +430,7 @@ Open a PR as a draft while you iterate and CI stays idle: every job in a PR-trig
 | `.github/workflows/integration-tests.yml` | Integration Tests | Container, dev-image, kind, manifest, Lambda, and MCP integration contracts |
 | `.github/workflows/security.yml` | Security | Python/npm/container/IaC/secret scans and Python+JavaScript CodeQL |
 | `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 streaming-Lambda tests with exact 100% line/function/branch gates |
-| `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, strict MkDocs, mypy, Ruff, ShellCheck, and yamllint |
+| `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, strict Zensical wiki build, mypy, Ruff, ShellCheck, and yamllint |
 
 Each workflow file has a comment header documenting triggers and per-job purpose. Every job uses `category:tool:test_name` display names (for example, `unit:pytest:core`) and `category-tool-test_name` job IDs.
 
@@ -442,7 +442,7 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/release-publish.yml` | `main` VERSION push + manual | Stage 2: verify the merged release commit, then create the immutable tag and GitHub Release |
 | `.github/workflows/deps-scan.yml` | Monthly + manual | Check pinned versions and live accelerator-catalog drift; maintain one rolling issue |
 | `.github/workflows/cve-scan.yml` | Weekly + manual | Re-run Trivy against current CVE databases |
-| `.github/workflows/pages.yml` | Successful Unit Tests run on `main` | Publish the strict MkDocs site, coverage report, and badge JSON |
+| `.github/workflows/pages.yml` | Successful Unit Tests run on `main` | Publish the strict Zensical site, coverage report, and badge JSON |
 | `.github/workflows/mooncake-image.yml` | `main`, PR, manual | Validate the pinned upstream Mooncake image contract |
 | `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready | Sync the declared type-of-change checkbox to its release-note label |
 | `.github/workflows/grafana-dashboards.yml` | `main`, PR, manual | Provision curated dashboards into the real Grafana image resolved from the pinned chart |
@@ -537,7 +537,7 @@ Where a change belongs:
 - `TENETS.md`: the normative north star and prioritized decision guidance; `docs/adr/`: the append-only log of significant architectural decisions.
 - `docs/README.md`: the index of every guide under `docs/` (a test keeps it exact); each guide owns its topic — CLI reference, REST API, concepts, customization, troubleshooting, runbooks, the per-feature guides.
 - Package `README.md` files (`cli/`, `gco/`, `gco_mcp/`, `lambda/`, `scripts/`, `tests/`, …): what the directory is for and its inventory; several are test-pinned to the directory contents.
-- `wiki/` + `mkdocs.yml`: the orientation wiki published to GitHub Pages (see [Developing the wiki](#developing-the-wiki)); it summarizes and links, never restates.
+- `wiki/` + `zensical.toml`: the orientation wiki published to GitHub Pages (see [Developing the wiki](#developing-the-wiki)); it summarizes and links, never restates.
 - `CONTRIBUTING.md`: this file.
 
 Repository inventories move in pairs and are guarded by tests. When adding or
@@ -561,45 +561,50 @@ The generator fails if marker-stripped target source differs from that commit.
 ### Developing the wiki
 
 The [project wiki](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/)
-is a small MkDocs site built from `wiki/*.md` and `mkdocs.yml`, published to
-GitHub Pages by `pages.yml` with the three coverage reports embedded at
-`/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`.
-[`wiki/README.md`](wiki/README.md) describes every page and the full build and
-publish pipeline; this section is the working checklist.
+is a small [Zensical](https://zensical.org/) site built from `wiki/*.md` and
+`zensical.toml`, published to GitHub Pages by `pages.yml` with the three
+coverage reports embedded at `/python-coverage/`, `/bash-coverage/` and
+`/nodejs-coverage/`. [`wiki/README.md`](wiki/README.md) describes every page
+and the full build and publish pipeline; this section is the working checklist.
 It is an orientation layer: pages **summarize and link** to the authoritative
 docs on GitHub — they must not restate reference detail (flags, config keys,
 procedures), which would rot. Deep-doc links use full
 `https://github.com/.../blob/main/...` URLs (the docs are not part of the
-built site), and images are referenced as `assets/images/<name>` — a build
-hook serves the tracked `images/` directory, so never commit image copies.
+built site), and images are referenced as `assets/images/<name>` —
+`scripts/build_wiki.py` stages the tracked `images/` directory (and the
+generated API spec sheets) into the source tree Zensical builds, so never
+commit image copies.
 
 To preview changes locally with live reload:
 
 ```bash
-pip install -e ".[docs]"        # once, in your venv (or use the dev container)
-./scripts/preview_wiki.sh       # strict build + live server on :8000
-./scripts/preview_wiki.sh --build-only   # just the CI-equivalent strict build
+pip install -e ".[docs]"                 # once, in your venv (or use the dev container)
+python scripts/build_wiki.py serve       # stage + strict build + live server on :8000
+python scripts/build_wiki.py build       # just the CI-equivalent strict build into site/
 ```
 
-The script's first phase runs `mkdocs build --strict` — the exact command the
-`lint:mkdocs:strict` PR gate and the Pages deploy run — so a broken link or a
-nav entry without a file fails locally before CI sees it. From the dev
-container, forward the port yourself
-(`docker run -p 8000:8000 ... ./scripts/preview_wiki.sh`); the `gco` shell
-function does not forward ports. The locally served coverage-report paths
+`serve` first runs `zensical build --clean --strict` on the staged tree — the
+exact build the `lint:zensical:strict` PR gate and the Pages deploy run — so a
+broken link or a nav entry without a file fails locally before CI sees it, then
+re-stages whenever a page, screenshot or spec sheet changes while the server
+runs. From the dev container, forward the port yourself
+(`docker run -p 8000:8000 ... python scripts/build_wiki.py serve`); the `gco`
+shell function does not forward ports. The locally served coverage-report paths
 (`/python-coverage/`, `/bash-coverage/`, `/nodejs-coverage/`) 404 by design —
-the reports are merged in at deploy time, not built by MkDocs.
+the reports are merged in at deploy time, not built by Zensical.
 
 Before pushing wiki changes, also run the wiki's guard tests and markdownlint:
 
 ```bash
-pytest tests/test_wiki.py -q
+pytest tests/test_wiki.py tests/test_build_wiki.py -q
 npm run lint:markdown
 ```
 
 `tests/test_wiki.py` enforces the structural invariants (every page in the
-nav, every repo link and image resolving, no external image hosts); keep
-`mkdocs.yml` free of custom YAML tags so those guards can keep parsing it.
+nav, every repo link and image resolving, no external image hosts, the
+configuration pointing at the staged tree) and `tests/test_build_wiki.py` the
+staging step itself; keep `zensical.toml` plain TOML so those guards can keep
+parsing it.
 
 ### Architecture Decision Records
 

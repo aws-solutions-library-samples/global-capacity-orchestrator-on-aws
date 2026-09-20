@@ -3,12 +3,14 @@
 # =============================================================================
 #
 # Deploys ONE Pages artifact containing:
-#   /                    — the orientation wiki, built with MkDocs from wiki/
-#                          and mkdocs.yml at the exact commit the triggering
-#                          Unit Tests run measured (workflow_run.head_sha)
+#   /                    — the orientation wiki, built with Zensical from
+#                          wiki/ and zensical.toml at the exact commit the
+#                          triggering Unit Tests run measured
+#                          (workflow_run.head_sha)
 #   /api/                — the API spec sheets (diagrams/api_specs/*.md, one
-#                          per FastAPI service), injected into that same
-#                          MkDocs build by scripts/mkdocs_hooks.py
+#                          per HTTP surface) and their interaction diagram,
+#                          staged into that same build's source tree by
+#                          scripts/build_wiki.py
 #   /swagger/            — FastAPI's Swagger UI console per service, built by
 #                          diagrams/api_specs/generate.py --swagger-ui-dir from
 #                          the committed docs/openapi/*.json with the pinned
@@ -59,7 +61,7 @@
 #
 # Note: workflow_run always uses the workflow definition from the default
 # branch, so edits here only take effect once merged to main (they can't be
-# exercised from a PR branch). The PR-side `lint:mkdocs:strict` job in
+# exercised from a PR branch). The PR-side `lint:zensical:strict` job in
 # lint.yml runs the identical wiki build, so a broken wiki fails pre-merge,
 # and each report is produced — and its shape verified — by the test job
 # that measures it; the packaging steps below (the sibling-run lookup, the
@@ -132,12 +134,14 @@ jobs:
       - name: Install the docs toolchain
         run: pip install -e ".[docs]"
       - name: Build the wiki (strict)
-        # Identical build to the PR-side lint:mkdocs:strict job. strict mode
-        # fails the deploy on any broken link or nav entry rather than
-        # publishing a damaged site; the previous deployment keeps serving.
-        # The API spec sheets under diagrams/api_specs/ are injected as
-        # /api/ pages by scripts/mkdocs_hooks.py during this build.
-        run: mkdocs build --strict
+        # Identical build to the PR-side lint:zensical:strict job:
+        # scripts/build_wiki.py stages the site's source tree (wiki/ pages,
+        # images/ as assets/images/, the API spec sheets under
+        # diagrams/api_specs/ as /api/) into build/wiki, then runs
+        # `zensical build --clean --strict`. Strict mode fails the deploy on
+        # any broken link or nav entry rather than publishing a damaged site;
+        # the previous deployment keeps serving.
+        run: python scripts/build_wiki.py build
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: ".nvmrc"

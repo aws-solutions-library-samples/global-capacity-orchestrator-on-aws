@@ -4,11 +4,11 @@
 SVG is XML with a scripting model. A file can carry ``<script>``, ``on*`` event
 handlers, ``<foreignObject>`` (arbitrary HTML), and references that make the
 renderer fetch remote resources (``<image>``, ``<use>``, ``xlink:href``, CSS
-``url()``). GitHub and MkDocs embed the repository's SVGs as ``<img>``, where
+``url()``). GitHub and the wiki embed the repository's SVGs as ``<img>``, where
 none of that runs — but each SVG is also published as its own document on the
-Pages origin (``scripts/mkdocs_hooks.py`` copies ``diagrams/api_specs/*.svg`` to
-``/api/``), and the interaction diagram's links only work when it is opened that
-way. Opened as a document, an SVG runs whatever it carries, on an origin every
+Pages origin (``scripts/build_wiki.py`` stages ``diagrams/api_specs/*.svg`` into
+the wiki's source tree as ``/api/``), and the interaction diagram's links only
+work when it is opened that way. Opened as a document, an SVG runs whatever it carries, on an origin every
 project site in the GitHub organisation shares.
 
 ``diagrams/api_specs/generate.py --check`` proves the committed bytes are what
@@ -24,7 +24,7 @@ validator pins the content itself, independent of how the file was made:
   external entities, ``<?xml-stylesheet?>``);
 * the default SVG namespace only — no ``xlink`` or other foreign namespaces;
 * every ``href`` is a same-document ``#id`` or a page under the ``site_url``
-  declared in ``mkdocs.yml``; every ``url(#id)`` paint or marker reference and
+  declared in ``zensical.toml``; every ``url(#id)`` paint or marker reference and
   every ``aria-labelledby`` token resolves to an ``id`` the file defines.
 
 Parsing uses the stdlib expat parser directly, with handlers that reject the
@@ -38,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,8 +50,6 @@ from pathlib import Path
 # defusedxml would add a dependency to guard a vector this policy already
 # refuses.
 from xml.parsers import expat  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
-
-import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KIB = 1024
@@ -274,10 +273,13 @@ def _validate_allowlist() -> None:
 
 def _site_url() -> str:
     """The published site's URL prefix, from the one place it is declared."""
-    config = yaml.safe_load((PROJECT_ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
-    site_url = config.get("site_url") if isinstance(config, dict) else None
+    with (PROJECT_ROOT / "zensical.toml").open("rb") as handle:
+        project = tomllib.load(handle).get("project")
+    site_url = project.get("site_url") if isinstance(project, dict) else None
     if not isinstance(site_url, str) or not site_url.startswith("https://"):
-        raise ValidationError("mkdocs.yml: site_url must be declared as an https:// URL")
+        raise ValidationError(
+            "zensical.toml: [project] site_url must be declared as an https:// URL"
+        )
     return site_url.rstrip("/") + "/"
 
 
@@ -307,7 +309,7 @@ def main() -> int:
                 f"PASS {relative_path}: {file_size:,} bytes, "
                 f"{element_count} elements, {link_count} links"
             )
-    except (OSError, subprocess.SubprocessError, ValidationError, yaml.YAMLError) as exc:
+    except (OSError, subprocess.SubprocessError, ValidationError, tomllib.TOMLDecodeError) as exc:
         print(f"SVG validation failed: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -33,7 +33,7 @@ ignores:
   - "**/*.egg-info/**"
   - ".venv/**"
   - "venv/**"
-  # MkDocs build output for the orientation wiki — generated, never authored.
+  # Zensical build output for the orientation wiki — generated, never authored.
   - "site/**"
   # IDE-local workspace content — gitignored, content-assist style only.
   - ".kiro/**"

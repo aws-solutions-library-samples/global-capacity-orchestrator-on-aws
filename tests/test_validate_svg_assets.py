@@ -385,7 +385,9 @@ def _fake_repo(tmp_path: Path, tracked: dict[str, str], *, site_url: str | None 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(payload, encoding="utf-8")
     if site_url is not None:
-        (root / "mkdocs.yml").write_text(f"site_name: t\nsite_url: {site_url}\n", encoding="utf-8")
+        (root / "zensical.toml").write_text(
+            f'[project]\nsite_name = "t"\nsite_url = "{site_url}"\n', encoding="utf-8"
+        )
     for argv in (
         [GIT, "init", "-q", "."],
         [GIT, "config", "user.email", "t@example.com"],
@@ -456,7 +458,7 @@ def test_allowlist_names_every_unreviewed_and_every_vanished_svg(
 # ---------------------------------------------------------------------------
 
 
-def test_site_url_is_read_from_mkdocs_and_normalised_to_a_trailing_slash(
+def test_site_url_is_read_from_zensical_toml_and_normalised_to_a_trailing_slash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _fake_repo(tmp_path, {}, site_url="https://example.test/gco")
@@ -466,18 +468,19 @@ def test_site_url_is_read_from_mkdocs_and_normalised_to_a_trailing_slash(
 
 
 @pytest.mark.parametrize(
-    "mkdocs",
+    "config",
     [
-        "site_name: t\n",  # no site_url
-        "site_name: t\nsite_url: http://example.test/\n",  # not https
-        "site_name: t\nsite_url: 42\n",  # not a string
-        "- just\n- a list\n",  # not a mapping
+        '[project]\nsite_name = "t"\n',  # no site_url
+        '[project]\nsite_name = "t"\nsite_url = "http://example.test/"\n',  # not https
+        '[project]\nsite_name = "t"\nsite_url = 42\n',  # not a string
+        'site_url = "https://example.test/"\n',  # not under [project]
+        "project = 1\n",  # [project] is not a table
     ],
 )
-def test_site_url_must_be_an_https_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mkdocs: str
+def test_site_url_must_be_an_https_url_under_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
 ) -> None:
-    (tmp_path / "mkdocs.yml").write_text(mkdocs, encoding="utf-8")
+    (tmp_path / "zensical.toml").write_text(config, encoding="utf-8")
     monkeypatch.setattr(validator, "PROJECT_ROOT", tmp_path)
 
     with pytest.raises(validator.ValidationError, match=r"site_url must be declared as an https"):
@@ -518,10 +521,10 @@ def test_main_fails_closed_on_a_policy_violation(
     assert captured.err == ("SVG validation failed: d/a.svg: <script> is not an allowed element\n")
 
 
-def test_main_fails_closed_when_mkdocs_is_missing(
+def test_main_fails_closed_when_the_site_config_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An OSError (here: no mkdocs.yml) is a failure, not a crash."""
+    """An OSError (here: no zensical.toml) is a failure, not a crash."""
     root = _fake_repo(tmp_path, {"d/a.svg": _svg()}, site_url=None)
     _point_at(monkeypatch, root, {Path("d/a.svg"): validator.SvgPolicy(1 * validator.KIB)})
 
@@ -529,11 +532,11 @@ def test_main_fails_closed_when_mkdocs_is_missing(
     assert "SVG validation failed: " in capsys.readouterr().err
 
 
-def test_main_fails_closed_on_unparseable_mkdocs(
+def test_main_fails_closed_on_unparseable_site_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _fake_repo(tmp_path, {"d/a.svg": _svg()}, site_url=None)
-    (root / "mkdocs.yml").write_text("site_url: [unclosed\n", encoding="utf-8")
+    (root / "zensical.toml").write_text("[project\nsite_url = ", encoding="utf-8")
     _point_at(monkeypatch, root, {Path("d/a.svg"): validator.SvgPolicy(1 * validator.KIB)})
 
     assert validator.main() == 1

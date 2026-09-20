@@ -16,13 +16,14 @@ of link are proven to resolve against the checkout:
   — must point at a path that exists in the checkout, exactly like the wiki
   guard in ``tests/test_wiki.py`` does for ``wiki/``.
 
-``wiki/`` pages are excluded on purpose: ``mkdocs build --strict`` and
+``wiki/`` pages are excluded on purpose: the strict Zensical build and
 ``tests/test_wiki.py`` already validate them, and their relative links resolve
-against the *built* site, where ``scripts/mkdocs_hooks.py`` injects assets
-that do not exist in the source tree. The one exception is ``wiki/README.md``,
-the directory's GitHub-facing README: it is excluded from the MkDocs build and
-its links (``../mkdocs.yml``, ``../scripts/mkdocs_hooks.py``, …) resolve
-against the source tree like every other README's, so it is scanned here.
+against the *built* site, where ``scripts/build_wiki.py`` stages assets that
+do not exist next to the pages in the source tree. The one exception is
+``wiki/README.md``, the directory's GitHub-facing README: the staging step
+leaves it out of the build and its links (``../zensical.toml``,
+``../scripts/build_wiki.py``, …) resolve against the source tree like every
+other README's, so it is scanned here.
 
 External URLs are deliberately out of scope — a unit test must not depend on
 the network — which is also why nothing here is a substitute for a periodic

@@ -18,7 +18,8 @@
 #   - lint:actions:pinning        — every action SHA-pinned, comment matches upstream
 #   - lint:hadolint:dockerfile    — hadolint on every Dockerfile
 #   - lint:markdownlint:md        — markdownlint-cli2 across all Markdown files
-#   - lint:mkdocs:strict          — strict MkDocs build of the wiki (wiki/ + mkdocs.yml)
+#   - lint:zensical:strict        — strict Zensical build of the wiki (wiki/ +
+#                                   zensical.toml, staged by scripts/build_wiki.py)
 #   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, gco_mcp/,
 #                                   scripts/, .github/scripts/, dockerfiles/,
 #                                   docs/client-examples/
@@ -189,9 +190,13 @@ jobs:
   # cannot be exercised from a PR branch — this job is what makes a broken
   # wiki (dead internal link, nav entry without a file, config error) a
   # pre-merge failure instead of a post-merge "Deploy Pages" surprise.
-  # `strict: true` in mkdocs.yml promotes every build warning to an error.
-  lint-mkdocs-strict:
-    name: "lint:mkdocs:strict"
+  # scripts/build_wiki.py first stages the site's source tree (wiki/ pages,
+  # images/, the generated API spec sheets) into build/wiki — Zensical has no
+  # hooks to pull them in during the build — then runs
+  # `zensical build --clean --strict`; `strict = true` in zensical.toml
+  # promotes every validation warning to an error either way.
+  lint-zensical-strict:
+    name: "lint:zensical:strict"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -204,8 +209,8 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install the docs toolchain
         run: pip install -e ".[docs]"
-      - name: Strict MkDocs build of the wiki
-        run: mkdocs build --strict
+      - name: Stage the wiki sources and build strictly with Zensical
+        run: python scripts/build_wiki.py build
 
   lint-hadolint-dockerfile:
     name: "lint:hadolint:dockerfile"
@@ -413,13 +418,13 @@ jobs:
       - lint-actions-pinning
       - lint-hadolint-dockerfile
       - lint-markdownlint-md
-      - lint-mkdocs-strict
       - lint-mypy-lambda
       - lint-mypy-stacks
       - lint-mypy-strict
       - lint-ruff-python
       - lint-shellcheck-shell
       - lint-yamllint-yaml
+      - lint-zensical-strict
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

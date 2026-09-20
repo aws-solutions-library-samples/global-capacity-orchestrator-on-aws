@@ -11,7 +11,7 @@ not have those documents get dangling references.
 This test walks every shipped top-level directory (``gco_mcp/``, ``cli/``,
 ``gco/``, ``lambda/``, ``tests/``, ``dockerfiles/``, ``examples/``, ``docs/``,
 ``scripts/``, ``wiki/``, ``diagrams/``, ``demo/``, ``images/``, ``.github/``) plus
-every regular file at the repository root (``README.md``, ``mkdocs.yml``,
+every regular file at the repository root (``README.md``, ``zensical.toml``,
 ``pyproject.toml``, ``cdk.json``, ``app.py``, ``Dockerfile.dev``, …) and fails
 loudly with file paths and line numbers if any prohibited pattern appears.
 
@@ -154,7 +154,7 @@ def _iter_target_files() -> list[Path]:
         for path in root.rglob("*"):
             _add(path)
 
-    # Every regular file at the repository root: the README family, mkdocs.yml,
+    # Every regular file at the repository root: the README family, zensical.toml,
     # pyproject.toml, cdk.json, app.py, Dockerfile.dev, and anything added later.
     for path in PROJECT_ROOT.iterdir():
         _add(path)

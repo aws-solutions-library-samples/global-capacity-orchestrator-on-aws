@@ -24,7 +24,7 @@ draft (draft PRs skip every job until marked ready for review):
 - **Security** — bandit, pip-audit, npm audit, Trivy (filesystem and
   per-image), trufflehog, gitleaks, semgrep, checkov, KICS, and CodeQL.
 - **Linting** — actionlint, hadolint, markdownlint, mypy (strict), ruff,
-  shellcheck, and yamllint. The strict MkDocs build of this wiki runs here
+  shellcheck, and yamllint. The strict Zensical build of this wiki runs here
   too.
 - **Inference streaming proxy** — native Node.js tests for the production
   streaming Lambda, with their own exact 100% line/function/branch gate.

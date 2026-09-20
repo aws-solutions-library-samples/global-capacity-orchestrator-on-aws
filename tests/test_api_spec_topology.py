@@ -21,7 +21,7 @@ import pytest
 
 from diagrams.api_specs import generate as sheets
 
-MKDOCS_YML = "site_url: https://example.test/site/\nrepo_url: https://example.test/org/repo\n"
+ZENSICAL_TOML = '[project]\nsite_url = "https://example.test/site/"\nrepo_url = "https://example.test/org/repo"\n'
 
 
 # ─── fixtures ────────────────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ def _catalogue(tmp_path: Path, documents: dict[str, dict[str, Any]]) -> Path:
     root = tmp_path / "repo"
     (root / "docs" / "openapi").mkdir(parents=True)
     (root / "diagrams" / "api_specs").mkdir(parents=True)
-    (root / "mkdocs.yml").write_text(MKDOCS_YML, encoding="utf-8")
+    (root / "zensical.toml").write_text(ZENSICAL_TOML, encoding="utf-8")
     for name, document in documents.items():
         (root / "docs" / "openapi" / f"{name}.json").write_text(
             json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"

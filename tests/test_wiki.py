@@ -1,36 +1,39 @@
-"""Guard tests for the orientation wiki (wiki/ + mkdocs.yml).
+"""Guard tests for the orientation wiki (wiki/ + zensical.toml).
 
 The wiki is a routing layer over the repository's documentation, so its most
 likely rot is referential: a renamed file breaking a GitHub deep link, a page
-falling out of the MkDocs nav, or a screenshot rename orphaning an image
-reference. These tests make each of those a PR-time failure, mirroring the
-symmetry style of ``tests/test_mcp_docs_index.py``.
+falling out of the nav, or a screenshot rename orphaning an image reference.
+These tests make each of those a PR-time failure, mirroring the symmetry style
+of ``tests/test_mcp_docs_index.py``.
 
-Deliberately pure-stdlib plus ``yaml.safe_load`` — no MkDocs import — which
-is why ``mkdocs.yml`` must never grow custom YAML tags (``!!python/name:``).
-The ``assets/images/`` → ``images/`` mapping asserted here mirrors the
-injection hook in ``scripts/mkdocs_hooks.py``.
+Deliberately stdlib-only — ``tomllib`` reads the configuration, no Zensical
+import — which is why ``zensical.toml`` stays plain TOML. Zensical reads its
+source tree from ``build/wiki``, which ``scripts/build_wiki.py`` stages from
+``wiki/``, ``images/`` (as ``assets/images/``) and ``diagrams/api_specs/`` (as
+``api/``); the ``assets/images/`` and ``api/`` mappings asserted here mirror
+that script, and the configuration guard pins ``docs_dir`` to the same
+directory the script writes.
 
 ``wiki/README.md`` is the one file in the directory that is *not* a page: it
-documents the directory for contributors browsing GitHub and is excluded from
-the build by ``exclude_docs`` (MkDocs would otherwise refuse the
-README.md/index.md conflict under ``strict``). The page-level guards skip it;
-the README-level guards at the end pin that exclusion, keep it out of the
-nav, and require it to describe every page and every supporting file. Its
-links resolve against the source tree, so ``tests/test_markdown_links.py``
-covers them.
+documents the directory for contributors browsing GitHub, and the staging step
+leaves it out of the tree Zensical builds (there is no ``exclude_docs`` in
+Zensical). The page-level guards skip it; the README-level guards at the end
+pin that exclusion, keep it out of the nav, and require it to describe every
+page and every supporting file. Its links resolve against the source tree, so
+``tests/test_markdown_links.py`` covers them.
 """
 
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
-import yaml
+from scripts import build_wiki
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WIKI_DIR = PROJECT_ROOT / "wiki"
-MKDOCS_YML = PROJECT_ROOT / "mkdocs.yml"
+ZENSICAL_TOML = PROJECT_ROOT / "zensical.toml"
 
 #: Canonical Pages origin; the nav's external coverage entry must live there.
 PAGES_ORIGIN = (
@@ -52,11 +55,11 @@ _REPO_LINK = re.compile(re.escape(REPO_URL) + r"/(?:blob|tree)/main/([^)\"'#\s]+
 _MD_TARGET = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)")
 _HTML_TARGET = re.compile(r"(?:src|href)=\"([^\"]+)\"")
 
-#: The image-injection mapping from scripts/mkdocs_hooks.py.
+#: The image staging mapping from scripts/build_wiki.py.
 _ASSETS_PREFIX = "assets/images/"
 _IMAGES_DIR = PROJECT_ROOT / "images"
 
-#: The API-spec-sheet injection mapping from scripts/mkdocs_hooks.py: the
+#: The API-spec-sheet staging mapping from scripts/build_wiki.py: the
 #: Markdown files diagrams/api_specs/generate.py renders become api/<name>.md.
 _API_PREFIX = "api/"
 _API_SPECS_DIR = PROJECT_ROOT / "diagrams" / "api_specs"
@@ -68,7 +71,7 @@ SWAGGER_SITE_PATH = "swagger/"
 
 
 def _nav_entries(node: object) -> list[str]:
-    """Flatten the mkdocs nav tree into its string leaves (pages + URLs)."""
+    """Flatten the nav tree into its string leaves (pages + URLs)."""
     leaves: list[str] = []
     if isinstance(node, str):
         leaves.append(node)
@@ -81,9 +84,15 @@ def _nav_entries(node: object) -> list[str]:
     return leaves
 
 
+def _project_config() -> dict[str, object]:
+    with ZENSICAL_TOML.open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+    assert isinstance(project, dict)
+    return project
+
+
 def _load_nav() -> list[str]:
-    config = yaml.safe_load(MKDOCS_YML.read_text(encoding="utf-8"))
-    return _nav_entries(config["nav"])
+    return _nav_entries(_project_config()["nav"])
 
 
 #: The directory's GitHub-facing README: documentation about the wiki, not a page of it.
@@ -113,12 +122,29 @@ def _link_targets(text: str) -> set[str]:
 # =============================================================================
 
 
-def test_mkdocs_yml_is_safe_loadable_with_a_nav() -> None:
-    """The guard contract itself: plain YAML, nav present, docs_dir is wiki."""
-    config = yaml.safe_load(MKDOCS_YML.read_text(encoding="utf-8"))
-    assert config["docs_dir"] == "wiki"
+def test_zensical_toml_builds_the_staged_tree_strictly_and_self_contained() -> None:
+    """The guard contract itself, and the constraints the file's header promises.
+
+    ``docs_dir`` must be the directory ``scripts/build_wiki.py`` stages, or the
+    build reads a tree nobody assembles; ``watch`` must name the three real
+    sources so the preview reloads on edits; ``strict`` fails the build on any
+    validation warning; ``font = false`` keeps the published site off Google
+    Fonts; and the MkDocs-only settings Zensical ignores must not creep back in.
+    """
+    config = _project_config()
+    assert config["docs_dir"] == build_wiki.STAGE_DIR.as_posix()
     assert config["strict"] is True
     assert isinstance(config["nav"], list) and config["nav"]
+    assert set(config["watch"]) == {  # type: ignore[arg-type]
+        build_wiki.WIKI_DIR.as_posix(),
+        build_wiki.IMAGES_DIR.as_posix(),
+        build_wiki.API_SPECS_DIR.as_posix(),
+    }
+    theme = config["theme"]
+    assert isinstance(theme, dict) and theme["font"] is False
+    assert not {"hooks", "exclude_docs", "draft_docs", "not_in_nav"} & set(config), (
+        "Zensical does not support these MkDocs settings; the staging step replaces them"
+    )
 
 
 def test_nav_and_wiki_pages_are_one_to_one() -> None:
@@ -144,7 +170,7 @@ COVERAGE_REPORT_PATHS = ("python-coverage/", "bash-coverage/", "nodejs-coverage/
 
 
 def test_nav_external_entries_are_the_canonical_pages_urls() -> None:
-    """Everything pages.yml adds outside the MkDocs build — the Swagger UI
+    """Everything pages.yml adds outside the Zensical build — the Swagger UI
     consoles at /swagger/ and the coverage reports at /python-coverage/,
     /bash-coverage/ and /nodejs-coverage/ — is reached through external nav
     entries, which must keep pointing exactly there, on the canonical origin,
@@ -264,13 +290,13 @@ def test_wiki_pages_carry_no_reference_to_docs_dir_pages_as_relative_links() -> 
 #: publish pipeline; a contributor who renames one has to come here, and to
 #: the README, in the same change.
 WIKI_README_SUPPORTING_FILES = (
-    "../mkdocs.yml",
-    "../scripts/mkdocs_hooks.py",
-    "../scripts/preview_wiki.sh",
+    "../zensical.toml",
+    "../scripts/build_wiki.py",
     "../.github/workflows/pages.yml",
     "../.github/workflows/lint.yml",
     "../.github/scripts/render_coverage_badges.py",
     "../tests/test_wiki.py",
+    "../tests/test_build_wiki.py",
     "../tests/test_docs_coverage.py",
     "../tests/test_markdown_links.py",
 )
@@ -279,15 +305,17 @@ WIKI_README_SUPPORTING_FILES = (
 def test_wiki_readme_is_excluded_from_the_build_and_the_nav() -> None:
     """The README is for GitHub; index.md is the home page.
 
-    Without the exclusion MkDocs warns that README.md conflicts with index.md
-    and ``strict`` turns that into a failed build, so this is what keeps the
-    strict build green rather than a stylistic preference.
+    Zensical treats a README.md next to an index.md as a competing index page
+    and, under ``strict``, validates its links against the site — where the
+    README's ``../`` links to repository files do not exist — so keeping it out
+    of the staged tree is what keeps the strict build green, not a stylistic
+    preference.
     """
-    config = yaml.safe_load(MKDOCS_YML.read_text(encoding="utf-8"))
-    patterns = str(config.get("exclude_docs", "")).split()
-    assert "/README.md" in patterns, "mkdocs.yml must exclude wiki/README.md via exclude_docs"
-    assert "README.md" not in _load_nav(), "the directory README is not a wiki page"
     assert WIKI_README.is_file()
+    assert Path("README.md") not in build_wiki.staged_files(PROJECT_ROOT), (
+        "scripts/build_wiki.py must leave wiki/README.md out of the staged tree"
+    )
+    assert "README.md" not in _load_nav(), "the directory README is not a wiki page"
 
 
 def test_wiki_readme_documents_every_page_in_the_directory() -> None:

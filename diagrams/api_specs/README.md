@@ -26,8 +26,8 @@ The **Swagger UI** column is the Swagger console for each document (FastAPI's ow
 `/docs` page for the services), served from the project site under `/swagger/`
 with a self-hosted copy of `swagger-ui-dist` (the site makes no third-party
 requests). It is built at deploy time by `pages.yml`; the sheets in this directory
-are also injected into the wiki under `/api/` by `scripts/mkdocs_hooks.py`, so
-both renderings come from one source.
+are also staged into the wiki's source tree under `/api/` by `scripts/build_wiki.py`,
+so both renderings come from one source.
 
 ## How the surfaces fit together
 

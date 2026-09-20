@@ -4,10 +4,9 @@ This directory is the source of the project's orientation wiki, the site
 published at
 <https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/>.
 The pages are plain Markdown, built into a static site by
-[MkDocs](https://www.mkdocs.org/) with the
-[Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) theme, and
-deployed to GitHub Pages by a workflow that runs after every successful
-`Unit Tests` run on `main`.
+[Zensical](https://zensical.org/) — the static site generator from the team
+behind Material for MkDocs — and deployed to GitHub Pages by a workflow that
+runs after every successful `Unit Tests` run on `main`.
 
 The wiki is an **orientation and routing layer** above the reference
 documentation: each page summarizes a topic and links to the authoritative
@@ -16,8 +15,9 @@ detail (flags, configuration keys, procedures) because duplicated reference
 content rots, and the deep docs are the ones the CI freshness guards protect.
 
 This README is for contributors browsing the repository. It is deliberately
-**not** part of the published site: [`mkdocs.yml`](../mkdocs.yml) excludes it,
-and [`index.md`](index.md) is the site's home page.
+**not** part of the published site: the staging step described below leaves it
+out of the tree Zensical builds, and [`index.md`](index.md) is the site's home
+page.
 
 ## Table of Contents
 
@@ -32,8 +32,8 @@ and [`index.md`](index.md) is the site's home page.
 ## What is in this directory
 
 Every file here is one published page, except this README. The order below is
-the site's navigation order, which lives in the `nav:` block of
-[`mkdocs.yml`](../mkdocs.yml).
+the site's navigation order, which lives in the `nav` list of
+[`zensical.toml`](../zensical.toml).
 
 | File | Published at | What it covers |
 |------|--------------|----------------|
@@ -49,55 +49,67 @@ the site's navigation order, which lives in the `nav:` block of
 
 ## What the site adds from elsewhere
 
-MkDocs only serves files under `docs_dir`, which is this directory. Several
-parts of the published site come from other places in the repository, or are
-merged in at deploy time, so that nothing is copied by hand and nothing can
-drift from its source:
+Zensical builds one directory (`docs_dir`), but the published site is drawn
+from several places in the repository, and nothing may be copied by hand from
+one to another. [`scripts/build_wiki.py`](../scripts/build_wiki.py) therefore
+**stages** the site's source tree into `build/wiki` (gitignored) before every
+build, and `zensical.toml` points `docs_dir` at that tree:
 
 | Site path | Source | How it gets there |
 |-----------|--------|-------------------|
-| `/assets/images/<name>` | [`images/`](../images/README.md) | Injected into the MkDocs build by [`scripts/mkdocs_hooks.py`](../scripts/mkdocs_hooks.py). Pages reference `assets/images/<name>`; the screenshots stay single-source, and the strict build verifies each one exists. |
-| `/api/` and `/api/<document>/` | [`diagrams/api_specs/`](../diagrams/api_specs/README.md) | The generated API spec sheets (two API Gateways, the in-cluster Gateway, four services) and the interaction diagram they embed, injected by the same hook. Rendered from `docs/openapi/*.json` by `diagrams/api_specs/generate.py`, which refuses to let a stale sheet through (`--check`). |
-| `/swagger/` | [`docs/openapi/`](../docs/openapi/README.md) | A Swagger UI console per OpenAPI document, built by the deploy workflow with `diagrams/api_specs/generate.py --swagger-ui-dir` and the pinned `swagger-ui-dist` package served from `/swagger/assets/`, so the site still makes zero third-party requests. |
-| `/python-coverage/`, `/bash-coverage/`, `/nodejs-coverage/` | Artifacts of the `Unit Tests` and `Inference Streaming Proxy` runs for the same commit | Copied into the site tree by the deploy workflow — no re-run, no regeneration. The nav links them as full external URLs because they are not part of the MkDocs build (locally they 404, by design). |
+| `/`, `/<page>/` | this directory | Every `wiki/*.md` except this README is staged as-is. |
+| `/assets/images/<name>` | [`images/`](../images/README.md) | Every tracked screenshot (not the directory's README) is staged as `assets/images/<name>`. Pages reference that path; the screenshots stay single-source, and the strict build fails if a referenced one is missing. |
+| `/api/` and `/api/<document>/` | [`diagrams/api_specs/`](../diagrams/api_specs/README.md) | The generated API spec sheets (two API Gateways, the in-cluster Gateway, four services) and the interaction diagram they embed are staged as `api/`. They are rendered from `docs/openapi/*.json` by `diagrams/api_specs/generate.py`, which refuses to let a stale sheet through (`--check`); the generator itself is not staged. |
+| `/swagger/` | [`docs/openapi/`](../docs/openapi/README.md) | A Swagger UI console per OpenAPI document, built by the deploy workflow with `diagrams/api_specs/generate.py --swagger-ui-dir` and the pinned `swagger-ui-dist` package served from `/swagger/assets/`, so the site still makes zero third-party asset requests. |
+| `/python-coverage/`, `/bash-coverage/`, `/nodejs-coverage/` | Artifacts of the `Unit Tests` and `Inference Streaming Proxy` runs for the same commit | Copied into the site tree by the deploy workflow — no re-run, no regeneration. The nav links them as full external URLs because they are not part of the Zensical build (locally they 404, by design). |
 | `/coverage/` | the deploy workflow | A redirect to `/python-coverage/`, the Python report's old address, so links published before the reports were split keep resolving. |
 | `/python-coverage-badge.json`, `/bash-coverage-badge.json`, `/nodejs-coverage-badge.json` | [`.github/scripts/render_coverage_badges.py`](../.github/scripts/render_coverage_badges.py) | The shields.io endpoint documents behind the three coverage badges in the root README, rendered from the three reports above and kept at the site root so the badge URLs never change. |
 
+The staging step is a sync, not a wholesale copy: files are copied when
+missing or changed, files whose source disappeared are removed, and the tree is
+never deleted, so the preview server keeps watching a directory that exists.
+MkDocs did the first two jobs through a build hook and kept this README out
+with `exclude_docs`; Zensical supports neither, and the explicit staging step
+is the testable replacement.
+
 ## How the site is assembled
 
-[`mkdocs.yml`](../mkdocs.yml) at the repository root is the whole
+[`zensical.toml`](../zensical.toml) at the repository root is the whole
 configuration; its header comment explains every constraint. The parts that
 matter most:
 
-- `docs_dir: wiki` — this directory is the source; `nav:` is the only place
-  page order and titles live, and `exclude_docs` keeps this README out of the
-  build (MkDocs would otherwise treat it as a second home page and refuse the
-  conflict with `index.md`).
-- `strict: true` — every warning is an error. A broken link, an image that
-  does not exist, or a nav entry without a file fails the build, locally and
+- `docs_dir = "build/wiki"` — the staged tree above, never this directory
+  directly. `watch` lists the three real sources (`wiki`, `images`,
+  `diagrams/api_specs`) so the preview server rebuilds when one changes.
+  `nav` is the only place page order and titles live.
+- `strict = true` — every validation warning is an error. A link to a page that
+  does not exist or an anchor that does not exist fails the build, locally and
   in CI.
-- `theme: material` with `font: false` and no analytics, external CSS or
-  JavaScript — the published site is self-contained and makes no third-party
-  requests. Search is Material's built-in client-side index.
-- `hooks: [scripts/mkdocs_hooks.py]` — the
-  [hook](https://www.mkdocs.org/user-guide/configuration/#hooks) whose
-  `on_files` registers the `images/` tree as `assets/images/` and the API spec
-  sheets as `api/` (see the table above), using `File.generated` so the build
-  copies the real on-disk files instead of duplicates.
+- `[project.theme]` uses Zensical's `modern` variant with `font = false` and no
+  analytics, external CSS or JavaScript — the published site is self-contained
+  and loads no third-party assets. Search is Zensical's built-in client-side
+  index. (The header's repository facts — stars, latest tag — are the one
+  request that leaves the site; `repo_url` enables them.)
+- Light and dark palettes with a toggle, both in the project's deep-orange.
+- `[project.markdown_extensions]` names every Python-Markdown extension the
+  pages use. Zensical enables none by default when the table is present, so
+  `tables` and the fenced-code pair (`pymdownx.superfences` with
+  `pymdownx.highlight` for Pygments-highlighted code blocks) are listed
+  alongside `admonition`, `attr_list`, `md_in_html` and `toc` with permalinks.
 - `site_url` and `repo_url` — declared once here and read by the spec-sheet
-  generator (for the links it renders) and by the wiki guard tests. On a
-  fork, [`scripts/migrate_fork.py`](../scripts/migrate_fork.py) rewrites both
-  the repository URL and the `<owner>.github.io/<repo>` Pages host throughout
-  the tree, this file included.
-- The Markdown extensions are the stock set (`admonition`, `attr_list`,
-  `md_in_html`, `toc` with permalinks). The file stays plain YAML — no
-  `!!python/name:` tags — so `tests/test_wiki.py` can read the nav with
-  `yaml.safe_load` and no MkDocs import.
+  generator (for the links it renders), the SVG content policy (for the link
+  targets it allows) and the wiki guard tests. On a fork,
+  [`scripts/migrate_fork.py`](../scripts/migrate_fork.py) rewrites both the
+  repository URL and the `<owner>.github.io/<repo>` Pages host throughout the
+  tree, this file included.
+- The file stays plain TOML so `tests/test_wiki.py` can read the nav with the
+  standard library's `tomllib` and no Zensical import.
 
 The toolchain is the `docs` extra in [`pyproject.toml`](../pyproject.toml):
-`mkdocs` and `mkdocs-material`, pinned there and in `requirements-lock.txt`.
-Nothing else is needed for the wiki itself; the Swagger consoles additionally
-need the repository's locked npm tooling (`npm ci --ignore-scripts`).
+`zensical`, pinned there and in `requirements-lock.txt` together with what it
+brings (Pygments, Python-Markdown, pymdown-extensions). Nothing else is needed
+for the wiki itself; the Swagger consoles additionally need the repository's
+locked npm tooling (`npm ci --ignore-scripts`).
 
 ## How the site is published
 
@@ -107,13 +119,14 @@ The site is one GitHub Pages deployment produced by
 one deployment per repository, which is why the wiki, the API consoles and the
 coverage reports ship together. From a change to a live page:
 
-1. **A pull request changes `wiki/`, `mkdocs.yml` or the hook.** The
-   `lint:mkdocs:strict` job in
+1. **A pull request changes `wiki/`, `zensical.toml` or the staging script.**
+   The `lint:zensical:strict` job in
    [`.github/workflows/lint.yml`](../.github/workflows/lint.yml) installs the
-   `docs` extra and runs `mkdocs build --strict` — the identical build the
-   deploy runs — so a broken wiki fails the PR (through the required
-   `gate:lint` check) instead of the post-merge deploy. `tests/test_wiki.py`
-   and markdownlint run on the same PR.
+   `docs` extra and runs `python scripts/build_wiki.py build` — the identical
+   command the deploy runs — so a broken wiki fails the PR (through the
+   required `gate:lint` check) instead of the post-merge deploy.
+   `tests/test_wiki.py`, `tests/test_build_wiki.py` and markdownlint run on the
+   same PR.
 2. **The PR merges and `Unit Tests` runs on `main`.** That run measures Python
    and shell coverage and uploads them as the `pytest-coverage` and
    `bash-coverage-report` artifacts; the `Inference Streaming Proxy` workflow
@@ -123,13 +136,13 @@ coverage reports ship together. From a change to a live page:
    to the default branch, and came from this repository (not a fork's PR
    head). It checks out exactly `workflow_run.head_sha`, so the site describes
    the commit the tests measured.
-4. **The site tree is assembled.** `mkdocs build --strict` builds the wiki
-   (with the injected images and spec sheets) into `site/`; the locked npm
-   toolchain is installed and `diagrams/api_specs/generate.py --swagger-ui-dir
-   site/swagger` builds the consoles; the three coverage artifacts are
-   downloaded (the Node.js one by locating the sibling run for the same
-   commit) and moved to `site/python-coverage`, `site/bash-coverage` and
-   `site/nodejs-coverage`; the `/coverage/` redirect stub is written; and
+4. **The site tree is assembled.** `python scripts/build_wiki.py build` stages
+   `build/wiki` and runs `zensical build --clean --strict` into `site/`; the
+   locked npm toolchain is installed and `diagrams/api_specs/generate.py
+   --swagger-ui-dir site/swagger` builds the consoles; the three coverage
+   artifacts are downloaded (the Node.js one by locating the sibling run for
+   the same commit) and moved to `site/python-coverage`, `site/bash-coverage`
+   and `site/nodejs-coverage`; the `/coverage/` redirect stub is written; and
    `render_coverage_badges.py` writes the three badge JSON files at the site
    root.
 5. **The tree is deployed.** `actions/upload-pages-artifact` packages `site/`
@@ -149,18 +162,28 @@ The wiki's most likely failure is referential: a renamed file breaks a link,
 a page falls out of the nav, a screenshot rename orphans an image. Each of
 those is a PR-time failure:
 
-- **`mkdocs build --strict`** (locally, in `lint:mkdocs:strict`, and in the
-  deploy) fails on any broken relative link, missing image, or nav entry
-  without a file.
+- **`zensical build --clean --strict`** (locally through
+  `scripts/build_wiki.py build`, in `lint:zensical:strict`, and in the deploy)
+  fails on any link to a page or anchor that does not exist, and on a nav
+  entry without a file.
 - **[`tests/test_wiki.py`](../tests/test_wiki.py)** pins the structure: the
-  nav and the pages are one-to-one (the injected `api/` sheets included);
-  the nav's only external entries are the canonical Pages addresses of the
-  Swagger consoles and the three coverage reports, and `pages.yml` places a
-  tree at each; every GitHub deep link resolves to a path in the checkout;
-  relative links resolve to sibling pages or injected assets; no image comes
-  from an external host; no page links to `docs/` relatively (it would 404 on
-  the built site); and this README is excluded from the build, absent from the
-  nav, and documents every page in the directory.
+  configuration builds the staged tree (`docs_dir` equals the directory
+  `scripts/build_wiki.py` writes, `watch` names the three sources, `strict` is
+  on, fonts are not fetched, and the MkDocs-only settings Zensical ignores are
+  absent); the nav and the pages are one-to-one (the staged `api/` sheets
+  included); the nav's only external entries are the canonical Pages addresses
+  of the Swagger consoles and the three coverage reports, and `pages.yml`
+  places a tree at each; every GitHub deep link resolves to a path in the
+  checkout; relative links resolve to sibling pages or staged assets; no image
+  comes from an external host; no page links to `docs/` relatively (it would
+  404 on the built site); and this README is left out of the staged tree,
+  absent from the nav, and documents every page in the directory.
+- **[`tests/test_build_wiki.py`](../tests/test_build_wiki.py)** pins the
+  staging step itself: what is copied, what is left out (both READMEs, the
+  generator), what is removed when a source disappears, that an unchanged tree
+  is untouched, and that the preview loop re-stages on change and shuts the
+  server down cleanly. Its last test checks the real repository's mapping
+  against the published pages, the tracked images and the shipped sheets.
 - **[`tests/test_docs_coverage.py`](../tests/test_docs_coverage.py)** checks
   that every `gco …` command inside a wiki shell block exists in the CLI and
   that every `examples/…` path the wiki names is a shipped file.
@@ -170,7 +193,7 @@ those is a PR-time failure:
 - **markdownlint** (`npm run lint:markdown`, configured in
   [`.github/config/.markdownlint-cli2.yaml`](../.github/config/.markdownlint-cli2.yaml))
   lints every Markdown file in the repository, these pages included.
-- The injected content carries its own guards: the spec sheets and the
+- The staged content carries its own guards: the spec sheets and the
   interaction diagram are byte-exact under `diagrams/api_specs/generate.py
   --check`, and every tracked SVG is held to the content policy in
   [`.github/scripts/validate_svg_assets.py`](../.github/scripts/validate_svg_assets.py)
@@ -182,18 +205,21 @@ Preview locally with the same strict build CI runs, then a live-reloading
 server:
 
 ```bash
-pip install -e ".[docs]"                  # once, in your venv (or use the dev container)
-./scripts/preview_wiki.sh                 # strict build, then serve on :8000
-./scripts/preview_wiki.sh --build-only    # just the CI-equivalent strict build
+pip install -e ".[docs]"                       # once, in your venv (or use the dev container)
+python scripts/build_wiki.py serve             # stage, strict build, then serve on :8000
+python scripts/build_wiki.py serve --port 9000 # another port
+python scripts/build_wiki.py build             # just the CI-equivalent strict build into site/
 ```
 
-[`scripts/preview_wiki.sh`](../scripts/preview_wiki.sh) runs `mkdocs build
---strict` first, so anything that would fail CI fails before you look at a
-page. The coverage-report paths 404 locally by design (they are merged in at
+[`scripts/build_wiki.py`](../scripts/build_wiki.py) stages the sources and
+runs `zensical build --clean --strict` first, so anything that would fail CI
+fails before you look at a page. While the server runs, the script re-stages
+whenever a page, screenshot or spec sheet changes, and Zensical reloads the
+browser. The coverage-report paths 404 locally by design (they are merged in at
 deploy time). Before pushing, run the guards too:
 
 ```bash
-pytest tests/test_wiki.py tests/test_docs_coverage.py tests/test_markdown_links.py -q
+pytest tests/test_wiki.py tests/test_build_wiki.py tests/test_docs_coverage.py tests/test_markdown_links.py -q
 npm run lint:markdown
 ```
 
@@ -201,8 +227,8 @@ To add a page:
 
 1. Create `wiki/<slug>.md` with a single `#` heading; the file name becomes
    the URL (`/<slug>/`).
-2. Add it to `nav:` in [`mkdocs.yml`](../mkdocs.yml) under the right section;
-   the strict build and `tests/test_wiki.py` both fail until you do.
+2. Add it to `nav` in [`zensical.toml`](../zensical.toml) under the right
+   section; the strict build and `tests/test_wiki.py` both fail until you do.
 3. Add its row to the table in this README; `tests/test_wiki.py` fails until
    you do.
 4. Follow the content contract: summarize and link, never restate. Deep links
@@ -216,14 +242,18 @@ To add a page:
 
 ## Further reading
 
-- [MkDocs user guide](https://www.mkdocs.org/user-guide/) — writing pages,
-  the [configuration reference](https://www.mkdocs.org/user-guide/configuration/)
-  (`docs_dir`, `nav`, `strict`, `exclude_docs`,
-  [hooks](https://www.mkdocs.org/user-guide/configuration/#hooks)), and the
-  [`build` and `serve` commands](https://www.mkdocs.org/user-guide/cli/).
-- [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) — the
-  theme; the [setup pages](https://squidfunk.github.io/mkdocs-material/setup/)
-  document the `palette` and `features` keys used in `mkdocs.yml`.
+- [Zensical documentation](https://zensical.org/docs/) — the
+  [basics](https://zensical.org/docs/setup/basics/) (`docs_dir`, `site_url`,
+  `watch`), [navigation](https://zensical.org/docs/setup/navigation/),
+  [validation and strict mode](https://zensical.org/docs/setup/validation/),
+  [colors](https://zensical.org/docs/setup/colors/) and
+  [fonts](https://zensical.org/docs/setup/fonts/), the supported
+  [Python-Markdown extensions](https://zensical.org/docs/compatibility/markdown/python-markdown/),
+  and the [`build`](https://zensical.org/docs/usage/build/) and
+  [`serve`](https://zensical.org/docs/usage/preview/) commands.
+- [Migrating from MkDocs](https://zensical.org/docs/compatibility/mkdocs/migration/)
+  — including the settings Zensical does not support (`hooks`, `exclude_docs`),
+  which is why the staging step exists.
 - [Publishing to GitHub Pages with a custom GitHub Actions workflow](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#publishing-with-a-custom-github-actions-workflow)
   — the deployment model `pages.yml` uses.
 - [`.github/CI.md`](../.github/CI.md) — the CI reference, including the
