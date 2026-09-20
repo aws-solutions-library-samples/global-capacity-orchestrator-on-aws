@@ -53,19 +53,62 @@ CHEAPEST_MEMBER = "g5.2xlarge"
 # ---------------------------------------------------------------------------
 
 
+UNSCHEDULABLE_MESSAGE = (
+    "0/6 nodes are available: 6 Insufficient nvidia.com/gpu. "
+    "preemption: 0/6 nodes are available: 6 No preemption victims found for incoming pod."
+)
+
+
 def _pod(
     name: str,
     node_name: str | None,
     *,
     phase: str = "Running",
     created: datetime | None = None,
+    conditions: list[Any] | None = None,
 ) -> MagicMock:
+    """A pod as the collector sees it.
+
+    ``conditions`` defaults to a MagicMock attribute (not a list), which is
+    how the pre-existing fakes look and how a pod whose status has not been
+    populated yet must be tolerated. Pass a list to model real conditions.
+    """
     pod = MagicMock()
     pod.metadata.name = name
     pod.metadata.creation_timestamp = created or datetime(2024, 1, 1, tzinfo=UTC)
     pod.spec.node_name = node_name
     pod.status.phase = phase
+    if conditions is not None:
+        pod.status.conditions = conditions
     return pod
+
+
+def _condition(
+    type_: str,
+    status: str,
+    *,
+    reason: str | None = None,
+    message: str | None = None,
+    since: datetime | None = None,
+) -> MagicMock:
+    condition = MagicMock()
+    condition.type = type_
+    condition.status = status
+    condition.reason = reason
+    condition.message = message
+    condition.last_transition_time = since
+    return condition
+
+
+def _unschedulable(since: datetime | None = None) -> MagicMock:
+    """The condition Kubernetes puts on a pod nothing can place."""
+    return _condition(
+        "PodScheduled",
+        "False",
+        reason="Unschedulable",
+        message=UNSCHEDULABLE_MESSAGE,
+        since=since or datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+    )
 
 
 def _node(labels: dict[str, Any] | None) -> MagicMock:
@@ -351,6 +394,294 @@ class TestCollectPodScheduling:
         assert forged in info["node_lookup_error"]
 
 
+class TestCollectPodState:
+    """The pods' own state, reported next to the placement.
+
+    A Job whose only pod cannot be scheduled still counts as ``active``, so the
+    Job status alone reads ``running`` for a run that never got a GPU. These
+    fields are how a caller tells the two apart from one read.
+    """
+
+    def test_an_unschedulable_pod_reports_its_phase_reason_and_message(self) -> None:
+        """The incident: pod Pending for 16 minutes, job status said running."""
+        core_v1 = _core_v1({})
+        since = datetime(2024, 1, 1, 0, 5, tzinfo=UTC)
+
+        info = _collect_pod_scheduling(
+            core_v1,
+            [_pod("trainer-abc", None, phase="Pending", conditions=[_unschedulable(since)])],
+        )
+
+        assert info["pod_phase"] == "Pending"
+        assert info["pod_phases"] == {"Pending": 1}
+        assert info["scheduled_pods"] == 0
+        assert info["unscheduled_pods"] == 1
+        assert info["unscheduled"] == [
+            {
+                "name": "trainer-abc",
+                "phase": "Pending",
+                "reason": "Unschedulable",
+                "message": UNSCHEDULABLE_MESSAGE,
+                "since": since.isoformat(),
+            }
+        ]
+        # Still no Node read and still no node entry: there is no node.
+        assert info["nodes"] == []
+        assert info["node_name"] is None
+        core_v1.read_node.assert_not_called()
+
+    def test_a_scheduled_pod_reports_its_phase_and_no_unscheduled_entry(self) -> None:
+        core_v1 = _core_v1({"n1": _node(_gpu_node_labels(CHEAPEST_MEMBER))})
+
+        info = _collect_pod_scheduling(core_v1, [_pod("p1", "n1")])
+
+        assert info["pod_phase"] == "Running"
+        assert info["pod_phases"] == {"Running": 1}
+        assert info["scheduled_pods"] == 1
+        assert info["unscheduled_pods"] == 0
+        assert info["unscheduled"] == []
+        # The per-node pod entries keep their two-key shape.
+        assert info["nodes"][0]["pods"] == [{"name": "p1", "phase": "Running"}]
+
+    def test_mixed_phases_leave_the_summary_unset_and_count_each(self) -> None:
+        """``pod_phase`` never hides a Pending pod behind a Running one."""
+        core_v1 = _core_v1({"n1": _node(_gpu_node_labels(CHEAPEST_MEMBER))})
+        pods = [
+            _pod("p-0", "n1", phase="Running", created=datetime(2024, 1, 1, 0, 0, tzinfo=UTC)),
+            _pod("p-1", "n1", phase="Running", created=datetime(2024, 1, 1, 0, 1, tzinfo=UTC)),
+            _pod(
+                "p-2",
+                None,
+                phase="Pending",
+                created=datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+                conditions=[_unschedulable()],
+            ),
+        ]
+
+        info = _collect_pod_scheduling(core_v1, pods)
+
+        assert info["pod_phase"] is None
+        assert info["pod_phases"] == {"Running": 2, "Pending": 1}
+        assert info["scheduled_pods"] == 2
+        assert info["unscheduled_pods"] == 1
+        assert [pod["name"] for pod in info["unscheduled"]] == ["p-2"]
+
+    def test_no_pods_reports_empty_state_not_a_verdict(self) -> None:
+        info = _collect_pod_scheduling(_core_v1({}), [])
+
+        assert info["pod_phase"] is None
+        assert info["pod_phases"] == {}
+        assert info["scheduled_pods"] == 0
+        assert info["unscheduled_pods"] == 0
+        assert info["unscheduled"] == []
+
+    def test_a_pod_whose_conditions_are_not_populated_yet_is_listed_without_a_reason(
+        self,
+    ) -> None:
+        """A freshly created pod has no conditions; the entry says nothing rather than guessing."""
+        for conditions in (None, []):
+            pod = _pod("fresh", None, phase="Pending")
+            pod.status.conditions = conditions
+
+            info = _collect_pod_scheduling(_core_v1({}), [pod])
+
+            assert info["unscheduled"] == [
+                {
+                    "name": "fresh",
+                    "phase": "Pending",
+                    "reason": None,
+                    "message": None,
+                    "since": None,
+                }
+            ]
+
+    def test_a_status_object_that_is_not_a_real_pod_status_is_tolerated(self) -> None:
+        """The pre-existing fakes carry a MagicMock in place of the condition list."""
+        info = _collect_pod_scheduling(_core_v1({}), [_pod("odd", None, phase="Pending")])
+
+        assert info["unscheduled"][0]["reason"] is None
+        assert info["unscheduled"][0]["message"] is None
+        json.dumps(info)
+
+    def test_a_pod_scheduled_condition_that_is_true_or_unknown_carries_no_diagnosis(
+        self,
+    ) -> None:
+        """Only the ``False`` state explains anything; the others are not a reason."""
+        for status in ("True", "Unknown"):
+            pod = _pod(
+                "p",
+                None,
+                phase="Pending",
+                conditions=[_condition("PodScheduled", status, reason="Stale", message="x")],
+            )
+
+            info = _collect_pod_scheduling(_core_v1({}), [pod])
+
+            assert info["unscheduled"][0]["reason"] is None
+            assert info["unscheduled"][0]["message"] is None
+            assert info["unscheduled"][0]["since"] is None
+
+    def test_other_conditions_are_skipped_to_find_pod_scheduled(self) -> None:
+        conditions = [
+            _condition("Initialized", "True"),
+            _condition("Ready", "False", reason="ContainersNotReady"),
+            _unschedulable(),
+        ]
+
+        info = _collect_pod_scheduling(
+            _core_v1({}), [_pod("p", None, phase="Pending", conditions=conditions)]
+        )
+
+        assert info["unscheduled"][0]["reason"] == "Unschedulable"
+
+    def test_a_condition_without_pod_scheduled_reports_no_reason(self) -> None:
+        conditions = [_condition("Initialized", "True"), _condition("Ready", "False")]
+
+        info = _collect_pod_scheduling(
+            _core_v1({}), [_pod("p", None, phase="Pending", conditions=conditions)]
+        )
+
+        assert info["unscheduled"][0]["reason"] is None
+
+    def test_non_string_condition_fields_and_a_missing_timestamp_are_dropped(self) -> None:
+        """A malformed condition cannot put a non-serializable value in the payload."""
+        condition = _condition("PodScheduled", "False", reason=7, message=object(), since=None)
+
+        info = _collect_pod_scheduling(
+            _core_v1({}), [_pod("p", None, phase="Pending", conditions=[condition])]
+        )
+
+        assert info["unscheduled"] == [
+            {"name": "p", "phase": "Pending", "reason": None, "message": None, "since": None}
+        ]
+        json.dumps(info)
+
+    def test_a_pod_without_a_usable_name_is_still_counted_and_listed(self) -> None:
+        core_v1 = _core_v1({"n1": _node(_gpu_node_labels(CHEAPEST_MEMBER))})
+        nameless_unscheduled = _pod("x", None, phase="Pending")
+        nameless_unscheduled.metadata.name = None
+        nameless_scheduled = _pod("y", "n1")
+        nameless_scheduled.metadata.name = 42
+
+        info = _collect_pod_scheduling(core_v1, [nameless_unscheduled, nameless_scheduled])
+
+        assert info["unscheduled_pods"] == 1
+        assert info["unscheduled"][0]["name"] is None
+        assert info["nodes"][0]["pods"] == [{"name": None, "phase": "Running"}]
+        assert info["pod_phases"] == {"Pending": 1, "Running": 1}
+        json.dumps(info)
+
+    def test_a_pod_without_a_phase_counts_as_unknown(self) -> None:
+        """JSON keys are strings, and ``Unknown`` is the phase Kubernetes itself uses."""
+        pod = _pod("p", None)
+        pod.status.phase = None
+
+        info = _collect_pod_scheduling(_core_v1({}), [pod])
+
+        assert info["pod_phases"] == {"Unknown": 1}
+        assert info["pod_phase"] == "Unknown"
+        assert info["unscheduled"][0]["phase"] is None
+
+    def test_the_payload_stays_json_serializable_with_an_unscheduled_pod(self) -> None:
+        info = _collect_pod_scheduling(
+            _core_v1({}), [_pod("p", None, phase="Pending", conditions=[_unschedulable()])]
+        )
+
+        json.dumps(info)
+
+    def test_the_real_client_wire_shape_produces_the_documented_output(self) -> None:
+        """Pin the field names against the real ``kubernetes`` client, not the fakes.
+
+        Every other case here drives the collector with MagicMocks, which
+        would happily accept a misspelled attribute. This one takes the exact
+        JSON the API server emits (camelCase, RFC 3339 timestamps), runs it
+        through ``ApiClient.deserialize`` into ``V1Pod`` / ``V1PodCondition``
+        objects, and asserts the collector reads ``status.conditions[].type``
+        / ``status`` / ``reason`` / ``message`` / ``last_transition_time`` and
+        ``spec.node_name`` off them exactly as documented in docs/API.md.
+        """
+        from kubernetes import client as k8s_client
+
+        def _wire_pod(
+            name: str, node_name: str | None, phase: str, condition: dict[str, Any]
+        ) -> Any:
+            wire = {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": name,
+                    "namespace": "gco-jobs",
+                    "creationTimestamp": "2024-01-15T10:00:00Z",
+                },
+                "spec": {"containers": [{"name": "main", "image": "pytorch:latest"}]},
+                "status": {"phase": phase, "conditions": [condition]},
+            }
+            if node_name is not None:
+                wire["spec"]["nodeName"] = node_name  # type: ignore[index]
+            response = MagicMock()
+            response.data = json.dumps(wire)
+            return k8s_client.ApiClient().deserialize(response, "V1Pod")
+
+        pods = [
+            _wire_pod(
+                "trainer-node-0",
+                "ip-10-0-1-7",
+                "Running",
+                {
+                    "type": "PodScheduled",
+                    "status": "True",
+                    "lastTransitionTime": "2024-01-15T10:00:02Z",
+                },
+            ),
+            _wire_pod(
+                "trainer-node-1",
+                None,
+                "Pending",
+                {
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": UNSCHEDULABLE_MESSAGE,
+                    "lastTransitionTime": "2024-01-15T10:00:05Z",
+                },
+            ),
+        ]
+        assert isinstance(pods[1].status.conditions[0], k8s_client.V1PodCondition)
+        core_v1 = _core_v1({"ip-10-0-1-7": _node(_gpu_node_labels(CHEAPEST_MEMBER))})
+
+        info = _collect_pod_scheduling(core_v1, pods)
+
+        assert info["pod_phase"] is None
+        assert info["pod_phases"] == {"Running": 1, "Pending": 1}
+        assert info["scheduled_pods"] == 1
+        assert info["unscheduled_pods"] == 1
+        assert info["unscheduled"] == [
+            {
+                "name": "trainer-node-1",
+                "phase": "Pending",
+                "reason": "Unschedulable",
+                "message": UNSCHEDULABLE_MESSAGE,
+                "since": "2024-01-15T10:00:05+00:00",
+            }
+        ]
+        assert info["node_name"] == "ip-10-0-1-7"
+        assert info["node_instance_type"] == CHEAPEST_MEMBER
+        assert info["nodes"][0]["pods"] == [{"name": "trainer-node-0", "phase": "Running"}]
+        core_v1.read_node.assert_called_once_with(name="ip-10-0-1-7")
+        json.dumps(info)
+
+    def test_the_empty_shape_carries_every_pod_state_key(self) -> None:
+        """The failure fallbacks return this shape, so the field set never varies."""
+        empty = api_shared._empty_scheduling_info()
+
+        assert empty["pod_phase"] is None
+        assert empty["pod_phases"] == {}
+        assert empty["scheduled_pods"] == 0
+        assert empty["unscheduled_pods"] == 0
+        assert empty["unscheduled"] == []
+        assert set(empty) == set(_collect_pod_scheduling(_core_v1({}), []))
+
+
 class TestParseNodeToDict:
     def test_the_name_comes_from_the_pod_not_the_node_object(self) -> None:
         """Keeps the pod/node join exact whatever the Node object echoes back."""
@@ -503,6 +834,50 @@ class TestGetJobRouteReportsPlacement:
         _assert_no_raw_newlines(warning)
         assert "forged entry" in data["scheduling"]["node_lookup_error"]
 
+    def test_an_unschedulable_pod_is_visible_on_the_job_read(self, processor: MagicMock) -> None:
+        """The incident, end to end: Job says running, the payload says why it is not."""
+        job = _batch_job()
+        # The Job controller counts an unplaced pod as active, which is exactly
+        # why the Job's own status cannot expose this.
+        job.status.active = 1
+        job.status.succeeded = 0
+        job.status.completion_time = None
+        processor.batch_v1.read_namespaced_job.return_value = job
+        pods = MagicMock()
+        pods.items = [_pod("trainer-abc", None, phase="Pending", conditions=[_unschedulable()])]
+        processor.core_v1.list_namespaced_pod.return_value = pods
+
+        data = self._get(processor, "/api/v1/jobs/gco-jobs/trainer")
+
+        assert data["computed_status"] == "running"
+        scheduling = data["scheduling"]
+        assert scheduling["pod_phase"] == "Pending"
+        assert scheduling["pod_phases"] == {"Pending": 1}
+        assert scheduling["scheduled_pods"] == 0
+        assert scheduling["unscheduled_pods"] == 1
+        assert scheduling["unscheduled"][0]["reason"] == "Unschedulable"
+        assert scheduling["unscheduled"][0]["message"] == UNSCHEDULABLE_MESSAGE
+        assert scheduling["unscheduled"][0]["since"] == "2024-01-01T00:05:00+00:00"
+        assert scheduling["node_name"] is None
+        processor.core_v1.read_node.assert_not_called()
+
+    def test_a_failed_pod_listing_still_carries_the_pod_state_keys(
+        self, processor: MagicMock
+    ) -> None:
+        """The fallback shape and the resolved shape have the same field set."""
+        processor.batch_v1.read_namespaced_job.return_value = _batch_job()
+        processor.core_v1.list_namespaced_pod.side_effect = RuntimeError("pods unavailable")
+
+        data = self._get(processor, "/api/v1/jobs/gco-jobs/trainer")
+
+        scheduling = data["scheduling"]
+        assert scheduling["pod_phase"] is None
+        assert scheduling["pod_phases"] == {}
+        assert scheduling["scheduled_pods"] == 0
+        assert scheduling["unscheduled_pods"] == 0
+        assert scheduling["unscheduled"] == []
+        assert "pods unavailable" in scheduling["node_lookup_error"]
+
     def test_a_completed_job_whose_pods_were_collected_reports_no_placement(
         self, processor: MagicMock
     ) -> None:
@@ -612,7 +987,36 @@ def _scheduling(
                 "pods": [{"name": "trainer-abc", "phase": "Running"}],
             }
         ],
+        "pod_phase": "Running",
+        "pod_phases": {"Running": 1},
+        "scheduled_pods": 1,
         "unscheduled_pods": 0,
+        "unscheduled": [],
+        "node_lookup_error": None,
+    }
+
+
+def _pending_scheduling() -> dict[str, Any]:
+    """The API payload for the incident: one pod, no node, Karpenter churning."""
+    return {
+        "node_name": None,
+        "node_instance_type": None,
+        "node_capacity_type": None,
+        "node_labels": {},
+        "nodes": [],
+        "pod_phase": "Pending",
+        "pod_phases": {"Pending": 1},
+        "scheduled_pods": 0,
+        "unscheduled_pods": 1,
+        "unscheduled": [
+            {
+                "name": "trainer-abc",
+                "phase": "Pending",
+                "reason": "Unschedulable",
+                "message": UNSCHEDULABLE_MESSAGE,
+                "since": "2024-01-01T00:05:00+00:00",
+            }
+        ],
         "node_lookup_error": None,
     }
 
@@ -708,9 +1112,96 @@ class TestJobInfoCarriesPlacement:
 
         first.node_labels["x"] = "y"
         first.nodes.append({"name": "n1"})
+        first.pod_phases["Pending"] = 1
+        first.unscheduled.append({"name": "p"})
 
         assert second.node_labels == {}
         assert second.nodes == []
+        assert second.pod_phases == {}
+        assert second.unscheduled == []
+
+    def test_an_unschedulable_pod_reaches_the_cli_and_mcp_payload(
+        self, manager: JobManager
+    ) -> None:
+        """A caller can now tell 'waiting on capacity' from 'training' in one read."""
+        manager._aws_client.get_job_details.return_value = _job_payload(_pending_scheduling())
+
+        job = manager.get_job("trainer", "gco-jobs", "us-east-1")
+
+        assert job is not None
+        assert job.status == "running"  # the Job's verdict, unchanged
+        assert job.pod_phase == "Pending"
+        assert job.pod_phases == {"Pending": 1}
+        assert job.scheduled_pods == 0
+        assert job.unscheduled_pods == 1
+        assert job.unscheduled[0]["reason"] == "Unschedulable"
+        assert job.unscheduled[0]["message"] == UNSCHEDULABLE_MESSAGE
+        assert job.node_name is None
+        payload = asdict(job)
+        assert payload["unscheduled_pods"] == 1
+        assert payload["unscheduled"][0]["since"] == "2024-01-01T00:05:00+00:00"
+        json.loads(json.dumps(payload, default=str))
+
+    def test_the_node_lookup_error_is_no_longer_dropped(self, manager: JobManager) -> None:
+        scheduling = _scheduling()
+        scheduling["node_instance_type"] = None
+        scheduling["node_lookup_error"] = 'nodes "ip-10-0-1-7" is forbidden'
+        manager._aws_client.get_job_details.return_value = _job_payload(scheduling)
+
+        job = manager.get_job("trainer", "gco-jobs", "us-east-1")
+
+        assert job is not None
+        assert job.node_lookup_error == 'nodes "ip-10-0-1-7" is forbidden'
+
+    def test_an_older_bridge_reports_unknown_counts_not_zero(self, manager: JobManager) -> None:
+        """A block that predates the pod-state keys must not read as 'zero unscheduled'."""
+        scheduling = {
+            key: value
+            for key, value in _scheduling().items()
+            if key
+            not in {"pod_phase", "pod_phases", "scheduled_pods", "unscheduled_pods", "unscheduled"}
+        }
+        manager._aws_client.get_job_details.return_value = _job_payload(scheduling)
+
+        job = manager.get_job("trainer", "gco-jobs", "us-east-1")
+
+        assert job is not None
+        assert job.node_instance_type == CHEAPEST_MEMBER
+        assert job.pod_phase is None
+        assert job.pod_phases == {}
+        assert job.scheduled_pods is None
+        assert job.unscheduled_pods is None
+        assert job.unscheduled == []
+
+    @pytest.mark.parametrize(
+        "scheduling",
+        [
+            {"pod_phases": "Pending", "unscheduled": "nope", "scheduled_pods": "1"},
+            {"pod_phases": ["Pending"], "unscheduled": [1, "x", None], "unscheduled_pods": True},
+            {"pod_phase": 3, "node_lookup_error": {"nested": True}, "scheduled_pods": 1.0},
+        ],
+    )
+    def test_malformed_pod_state_values_are_ignored_not_propagated(
+        self, manager: JobManager, scheduling: dict[str, Any]
+    ) -> None:
+        payload = _job_payload(scheduling)
+
+        job = manager._parse_job_info(payload, "us-east-1")
+
+        assert job.pod_phase is None
+        assert job.pod_phases == {}
+        assert job.scheduled_pods is None
+        assert job.unscheduled_pods is None
+        assert job.unscheduled == []
+        assert job.node_lookup_error is None
+
+    def test_only_dict_entries_survive_in_unscheduled(self, manager: JobManager) -> None:
+        scheduling = _pending_scheduling()
+        scheduling["unscheduled"] = [scheduling["unscheduled"][0], "junk", 4]
+
+        job = manager._parse_job_info(_job_payload(scheduling), "us-east-1")
+
+        assert [pod["name"] for pod in job.unscheduled] == ["trainer-abc"]
 
     def test_the_new_fields_are_all_optional(self) -> None:
         """JobInfo stays constructible from the four required fields."""
@@ -723,7 +1214,24 @@ class TestJobInfoCarriesPlacement:
             "node_capacity_type",
             "node_labels",
             "nodes",
+            "node_lookup_error",
         }
+        pod_state = {
+            f.name for f in fields(job) if f.name.startswith(("pod_", "scheduled", "unscheduled"))
+        }
+        assert pod_state == {
+            "pod_phase",
+            "pod_phases",
+            "scheduled_pods",
+            "unscheduled_pods",
+            "unscheduled",
+        }
+        assert job.pod_phase is None
+        assert job.pod_phases == {}
+        assert job.scheduled_pods is None
+        assert job.unscheduled_pods is None
+        assert job.unscheduled == []
+        assert job.node_lookup_error is None
 
 
 class TestListJobsStaysCheap:
@@ -798,14 +1306,20 @@ class TestTrainJobPlacement:
 class TestExtractScheduling:
     def test_it_copies_rather_than_aliasing_the_response(self) -> None:
         """A JobInfo must not share mutable state with the parsed response."""
-        scheduling = _scheduling()
+        scheduling = _pending_scheduling()
         extracted = _extract_scheduling({"scheduling": scheduling})
 
         extracted["node_labels"]["injected"] = "value"
         extracted["nodes"].append({"name": "extra"})
+        extracted["pod_phases"]["Running"] = 9
+        extracted["unscheduled"].append({"name": "extra"})
+        extracted["unscheduled"][0]["reason"] = "tampered"
 
         assert "injected" not in scheduling["node_labels"]
-        assert len(scheduling["nodes"]) == 1
+        assert len(scheduling["nodes"]) == 0
+        assert scheduling["pod_phases"] == {"Pending": 1}
+        assert len(scheduling["unscheduled"]) == 1
+        assert scheduling["unscheduled"][0]["reason"] == "Unschedulable"
 
     def test_the_returned_keys_match_the_jobinfo_fields(self) -> None:
         """Guards the ``**_extract_scheduling(...)`` splat against drift."""
@@ -933,6 +1447,109 @@ class TestJobsGetOutput:
 
         assert result.exit_code == 0, result.output
         assert "Placement" not in result.output
+        assert "Unscheduled pods" not in result.output
+
+    def test_an_unschedulable_pod_is_listed_with_the_schedulers_reason(self) -> None:
+        """The operator sees why the run is waiting without a second command."""
+        manager = MagicMock()
+        manager.get_job.return_value = _job_info(
+            node_name=None,
+            node_instance_type=None,
+            node_capacity_type=None,
+            node_labels={},
+            nodes=[],
+            pod_phase="Pending",
+            pod_phases={"Pending": 1},
+            scheduled_pods=0,
+            unscheduled_pods=1,
+            unscheduled=_pending_scheduling()["unscheduled"],
+        )
+
+        result = _invoke_cli(["jobs", "get", "trainer", "-r", "us-east-1"], manager)
+
+        assert result.exit_code == 0, result.output
+        assert "Placement" not in result.output
+        assert "Unscheduled pods" in result.output
+        assert "trainer-abc" in result.output
+        assert "Pending" in result.output
+        assert "reason: Unschedulable" in result.output
+        assert "since: 2024-01-01T00:05:00+00:00" in result.output
+        assert "0/6 nodes are available" in result.output
+
+    def test_a_count_without_details_still_prints_the_block(self) -> None:
+        """A bridge reporting the count but no entries gets a placeholder row, not silence."""
+        manager = MagicMock()
+        manager.get_job.return_value = _job_info(
+            node_name=None,
+            node_instance_type=None,
+            node_capacity_type=None,
+            node_labels={},
+            nodes=[],
+            unscheduled_pods=2,
+            unscheduled=[],
+        )
+
+        result = _invoke_cli(["jobs", "get", "trainer", "-r", "us-east-1"], manager)
+
+        assert result.exit_code == 0, result.output
+        assert "Unscheduled pods" in result.output
+        assert result.output.count("reason: -") == 2
+
+    def test_a_fully_scheduled_job_prints_no_unscheduled_block(self) -> None:
+        manager = MagicMock()
+        manager.get_job.return_value = _job_info(
+            pod_phase="Running", pod_phases={"Running": 1}, scheduled_pods=1, unscheduled_pods=0
+        )
+
+        result = _invoke_cli(["jobs", "get", "trainer", "-r", "us-east-1"], manager)
+
+        assert result.exit_code == 0, result.output
+        assert "Placement" in result.output
+        assert "Unscheduled pods" not in result.output
+
+    def test_json_output_carries_the_pod_state_and_no_table_blocks(self) -> None:
+        manager = MagicMock()
+        manager.get_job.return_value = _job_info(
+            node_name=None,
+            node_instance_type=None,
+            node_capacity_type=None,
+            node_labels={},
+            nodes=[],
+            pod_phase="Pending",
+            pod_phases={"Pending": 1},
+            scheduled_pods=0,
+            unscheduled_pods=1,
+            unscheduled=_pending_scheduling()["unscheduled"],
+        )
+
+        result = _invoke_cli(
+            ["--output", "json", "jobs", "get", "trainer", "-r", "us-east-1"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "running"
+        assert payload["pod_phase"] == "Pending"
+        assert payload["unscheduled_pods"] == 1
+        assert payload["unscheduled"][0]["reason"] == "Unschedulable"
+        assert "Unscheduled pods" not in result.output
+
+
+class TestMcpToolDocumentsTheFields:
+    def test_get_job_docstring_names_every_pod_state_field(self) -> None:
+        """The tool description is what an agent reads to know the fields exist."""
+        from gco_mcp.tools import jobs as mcp_jobs
+
+        doc = mcp_jobs.get_job.__doc__ or ""
+        for name in (
+            "pod_phase",
+            "pod_phases",
+            "scheduled_pods",
+            "unscheduled_pods",
+            "unscheduled",
+            "PodScheduled",
+        ):
+            assert name in doc, name
 
 
 class TestJobsPodsOutput:

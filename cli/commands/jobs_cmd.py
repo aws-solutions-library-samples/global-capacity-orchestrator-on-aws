@@ -509,6 +509,31 @@ def _print_job_placement(job: JobInfo) -> None:
             print(f"    {key}: {job.node_labels[key]}")
 
 
+def _print_unscheduled_pods(job: JobInfo) -> None:
+    """Print the pods that have no node yet, and why Kubernetes says so.
+
+    The Job's ``status`` says ``running`` as long as a pod exists, placed or
+    not; this block is what tells an operator the run is actually waiting on
+    capacity. Absent (not zero) counts come from a bridge that predates the
+    fields, so nothing is printed rather than a wrong verdict.
+    """
+    if not job.unscheduled_pods and not job.unscheduled:
+        return
+    print("\n  Unscheduled pods")
+    print("  " + "-" * 78)
+    entries = job.unscheduled or [{}] * (job.unscheduled_pods or 0)
+    for pod in entries:
+        name = str(pod.get("name") or "-")[:60]
+        phase = str(pod.get("phase") or "-")
+        reason = str(pod.get("reason") or "-")
+        print(f"  {name:<61} {phase}")
+        print(f"    reason: {reason}")
+        if pod.get("since"):
+            print(f"    since: {pod['since']}")
+        if pod.get("message"):
+            print(f"    message: {pod['message']}")
+
+
 @jobs.command("get")
 @click.argument("job_name")
 @click.option("--namespace", "-n", default="gco-jobs", help="Job namespace")
@@ -519,7 +544,9 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
 
     Reports the node each pod landed on along with that node's instance type
     and spot/on-demand capacity type, so a job authorized to run on a set of
-    interchangeable instance types shows which one it actually used.
+    interchangeable instance types shows which one it actually used. Pods that
+    have no node yet are listed with the scheduler's own reason, so a Job that
+    is waiting on capacity is distinguishable from one that is training.
 
     Examples:
         gco jobs get my-job --region us-east-1
@@ -534,6 +561,7 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
             formatter.print(job)
             if config.output_format == "table" and isinstance(job, JobInfo):
                 _print_job_placement(job)
+                _print_unscheduled_pods(job)
         else:
             formatter.print_error(f"Job {job_name} not found")
             sys.exit(1)

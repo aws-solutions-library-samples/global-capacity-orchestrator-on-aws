@@ -98,6 +98,17 @@ def get_job(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
     not just what the manifest permitted. The fields are unset — never guessed
     — when nothing is scheduled yet or the pods have been garbage-collected.
 
+    ``status`` is the Job's verdict and stays ``running`` while an unplaced
+    pod exists, so read the pod state next to it: ``pod_phase`` (the phase all
+    pods share; ``null`` when they disagree), ``pod_phases`` (count per
+    phase), ``scheduled_pods`` / ``unscheduled_pods``, and ``unscheduled`` —
+    one entry per pod with no node, carrying the ``PodScheduled`` condition's
+    ``reason`` and ``message`` ("0/6 nodes are available ...", a taint nobody
+    tolerates, Karpenter still nominating capacity). A Job whose only pod sits
+    in ``unscheduled`` is waiting on capacity, not training, and needs no
+    ``get_job_events`` call to learn why. Counts are ``null`` (unknown), not
+    ``0``, when the region runs a bridge that predates them.
+
     Args:
         job_name: Name of the job.
         region: AWS region where the job is running.

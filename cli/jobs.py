@@ -21,8 +21,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-20T23:20:00Z
+# Generated from Git commit: 42cc3f2094423b3f8056fbc5c20652e222b0650f
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
@@ -139,14 +139,34 @@ def _extract_scheduling(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(scheduling, dict):
         return {}
 
+    def _text(key: str) -> str | None:
+        value = scheduling.get(key)
+        return value if isinstance(value, str) else None
+
+    def _count(key: str) -> int | None:
+        # A bridge that predates the field reports nothing, which must read as
+        # "unknown" (None) rather than as a confident zero.
+        value = scheduling.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
     nodes = scheduling.get("nodes")
     labels = scheduling.get("node_labels")
+    phases = scheduling.get("pod_phases")
+    unscheduled = scheduling.get("unscheduled")
     return {
-        "node_name": scheduling.get("node_name"),
-        "node_instance_type": scheduling.get("node_instance_type"),
-        "node_capacity_type": scheduling.get("node_capacity_type"),
+        "node_name": _text("node_name"),
+        "node_instance_type": _text("node_instance_type"),
+        "node_capacity_type": _text("node_capacity_type"),
         "node_labels": dict(labels) if isinstance(labels, dict) else {},
         "nodes": list(nodes) if isinstance(nodes, list) else [],
+        "pod_phase": _text("pod_phase"),
+        "pod_phases": dict(phases) if isinstance(phases, dict) else {},
+        "scheduled_pods": _count("scheduled_pods"),
+        "unscheduled_pods": _count("unscheduled_pods"),
+        "unscheduled": [dict(pod) for pod in unscheduled if isinstance(pod, dict)]
+        if isinstance(unscheduled, list)
+        else [],
+        "node_lookup_error": _text("node_lookup_error"),
     }
 
 
@@ -185,6 +205,27 @@ class JobInfo:
     node_capacity_type: str | None = None
     node_labels: dict[str, str] = field(default_factory=dict)
     nodes: list[dict[str, Any]] = field(default_factory=list)
+
+    # What the pods themselves are doing. ``status`` above is the *Job's*
+    # verdict, and a Job whose only pod cannot be scheduled still reports
+    # ``running``; these fields are how a caller tells "the container is
+    # training" from "a Job object exists and nothing is placed".
+    #
+    # ``pod_phase`` is the phase every pod shares (None the moment they
+    # disagree — it never summarizes a Pending pod away), ``pod_phases`` counts
+    # pods by phase, ``scheduled_pods`` / ``unscheduled_pods`` split them by
+    # whether a node was assigned, and ``unscheduled`` names each unplaced pod
+    # with the ``PodScheduled`` condition's ``reason`` / ``message`` / ``since``.
+    # The counts are None, not 0, when the regional bridge predates them:
+    # absent stays absent.
+    pod_phase: str | None = None
+    pod_phases: dict[str, int] = field(default_factory=dict)
+    scheduled_pods: int | None = None
+    unscheduled_pods: int | None = None
+    unscheduled: list[dict[str, Any]] = field(default_factory=list)
+    # Why node hardware is missing when it is (RBAC refusal, node reclaimed,
+    # pod listing failed). Evidence for the caller, never folded into ``status``.
+    node_lookup_error: str | None = None
 
     @property
     def is_complete(self) -> bool:
