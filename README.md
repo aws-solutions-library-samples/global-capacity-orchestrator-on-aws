@@ -572,7 +572,6 @@ embedded.
 ├── app.py                               # CDK app entry point
 ├── TENETS.md                            # Prioritized project principles and north-star guidance
 ├── cdk.json                             # CDK configuration (regions, features, thresholds)
-├── mkdocs.yml                           # MkDocs configuration for the GitHub Pages wiki (sources in wiki/)
 ├── pyproject.toml                       # Project metadata, dependencies, and CLI installation
 │
 ├── cli/                                 # GCO CLI (jobs, stacks, capacity, inference, costs, DAGs)
@@ -615,7 +614,8 @@ embedded.
 ├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 ├── tests/                               # PyTest + BATS test suites
-└── wiki/                                # Orientation wiki sources, built with MkDocs and published to GitHub Pages (wiki/README.md explains how)
+├── wiki/                                # Orientation wiki sources, built with Zensical and published to GitHub Pages (wiki/README.md explains how)
+└── zensical.toml                        # Zensical configuration for the GitHub Pages wiki (sources in wiki/, staged by scripts/build_wiki.py)
 ```
 
 ## Contributing

@@ -718,7 +718,7 @@ _API_DOCUMENT = {
     "info": {"title": "Fake API", "version": "1.0.0"},
     "paths": {"/ping": {"get": {"summary": "Ping", "responses": {"200": {"description": "OK"}}}}},
 }
-_API_MKDOCS = "site_url: https://example.test/site/\nrepo_url: https://example.test/org/repo\n"
+_API_ZENSICAL = '[project]\nsite_url = "https://example.test/site/"\nrepo_url = "https://example.test/org/repo"\n'
 
 
 def _write_api_catalogue(root: Path) -> Path:
@@ -727,7 +727,7 @@ def _write_api_catalogue(root: Path) -> Path:
     (root / "docs" / "openapi" / "fake-service.json").write_text(
         json.dumps(_API_DOCUMENT, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (root / "mkdocs.yml").write_text(_API_MKDOCS, encoding="utf-8")
+    (root / "zensical.toml").write_text(_API_ZENSICAL, encoding="utf-8")
     api_specs.write_outputs(root)
     return root / "diagrams" / "api_specs"
 

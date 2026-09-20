@@ -53,10 +53,6 @@ aws-cdk-lib==2.269.0
     #   cdk-nag
     #   gco-cli
     #   gco-cli (pyproject.toml)
-babel==2.18.0
-    # via mkdocs-material
-backrefs==8.0
-    # via mkdocs-material
 bandit==1.9.4
     # via
     #   gco-cli
@@ -106,14 +102,12 @@ click==8.5.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-    #   mkdocs
     #   pip-tools
     #   typer
     #   uvicorn
+    #   zensical
 cloudpickle==3.1.2
     # via pydocket
-colorama==0.4.6
-    # via mkdocs-material
 constructs==10.8.1
     # via
     #   aws-cdk-lib
@@ -134,6 +128,8 @@ cryptography==50.0.0
     #   secretstorage
 cyclopts==4.11.0
     # via fastmcp-slim
+deepmerge==3.0.1
+    # via zensical
 distlib==0.4.0
     # via virtualenv
 dnspython==2.8.0
@@ -172,8 +168,6 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-ghp-import==2.1.0
-    # via mkdocs
 greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
@@ -226,9 +220,7 @@ jeepney==0.9.0
     #   keyring
     #   secretstorage
 jinja2==3.1.6
-    # via
-    #   mkdocs
-    #   mkdocs-material
+    # via zensical
 jmespath==1.1.0
     # via
     #   boto3
@@ -272,16 +264,14 @@ librt==0.13.0
     # via mypy
 markdown==3.10.2
     # via
-    #   mkdocs
-    #   mkdocs-material
     #   pymdown-extensions
     #   tensorboard
+    #   zensical
 markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
     # via
     #   jinja2
-    #   mkdocs
     #   werkzeug
 mcp==2.1.1
     # via fastmcp-slim
@@ -291,23 +281,6 @@ mcp-types==2.1.1
     #   mcp
 mdurl==0.1.2
     # via markdown-it-py
-mergedeep==1.3.4
-    # via
-    #   mkdocs
-    #   mkdocs-get-deps
-mkdocs==1.6.1
-    # via
-    #   gco-cli
-    #   gco-cli (pyproject.toml)
-    #   mkdocs-material
-mkdocs-get-deps==0.2.2
-    # via mkdocs
-mkdocs-material==9.7.7
-    # via
-    #   gco-cli
-    #   gco-cli (pyproject.toml)
-mkdocs-material-extensions==1.3.1
-    # via mkdocs-material
 more-itertools==11.0.2
     # via
     #   jaraco-classes
@@ -352,12 +325,9 @@ packaging==26.2
     # via
     #   build
     #   fastmcp-slim
-    #   mkdocs
     #   pytest
     #   tensorboard
     #   wheel
-paginate==0.5.7
-    # via mkdocs-material
 pandas==3.0.5
     # via
     #   gco-cli
@@ -367,7 +337,6 @@ pathable==0.6.0
     # via jsonschema-path
 pathspec==1.1.1
     # via
-    #   mkdocs
     #   mypy
     #   yamllint
 pillow==12.3.0
@@ -382,7 +351,6 @@ pip-tools==7.6.1
 platformdirs==4.9.6
     # via
     #   fastmcp-slim
-    #   mkdocs-get-deps
     #   python-discovery
     #   virtualenv
 playwright==1.62.0
@@ -458,13 +426,13 @@ pyflowchart==0.6.0
     #   gco-cli (pyproject.toml)
 pygments==2.20.0
     # via
-    #   mkdocs-material
     #   pytest
     #   rich
+    #   zensical
 pyjwt==2.13.0
     # via mcp
 pymdown-extensions==11.0.1
-    # via mkdocs-material
+    # via zensical
 pyperclip==1.11.0
     # via fastmcp-slim
 pyproject-hooks==1.2.0
@@ -498,7 +466,6 @@ pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
     # via
     #   botocore
-    #   ghp-import
     #   jsii
     #   kubernetes
     #   pandas
@@ -522,15 +489,11 @@ pyyaml==6.0.3
     #   gco-cli (pyproject.toml)
     #   jsonschema-path
     #   kubernetes
-    #   mkdocs
-    #   mkdocs-get-deps
     #   pre-commit
     #   pymdown-extensions
-    #   pyyaml-env-tag
     #   responses
     #   yamllint
-pyyaml-env-tag==1.1
-    # via mkdocs
+    #   zensical
 rank-bm25==0.2.2
     # via
     #   gco-cli
@@ -550,7 +513,6 @@ requests==2.34.2
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   kubernetes
-    #   mkdocs-material
     #   moto
     #   requests-oauthlib
     #   responses
@@ -610,6 +572,8 @@ tensorboard==2.21.0
     # via tbparse
 tensorboard-data-server==0.7.2
     # via tensorboard
+tomli==2.4.1
+    # via zensical
 truststore==0.10.4
     # via
     #   httpcore2
@@ -673,8 +637,6 @@ uvicorn==0.52.4
     #   mcp
 virtualenv==21.3.0
     # via pre-commit
-watchdog==6.0.0
-    # via mkdocs
 watchfiles==1.1.1
     # via fastmcp-slim
 websocket-client==1.9.0
@@ -695,6 +657,10 @@ yamllint==1.38.0
     #   gco-cli (pyproject.toml)
 yarl==1.24.2
     # via aiohttp
+zensical==0.0.63
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
 zipp==3.23.1
     # via importlib-metadata
 

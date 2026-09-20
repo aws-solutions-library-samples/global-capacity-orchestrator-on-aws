@@ -21,6 +21,7 @@ Utility scripts for development, testing, and operations.
 | Script | Description |
 |--------|-------------|
 | `accelerator_catalog.py` | Validates and refreshes the reviewed NVIDIA GPU/AWS Neuron catalog, NodePool families, capacity-history watch lists, and capacity pools. |
+| `build_wiki.py` | Stages the orientation wiki's source tree into `build/wiki` — `wiki/*.md` (minus the directory README), `images/` as `assets/images/`, the generated API spec sheets and their diagram from `diagrams/api_specs/` as `api/` — then builds it with Zensical (`build`: `zensical build --clean --strict`, the exact command `lint:zensical:strict` and `pages.yml` run) or serves it with live reload (`serve`, re-staging whenever a source changes). Zensical has no build hooks or `exclude_docs`, so this is the explicit, tested replacement for both. |
 | `bump_version.py` | Bumps `VERSION` and every maintained version mirror used by packages and release documentation. |
 | `capture_monitoring_screenshots.py` | Uses Playwright against a live Grafana/OpenCost port-forward to refresh monitoring screenshots under `images/`. |
 | `capture_scaffold_fixtures.py` | Captures model output for the Mission scaffolder fixture-replay corpus. |
@@ -30,8 +31,6 @@ Utility scripts for development, testing, and operations.
 | `generate_openapi.py` | Writes or checks the committed OpenAPI documents for all four GCO HTTP services. |
 | `mcp_install_smoke.py` | Verifies a packaged install exposes a self-contained, version-matched `gco-mcp` server and bundled `gco` CLI. |
 | `migrate_fork.py` | Safely rewrites references owned by this repository when adopting GCO into a fork. See [`docs/FORKING.md`](../docs/FORKING.md). |
-| `mkdocs_hooks.py` | Injects tracked `images/` assets (as `assets/images/`) and the generated API spec sheets plus their interaction diagram from `diagrams/api_specs/` (as `api/`) into the MkDocs wiki build without duplicating either. |
-| `preview_wiki.sh` | Runs the strict MkDocs build and optional local live-reload server used for wiki development. |
 | `setup-cluster-access.sh` | Configures kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. |
 | `setup-dev-alias.sh` | Builds the dev image and installs the shell function that runs `gco` through the containerized toolchain. |
 | `split_tests.py` | Collects and deterministically balances the core pytest suite across CI shards. |

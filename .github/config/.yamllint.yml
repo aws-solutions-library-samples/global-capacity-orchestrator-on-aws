@@ -58,6 +58,6 @@ ignore: |
   .pytest_cache/
   .ruff_cache/
   .git/
-  # MkDocs build output for the orientation wiki (kept in sync with the
+  # Zensical build output for the orientation wiki (kept in sync with the
   # markdownlint ignore list) — generated, never authored.
   site/

@@ -10,9 +10,10 @@ into two human-facing renderings:
 
 * ``diagrams/api_specs/<service>.md`` — a Markdown spec sheet: the endpoint
   table, every operation's parameters, request body and responses, and every
-  component schema as a property table. It renders on GitHub and, injected by
-  ``scripts/mkdocs_hooks.py``, as a page of the MkDocs wiki, so the API
-  reference is embedded in the documentation without a hand-maintained copy.
+  component schema as a property table. It renders on GitHub and, staged into
+  the wiki's source tree by ``scripts/build_wiki.py``, as a page of the
+  Zensical-built wiki, so the API reference is embedded in the documentation
+  without a hand-maintained copy.
 * The Swagger UI console FastAPI serves at ``/docs`` — ``--swagger-ui-dir``
   writes FastAPI's own ``get_swagger_ui_html`` page per service, pointing at a
   copy of the document and at a self-hosted ``swagger-ui-dist`` (the pinned npm
@@ -41,6 +42,7 @@ import json
 import re
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +78,8 @@ _METHOD_ORDER: tuple[str, ...] = (
     "trace",
 )
 
-_SITE_URL_RE = re.compile(r"^site_url:\s*(\S+)\s*$", re.MULTILINE)
-_REPO_URL_RE = re.compile(r"^repo_url:\s*(\S+)\s*$", re.MULTILINE)
+#: The wiki's configuration, the one place the site and repository URLs live.
+SITE_CONFIG_FILE = "zensical.toml"
 _REF_PREFIX = "#/components/schemas/"
 
 #: The interaction diagram rendered next to the sheets.
@@ -148,19 +150,25 @@ def catalogue_order(documents: dict[str, dict[str, Any]]) -> list[str]:
     )
 
 
-def read_site_config(mkdocs_yml: Path) -> tuple[str, str]:
-    """``(site_url, repo_url)`` from mkdocs.yml — the one place both are declared.
+def read_site_config(zensical_toml: Path) -> tuple[str, str]:
+    """``(site_url, repo_url)`` from zensical.toml — the one place both are declared.
 
-    Read with a regex rather than PyYAML so the render path stays stdlib-only,
-    and so a fork's ``scripts/migrate_fork.py`` rewrite of mkdocs.yml is the
-    only edit needed for the generated links to follow.
+    Read with the stdlib ``tomllib`` so the render path needs nothing beyond the
+    standard library, and so a fork's ``scripts/migrate_fork.py`` rewrite of
+    zensical.toml is the only edit needed for the generated links to follow.
     """
-    text = mkdocs_yml.read_text(encoding="utf-8")
-    site = _SITE_URL_RE.search(text)
-    repo = _REPO_URL_RE.search(text)
-    if site is None or repo is None:
-        raise SpecSheetError(f"{mkdocs_yml}: site_url and repo_url must both be declared")
-    return site.group(1).rstrip("/") + "/", repo.group(1).rstrip("/")
+    try:
+        with zensical_toml.open("rb") as handle:
+            project = tomllib.load(handle).get("project")
+    except tomllib.TOMLDecodeError as exc:
+        raise SpecSheetError(f"{zensical_toml}: not valid TOML ({exc})") from exc
+    site = project.get("site_url") if isinstance(project, dict) else None
+    repo = project.get("repo_url") if isinstance(project, dict) else None
+    if not isinstance(site, str) or not isinstance(repo, str) or not site or not repo:
+        raise SpecSheetError(
+            f"{zensical_toml}: [project] site_url and repo_url must both be declared"
+        )
+    return site.rstrip("/") + "/", repo.rstrip("/")
 
 
 # ─── Markdown primitives ─────────────────────────────────────────────────────
@@ -920,8 +928,8 @@ def render_index(documents: dict[str, dict[str, Any]], *, site_url: str, repo_ur
         f"`/docs` page for the services), served from the project site under `/{SWAGGER_SITE_PREFIX}/`",
         "with a self-hosted copy of `swagger-ui-dist` (the site makes no third-party",
         "requests). It is built at deploy time by `pages.yml`; the sheets in this directory",
-        "are also injected into the wiki under `/api/` by `scripts/mkdocs_hooks.py`, so",
-        "both renderings come from one source.",
+        "are also staged into the wiki's source tree under `/api/` by `scripts/build_wiki.py`,",
+        "so both renderings come from one source.",
         "",
         "## How the surfaces fit together",
         "",
@@ -1465,7 +1473,7 @@ def expected_outputs(project_root: Path) -> dict[Path, str]:
     """``{path: content}`` for every file this catalogue owns, rendered in memory."""
     openapi_dir = project_root / "docs" / "openapi"
     output_dir = project_root / "diagrams" / "api_specs"
-    site_url, repo_url = read_site_config(project_root / "mkdocs.yml")
+    site_url, repo_url = read_site_config(project_root / SITE_CONFIG_FILE)
     documents = {
         service: load_document(service, openapi_dir) for service in service_names(openapi_dir)
     }
@@ -1486,7 +1494,7 @@ def api_contract_issues(project_root: Path) -> list[str]:
     """Stale, missing and orphan sheets, by repository path; empty when current.
 
     A checkout that cannot be rendered at all (no OpenAPI documents, no
-    ``mkdocs.yml``, a colliding anchor) is reported as an issue rather than
+    ``zensical.toml``, a colliding anchor) is reported as an issue rather than
     raised, so the aggregate ``--check`` prints one actionable line per
     catalogue instead of a traceback.
     """
@@ -1573,7 +1581,7 @@ def build_swagger_site(site_dir: Path, assets_dir: Path, *, project_root: Path) 
             f"swagger-ui-dist assets missing from {assets_dir}: {', '.join(missing)} "
             "(run `npm ci --ignore-scripts --no-audit --no-fund`)"
         )
-    site_url, _repo_url = read_site_config(project_root / "mkdocs.yml")
+    site_url, _repo_url = read_site_config(project_root / SITE_CONFIG_FILE)
     openapi_dir = project_root / "docs" / "openapi"
     written: list[Path] = []
     assets_out = site_dir / "assets"

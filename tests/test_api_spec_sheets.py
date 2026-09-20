@@ -27,7 +27,7 @@ from diagrams.api_specs import generate as sheets
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-MKDOCS_YML = "site_url: https://example.test/site/\nrepo_url: https://example.test/org/repo\n"
+ZENSICAL_TOML = '[project]\nsite_url = "https://example.test/site/"\nrepo_url = "https://example.test/org/repo"\n'
 
 
 # ─── fixtures ────────────────────────────────────────────────────────────────
@@ -209,11 +209,11 @@ def _document(**overrides: Any) -> dict[str, Any]:
 
 
 def _repo(tmp_path: Path, documents: dict[str, dict[str, Any]] | None = None) -> Path:
-    """A stand-in checkout: docs/openapi/*.json, mkdocs.yml, an empty catalogue."""
+    """A stand-in checkout: docs/openapi/*.json, zensical.toml, an empty catalogue."""
     root = tmp_path / "repo"
     (root / "docs" / "openapi").mkdir(parents=True)
     (root / "diagrams" / "api_specs").mkdir(parents=True)
-    (root / "mkdocs.yml").write_text(MKDOCS_YML, encoding="utf-8")
+    (root / "zensical.toml").write_text(ZENSICAL_TOML, encoding="utf-8")
     for service, document in (documents or {"widget-service": _document()}).items():
         (root / "docs" / "openapi" / f"{service}.json").write_text(
             json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -247,16 +247,37 @@ def test_documents_without_a_paths_object_are_refused(tmp_path: Path, payload: s
         sheets.load_document("svc", tmp_path)
 
 
-def test_site_config_comes_from_mkdocs_yml(tmp_path: Path) -> None:
-    path = tmp_path / "mkdocs.yml"
-    path.write_text("x: 1\nsite_url: https://h/site\nrepo_url: https://g/o/r/\n", encoding="utf-8")
+def test_site_config_comes_from_zensical_toml(tmp_path: Path) -> None:
+    """Trailing slashes are normalised: the site URL keeps one, the repo URL drops it."""
+    path = tmp_path / "zensical.toml"
+    path.write_text(
+        '[project]\nx = 1\nsite_url = "https://h/site"\nrepo_url = "https://g/o/r/"\n',
+        encoding="utf-8",
+    )
     assert sheets.read_site_config(path) == ("https://h/site/", "https://g/o/r")
 
 
-def test_site_config_requires_both_urls(tmp_path: Path) -> None:
-    path = tmp_path / "mkdocs.yml"
-    path.write_text("site_url: https://h/site/\n", encoding="utf-8")
-    with pytest.raises(sheets.SpecSheetError, match="site_url and repo_url"):
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[project]\nsite_url = "https://h/site/"\n',  # repo_url missing
+        '[project]\nsite_url = "https://h/site/"\nrepo_url = ""\n',  # empty
+        '[project]\nsite_url = 1\nrepo_url = "https://g/o/r"\n',  # wrong type
+        'site_url = "https://h/site/"\nrepo_url = "https://g/o/r"\n',  # no [project] table
+        "[other]\nsite_url = 1\n",  # [project] absent
+    ],
+)
+def test_site_config_requires_both_urls_under_project(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "zensical.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(sheets.SpecSheetError, match=r"\[project\] site_url and repo_url"):
+        sheets.read_site_config(path)
+
+
+def test_site_config_reports_invalid_toml(tmp_path: Path) -> None:
+    path = tmp_path / "zensical.toml"
+    path.write_text("[project\nsite_url = ", encoding="utf-8")
+    with pytest.raises(sheets.SpecSheetError, match="not valid TOML"):
         sheets.read_site_config(path)
 
 
@@ -812,7 +833,7 @@ def test_committed_sheets_link_only_to_things_that_exist() -> None:
 
 def test_committed_diagram_links_every_document_and_nothing_else() -> None:
     """Every box of the interaction diagram that is a document links to its sheet on the site."""
-    site_url, _ = sheets.read_site_config(REPO_ROOT / "mkdocs.yml")
+    site_url, _ = sheets.read_site_config(REPO_ROOT / sheets.SITE_CONFIG_FILE)
     svg = (REPO_ROOT / "diagrams" / "api_specs" / sheets.TOPOLOGY_FILE).read_text(encoding="utf-8")
     linked = set(re.findall(r'<a href="([^"]+)">', svg))
     assert linked == {f"{site_url}api/{name}/" for name in _exported_documents()}
@@ -820,8 +841,8 @@ def test_committed_diagram_links_every_document_and_nothing_else() -> None:
     assert "http://" not in svg.replace("http://www.w3.org/", ""), "no remote references"
 
 
-def test_committed_sheets_use_the_repository_urls_from_mkdocs() -> None:
-    site_url, repo_url = sheets.read_site_config(REPO_ROOT / "mkdocs.yml")
+def test_committed_sheets_use_the_repository_urls_from_zensical_toml() -> None:
+    site_url, repo_url = sheets.read_site_config(REPO_ROOT / sheets.SITE_CONFIG_FILE)
     readme = (REPO_ROOT / "diagrams" / "api_specs" / "README.md").read_text(encoding="utf-8")
     assert f"{site_url}{sheets.SWAGGER_SITE_PREFIX}/manifest-processor/" in readme
     assert f"{repo_url}/blob/main/docs/openapi/manifest-processor.json" in readme

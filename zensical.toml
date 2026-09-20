@@ -1,0 +1,145 @@
+# =============================================================================
+# zensical.toml — the GCO orientation wiki (GitHub Pages site root)
+# =============================================================================
+#
+# Builds the wiki into the site served at
+# https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/
+# with Zensical (https://zensical.org/), the static site generator by the
+# Material for MkDocs team. The wiki is an orientation and routing layer ABOVE
+# the reference docs: pages summarize and link to README/docs/package READMEs
+# on GitHub, never restate them (duplicated reference content rots; the deep
+# docs carry the CI freshness guards).
+#
+# The source Zensical reads is NOT wiki/ directly. `docs_dir` is build/wiki, a
+# staged tree that scripts/build_wiki.py assembles before every build from
+# three places, so nothing is ever copied by hand into the repository:
+#   wiki/*.md                    -> build/wiki/<page>.md      (all but README.md,
+#                                   the directory's GitHub-facing README)
+#   images/*                     -> build/wiki/assets/images/ (the tracked
+#                                   screenshots, single-source)
+#   diagrams/api_specs/*.md|svg  -> build/wiki/api/           (the generated API
+#                                   spec sheets and their interaction diagram)
+# Zensical has no hooks or `exclude_docs`, which is what MkDocs used for the
+# same three jobs; the staging step is the explicit, testable replacement.
+# `watch` lists the real sources so `zensical serve` (through
+# scripts/build_wiki.py serve, which re-stages on change) reloads on edits.
+#
+# The coverage reports are NOT built here — pages.yml drops the three report
+# trees into site/python-coverage/, site/bash-coverage/ and
+# site/nodejs-coverage/ after this build, and builds the Swagger UI consoles
+# into site/swagger/, which is why those nav entries are full external URLs
+# rather than local pages.
+#
+# Constraints honored by this file (guarded by tests/test_wiki.py):
+#   - Plain TOML: tests read the nav with tomllib and no Zensical import.
+#   - Self-contained site: `font = false` keeps the theme off Google Fonts; no
+#     analytics, no external CSS/JS; search is Zensical's built-in client-side
+#     index. The only browser request that leaves the site is the header's
+#     repository facts (stars, latest tag) from api.github.com, which
+#     `repo_url` enables.
+#   - `strict = true` — every validation warning (a link to a page that does
+#     not exist, an anchor that does not exist) fails the build: locally, in
+#     lint:zensical:strict on PRs, and in the pages.yml deploy.
+#   - `site_url` and `repo_url` are declared once, here, and read by
+#     diagrams/api_specs/generate.py (spec-sheet links),
+#     .github/scripts/validate_svg_assets.py (allowed link targets) and the
+#     wiki guard tests. scripts/migrate_fork.py rewrites both on a fork.
+# =============================================================================
+
+[project]
+site_name = "Global Capacity Orchestrator on AWS"
+site_description = "Orientation wiki for GCO — intelligent global capacity orchestration for GPU/accelerated workloads on AWS."
+site_url = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"
+repo_url = "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws"
+repo_name = "aws-solutions-library-samples/global-capacity-orchestrator-on-aws"
+edit_uri = ""
+
+# The staged source tree (see the header) and the build output. Both are
+# gitignored; scripts/build_wiki.py owns build/wiki entirely.
+docs_dir = "build/wiki"
+site_dir = "site"
+strict = true
+
+# The real sources behind the staged tree, so the preview server rebuilds when
+# a page, screenshot or spec sheet changes (scripts/build_wiki.py serve
+# re-stages them into docs_dir).
+watch = ["wiki", "images", "diagrams/api_specs"]
+
+# Page order and titles live here and nowhere else. api/* entries are the spec
+# sheets staged from diagrams/api_specs/ (README.md serves /api/ and embeds the
+# interaction diagram); the Swagger UI consoles and the coverage reports are
+# merged into the Pages artifact by pages.yml outside this build, hence the
+# external URLs.
+nav = [
+  { "Home" = "index.md" },
+  { "How it works" = "how-it-works.md" },
+  { "For users" = [
+    { "Get started" = "get-started.md" },
+    { "Evaluating & deploying" = "evaluating-and-deploying.md" },
+    { "What you can run" = "what-you-can-run.md" },
+  ] },
+  { "For developers" = [
+    { "Repo tour" = "repo-tour.md" },
+    { "How we build & test" = "build-and-test.md" },
+  ] },
+  { "Contributing" = "contributing.md" },
+  { "API reference" = [
+    { "Overview" = "api/README.md" },
+    { "Global API Gateway" = "api/api-gateway-global.md" },
+    { "Regional API Gateway" = "api/api-gateway-regional.md" },
+    { "Cluster gateway (internal ALB)" = "api/cluster-gateway.md" },
+    { "Manifest processor" = "api/manifest-processor.md" },
+    { "Health monitor" = "api/health-monitor.md" },
+    { "Inference proxy" = "api/inference-proxy.md" },
+    { "Cost monitor" = "api/cost-monitor.md" },
+    { "Swagger UI consoles" = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/" },
+  ] },
+  { "Coverage reports" = [
+    { "Python" = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/python-coverage/" },
+    { "Bash" = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/bash-coverage/" },
+    { "Node.js" = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/nodejs-coverage/" },
+  ] },
+]
+
+[project.theme]
+# Zensical's own look. The `classic` variant would reproduce Material for
+# MkDocs pixel for pixel; nothing here depends on that appearance.
+variant = "modern"
+# No Google Fonts fetch: the built site must make zero third-party asset
+# requests. The theme falls back to a system font stack.
+font = false
+features = [
+  "navigation.sections",
+  "navigation.footer",
+  "toc.integrate",
+  "search.suggest",
+]
+
+# Light and dark palettes with a header toggle; both use the project's colour.
+[[project.theme.palette]]
+scheme = "default"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+# Python-Markdown extensions the pages rely on. Unlike MkDocs, Zensical enables
+# none by default when this table is present, so `tables` and the fenced-code
+# pair (`pymdownx.superfences` + `pymdownx.highlight`, Pygments-highlighted
+# code blocks) are listed explicitly alongside the ones the MkDocs build named.
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+"pymdownx.highlight" = { pygments_lang_class = true }
+"pymdownx.inlinehilite" = {}
+"pymdownx.superfences" = {}
