@@ -3116,10 +3116,30 @@ only what the job was authorized to use — this reports what it used.
     topology.kubernetes.io/zone: us-east-1a
 ```
 
+**Pods without a node:** `STATUS` is the *Job's* verdict and reads `running`
+as long as a pod exists, placed or not. When a pod has no node yet, an
+`Unscheduled pods` block names it with the `PodScheduled` condition's reason
+and message — the scheduler's own explanation, the same text `kubectl describe
+pod` shows — so a job waiting on capacity is distinguishable from one that is
+training without a second `gco jobs events` call:
+
+```text
+  Unscheduled pods
+  ------------------------------------------------------------------------------
+  training-job-001-abc123                                       Pending
+    reason: Unschedulable
+    since: 2024-01-15T10:00:05+00:00
+    message: 0/6 nodes are available: 6 Insufficient nvidia.com/gpu. preemption: 0/6 nodes are available: 6 No preemption victims found for incoming pod.
+```
+
 `--output json` exposes the same facts as top-level `node_name`,
-`node_instance_type`, `node_capacity_type`, `node_labels` and `nodes` fields.
-They are absent rather than guessed when nothing is scheduled yet or the pods
-have already been garbage-collected. See
+`node_instance_type`, `node_capacity_type`, `node_labels` and `nodes` fields,
+plus `pod_phase` (the phase every pod shares; `null` when they disagree),
+`pod_phases` (count per phase), `scheduled_pods`, `unscheduled_pods`,
+`unscheduled` (one entry per unplaced pod with `reason`, `message`, `since`)
+and `node_lookup_error`. They are absent rather than guessed when nothing is
+scheduled yet or the pods have already been garbage-collected, and the counts
+are `null`, not `0`, when the region's bridge predates them. See
 [Get Job](API.md#get-job) for the field-by-field reference.
 
 #### `gco jobs logs`

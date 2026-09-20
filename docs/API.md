@@ -664,7 +664,8 @@ GET /api/v1/jobs/{namespace}/{name}
 ```
 
 Get details of a single Job, plus a `scheduling` block reporting which node
-each of its pods landed on and what hardware that node is.
+each of its pods landed on, what hardware that node is, and — for pods that
+have no node yet — why the scheduler is holding them.
 
 **CLI:**
 
@@ -724,7 +725,11 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
         "pods": [{"name": "training-job-001-abc123", "phase": "Running"}]
       }
     ],
+    "pod_phase": "Running",
+    "pod_phases": {"Running": 1},
+    "scheduled_pods": 1,
     "unscheduled_pods": 0,
+    "unscheduled": [],
     "node_lookup_error": null
   }
 }
@@ -739,7 +744,11 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
 | `node_capacity_type` | That node's `karpenter.sh/capacity-type` label — `spot` or `on-demand` |
 | `node_labels` | That node's placement labels: instance type, capacity type, zone, region, arch, NodePool |
 | `nodes` | Every node the job's pods landed on, with the pods on each. A job that was retried onto a different instance type shows both |
+| `pod_phase` | The phase every pod shares (`Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`). `null` as soon as the pods disagree, so it never summarizes a `Pending` pod away behind a `Running` one; read `pod_phases` then |
+| `pod_phases` | Pod count per phase, e.g. `{"Running": 3, "Pending": 1}`. A pod whose phase is not populated yet counts under `Unknown` |
+| `scheduled_pods` | Pods that have a `nodeName` |
 | `unscheduled_pods` | Pods that exist but have no `nodeName` yet |
+| `unscheduled` | One entry per unscheduled pod: its `name`, `phase`, and the `PodScheduled` condition's `reason`, `message` and `since` (the condition's `lastTransitionTime`). All three are `null` unless that condition is `False`; the scheduler has not stated a diagnosis otherwise |
 | `node_lookup_error` | Why a node's labels are missing, when they are — RBAC refusal, or a node already reclaimed |
 
 A job constrained to a *set* of interchangeable instance types (a
@@ -748,10 +757,55 @@ within that set, so the submitted manifest records only what the job was
 *authorized* to run on. `node_instance_type` records what it actually ran on,
 which is what reconciling observed cost against an estimate needs.
 
+`computed_status` is the *Job's* verdict: it reads `running` as long as
+`status.active` is non-zero, and a Job whose only pod cannot be scheduled
+still counts as active. The pod fields are what tell "the container is
+training" from "a Job object exists and nothing is placed". A job waiting on
+GPU capacity looks like this — same `computed_status`, no node, and the
+scheduler's own explanation on the pod:
+
+```json
+{
+  "computed_status": "running",
+  "status": {"active": 1, "succeeded": 0, "failed": 0},
+  "scheduling": {
+    "node_name": null,
+    "node_instance_type": null,
+    "node_capacity_type": null,
+    "node_labels": {},
+    "nodes": [],
+    "pod_phase": "Pending",
+    "pod_phases": {"Pending": 1},
+    "scheduled_pods": 0,
+    "unscheduled_pods": 1,
+    "unscheduled": [
+      {
+        "name": "training-job-001-abc123",
+        "phase": "Pending",
+        "reason": "Unschedulable",
+        "message": "0/6 nodes are available: 6 Insufficient nvidia.com/gpu. preemption: 0/6 nodes are available: 6 No preemption victims found for incoming pod.",
+        "since": "2024-01-15T10:00:05+00:00"
+      }
+    ],
+    "node_lookup_error": null
+  }
+}
+```
+
+`reason` and `message` are the `PodScheduled` condition verbatim — the same
+text `kubectl describe pod` shows — so the caller does not need a second
+[Get Job Events](#get-job-events) call to learn why the pod is waiting. A pod
+that Karpenter is still provisioning capacity for typically carries
+`Unschedulable` with a `nodes are available` message until the new node
+registers; a taint no toleration matches, or a `nodeAffinity` no NodePool can
+satisfy, are stated the same way.
+
 Placement fields are `null` — never inferred from the manifest — when nothing
 is scheduled yet, when the pods have been garbage-collected
 (`ttlSecondsAfterFinished`), or when the Node read fails. In the last case
 `node_lookup_error` says why. Resolving placement never fails the job read.
+A regional bridge that predates the pod fields simply omits them; the CLI and
+MCP tool report the counts as unknown (`null`) rather than as `0`.
 
 Reading node labels requires the `nodes` `get` permission on the
 `gco-manifest-processor-cluster-read` ClusterRole; without it the node name is
@@ -936,7 +990,11 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
         "pods": [{"name": "training-job-001-abc123", "phase": "Running"}]
       }
     ],
+    "pod_phase": "Running",
+    "pod_phases": {"Running": 1},
+    "scheduled_pods": 1,
     "unscheduled_pods": 0,
+    "unscheduled": [],
     "node_lookup_error": null
   }
 }
@@ -944,8 +1002,9 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
 
 Each pod's `node` block is the same node record the `scheduling` block carries,
 denormalized so a caller iterating pods does not have to join. It is `null` for
-a pod that has not been scheduled. `scheduling` has the same shape and meaning
-as on [Get Job](#get-job).
+a pod that has not been scheduled; that pod then appears in
+`scheduling.unscheduled` with the scheduler's reason. `scheduling` has the same
+shape and meaning as on [Get Job](#get-job).
 
 ### Get Job Metrics
 

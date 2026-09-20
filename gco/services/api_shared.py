@@ -449,16 +449,62 @@ _REPORTED_NODE_LABELS: tuple[str, ...] = (
 
 
 def _empty_scheduling_info() -> dict[str, Any]:
-    """The shape returned when nothing about placement is known yet."""
+    """The shape returned when nothing about placement is known yet.
+
+    Every key the collector can fill in is present here, so a caller sees the
+    same field set whether placement resolved, no pods exist yet, or the pod
+    listing itself failed (``node_lookup_error`` says which).
+    """
     return {
         "node_name": None,
         "node_instance_type": None,
         "node_capacity_type": None,
         "node_labels": {},
         "nodes": [],
+        "pod_phase": None,
+        "pod_phases": {},
+        "scheduled_pods": 0,
         "unscheduled_pods": 0,
+        "unscheduled": [],
         "node_lookup_error": None,
     }
+
+
+def _pod_scheduled_condition(status: Any) -> dict[str, Any]:
+    """The ``PodScheduled`` condition of a pod, reduced to its reason and message.
+
+    Kubernetes already states why a pod is not placed ("0/6 nodes are
+    available: ...", a taint nobody tolerates, Karpenter's nomination churn)
+    on this condition; surfacing it here saves the second ``events`` call a
+    caller otherwise needs to learn the same thing. Only the ``False`` state
+    carries a diagnosis; ``True`` and ``Unknown`` report nothing, as does a pod
+    whose conditions have not been populated yet. Never raises: every field
+    is taken with ``getattr`` and kept only when it has the expected type.
+    """
+    empty: dict[str, Any] = {"reason": None, "message": None, "since": None}
+    conditions = getattr(status, "conditions", None) if status is not None else None
+    if not isinstance(conditions, list):
+        return empty
+    for condition in conditions:
+        if getattr(condition, "type", None) != "PodScheduled":
+            continue
+        if getattr(condition, "status", None) != "False":
+            return empty
+        reason = getattr(condition, "reason", None)
+        message = getattr(condition, "message", None)
+        transition = getattr(condition, "last_transition_time", None)
+        since = None
+        if transition is not None:
+            try:
+                since = transition.isoformat()
+            except Exception:  # pragma: no cover - defensive
+                since = None
+        return {
+            "reason": reason if isinstance(reason, str) else None,
+            "message": message if isinstance(message, str) else None,
+            "since": since if isinstance(since, str) else None,
+        }
+    return empty
 
 
 def _parse_node_to_dict(node: Any, name: str) -> dict[str, Any]:
@@ -499,12 +545,24 @@ def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
     involved, with the pods on each, so a retried job that moved between
     instance types is still fully described.
 
+    The pods' own state is reported next to the placement, because the Job's
+    status alone cannot tell "the container is training" from "a Job object
+    exists and nothing is placed": a Job whose only pod cannot be scheduled
+    still counts as active. ``pod_phases`` counts every pod by phase;
+    ``pod_phase`` is the one phase they all share (``None`` as soon as they
+    disagree, so it is never a summary that hides a Pending pod behind a
+    Running one); ``scheduled_pods`` / ``unscheduled_pods`` split them by
+    whether a node has been assigned; and ``unscheduled`` names each unplaced
+    pod with the ``PodScheduled`` condition's reason and message, which is
+    where Kubernetes states why it is waiting.
+
     Never raises. A Node read that is refused (no RBAC) or 404s (node already
     reclaimed) leaves the instance type ``None`` and records why in
     ``node_lookup_error`` — an absent value that says so is more useful than a
     guess that looks verified.
     """
     info = _empty_scheduling_info()
+    phases: dict[str, int] = {}
 
     def _sort_key(pod: V1Pod) -> tuple[str, str]:
         """Deterministic (created, name) ordering that cannot raise.
@@ -538,10 +596,22 @@ def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
         node_name = getattr(spec, "node_name", None) if spec is not None else None
         pod_name = getattr(metadata, "name", None) if metadata is not None else None
         phase = getattr(status, "phase", None) if status is not None else None
+        if not isinstance(pod_name, str):
+            pod_name = None
+        if not isinstance(phase, str):
+            phase = None
+        phases[phase or "Unknown"] = phases.get(phase or "Unknown", 0) + 1
 
         if not isinstance(node_name, str) or not node_name:
+            # No Node read for a pod that has no node: the diagnosis lives on
+            # the pod's own PodScheduled condition, which is already in hand.
             info["unscheduled_pods"] += 1
+            info["unscheduled"].append(
+                {"name": pod_name, "phase": phase, **_pod_scheduled_condition(status)}
+            )
             continue
+
+        info["scheduled_pods"] += 1
 
         if node_name not in node_cache:
             node_order.append(node_name)
@@ -567,12 +637,13 @@ def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
                     "labels": {},
                 }
 
-        pods_by_node[node_name].append(
-            {
-                "name": pod_name if isinstance(pod_name, str) else None,
-                "phase": phase if isinstance(phase, str) else None,
-            }
-        )
+        pods_by_node[node_name].append({"name": pod_name, "phase": phase})
+
+    info["pod_phases"] = phases
+    if len(phases) == 1:
+        # One phase shared by every pod is the only aggregate that cannot
+        # mislead; anything mixed stays None and the caller reads the counts.
+        (info["pod_phase"],) = phases
 
     if not node_order:
         return info
