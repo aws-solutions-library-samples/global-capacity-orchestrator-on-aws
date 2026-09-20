@@ -683,7 +683,7 @@ GCO implements defense in depth across the six controls in the [Security Model](
 - Python dependencies audited with [pip-audit](https://github.com/pypa/pip-audit) (GHSA/CVE detection)
 - Both repository-owned npm graphs are exact-pinned with committed lockfiles (see [package.json](./package.json) and [package-lock.json](./package-lock.json)), [audited](https://docs.npmjs.com/cli/v8/commands/npm-audit) on every PR, and updated by [Dependabot](https://docs.github.com/en/code-security/dependabot)
 - Production JavaScript is scanned by [CodeQL](https://codeql.github.com/docs/) and [Semgrep](https://semgrep.dev/docs/); the inference-streaming Lambda has a separate Node.js 24 test workflow with exact 100% line/function/branch gates (see [./tests/inference-streaming-proxy/](./tests/inference-streaming-proxy/))
-- Dependency versions pinned with exact hashes in `requirements-lock.txt` (see [requirements-lock.txt](./requirements-lock.txt))
+- Every Python dependency, direct and transitive, pinned to an exact version in `requirements-lock.txt` (see [requirements-lock.txt](./requirements-lock.txt)); CI fails when the lock drifts from `pyproject.toml`
 - Dependabot and CodeQL enabled for automated vulnerability alerts
 - Strict [KICS](https://www.kics.io/index.html) and [Checkov](https://www.checkov.io/) infrastructure scans
 - [SBOM](https://www.cisa.gov/topics/information-communications-technology-supply-chain-security/sbom) generation via [Trivy](https://trivy.dev/) for all container images

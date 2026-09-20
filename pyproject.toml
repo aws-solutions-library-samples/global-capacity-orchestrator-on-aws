@@ -96,20 +96,28 @@ diagrams = [
 # Direct runtime roots for the six production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
 # only as the shared transitive constraint; they never install the project extra.
+# The four uvicorn-served images also carry uvloop and httptools: uvicorn's
+# default ``loop="auto"`` / ``http="auto"`` selection picks them up whenever
+# they are importable, and the TLS sidecar (gco.services.tls_proxy, same
+# image) runs on the same uvloop wheel. integration:docker:* asserts both
+# are importable and selected inside every built image.
 image-health-monitor = [
     "boto3==1.43.93",
     "botocore==1.43.93",
     "fastapi==0.141.1",
+    "httptools==0.8.0",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
+    "uvloop==0.22.1",
 ]
 image-manifest-processor = [
     "boto3==1.43.93",
     "botocore==1.43.93",
     "fastapi==0.141.1",
+    "httptools==0.8.0",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
@@ -118,15 +126,18 @@ image-manifest-processor = [
     "requests==2.34.2",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
+    "uvloop==0.22.1",
 ]
 image-inference-proxy = [
     "boto3==1.43.93",
     "botocore==1.43.93",
     "fastapi==0.141.1",
+    "httptools==0.8.0",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
+    "uvloop==0.22.1",
 ]
 image-inference-monitor = [
     "boto3==1.43.93",
@@ -144,12 +155,14 @@ image-cost-monitor = [
     "boto3==1.43.93",
     "botocore==1.43.93",
     "fastapi==0.141.1",
+    "httptools==0.8.0",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
     "pyarrow==25.0.1",
     "pydantic==2.13.5",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
+    "uvloop==0.22.1",
 ]
 # Optional metric-reader file formats. The readers in
 # gco_mcp/metric_readers/files.py lazy-import these and, when they are
@@ -185,6 +198,11 @@ lint = [
 ]
 typecheck = [
     "mypy==2.3.1",
+    # gco/services/tls_proxy.py imports uvloop (which ships py.typed) for its
+    # loop factory; without the wheel installed mypy would see ``Any`` and
+    # warn_return_any would reject the factory's return. Same pin as the
+    # image-* groups.
+    "uvloop==0.22.1",
     "types-requests==2.33.0.20260906",
     "types-PyYAML==6.0.12.20260906",
 ]

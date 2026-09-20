@@ -50,8 +50,8 @@ from gco.services.template_store import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-20T18:35:17Z
+# Generated from Git commit: b5e38fd2b8d538270e52d393d97979d9ca78e914
 # Flowchart(s) generated from this file:
 #   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
@@ -497,6 +497,8 @@ def _run_server() -> None:
     """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
+    from gco.services.uvicorn_runtime import describe_uvicorn_runtime
+
     host = os.getenv("HOST", "0.0.0.0")  # container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
@@ -507,7 +509,14 @@ def _run_server() -> None:
         )
     )
 
-    logger.info("Starting Manifest API on %s:%d", host, port)
+    loop_impl, http_impl = describe_uvicorn_runtime()
+    logger.info(
+        "Starting Manifest API on %s:%d (uvicorn loop=%s http=%s)",
+        host,
+        port,
+        loop_impl,
+        http_impl,
+    )
 
     uvicorn.run(
         "gco.services.manifest_api:app",
