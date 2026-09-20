@@ -564,6 +564,8 @@ The [project wiki](https://aws-solutions-library-samples.github.io/global-capaci
 is a small MkDocs site built from `wiki/*.md` and `mkdocs.yml`, published to
 GitHub Pages by `pages.yml` with the three coverage reports embedded at
 `/python-coverage/`, `/bash-coverage/` and `/nodejs-coverage/`.
+[`wiki/README.md`](wiki/README.md) describes every page and the full build and
+publish pipeline; this section is the working checklist.
 It is an orientation layer: pages **summarize and link** to the authoritative
 docs on GitHub — they must not restate reference detail (flags, config keys,
 procedures), which would rot. Deep-doc links use full

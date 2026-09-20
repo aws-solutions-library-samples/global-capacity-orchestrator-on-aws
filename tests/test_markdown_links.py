@@ -16,10 +16,13 @@ of link are proven to resolve against the checkout:
   — must point at a path that exists in the checkout, exactly like the wiki
   guard in ``tests/test_wiki.py`` does for ``wiki/``.
 
-``wiki/`` is excluded on purpose: ``mkdocs build --strict`` and
-``tests/test_wiki.py`` already validate it, and its relative links resolve
+``wiki/`` pages are excluded on purpose: ``mkdocs build --strict`` and
+``tests/test_wiki.py`` already validate them, and their relative links resolve
 against the *built* site, where ``scripts/mkdocs_hooks.py`` injects assets
-that do not exist in the source tree.
+that do not exist in the source tree. The one exception is ``wiki/README.md``,
+the directory's GitHub-facing README: it is excluded from the MkDocs build and
+its links (``../mkdocs.yml``, ``../scripts/mkdocs_hooks.py``, …) resolve
+against the source tree like every other README's, so it is scanned here.
 
 External URLs are deliberately out of scope — a unit test must not depend on
 the network — which is also why nothing here is a substitute for a periodic
@@ -70,6 +73,8 @@ EXCLUDED_DIR_NAMES = frozenset(
 )
 #: Top-level trees with their own link validation (see module docstring).
 EXCLUDED_TOP_LEVEL = frozenset({"wiki"})
+#: Files inside an excluded tree that are scanned anyway (see module docstring).
+SCANNED_EXCEPTIONS = frozenset({"wiki/README.md"})
 
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _CODE_SPAN = re.compile(r"(`+)(.+?)\1")
@@ -109,10 +114,11 @@ def markdown_files() -> list[Path]:
     """Every scanned Markdown file, sorted, honoring both exclusion lists."""
     files: list[Path] = []
     for path in PROJECT_ROOT.rglob("*.md"):
-        parts = path.relative_to(PROJECT_ROOT).parts
+        relative = path.relative_to(PROJECT_ROOT)
+        parts = relative.parts
         if any(part in EXCLUDED_DIR_NAMES for part in parts):
             continue
-        if parts[0] in EXCLUDED_TOP_LEVEL:
+        if parts[0] in EXCLUDED_TOP_LEVEL and relative.as_posix() not in SCANNED_EXCEPTIONS:
             continue
         files.append(path)
     return sorted(files)
@@ -287,7 +293,9 @@ def test_scan_covers_the_documentation_set() -> None:
     """A broken enumeration must fail loudly rather than pass on an empty scan."""
     names = {path.relative_to(PROJECT_ROOT).as_posix() for path in INVENTORY.files}
     assert "README.md" in names and "docs/CLI.md" in names and ".github/CI.md" in names
-    assert not any(name.startswith("wiki/") for name in names), "wiki/ has its own guard"
+    assert {name for name in names if name.startswith("wiki/")} == SCANNED_EXCEPTIONS, (
+        "wiki/ pages have their own guard; only the directory README is scanned here"
+    )
     assert len(INVENTORY.files) >= 60, f"sanity floor: only {len(INVENTORY.files)} Markdown files"
     assert len(_relative_links()) >= 400, (
         f"sanity floor: only {len(_relative_links())} relative links"
