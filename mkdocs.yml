@@ -35,6 +35,13 @@ edit_uri: ""
 
 docs_dir: wiki
 strict: true
+# wiki/README.md documents the directory for contributors browsing GitHub
+# (every page, and how the site is assembled and published). It is not a
+# page: index.md is the home page, and MkDocs would otherwise treat the
+# README.md/index.md pair as a conflict and fail the strict build.
+# tests/test_wiki.py pins the exclusion and keeps the README out of the nav.
+exclude_docs: |
+  /README.md
 
 theme:
   name: material

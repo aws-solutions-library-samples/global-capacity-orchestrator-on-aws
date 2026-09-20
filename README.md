@@ -615,7 +615,7 @@ embedded.
 ├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 ├── tests/                               # PyTest + BATS test suites
-└── wiki/                                # GitHub Pages wiki sources (published at aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws)
+└── wiki/                                # Orientation wiki sources, built with MkDocs and published to GitHub Pages (wiki/README.md explains how)
 ```
 
 ## Contributing

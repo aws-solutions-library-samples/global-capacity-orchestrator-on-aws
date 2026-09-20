@@ -61,6 +61,11 @@ capacity, and pulling the logs — without leaving the editor.*
   — workflows, composite actions, scanner configs, and templates, all
   documented in `.github/CI.md` (see
   [How we build & test](build-and-test.md)).
+- [`wiki/`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/wiki/README.md)
+  — the source of this site. Its README describes every page and the whole
+  pipeline behind it: the MkDocs build, the hook that pulls in the images and
+  the API spec sheets, the strict-build gate on every PR, and the GitHub
+  Pages deploy that merges in the coverage reports after each `main` run.
 - [`diagrams/`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/tree/main/diagrams)
   — auto-generated architecture diagrams, code flowcharts, and the API spec
   sheets, regenerated from the CDK app, the source, the HTTPRoute manifest

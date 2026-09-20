@@ -10,6 +10,15 @@ Deliberately pure-stdlib plus ``yaml.safe_load`` — no MkDocs import — which
 is why ``mkdocs.yml`` must never grow custom YAML tags (``!!python/name:``).
 The ``assets/images/`` → ``images/`` mapping asserted here mirrors the
 injection hook in ``scripts/mkdocs_hooks.py``.
+
+``wiki/README.md`` is the one file in the directory that is *not* a page: it
+documents the directory for contributors browsing GitHub and is excluded from
+the build by ``exclude_docs`` (MkDocs would otherwise refuse the
+README.md/index.md conflict under ``strict``). The page-level guards skip it;
+the README-level guards at the end pin that exclusion, keep it out of the
+nav, and require it to describe every page and every supporting file. Its
+links resolve against the source tree, so ``tests/test_markdown_links.py``
+covers them.
 """
 
 from __future__ import annotations
@@ -77,8 +86,17 @@ def _load_nav() -> list[str]:
     return _nav_entries(config["nav"])
 
 
+#: The directory's GitHub-facing README: documentation about the wiki, not a page of it.
+WIKI_README = WIKI_DIR / "README.md"
+
+
 def _wiki_pages() -> dict[str, str]:
-    return {path.name: path.read_text(encoding="utf-8") for path in sorted(WIKI_DIR.glob("*.md"))}
+    """The published pages: every ``wiki/*.md`` except the directory README."""
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(WIKI_DIR.glob("*.md"))
+        if path != WIKI_README
+    }
 
 
 def _injected_api_pages() -> set[str]:
@@ -235,3 +253,71 @@ def test_wiki_pages_carry_no_reference_to_docs_dir_pages_as_relative_links() -> 
     assert not offenders, (
         f"relative docs/ links would 404 on the built site (use GitHub blob URLs): {offenders}"
     )
+
+
+# =============================================================================
+# The directory README (wiki/README.md): documentation, not a page
+# =============================================================================
+
+#: Files the README must describe, as the ``](<relative link>)`` targets it
+#: uses for them (relative to wiki/). Each is a moving part of the build or
+#: publish pipeline; a contributor who renames one has to come here, and to
+#: the README, in the same change.
+WIKI_README_SUPPORTING_FILES = (
+    "../mkdocs.yml",
+    "../scripts/mkdocs_hooks.py",
+    "../scripts/preview_wiki.sh",
+    "../.github/workflows/pages.yml",
+    "../.github/workflows/lint.yml",
+    "../.github/scripts/render_coverage_badges.py",
+    "../tests/test_wiki.py",
+    "../tests/test_docs_coverage.py",
+    "../tests/test_markdown_links.py",
+)
+
+
+def test_wiki_readme_is_excluded_from_the_build_and_the_nav() -> None:
+    """The README is for GitHub; index.md is the home page.
+
+    Without the exclusion MkDocs warns that README.md conflicts with index.md
+    and ``strict`` turns that into a failed build, so this is what keeps the
+    strict build green rather than a stylistic preference.
+    """
+    config = yaml.safe_load(MKDOCS_YML.read_text(encoding="utf-8"))
+    patterns = str(config.get("exclude_docs", "")).split()
+    assert "/README.md" in patterns, "mkdocs.yml must exclude wiki/README.md via exclude_docs"
+    assert "README.md" not in _load_nav(), "the directory README is not a wiki page"
+    assert WIKI_README.is_file()
+
+
+def test_wiki_readme_documents_every_page_in_the_directory() -> None:
+    """Each published page has a row that links to it; no row names a ghost page."""
+    text = WIKI_README.read_text(encoding="utf-8")
+    linked_pages = {
+        target for target in _link_targets(text) if target.endswith(".md") and "/" not in target
+    }
+    pages = set(_wiki_pages())
+    assert linked_pages == pages, (
+        f"README/pages mismatch — pages without a README link: {sorted(pages - linked_pages)}, "
+        f"README links to pages that do not exist: {sorted(linked_pages - pages)}"
+    )
+    # Every published page is a table row (``| [`name.md`](name.md) |``), not
+    # just a passing mention, so the table of contents stays a complete
+    # inventory of the directory.
+    for page in sorted(pages):
+        assert re.search(rf"^\| \[`{re.escape(page)}`\]\({re.escape(page)}\) \|", text, re.M), (
+            f"wiki/README.md has no table row for {page}"
+        )
+
+
+def test_wiki_readme_links_every_supporting_file() -> None:
+    """The build and publish pipeline it describes is linked, not just named.
+
+    The paths themselves resolve (and are checked) in tests/test_markdown_links.py;
+    this pins that the README keeps pointing at each moving part at all.
+    """
+    targets = _link_targets(WIKI_README.read_text(encoding="utf-8"))
+    missing = [path for path in WIKI_README_SUPPORTING_FILES if path not in targets]
+    assert not missing, f"wiki/README.md no longer links to: {missing}"
+    for path in WIKI_README_SUPPORTING_FILES:
+        assert (WIKI_DIR / path).resolve().is_file(), f"supporting file vanished: {path}"
