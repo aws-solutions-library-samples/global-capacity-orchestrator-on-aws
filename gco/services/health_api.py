@@ -406,6 +406,8 @@ def _run_server() -> None:
     """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
+    from gco.services.uvicorn_runtime import describe_uvicorn_runtime
+
     host = os.getenv("HOST", "0.0.0.0")  # container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
@@ -416,7 +418,10 @@ def _run_server() -> None:
         )
     )
 
-    logger.info("Starting Health API on %s:%d", host, port)
+    loop_impl, http_impl = describe_uvicorn_runtime()
+    logger.info(
+        "Starting Health API on %s:%d (uvicorn loop=%s http=%s)", host, port, loop_impl, http_impl
+    )
 
     uvicorn.run(
         "gco.services.health_api:app",

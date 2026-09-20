@@ -183,6 +183,8 @@ httpcore==1.0.9
     # via httpx
 httpcore2==2.12.0
     # via httpx2
+httptools==0.8.0
+    # via gco-cli (pyproject.toml)
 httpx==0.28.1
     # via
     #   gco-cli
@@ -635,6 +637,10 @@ uvicorn==0.52.4
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   mcp
+uvloop==0.22.1
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
 virtualenv==21.3.0
     # via pre-commit
 watchfiles==1.1.1

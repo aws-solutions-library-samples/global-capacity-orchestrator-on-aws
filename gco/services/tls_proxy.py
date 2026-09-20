@@ -5,6 +5,18 @@ using this module exposes only HTTPS to the pod network and forwards decrypted
 bytes over loopback. Certificate files are treated as a pluggable projection:
 today cert-manager supplies a Secret volume; a future Kubernetes PodCertificate
 volume can replace it without changing the proxy or Service topology.
+
+Rotation never touches the listening socket. The listener is bound once with a
+dispatcher ``SSLContext`` that carries no keypair; its ``sni_callback`` points
+every handshake at the currently active, fully validated keypair context.
+OpenSSL runs that callback for every ClientHello -- with ``server_name=None``
+when the peer sends no SNI, which is how the ALB connects to its targets -- so
+activating a rotated leaf is a single attribute assignment: no accept gap while
+a replacement listener binds, no rebind that could fail, and established
+streams keep the session they already negotiated.
+
+The process runs on uvloop when it is importable (the service images ship it
+for uvicorn) and on the stdlib selector loop otherwise.
 """
 
 from __future__ import annotations
@@ -17,6 +29,8 @@ import math
 import os
 import signal
 import ssl
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -91,11 +105,17 @@ def _keypair_digest(config: ProxyConfig) -> str:
     return digest.hexdigest()
 
 
-def _ssl_context(config: ProxyConfig) -> tuple[ssl.SSLContext, str]:
-    """Build a TLS 1.2+ server context and return its keypair digest."""
-    digest = _keypair_digest(config)
+def _server_context() -> ssl.SSLContext:
+    """TLS 1.2+ server context with no keypair; handshakes fail closed until one is loaded."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def _ssl_context(config: ProxyConfig) -> tuple[ssl.SSLContext, str]:
+    """Build a validated keypair context and return it with its keypair digest."""
+    digest = _keypair_digest(config)
+    context = _server_context()
     context.load_cert_chain(config.cert_file, config.key_file)
     return context, digest
 
@@ -113,15 +133,31 @@ async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 class TlsProxy:
-    """TLS-only TCP proxy with certificate reload and graceful stream drain."""
+    """TLS-only TCP proxy with in-place certificate rotation and graceful stream drain."""
 
     def __init__(self, config: ProxyConfig) -> None:
         self.config = config
         self._server: asyncio.Server | None = None
+        # Replaced by the projected keypair in start(); until then the
+        # keypair-less placeholder makes any handshake fail closed.
+        self._active_context: ssl.SSLContext = _server_context()
         self._keypair_digest = ""
         self._stop = asyncio.Event()
         self._connections: set[asyncio.Task[Any]] = set()
-        self._retired_acceptors: set[asyncio.Task[Any]] = set()
+
+    def _select_context(
+        self,
+        ssl_object: ssl.SSLObject,
+        server_name: str | None,
+        dispatcher: ssl.SSLContext,
+    ) -> None:
+        """Point one handshake at the keypair active when its ClientHello arrived.
+
+        The ALB sends no SNI, so ``server_name`` is ``None`` in production; the
+        active leaf serves every peer regardless of the name presented.
+        """
+        del server_name, dispatcher
+        ssl_object.context = self._active_context
 
     async def _handle_connection(
         self,
@@ -158,13 +194,15 @@ class TlsProxy:
                 self._connections.discard(task)
 
     async def start(self) -> None:
-        """Start the cert-backed ALB listener."""
-        context, self._keypair_digest = _ssl_context(self.config)
+        """Bind the ALB listener once; every handshake is routed to the active keypair."""
+        self._active_context, self._keypair_digest = _ssl_context(self.config)
+        dispatcher = _server_context()
+        dispatcher.sni_callback = self._select_context
         self._server = await asyncio.start_server(
             self._handle_connection,
             self.config.host,
             self.config.port,
-            ssl=context,
+            ssl=dispatcher,
         )
         logger.info(
             "TLS proxy listening on https://%s:%d; upstream=http://%s:%d",
@@ -174,59 +212,40 @@ class TlsProxy:
             self.config.upstream_port,
         )
 
-    async def _reload_certificate(self, context: ssl.SSLContext, digest: str) -> None:
-        old_server = self._server
-        if old_server is not None:
-            # ``Server.wait_closed`` waits for accepted clients on current
-            # Python releases. Closing the acceptor releases its listening
-            # socket synchronously; retire it in the background so a long-lived
-            # stream cannot block the replacement listener from binding.
-            old_server.close()
-            retired = asyncio.create_task(old_server.wait_closed())
-            self._retired_acceptors.add(retired)
-            retired.add_done_callback(self._retired_acceptors.discard)
-        try:
-            self._server = await asyncio.start_server(
-                self._handle_connection,
-                self.config.host,
-                self.config.port,
-                ssl=context,
-            )
-        except Exception:
-            self._server = None
-            self._stop.set()
-            logger.critical(
-                "TLS listener rebind failed after certificate rotation; exiting for restart",
-                exc_info=True,
-            )
-            raise
+    def activate_keypair(self, context: ssl.SSLContext, digest: str) -> None:
+        """Serve a validated rotated keypair to new handshakes.
+
+        The listener and every established stream are untouched: only the
+        context the next ClientHello is routed to changes.
+        """
+        self._active_context = context
         self._keypair_digest = digest
-        logger.info("Reloaded the TLS listener after workload certificate rotation")
+        logger.info("Activated the rotated workload certificate for new TLS handshakes")
 
     async def watch_certificates(self) -> None:
-        """Reload atomically projected certificate changes without dropping streams."""
+        """Activate atomically projected certificate changes without dropping streams."""
         while not self._stop.is_set():
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.config.poll_seconds)
             except TimeoutError:
                 # The polling interval elapsed normally; inspect the projected
-                # keypair and reload only when its content digest changed.
+                # keypair and activate it only when its content digest changed.
                 try:
                     context, digest = _ssl_context(self.config)
                 except OSError, RuntimeError, ssl.SSLError:
                     logger.exception("Rejected an unreadable or invalid rotated TLS keypair")
                     continue
                 if digest != self._keypair_digest:
-                    await self._reload_certificate(context, digest)
+                    self.activate_keypair(context, digest)
             else:
                 break
 
     async def shutdown(self) -> None:
         """Stop accepting connections and drain established streams."""
         self._stop.set()
-        current_server = self._server
-        if current_server is not None:
-            current_server.close()
+        server = self._server
+        if server is not None:
+            server.close()
 
         active = set(self._connections)
         if active:
@@ -245,19 +264,26 @@ class TlsProxy:
                     task.cancel()
                 await asyncio.gather(*active, return_exceptions=True)
 
-        acceptor_waiters: list[asyncio.Future[Any]] = list(self._retired_acceptors)
-        if current_server is not None:
-            acceptor_waiters.append(asyncio.ensure_future(current_server.wait_closed()))
-        if acceptor_waiters:
-            await asyncio.gather(*acceptor_waiters, return_exceptions=True)
+        if server is not None:
+            await server.wait_closed()
 
 
 async def run_proxy(config: ProxyConfig | None = None) -> None:
     """Run until SIGTERM/SIGINT, then drain accepted proxy connections."""
     proxy = TlsProxy(config or load_proxy_config())
     loop = asyncio.get_running_loop()
+    logger.info("TLS proxy event loop: %s.%s", type(loop).__module__, type(loop).__qualname__)
     for signum in (signal.SIGTERM, signal.SIGINT):
-        with contextlib.suppress(NotImplementedError):
+        with contextlib.suppress(NotImplementedError), warnings.catch_warnings():
+            # uvloop 0.22 validates the callback with asyncio.iscoroutinefunction,
+            # which Python 3.14 deprecates. The warning is attributed to this
+            # call site and, with the module running as __main__, would print
+            # into every sidecar's log at startup; nothing here can act on it.
+            warnings.filterwarnings(
+                "ignore",
+                message=r"'asyncio\.iscoroutinefunction' is deprecated",
+                category=DeprecationWarning,
+            )
             loop.add_signal_handler(signum, proxy._stop.set)
 
     await proxy.start()
@@ -279,12 +305,21 @@ async def run_proxy(config: ProxyConfig | None = None) -> None:
         raise watcher_error
 
 
+def _loop_factory() -> Callable[[], asyncio.AbstractEventLoop] | None:
+    """Prefer uvloop (shipped in the service images for uvicorn); else the stdlib loop."""
+    try:
+        import uvloop
+    except ImportError:
+        return None
+    return uvloop.new_event_loop
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    asyncio.run(run_proxy())
+    asyncio.run(run_proxy(), loop_factory=_loop_factory())
 
 
 if __name__ == "__main__":

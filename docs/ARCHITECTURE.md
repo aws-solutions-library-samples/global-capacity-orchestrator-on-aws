@@ -90,7 +90,7 @@ Each region contains:
 - Registered with Global Accelerator when the deployment partition is `aws`, and recorded in the global-region SSM registry in every partition
 - Routes `/api/v1/*` and `/inference/*` through authenticated platform services via the shared `HTTPRoute`
 - Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and the exact `gco.aws/gateway` ownership tag before a regional proxy forwards traffic
-- Terminates private-root TLS, then re-encrypts target traffic to TLS-only proxy sidecars on pod port 8443 with HTTPS `/healthz` target-group checks. Each sidecar hot-reloads its projected leaf and forwards only over pod loopback; ALB does not validate the self-signed workload leaves. HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
+- Terminates private-root TLS, then re-encrypts target traffic to TLS-only proxy sidecars on pod port 8443 with HTTPS `/healthz` target-group checks. Each sidecar (`gco.services.tls_proxy`, the same image as its application, running on uvloop) hot-reloads its projected leaf in place — the listener is bound once and every handshake is routed to the currently active keypair, so rotation never refuses a connection or drops a stream — and forwards only over pod loopback; ALB does not validate the self-signed workload leaves. HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
 
 **Regional API Gateway Bridge** (separate stack)
 
@@ -436,6 +436,7 @@ A second property concerns timing. The VPC CNI attaches a new pod's policies in 
 - **Pod Disruption Budgets**: `maxUnavailable: 1` on every multi-replica platform Deployment, so one voluntary disruption at a time whatever the replica count (a `minAvailable` budget on an autoscaled Deployment would widen as the HPA scales up); the single-replica cost monitor carries `karpenter.sh/do-not-disrupt` instead
 - **Health Checks**: Startup, liveness, and readiness probes on every container
 - **Graceful Shutdown**: preStop hooks plus a uvicorn drain budget (`GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`) inside `terminationGracePeriodSeconds` let in-flight requests and streams complete
+- **Server Runtime**: The four FastAPI services run uvicorn on uvloop with the httptools parser (both shipped in their images and picked by uvicorn's `auto` selection); each service logs the resolved `loop=`/`http=` implementations at startup and the image CI jobs assert the same resolution
 - **Rolling Updates**: Zero-downtime deployments with maxUnavailable=0, one surge pod, and three retained revisions
 - **Auto-Healing**: Kubernetes restarts failed pods
 

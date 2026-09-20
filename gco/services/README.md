@@ -31,7 +31,8 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `spot_price_gate.py` | TTL-cached spot-price lookup and per-job dispatch decisions for price-capped central queue records. |
 | `structured_logging.py` | JSON logging and safe operational-context formatting for service processes. |
 | `template_store.py` | DynamoDB-backed job templates, webhook registrations, and central queue lifecycle records. |
-| `tls_proxy.py` | Hot-reloading TLS sidecar proxy that terminates pod-facing HTTPS and forwards over loopback. |
+| `tls_proxy.py` | uvloop-backed TLS sidecar proxy that terminates pod-facing HTTPS, forwards over loopback, and activates rotated cert-manager leaves in place without rebinding its listener. |
+| `uvicorn_runtime.py` | Reports which event loop (uvloop) and HTTP parser (httptools) uvicorn's `auto` selection resolved, for the FastAPI services' startup log line. |
 | `webhook_dispatcher.py` | Delivers HMAC-signed job lifecycle notifications with bounded retry behavior. |
 
 ## API Routes
