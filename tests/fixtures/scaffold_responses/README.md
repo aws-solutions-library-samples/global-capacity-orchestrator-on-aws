@@ -33,7 +33,7 @@ seen continues to round-trip through the validator.
 
 ```text
 tests/fixtures/
-├── scaffold_response_capture_provenance.json # prompt hashes for capture cohorts
+├── scaffold_response_capture_provenance.json  # prompt hashes for capture cohorts
 └── scaffold_responses/
     ├── README.md                              # this file
     ├── global_anthropic_claude_opus_5.json    # canonical default

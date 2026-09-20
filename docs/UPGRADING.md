@@ -151,12 +151,12 @@ should show `CREATE_COMPLETE`.
 The new regional stacks start empty. Put back what the workloads need:
 
 ```bash
-gco stacks access -r us-east-1                                 # kubectl access to the new cluster
+gco stacks access -r us-east-1                                           # kubectl access to the new cluster
 gco storage sync cluster-shared ./staged --prefix upgrade/$(date +%F)/   # or straight from S3 in a job
 gco storage sync regional-shared:us-east-1 ./staged/regional-shared --direction upload
-gco models list                                                # model weights were never touched
-gco inference deploy ...                                       # recreate endpoints
-gco jobs submit ...                                            # resubmit work
+gco models list                                                          # model weights were never touched
+gco inference deploy ...                                                 # recreate endpoints
+gco jobs submit ...                                                      # resubmit work
 ```
 
 Jobs that read their inputs from the cluster-shared or model buckets need

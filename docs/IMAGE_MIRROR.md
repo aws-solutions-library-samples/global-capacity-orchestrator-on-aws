@@ -108,7 +108,7 @@ The auto-mirror on deploy covers the common case. Run the CLI directly when you 
 
 ```bash
 gco images mirror --region us-east-1
-gco images mirror --region us-east-1 --dry-run          # preview the plan only
+gco images mirror --region us-east-1 --dry-run           # preview the plan only
 gco images mirror --region us-east-1 --ecr-namespace gco/dockerhub
 gco images mirror --region us-east-1 --no-skip-existing  # re-copy even if present
 ```
@@ -162,7 +162,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 
 ```bash
 gco images mirror --region us-east-1 --dry-run   # what should be mirrored
-gco stacks addons install -r us-east-1                          # re-fire the Helm install
+gco stacks addons install -r us-east-1           # re-fire the Helm install
 gco stacks addons status -r us-east-1
 ```
 

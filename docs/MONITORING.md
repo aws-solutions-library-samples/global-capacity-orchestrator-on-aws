@@ -231,7 +231,7 @@ survive.
 `mlflow.monitoring:5000`) — no Ingress, no public endpoint:
 
 ```bash
-gco monitoring open --service mlflow          # http://localhost:5000
+gco monitoring open --service mlflow                  # http://localhost:5000
 gco monitoring open --service mlflow --via-ssm auto   # no VPC route? ephemeral bastion
 ```
 

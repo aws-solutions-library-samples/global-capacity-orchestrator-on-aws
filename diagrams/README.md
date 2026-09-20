@@ -112,8 +112,8 @@ the same PR.
 ```bash
 bash .github/scripts/use-pinned-npm.sh package.json
 npm ci --ignore-scripts --no-audit --no-fund  # locked cdk-dia + CDK CLI
-pip install -e '.[cdk]'    # CDK libs used to synthesize the app in-process
-brew install graphviz      # or: apt-get install graphviz  (provides `dot`)
+pip install -e '.[cdk]'                       # CDK libs used to synthesize the app in-process
+brew install graphviz                         # or: apt-get install graphviz  (provides `dot`)
 ```
 
 **Code flowcharts** (`pyflowchart` + `playwright` + Chromium):
