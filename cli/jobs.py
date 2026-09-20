@@ -21,8 +21,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-20T23:20:00Z
+# Generated from Git commit: 42cc3f2094423b3f8056fbc5c20652e222b0650f
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)

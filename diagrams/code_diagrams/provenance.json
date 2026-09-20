@@ -37,9 +37,9 @@
       "source_commit": "7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab"
     },
     "cli/jobs.py": {
-      "digest": "92bf455c5ef34c0ab1fd01da277a013f6ae41eb8bc1c9e2ba77bf04ec0fc90f0",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "962680ef2d65b61f9950ab8b1d1fb347be9e01bb2c8ef5ed05d4dc4e426f742d",
+      "generated_at": "2026-09-20T23:20:00Z",
+      "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
     },
     "cli/stacks.py": {
       "digest": "ee94f2d48793dc26032a4ba785beba98c94920a8e0f9dae08de73dfef0490f52",
