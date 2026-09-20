@@ -589,6 +589,87 @@ class TestCollectPodState:
 
         json.dumps(info)
 
+    def test_the_real_client_wire_shape_produces_the_documented_output(self) -> None:
+        """Pin the field names against the real ``kubernetes`` client, not the fakes.
+
+        Every other case here drives the collector with MagicMocks, which
+        would happily accept a misspelled attribute. This one takes the exact
+        JSON the API server emits (camelCase, RFC 3339 timestamps), runs it
+        through ``ApiClient.deserialize`` into ``V1Pod`` / ``V1PodCondition``
+        objects, and asserts the collector reads ``status.conditions[].type``
+        / ``status`` / ``reason`` / ``message`` / ``last_transition_time`` and
+        ``spec.node_name`` off them exactly as documented in docs/API.md.
+        """
+        from kubernetes import client as k8s_client
+
+        def _wire_pod(
+            name: str, node_name: str | None, phase: str, condition: dict[str, Any]
+        ) -> Any:
+            wire = {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": name,
+                    "namespace": "gco-jobs",
+                    "creationTimestamp": "2024-01-15T10:00:00Z",
+                },
+                "spec": {"containers": [{"name": "main", "image": "pytorch:latest"}]},
+                "status": {"phase": phase, "conditions": [condition]},
+            }
+            if node_name is not None:
+                wire["spec"]["nodeName"] = node_name  # type: ignore[index]
+            response = MagicMock()
+            response.data = json.dumps(wire)
+            return k8s_client.ApiClient().deserialize(response, "V1Pod")
+
+        pods = [
+            _wire_pod(
+                "trainer-node-0",
+                "ip-10-0-1-7",
+                "Running",
+                {
+                    "type": "PodScheduled",
+                    "status": "True",
+                    "lastTransitionTime": "2024-01-15T10:00:02Z",
+                },
+            ),
+            _wire_pod(
+                "trainer-node-1",
+                None,
+                "Pending",
+                {
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": UNSCHEDULABLE_MESSAGE,
+                    "lastTransitionTime": "2024-01-15T10:00:05Z",
+                },
+            ),
+        ]
+        assert isinstance(pods[1].status.conditions[0], k8s_client.V1PodCondition)
+        core_v1 = _core_v1({"ip-10-0-1-7": _node(_gpu_node_labels(CHEAPEST_MEMBER))})
+
+        info = _collect_pod_scheduling(core_v1, pods)
+
+        assert info["pod_phase"] is None
+        assert info["pod_phases"] == {"Running": 1, "Pending": 1}
+        assert info["scheduled_pods"] == 1
+        assert info["unscheduled_pods"] == 1
+        assert info["unscheduled"] == [
+            {
+                "name": "trainer-node-1",
+                "phase": "Pending",
+                "reason": "Unschedulable",
+                "message": UNSCHEDULABLE_MESSAGE,
+                "since": "2024-01-15T10:00:05+00:00",
+            }
+        ]
+        assert info["node_name"] == "ip-10-0-1-7"
+        assert info["node_instance_type"] == CHEAPEST_MEMBER
+        assert info["nodes"][0]["pods"] == [{"name": "trainer-node-0", "phase": "Running"}]
+        core_v1.read_node.assert_called_once_with(name="ip-10-0-1-7")
+        json.dumps(info)
+
     def test_the_empty_shape_carries_every_pod_state_key(self) -> None:
         """The failure fallbacks return this shape, so the field set never varies."""
         empty = api_shared._empty_scheduling_info()
