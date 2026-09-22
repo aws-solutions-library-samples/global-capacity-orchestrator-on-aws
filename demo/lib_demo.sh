@@ -684,9 +684,12 @@ release_legacy_recording_lock() {
 
 # sanitize_cast <cast_file>
 #
-# Redacts AWS account IDs and temporary/long-lived AWS access-key IDs from an
-# asciinema recording. Account-ID-shaped values become 000000000000 and
-# AKIA/ASIA access-key IDs become REDACTED_AWS_ACCESS_KEY_ID. Operates in place.
+# Redacts AWS account IDs, temporary/long-lived AWS access-key IDs and the
+# recording user's home directory from an asciinema recording.
+# Account-ID-shaped values become 000000000000, AKIA/ASIA access-key IDs become
+# REDACTED_AWS_ACCESS_KEY_ID and the absolute $HOME prefix folds back to ``~``
+# (agent TUIs print the absolute working directory in their status bars, which
+# would otherwise commit the recording user's login name). Operates in place.
 #
 # The account heuristic is intentionally broad: unrelated standalone 12-digit
 # values are also redacted. Over-redaction is safer than allowing an account ID
@@ -705,16 +708,22 @@ sanitize_cast() {
 
     python3 - "$cast_file" <<'PYEOF'
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ACCOUNT_ID = re.compile(r"(?<![0-9])[0-9]{12}(?![0-9])")
 ACCESS_KEY_ID = re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
-PATTERNS = (
+PATTERNS = [
     (ACCOUNT_ID, "000000000000"),
     (ACCESS_KEY_ID, "REDACTED_AWS_ACCESS_KEY_ID"),
-)
+]
+# The absolute home directory names the recording user. Only the exact prefix
+# folds to "~": a sibling such as /Users/name2 is a different path.
+HOME_DIRECTORY = os.environ.get("HOME", "").rstrip("/")
+if HOME_DIRECTORY.startswith("/") and len(HOME_DIRECTORY) > 1:
+    PATTERNS.append((re.compile(re.escape(HOME_DIRECTORY) + r"(?![A-Za-z0-9_.-])"), "~"))
 
 
 def redactions(text):
@@ -810,7 +819,8 @@ PYEOF
 #
 # Independently verifies the sanitizer's postcondition without printing the
 # matched values. The all-zero account placeholder is allowed; every other
-# standalone 12-digit value and every AKIA/ASIA access-key ID fails closed.
+# standalone 12-digit value, every AKIA/ASIA access-key ID and every absolute
+# $HOME path fails closed.
 verify_cast_sanitized() {
     local cast_file="$1"
     if [ "${SKIP_SANITIZE:-}" = "1" ]; then
@@ -823,12 +833,19 @@ verify_cast_sanitized() {
 
     python3 - "$cast_file" <<'PYEOF'
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ACCOUNT_ID = re.compile(r"(?<![0-9])[0-9]{12}(?![0-9])")
 ACCESS_KEY_ID = re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
+HOME_DIRECTORY = os.environ.get("HOME", "").rstrip("/")
+HOME_PATH = (
+    re.compile(re.escape(HOME_DIRECTORY) + r"(?![A-Za-z0-9_.-])")
+    if HOME_DIRECTORY.startswith("/") and len(HOME_DIRECTORY) > 1
+    else None
+)
 
 
 def string_values(value):
@@ -876,11 +893,17 @@ access_key_ids = [
     for text in texts
     for match in ACCESS_KEY_ID.finditer(text)
 ]
-if account_ids or access_key_ids:
+home_paths = [
+    match.group(0)
+    for text in texts
+    for match in (HOME_PATH.finditer(text) if HOME_PATH else ())
+]
+if account_ids or access_key_ids or home_paths:
     print(
         "Cast sanitization verification failed: "
         f"{len(account_ids)} account-ID pattern(s), "
-        f"{len(access_key_ids)} access-key-ID pattern(s) remain.",
+        f"{len(access_key_ids)} access-key-ID pattern(s), "
+        f"{len(home_paths)} home-directory path(s) remain.",
         file=sys.stderr,
     )
     raise SystemExit(1)

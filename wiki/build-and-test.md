@@ -17,8 +17,8 @@ draft (draft PRs skip every job until marked ready for review):
   BATS, CLI and autopilot smoke checks, and MCP install/launch smoke.
 - **Integration Tests** — per-Dockerfile build and functional container
   contracts, kind-based end-to-end clusters with real NetworkPolicy
-  enforcement, Kubernetes manifest schema validation, the autopilot boot
-  probe, and MCP server tests.
+  enforcement, Kubernetes manifest schema validation, the per-engine
+  autopilot boot probes, and MCP server tests.
 - **Floci Tests** — an emulated-AWS layer: production code issuing real SDK
   requests against a local emulator, with zero AWS credentials in CI.
 - **Security** — bandit, pip-audit, npm audit, Trivy (filesystem and

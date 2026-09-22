@@ -14,6 +14,9 @@ from ..autopilot import (
     CODEX_BEDROCK_PROVIDER,
     CODEX_PACKAGE,
     CODEX_VERSION,
+    OPENCODE_BEDROCK_PROVIDER,
+    OPENCODE_PACKAGE,
+    OPENCODE_VERSION,
     AutopilotEngine,
     build_claude_env,
     build_codex_config_toml,
@@ -22,6 +25,10 @@ from ..autopilot import (
     build_codex_owned_args,
     build_launch_argv,
     build_mcp_config,
+    build_opencode_config,
+    build_opencode_env,
+    build_opencode_launch_argv,
+    build_opencode_owned_args,
     build_plugin_args,
     claude_install_command,
     codex_config_path,
@@ -30,17 +37,25 @@ from ..autopilot import (
     effective_aws_region,
     exec_claude,
     exec_codex,
+    exec_opencode,
     find_claude_binary,
     find_codex_binary,
+    find_opencode_binary,
     has_resumable_session,
     install_claude_code,
     install_codex,
+    install_opencode,
+    opencode_config_path,
+    opencode_install_command,
+    opencode_utility_invocation,
     plugin_paths_requested,
     resolve_codex_model,
     resolve_codex_reasoning_effort,
     resolve_engine,
     resolve_mcp_flags,
     resolve_model,
+    resolve_opencode_model,
+    resolve_opencode_skills_paths,
     resolve_plugin_paths,
     resolve_small_fast_model,
     stage_codex_skills,
@@ -48,6 +63,7 @@ from ..autopilot import (
     validate_imports,
     write_codex_config,
     write_mcp_config,
+    write_opencode_config,
 )
 from ..config import GCOConfig
 from ..output import confirm, emit_structured_document, get_output_formatter
@@ -66,6 +82,18 @@ from ..output import confirm, emit_structured_document, get_output_formatter
 #: passthrough args (after ``--``), the caller has already made a resume
 #: choice and autopilot neither prompts nor injects its own flags.
 _CLAUDE_RESUME_FLAGS = frozenset({"-c", "--continue", "-r", "--resume"})
+
+#: How each engine keeps the generated config authoritative, as shown in the
+#: dry-run summary next to the config path.
+_ENGINE_ISOLATION_LABELS = {
+    AutopilotEngine.CLAUDE_CODE.value: "--strict-mcp-config",
+    AutopilotEngine.CODEX.value: "isolated CODEX_HOME",
+    AutopilotEngine.OPENCODE.value: "OPENCODE_CONFIG, project config disabled",
+}
+
+#: Large generated documents the machine-readable dry-run plan omits; each
+#: has its own ``--print-config`` surface.
+_PLAN_GENERATED_CONFIG_KEYS = frozenset({"mcp_config", "codex_config", "opencode_config"})
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
@@ -136,11 +164,44 @@ def _plan(
             region=resolved_region,
             reasoning_effort=reasoning_effort,
         )
+        opencode_config = None
         binary = find_codex_binary()
         pin = f"{CODEX_PACKAGE}@{CODEX_VERSION}"
         install_command = codex_install_command()
         config_file = codex_config_path()
         display_name = "Codex"
+        resumable = False
+    elif resolved_engine is AutopilotEngine.OPENCODE:
+        # OpenCode has a native ``small_model`` for title generation and other
+        # lightweight calls, so the fast-model option maps onto it directly.
+        resolved_small = resolve_small_fast_model(small_fast_model)
+        if plugin_paths_requested(plugins):
+            raise ValueError(
+                "--plugin and GCO_AUTOPILOT_PLUGIN_DIRS are Claude Code plugin "
+                "inputs and are not supported by the opencode engine"
+            )
+        plugin_paths = []
+        if agents:
+            raise ValueError(
+                "--agents imports Claude Code agent files and is not supported by "
+                "the opencode engine"
+            )
+        skills_paths = resolve_opencode_skills_paths(skills)
+        resolved_model, warnings = resolve_opencode_model(model)
+        reasoning_effort = None
+        codex_config = None
+        opencode_config = build_opencode_config(
+            mcp_config,
+            model=resolved_model,
+            region=resolved_region,
+            small_model=resolved_small,
+            skills_paths=skills_paths,
+        )
+        binary = find_opencode_binary()
+        pin = f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+        install_command = opencode_install_command()
+        config_file = opencode_config_path()
+        display_name = "OpenCode"
         resumable = False
     else:
         resolved_model, warnings = resolve_model(model)
@@ -149,6 +210,7 @@ def _plan(
         validate_imports(skills, agents)
         reasoning_effort = None
         codex_config = None
+        opencode_config = None
         binary = find_claude_binary()
         pin = f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
         install_command = claude_install_command()
@@ -176,10 +238,13 @@ def _plan(
         "claude_code_pin": (pin if resolved_engine is AutopilotEngine.CLAUDE_CODE else None),
         "codex_binary": binary if resolved_engine is AutopilotEngine.CODEX else None,
         "codex_pin": pin if resolved_engine is AutopilotEngine.CODEX else None,
+        "opencode_binary": binary if resolved_engine is AutopilotEngine.OPENCODE else None,
+        "opencode_pin": pin if resolved_engine is AutopilotEngine.OPENCODE else None,
         "install_command": " ".join(install_command),
         "resumable_session": resumable,
         "mcp_config": mcp_config,
         "codex_config": codex_config,
+        "opencode_config": opencode_config,
     }
     return plan, warnings
 
@@ -233,6 +298,75 @@ def _resolve_codex_resume_args(
             return ("resume", "--", resume)
         return ("resume", resume)
     return ()
+
+
+def _resolve_opencode_resume_args(
+    continue_session: bool,
+    resume: str | None,
+) -> tuple[str, ...]:
+    """Map generic resume options onto OpenCode's ``--continue`` / ``--session``.
+
+    OpenCode has no interactive session picker flag, so a bare ``--resume``
+    is an error with the native way to find an id rather than a silent
+    fallback to the last session.
+    """
+    if continue_session:
+        return ("--continue",)
+    if resume is not None:
+        if resume == "":
+            raise ValueError(
+                "OpenCode has no interactive session picker. Pass --resume <session-id> "
+                "(list ids with `opencode session list`) or use --continue for the "
+                "most recent session."
+            )
+        return ("--session", resume)
+    return ()
+
+
+#: OpenCode flags and subcommands that would take the launch off the plan.
+#: ``--model`` is owned by Autopilot (use the top-level ``--model``);
+#: ``upgrade`` would replace the pinned binary in place.
+_OPENCODE_RESERVED_ARGS = frozenset({"-m", "--model", "upgrade"})
+_OPENCODE_RESERVED_PREFIXES = ("--model=",)
+
+
+def _validate_opencode_engine_args(
+    engine_args: tuple[str, ...],
+    *,
+    resuming: bool = False,
+) -> None:
+    """Reject native OpenCode overrides that would invalidate the launch plan.
+
+    Everything else passes through untouched: ``run`` for non-interactive
+    prompts, ``--auto`` to lift the ``ask`` permission floor for one session,
+    ``--agent``, ``--print-logs``, and so on. Scanning stops at a bare ``--``
+    because OpenCode treats the remainder as prompt text.
+
+    Utility subcommands (``mcp list``, ``models``, ...) run against the
+    generated config without the session flags, so combining one with
+    ``--continue``/``--resume`` is a contradiction reported here instead of
+    a silently dropped selector.
+    """
+    if resuming and opencode_utility_invocation(engine_args):
+        raise ValueError(
+            f"OpenCode subcommand {engine_args[0]!r} is a utility, not a session; "
+            "--continue/--resume do not apply to it."
+        )
+    for argument in engine_args:
+        if argument == "--":
+            break
+        attached_short_override = argument.startswith("-m") and not argument.startswith("--")
+        if (
+            argument in _OPENCODE_RESERVED_ARGS
+            or argument.startswith(_OPENCODE_RESERVED_PREFIXES)
+            or attached_short_override
+        ):
+            raise ValueError(
+                f"OpenCode passthrough option {argument!r} would override Autopilot's "
+                "Bedrock launch plan. Use the top-level `gco autopilot --model` option "
+                "for model overrides; in-place upgrades are incompatible with the "
+                "pinned engine install."
+            )
 
 
 def _validate_codex_engine_args(engine_args: tuple[str, ...]) -> None:
@@ -399,7 +533,7 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
         print(f"  Fast model:        {plan['small_fast_model']}")
     print(f"  AWS region:        {plan['region']}")
     print(f"  Workspace:         {plan['workspace']}")
-    isolation = "--strict-mcp-config" if plan["engine"] == "claude-code" else "isolated CODEX_HOME"
+    isolation = _ENGINE_ISOLATION_LABELS[plan["engine"]]
     print(f"  MCP config:        {plan['mcp_config_path']}  ({isolation})")
     print(f"  MCP servers ({len(plan['mcp_servers'])}):   " + ", ".join(plan["mcp_servers"]))
     if plan["gco_mcp_env"]:
@@ -412,6 +546,9 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     if plan["engine"] == AutopilotEngine.CODEX.value and plan["import_skills"]:
         skills = ", ".join(plan["import_skills"])
         print(f"  Skills:            {skills}  (copied into isolated CODEX_HOME)")
+    elif plan["engine"] == AutopilotEngine.OPENCODE.value and plan["import_skills"]:
+        skills = ", ".join(plan["import_skills"])
+        print(f"  Skills:            {skills}  (referenced via skills.paths)")
     else:
         imports = [f"skills:{path}" for path in plan["import_skills"]] + [
             f"agents:{path}" for path in plan["import_agents"]
@@ -429,6 +566,11 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
         print("  Previous session:  found — launch will offer to resume (or pass --continue)")
     elif plan["engine"] == "claude-code":
         print("  Previous session:  none for this workspace")
+    elif plan["engine"] == AutopilotEngine.OPENCODE.value:
+        print(
+            "  Previous session:  use --continue or --resume <session-id> to reopen an "
+            "OpenCode session"
+        )
     else:
         print("  Previous session:  use --continue or --resume to reopen a Codex session")
     print("  " + "-" * 68)
@@ -443,7 +585,8 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     default=None,
     help=(
         "Agent runtime (default: claude-code; env override: GCO_AUTOPILOT_ENGINE). "
-        "Codex uses Amazon Bedrock and an isolated CODEX_HOME."
+        "Codex uses Amazon Bedrock and an isolated CODEX_HOME; OpenCode uses "
+        "Amazon Bedrock through a generated OPENCODE_CONFIG."
     ),
 )
 @click.option(
@@ -452,18 +595,21 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     default=None,
     help=(
         "Bedrock model or inference-profile id for the selected engine. "
-        "Defaults: context.bedrock.claude_code_default_model_id or "
-        "context.bedrock.codex_default_model_id. Codex env override: "
-        "GCO_AUTOPILOT_CODEX_MODEL; shared fallback: GCO_AUTOPILOT_MODEL."
+        "Defaults: context.bedrock.claude_code_default_model_id, "
+        "context.bedrock.codex_default_model_id, or "
+        "context.bedrock.opencode_default_model_id. Engine env overrides: "
+        "GCO_AUTOPILOT_CODEX_MODEL, GCO_AUTOPILOT_OPENCODE_MODEL; shared "
+        "fallback: GCO_AUTOPILOT_MODEL."
     ),
 )
 @click.option(
     "--small-fast-model",
     default=None,
     help=(
-        "Optional Bedrock model for Claude Code's background/fast tasks "
-        "(env override: GCO_AUTOPILOT_SMALL_FAST_MODEL; unset by default). "
-        "Claude-only; Codex rejects fast-model configuration."
+        "Optional Bedrock model for background/fast tasks: Claude Code's "
+        "ANTHROPIC_SMALL_FAST_MODEL or OpenCode's small_model (env override: "
+        "GCO_AUTOPILOT_SMALL_FAST_MODEL; unset by default). Codex rejects "
+        "fast-model configuration."
     ),
 )
 @click.option(
@@ -503,7 +649,7 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     help=(
         "Load a Claude Code plugin directory or .zip into the session "
         "(repeatable; env: GCO_AUTOPILOT_PLUGIN_DIRS, colon-separated). "
-        "Claude-only; Codex rejects plugins."
+        "Claude-only; Codex and OpenCode reject plugins."
     ),
 )
 @click.option(
@@ -514,7 +660,8 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     help=(
         "Import a directory of skills (one subdirectory per skill, each "
         "with a SKILL.md) into the session (repeatable). Claude stages a "
-        "session plugin; Codex copies skills into GCO's isolated CODEX_HOME."
+        "session plugin; Codex copies skills into GCO's isolated CODEX_HOME; "
+        "OpenCode references the directories through skills.paths."
     ),
 )
 @click.option(
@@ -524,8 +671,8 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     metavar="DIR",
     help=(
         "Import a directory of Claude Code agent files (*.md subagent "
-        "definitions) into the session (repeatable). Claude-only; Codex "
-        "rejects agent imports."
+        "definitions) into the session (repeatable). Claude-only; Codex and "
+        "OpenCode reject agent imports."
     ),
 )
 @click.option(
@@ -544,7 +691,8 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     metavar="[SESSION_ID]",
     help=(
         "Resume a specific session by id, or open the selected engine's "
-        "interactive session picker when no id is given."
+        "interactive session picker when no id is given (Claude Code and "
+        "Codex; OpenCode has no picker and requires the id)."
     ),
 )
 @click.option(
@@ -579,17 +727,21 @@ def autopilot(
     yes: Any,
     engine_args: Any,
 ) -> None:
-    """Launch a fully configured Claude Code or Codex session for GCO.
+    """Launch a fully configured Claude Code, Codex, or OpenCode session for GCO.
 
     Claude Code remains the default engine. Select Codex with ``--engine
-    codex`` or ``GCO_AUTOPILOT_ENGINE=codex``. Both engines use Amazon
-    Bedrock through your AWS credentials and receive the GCO MCP server plus
+    codex`` (``GCO_AUTOPILOT_ENGINE=codex``) or OpenCode with ``--engine
+    opencode`` (``GCO_AUTOPILOT_ENGINE=opencode``). Every engine uses Amazon
+    Bedrock through your AWS credentials and receives the GCO MCP server plus
     the recommended companion servers.
 
     Each engine has an independent model default in ``cdk.json`` and supports
     ``--model`` / environment overrides. Codex uses GCO's isolated
     ``~/.gco/autopilot/codex`` home and official Amazon Bedrock provider
-    configuration; Claude preserves its JSON config and strict MCP mode.
+    configuration; OpenCode reads a generated ``opencode.json`` through
+    ``OPENCODE_CONFIG`` with project config disabled and edit/shell
+    permissions set to ask (pass ``-- --auto`` to lift that for one session);
+    Claude preserves its JSON config and strict MCP mode.
 
     If the selected CLI is absent, Autopilot offers to install its exact npm
     pin. Arguments after ``--`` pass through unchanged to that CLI.
@@ -600,14 +752,17 @@ def autopilot(
     the read-only toolset; pass ``--enable`` per flag or ``--enable all-tools``.
     ``--mcp-env`` sets any other GCO server variable.
 
-    ``--skills`` works with either engine. ``--plugin`` and ``--agents`` are
-    Claude-only because they use Claude Code plugin and agent formats.
+    ``--skills`` works with every engine. ``--small-fast-model`` works with
+    Claude Code and OpenCode. ``--plugin`` and ``--agents`` are Claude-only
+    because they use Claude Code plugin and agent formats.
 
     \b
     Examples:
         gco autopilot
         gco autopilot --engine codex
+        gco autopilot --engine opencode
         GCO_AUTOPILOT_ENGINE=codex gco autopilot --continue
+        GCO_AUTOPILOT_ENGINE=opencode gco autopilot --continue
         gco autopilot --resume
         gco autopilot -e mission -e infrastructure-deploy
         gco autopilot -e all-tools
@@ -617,9 +772,12 @@ def autopilot(
         gco autopilot --plugin ~/plugins/incident-response
         gco autopilot -m global.anthropic.claude-sonnet-4-6
         gco autopilot --engine codex -m global.openai.gpt-5.6-terra
+        gco autopilot --engine opencode -m us.moonshotai.kimi-k3
         gco autopilot --engine codex --print-config
+        gco autopilot --engine opencode --print-config
         gco autopilot --dry-run
         gco autopilot -y -- --permission-mode plan
+        gco autopilot --engine opencode -y -- --auto
 
     \b
     Requirements:
@@ -644,6 +802,13 @@ def autopilot(
         resolved_engine = resolve_engine(engine)
         if resolved_engine is AutopilotEngine.CODEX:
             _validate_codex_engine_args(tuple(engine_args))
+        elif resolved_engine is AutopilotEngine.OPENCODE:
+            _validate_opencode_engine_args(
+                tuple(engine_args),
+                resuming=continue_session or resume is not None,
+            )
+            # Fail before the plan resolves so a bare --resume never installs.
+            _resolve_opencode_resume_args(continue_session, resume)
         plan, warnings = _plan(
             config,
             model,
@@ -669,6 +834,12 @@ def autopilot(
     if print_config:
         if plan["engine"] == AutopilotEngine.CODEX.value:
             click.echo(plan["codex_config"], nl=False)
+        elif plan["engine"] == AutopilotEngine.OPENCODE.value:
+            emit_structured_document(
+                plan["opencode_config"],
+                output_format="json",
+                rendered=json.dumps(plan["opencode_config"], indent=2),
+            )
         else:
             # Preserve Claude's raw JSON machine-readable surface.
             emit_structured_document(
@@ -686,10 +857,65 @@ def autopilot(
                 {
                     key: value
                     for key, value in plan.items()
-                    if key not in {"mcp_config", "codex_config"}
+                    if key not in _PLAN_GENERATED_CONFIG_KEYS
                 }
             )
         return
+
+    if plan["engine"] == AutopilotEngine.OPENCODE.value:
+        opencode_binary = plan["opencode_binary"]
+        if opencode_binary is None:
+            formatter.print_info(f"OpenCode is not installed (pinned: {plan['opencode_pin']}).")
+            if not yes and not confirm(f"Install it now with `{plan['install_command']}`?"):
+                formatter.print_error(
+                    "OpenCode is required for this engine. Install it manually with "
+                    f"`{plan['install_command']}` and re-run `gco autopilot --engine opencode`."
+                )
+                sys.exit(1)
+            rc = install_opencode()
+            if rc == 127:
+                formatter.print_error(
+                    "npm was not found on PATH. The GCO dev container ships the required "
+                    "Node.js/npm toolchain; rebuild it or install npm and re-run."
+                )
+                sys.exit(1)
+            if rc != 0:
+                formatter.print_error(f"`{plan['install_command']}` failed with exit code {rc}.")
+                sys.exit(1)
+            opencode_binary = find_opencode_binary()
+            if opencode_binary is None:
+                formatter.print_error(
+                    "OpenCode installed but the `opencode` binary is not on PATH. Open a "
+                    "new shell (or fix your npm global bin path) and re-run."
+                )
+                sys.exit(1)
+        try:
+            write_opencode_config(plan["opencode_config"])
+        except (OSError, ValueError) as e:
+            formatter.print_error(f"Failed to prepare the OpenCode session: {e}")
+            sys.exit(1)
+        resume_args = _resolve_opencode_resume_args(continue_session, resume)
+        env = build_opencode_env(plan["region"])
+        argv = build_opencode_launch_argv(
+            opencode_binary,
+            root_args=build_opencode_owned_args(model=plan["model"]),
+            resume_args=resume_args,
+            extra_args=tuple(engine_args),
+        )
+        formatter.print_info(
+            f"Launching OpenCode on Bedrock ({plan['model']}, "
+            f"provider={OPENCODE_BEDROCK_PROVIDER})..."
+        )
+        try:
+            rc = exec_opencode(argv, env)
+        except OSError as e:
+            formatter.print_error(
+                f"Failed to launch OpenCode at {argv[0]}: {e}. The install may be "
+                "incomplete — reinstall with "
+                f"`{' '.join(opencode_install_command())}` and re-run."
+            )
+            sys.exit(1)
+        sys.exit(rc)
 
     if plan["engine"] == AutopilotEngine.CODEX.value:
         codex_binary = plan["codex_binary"]

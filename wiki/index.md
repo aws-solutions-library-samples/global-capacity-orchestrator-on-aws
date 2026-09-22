@@ -29,8 +29,8 @@ success looks like, and points at the fixes when it does not.
 ![Checking GPU capacity for g5.xlarge in us-east-1 through the GCO MCP server](assets/images/gco_mcp_check_capacity.png)
 
 *Or just ask: the GCO MCP server answering a GPU-capacity question inside an
-AI-powered IDE. `gco autopilot` sets this up for Claude Code or OpenAI Codex
-in one command.*
+AI-powered IDE. `gco autopilot` sets this up for Claude Code, OpenAI Codex,
+or OpenCode in one command.*
 
 ## Is GCO for you?
 
@@ -50,8 +50,9 @@ batch ML, HPC, and everyday CPU jobs — who want:
 - **Outputs that outlive the pod**: shared EFS by default, FSx for Lustre and
   per-Region S3 buckets when you need them.
 - **An agent-first front door**: `gco autopilot` launches Claude Code on
-  Amazon Bedrock (`gco autopilot --engine codex` launches OpenAI Codex),
-  grounded by the GCO MCP server and recommended companion MCPs.
+  Amazon Bedrock (`gco autopilot --engine codex` launches OpenAI Codex and
+  `gco autopilot --engine opencode` launches OpenCode), grounded by the GCO
+  MCP server and recommended companion MCPs.
 
 The README's
 [Why GCO?](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#why-gco)

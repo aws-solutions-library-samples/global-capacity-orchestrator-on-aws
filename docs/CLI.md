@@ -434,7 +434,7 @@ gco analytics doctor
 
 ### Autopilot Command
 
-Launch a fully configured agent session for GCO—[Claude Code](https://code.claude.com/docs/en/overview) by default, or OpenAI Codex with `--engine codex`. Both use Amazon Bedrock with the GCO MCP server and recommended companion MCP servers preconfigured. Full guide: [docs/AUTOPILOT.md](AUTOPILOT.md).
+Launch a fully configured agent session for GCO—[Claude Code](https://code.claude.com/docs/en/overview) by default, OpenAI Codex with `--engine codex`, or [OpenCode](https://opencode.ai/docs/) with `--engine opencode`. Every engine uses Amazon Bedrock with the GCO MCP server and recommended companion MCP servers preconfigured. Full guide: [docs/AUTOPILOT.md](AUTOPILOT.md).
 
 ```bash
 # Default engine: Claude Code on Amazon Bedrock
@@ -445,45 +445,61 @@ gco autopilot
 # (context.bedrock.codex_default_model_id + codex.reasoning_effort)
 gco autopilot --engine codex
 
-# Preview either launch without installing, writing, or starting the agent
+# Alternate engine: OpenCode on Amazon Bedrock
+# (context.bedrock.opencode_default_model_id; shipped: Kimi K3)
+gco autopilot --engine opencode
+
+# Preview any launch without installing, writing, or starting the agent
 gco autopilot --dry-run
 gco autopilot --engine codex --dry-run
+gco autopilot --engine opencode --dry-run
 
 # Override the selected engine's Bedrock model or inference profile.
 # Any explicit Codex override intentionally omits canonical reasoning,
 # even when its ID equals the configured default.
 gco autopilot -m global.anthropic.claude-sonnet-4-6
 gco autopilot --engine codex -m global.openai.gpt-5.6-sol
+gco autopilot --engine opencode -m us.moonshotai.kimi-k3
 
 # Resume the previous workspace session using engine-native semantics
 gco autopilot --continue
 gco autopilot --engine codex --continue
+gco autopilot --engine opencode --continue
+gco autopilot --engine opencode --resume SESSION_ID   # OpenCode has no picker; bare --resume is an error
 
-# Enable opt-in GCO MCP tool groups (shared by both engines; repeatable)
+# Enable opt-in GCO MCP tool groups (shared by every engine; repeatable)
 gco autopilot -e mission -e infrastructure-deploy
 gco autopilot --engine codex -e mission
+gco autopilot --engine opencode -e mission
 
-# Import skills into either engine
+# Import skills into any engine
 gco autopilot --skills ~/team-skills
 gco autopilot --engine codex --skills ~/team-skills
+gco autopilot --engine opencode --skills ~/team-skills
 
-# Agents and plugins are Claude Code concepts and are rejected by Codex
+# Agents and plugins are Claude Code concepts and are rejected by Codex and OpenCode
 gco autopilot --agents ~/my-agents
 gco autopilot --plugin ~/plugins/incident-response
 
 # GCO MCP server only, no companions (shared)
 gco autopilot --no-companions
 
-# Print the selected engine's generated config: Claude JSON or Codex TOML
+# Print the selected engine's generated config: Claude JSON, Codex TOML, or OpenCode JSON
 gco autopilot --print-config
 gco autopilot --engine codex --print-config
+gco autopilot --engine opencode --print-config
 
 # Install the selected pinned CLI without prompting if it is absent
 gco autopilot -y
 gco autopilot --engine codex -y
+gco autopilot --engine opencode -y
+
+# Pass native arguments through after --
+gco autopilot --engine opencode -y -- --auto        # lift OpenCode's ask-first permission floor for one session
+gco autopilot --engine opencode -- mcp list         # OpenCode utility subcommands pass through verbatim
 ```
 
-If the selected `claude` or `codex` binary is missing, Autopilot offers that engine's exact pinned npm install. Neither agent CLI is baked into the dev container; first-use setup stays reproducible, and the monthly dependency scan tracks both pins. See the [Autopilot guide](AUTOPILOT.md) for model and Region precedence, generated JSON/TOML isolation, native argument passthrough, and each engine's resume behavior.
+If the selected `claude`, `codex`, or `opencode` binary is missing, Autopilot offers that engine's exact pinned npm install. No agent CLI is baked into the dev container; first-use setup stays reproducible, and the monthly dependency scan tracks all three pins. See the [Autopilot guide](AUTOPILOT.md) for model and Region precedence, generated JSON/TOML isolation, native argument passthrough, and each engine's resume behavior.
 
 ---
 
@@ -4694,7 +4710,7 @@ gco stacks regions set monitoring us-west-2 -y
 
 #### `gco stacks bedrock`
 
-Manage the four Bedrock model defaults in `context.bedrock`—Mission, capacity advisor, Claude Code, and Codex—plus the canonical Codex `reasoning_effort`. Every edit uses the managed-config engine, so it is validated, atomic, idempotent, and audited, and it preserves all sibling settings. The Codex model and effort remain independently editable so changing one never replaces the other; review them together when changing model families. See [Autopilot](AUTOPILOT.md#choosing-a-model-and-reasoning) for launch-time precedence and why explicit Codex model overrides omit the canonical effort.
+Manage the five Bedrock model defaults in `context.bedrock`—Mission, capacity advisor, Claude Code, Codex, and OpenCode—plus the canonical Codex `reasoning_effort`. Every edit uses the managed-config engine, so it is validated, atomic, idempotent, and audited, and it preserves all sibling settings. The Codex model and effort remain independently editable so changing one never replaces the other; review them together when changing model families. See [Autopilot](AUTOPILOT.md#choosing-a-model-and-reasoning) for launch-time precedence and why explicit Codex model overrides omit the canonical effort.
 
 ```bash
 gco stacks bedrock COMMAND [OPTIONS]
@@ -4702,12 +4718,13 @@ gco stacks bedrock COMMAND [OPTIONS]
 
 **Subcommands:**
 
-- `show` - Show all four managed model IDs, the Codex reasoning effort, and their backing cdk.json path (`gco stacks bedrock show`).
+- `show` - Show all five managed model IDs, the Codex reasoning effort, and their backing cdk.json path (`gco stacks bedrock show`).
 - `set-mission-model` - Set the Mission sampling default model/inference-profile ID (`gco stacks bedrock set-mission-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
 - `set-capacity-advisor-model` - Set the capacity advisor default model/inference-profile ID (`gco stacks bedrock set-capacity-advisor-model`). Same free-form validation; explicit `--model` overrides still win at run time.
 - `set-claude-code-model` - Set the Claude Code session model `gco autopilot` launches with (`gco stacks bedrock set-claude-code-model`). Same free-form validation; explicit `--model`/`GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 - `set-codex-model` - Set the canonical Codex session model (`gco stacks bedrock set-codex-model`) while preserving `context.bedrock.codex.reasoning_effort`. Explicit `--model`, `GCO_AUTOPILOT_CODEX_MODEL`, and `GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 - `set-codex-reasoning-effort` - Set `context.bedrock.codex.reasoning_effort` to `minimal`, `low`, `medium`, `high`, or `xhigh` while preserving the Codex model. This applies only when the canonical Codex model wins resolution.
+- `set-opencode-model` - Set the canonical OpenCode session model (`gco stacks bedrock set-opencode-model`). OpenCode has no engine-owned reasoning knob, so this is a single scalar. Explicit `--model`, `GCO_AUTOPILOT_OPENCODE_MODEL`, and `GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 
 **Example:**
 
@@ -4718,6 +4735,7 @@ gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
 gco stacks bedrock set-codex-model global.openai.gpt-5.6-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
+gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```
 
 #### `gco stacks fsx`
@@ -5908,11 +5926,12 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
-| `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default) or `codex`; top-level `--engine` wins. |
-| `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, and Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |
+| `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default), `codex`, or `opencode`; top-level `--engine` wins. |
+| `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`, and OpenCode after `GCO_AUTOPILOT_OPENCODE_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |
 | `GCO_AUTOPILOT_CODEX_MODEL` | Codex-specific Bedrock model override, ahead of the shared model variable. |
-| `GCO_AUTOPILOT_SMALL_FAST_MODEL` | Optional Bedrock model for Claude Code's background/fast tasks (unset by default; rejected by Codex). |
-| `GCO_AUTOPILOT_CONFIG_DIR` | Directory for generated Claude/Codex config and staged imports (default: `~/.gco/autopilot`; inside `gco-dev`, use a writable container path). |
+| `GCO_AUTOPILOT_OPENCODE_MODEL` | OpenCode-specific Bedrock model override, ahead of the shared model variable. |
+| `GCO_AUTOPILOT_SMALL_FAST_MODEL` | Optional Bedrock model for background/fast tasks: Claude Code's `ANTHROPIC_SMALL_FAST_MODEL` or OpenCode's `small_model` (unset by default; rejected by Codex). |
+| `GCO_AUTOPILOT_CONFIG_DIR` | Directory for generated Claude/Codex/OpenCode config and staged imports (default: `~/.gco/autopilot`; inside `gco-dev`, use a writable container path). |
 | `GCO_AUTOPILOT_PLUGIN_DIRS` | Colon-separated Claude Code plugin dirs/zips loaded into every `gco autopilot` session (merged with per-launch `--plugin` flags; not forwarded across the dev-container boundary because host paths may not exist there). |
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |

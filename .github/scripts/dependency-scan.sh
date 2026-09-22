@@ -20,6 +20,7 @@
 #     context.bedrock.capacity_advisor_default_model_id (capacity advisor),
 #     context.bedrock.claude_code_default_model_id (Claude Autopilot),
 #     context.bedrock.codex_default_model_id (Codex Autopilot),
+#     context.bedrock.opencode_default_model_id (OpenCode Autopilot),
 #     context.bedrock.embedding_model_id (Mission memory), and
 #     context.vector_store.embedding_model_id (workload RAG corpus), each
 #     compared against the newest same-family release — inference profiles
@@ -31,10 +32,10 @@
 #     AWS CLI v2, Docker CLI, Docker Buildx, uv) and the immutable AWS CLI
 #     runtime image in gco/services/inference_monitor.py — public registries,
 #     no AWS creds needed
-#   - GCO Autopilot pins from cli/autopilot.py: CLAUDE_CODE_VERSION and
-#     CODEX_VERSION install pins vs their npm latest dist-tags, plus companion
-#     MCP server liveness (missing/deprecated/yanked on npm or PyPI) — public
-#     endpoints, no AWS creds needed
+#   - GCO Autopilot pins from cli/autopilot.py: CLAUDE_CODE_VERSION,
+#     CODEX_VERSION and OPENCODE_VERSION install pins vs their npm latest
+#     dist-tags, plus companion MCP server liveness (missing/deprecated/yanked
+#     on npm or PyPI) — public endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
@@ -898,9 +899,10 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # advisor), context.bedrock.claude_code_default_model_id (the session
 # model GCO Autopilot hands to Claude Code),
 # context.bedrock.codex_default_model_id (the session model it hands to Codex),
-# and context.bedrock.embedding_model_id (Mission memory's text-embedding
-# model) — against the newest release in the SAME model family. The three
-# generation keys compare against system-defined inference profiles
+# context.bedrock.opencode_default_model_id (the session model it hands to
+# OpenCode), and context.bedrock.embedding_model_id (Mission memory's
+# text-embedding model) — against the newest release in the SAME model
+# family. The generation keys compare against system-defined inference profiles
 # (aws bedrock list-inference-profiles); the embedding key is a plain
 # foundation model, so it compares against
 # aws bedrock list-foundation-models --by-output-modality EMBEDDING.
@@ -934,7 +936,7 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
   echo "  $BEDROCK_MODEL_SKIP_REASON"
 else
-  for BEDROCK_MODEL_LEAF in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id codex_default_model_id embedding_model_id; do
+  for BEDROCK_MODEL_LEAF in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id codex_default_model_id opencode_default_model_id embedding_model_id; do
     CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json "$BEDROCK_MODEL_LEAF")"
     if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
       BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.${BEDROCK_MODEL_LEAF} from cdk.json."
@@ -1158,13 +1160,15 @@ DOCKERFILE_COUNT="$(wc -l < "$DOCKERFILE_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # GCO Autopilot pins (agent CLI releases + companion MCP servers)
 #
-# ``gco autopilot`` (cli/autopilot.py) carries three dependency surfaces that
+# ``gco autopilot`` (cli/autopilot.py) carries four dependency surfaces that
 # live in Python constants, invisible to Dependabot and to every sweep above:
 #
 #   CLAUDE_CODE_VERSION      exact @anthropic-ai/claude-code release installed
 #                            by the default engine on first use.
 #   CODEX_VERSION            exact @openai/codex release installed by the Codex
 #                            engine on first use.
+#   OPENCODE_VERSION         exact opencode-ai release installed by the
+#                            OpenCode engine on first use.
 #   COMPANION_MCP_SERVERS    the npx/uvx-launched companion MCP servers wired
 #                            into every autopilot session. Nothing pins them
 #                            (they resolve at launch), so the risk isn't
@@ -1233,6 +1237,8 @@ else
     "CLAUDE_CODE_VERSION" "@anthropic-ai/claude-code" extract_claude_code_pin
   check_autopilot_npm_pin \
     "CODEX_VERSION" "@openai/codex" extract_codex_pin
+  check_autopilot_npm_pin \
+    "OPENCODE_VERSION" "opencode-ai" extract_opencode_pin
 
   # Companion MCP server liveness. Missing/deprecated/yanked is drift; a
   # network failure marks the scan incomplete rather than inventing findings.
@@ -2494,8 +2500,9 @@ summary_row() {
     echo ""
     echo "A Bedrock model default configured in \`cdk.json\` is behind a newer"
     echo "release in the same model family. For"
-    echo "\`bedrock.mission_default_model_id\` and \`bedrock.codex_default_model_id\`,"
-    echo "update the value and re-capture the matching scaffold fixture"
+    echo "\`bedrock.mission_default_model_id\`, \`bedrock.codex_default_model_id\`"
+    echo "and \`bedrock.opencode_default_model_id\`, update the value and"
+    echo "re-capture the matching scaffold fixture"
     echo "(\`scripts/capture_scaffold_fixtures.py\`). For"
     echo "\`bedrock.capacity_advisor_default_model_id\` and"
     echo "\`bedrock.claude_code_default_model_id\`, updating the value is enough."
@@ -2547,8 +2554,9 @@ summary_row() {
     echo "## GCO Autopilot Pins"
     echo ""
     echo "\`gco autopilot\`'s dependency surfaces in \`cli/autopilot.py\`: the"
-    echo "pinned \`CLAUDE_CODE_VERSION\` and \`CODEX_VERSION\` agent CLIs"
-    echo "(each compared against its npm \`latest\` dist-tag) and the launch-time"
+    echo "pinned \`CLAUDE_CODE_VERSION\`, \`CODEX_VERSION\` and \`OPENCODE_VERSION\`"
+    echo "agent CLIs (each compared against its npm \`latest\` dist-tag) and the"
+    echo "launch-time"
     echo "companion MCP servers"
     echo "(reported when a package is missing, deprecated, or yanked on its"
     echo "registry — an unhealthy companion breaks every new session, so treat"

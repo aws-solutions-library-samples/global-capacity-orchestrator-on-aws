@@ -1092,7 +1092,9 @@ if isinstance(value, str) and value.strip():
 # family and differ only on version. The family is the geography +
 # provider + the non-version tokens of the model name, with numeric model
 # version/generation/date tokens dropped. Numeric tokens may be integers or
-# dotted versions embedded between hyphens:
+# dotted versions embedded between hyphens, or a single-letter generation
+# marker such as Moonshot's ``k2.5`` / ``k3`` (a letter followed by the
+# digits) when it follows the model's name word:
 #
 #   us.amazon.nova-pro-v1:0                       -> us.amazon.nova-pro
 #   global.amazon.nova-3-lite-v1:0                -> global.amazon.nova-lite
@@ -1100,6 +1102,7 @@ if isinstance(value, str) and value.strip():
 #   global.anthropic.claude-opus-4-6-v1           -> global.anthropic.claude-opus
 #   global.anthropic.claude-opus-9                -> global.anthropic.claude-opus
 #   global.openai.gpt-5.7-sol                     -> global.openai.gpt-sol
+#   us.moonshotai.kimi-k4                         -> us.moonshotai.kimi
 #
 # The trailing revision appears in three shapes across live profiles:
 # ``-vMAJOR:MINOR``, ``-vMAJOR`` alone (newer Anthropic profiles), and
@@ -1112,7 +1115,13 @@ if isinstance(value, str) and value.strip():
 # than the family) is deliberate: it keeps "Nova 1 Pro" and a future
 # "Nova 2 Pro" in the same family so a generation bump is reported as
 # drift, while different tiers (nova-pro vs nova-lite) and providers
-# stay in separate families and are never cross-suggested.
+# stay in separate families and are never cross-suggested. The
+# single-letter marker rule exists for the same reason: without it
+# ``kimi-k3`` would sit in its own ``kimi-k3`` family and a ``kimi-k4``
+# release would never be reported. The marker is only folded when it
+# follows a name word, so ids whose entire name IS the marker
+# (``deepseek.r1`` vs ``deepseek.v3``) keep separate families instead of
+# collapsing into a provider-wide one.
 bedrock_model_family() {
   python3 -c "
 import re, sys
@@ -1125,8 +1134,11 @@ elif len(parts) == 2:
     geo, provider, name = '', parts[0], parts[1]
 else:
     geo, provider, name = '', '', core
+words = [t for t in name.split('-') if t]
 tokens = [
-    t for t in name.split('-') if t and not re.fullmatch(r'\d+(?:\.\d+)*', t)
+    t for i, t in enumerate(words)
+    if not re.fullmatch(r'\d+(?:\.\d+)*', t)
+    and not (i > 0 and re.fullmatch(r'[A-Za-z]\d+(?:\.\d+)*', t))
 ]
 prefix = '.'.join([p for p in (geo, provider) if p])
 print(prefix + ('.' + '-'.join(tokens) if tokens else ''))
@@ -1190,7 +1202,8 @@ import json, re, sys
 current = sys.argv[1]
 def family(mid):
     # Keep in lockstep with bedrock_model_family above: the revision
-    # suffix is optional and its ``:MINOR`` half is too.
+    # suffix is optional and its ``:MINOR`` half is too, and a
+    # single-letter generation marker (kimi-k3) folds like a number.
     core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
     parts = core.split('.')
     if len(parts) >= 3:
@@ -1199,9 +1212,12 @@ def family(mid):
         geo, provider, name = '', parts[0], parts[1]
     else:
         geo, provider, name = '', '', core
+    words = [t for t in name.split('-') if t]
     tokens = [
-    t for t in name.split('-') if t and not re.fullmatch(r'\d+(?:\.\d+)*', t)
-]
+        t for i, t in enumerate(words)
+        if not re.fullmatch(r'\d+(?:\.\d+)*', t)
+        and not (i > 0 and re.fullmatch(r'[A-Za-z]\d+(?:\.\d+)*', t))
+    ]
     prefix = '.'.join([p for p in (geo, provider) if p])
     return prefix + ('.' + '-'.join(tokens) if tokens else '')
 def key(mid):
@@ -1267,7 +1283,8 @@ import json, re, sys
 current = sys.argv[1]
 def family(mid):
     # Keep in lockstep with bedrock_model_family above: the revision
-    # suffix is optional and its ``:MINOR`` half is too.
+    # suffix is optional and its ``:MINOR`` half is too, and a
+    # single-letter generation marker (kimi-k3) folds like a number.
     core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
     parts = core.split('.')
     if len(parts) >= 3:
@@ -1276,9 +1293,12 @@ def family(mid):
         geo, provider, name = '', parts[0], parts[1]
     else:
         geo, provider, name = '', '', core
+    words = [t for t in name.split('-') if t]
     tokens = [
-    t for t in name.split('-') if t and not re.fullmatch(r'\d+(?:\.\d+)*', t)
-]
+        t for i, t in enumerate(words)
+        if not re.fullmatch(r'\d+(?:\.\d+)*', t)
+        and not (i > 0 and re.fullmatch(r'[A-Za-z]\d+(?:\.\d+)*', t))
+    ]
     prefix = '.'.join([p for p in (geo, provider) if p])
     return prefix + ('.' + '-'.join(tokens) if tokens else '')
 def key(mid):
@@ -2122,6 +2142,26 @@ import re, sys
 with open(sys.argv[1]) as f:
     text = f.read()
 m = re.search(r'^CODEX_VERSION = \"([^\"]+)\"', text, re.MULTILINE)
+if m:
+    print(m.group(1))
+" "$file" 2>/dev/null
+}
+
+# extract_opencode_pin [autopilot_py]
+#
+# Prints the exact OpenCode CLI release the OpenCode Autopilot engine
+# installs, read from the scanner-stable ``OPENCODE_VERSION`` literal in
+# cli/autopilot.py. OpenCode (npm ``opencode-ai``) is the third lazy global
+# npm dependency, so it flows through the same monthly registry-drift
+# system as Claude Code and Codex rather than package.json.
+extract_opencode_pin() {
+  local file="${1:-cli/autopilot.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+m = re.search(r'^OPENCODE_VERSION = \"([^\"]+)\"', text, re.MULTILINE)
 if m:
     print(m.group(1))
 " "$file" 2>/dev/null

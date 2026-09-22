@@ -32,7 +32,16 @@ from cli.autopilot import (
     CODEX_PACKAGE,
     CODEX_VERSION,
     COMPANION_MCP_SERVERS,
+    OPENCODE_BEDROCK_PROVIDER,
+    OPENCODE_MCP_TIMEOUT_MS,
+    OPENCODE_PACKAGE,
+    OPENCODE_VERSION,
     build_codex_owned_args,
+    build_opencode_config,
+    build_opencode_owned_args,
+    opencode_aws_profile,
+    opencode_model_declaration,
+    opencode_utility_invocation,
 )
 from cli.commands.autopilot_cmd import autopilot
 from cli.config import GCOConfig
@@ -40,6 +49,7 @@ from gco.bedrock import (
     get_default_claude_code_model_id,
     get_default_codex_model_id,
     get_default_codex_reasoning_effort,
+    get_default_opencode_model_id,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +65,18 @@ _PRUNED_PACKAGES = (
     "@andrea9293/mcp-documentation-server",
 )
 
+#: Environment variables OpenCode's Bedrock loader treats as a credential
+#: source. Any one of them must suppress the ``profile`` pin in the generated
+#: config (an explicit profile makes the AWS SDK skip environment credentials).
+_OPENCODE_CREDENTIAL_SOURCE_ENV = (
+    "AWS_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+)
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -68,11 +90,20 @@ def _isolated_autopilot_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         "GCO_AUTOPILOT_ENGINE",
         "GCO_AUTOPILOT_MODEL",
         "GCO_AUTOPILOT_CODEX_MODEL",
+        "GCO_AUTOPILOT_OPENCODE_MODEL",
         "GCO_AUTOPILOT_SMALL_FAST_MODEL",
         "GCO_AUTOPILOT_PLUGIN_DIRS",
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
         "CODEX_HOME",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        # OpenCode's generated config pins the ``default`` AWS profile only
+        # when none of these credential sources is present; strip them so
+        # the developer's shell never changes the rendered provider block.
+        *_OPENCODE_CREDENTIAL_SOURCE_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GCO_AUTOPILOT_CONFIG_DIR", str(tmp_path / "autopilot"))
@@ -1050,8 +1081,8 @@ def test_claude_code_pin_is_an_exact_semver() -> None:
     assert re.fullmatch(r"\d+\.\d+\.\d+", CLAUDE_CODE_VERSION)
 
 
-def test_public_entry_points_document_both_autopilot_engines() -> None:
-    """Claude-first entry points must expose the equivalent Codex path."""
+def test_public_entry_points_document_all_autopilot_engines() -> None:
+    """Claude-first entry points must expose the equivalent Codex and OpenCode paths."""
     entry_points = (
         "README.md",
         "QUICKSTART.md",
@@ -1064,27 +1095,43 @@ def test_public_entry_points_document_both_autopilot_engines() -> None:
     missing = []
     for relative_path in entry_points:
         text = (_REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        if "Claude Code" not in text or "gco autopilot --engine codex" not in text:
+        if (
+            "Claude Code" not in text
+            or "gco autopilot --engine codex" not in text
+            or "gco autopilot --engine opencode" not in text
+        ):
             missing.append(relative_path)
-    assert not missing, f"public Autopilot docs missing Claude/Codex parity: {missing}"
+    assert not missing, f"public Autopilot docs missing Claude/Codex/OpenCode parity: {missing}"
 
     root_readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "demo/autopilot-claude-code.gif" in root_readme
     assert "demo/autopilot-codex.gif" in root_readme
+    assert "demo/autopilot-opencode.gif" in root_readme
 
     mcp_readme = _MCP_README.read_text(encoding="utf-8")
     assert "### Claude Code" in mcp_readme
     assert "### OpenAI Codex" in mcp_readme
-    codex_section = mcp_readme.split("### OpenAI Codex", 1)[1].split("### Cursor", 1)[0]
+    assert "### OpenCode" in mcp_readme
+    codex_section = mcp_readme.split("### OpenAI Codex", 1)[1].split("### OpenCode", 1)[0]
     codex_block = re.search(r"```toml\n(.*?)```", codex_section, re.S)
     assert codex_block is not None
     codex_config = tomllib.loads(codex_block.group(1))
     assert set(codex_config["mcp_servers"]) == {"gco"}
     assert codex_config["mcp_servers"]["gco"]["enabled"] is True
 
+    opencode_section = mcp_readme.split("### OpenCode", 1)[1].split("### Cursor", 1)[0]
+    opencode_block = re.search(r"```json\n(.*?)```", opencode_section, re.S)
+    assert opencode_block is not None
+    opencode_config = json.loads(opencode_block.group(1))
+    assert set(opencode_config["mcp"]) == {"gco"}
+    assert opencode_config["mcp"]["gco"]["type"] == "local"
+    assert opencode_config["mcp"]["gco"]["enabled"] is True
+    assert opencode_config["mcp"]["gco"]["timeout"] == OPENCODE_MCP_TIMEOUT_MS
+
     maintenance = (_REPO_ROOT / "docs" / "MAINTENANCE.md").read_text(encoding="utf-8")
     assert "claude_code_default_model_id" in maintenance
     assert "codex_default_model_id" in maintenance
+    assert "opencode_default_model_id" in maintenance
     assert "codex.reasoning_effort" in maintenance
     assert "docs/AUTOPILOT.md" in maintenance
 
@@ -1138,7 +1185,7 @@ def test_registry_source_stays_extractable_by_the_deps_scanner() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dual-engine and Codex Autopilot
+# Multi-engine selection and Codex Autopilot
 # ---------------------------------------------------------------------------
 
 
@@ -1216,15 +1263,18 @@ def test_codex_owned_args_disable_project_config_and_repeat_plan_scalars(
     assert not any("model_reasoning_effort" in item for item in no_reasoning)
 
 
-def test_help_describes_both_engines_and_engine_passthrough(runner: CliRunner) -> None:
+def test_help_describes_all_engines_and_engine_passthrough(runner: CliRunner) -> None:
     result = _invoke(runner, ["--help"])
 
     assert result.exit_code == 0
-    assert "--engine [claude-code|codex]" in result.output
+    assert "--engine [claude-code|codex|opencode]" in result.output
     assert "Claude Code remains the default engine" in result.output
     assert "ENGINE_ARGS" in result.output
     assert "GCO_AUTOPILOT_CODEX_MODEL" in result.output
-    assert "Claude-only; Codex rejects" in result.output
+    assert "GCO_AUTOPILOT_OPENCODE_MODEL" in result.output
+    assert "Claude-only; Codex and OpenCode reject" in result.output
+    assert "OpenCode has no picker" in result.output
+    assert "gco autopilot --engine opencode -y -- --auto" in result.output
 
 
 def test_no_engine_selection_explicitly_remains_claude_code(runner: CliRunner) -> None:
@@ -1234,6 +1284,7 @@ def test_no_engine_selection_explicitly_remains_claude_code(runner: CliRunner) -
             return_value="/tmp/bin/claude",
         ) as find_claude,
         patch("cli.commands.autopilot_cmd.find_codex_binary") as find_codex,
+        patch("cli.commands.autopilot_cmd.find_opencode_binary") as find_opencode,
     ):
         result = _invoke(runner, ["--dry-run"], config=_config(output_format="json"))
 
@@ -1243,8 +1294,11 @@ def test_no_engine_selection_explicitly_remains_claude_code(runner: CliRunner) -
     assert plan["model"] == get_default_claude_code_model_id()
     assert plan["claude_binary"] == "/tmp/bin/claude"
     assert plan["codex_binary"] is None
+    assert plan["opencode_binary"] is None
+    assert plan["opencode_pin"] is None
     find_claude.assert_called_once_with()
     find_codex.assert_not_called()
+    find_opencode.assert_not_called()
 
 
 def test_engine_environment_selects_codex(
@@ -1280,7 +1334,7 @@ def test_unknown_engine_environment_fails_clearly(
 
     assert result.exit_code == 1
     assert "Unknown autopilot engine" in result.output
-    assert "claude-code, codex" in result.output
+    assert "claude-code, codex, opencode" in result.output
 
 
 def test_codex_print_config_matches_the_official_bedrock_runtime_schema(
@@ -1534,6 +1588,15 @@ def test_codex_native_separator_stops_override_scanning(runner: CliRunner) -> No
         ),
         (["--model", "  "], {}, "--model"),
         (["--engine", "codex", "--model", "  "], {}, "--model"),
+        (
+            ["--engine", "opencode"],
+            {
+                "GCO_AUTOPILOT_OPENCODE_MODEL": "\n ",
+                "GCO_AUTOPILOT_MODEL": "us.moonshotai.kimi-k3",
+            },
+            "GCO_AUTOPILOT_OPENCODE_MODEL",
+        ),
+        (["--engine", "opencode", "--model", "  "], {}, "--model"),
     ],
 )
 def test_whitespace_model_overrides_fail_closed(
@@ -1866,3 +1929,917 @@ def test_codex_pin_source_is_an_exact_scanner_friendly_literal() -> None:
     assert pin is not None
     assert pin.group(1) == CODEX_VERSION == "0.154.0"
     assert re.fullmatch(r"\d+\.\d+\.\d+", CODEX_VERSION)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode Autopilot
+# ---------------------------------------------------------------------------
+
+_OPENCODE_BINARY = "/tmp/bin/opencode"
+
+
+def _parse_opencode_config(result: Any) -> dict[str, Any]:
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)
+
+
+def _launch_opencode(
+    runner: CliRunner,
+    args: list[str],
+) -> tuple[Any, list[str], dict[str, str]]:
+    argv_seen: list[str] = []
+    env_seen: dict[str, str] = {}
+
+    def fake_exec(argv: list[str], env: dict[str, str]) -> int:
+        argv_seen.extend(argv)
+        env_seen.update(env)
+        return 0
+
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=_OPENCODE_BINARY),
+        patch("cli.commands.autopilot_cmd.install_opencode") as install,
+        patch("cli.commands.autopilot_cmd.exec_opencode", side_effect=fake_exec),
+    ):
+        result = _invoke(runner, ["--engine", "opencode", *args])
+    install.assert_not_called()
+    return result, argv_seen, env_seen
+
+
+def _expected_opencode_argv(*tail: str, model: str | None = None) -> list[str]:
+    owned = build_opencode_owned_args(model=model or get_default_opencode_model_id())
+    return [_OPENCODE_BINARY, *owned, *tail]
+
+
+def _selector(model: str) -> str:
+    return f"{OPENCODE_BEDROCK_PROVIDER}/{model}"
+
+
+def test_opencode_owned_args_repeat_the_model_selector_at_cli_precedence() -> None:
+    assert build_opencode_owned_args(model="us.moonshotai.kimi-k3") == (
+        "--model",
+        "amazon-bedrock/us.moonshotai.kimi-k3",
+    )
+    assert OPENCODE_BEDROCK_PROVIDER == "amazon-bedrock"
+
+
+def test_engine_environment_selects_opencode(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GCO_AUTOPILOT_ENGINE", " OpenCode ")
+
+    config = _parse_opencode_config(_invoke(runner, ["--print-config"]))
+
+    assert config["model"] == _selector("global.moonshotai.kimi-k3")
+
+
+def test_opencode_print_config_matches_the_bedrock_provider_schema(runner: CliRunner) -> None:
+    result = _invoke(runner, ["--engine", "opencode", "--print-config"])
+    config = _parse_opencode_config(result)
+
+    default_model = get_default_opencode_model_id()
+    assert default_model == "global.moonshotai.kimi-k3"
+    assert config["$schema"] == "https://opencode.ai/config.json"
+    assert config["model"] == _selector(default_model)
+    # The session model doubles as the small model so title generation never
+    # silently picks a Claude Haiku profile the caller did not choose.
+    assert config["small_model"] == _selector(default_model)
+    assert config["autoupdate"] is False
+    assert config["share"] == "disabled"
+    assert config["permission"] == {"edit": "ask", "bash": "ask"}
+
+    provider = config["provider"]
+    assert set(provider) == {OPENCODE_BEDROCK_PROVIDER}
+    bedrock = provider[OPENCODE_BEDROCK_PROVIDER]
+    assert bedrock["options"] == {"region": "us-east-1", "profile": "default"}
+    assert set(bedrock["models"]) == {default_model}
+    declared = bedrock["models"][default_model]
+    assert declared["name"] == "Kimi K3 (Global)"
+    assert declared["reasoning"] is True
+    assert declared["tool_call"] is True
+    assert declared["limit"] == {"context": 1_048_576, "output": 131_072}
+
+    expected_servers = {"gco"} | {server.name for server in COMPANION_MCP_SERVERS}
+    assert set(config["mcp"]) == expected_servers
+    for name, entry in config["mcp"].items():
+        assert entry["type"] == "local", name
+        assert entry["enabled"] is True, name
+        assert entry["timeout"] == OPENCODE_MCP_TIMEOUT_MS == 60_000, name
+        assert isinstance(entry["command"], list) and entry["command"], name
+        assert all(isinstance(item, str) for item in entry["command"]), name
+    assert "skills" not in config
+    for package in _PRUNED_PACKAGES:
+        assert package not in result.output
+
+
+def test_opencode_config_carries_gco_mcp_flags_without_companions(runner: CliRunner) -> None:
+    result = _invoke(
+        runner,
+        [
+            "--engine",
+            "opencode",
+            "--no-companions",
+            "--enable",
+            "mission",
+            "--mcp-env",
+            "GCO_MCP_TOOL_SEARCH=bm25",
+            "--print-config",
+        ],
+    )
+    config = _parse_opencode_config(result)
+
+    assert set(config["mcp"]) == {"gco"}
+    gco = config["mcp"]["gco"]
+    assert gco["environment"] == {
+        "GCO_ENABLE_MISSION": "true",
+        "GCO_MCP_TOOL_SEARCH": "bm25",
+    }
+    assert list(gco["environment"]) == sorted(gco["environment"])
+    assert gco["command"][0]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("global.moonshotai.kimi-k3", "Kimi K3 (Global)"),
+        ("us.moonshotai.kimi-k3", "Kimi K3 (US)"),
+        ("eu.moonshotai.kimi-k3", "Kimi K3 (EU)"),
+        ("moonshotai.kimi-k3", "Kimi K3"),
+    ],
+)
+def test_opencode_declares_kimi_k3_metadata_with_the_geography_label(
+    model: str,
+    expected: str,
+) -> None:
+    declaration = opencode_model_declaration(model)
+
+    assert declaration["name"] == expected
+    assert declaration["family"] == "kimi-k3"
+    assert declaration["modalities"] == {"input": ["text", "image"], "output": ["text"]}
+    assert declaration["cost"]["input"] == 3.0
+
+
+def test_opencode_declares_catalogued_models_with_an_empty_entry() -> None:
+    assert opencode_model_declaration("global.anthropic.claude-sonnet-4-6") == {}
+    assert (
+        opencode_model_declaration("arn:aws:bedrock:us-east-1:123:application-inference-profile/x")
+        == {}
+    )
+
+
+def test_opencode_model_declaration_never_mutates_the_shared_metadata() -> None:
+    first = opencode_model_declaration("us.moonshotai.kimi-k3")
+    first["limit"]["context"] = 1  # type: ignore[index]
+
+    assert opencode_model_declaration("us.moonshotai.kimi-k3")["limit"] == {
+        "context": 1_048_576,
+        "output": 131_072,
+    }
+
+
+def test_opencode_pins_the_default_profile_only_for_an_empty_credential_environment() -> None:
+    assert opencode_aws_profile() == "default"
+
+
+@pytest.mark.parametrize("variable", _OPENCODE_CREDENTIAL_SOURCE_ENV)
+def test_opencode_drops_the_profile_pin_when_a_credential_source_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    monkeypatch.setenv(variable, "present")
+    assert opencode_aws_profile() is None
+
+    # Blank values are not a credential source; the SDK ignores them too.
+    monkeypatch.setenv(variable, " \t")
+    assert opencode_aws_profile() == "default"
+
+
+def test_opencode_print_config_omits_the_profile_for_environment_credentials(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLEEXAMPLE01")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+
+    config = _parse_opencode_config(
+        _invoke(runner, ["--engine", "opencode", "--print-config"]),
+    )
+
+    assert config["provider"][OPENCODE_BEDROCK_PROVIDER]["options"] == {"region": "eu-west-1"}
+
+
+def test_opencode_small_fast_model_pins_small_model_and_declares_it(runner: CliRunner) -> None:
+    config = _parse_opencode_config(
+        _invoke(
+            runner,
+            [
+                "--engine",
+                "opencode",
+                "--small-fast-model",
+                "us.anthropic.claude-haiku-4-5-v1:0",
+                "--print-config",
+            ],
+        ),
+    )
+
+    assert config["model"] == _selector("global.moonshotai.kimi-k3")
+    assert config["small_model"] == _selector("us.anthropic.claude-haiku-4-5-v1:0")
+    models = config["provider"][OPENCODE_BEDROCK_PROVIDER]["models"]
+    assert set(models) == {"global.moonshotai.kimi-k3", "us.anthropic.claude-haiku-4-5-v1:0"}
+    assert models["us.anthropic.claude-haiku-4-5-v1:0"] == {}
+
+
+def test_opencode_small_fast_model_env_var_is_honoured(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GCO_AUTOPILOT_SMALL_FAST_MODEL", "us.moonshotai.kimi-k3")
+
+    result = _invoke(runner, ["--engine", "opencode", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Fast model:        us.moonshotai.kimi-k3" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "opencode_env", "generic_env", "expected"),
+    [
+        (
+            ["--model", "us.moonshotai.kimi-k3"],
+            "eu.moonshotai.kimi-k3",
+            "global.anthropic.claude-sonnet-4-6",
+            "us.moonshotai.kimi-k3",
+        ),
+        (
+            [],
+            "eu.moonshotai.kimi-k3",
+            "global.anthropic.claude-sonnet-4-6",
+            "eu.moonshotai.kimi-k3",
+        ),
+        ([], None, "global.anthropic.claude-sonnet-4-6", "global.anthropic.claude-sonnet-4-6"),
+    ],
+)
+def test_opencode_model_override_precedence(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    opencode_env: str | None,
+    generic_env: str,
+    expected: str,
+) -> None:
+    if opencode_env is not None:
+        monkeypatch.setenv("GCO_AUTOPILOT_OPENCODE_MODEL", opencode_env)
+    monkeypatch.setenv("GCO_AUTOPILOT_MODEL", generic_env)
+
+    config = _parse_opencode_config(
+        _invoke(runner, ["--engine", "opencode", *args, "--print-config"]),
+    )
+
+    assert config["model"] == _selector(expected)
+    assert config["small_model"] == _selector(expected)
+    assert set(config["provider"][OPENCODE_BEDROCK_PROVIDER]["models"]) == {expected}
+
+
+def test_opencode_model_override_is_engine_scoped(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GCO_AUTOPILOT_OPENCODE_MODEL", "us.moonshotai.kimi-k3")
+
+    codex = _parse_codex_config(_invoke(runner, ["--engine", "codex", "--print-config"]))
+    result = _invoke(runner, ["--dry-run"])
+
+    assert codex["model"] == get_default_codex_model_id()
+    assert result.exit_code == 0
+    assert f"Model (Bedrock):   {get_default_claude_code_model_id()}" in result.output
+
+
+def test_opencode_warns_about_non_bedrock_model_ids_but_continues(runner: CliRunner) -> None:
+    result = _invoke(runner, ["--engine", "opencode", "--model", "kimi-k3", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "does not look like a Bedrock model id" in result.output
+    assert "Model (Bedrock):   kimi-k3" in result.output
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "us.moonshotai.kimi-k3",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+    ],
+)
+def test_opencode_accepts_dotted_ids_and_arns_without_warning(
+    runner: CliRunner,
+    model: str,
+) -> None:
+    result = _invoke(runner, ["--engine", "opencode", "--model", model, "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "does not look like" not in result.output
+
+
+@pytest.mark.parametrize(
+    "native_args",
+    [
+        ["--model", "amazon-bedrock/us.moonshotai.kimi-k3"],
+        ["-m", "amazon-bedrock/us.moonshotai.kimi-k3"],
+        ["--model=amazon-bedrock/us.moonshotai.kimi-k3"],
+        ["-mamazon-bedrock/us.moonshotai.kimi-k3"],
+        ["--auto", "--model", "openai/gpt-5"],
+        ["upgrade"],
+    ],
+)
+def test_opencode_rejects_native_passthrough_that_overrides_the_bedrock_plan(
+    runner: CliRunner,
+    native_args: list[str],
+) -> None:
+    with patch("cli.commands.autopilot_cmd.find_opencode_binary") as find_binary:
+        result = _invoke(runner, ["--engine", "opencode", "--dry-run", "--", *native_args])
+
+    assert result.exit_code == 1
+    assert "OpenCode passthrough option" in result.output
+    assert "Bedrock launch plan" in result.output
+    assert "gco autopilot --model" in result.output
+    find_binary.assert_not_called()
+
+
+def test_opencode_allows_unrelated_native_passthrough(runner: CliRunner) -> None:
+    result, argv, _env = _launch_opencode(
+        runner,
+        ["--", "--auto", "--agent", "plan", "--print-logs", "--mode", "safe-ish"],
+    )
+
+    assert result.exit_code == 0
+    assert argv == _expected_opencode_argv(
+        "--auto",
+        "--agent",
+        "plan",
+        "--print-logs",
+        "--mode",
+        "safe-ish",
+    )
+
+
+def test_opencode_native_separator_stops_override_scanning(runner: CliRunner) -> None:
+    result, argv, _env = _launch_opencode(
+        runner,
+        ["--", "--", "--model", "is prompt text after the native separator"],
+    )
+
+    assert result.exit_code == 0
+    assert argv == _expected_opencode_argv(
+        "--",
+        "--model",
+        "is prompt text after the native separator",
+    )
+
+
+@pytest.mark.parametrize(
+    "utility",
+    [
+        ["mcp", "list"],
+        ["models"],
+        ["providers"],
+        ["session", "list"],
+        ["auth", "list"],
+        ["debug", "agent", "build"],
+        ["stats"],
+    ],
+)
+def test_opencode_utility_subcommands_pass_through_without_session_flags(
+    runner: CliRunner,
+    utility: list[str],
+) -> None:
+    assert opencode_utility_invocation(tuple(utility)) is True
+
+    result, argv, env = _launch_opencode(runner, ["--", *utility])
+
+    assert result.exit_code == 0
+    assert argv == [_OPENCODE_BINARY, *utility]
+    assert "--model" not in argv
+    # Utilities still run against the generated config, so the plan is intact.
+    assert env["OPENCODE_CONFIG"].endswith("opencode.json")
+
+
+@pytest.mark.parametrize(
+    "session_args",
+    [(), ("run", "summarize the queue"), ("--auto",), ("/tmp",), ("--", "mcp")],
+)
+def test_opencode_session_invocations_are_not_utilities(session_args: tuple[str, ...]) -> None:
+    assert opencode_utility_invocation(session_args) is False
+
+
+@pytest.mark.parametrize("resume_option", [["--continue"], ["--resume", "ses_123"]])
+def test_opencode_utility_subcommands_reject_resume_selectors(
+    runner: CliRunner,
+    resume_option: list[str],
+) -> None:
+    with patch("cli.commands.autopilot_cmd.find_opencode_binary") as find_binary:
+        result = _invoke(runner, ["--engine", "opencode", *resume_option, "--", "mcp", "list"])
+
+    assert result.exit_code == 1
+    assert "OpenCode subcommand 'mcp' is a utility, not a session" in result.output
+    find_binary.assert_not_called()
+
+
+def test_opencode_bare_resume_fails_with_native_session_guidance(runner: CliRunner) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=None) as find_binary,
+        patch("cli.commands.autopilot_cmd.install_opencode") as install,
+    ):
+        result = _invoke(runner, ["--engine", "opencode", "--resume", "--yes"])
+
+    assert result.exit_code == 1
+    assert "OpenCode has no interactive session picker" in result.output
+    assert "opencode session list" in result.output
+    assert "--continue" in result.output
+    find_binary.assert_not_called()
+    install.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_tail"),
+    [
+        (["--continue"], ["--continue"]),
+        (["--resume", "ses_123"], ["--session", "ses_123"]),
+        (["--", "run", "explain the queue"], ["run", "explain the queue"]),
+        (["--continue", "--", "--auto"], ["--continue", "--auto"]),
+        (
+            ["--resume", "ses_123", "--", "--auto", "finish the tests"],
+            ["--session", "ses_123", "--auto", "finish the tests"],
+        ),
+    ],
+)
+def test_opencode_resume_and_passthrough_map_to_native_argv(
+    runner: CliRunner,
+    options: list[str],
+    expected_tail: list[str],
+) -> None:
+    result, argv, _env = _launch_opencode(runner, options)
+
+    assert result.exit_code == 0
+    assert argv == _expected_opencode_argv(*expected_tail)
+    assert "Resume your previous Claude Code session" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("aws_region", "aws_default_region", "expected"),
+    [
+        ("eu-west-1", "ap-southeast-2", "eu-west-1"),
+        (None, "ap-southeast-2", "ap-southeast-2"),
+        (None, None, "ca-central-1"),
+    ],
+)
+def test_opencode_region_precedence_is_shared_with_the_generated_config(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    aws_region: str | None,
+    aws_default_region: str | None,
+    expected: str,
+) -> None:
+    if aws_region is not None:
+        monkeypatch.setenv("AWS_REGION", aws_region)
+    if aws_default_region is not None:
+        monkeypatch.setenv("AWS_DEFAULT_REGION", aws_default_region)
+
+    config = _parse_opencode_config(
+        _invoke(
+            runner,
+            ["--engine", "opencode", "--print-config"],
+            config=_config(default_region="ca-central-1"),
+        ),
+    )
+
+    assert config["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["region"] == expected
+
+
+def test_opencode_launch_writes_config_isolates_it_and_references_skills(
+    runner: CliRunner,
+    tmp_path: Path,
+    skills_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "personal-opencode.json"))
+
+    result, argv, env = _launch_opencode(
+        runner,
+        ["--skills", str(skills_dir), "--", "--auto"],
+    )
+
+    assert result.exit_code == 0
+    assert "Launching OpenCode on Bedrock (global.moonshotai.kimi-k3" in result.output
+    assert f"provider={OPENCODE_BEDROCK_PROVIDER}" in result.output
+    config_file = tmp_path / "autopilot" / "opencode" / "opencode.json"
+    assert env["OPENCODE_CONFIG"] == str(config_file)
+    assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+    assert env["AWS_REGION"] == "eu-central-1"
+    assert argv == _expected_opencode_argv("--auto")
+    assert "--strict-mcp-config" not in argv
+    assert config_file.is_file()
+    written = json.loads(config_file.read_text(encoding="utf-8"))
+    assert written["model"] == _selector("global.moonshotai.kimi-k3")
+    assert written["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["region"] == "eu-central-1"
+    assert written["skills"] == {"paths": [str(skills_dir.resolve())]}
+    assert (skills_dir / "capacity-planner" / "SKILL.md").is_file()
+    assert not (tmp_path / "autopilot" / "mcp.json").exists()
+    assert not (tmp_path / "autopilot" / "codex").exists()
+    assert not (tmp_path / "personal-opencode.json").exists()
+
+
+def test_opencode_launch_respects_a_caller_supplied_aws_region(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+
+    result, _argv, env = _launch_opencode(runner, [])
+
+    assert result.exit_code == 0
+    assert env["AWS_REGION"] == "ap-southeast-2"
+
+
+def test_opencode_skills_are_referenced_once_and_validated(
+    runner: CliRunner,
+    skills_dir: Path,
+    tmp_path: Path,
+) -> None:
+    config = _parse_opencode_config(
+        _invoke(
+            runner,
+            [
+                "--engine",
+                "opencode",
+                "--skills",
+                str(skills_dir),
+                "--skills",
+                str(skills_dir) + "/",
+                "--print-config",
+            ],
+        ),
+    )
+    assert config["skills"] == {"paths": [str(skills_dir.resolve())]}
+
+    empty = tmp_path / "empty-skills"
+    empty.mkdir()
+    result = _invoke(runner, ["--engine", "opencode", "--skills", str(empty), "--dry-run"])
+    assert result.exit_code == 1
+    assert "SKILL.md" in result.output
+
+
+def test_opencode_dry_run_is_engine_aware_and_has_no_side_effects(
+    runner: CliRunner,
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=None),
+        patch("cli.commands.autopilot_cmd.install_opencode") as install,
+        patch("cli.commands.autopilot_cmd.write_opencode_config") as write_config,
+        patch("cli.commands.autopilot_cmd.exec_opencode") as execute,
+    ):
+        result = _invoke(
+            runner,
+            ["--engine", "opencode", "--skills", str(skills_dir), "--dry-run"],
+        )
+
+    assert result.exit_code == 0
+    assert "Engine:            OpenCode" in result.output
+    assert "Model (Bedrock):   global.moonshotai.kimi-k3" in result.output
+    assert "Reasoning effort:" not in result.output
+    assert "OPENCODE_CONFIG, project config disabled" in result.output
+    assert "referenced via skills.paths" in result.output
+    assert f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}" in result.output
+    assert "use --continue or --resume <session-id> to reopen an OpenCode session" in result.output
+    install.assert_not_called()
+    write_config.assert_not_called()
+    execute.assert_not_called()
+    assert not (tmp_path / "autopilot" / "opencode").exists()
+
+
+def test_opencode_json_dry_run_reports_engine_fields_without_the_config(
+    runner: CliRunner,
+) -> None:
+    with patch(
+        "cli.commands.autopilot_cmd.find_opencode_binary",
+        return_value=_OPENCODE_BINARY,
+    ):
+        result = _invoke(
+            runner,
+            ["--engine", "opencode", "--dry-run"],
+            config=_config(output_format="json"),
+        )
+
+    assert result.exit_code == 0
+    plan = json.loads(result.output)
+    assert plan["engine"] == "opencode"
+    assert plan["engine_display_name"] == "OpenCode"
+    assert plan["opencode_binary"] == _OPENCODE_BINARY
+    assert plan["opencode_pin"] == f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+    assert plan["claude_binary"] is None
+    assert plan["codex_binary"] is None
+    assert plan["reasoning_effort"] is None
+    assert plan["resumable_session"] is False
+    assert plan["mcp_config_path"].endswith("opencode/opencode.json")
+    assert plan["install_command"] == (
+        f"npm install -g --allow-scripts={OPENCODE_PACKAGE} {OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+    )
+    assert "opencode_config" not in plan
+    assert "codex_config" not in plan
+    assert "mcp_config" not in plan
+
+
+@pytest.mark.parametrize(
+    ("option", "environment", "message"),
+    [
+        (
+            ["--agents", "/does/not/need/to/exist"],
+            {},
+            "not supported by the opencode engine",
+        ),
+        (
+            [],
+            {"GCO_AUTOPILOT_PLUGIN_DIRS": "/does/not/need/to/exist"},
+            "Claude Code plugin inputs and are not supported by the opencode engine",
+        ),
+        (
+            ["--plugin", "/does/not/need/to/exist"],
+            {},
+            "Claude Code plugin inputs and are not supported by the opencode engine",
+        ),
+    ],
+)
+def test_opencode_rejects_claude_only_configuration(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    option: list[str],
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    result = _invoke(runner, ["--engine", "opencode", *option, "--dry-run"])
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert "Plugin path does not exist" not in result.output
+
+
+def test_opencode_lazy_install_uses_the_exact_pin(runner: CliRunner) -> None:
+    exec_argv: list[str] = []
+    with (
+        patch(
+            "cli.commands.autopilot_cmd.find_opencode_binary",
+            side_effect=[None, _OPENCODE_BINARY],
+        ),
+        patch("cli.commands.autopilot_cmd.install_opencode", return_value=0) as install,
+        patch(
+            "cli.commands.autopilot_cmd.exec_opencode",
+            side_effect=_exec_capture(exec_argv),
+        ),
+    ):
+        result = _invoke(runner, ["--engine", "opencode", "--yes"])
+
+    assert result.exit_code == 0
+    install.assert_called_once_with()
+    assert exec_argv[0] == _OPENCODE_BINARY
+    assert f"OpenCode is not installed (pinned: {OPENCODE_PACKAGE}@{OPENCODE_VERSION})" in (
+        result.output
+    )
+
+
+def test_confirming_the_opencode_install_prompt_installs_and_launches(runner: CliRunner) -> None:
+    exec_argv: list[str] = []
+    with (
+        patch(
+            "cli.commands.autopilot_cmd.find_opencode_binary",
+            side_effect=[None, _OPENCODE_BINARY],
+        ),
+        patch("cli.commands.autopilot_cmd.install_opencode", return_value=0) as install,
+        patch(
+            "cli.commands.autopilot_cmd.exec_opencode",
+            side_effect=_exec_capture(exec_argv),
+        ),
+    ):
+        result = _invoke(runner, ["--engine", "opencode"], input_text="y\n")
+
+    assert result.exit_code == 0, result.output
+    install.assert_called_once_with()
+    assert exec_argv == _expected_opencode_argv()
+
+
+def test_declining_opencode_install_names_the_engine_and_exact_command(
+    runner: CliRunner,
+) -> None:
+    with patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=None):
+        result = _invoke(runner, ["--engine", "opencode"], input_text="n\n")
+
+    assert result.exit_code == 1
+    assert "OpenCode is required for this engine" in result.output
+    assert (
+        f"npm install -g --allow-scripts={OPENCODE_PACKAGE} {OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+        in result.output
+    )
+    assert "gco autopilot --engine opencode" in result.output
+
+
+@pytest.mark.parametrize(
+    ("return_code", "message"),
+    [(127, "npm was not found"), (2, "exit code 2")],
+)
+def test_opencode_install_failures_are_engine_aware(
+    runner: CliRunner,
+    return_code: int,
+    message: str,
+) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=None),
+        patch("cli.commands.autopilot_cmd.install_opencode", return_value=return_code),
+    ):
+        result = _invoke(runner, ["--engine", "opencode", "--yes"])
+
+    assert result.exit_code == 1
+    assert message in result.output
+
+
+def test_opencode_missing_from_path_after_install_exits_with_guidance(
+    runner: CliRunner,
+) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=None),
+        patch("cli.commands.autopilot_cmd.install_opencode", return_value=0),
+    ):
+        result = _invoke(runner, ["--engine", "opencode", "--yes"])
+
+    assert result.exit_code == 1
+    assert "OpenCode installed but the `opencode` binary is not on PATH" in result.output
+
+
+def test_unexecutable_opencode_fails_with_exact_reinstall_guidance(runner: CliRunner) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=_OPENCODE_BINARY),
+        patch(
+            "cli.commands.autopilot_cmd.exec_opencode",
+            side_effect=OSError(8, "Exec format error"),
+        ),
+    ):
+        result = _invoke(runner, ["--engine", "opencode"])
+
+    assert result.exit_code == 1
+    assert f"Failed to launch OpenCode at {_OPENCODE_BINARY}" in result.output
+    assert (
+        f"npm install -g --allow-scripts={OPENCODE_PACKAGE} {OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+        in result.output
+    )
+
+
+def test_unwritable_opencode_config_exits_with_the_os_error(runner: CliRunner) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=_OPENCODE_BINARY),
+        patch(
+            "cli.commands.autopilot_cmd.write_opencode_config",
+            side_effect=OSError("read-only file system"),
+        ),
+    ):
+        result = _invoke(runner, ["--engine", "opencode"])
+
+    assert result.exit_code == 1
+    assert "Failed to prepare the OpenCode session" in result.output
+    assert "read-only file system" in result.output
+
+
+def test_opencode_exec_propagates_the_engine_exit_code(runner: CliRunner) -> None:
+    with (
+        patch("cli.commands.autopilot_cmd.find_opencode_binary", return_value=_OPENCODE_BINARY),
+        patch("cli.commands.autopilot_cmd.exec_opencode", return_value=3),
+    ):
+        result = _invoke(runner, ["--engine", "opencode"])
+
+    assert result.exit_code == 3
+
+
+@pytest.mark.parametrize(
+    ("servers", "message"),
+    [
+        ({"gco": {"args": ["x"]}}, "OpenCode MCP server 'gco' has no command"),
+        ({"gco": {"command": ""}}, "OpenCode MCP server 'gco' has no command"),
+        ({"gco": {"command": "uvx", "args": "gco-mcp"}}, "args must be strings"),
+        ({"gco": {"command": "uvx", "args": ["gco-mcp", 1]}}, "args must be strings"),
+        ({"gco": {"command": "uvx", "env": ["A=B"]}}, "env must contain strings"),
+        ({"gco": {"command": "uvx", "env": {"A": 1}}}, "env must contain strings"),
+    ],
+)
+def test_build_opencode_config_rejects_malformed_mcp_entries(
+    servers: dict[str, dict[str, object]],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        build_opencode_config(
+            {"mcpServers": servers},  # type: ignore[arg-type]
+            model="global.moonshotai.kimi-k3",
+            region="us-east-1",
+        )
+
+
+def test_build_opencode_config_omits_empty_environments_and_sorts_servers() -> None:
+    config = build_opencode_config(
+        {
+            "mcpServers": {
+                "zeta": {"command": "npx", "args": ["-y", "zeta"], "env": {}},
+                "alpha": {"command": "uvx", "args": ["alpha"], "env": {"B": "2", "A": "1"}},
+            }
+        },
+        model="us.moonshotai.kimi-k3",
+        region="us-west-2",
+        small_model="us.moonshotai.kimi-k3",
+    )
+
+    mcp = config["mcp"]
+    assert isinstance(mcp, dict)
+    assert list(mcp) == ["alpha", "zeta"]
+    assert mcp["alpha"]["environment"] == {"A": "1", "B": "2"}
+    assert list(mcp["alpha"]["environment"]) == ["A", "B"]
+    assert "environment" not in mcp["zeta"]
+    assert mcp["zeta"]["command"] == ["npx", "-y", "zeta"]
+    assert config["small_model"] == _selector("us.moonshotai.kimi-k3")
+    provider = config["provider"]
+    assert isinstance(provider, dict)
+    assert set(provider[OPENCODE_BEDROCK_PROVIDER]["models"]) == {"us.moonshotai.kimi-k3"}
+
+
+def test_install_opencode_uses_only_the_exact_npm_pin() -> None:
+    from cli.autopilot import install_opencode, opencode_install_command
+
+    assert OPENCODE_VERSION == "1.18.31"
+    assert OPENCODE_PACKAGE == "opencode-ai"
+    assert opencode_install_command() == [
+        "npm",
+        "install",
+        "-g",
+        "--allow-scripts=opencode-ai",
+        "opencode-ai@1.18.31",
+    ]
+    with (
+        patch("cli.autopilot.shutil.which", return_value="/usr/bin/npm"),
+        patch("cli.autopilot.subprocess.call", return_value=0) as call,
+    ):
+        assert install_opencode() == 0
+    call.assert_called_once_with(opencode_install_command())
+
+
+def test_install_opencode_reports_127_without_npm() -> None:
+    from cli.autopilot import install_opencode
+
+    with patch("cli.autopilot.shutil.which", return_value=None):
+        assert install_opencode() == 127
+
+
+def test_opencode_pin_source_is_an_exact_scanner_friendly_literal() -> None:
+    source = _AUTOPILOT_SOURCE.read_text(encoding="utf-8")
+
+    pin = re.search(r'^OPENCODE_VERSION = "([^"]+)"$', source, re.M)
+    assert pin is not None
+    assert pin.group(1) == OPENCODE_VERSION == "1.18.31"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", OPENCODE_VERSION)
+
+
+def test_opencode_live_recorder_is_docs_only_and_fails_closed_on_prompts() -> None:
+    source = (_REPO_ROOT / "demo" / "record_autopilot.sh").read_text(encoding="utf-8")
+    opencode_branch = source.split(
+        'elif [ "$DEMO_MODE" = "live" ] && [ "$DEMO_ENGINE" = "opencode" ]; then',
+        1,
+    )[1].split('elif [ "$DEMO_MODE" = "live" ]; then', 1)[0]
+
+    for required in (
+        "spawn gco autopilot --engine opencode --no-companions",
+        "set env(OPENCODE_CONFIG_CONTENT)",
+        '"bash":"deny"',
+        '"edit":"deny"',
+        '"read":"deny"',
+        '"webfetch":"deny"',
+        '"task":"deny"',
+        "-nocase -re {permission required|allow once|allow always} { exit 7 }",
+        "-re {Ask anything} {}",
+        "-re {submit-sqs} {}",
+        "-timeout 6 -re {.+}",
+        "shopt -u checkwinsize",
+        'send -- "/exit"',
+    ):
+        assert required in opencode_branch, required
+    # The permission floor stays in place: nothing lifts it for the recording.
+    assert "--auto" not in opencode_branch
+    assert "press_enter" not in opencode_branch
+    assert "allow always" not in opencode_branch.replace(
+        "-nocase -re {permission required|allow once|allow always} { exit 7 }", ""
+    )
+    override = re.search(r"set env\(OPENCODE_CONFIG_CONTENT\) \{(\{.*?\})\}\n", opencode_branch)
+    assert override is not None
+    denied = json.loads(override.group(1))
+    assert set(denied) == {"permission"}
+    assert set(denied["permission"].values()) == {"deny"}
+    assert {"bash", "edit", "read", "glob", "grep", "list", "webfetch", "websearch"} <= set(
+        denied["permission"]
+    )

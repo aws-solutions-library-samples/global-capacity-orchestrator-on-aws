@@ -42,6 +42,7 @@ from gco.bedrock import (  # noqa: E402
     get_default_codex_model_id,
     get_default_codex_reasoning_effort,
     get_default_mission_model_id,
+    get_default_opencode_model_id,
 )
 from tests._scaffold_replay import (  # noqa: E402
     CANONICAL_CAPTURE_SLUGS,
@@ -60,9 +61,11 @@ _EXPECTED_CAPACITY_ADVISOR_MODEL_ID = "global.anthropic.claude-opus-5"
 _EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5"
 _EXPECTED_CODEX_MODEL_ID = "global.openai.gpt-5.6-sol"
 _EXPECTED_CODEX = {"reasoning_effort": "xhigh"}
+_EXPECTED_OPENCODE_MODEL_ID = "global.moonshotai.kimi-k3"
 _EXPECTED_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 _EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5.json"
 _EXPECTED_CODEX_FIXTURE_NAME = "global_openai_gpt_5_6_sol.json"
+_EXPECTED_OPENCODE_FIXTURE_NAME = "global_moonshotai_kimi_k3.json"
 _EXPECTED_GENERATION_REASONING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
 _RUNTIME_SOURCE_SUFFIXES = {".py", ".sh"}
@@ -140,6 +143,28 @@ def test_cdk_json_is_the_single_codex_default_source(monkeypatch: Any) -> None:
     assert "get_default_codex_reasoning_effort" in bedrock_config.__all__
 
 
+def test_cdk_json_is_the_single_opencode_default_source(monkeypatch: Any) -> None:
+    """The OpenCode session model resolves from its own scalar key.
+
+    OpenCode has no engine-owned reasoning knob (Kimi K3 reasons on its
+    own), so unlike Codex there is no sibling mapping to validate; the key
+    is independent of every other default the same way the Claude Code and
+    Codex keys are.
+    """
+    from cli.autopilot import resolve_opencode_model
+
+    monkeypatch.delenv("GCO_AUTOPILOT_OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("GCO_AUTOPILOT_MODEL", raising=False)
+
+    configured = get_default_opencode_model_id(PROJECT_ROOT / "cdk.json")
+    resolved_model, warnings = resolve_opencode_model(None)
+
+    assert configured == _EXPECTED_OPENCODE_MODEL_ID
+    assert resolved_model == configured
+    assert warnings == []
+    assert "get_default_opencode_model_id" in bedrock_config.__all__
+
+
 def test_the_single_advisory_surface_is_fully_retired() -> None:
     """The pre-v6 one-knob API is gone, not aliased.
 
@@ -195,6 +220,7 @@ def test_exact_default_literals_are_absent_from_all_runtime_sources() -> None:
         _EXPECTED_CAPACITY_ADVISOR_MODEL_ID,
         _EXPECTED_CLAUDE_CODE_MODEL_ID,
         _EXPECTED_CODEX_MODEL_ID,
+        _EXPECTED_OPENCODE_MODEL_ID,
     }
     violations: list[str] = []
     for root_name in _RUNTIME_SOURCE_ROOTS:
@@ -325,6 +351,23 @@ def test_codex_default_has_the_exact_complete_mission_replay_fixture() -> None:
     assert set(CANONICAL_CAPTURE_SLUGS) <= {capture.slug for capture in fixture.captures}
 
 
+def test_opencode_default_has_the_exact_complete_mission_replay_fixture() -> None:
+    """The OpenCode default is proved as an explicit Mission override too."""
+    fixture = FIXTURES_BY_MODEL[_EXPECTED_OPENCODE_MODEL_ID]
+    expected_path = (
+        PROJECT_ROOT
+        / "tests"
+        / "fixtures"
+        / "scaffold_responses"
+        / f"{model_fixture_slug(_EXPECTED_OPENCODE_MODEL_ID)}.json"
+    )
+
+    assert get_default_opencode_model_id(PROJECT_ROOT / "cdk.json") == fixture.model_id
+    assert fixture.path == expected_path
+    assert fixture.path.name == _EXPECTED_OPENCODE_FIXTURE_NAME
+    assert set(CANONICAL_CAPTURE_SLUGS) <= {capture.slug for capture in fixture.captures}
+
+
 @pytest.mark.parametrize(
     "model_id",
     [
@@ -332,6 +375,7 @@ def test_codex_default_has_the_exact_complete_mission_replay_fixture() -> None:
         pytest.param(_EXPECTED_CAPACITY_ADVISOR_MODEL_ID, id="capacity-advisor-default"),
         pytest.param(_EXPECTED_CLAUDE_CODE_MODEL_ID, id="claude-code-default"),
         pytest.param(_EXPECTED_CODEX_MODEL_ID, id="codex-default"),
+        pytest.param(_EXPECTED_OPENCODE_MODEL_ID, id="opencode-default"),
     ],
 )
 def test_default_model_is_a_system_defined_inference_profile_id(model_id: str) -> None:
@@ -384,6 +428,7 @@ def test_cdk_json_contains_exactly_the_managed_default_model_keys() -> None:
         "claude_code_default_model_id": _EXPECTED_CLAUDE_CODE_MODEL_ID,
         "codex_default_model_id": _EXPECTED_CODEX_MODEL_ID,
         "codex": _EXPECTED_CODEX,
+        "opencode_default_model_id": _EXPECTED_OPENCODE_MODEL_ID,
         "embedding_model_id": _EXPECTED_EMBEDDING_MODEL_ID,
         "generation_reasoning": _EXPECTED_GENERATION_REASONING,
     }
@@ -445,6 +490,39 @@ def test_xai_grok_converse_options_drop_unsupported_temperature() -> None:
     )
 
     assert options == {"inferenceConfig": {"maxTokens": 2048}}
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        _EXPECTED_OPENCODE_MODEL_ID,
+        "us.moonshotai.kimi-k3",
+        "moonshotai.kimi-k3",
+        "arn:aws:bedrock:us-east-1:123456789012:inference-profile/eu.moonshotai.kimi-k3",
+    ],
+)
+def test_kimi_k3_converse_options_drop_unsupported_temperature(model_id: str) -> None:
+    """The OpenCode default rejects ``temperature`` ("This model doesn't support
+    the temperature field") for canonical and explicit callers alike, so the
+    shared builder strips it while keeping the caller's output cap."""
+    options = build_bedrock_converse_options(
+        model_id,
+        inference_config={"maxTokens": 2048, "temperature": 0.2},
+        apply_default_reasoning=False,
+    )
+
+    assert options == {"inferenceConfig": {"maxTokens": 2048}}
+
+
+def test_kimi_k2_5_keeps_temperature_because_only_verified_lines_are_normalized() -> None:
+    """The Moonshot rule is an enumerated allowlist, not a provider prefix."""
+    options = build_bedrock_converse_options(
+        "moonshotai.kimi-k2.5",
+        inference_config={"maxTokens": 2048, "temperature": 0.2},
+        apply_default_reasoning=False,
+    )
+
+    assert options == {"inferenceConfig": {"maxTokens": 2048, "temperature": 0.2}}
 
 
 def test_nova_default_still_translates_to_reasoning_config(tmp_path: Path) -> None:
@@ -609,6 +687,7 @@ def _bedrock_payload(
     claude_code_model_id: Any = _EXPECTED_CLAUDE_CODE_MODEL_ID,
     codex_model_id: Any = _EXPECTED_CODEX_MODEL_ID,
     codex: Any = _EXPECTED_CODEX,
+    opencode_model_id: Any = _EXPECTED_OPENCODE_MODEL_ID,
 ) -> dict[str, Any]:
     return {
         "context": {
@@ -618,6 +697,7 @@ def _bedrock_payload(
                 "claude_code_default_model_id": claude_code_model_id,
                 "codex_default_model_id": codex_model_id,
                 "codex": dict(codex) if isinstance(codex, dict) else codex,
+                "opencode_default_model_id": opencode_model_id,
                 "generation_reasoning": dict(_EXPECTED_GENERATION_REASONING),
             }
         }
@@ -1145,3 +1225,70 @@ def test_other_defaults_survive_missing_codex_keys(tmp_path: Path) -> None:
     assert get_default_claude_code_model_id(config_path) == _EXPECTED_CLAUDE_CODE_MODEL_ID
     with pytest.raises(bedrock_config.BedrockModelConfigurationError):
         get_default_codex_configuration(config_path)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode default validation and failure-domain isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_id", [None, 42, "", " \n"], ids=("absent", "int", "empty", "blank"))
+def test_opencode_payload_validation_fails_closed_and_names_the_setter(model_id: Any) -> None:
+    path = Path("/canonical/cdk.json")
+
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError) as exc_info:
+        bedrock_config._opencode_model_id_from_payload(
+            _bedrock_payload(opencode_model_id=model_id),
+            path,
+        )
+
+    message = str(exc_info.value)
+    assert str(path) in message
+    assert "context.bedrock.opencode_default_model_id must be a non-empty string" in message
+    assert "gco stacks bedrock set-opencode-model <model-id>" in message
+
+
+def test_opencode_payload_trims_the_model() -> None:
+    model_id = bedrock_config._opencode_model_id_from_payload(
+        _bedrock_payload(opencode_model_id="  us.moonshotai.kimi-k3\n"),
+        Path("/canonical/cdk.json"),
+    )
+
+    assert model_id == "us.moonshotai.kimi-k3"
+
+
+def test_opencode_default_ignores_other_consumers_malformed_configuration(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "cdk.json"
+    payload = _bedrock_payload(claude_code_model_id=None, codex={"reasoning_effort": "maximum"})
+    payload["context"]["bedrock"]["generation_reasoning"] = {"effort": "maximum"}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert get_default_opencode_model_id(config_path) == _EXPECTED_OPENCODE_MODEL_ID
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        get_default_bedrock_configuration(config_path)
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        get_default_claude_code_model_id(config_path)
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        get_default_codex_configuration(config_path)
+
+
+def test_other_defaults_survive_a_malformed_or_missing_opencode_key(tmp_path: Path) -> None:
+    config_path = tmp_path / "cdk.json"
+    config_path.write_text(json.dumps(_bedrock_payload(opencode_model_id=7)), encoding="utf-8")
+
+    assert get_default_mission_model_id(config_path) == _EXPECTED_MISSION_MODEL_ID
+    assert get_default_capacity_advisor_model_id(config_path) == _EXPECTED_CAPACITY_ADVISOR_MODEL_ID
+    assert get_default_claude_code_model_id(config_path) == _EXPECTED_CLAUDE_CODE_MODEL_ID
+    assert get_default_codex_model_id(config_path) == _EXPECTED_CODEX_MODEL_ID
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError):
+        get_default_opencode_model_id(config_path)
+
+    payload = _bedrock_payload()
+    del payload["context"]["bedrock"]["opencode_default_model_id"]
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert get_default_codex_reasoning_effort(config_path) == "xhigh"
+    with pytest.raises(bedrock_config.BedrockModelConfigurationError, match="set-opencode-model"):
+        get_default_opencode_model_id(config_path)

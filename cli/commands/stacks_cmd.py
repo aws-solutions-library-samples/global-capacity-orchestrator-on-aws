@@ -1287,10 +1287,10 @@ def regions_set(config: Any, role: Any, region: Any, config_path: Any, yes: Any)
 def bedrock_cmd(config: Any) -> None:
     """Manage Bedrock model and reasoning defaults in cdk.json.
 
-    Four independent model keys serve Mission sampling, the capacity advisor,
-    Claude Code, and Codex. Codex also owns a reviewed reasoning-effort sibling.
-    Every edit uses the shared managed-config engine: validated, atomic,
-    idempotent, and audited.
+    Five independent model keys serve Mission sampling, the capacity advisor,
+    Claude Code, Codex, and OpenCode. Codex also owns a reviewed
+    reasoning-effort sibling. Every edit uses the shared managed-config
+    engine: validated, atomic, idempotent, and audited.
     """
 
 
@@ -1531,6 +1531,50 @@ def bedrock_set_codex_reasoning_effort(
         formatter.print_info(
             "Canonical Codex sessions pick this up at launch; explicit model "
             "overrides intentionally omit canonical reasoning"
+        )
+    else:
+        formatter.print_info(report.summary())
+
+
+@bedrock_cmd.command("set-opencode-model")
+@click.argument("model_id")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def bedrock_set_opencode_model(config: Any, model_id: Any, config_path: Any, yes: Any) -> None:
+    """Set context.bedrock.opencode_default_model_id.
+
+    This is the canonical model for OpenCode Autopilot sessions. OpenCode has
+    no engine-owned reasoning sibling, so this single key is the whole
+    default. Explicit --model, GCO_AUTOPILOT_OPENCODE_MODEL, and
+    GCO_AUTOPILOT_MODEL overrides still win.
+
+    Examples:
+        gco stacks bedrock set-opencode-model global.moonshotai.<model-id>
+        gco stacks bedrock set-opencode-model us.moonshotai.<model-id> -y
+    """
+    from ..managed_config import ManagedConfigError, set_opencode_default_model
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        confirm(
+            f"Set bedrock.opencode_default_model_id to {model_id} in cdk.json?",
+            abort=True,
+        )
+
+    try:
+        report = set_opencode_default_model(model_id, config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+
+    if report.changed:
+        formatter.print_success(report.summary())
+        formatter.print_info(
+            "Canonical OpenCode sessions pick this up at launch; explicit "
+            "--model/GCO_AUTOPILOT_OPENCODE_MODEL/GCO_AUTOPILOT_MODEL overrides "
+            "still take precedence"
         )
     else:
         formatter.print_info(report.summary())

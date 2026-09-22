@@ -379,14 +379,24 @@ def test_the_frame_ceiling_is_enforced(tmp_path: Path, monkeypatch: pytest.Monke
         validator._validate_gif(relative, _policy(max_frames=2))
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "demo/autopilot-codex.gif",
+        "demo/autopilot-claude-code.gif",
+        "demo/autopilot-opencode.gif",
+    ],
+)
 def test_a_blank_first_frame_is_rejected_for_the_autopilot_demos(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
-    """Static clients show frame zero; an empty PTY frame is a broken preview."""
+    """Static clients show frame zero; an empty PTY frame is a broken preview.
+
+    Every engine's Autopilot recording is embedded as a product demo, so each
+    one is held to the preview rule.
+    """
     payload = _gif_bytes(width=16, height=16, frames=2, fill=0)
-    _, relative = _single(
-        tmp_path, monkeypatch, payload, _policy(), name="demo/autopilot-codex.gif"
-    )
+    _, relative = _single(tmp_path, monkeypatch, payload, _policy(), name=name)
 
     with pytest.raises(validator.ValidationError, match="first frame is effectively blank"):
         validator._validate_gif(relative, _policy())
@@ -406,7 +416,7 @@ def test_a_varied_first_frame_passes_the_autopilot_check(
 def test_a_blank_first_frame_is_fine_for_a_non_autopilot_gif(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The preview rule is scoped to the two embedded product demos."""
+    """The preview rule is scoped to the embedded Autopilot product demos."""
     payload = _gif_bytes(width=16, height=16, frames=2, fill=0)
     _, relative = _single(tmp_path, monkeypatch, payload, _policy(), name="demo/deploy.gif")
 

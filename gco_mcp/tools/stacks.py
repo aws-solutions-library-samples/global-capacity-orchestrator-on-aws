@@ -771,3 +771,21 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
             reasoning_effort,
             "-y",
         )
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_opencode_default_model(model_id: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set cdk.json bedrock.opencode_default_model_id.
+
+        Config-only and idempotent. OpenCode has no engine-owned reasoning
+        sibling, so this single key is the whole default. Explicit --model,
+        GCO_AUTOPILOT_OPENCODE_MODEL, and GCO_AUTOPILOT_MODEL overrides still
+        take precedence at launch.
+
+        Args:
+            model_id: Bedrock model or inference-profile ID
+                (e.g. global.moonshotai.<model-id>).
+        """
+        return cli_runner._run_cli("stacks", "bedrock", "set-opencode-model", model_id, "-y")

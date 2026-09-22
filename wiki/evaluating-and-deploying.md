@@ -32,7 +32,8 @@ remains the authoritative walkthrough.
 | **Tear down** | Destroy every stack in dependency order with best-effort cleanup of the resources CloudFormation leaves behind. | `gco stacks destroy-all -y` |
 
 Prefer to let an agent drive? `gco autopilot` launches Claude Code by
-default; `gco autopilot --engine codex` launches OpenAI Codex. Both run on
+default; `gco autopilot --engine codex` launches OpenAI Codex and
+`gco autopilot --engine opencode` launches OpenCode. All three run on
 Amazon Bedrock with the GCO MCP server and recommended companions wired in —
 so you can deploy, check capacity, and submit jobs conversationally. See
 [docs/AUTOPILOT.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/AUTOPILOT.md).

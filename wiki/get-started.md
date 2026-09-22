@@ -124,8 +124,9 @@ objects for you; canaries, scaling, and model-weight sync from S3 are in the
 ## Prefer to talk to it?
 
 ```bash
-gco autopilot                  # Claude Code on Amazon Bedrock, GCO MCP server preconfigured
-gco autopilot --engine codex   # the same session with OpenAI Codex
+gco autopilot                     # Claude Code on Amazon Bedrock, GCO MCP server preconfigured
+gco autopilot --engine codex      # the same session with OpenAI Codex
+gco autopilot --engine opencode   # the same session with OpenCode (Kimi K3)
 ```
 
 Autopilot installs nothing without asking, wires the project's MCP server and

@@ -110,6 +110,7 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "set_claude_code_default_model": FLAG_CONFIG_MANAGEMENT,
     "set_codex_default_model": FLAG_CONFIG_MANAGEMENT,
     "set_codex_reasoning_effort": FLAG_CONFIG_MANAGEMENT,
+    "set_opencode_default_model": FLAG_CONFIG_MANAGEMENT,
     # Other destructive module-level gates
     "delete_job": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_inference": FLAG_DESTRUCTIVE_OPERATIONS,

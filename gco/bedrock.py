@@ -17,6 +17,7 @@ _CLAUDE_CODE_MODEL_ID_KEY = "claude_code_default_model_id"
 _CODEX_MODEL_ID_KEY = "codex_default_model_id"
 _CODEX_KEY = "codex"
 _CODEX_REASONING_EFFORT_KEY = "reasoning_effort"
+_OPENCODE_MODEL_ID_KEY = "opencode_default_model_id"
 _EMBEDDING_MODEL_ID_KEY = "embedding_model_id"
 _GENERATION_REASONING_KEY = "generation_reasoning"
 _LEGACY_THINKING_KEY = "thinking"
@@ -88,6 +89,13 @@ _CLAUDE_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature", "topP", "topK"})
 # future Converse callers cannot drift.
 _OPENAI_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature"})
 _XAI_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature"})
+# Moonshot AI's Kimi K3 (the OpenCode engine default) is an always-on
+# reasoning model and Bedrock rejects Converse ``temperature`` for it ("This
+# model doesn't support the temperature field"). Kimi K2.5 still accepts it,
+# so the rule is an enumerated allowlist like the Claude one rather than a
+# provider-wide prefix match.
+_MOONSHOT_RESTRICTED_SAMPLING_MODELS = frozenset({"moonshotai.kimi-k3"})
+_MOONSHOT_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature"})
 BEDROCK_READ_TIMEOUT_SECONDS = 3600
 _DISTRIBUTION_NAME = "gco-cli"
 _SOURCE_ROOT = Path(__file__).resolve().parent.parent
@@ -302,6 +310,20 @@ def _codex_configuration_from_payload(
     )
 
 
+def _opencode_model_id_from_payload(payload: Any, path: Path) -> str:
+    """Extract and validate the OpenCode session model default."""
+    bedrock = _bedrock_block_from_payload(payload, path)
+
+    model_id = bedrock.get(_OPENCODE_MODEL_ID_KEY)
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_OPENCODE_MODEL_ID_KEY} "
+            "must be a non-empty string. Add the key to the deployment config "
+            "or run `gco stacks bedrock set-opencode-model <model-id>`."
+        )
+    return model_id.strip()
+
+
 def _embedding_model_id_from_payload(payload: Any, path: Path) -> str:
     """Extract and validate the text-embedding model default."""
     bedrock = _bedrock_block_from_payload(payload, path)
@@ -434,6 +456,21 @@ def get_default_codex_reasoning_effort(cdk_json_path: Path | None = None) -> str
     return get_default_codex_configuration(cdk_json_path).reasoning_effort
 
 
+def get_default_opencode_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in OpenCode session model default from ``cdk.json``.
+
+    This is the Bedrock model ``gco autopilot --engine opencode`` hands to
+    OpenCode, independent of every other default the same way the Claude Code
+    and Codex keys are: repointing one interactive engine never moves another,
+    and a malformed sibling block cannot fail this accessor. OpenCode has no
+    engine-owned reasoning knob (the shipped Kimi K3 default reasons on its
+    own), so unlike Codex the key is a single scalar. Path selection and trust
+    boundaries match :func:`get_default_bedrock_configuration`.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
+    return _opencode_model_id_from_payload(payload, path)
+
+
 def _supports_nova_2_reasoning(model_id: str) -> bool:
     """Return whether a model/profile identifier accepts Nova 2 reasoningConfig."""
     return _NOVA_2_MODEL_ID_RE.search(model_id) is not None
@@ -461,6 +498,12 @@ def _is_xai_model(model_id: str) -> bool:
     """Return whether an id names an xAI foundation model or profile."""
     base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
     return base.startswith("xai.")
+
+
+def _requires_moonshot_sampling_normalization(model_id: str) -> bool:
+    """Return whether the id names a Kimi line that rejects Converse ``temperature``."""
+    base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
+    return base in _MOONSHOT_RESTRICTED_SAMPLING_MODELS
 
 
 def _nova_reasoning_options(
@@ -536,8 +579,9 @@ def build_bedrock_converse_options(
       ``topK`` are dropped because Claude removed them from Opus 4.7 onward.
     * Nova 2 ``reasoningConfig`` — ``maxReasoningEffort``, with ``maxTokens``,
       ``temperature``, and ``topP`` dropped at ``high`` effort only.
-    * OpenAI GPT and xAI Grok — unsupported ``temperature`` is dropped for
-      canonical and explicit models; no Converse reasoning dialect is inferred.
+    * OpenAI GPT, xAI Grok, and Moonshot AI Kimi K3 — unsupported
+      ``temperature`` is dropped for canonical and explicit models; no
+      Converse reasoning dialect is inferred.
 
     A default model in neither reasoning dialect keeps its remaining
     caller-supplied inference controls and receives no reasoning fields.
@@ -560,6 +604,12 @@ def build_bedrock_converse_options(
             key: value
             for key, value in resolved_inference.items()
             if key not in _XAI_UNSUPPORTED_SAMPLING_FIELDS
+        }
+    if _requires_moonshot_sampling_normalization(model_id):
+        resolved_inference = {
+            key: value
+            for key, value in resolved_inference.items()
+            if key not in _MOONSHOT_UNSUPPORTED_SAMPLING_FIELDS
         }
     inference_only = {"inferenceConfig": resolved_inference} if resolved_inference else {}
     if apply_default_reasoning is False:
@@ -744,6 +794,7 @@ __all__ = [
     "get_default_codex_reasoning_effort",
     "get_default_embedding_model_id",
     "get_default_mission_model_id",
+    "get_default_opencode_model_id",
     "is_bedrock_ftu_form_error",
     "raise_if_bedrock_ftu_form_error",
 ]

@@ -370,10 +370,11 @@ SHIM
 
 # -- Autopilot persistence mounts ----------------------------------------------
 #
-# `gco autopilot` lazily installs the selected Claude Code or Codex pin and
-# keeps generated/session state under ~/.claude and/or ~/.gco. The emitted
-# function must carry all three persistence mounts (npm-global named volume,
-# ~/.claude, ~/.gco) and CLAUDE_CONFIG_DIR on every runtime, or installs and
+# `gco autopilot` lazily installs the selected Claude Code, Codex, or OpenCode
+# pin and keeps generated/session state under ~/.claude, ~/.gco, and (OpenCode's
+# session database) ~/.local/share/opencode. The emitted function must carry
+# all four persistence mounts (npm-global named volume, ~/.claude, ~/.gco, the
+# OpenCode named volume) and CLAUDE_CONFIG_DIR on every runtime, or installs and
 # sessions evaporate with the --rm container.
 
 @test "emitted block carries the autopilot persistence mounts on every runtime" {
@@ -384,6 +385,7 @@ SHIM
         [[ "$output" == *'-v gco-dev-tools:/root/.npm-global'* ]]
         [[ "$output" == *'.claude:/root/.claude'* ]]
         [[ "$output" == *'.gco:/root/.gco'* ]]
+        [[ "$output" == *'-v gco-dev-opencode:/root/.local/share/opencode'* ]]
         [[ "$output" == *'-e CLAUDE_CONFIG_DIR=/root/.claude'* ]]
     done
 }
@@ -395,8 +397,21 @@ SHIM
     notty_line="$(echo "$output" | grep -- 'run --rm -i ')"
     for line in "$tty_line" "$notty_line"; do
         [[ "$line" == *'gco-dev-tools:/root/.npm-global'* ]]
+        [[ "$line" == *'gco-dev-opencode:/root/.local/share/opencode'* ]]
         [[ "$line" == *'CLAUDE_CONFIG_DIR=/root/.claude'* ]]
     done
+}
+
+@test "OpenCode session state is a named volume, never a host directory mount" {
+    # The host's own ~/.local/share/opencode may belong to a different OpenCode
+    # release; sharing one SQLite database across versions is not safe, so the
+    # function must not bind-mount it (and must not pre-create it either).
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'.local/share/opencode:/root/.local/share/opencode'* ]]
+    mkdir_line="$(printf '%s\n' "$output" | grep -- 'mkdir -p')"
+    [ -n "$mkdir_line" ]
+    [[ "$mkdir_line" != *'opencode'* ]]
 }
 
 @test "emitted function pre-creates the host state dirs before running" {
@@ -415,7 +430,9 @@ SHIM
     [ -d "$HOME/.claude" ]
     [ -d "$HOME/.gco" ]
     grep -q -- 'gco-dev-tools:/root/.npm-global' "$GCO_SHIM_LOG"
+    grep -q -- 'gco-dev-opencode:/root/.local/share/opencode' "$GCO_SHIM_LOG"
     grep -q -- 'CLAUDE_CONFIG_DIR=/root/.claude' "$GCO_SHIM_LOG"
+    [ ! -e "$HOME/.local/share/opencode" ]
 }
 
 # -- AWS credential support ----------------------------------------------------
@@ -479,6 +496,7 @@ SHIM
         GCO_AUTOPILOT_ENGINE
         GCO_AUTOPILOT_MODEL
         GCO_AUTOPILOT_CODEX_MODEL
+        GCO_AUTOPILOT_OPENCODE_MODEL
         GCO_AUTOPILOT_SMALL_FAST_MODEL
         GCO_AUTOPILOT_CONFIG_DIR
     )

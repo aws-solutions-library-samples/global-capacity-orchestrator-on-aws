@@ -38,6 +38,7 @@ from cli.managed_config import (
     CODEX_REASONING_EFFORT,
     DEPLOYMENT_REGION_SCALARS,
     MISSION_DEFAULT_MODEL,
+    OPENCODE_DEFAULT_MODEL,
     REGIONAL_DEPLOYMENT_REGIONS,
     ChangeReport,
     ManagedConfigError,
@@ -51,6 +52,7 @@ from cli.managed_config import (
     set_codex_reasoning_effort,
     set_deployment_region_role,
     set_mission_default_model,
+    set_opencode_default_model,
 )
 
 # Ensure gco_mcp/ is importable, mirroring the other MCP test modules.
@@ -69,6 +71,7 @@ REGION_TOOLS = (
     "set_claude_code_default_model",
     "set_codex_default_model",
     "set_codex_reasoning_effort",
+    "set_opencode_default_model",
 )
 
 BASE_CONFIG: dict = {
@@ -87,6 +90,7 @@ BASE_CONFIG: dict = {
             "claude_code_default_model_id": "global.anthropic.claude-opus-5",
             "codex_default_model_id": "global.openai.gpt-5.6-sol",
             "codex": {"reasoning_effort": "xhigh"},
+            "opencode_default_model_id": "global.moonshotai.kimi-k3",
             "generation_reasoning": {"effort": "high"},
         },
         "project_name": "gco",
@@ -811,6 +815,41 @@ class TestEngineScalars:
         assert report.key_id == "bedrock.codex.reasoning_effort"
         assert cdk_json.read_bytes() == before
 
+    def test_set_opencode_model_preserves_every_sibling(self, cdk_json: Path):
+        report = set_opencode_default_model("us.moonshotai.kimi-k3", config_path=cdk_json)
+
+        assert report.changed is True
+        assert report.key_id == "bedrock.opencode_default_model_id"
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["opencode_default_model_id"] == "us.moonshotai.kimi-k3"
+        # Repointing OpenCode never repoints Mission, the advisor, Claude Code, or Codex.
+        assert bedrock["codex_default_model_id"] == "global.openai.gpt-5.6-sol"
+        assert bedrock["codex"] == {"reasoning_effort": "xhigh"}
+        assert bedrock["generation_reasoning"] == {"effort": "high"}
+        assert bedrock["mission_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["capacity_advisor_default_model_id"] == "global.anthropic.claude-opus-5"
+        assert bedrock["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_opencode_model_is_idempotent(self, cdk_json: Path):
+        before = cdk_json.read_bytes()
+        report = set_opencode_default_model("global.moonshotai.kimi-k3", config_path=cdk_json)
+        assert report.changed is False
+        assert cdk_json.read_bytes() == before
+
+    def test_set_opencode_model_materializes_the_key_when_absent(self, cdk_json: Path):
+        document = json.loads(cdk_json.read_text(encoding="utf-8"))
+        del document["context"]["bedrock"]["opencode_default_model_id"]
+        cdk_json.write_text(json.dumps(document), encoding="utf-8")
+
+        report = set_opencode_default_model("global.moonshotai.kimi-k3", config_path=cdk_json)
+
+        assert report.changed is True
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        assert written["context"]["bedrock"]["opencode_default_model_id"] == (
+            "global.moonshotai.kimi-k3"
+        )
+
     def test_set_mission_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(ManagedConfigError, match="non-empty string"):
             set_mission_default_model("   ", config_path=cdk_json)
@@ -872,6 +911,23 @@ class TestEngineScalars:
         ):
             set_codex_default_model(" model-id ", config_path=cdk_json)
 
+    @pytest.mark.parametrize("model_id", ["", "   "])
+    def test_set_opencode_model_empty_rejected(self, cdk_json: Path, model_id: str):
+        before = cdk_json.read_bytes()
+        with pytest.raises(
+            ManagedConfigError,
+            match=re.escape("bedrock.opencode_default_model_id must be a non-empty string"),
+        ):
+            set_opencode_default_model(model_id, config_path=cdk_json)
+        assert cdk_json.read_bytes() == before
+
+    def test_set_opencode_model_surrounding_whitespace_rejected(self, cdk_json: Path):
+        with pytest.raises(
+            ManagedConfigError,
+            match=re.escape("bedrock.opencode_default_model_id must not have"),
+        ):
+            set_opencode_default_model(" model-id ", config_path=cdk_json)
+
     @pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh"])
     def test_set_codex_reasoning_accepts_supported_values(self, cdk_json: Path, effort: str):
         set_codex_reasoning_effort(effort, config_path=cdk_json)
@@ -907,6 +963,7 @@ class TestEngineScalars:
         assert status["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
         assert status["codex_default_model_id"] == "global.openai.gpt-5.6-sol"
         assert status["codex_reasoning_effort"] == "xhigh"
+        assert status["opencode_default_model_id"] == "global.moonshotai.kimi-k3"
         assert status["config_path"] == str(cdk_json)
 
     def test_bedrock_container_materialized_when_absent(self, tmp_path: Path):
@@ -1102,6 +1159,7 @@ class TestBedrockCli:
         assert payload["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
         assert payload["codex_default_model_id"] == "global.openai.gpt-5.6-sol"
         assert payload["codex_reasoning_effort"] == "xhigh"
+        assert payload["opencode_default_model_id"] == "global.moonshotai.kimi-k3"
 
     def test_set_claude_code_model_with_yes_writes(self, cdk_json: Path):
         runner = CliRunner()
@@ -1268,6 +1326,63 @@ class TestBedrockCli:
         bedrock = written["context"]["bedrock"]
         assert bedrock["codex"] == {"reasoning_effort": "high"}
         assert bedrock["codex_default_model_id"] == "global.openai.gpt-5.6-sol"
+
+    def test_set_opencode_model_with_yes_writes(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-opencode-model",
+                "us.moonshotai.kimi-k3",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["opencode_default_model_id"] == "us.moonshotai.kimi-k3"
+        assert bedrock["codex_default_model_id"] == "global.openai.gpt-5.6-sol"
+        assert bedrock["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_opencode_model_prompts_and_declining_leaves_the_file_alone(self, cdk_json: Path):
+        before = cdk_json.read_bytes()
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-opencode-model",
+                "us.moonshotai.kimi-k3",
+                "--config-path",
+                str(cdk_json),
+            ],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        assert "Set bedrock.opencode_default_model_id to us.moonshotai.kimi-k3" in result.output
+        assert cdk_json.read_bytes() == before
+
+    def test_set_opencode_model_empty_exits_nonzero(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-opencode-model",
+                "  ",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "refusing to update" in result.output
 
     def test_set_codex_reasoning_effort_rejects_unknown_choice(self, cdk_json: Path):
         runner = CliRunner()
@@ -1453,6 +1568,21 @@ class TestMcpRegionToolsArgv:
         ]
 
     @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
+    def test_set_opencode_model_argv(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.set_opencode_default_model(model_id="global.moonshotai.kimi-k3")
+            cmd = mock.call_args[0][0]
+        assert cmd[-5:] == [
+            "stacks",
+            "bedrock",
+            "set-opencode-model",
+            "global.moonshotai.kimi-k3",
+            "-y",
+        ]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
     def test_set_codex_reasoning_effort_argv(self):
         importlib.reload(run_mcp)
         with patch("cli_runner.subprocess.run") as mock:
@@ -1521,3 +1651,10 @@ class TestRegistryContract:
         assert key.container == "bedrock"
         assert key.leaf == "reasoning_effort"
         assert key.nested == ("codex",)
+
+    def test_opencode_model_registry_entry_shape(self):
+        key = OPENCODE_DEFAULT_MODEL
+        assert key.key_id == "bedrock.opencode_default_model_id"
+        assert key.container == "bedrock"
+        assert key.leaf == "opencode_default_model_id"
+        assert key.nested == ()

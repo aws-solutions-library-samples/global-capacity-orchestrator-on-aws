@@ -26,7 +26,7 @@ registered groups; this table only says what each module owns.
 | File | Group | Description | Reference |
 |------|-------|-------------|-----------|
 | `analytics_cmd.py` | `gco analytics ...` | Manage the GCO analytics (SageMaker Studio + EMR) environment. | [reference](../../docs/CLI.md#analytics-commands) |
-| `autopilot_cmd.py` | `gco autopilot` | Launch a fully configured Claude Code or Codex session for GCO. | [reference](../../docs/CLI.md#autopilot-command) |
+| `autopilot_cmd.py` | `gco autopilot` | Launch a fully configured Claude Code, Codex, or OpenCode session for GCO. | [reference](../../docs/CLI.md#autopilot-command) |
 | `capacity_cmd.py` | `gco capacity ...` | Check EC2 capacity availability. | [reference](../../docs/CLI.md#capacity-commands) |
 | `cluster_cmd.py` | `gco cluster ...` | Cluster connectivity helpers (SSM tunnel to the private EKS API). | [reference](../../docs/CLI.md#cluster-commands) |
 | `config_cmd.py` | `gco config-cmd ...` | Manage CLI configuration. | [reference](../../docs/CLI.md#config-cmd-commands) |

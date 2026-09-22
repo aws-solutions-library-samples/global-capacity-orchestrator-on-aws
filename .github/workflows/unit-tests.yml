@@ -19,7 +19,7 @@
 #   - unit:cdk:nag-compliance:list  — emits the dynamic cdk-nag matrix
 #   - unit:cdk:project-name-scoping — #139 name-collision + backward-compat synth checks
 #   - unit:cdk:synth                — cdk synth of the default config
-#   - unit:cli:autopilot            — both-engine plans, configs, imports, and pinned CLIs
+#   - unit:cli:autopilot            — three-engine plans, configs, imports, and pinned CLIs
 #   - unit:cli:smoke                — gco --help and all subcommand help pages
 #   - unit:cli:smoke:windows        — native Windows cli.stacks/app import + file-lock smoke
 #   - unit:fresh-install            — pip install from scratch, verify imports
@@ -538,12 +538,12 @@ jobs:
           python -m pytest --noconftest -q
           tests/test_managed_config.py::TestEngineWriteMechanics::test_process_update_waits_for_shared_lock
 
-  # End-to-end smoke for both `gco autopilot` engines: each launch plan
-  # resolves without its agent CLI present, both generated config formats are
+  # End-to-end smoke for all three `gco autopilot` engines: each launch plan
+  # resolves without its agent CLI present, every generated config format is
   # validated against the shared companion registry, and the exact pinned
-  # Claude Code and Codex npm releases install and are detected. Complements
-  # mocked pytest coverage with the one thing mocks cannot prove: both lazy
-  # runtime pins are installable.
+  # Claude Code, Codex and OpenCode npm releases install and are detected.
+  # Complements mocked pytest coverage with the one thing mocks cannot prove:
+  # every lazy runtime pin is installable.
   unit-cli-autopilot:
     name: "unit:cli:autopilot"
     runs-on: ubuntu-latest
@@ -564,21 +564,26 @@ jobs:
       - name: Install CLI
         run: |
           pip install -e .
-      - name: Resolve both launch plans without agent CLIs installed
+      - name: Resolve every launch plan without agent CLIs installed
         run: |
           gco autopilot --help
           gco autopilot --dry-run
           gco -o json autopilot --dry-run > /tmp/autopilot-plan.json
           gco autopilot --engine codex --dry-run
           gco -o json autopilot --engine codex --dry-run > /tmp/codex-plan.json
+          gco autopilot --engine opencode --dry-run
+          gco -o json autopilot --engine opencode --dry-run > /tmp/opencode-plan.json
           # Assertions live in the shared engine-aware CI contract — the same
-          # checks the dev-container step and boot probe consume.
+          # checks the dev-container step and boot probes consume.
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-plan /tmp/autopilot-plan.json --claude-binary absent
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-plan /tmp/codex-plan.json \
             --engine codex --codex-binary absent
-      - name: Validate both generated MCP configs
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-plan /tmp/opencode-plan.json \
+            --engine opencode --opencode-binary absent
+      - name: Validate every generated MCP config
         run: |
           gco autopilot --print-config > /tmp/autopilot-mcp.json
           python3 .github/scripts/autopilot_ci_contract.py \
@@ -586,6 +591,28 @@ jobs:
           gco autopilot --engine codex --print-config > /tmp/autopilot-codex.toml
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-codex-config /tmp/autopilot-codex.toml
+          gco autopilot --engine opencode --print-config > /tmp/autopilot-opencode.json
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-opencode-config /tmp/autopilot-opencode.json
+          # The AWS profile pin follows the credential-source environment:
+          # pinned when nothing else names credentials (the ~/.aws and
+          # instance-role case), withheld when static keys are exported so
+          # the AWS SDK does not skip them.
+          env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_BEARER_TOKEN_BEDROCK \
+            -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+            -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
+            gco autopilot --engine opencode --print-config > /tmp/opencode-no-cred-env.json
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-opencode-config /tmp/opencode-no-cred-env.json --profile default
+          AWS_ACCESS_KEY_ID=parser-smoke AWS_SECRET_ACCESS_KEY=parser-smoke \
+            gco autopilot --engine opencode --print-config > /tmp/opencode-static-keys.json
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-opencode-config /tmp/opencode-static-keys.json --no-profile
+          # --small-fast-model overrides the small_model pin alongside the model.
+          gco autopilot --engine opencode --small-fast-model small-smoke --print-config \
+            > /tmp/opencode-small.json
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-opencode-config /tmp/opencode-small.json --small-model small-smoke
       - name: Validate feature-flag and resume-flag handling
         run: |
           # Feature flags land on the gco server entry only (the contract's
@@ -599,6 +626,11 @@ jobs:
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-codex-config /tmp/codex-flags.toml \
             --expect-gco-env GCO_ENABLE_ALL_TOOLS=true
+          gco autopilot --engine opencode -e all-tools --print-config \
+            > /tmp/opencode-flags.json
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-opencode-config /tmp/opencode-flags.json \
+            --expect-gco-env GCO_ENABLE_ALL_TOOLS=true
           # Bad inputs fail loudly instead of launching a wrong session.
           if gco autopilot -e bogus-flag --print-config; then
             echo "unknown feature flag was accepted" >&2; exit 1
@@ -608,6 +640,12 @@ jobs:
           fi
           if gco autopilot --continue --resume abc --dry-run; then
             echo "--continue with --resume was accepted" >&2; exit 1
+          fi
+          if gco autopilot --engine opencode --resume --dry-run; then
+            echo "bare --resume was accepted for OpenCode, which cannot pick a session" >&2; exit 1
+          fi
+          if gco autopilot --engine opencode --continue --dry-run -- mcp list; then
+            echo "--continue was accepted for an OpenCode utility subcommand" >&2; exit 1
           fi
           echo "invalid-input handling OK"
       - name: Validate skills/agents/plugin imports
@@ -628,22 +666,41 @@ jobs:
             echo "missing --skills path was accepted" >&2; exit 1
           fi
           echo "imports handling OK"
-      - name: Install both pinned agent CLIs and re-resolve
+      - name: Install every pinned agent CLI and re-resolve
         # Execute the exact lazy-install commands production Autopilot uses,
         # then prove each real binary and installed-plan state.
         run: |
           python3 - <<'PY'
           import subprocess
 
-          from cli.autopilot import claude_install_command, codex_install_command
+          from cli.autopilot import (
+              claude_install_command,
+              codex_install_command,
+              opencode_install_command,
+          )
 
           subprocess.run(claude_install_command(), check=True)
           subprocess.run(codex_install_command(), check=True)
+          subprocess.run(opencode_install_command(), check=True)
           PY
           claude --version | grep -qF \
             "$(python3 .github/scripts/autopilot_ci_contract.py pin)"
           codex --version | grep -qF \
             "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine codex)"
+          opencode --version | grep -qF \
+            "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine opencode)"
+          # Parse the exact session-precedence and resume spellings production
+          # uses for OpenCode (root TUI and `run`), and confirm the utility
+          # subcommands still reject them — the reason autopilot withholds the
+          # session flags from `mcp list` & co. A future pin whose CLI moves
+          # fails here, not in a user's terminal.
+          export OPENCODE_DISABLE_AUTOUPDATE=1
+          opencode --model parser-smoke --continue --help >/dev/null
+          opencode --model parser-smoke --session parser-smoke --help >/dev/null
+          opencode --model parser-smoke run --continue --help >/dev/null
+          if opencode mcp list --model parser-smoke >/dev/null 2>&1; then
+            echo "OpenCode utility subcommand accepted the session --model flag" >&2; exit 1
+          fi
           # Parse the exact session-precedence and resume spellings production
           # uses. This catches a future Codex pin whose CLI/schema moves.
           codex --model parser-smoke \
@@ -661,11 +718,16 @@ jobs:
           gco -o json autopilot --dry-run > /tmp/autopilot-plan-installed.json
           gco -o json autopilot --engine codex --dry-run \
             > /tmp/codex-plan-installed.json
+          gco -o json autopilot --engine opencode --dry-run \
+            > /tmp/opencode-plan-installed.json
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-plan /tmp/autopilot-plan-installed.json --claude-binary present
           python3 .github/scripts/autopilot_ci_contract.py \
             verify-plan /tmp/codex-plan-installed.json \
             --engine codex --codex-binary present
+          python3 .github/scripts/autopilot_ci_contract.py \
+            verify-plan /tmp/opencode-plan-installed.json \
+            --engine opencode --opencode-binary present
 
   unit-cdk-synth:
     name: "unit:cdk:synth"

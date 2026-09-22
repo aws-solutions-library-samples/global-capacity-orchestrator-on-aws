@@ -317,6 +317,12 @@ def test_exec_codex_delegates_to_shared_exec() -> None:
     execute.assert_called_once_with(["codex"], {"A": "B"})
 
 
+def test_exec_opencode_delegates_to_shared_exec() -> None:
+    with patch("cli.autopilot.exec_claude", return_value=29) as execute:
+        assert autopilot.exec_opencode(["opencode"], {"A": "B"}) == 29
+    execute.assert_called_once_with(["opencode"], {"A": "B"})
+
+
 def test_describe_stack_outputs_returns_none_for_empty_stack_list() -> None:
     cfn = MagicMock()
     cfn.describe_stacks.return_value = {"Stacks": []}
