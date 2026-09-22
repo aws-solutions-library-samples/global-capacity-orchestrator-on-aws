@@ -1088,15 +1088,15 @@ if candidates:
       # aws/aws-cli doesn't publish GitHub Releases for v2; tags are the
       # canonical source. First page (per_page=20) is newest-first;
       # filter to 2.x.y semver and take the top match.
-      latest="$(curl -fsSL --max-time 15 \
-        "https://api.github.com/repos/aws/aws-cli/tags?per_page=20" 2>/dev/null \
+      latest="$(github_api_get \
+        "https://api.github.com/repos/aws/aws-cli/tags?per_page=20" \
         | jq -r '[.[].name | select(test("^2\\.[0-9]+\\.[0-9]+$"))][0] // empty' 2>/dev/null)" || true
       ;;
     DOCKER_VERSION)
       # moby/moby tags releases as ``docker-v<semver>``; strip the
       # prefix so compare_semver can handle the value.
-      latest="$(curl -fsSL --max-time 15 \
-        "https://api.github.com/repos/moby/moby/releases/latest" 2>/dev/null \
+      latest="$(github_api_get \
+        "https://api.github.com/repos/moby/moby/releases/latest" \
         | jq -r '.tag_name // empty' 2>/dev/null \
         | sed -E 's/^(docker-)?v//')" || true
       ;;
@@ -1105,8 +1105,8 @@ if candidates:
       # (e.g. v0.35.0). The release tag is the canonical source;
       # compare_semver strips the leading v on both sides. The
       # Dockerfile installs the plugin binary buildx-<tag>.linux-<arch>.
-      latest="$(curl -fsSL --max-time 15 \
-        "https://api.github.com/repos/docker/buildx/releases/latest" 2>/dev/null \
+      latest="$(github_api_get \
+        "https://api.github.com/repos/docker/buildx/releases/latest" \
         | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
     UV_VERSION)
@@ -1114,8 +1114,8 @@ if candidates:
       # (e.g. 0.12.1). The dev container ships uv/uvx for the `gco
       # autopilot` companion MCP servers; bump the two SHA256 ARGs in
       # lockstep from the per-artifact *.sha256 release files.
-      latest="$(curl -fsSL --max-time 15 \
-        "https://api.github.com/repos/astral-sh/uv/releases/latest" 2>/dev/null \
+      latest="$(github_api_get \
+        "https://api.github.com/repos/astral-sh/uv/releases/latest" \
         | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
   esac
@@ -1125,7 +1125,14 @@ if candidates:
   # silence.
 
   if [ -z "$latest" ]; then
-    mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}."
+    case "$name" in
+      AWSCLI_VERSION|DOCKER_VERSION|BUILDX_VERSION|UV_VERSION)
+        mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}$(github_api_failure_hint)."
+        ;;
+      *)
+        mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}."
+        ;;
+    esac
     return
   fi
 
@@ -1319,7 +1326,7 @@ if [ -f "$PRECOMMIT_CONFIG" ]; then
 
     latest_rev="$(get_latest_precommit_hook_release "$repo")"
     if [ -z "$latest_rev" ]; then
-      mark_scan_incomplete "Pre-commit tag lookup failed for ${repo}."
+      mark_scan_incomplete "Pre-commit tag lookup failed for ${repo}$(github_api_failure_hint)."
       continue
     fi
 
@@ -1568,7 +1575,7 @@ check_github_tool() {
   fi
   latest="$(get_latest_github_release_tag "$repo")"
   if [ -z "$latest" ]; then
-    mark_scan_incomplete "GitHub release lookup failed for ${name} (${repo})."
+    mark_scan_incomplete "GitHub release lookup failed for ${name} (${repo})$(github_api_failure_hint)."
     return 0
   fi
   if [ "$current" != "$latest" ] \

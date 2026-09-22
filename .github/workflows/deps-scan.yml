@@ -52,8 +52,10 @@
 # If any are outdated, opens (or refreshes) a single rolling GitHub issue with
 # the details and mirrors the report into the workflow run's job summary. Once
 # a complete scan is clean (no skipped checks), comments on and closes that
-# issue. Uses the built-in GITHUB_TOKEN with `issues: write` — no long-lived
-# PAT needed.
+# issue. Uses the built-in GITHUB_TOKEN throughout — for the issue writes
+# (`issues: write`) and, as a bearer token on the scan's own api.github.com
+# release/tag lookups, to stay off the shared anonymous rate-limit bucket. No
+# long-lived PAT needed.
 #
 # =============================================================================
 
@@ -181,6 +183,17 @@ jobs:
         id: scan
         env:
           WORKFLOWS_DIR: .github/workflows
+          # The scan's release/tag lookups for the CI tooling, the pre-commit
+          # hooks and the Dockerfile.dev pins all read api.github.com. Sent
+          # anonymously they draw from a 60 req/h bucket keyed on the runner's
+          # egress IP, which is shared with every other tenant's job on that
+          # host — a run can start with the bucket already empty and lose all
+          # fifteen GitHub lookups at once while PyPI, npm and the OCI
+          # registries succeed (the shape of a partial monthly report). The
+          # job's own token moves those reads to the 5 000 req/h per-token
+          # bucket; `contents: read` above is all it needs, since every repo
+          # queried is public. Nothing else in the scan step uses the token.
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash .github/scripts/dependency-scan.sh
       - name: Open or refresh the drift issue
         if: steps.scan.outputs.has_drift == 'true'

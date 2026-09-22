@@ -1595,6 +1595,31 @@ except Exception:
     [ -z "$output" ]
 }
 
+# write_github_curl_shim <dir> <body-file>
+#
+# Installs a ``curl`` in <dir> that answers every request with HTTP 200 and
+# the contents of <body-file>. The shim honours the ``-D FILE`` header dump
+# ``github_api_get`` reads its status from, which is what makes the helper
+# accept the canned body; a shim that only prints a body reads as a failed
+# call. Used by the tests that exercise the parsers behind a GitHub lookup.
+write_github_curl_shim() {
+    local dir="$1" body="$2"
+    cat > "$dir/curl" <<SHIM
+#!/usr/bin/env bash
+dump=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        -D) dump="\$2"; shift 2 ;;
+        -H|--max-time|--retry|--retry-max-time) shift 2 ;;
+        *) shift ;;
+    esac
+done
+[ -n "\$dump" ] && printf 'HTTP/2 200 \r\nx-ratelimit-remaining: 4999\r\n\r\n' > "\$dump"
+cat "${body}"
+SHIM
+    chmod +x "$dir/curl"
+}
+
 @test "get_latest_precommit_hook_release: trailing slash is tolerated" {
     # We don't want the network call, so we simulate by replacing curl
     # in PATH with a shim that prints a canned tags response. This
@@ -1602,12 +1627,10 @@ except Exception:
     # internet — same pattern other BATS suites in this file would use
     # if they needed to.
     tmpdir="$(mktemp -d)"
-    cat > "$tmpdir/curl" <<'SHIM'
-#!/usr/bin/env bash
-# Emit a tags-shaped JSON regardless of args so the helper's parser
-# gets something realistic. The tags below mix shapes (vX.Y.Z, X.Y.Z,
-# pre-release suffix, non-semver) so this also covers the parser.
-cat <<'JSON'
+    # A tags-shaped JSON regardless of args so the helper's parser gets
+    # something realistic. The tags below mix shapes (vX.Y.Z, X.Y.Z,
+    # pre-release suffix, non-semver) so this also covers the parser.
+    cat > "$tmpdir/tags.json" <<'JSON'
 [
   {"name": "v1.2.3"},
   {"name": "v1.3.0-rc1"},
@@ -1616,8 +1639,7 @@ cat <<'JSON'
   {"name": "v1.2.4"}
 ]
 JSON
-SHIM
-    chmod +x "$tmpdir/curl"
+    write_github_curl_shim "$tmpdir" "$tmpdir/tags.json"
     PATH="$tmpdir:$PATH" run get_latest_precommit_hook_release "https://github.com/owner/repo/"
     [ "$status" -eq 0 ]
     # ``1.4.0`` is the highest valid semver in the fixture; non-semver
@@ -1628,11 +1650,8 @@ SHIM
 
 @test "get_latest_precommit_hook_release: .git suffix is stripped" {
     tmpdir="$(mktemp -d)"
-    cat > "$tmpdir/curl" <<'SHIM'
-#!/usr/bin/env bash
-echo '[{"name": "v0.22.1"}]'
-SHIM
-    chmod +x "$tmpdir/curl"
+    echo '[{"name": "v0.22.1"}]' > "$tmpdir/tags.json"
+    write_github_curl_shim "$tmpdir" "$tmpdir/tags.json"
     PATH="$tmpdir:$PATH" run get_latest_precommit_hook_release "https://github.com/owner/repo.git"
     [ "$status" -eq 0 ]
     [ "$output" = "v0.22.1" ]
@@ -1641,11 +1660,8 @@ SHIM
 
 @test "get_latest_precommit_hook_release: empty when curl returns no tags" {
     tmpdir="$(mktemp -d)"
-    cat > "$tmpdir/curl" <<'SHIM'
-#!/usr/bin/env bash
-echo '[]'
-SHIM
-    chmod +x "$tmpdir/curl"
+    echo '[]' > "$tmpdir/tags.json"
+    write_github_curl_shim "$tmpdir" "$tmpdir/tags.json"
     PATH="$tmpdir:$PATH" run get_latest_precommit_hook_release "https://github.com/owner/repo"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -1656,16 +1672,13 @@ SHIM
     # Only date-based tags, like a few infrastructure-as-code repos
     # publish. The helper must return empty rather than guess.
     tmpdir="$(mktemp -d)"
-    cat > "$tmpdir/curl" <<'SHIM'
-#!/usr/bin/env bash
-cat <<'JSON'
+    cat > "$tmpdir/tags.json" <<'JSON'
 [
   {"name": "release-2024-09-01"},
   {"name": "release-2024-10-01"}
 ]
 JSON
-SHIM
-    chmod +x "$tmpdir/curl"
+    write_github_curl_shim "$tmpdir" "$tmpdir/tags.json"
     PATH="$tmpdir:$PATH" run get_latest_precommit_hook_release "https://github.com/owner/repo"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -2356,6 +2369,207 @@ SHIM
     [ -z "$output" ]
 }
 
+# ── github_api_get / github_api_failure_hint ────────────────────────────────
+#
+# Every api.github.com read goes through github_api_get, so its behaviour is
+# pinned directly against a scripted curl: the header dump is where the
+# status and quota come from, a token is sent only when one is set, a refused
+# token is retried anonymously, and the recorded cause reads back exactly once
+# through the hint. FAKE_GITHUB_MODE picks the response for authenticated
+# calls; FAKE_GITHUB_MODE_ANON overrides it for the anonymous ones.
+
+write_github_api_curl() {
+    local dir="$1"
+    cat > "$dir/curl" <<'SHIM'
+#!/usr/bin/env bash
+dump="" bearer="" url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -D) dump="$2"; shift 2 ;;
+        -H) case "$2" in "Authorization: Bearer "*) bearer="${2#Authorization: Bearer }" ;; esac; shift 2 ;;
+        --max-time|--retry|--retry-max-time) shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s %s\n' "${bearer:-anonymous}" "$url" >> "${FAKE_GITHUB_CALLS}"
+mode="${FAKE_GITHUB_MODE:-ok}"
+[ -z "$bearer" ] && [ -n "${FAKE_GITHUB_MODE_ANON:-}" ] && mode="$FAKE_GITHUB_MODE_ANON"
+respond() { printf 'HTTP/2 %s \r\n%s\r\n\r\n' "$1" "$2" > "$dump"; printf '%s' "$3"; }
+case "$mode" in
+    ok)           respond 200 'x-ratelimit-remaining: 4999' '{"tag_name": "v9.9.9"}' ;;
+    redirect)     { printf 'HTTP/2 301 \r\nlocation: https://api.github.com/elsewhere\r\n\r\n'
+                    printf 'HTTP/2 200 \r\nX-RateLimit-Remaining: 12\r\n\r\n'; } > "$dump"
+                  printf '{"tag_name": "v1.2.3"}' ;;
+    ratelimit)    respond 403 'x-ratelimit-remaining: 0' '{"message": "API rate limit exceeded for 203.0.113.9."}' ;;
+    secondary429) respond 429 'X-RateLimit-Remaining: 40' '{"message": "You have exceeded a secondary rate limit."}' ;;
+    secondary403) respond 403 'Retry-After: 60' '{"message": "You have exceeded a secondary rate limit."}' ;;
+    forbidden)    respond 403 'x-ratelimit-remaining: 57' '{"message": "Resource not accessible by integration"}' ;;
+    unauthorized) respond 401 'x-ratelimit-remaining: 57' '{"message": "Bad credentials"}' ;;
+    notfound)     respond 404 'x-ratelimit-remaining: 30' '{"message": "Not Found"}' ;;
+    down)         exit 6 ;;
+esac
+SHIM
+    chmod +x "$dir/curl"
+}
+
+github_api_fixture() {
+    GITHUB_API_DIR="$(mktemp -d)"
+    write_github_api_curl "$GITHUB_API_DIR"
+    FAKE_GITHUB_CALLS="$GITHUB_API_DIR/calls"
+    : > "$FAKE_GITHUB_CALLS"
+    GITHUB_API_FAILURE_FILE="$GITHUB_API_DIR/failure"
+    : > "$GITHUB_API_FAILURE_FILE"
+    export FAKE_GITHUB_CALLS GITHUB_API_FAILURE_FILE
+    export PATH="$GITHUB_API_DIR:$PATH"
+    unset GITHUB_TOKEN GH_TOKEN
+}
+
+@test "github_api_get: empty url is refused without a request" {
+    github_api_fixture
+    run github_api_get ""
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ ! -s "$FAKE_GITHUB_CALLS" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: a 200 prints the body, stays anonymous without a token, and leaves no failure" {
+    github_api_fixture
+    run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"tag_name": "v9.9.9"}' ]
+    grep -qx 'anonymous https://api.github.com/repos/helm/helm/releases/latest' "$FAKE_GITHUB_CALLS"
+    run github_api_failure_hint
+    [ -z "$output" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: the final hop of a redirect chain is the status that counts" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=redirect run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"tag_name": "v1.2.3"}' ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: GITHUB_TOKEN, then GH_TOKEN, is sent as a bearer token" {
+    github_api_fixture
+    GITHUB_TOKEN=ghs_primary GH_TOKEN=gho_secondary run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 0 ]
+    grep -qx 'ghs_primary https://api.github.com/repos/helm/helm/releases/latest' "$FAKE_GITHUB_CALLS"
+    GH_TOKEN=gho_secondary run github_api_get "https://api.github.com/repos/helm/helm/tags?per_page=100"
+    [ "$status" -eq 0 ]
+    grep -qx 'gho_secondary https://api.github.com/repos/helm/helm/tags?per_page=100' "$FAKE_GITHUB_CALLS"
+    ! grep -q '^anonymous' "$FAKE_GITHUB_CALLS"
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: an exhausted anonymous bucket is reported with the remedy, once" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=ratelimit run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)" ]
+    # The hint is consumed: a later, unrelated reason cannot inherit it.
+    run github_api_failure_hint
+    [ -z "$output" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: secondary limits (429, or 403 with retry-after) are rate limits too" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=secondary429 run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 2 ]
+    run github_api_failure_hint
+    [[ "$output" == *"rate limit exceeded on the anonymous 60 req/h bucket"* ]]
+    FAKE_GITHUB_MODE=secondary403 run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 2 ]
+    run github_api_failure_hint
+    [[ "$output" == *"rate limit exceeded on the anonymous 60 req/h bucket"* ]]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: an exhausted token bucket names the token, not a variable to set" {
+    github_api_fixture
+    GITHUB_TOKEN=ghs_token FAKE_GITHUB_MODE=ratelimit run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 2 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: rate limit exceeded for the authenticated token)" ]
+    # A rate limit is not a refusal: exactly one request was made.
+    [ "$(wc -l < "$FAKE_GITHUB_CALLS")" -eq 1 ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: a 403 with quota left is not a rate limit, and anonymous calls are not retried" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=forbidden run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 4 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: HTTP 403)" ]
+    [ "$(wc -l < "$FAKE_GITHUB_CALLS")" -eq 1 ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: a refused token falls back to an anonymous read" {
+    # An organisation that blocks the GitHub Actions app answers 401/403 to
+    # the workflow token on its public repositories while an anonymous
+    # request succeeds; the lookup must survive that.
+    github_api_fixture
+    GITHUB_TOKEN=ghs_blocked FAKE_GITHUB_MODE=forbidden FAKE_GITHUB_MODE_ANON=ok \
+        run github_api_get "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"tag_name": "v9.9.9"}' ]
+    grep -qx 'ghs_blocked https://api.github.com/repos/aquasecurity/trivy/releases/latest' "$FAKE_GITHUB_CALLS"
+    grep -qx 'anonymous https://api.github.com/repos/aquasecurity/trivy/releases/latest' "$FAKE_GITHUB_CALLS"
+    run github_api_failure_hint
+    [ -z "$output" ]
+    GITHUB_TOKEN=ghs_blocked FAKE_GITHUB_MODE=unauthorized FAKE_GITHUB_MODE_ANON=ok \
+        run github_api_get "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
+    [ "$status" -eq 0 ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: a failed anonymous retry reports both outcomes" {
+    github_api_fixture
+    GITHUB_TOKEN=ghs_blocked FAKE_GITHUB_MODE=forbidden FAKE_GITHUB_MODE_ANON=ratelimit \
+        run github_api_get "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
+    [ "$status" -eq 2 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: HTTP 403, token refused, then anonymous retry: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)" ]
+    GITHUB_TOKEN=ghs_blocked FAKE_GITHUB_MODE=forbidden FAKE_GITHUB_MODE_ANON=notfound \
+        run github_api_get "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
+    [ "$status" -eq 4 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: HTTP 403, token refused, then anonymous retry: HTTP 404)" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: other statuses and transport errors are named as such" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=notfound run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 4 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: HTTP 404)" ]
+    FAKE_GITHUB_MODE=down run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 1 ]
+    run github_api_failure_hint
+    [ "$output" = " (GitHub API: transport error)" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
+@test "github_api_get: a success clears an earlier recorded failure" {
+    github_api_fixture
+    FAKE_GITHUB_MODE=down run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 1 ]
+    FAKE_GITHUB_MODE=ok run github_api_get "https://api.github.com/repos/helm/helm/releases/latest"
+    [ "$status" -eq 0 ]
+    run github_api_failure_hint
+    [ -z "$output" ]
+    rm -rf "$GITHUB_API_DIR"
+}
+
 # ── get_latest_github_release_tag ───────────────────────────────────────────
 #
 # Same split as get_latest_precommit_hook_release: the owner/repo guard
@@ -2382,14 +2596,9 @@ SHIM
 
 @test "get_latest_github_release_tag: parses tag_name from a shimmed release response" {
     tmpdir="$(mktemp -d)"
-    cat > "$tmpdir/curl" <<'SHIM'
-#!/usr/bin/env bash
-# Emit a releases/latest-shaped JSON regardless of args.
-cat <<'JSON'
-{"tag_name": "v0.71.0", "name": "Trivy v0.71.0"}
-JSON
-SHIM
-    chmod +x "$tmpdir/curl"
+    # A releases/latest-shaped JSON regardless of args.
+    echo '{"tag_name": "v0.71.0", "name": "Trivy v0.71.0"}' > "$tmpdir/release.json"
+    write_github_curl_shim "$tmpdir" "$tmpdir/release.json"
     PATH="$tmpdir:$PATH" run get_latest_github_release_tag "aquasecurity/trivy"
     [ "$status" -eq 0 ]
     [ "$output" = "v0.71.0" ]

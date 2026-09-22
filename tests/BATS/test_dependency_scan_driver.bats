@@ -55,25 +55,41 @@ setup() {
 
 make_fakes() {
     # curl: routes on the URL and answers from the catalog. Understands the
-    # two call shapes the scan uses (body on stdout; `-o FILE -w %{http_code}`).
-    # FAKE_NETWORK=down fails every request. FAKE_COMPANIONS=unhealthy answers
-    # deprecated/yanked for packages the catalog does not know; =missing 404s.
+    # three call shapes the scan uses (body on stdout; `-o FILE -w %{http_code}`;
+    # the GitHub API helper's `-D FILE` header dump, from which it reads the
+    # status and quota). FAKE_NETWORK=down fails every request.
+    # FAKE_COMPANIONS=unhealthy answers deprecated/yanked for packages the
+    # catalog does not know; =missing 404s. FAKE_GITHUB=ratelimit exhausts the
+    # api.github.com quota for every caller; =refuse-token answers 403 with
+    # quota left to *authenticated* api.github.com calls only, the way an
+    # organisation that blocks the GitHub Actions app does.
     write_stub "$FAKE_BIN" curl <<'FAKE_CURL'
 #!/usr/bin/env bash
 source "$FAKE_LIB"
-url="" out="" write_out=""
+url="" out="" write_out="" dump="" bearer=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o) out="$2"; shift 2 ;;
         -w) write_out="$2"; shift 2 ;;
-        -H|--max-time) shift 2 ;;
+        -D) dump="$2"; shift 2 ;;
+        -H)
+            case "$2" in "Authorization: Bearer "*) bearer="${2#Authorization: Bearer }" ;; esac
+            shift 2 ;;
+        --max-time|--retry|--retry-max-time) shift 2 ;;
         -*) shift ;;
         *) url="$1"; shift ;;
     esac
 done
-printf 'curl %s\n' "$url" >> "$CALLS"
+# Authenticated calls carry a marker so a test can prove the token reaches
+# api.github.com and nothing else.
+printf 'curl %s%s\n' "$url" "${bearer:+ [bearer]}" >> "$CALLS"
 reply() {
-    local code="$1" body="$2"
+    local code="$1" body="$2" extra_header="${3:-}"
+    if [ -n "$dump" ]; then
+        { printf 'HTTP/2 %s \r\n' "$code"
+          [ -n "$extra_header" ] && printf '%s\r\n' "$extra_header"
+          printf '\r\n'; } > "$dump"
+    fi
     if [ -n "$out" ]; then printf '%s' "$body" > "$out"; else printf '%s' "$body"; fi
     [ -n "$write_out" ] && printf '%s' "$code"
     [ "$code" = "200" ]
@@ -81,6 +97,19 @@ reply() {
 unreachable() {
     [ -n "$write_out" ] && printf '000'
     exit 22
+}
+github_gate() {
+    case "${FAKE_GITHUB:-ok}" in
+        ratelimit)
+            reply 403 '{"message": "API rate limit exceeded for 203.0.113.9."}' 'x-ratelimit-remaining: 0'
+            return 1 ;;
+        refuse-token)
+            if [ -n "$bearer" ]; then
+                reply 403 '{"message": "Resource not accessible by integration"}' 'x-ratelimit-remaining: 57'
+                return 1
+            fi ;;
+    esac
+    return 0
 }
 [ "${FAKE_NETWORK:-up}" = "down" ] && unreachable
 case "$url" in
@@ -111,10 +140,12 @@ case "$url" in
         reply 200 "{\"version\": \"$(answer npm "$pkg" 1.0.0)\"}"
         ;;
     *api.github.com/repos/*/releases/latest)
+        github_gate || exit 0
         repo="${url#*api.github.com/repos/}"; repo="${repo%/releases/latest}"
         reply 200 "{\"tag_name\": \"$(answer github-release "$repo" v1.0.0)\"}"
         ;;
     *api.github.com/repos/*/tags*)
+        github_gate || exit 0
         repo="${url#*api.github.com/repos/}"; repo="${repo%%/tags*}"
         if [ "$repo" = "aws/aws-cli" ]; then
             # The scan only accepts 2.x.y tags for the AWS CLI, so "newer"
@@ -681,7 +712,7 @@ run_scan() {
     GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/github-step-summary"
     : > "$GITHUB_OUTPUT"
     : > "$GITHUB_STEP_SUMMARY"
-    run env PATH="$FAKE_BIN:$PATH" TMPDIR="$BATS_TEST_TMPDIR" \
+    run env -u GITHUB_TOKEN -u GH_TOKEN PATH="$FAKE_BIN:$PATH" TMPDIR="$BATS_TEST_TMPDIR" \
         GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
         FAKE_AWS_CDK=present "$@" \
         bash -c 'cd "$1" && exec bash "$2"' _ "$root" "$SCRIPT"
@@ -869,9 +900,10 @@ report_path() {
     [[ "$output" == *"INCOMPLETE: Node.js release-schedule lookup failed or returned no active LTS major."* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin CDK_VERSION."* ]]
     [[ "$output" == *"npm lookup for @anthropic-ai/claude-code failed (network)."* ]]
-    [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit."* ]]
+    [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit (GitHub API: transport error)."* ]]
     [[ "$output" == *"endoflife.date query failed (network or schema change)."* ]]
-    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)."* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy) (GitHub API: transport error)."* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin UV_VERSION (GitHub API: transport error)."* ]]
     [[ "$output" == *"INCOMPLETE: kubectl stable-version lookup failed for minor 1.36."* ]]
     [[ "$output" == *"INCOMPLETE: Container registry lookup failed for kindest/node minor 1.36."* ]]
     [[ "$output" == *"Offline accelerator validator failed operationally."* ]]
@@ -887,6 +919,85 @@ report_path() {
     grep -qF -- "    boto3 is not installed" "$report"
     grep -qF -- "> Recorded failures: " "$report"
     grep -qF -- "- **Incomplete lookup or parse:** pip list --outdated failed." "$report"
+}
+
+@test "a rate-limited GitHub API names the exhausted bucket and the remedy on every GitHub-backed lookup" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+    run_scan "$root" FAKE_GITHUB=ratelimit
+
+    [ "$status" -eq 0 ]
+    local why=" (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)."
+    # The seven CI-tooling releases, the two GitHub-hosted pre-commit hooks and
+    # the four GitHub-backed Dockerfile.dev pins all read api.github.com, so all
+    # thirteen go incomplete together and every line says the same thing.
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/DavidAnson/markdownlint-cli2${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin AWSCLI_VERSION${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin DOCKER_VERSION${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin BUILDX_VERSION${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin UV_VERSION${why}"* ]]
+    # Surfaces on other hosts are untouched: the npm-backed CDK pin still
+    # resolves, and nothing else went incomplete.
+    [[ "$output" != *"Dockerfile.dev pin CDK_VERSION"* ]]
+    [[ "$output" == *"Incomplete lookups:       13"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    # No token was offered, so no request carried one.
+    ! grep -q '\[bearer\]' "$CALLS"
+    # A clean-but-incomplete scan writes no drift report; the cause still has
+    # to reach the operator through the job summary's incomplete-checks line.
+    grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
+    [[ "$output" == *"No drift was found in completed checks, but the scan is incomplete."* ]]
+    grep -qF -- "rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "GITHUB_TOKEN is sent as a bearer token to api.github.com and nowhere else" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+    run_scan "$root" GITHUB_TOKEN=ghs_scan_token
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Incomplete lookups:       0"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    grep -q '^curl https://api.github.com/repos/aquasecurity/trivy/releases/latest \[bearer\]$' "$CALLS"
+    grep -q '^curl https://api.github.com/repos/astral-sh/ruff-pre-commit/tags?per_page=100 \[bearer\]$' "$CALLS"
+    grep -q '^curl https://api.github.com/repos/aws/aws-cli/tags?per_page=20 \[bearer\]$' "$CALLS"
+    # Every api.github.com call was authenticated, and the token never left
+    # GitHub: the registry, PyPI, endoflife.date and k8s lookups stay anonymous.
+    ! grep '^curl https://api.github.com/' "$CALLS" | grep -qv '\[bearer\]$'
+    ! grep -v '^curl https://api.github.com/' "$CALLS" | grep -q '\[bearer\]'
+
+    # A rate limit hit *with* a token is reported as the token's own bucket, so
+    # nobody is told to set a variable that is already set.
+    run_scan "$root" GITHUB_TOKEN=ghs_scan_token FAKE_GITHUB=ratelimit
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy) (GitHub API: rate limit exceeded for the authenticated token)."* ]]
+    [[ "$output" != *"set GITHUB_TOKEN"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+}
+
+@test "a token the GitHub API refuses falls back to an anonymous read and the scan stays complete" {
+    # An organisation that blocks the GitHub Actions app answers 403 to a
+    # workflow token on its public repositories while an anonymous request
+    # succeeds; the release lookup must not be lost to that.
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+    run_scan "$root" GITHUB_TOKEN=ghs_blocked_by_org FAKE_GITHUB=refuse-token
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Incomplete lookups:       0"* ]]
+    [[ "$output" != *"token refused"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    # Each GitHub URL was tried with the token first and then anonymously.
+    grep -q '^curl https://api.github.com/repos/aquasecurity/trivy/releases/latest \[bearer\]$' "$CALLS"
+    grep -q '^curl https://api.github.com/repos/aquasecurity/trivy/releases/latest$' "$CALLS"
+    grep -q '^curl https://api.github.com/repos/astral-sh/uv/releases/latest \[bearer\]$' "$CALLS"
+    grep -q '^curl https://api.github.com/repos/astral-sh/uv/releases/latest$' "$CALLS"
 }
 
 @test "the remaining lookup and parse failure branches each degrade as designed" {
