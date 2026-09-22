@@ -63,6 +63,7 @@ FORWARDED_ENV_VARS=(
     GCO_AUTOPILOT_ENGINE
     GCO_AUTOPILOT_MODEL
     GCO_AUTOPILOT_CODEX_MODEL
+    GCO_AUTOPILOT_OPENCODE_MODEL
     GCO_AUTOPILOT_SMALL_FAST_MODEL
     GCO_AUTOPILOT_CONFIG_DIR
 )
@@ -132,7 +133,7 @@ assume-role session, static keys, and a plain ~/.aws/config all work the same
 way inside the container as they do on the host.
 
 Autopilot controls are also forwarded by name: GCO_AUTOPILOT_ENGINE,
-GCO_AUTOPILOT_MODEL, GCO_AUTOPILOT_CODEX_MODEL,
+GCO_AUTOPILOT_MODEL, GCO_AUTOPILOT_CODEX_MODEL, GCO_AUTOPILOT_OPENCODE_MODEL,
 GCO_AUTOPILOT_SMALL_FAST_MODEL, and GCO_AUTOPILOT_CONFIG_DIR. Config-directory
 values must name a writable path as seen inside the container.
 EOF
@@ -275,15 +276,25 @@ emit_block() {
     local rt="$1" socket="$2" image="$3" forwarded_env="$4" mount_opts="$5" rt_word image_word
     rt_word="$(shell_word "$rt")"
     image_word="$(shell_word "$image")"
-    # Three persistence mounts make both `gco autopilot` engines (and anything
+    # Four persistence mounts make every `gco autopilot` engine (and anything
     # else that keeps state under ~/.gco) survive the --rm container lifecycle:
-    #   gco-dev-tools -> /root/.npm-global   named volume; pinned Claude Code
-    #                                        and Codex lazy installs persist
-    #   ~/.claude     -> /root/.claude       host dir; CLAUDE_CONFIG_DIR keeps
-    #                                        Claude onboarding and transcripts
-    #   ~/.gco        -> /root/.gco          host dir; GCO CLI state plus the
-    #                                        generated MCP/Codex configs and
-    #                                        isolated Codex session state
+    #   gco-dev-tools    -> /root/.npm-global           named volume; pinned
+    #                                                   Claude Code, Codex, and
+    #                                                   OpenCode lazy installs
+    #   ~/.claude        -> /root/.claude               host dir; CLAUDE_CONFIG_DIR
+    #                                                   keeps Claude onboarding
+    #                                                   and transcripts
+    #   ~/.gco           -> /root/.gco                  host dir; GCO CLI state
+    #                                                   plus the generated MCP/
+    #                                                   Codex/OpenCode configs and
+    #                                                   isolated Codex sessions
+    #   gco-dev-opencode -> /root/.local/share/opencode named volume; OpenCode's
+    #                                                   session database, so
+    #                                                   --continue/--resume work
+    #                                                   across container runs
+    # OpenCode state is a named volume rather than a host mount on purpose: the
+    # host's own ~/.local/share/opencode may belong to a different OpenCode
+    # release, and sharing one SQLite database across versions is not safe.
     # The host dirs are pre-created so a root-owned mount point is never
     # created on Linux hosts.
     cat <<EOF
@@ -299,9 +310,9 @@ $MARKER_BEGIN
 gco() {
     mkdir -p "\$HOME/.aws" "\$HOME/.claude" "\$HOME/.gco"
     if [ -t 0 ] && [ -t 1 ]; then
-        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     else
-        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     fi
 }
 $MARKER_END

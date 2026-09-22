@@ -623,9 +623,9 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
     },
     "AUTOPILOT": {
         "summary": (
-            "gco autopilot: one command to a fully configured Claude Code "
-            "session on Amazon Bedrock with the GCO MCP server and the "
-            "recommended companion MCP servers wired in."
+            "gco autopilot: one command to a fully configured Claude Code, "
+            "OpenAI Codex, or OpenCode session on Amazon Bedrock with the GCO "
+            "MCP server and the recommended companion MCP servers wired in."
         ),
         "topics": [
             "cli",
@@ -638,6 +638,9 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "keywords": [
             "autopilot",
             "claude code",
+            "codex",
+            "opencode",
+            "kimi",
             "bedrock",
             "mcp",
             "agent session",

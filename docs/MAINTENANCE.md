@@ -393,18 +393,21 @@ Because it is a deployment configuration value — not a `pyproject.toml` entry,
 a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The monthly
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
 **Bedrock default model** check reads each managed `cdk.json` context value and
-flags a newer release **in the same model family**—a future global Claude Opus
-or OpenAI GPT release, never a jump to a different scope, tier, or provider
-(that is a choice, not drift). The generation keys
+flags a newer release **in the same model family**—a future global Claude Opus,
+OpenAI GPT, or Moonshot AI Kimi release, never a jump to a different scope,
+tier, or provider (that is a choice, not drift). The generation keys
 (`mission_default_model_id`, `capacity_advisor_default_model_id`) and Autopilot
-session keys (`claude_code_default_model_id`, `codex_default_model_id`) compare
-against system-defined inference profiles in `us-east-1`;
+session keys (`claude_code_default_model_id`, `codex_default_model_id`,
+`opencode_default_model_id`) compare against system-defined inference profiles
+in `us-east-1`;
 `embedding_model_id`—Mission memory's text-embedding model, resolved through
 `gco.bedrock.get_default_embedding_model_id()`—is a plain foundation model, so
 it compares against `bedrock list-foundation-models --by-output-modality
 EMBEDDING` instead. Family derivation tolerates all three revision shapes
-Bedrock ships (`-vMAJOR:MINOR`, a bare `-vMAJOR`, and no suffix at all), so one
-model line stays one family. The check needs AWS credentials via OIDC; without
+Bedrock ships (`-vMAJOR:MINOR`, a bare `-vMAJOR`, and no suffix at all), and a
+single-letter generation marker such as Kimi's `k3` folds like a number, so one
+model line stays one family and a `kimi-k4` release is reported as drift
+against the Kimi K3 default. The check needs AWS credentials via OIDC; without
 them the scan skips it with a noted reason, so a credential-less run is not a
 false "up to date".
 
@@ -415,11 +418,20 @@ deliberately):
    `context.bedrock.mission_default_model_id` (Mission sampling) and
    `context.bedrock.capacity_advisor_default_model_id` (capacity advisor)—share
    `context.bedrock.generation_reasoning.effort`, so review that effort and the
-   sibling generation key together. Treat the two Autopilot session defaults
+   sibling generation key together. Treat the three Autopilot session defaults
    independently: `context.bedrock.claude_code_default_model_id` should remain
-   a Claude model, while `context.bedrock.codex_default_model_id` should remain
+   a Claude model, `context.bedrock.codex_default_model_id` should remain
    a Codex-compatible OpenAI profile and must be reviewed with
-   `context.bedrock.codex.reasoning_effort`. The stock values are
+   `context.bedrock.codex.reasoning_effort`, and
+   `context.bedrock.opencode_default_model_id` may be any Bedrock model OpenCode
+   can drive through Converse tool calling (the shipped Kimi K3 profile reasons
+   on its own, so it has no effort sibling). When the OpenCode default moves to
+   a line OpenCode's models.dev catalog does not list yet, add its model card to
+   `_OPENCODE_BEDROCK_MODEL_METADATA` in `cli/autopilot.py` so context
+   compaction and cost reporting stay accurate (an undeclared line still
+   launches with an empty declaration). If the new line rejects a Converse
+   sampling control, add it to the enumerated allowlists in `gco/bedrock.py`
+   the way Kimi K3's `temperature` rejection is recorded. The stock values are
    system-defined **global inference profiles**; global profiles can route
    worldwide and are unsuitable when a geography boundary is required. Use an
    appropriate geography-scoped profile (`us.` / `eu.` / `jp.` / etc.) where
@@ -431,22 +443,24 @@ deliberately):
 
    Update the intentionally independent `_EXPECTED_MISSION_MODEL_ID`,
    `_EXPECTED_CAPACITY_ADVISOR_MODEL_ID`, `_EXPECTED_CLAUDE_CODE_MODEL_ID`,
-   `_EXPECTED_CODEX_MODEL_ID`, `_EXPECTED_CODEX`, `_EXPECTED_FIXTURE_NAME`,
-   `_EXPECTED_CODEX_FIXTURE_NAME`, and generation-reasoning pins in
+   `_EXPECTED_CODEX_MODEL_ID`, `_EXPECTED_CODEX`, `_EXPECTED_OPENCODE_MODEL_ID`,
+   `_EXPECTED_FIXTURE_NAME`, `_EXPECTED_CODEX_FIXTURE_NAME`,
+   `_EXPECTED_OPENCODE_FIXTURE_NAME`, and generation-reasoning pins in
    `tests/test_default_bedrock_model_consistency.py` as applicable. Those
    assertions are not runtime defaults, but they make every model, fixture, and
-   reasoning change explicit in review. Update the exact shipped Codex model,
-   `xhigh` effort, Mission-compatibility model, and fixture-path literals in
-   `docs/AUTOPILOT.md` at the same time; that guide is the authoritative
-   user-facing contract and must not describe the previous reviewed pair.
-2. When the Mission default or Codex default moves, capture a genuine fixture
-   for the exact profile id:
+   reasoning change explicit in review. Update the exact shipped Codex and
+   OpenCode models, `xhigh` effort, Mission-compatibility models, and
+   fixture-path literals in `docs/AUTOPILOT.md` at the same time; that guide is
+   the authoritative user-facing contract and must not describe the previous
+   reviewed values.
+2. When the Mission, Codex, or OpenCode default moves, capture a genuine
+   fixture for the exact profile id:
    `python3 scripts/capture_scaffold_fixtures.py --model <id> --region us-east-1`.
    The canonical directive set makes three paid calls; high reasoning can make
    the run substantially slower and more expensive. Mission's fixture proves
-   its default sampling path; the Codex fixture proves that profile remains a
-   valid explicit Mission override. A capacity-advisor-only or Claude-Code-only
-   move needs no re-capture.
+   its default sampling path; the Codex and OpenCode fixtures prove those
+   profiles remain valid explicit Mission overrides. A capacity-advisor-only or
+   Claude-Code-only move needs no re-capture.
 3. Run the Mission, capacity, Autopilot, fixture-replay, and default-consistency
    suites, then open a PR. The consistency guard proves every consumer accessor
    and the dependency scanner still resolve the same `cdk.json` values.
@@ -468,8 +482,8 @@ value.
 
 Picking a *different* model—for regulatory, data-residency,
 model-governance, or cost reasons, or to avoid the Anthropic FTU form—rather
-than tracking a newer release in the existing Claude or OpenAI family is an
-operator choice, not routine maintenance. Generation override paths live in
+than tracking a newer release in the existing Claude, OpenAI, or Kimi family is
+an operator choice, not routine maintenance. Generation override paths live in
 [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection); Autopilot's
 per-engine precedence and reasoning behavior live in
 [Autopilot](AUTOPILOT.md#choosing-a-model-and-reasoning). Mission and the
@@ -558,7 +572,9 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   `cli/images.py`, and the Bedrock models at `cdk.json`
   `context.bedrock.mission_default_model_id`,
   `context.bedrock.capacity_advisor_default_model_id`,
-  `context.bedrock.claude_code_default_model_id`, and
+  `context.bedrock.claude_code_default_model_id`,
+  `context.bedrock.codex_default_model_id`,
+  `context.bedrock.opencode_default_model_id`,
   `context.bedrock.embedding_model_id`, and
   `context.vector_store.embedding_model_id` (see
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).

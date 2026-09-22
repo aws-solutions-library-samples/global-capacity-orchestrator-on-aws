@@ -39,11 +39,11 @@ source ~/.zshrc                # or ~/.bashrc — the script prints which file i
 gco stacks deploy-all -y       # stand up every region in cdk.json; `gco stacks destroy-all -y` tears it down
 ```
 
-Or let an agent drive: `gco autopilot` opens a [Claude Code](https://code.claude.com/docs/en/overview) session — `gco autopilot --engine codex` an [OpenAI Codex](https://developers.openai.com/codex/cli) one — on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) with the GCO MCP server already wired in, and you ask for what you want. [Get started](#get-started) has the details and the alternatives, the [Quick Start](QUICKSTART.md) walks through your first job, and the [wiki](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/) is the short orientation site.
+Or let an agent drive: `gco autopilot` opens a [Claude Code](https://code.claude.com/docs/en/overview) session — `gco autopilot --engine codex` an [OpenAI Codex](https://developers.openai.com/codex/cli) one, `gco autopilot --engine opencode` an [OpenCode](https://opencode.ai/docs/) one — on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) with the GCO MCP server already wired in, and you ask for what you want. [Get started](#get-started) has the details and the alternatives, the [Quick Start](QUICKSTART.md) walks through your first job, and the [wiki](https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/) is the short orientation site.
 
 ![GCO Live Demo](demo/live_demo.gif)
 
-*A real `gco` session, not a mock-up: fleet-wide status with cost and policy agreement, capacity discovery, four schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), [Slurm](https://slurm.schedmd.com/slinky.html)) plus [KEDA](https://keda.sh/) running the queue processor, [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) database, a globally replicated vector store answering a semantic query over GCO's own docs, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), and live LLM inference — reproducible from [`demo/live_demo.sh`](demo/live_demo.sh). Deploy, teardown and both Autopilot engines are recorded under [See it running](#see-it-running).*
+*A real `gco` session, not a mock-up: fleet-wide status with cost and policy agreement, capacity discovery, four schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), [Slurm](https://slurm.schedmd.com/slinky.html)) plus [KEDA](https://keda.sh/) running the queue processor, [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), an [Aurora Serverless v2 pgvector](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) database, a globally replicated vector store answering a semantic query over GCO's own docs, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), and live LLM inference — reproducible from [`demo/live_demo.sh`](demo/live_demo.sh). Deploy, teardown and all three Autopilot engines are recorded under [See it running](#see-it-running).*
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -152,11 +152,12 @@ pipx install -e .
 
 ### Let an agent drive
 
-`gco autopilot` turns your terminal into a fully configured agent session for GCO: [Claude Code](https://code.claude.com/docs/en/overview) by default, or OpenAI Codex with `--engine codex`. Both engines use an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend with your AWS credentials, per-engine reviewed model defaults, the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`/`--resume`), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills come along for either engine (Claude also supports `--agents`/`--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+`gco autopilot` turns your terminal into a fully configured agent session for GCO: [Claude Code](https://code.claude.com/docs/en/overview) by default, OpenAI Codex with `--engine codex`, or [OpenCode](https://opencode.ai/docs/) with `--engine opencode`. Every engine uses an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend with your AWS credentials, per-engine reviewed model defaults, the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`/`--resume`), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills come along for any engine (Claude also supports `--agents`/`--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
 
 ```bash
-gco autopilot                  # default Claude Code session
-gco autopilot --engine codex   # or an OpenAI Codex session
+gco autopilot                     # default Claude Code session
+gco autopilot --engine codex      # or an OpenAI Codex session
+gco autopilot --engine opencode   # or an OpenCode session (Kimi K3)
 ```
 
 ### Deploy
@@ -248,9 +249,18 @@ Real terminal recordings, not mock-ups. Each one is reproducible from the script
 
 </details>
 
+<details>
+<summary>🤖 <a href="https://opencode.ai/docs/">OpenCode</a> Autopilot recording — the OpenCode engine on Kimi K3, ready in one command</summary>
+
+![GCO Autopilot with OpenCode](demo/autopilot-opencode.gif)
+
+*A real Bedrock-backed `gco autopilot --engine opencode --no-companions` session (Moonshot AI's Kimi K3) using a least-privilege recording profile: only the GCO MCP `find_docs`/`read_resource` tools, every built-in OpenCode tool denied, and no permission prompts. A normal `gco autopilot --engine opencode` launch includes the recommended companions and OpenCode's ordinary tool set behind an ask-first permission floor ([docs](docs/AUTOPILOT.md) · [re-record](demo/record_autopilot.sh) with `DEMO_ENGINE=opencode DEMO_MODE=live`).*
+
+</details>
+
 ## Install the MCP server
 
-GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 139 tools by default (up to 196 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support and explore GCO conversationally — *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"* — or let it drive real operations. One click adds it (pinned to the latest release, no clone needed) to your client; [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and AWS credentials are the only prerequisites. Other clients and options: [setup guide](gco_mcp/README.md#setup).
+GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 139 tools by default (up to 197 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support and explore GCO conversationally — *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"* — or let it drive real operations. One click adds it (pinned to the latest release, no clone needed) to your client; [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and AWS credentials are the only prerequisites. Other clients and options: [setup guide](gco_mcp/README.md#setup).
 
 <!-- BEGIN MCP INSTALL TABLE (generated by scripts/bump_version.py; edit there) -->
 <table>
@@ -401,7 +411,7 @@ The HTTP API surface has its own catalogue: [`diagrams/api_specs/`](diagrams/api
 | [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
 | [Amazon Athena](https://aws.amazon.com/athena/) | Cross-region cost analytics — a KMS-enforced workgroup queried by `gco costs k8s` |
 | [AWS Glue](https://aws.amazon.com/glue/) | Data Catalog database and table (partition projection) over the Parquet cost reports — no crawlers or scheduled repair jobs |
-| [Amazon Bedrock](https://aws.amazon.com/bedrock/) | Dual-engine Autopilot (`gco autopilot` for Claude Code or `--engine codex` for OpenAI Codex), the optional AI capacity advisor (`gco capacity ai-recommend` / `predict`), and Mission strategy sampling |
+| [Amazon Bedrock](https://aws.amazon.com/bedrock/) | Multi-engine Autopilot (`gco autopilot` for Claude Code, `--engine codex` for OpenAI Codex, or `--engine opencode` for OpenCode), the optional AI capacity advisor (`gco capacity ai-recommend` / `predict`), and Mission strategy sampling |
 
 ## Sample Cost Table
 
@@ -492,7 +502,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 ### Operations
 
-- **[Dual-engine Autopilot](docs/AUTOPILOT.md)**: launch Claude Code by default with `gco autopilot`, or OpenAI Codex with `gco autopilot --engine codex`; both use Amazon Bedrock with the GCO MCP server and recommended companion MCPs preconfigured
+- **[Multi-engine Autopilot](docs/AUTOPILOT.md)**: launch Claude Code by default with `gco autopilot`, OpenAI Codex with `gco autopilot --engine codex`, or OpenCode with `gco autopilot --engine opencode`; every engine uses Amazon Bedrock with the GCO MCP server and recommended companion MCPs preconfigured
 - **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
 - **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard, scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
@@ -532,7 +542,7 @@ embedded.
 | Understand what GCO does | [Core Concepts](docs/CONCEPTS.md) |
 | Follow a guided learning path (new to GCO or Kubernetes) | [Learning Path](docs/LEARNING_PATH.md) |
 | Get running in under 60 minutes | [Quick Start Guide](QUICKSTART.md) |
-| Let Claude Code or OpenAI Codex drive GCO from your terminal | [Autopilot Guide](docs/AUTOPILOT.md) |
+| Let Claude Code, OpenAI Codex, or OpenCode drive GCO from your terminal | [Autopilot Guide](docs/AUTOPILOT.md) |
 | Learn the architecture | [Architecture Details](docs/ARCHITECTURE.md) |
 | Browse every guide in one place | [Documentation Index](docs/README.md) |
 
@@ -610,7 +620,7 @@ embedded.
 │   ├── traffic-dial-controller/         # Health-driven Global Accelerator traffic dials
 │   └── vector-ingest/                   # S3-triggered chunking + Bedrock embeddings for the vector store
 │
-├── gco_mcp/                             # MCP server for LLM interaction (139 tools default, up to 196 with feature flags)
+├── gco_mcp/                             # MCP server for LLM interaction (139 tools default, up to 197 with feature flags)
 ├── images/                              # Screenshots and visual assets for docs and the wiki
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 ├── tests/                               # PyTest + BATS test suites

@@ -876,6 +876,10 @@ def test_regions_remove_stays_quiet_while_regions_remain() -> None:
             ["bedrock", "set-codex-reasoning-effort", "high", "-y"],
             "cli.managed_config.set_codex_reasoning_effort",
         ),
+        (
+            ["bedrock", "set-opencode-model", "model", "-y"],
+            "cli.managed_config.set_opencode_default_model",
+        ),
     ],
 )
 def test_managed_stack_commands_report_errors(args: list[str], patch_target: str) -> None:
@@ -921,6 +925,10 @@ def test_managed_stack_commands_report_errors(args: list[str], patch_target: str
         (
             ["bedrock", "set-codex-reasoning-effort", "high", "-y"],
             "cli.managed_config.set_codex_reasoning_effort",
+        ),
+        (
+            ["bedrock", "set-opencode-model", "model", "-y"],
+            "cli.managed_config.set_opencode_default_model",
         ),
     ],
 )
@@ -1528,6 +1536,10 @@ def test_synth_and_diff_without_stack_names_build_expected_commands(
             ["bedrock", "set-codex-reasoning-effort", "high", "-y"],
             "cli.managed_config.set_codex_reasoning_effort",
         ),
+        (
+            ["bedrock", "set-opencode-model", "model", "-y"],
+            "cli.managed_config.set_opencode_default_model",
+        ),
     ],
 )
 def test_managed_stack_commands_report_changed(args: list[str], patch_target: str) -> None:
@@ -2024,6 +2036,10 @@ def test_decode_addon_replay_input_preserves_legacy_raw_json() -> None:
         (
             ["bedrock", "set-codex-reasoning-effort", "high"],
             "cli.managed_config.set_codex_reasoning_effort",
+        ),
+        (
+            ["bedrock", "set-opencode-model", "model"],
+            "cli.managed_config.set_opencode_default_model",
         ),
     ],
 )

@@ -4,7 +4,7 @@ Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 
 > **🐳 Use the dev container.** GCO pins exact versions of a lot of Python packages so CI is reproducible, which makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` errors. The recommended path — and the one this guide follows — is the dev container: [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds it and installs a `gco` shell function, so every command below runs inside the container without a hand-written `docker run …`. Host installs are an advanced path for contributors who develop on their host; see [Installing on your host instead](#installing-on-your-host-instead-advanced).
 >
-> **🤖 Or let an agent drive:** once `gco` is installed (Step 1), `gco autopilot` starts [Claude Code](https://code.claude.com/docs/en/overview) and `gco autopilot --engine codex` starts OpenAI Codex, both on Amazon Bedrock with the GCO MCP server and recommended companion MCPs wired in. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+> **🤖 Or let an agent drive:** once `gco` is installed (Step 1), `gco autopilot` starts [Claude Code](https://code.claude.com/docs/en/overview), `gco autopilot --engine codex` starts OpenAI Codex, and `gco autopilot --engine opencode` starts [OpenCode](https://opencode.ai/docs/), all on Amazon Bedrock with the GCO MCP server and recommended companion MCPs wired in. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
 >
 > **💡 Tip:** the same [MCP server](gco_mcp/) also plugs into your IDE for guided exploration — *"What do I need to deploy?"*, *"Explain the architecture"*. See [MCP Server](#mcp-server-for-cursor--kiro--llm-integration) below.
 
@@ -295,7 +295,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 139 tools by default (up to 196 with all flags enabled) spanning the CLI and project-aware resources. The recommended install needs no clone: the one-click buttons in the [README](README.md#install-the-mcp-server) add it to Kiro, Cursor or VS Code pinned to the latest release, and [`gco_mcp/README.md`](gco_mcp/README.md#install-with-uv-recommended) has the equivalent `uvx` command for any other client.
+GCO includes an MCP server with 139 tools by default (up to 197 with all flags enabled) spanning the CLI and project-aware resources. The recommended install needs no clone: the one-click buttons in the [README](README.md#install-the-mcp-server) add it to Kiro, Cursor or VS Code pinned to the latest release, and [`gco_mcp/README.md`](gco_mcp/README.md#install-with-uv-recommended) has the equivalent `uvx` command for any other client.
 
 To run it from this checkout instead — when developing GCO, or for the clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`) and the stack lifecycle tools — the dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 

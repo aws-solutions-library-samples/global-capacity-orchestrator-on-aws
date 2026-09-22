@@ -273,6 +273,65 @@ PYEOF
     [[ "$output" == *"1 account-ID pattern(s)"* ]]
 }
 
+@test "sanitize_cast folds the recording user's home directory back to ~ (even split across events)" {
+    local cast="$TEST_TMPDIR/home.cast"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","cwd /Users/recording-user/gco status bar; /Users/recording-user2/other is a different user"]\n'
+        printf '[0.2,"o","~/gco already folded "]\n'
+        printf '[0.3,"o","/Users/recording-"]\n'
+        printf '[0.4,"o","user/.gco/autopilot/opencode/opencode.json"]\n'
+    } > "$cast"
+
+    HOME=/Users/recording-user sanitize_cast "$cast"
+    HOME=/Users/recording-user verify_cast_sanitized "$cast"
+
+    python3 - "$cast" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    documents = [json.loads(line) for line in stream]
+rendered = "".join(
+    document[2]
+    for document in documents
+    if isinstance(document, list) and len(document) >= 3 and document[1] == "o"
+)
+assert len(documents) == 5
+assert "cwd ~/gco status bar;" in rendered
+assert "/Users/recording-user2/other is a different user" in rendered
+assert "~/.gco/autopilot/opencode/opencode.json" in rendered
+assert "/Users/recording-user/" not in rendered
+PYEOF
+}
+
+@test "sanitize_cast and verify_cast_sanitized ignore a root or unset home directory" {
+    local cast="$TEST_TMPDIR/root-home.cast"
+    printf '[0.0,"o","/ and /root/.gco stay put when HOME is / or unset"]\n' > "$cast"
+
+    HOME=/ sanitize_cast "$cast"
+    HOME=/ verify_cast_sanitized "$cast"
+    env -u HOME bash -c 'source "$1"; sanitize_cast "$2" && verify_cast_sanitized "$2"' _ "$LIB" "$cast"
+
+    grep -q '"/ and /root/.gco stay put when HOME is / or unset"' "$cast"
+}
+
+@test "verify_cast_sanitized rejects a cast that still names the home directory" {
+    local cast="$TEST_TMPDIR/home-unsanitized.cast"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","/Users/recording-user/gco"]\n'
+        printf '[0.2,"o","/Users/recording-user2/gco is fine"]\n'
+    } > "$cast"
+
+    HOME=/Users/recording-user run verify_cast_sanitized "$cast"
+
+    [ "$status" -ne 0 ]
+    # The path is counted once in its own event and once in the reconstructed
+    # stream, the same way account IDs and access keys are.
+    [[ "$output" == *"0 account-ID pattern(s), 0 access-key-ID pattern(s), 2 home-directory path(s) remain."* ]]
+}
+
 @test "sanitize_cast leaves short numbers (timestamps, counts) alone" {
     # We intentionally only redact exactly-12-digit sequences. Eleven-digit
     # unix timestamps or four-digit years should pass through unchanged.

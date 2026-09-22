@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-08T04:02:10Z">
-        <meta name="gco-source-commit" content="90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4">
-        <meta name="gco-flow-digest" content="ce6e053f1610484b">
+        <meta name="gco-generated-at" content="2026-09-22T01:41:35Z">
+        <meta name="gco-source-commit" content="e43f6110f7bed86e6c879a3f03c1f1ca34674311">
+        <meta name="gco-flow-digest" content="331f3c22c8bcc0a0">
         <title>Autopilot launch planner (engine, model, MCP, imports, resume)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,83 +208,120 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1641=>operation: 'Resolve an engine launch plan without installing or writing files.'
-op1643=>operation: resolved_engine = resolve_engine(engine)
-op1645=>operation: gco_mcp_env = resolve_mcp_flags(enable)
-sub1647=>subroutine: gco_mcp_env.update(_parse_mcp_env(mcp_env))
-op1649=>operation: workspace = Path.cwd()
-op1651=>operation: mcp_config = build_mcp_config(workspace, include_companions=companions, gco_mcp_env=gco_mcp_env)
-op1653=>operation: resolved_region = effective_aws_region(config.default_region)
-cond1656=>condition: if resolved_engine is AutopilotEngine.CODEX
-op1660=>operation: resolved_small = resolve_small_fast_model(small_fast_model)
-cond1663=>operation: raise ValueError('--small-fast-model and GCO_AUTOPILOT_SMALL_FAST_MODEL are supported only by the claude-code engine') if  resolved_small is not None
-cond1674=>operation: raise ValueError('--plugin and GCO_AUTOPILOT_PLUGIN_DIRS are Claude Code plugin inputs and are not supported by the codex engine') if  plugin_paths_requested(plugins)
-op1684=>operation: plugin_paths: list[Path] = []
-cond1687=>operation: raise ValueError('--agents imports Claude Code agent files and is not supported by the codex engine') if  agents
-sub1697=>subroutine: validate_imports(skills, ())
-op1699=>operation: resolved_model, warnings = resolve_codex_model(model)
-op1701=>operation: reasoning_effort = resolve_codex_reasoning_effort(model)
-op1703=>operation: codex_config = build_codex_config_toml(mcp_config, model=resolved_model, region=resolved_region, reasoning_effort=reasoning_effort)
-op1705=>operation: binary = find_codex_binary()
-op1707=>operation: pin = f'{CODEX_PACKAGE}@{CODEX_VERSION}'
-op1709=>operation: install_command = codex_install_command()
-op1711=>operation: config_file = codex_config_path()
-op1713=>operation: display_name = 'Codex'
-op1715=>operation: resumable = False
-op1744=>operation: plan = {'engine': resolved_engine.value, 'engine_display_name': display_name, 'engine_binary': binary, 'engine_pin': pin, 'model': resolved_model, 'small_fast_model': resolved_small, 'reasoning_effort': reasoning_effort, 'region': resolved_region, 'workspace': str(workspace), 'mcp_config_path': str(config_file), 'mcp_servers': sorted(mcp_config['mcpServers']), 'gco_mcp_env': dict(sorted(gco_mcp_env.items())), 'plugins': [str(path) for path in plugin_paths], 'import_skills': [str(Path(item).expanduser()) for item in skills], 'import_agents': [str(Path(item).expanduser()) for item in agents], 'claude_binary': binary if resolved_engine is AutopilotEngine.CLAUDE_CODE else None, 'claude_code_pin': pin if resolved_engine is AutopilotEngine.CLAUDE_CODE else None, 'codex_binary': binary if resolved_engine is AutopilotEngine.CODEX else None, 'codex_pin': pin if resolved_engine is AutopilotEngine.CODEX else None, 'install_command': ' '.join(install_command), 'resumable_session': resumable, 'mcp_config': mcp_config, 'codex_config': codex_config}
-io1749=>inputoutput: output: (plan, warnings)
-e1747=>end: end function return
-op1719=>operation: resolved_model, warnings = resolve_model(model)
-op1721=>operation: resolved_small = resolve_small_fast_model(small_fast_model)
-op1723=>operation: plugin_paths = resolve_plugin_paths(plugins)
-sub1725=>subroutine: validate_imports(skills, agents)
-op1727=>operation: reasoning_effort = None
-op1729=>operation: codex_config = None
-op1731=>operation: binary = find_claude_binary()
-op1733=>operation: pin = f'{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}'
-op1735=>operation: install_command = claude_install_command()
-op1737=>operation: config_file = config_path()
-op1739=>operation: display_name = 'Claude Code'
-op1741=>operation: resumable = has_resumable_session(workspace)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Resolve an engine launch plan without installing or writing files.'
+op4=>operation: resolved_engine = resolve_engine(engine)
+op6=>operation: gco_mcp_env = resolve_mcp_flags(enable)
+sub8=>subroutine: gco_mcp_env.update(_parse_mcp_env(mcp_env))
+op10=>operation: workspace = Path.cwd()
+op12=>operation: mcp_config = build_mcp_config(workspace, include_companions=companions, gco_mcp_env=gco_mcp_env)
+op14=>operation: resolved_region = effective_aws_region(config.default_region)
+cond17=>condition: if resolved_engine is AutopilotEngine.CODEX
+op21=>operation: resolved_small = resolve_small_fast_model(small_fast_model)
+cond24=>operation: raise ValueError('--small-fast-model and GCO_AUTOPILOT_SMALL_FAST_MODEL are supported only by the claude-code engine') if  resolved_small is not None
+cond35=>operation: raise ValueError('--plugin and GCO_AUTOPILOT_PLUGIN_DIRS are Claude Code plugin inputs and are not supported by the codex engine') if  plugin_paths_requested(plugins)
+op45=>operation: plugin_paths: list[Path] = []
+cond48=>operation: raise ValueError('--agents imports Claude Code agent files and is not supported by the codex engine') if  agents
+sub58=>subroutine: validate_imports(skills, ())
+op60=>operation: resolved_model, warnings = resolve_codex_model(model)
+op62=>operation: reasoning_effort = resolve_codex_reasoning_effort(model)
+op64=>operation: codex_config = build_codex_config_toml(mcp_config, model=resolved_model, region=resolved_region, reasoning_effort=reasoning_effort)
+op66=>operation: opencode_config = None
+op68=>operation: binary = find_codex_binary()
+op70=>operation: pin = f'{CODEX_PACKAGE}@{CODEX_VERSION}'
+op72=>operation: install_command = codex_install_command()
+op74=>operation: config_file = codex_config_path()
+op76=>operation: display_name = 'Codex'
+op78=>operation: resumable = False
+op165=>operation: plan = {'engine': resolved_engine.value, 'engine_display_name': display_name, 'engine_binary': binary, 'engine_pin': pin, 'model': resolved_model, 'small_fast_model': resolved_small, 'reasoning_effort': reasoning_effort, 'region': resolved_region, 'workspace': str(workspace), 'mcp_config_path': str(config_file), 'mcp_servers': sorted(mcp_config['mcpServers']), 'gco_mcp_env': dict(sorted(gco_mcp_env.items())), 'plugins': [str(path) for path in plugin_paths], 'import_skills': [str(Path(item).expanduser()) for item in skills], 'import_agents': [str(Path(item).expanduser()) for item in agents], 'claude_binary': binary if resolved_engine is AutopilotEngine.CLAUDE_CODE else None, 'claude_code_pin': pin if resolved_engine is AutopilotEngine.CLAUDE_CODE else None, 'codex_binary': binary if resolved_engine is AutopilotEngine.CODEX else None, 'codex_pin': pin if resolved_engine is AutopilotEngine.CODEX else None, 'opencode_binary': binary if resolved_engine is AutopilotEngine.OPENCODE else None, 'opencode_pin': pin if resolved_engine is AutopilotEngine.OPENCODE else None, 'install_command': ' '.join(install_command), 'resumable_session': resumable, 'mcp_config': mcp_config, 'codex_config': codex_config, 'opencode_config': opencode_config}
+io170=>inputoutput: output: (plan, warnings)
+e168=>end: end function return
+cond83=>condition: if resolved_engine is AutopilotEngine.OPENCODE
+op87=>operation: resolved_small = resolve_small_fast_model(small_fast_model)
+cond90=>operation: raise ValueError('--plugin and GCO_AUTOPILOT_PLUGIN_DIRS are Claude Code plugin inputs and are not supported by the opencode engine') if  plugin_paths_requested(plugins)
+op100=>operation: plugin_paths = []
+cond103=>operation: raise ValueError('--agents imports Claude Code agent files and is not supported by the opencode engine') if  agents
+op113=>operation: skills_paths = resolve_opencode_skills_paths(skills)
+op115=>operation: resolved_model, warnings = resolve_opencode_model(model)
+op117=>operation: reasoning_effort = None
+op119=>operation: codex_config = None
+op121=>operation: opencode_config = build_opencode_config(mcp_config, model=resolved_model, region=resolved_region, small_model=resolved_small, skills_paths=skills_paths)
+op123=>operation: binary = find_opencode_binary()
+op125=>operation: pin = f'{OPENCODE_PACKAGE}@{OPENCODE_VERSION}'
+op127=>operation: install_command = opencode_install_command()
+op129=>operation: config_file = opencode_config_path()
+op131=>operation: display_name = 'OpenCode'
+op133=>operation: resumable = False
+op137=>operation: resolved_model, warnings = resolve_model(model)
+op139=>operation: resolved_small = resolve_small_fast_model(small_fast_model)
+op141=>operation: plugin_paths = resolve_plugin_paths(plugins)
+sub143=>subroutine: validate_imports(skills, agents)
+op145=>operation: reasoning_effort = None
+op147=>operation: codex_config = None
+op149=>operation: opencode_config = None
+op151=>operation: binary = find_claude_binary()
+op153=>operation: pin = f'{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}'
+op155=>operation: install_command = claude_install_command()
+op157=>operation: config_file = config_path()
+op159=>operation: display_name = 'Claude Code'
+op161=>operation: resumable = has_resumable_session(workspace)
 
-op1641->op1643
-op1643->op1645
-op1645->sub1647
-sub1647->op1649
-op1649->op1651
-op1651->op1653
-op1653->cond1656
-cond1656(yes)->op1660
-op1660->cond1663
-cond1663->cond1674
-cond1674->op1684
-op1684->cond1687
-cond1687->sub1697
-sub1697->op1699
-op1699->op1701
-op1701->op1703
-op1703->op1705
-op1705->op1707
-op1707->op1709
-op1709->op1711
-op1711->op1713
-op1713->op1715
-op1715->op1744
-op1744->io1749
-io1749->e1747
-cond1656(no)->op1719
-op1719->op1721
-op1721->op1723
-op1723->sub1725
-sub1725->op1727
-op1727->op1729
-op1729->op1731
-op1731->op1733
-op1733->op1735
-op1735->op1737
-op1737->op1739
-op1739->op1741
-op1741->op1744
+op2->op4
+op4->op6
+op6->sub8
+sub8->op10
+op10->op12
+op12->op14
+op14->cond17
+cond17(yes)->op21
+op21->cond24
+cond24->cond35
+cond35->op45
+op45->cond48
+cond48->sub58
+sub58->op60
+op60->op62
+op62->op64
+op64->op66
+op66->op68
+op68->op70
+op70->op72
+op72->op74
+op74->op76
+op76->op78
+op78->op165
+op165->io170
+io170->e168
+cond17(no)->cond83
+cond83(yes)->op87
+op87->cond90
+cond90->op100
+op100->cond103
+cond103->op113
+op113->op115
+op115->op117
+op117->op119
+op119->op121
+op121->op123
+op123->op125
+op125->op127
+op127->op129
+op129->op131
+op131->op133
+op133->op165
+cond83(no)->op137
+op137->op139
+op139->op141
+op141->sub143
+sub143->op145
+op145->op147
+op147->op149
+op149->op151
+op151->op153
+op153->op155
+op155->op157
+op157->op159
+op159->op161
+op161->op165
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -294,17 +331,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-08T04:02:10Z -->
-        <!-- Generated from Git commit: 90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4 -->
+        <!-- Generated at (UTC): 2026-09-22T01:41:35Z -->
+        <!-- Generated from Git commit: e43f6110f7bed86e6c879a3f03c1f1ca34674311 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-08T04:02:10Z">2026-09-08T04:02:10Z</time>
+            Generated at (UTC): <time datetime="2026-09-22T01:41:35Z">2026-09-22T01:41:35Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4</code>
+            Source commit: <code>e43f6110f7bed86e6c879a3f03c1f1ca34674311</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>ce6e053f1610484b</code>
+            Flow content SHA-256: <code>331f3c22c8bcc0a0</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -13,7 +13,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | File | Description |
 |------|-------------|
 | `main.py` | CLI entry point and top-level command group registration |
-| `autopilot.py` | Autopilot launch-plan logic: Bedrock model resolution, session MCP config generation, pinned [Claude Code](https://code.claude.com/docs/en/overview) install ([docs](../docs/AUTOPILOT.md)) |
+| `autopilot.py` | Autopilot launch-plan logic: per-engine Bedrock model resolution, session MCP config generation (Claude Code JSON, Codex TOML, OpenCode JSON), pinned [Claude Code](https://code.claude.com/docs/en/overview) / Codex / OpenCode installs ([docs](../docs/AUTOPILOT.md)) |
 | `aws_client.py` | AWS SDK client wrapper with region discovery and credential handling |
 | `config.py` | CLI configuration loader (cdk.json, env vars, user config) |
 | `output.py` | Output formatting (table, JSON, YAML) |

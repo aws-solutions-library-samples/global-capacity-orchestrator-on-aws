@@ -407,9 +407,9 @@ loop locally.
   `swarm_abort`, `swarm_list`, `swarm_plan`; see the
   [feature-flag table](../gco_mcp/README.md#feature-flags).
 - **Agent cockpit** — `gco autopilot -e swarm -e mission` launches a
-  Claude Code session with the swarm tools registered; the agent drives
-  the same MCP surface as any client, and the engine keeps the control
-  path.
+  Claude Code session (or Codex/OpenCode with `--engine`) with the swarm
+  tools registered; the agent drives the same MCP surface as any client,
+  and the engine keeps the control path.
 - **Sessions** — orchestrators and children persist through the standard
   Mission state backends (filesystem or DynamoDB) and are readable with
   `gco mission status` / `mission_status` when the mission flag is on.

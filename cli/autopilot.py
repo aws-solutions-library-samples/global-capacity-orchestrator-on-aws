@@ -1,21 +1,26 @@
-"""Autopilot: launch a configured Claude Code or Codex session against GCO.
+"""Autopilot: launch a configured Claude Code, Codex, or OpenCode session against GCO.
 
 ``gco autopilot`` defaults to Claude Code for backward compatibility and can
-select Codex with ``--engine codex`` or ``GCO_AUTOPILOT_ENGINE=codex``. Both
-engines use the caller's AWS credentials, GCO's canonical Bedrock defaults,
-the GCO MCP server, and the recommended companion MCP servers. Claude Code
-keeps its generated JSON config plus ``--strict-mcp-config`` behavior. Codex
-uses a generated TOML config and skills inside GCO's isolated
+select Codex with ``--engine codex`` (``GCO_AUTOPILOT_ENGINE=codex``) or
+OpenCode with ``--engine opencode`` (``GCO_AUTOPILOT_ENGINE=opencode``). All
+three engines use the caller's AWS credentials, GCO's canonical Bedrock
+defaults, the GCO MCP server, and the recommended companion MCP servers.
+Claude Code keeps its generated JSON config plus ``--strict-mcp-config``
+behavior. Codex uses a generated TOML config and skills inside GCO's isolated
 ``~/.gco/autopilot/codex`` home, leaving personal ``~/.codex`` state alone.
+OpenCode reads a generated ``opencode.json`` under ``~/.gco/autopilot/opencode``
+through ``OPENCODE_CONFIG`` with project-level configuration disabled, so the
+launch plan wins over any per-repository ``opencode.json``.
 
-Neither CLI is baked into the development container. Autopilot detects the
-selected engine's binary and offers to install its exact npm pin lazily.
+None of the CLIs is baked into the development container. Autopilot detects
+the selected engine's binary and offers to install its exact npm pin lazily.
 
 Scanner contract (``.github/scripts/lib_dependency_scan.sh``):
 
-* ``extract_claude_code_pin`` and ``extract_codex_pin`` read
-  :data:`CLAUDE_CODE_VERSION` and :data:`CODEX_VERSION` from this file with
-  regexes — keep both as single-line, double-quoted assignments.
+* ``extract_claude_code_pin``, ``extract_codex_pin``, and
+  ``extract_opencode_pin`` read :data:`CLAUDE_CODE_VERSION`,
+  :data:`CODEX_VERSION`, and :data:`OPENCODE_VERSION` from this file with
+  regexes — keep all three as single-line, double-quoted assignments.
 * ``extract_companion_mcp_packages`` pairs the ``registry=`` / ``package=``
   keywords inside each ``CompanionServer(`` block — keep those two fields
   on their own lines when editing the registry below.
@@ -37,6 +42,7 @@ from gco.bedrock import (
     get_default_claude_code_model_id,
     get_default_codex_model_id,
     get_default_codex_reasoning_effort,
+    get_default_opencode_model_id,
 )
 
 from . import __version__
@@ -64,9 +70,26 @@ CODEX_BEDROCK_PROVIDER = "amazon-bedrock-runtime"
 #: generated config gives every curated MCP server one bounded minute.
 CODEX_MCP_STARTUP_TIMEOUT_SECONDS = 60.0
 
+#: Exact OpenCode CLI release installed by the OpenCode engine.
+#: Keep this literal assignment scanner-friendly like CLAUDE_CODE_VERSION.
+OPENCODE_VERSION = "1.18.31"
+
+#: npm package that ships the ``opencode`` binary.
+OPENCODE_PACKAGE = "opencode-ai"
+
+#: OpenCode's built-in Amazon Bedrock provider id. Model selectors take the
+#: ``provider/model`` form, so every Bedrock id is prefixed with this value.
+OPENCODE_BEDROCK_PROVIDER = "amazon-bedrock"
+
+#: OpenCode's per-server MCP request timeout is expressed in milliseconds and
+#: defaults to five seconds — too short for a first-use ``uvx``/``npx``
+#: download. Give every curated server the same bounded minute Codex gets.
+OPENCODE_MCP_TIMEOUT_MS = 60_000
+
 #: Engine override environment variable; Claude Code remains the compatibility default.
 _ENGINE_ENV = "GCO_AUTOPILOT_ENGINE"
 _CODEX_MODEL_ENV = "GCO_AUTOPILOT_CODEX_MODEL"
+_OPENCODE_MODEL_ENV = "GCO_AUTOPILOT_OPENCODE_MODEL"
 
 
 class AutopilotEngine(StrEnum):
@@ -74,6 +97,7 @@ class AutopilotEngine(StrEnum):
 
     CLAUDE_CODE = "claude-code"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 def resolve_engine(explicit: str | AutopilotEngine | None) -> AutopilotEngine:
@@ -103,6 +127,63 @@ _CONFIG_FILENAME = "mcp.json"
 _CODEX_HOME_DIRNAME = "codex"
 _CODEX_CONFIG_FILENAME = "config.toml"
 _CODEX_SKILLS_DIRNAME = "skills"
+_OPENCODE_HOME_DIRNAME = "opencode"
+_OPENCODE_CONFIG_FILENAME = "opencode.json"
+
+#: JSON schema OpenCode publishes for ``opencode.json``; emitted so editors
+#: validate the generated file and so OpenCode never rewrites it.
+_OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
+
+#: AWS named profile the generated OpenCode config pins when the environment
+#: carries no credential source at all. OpenCode's Bedrock loader only
+#: enables the provider when it sees a profile (config or ``AWS_PROFILE``),
+#: static keys, a bearer token, web-identity, or container credentials, so a
+#: plain ``~/.aws/credentials`` ``[default]`` user (or an EC2 instance role
+#: with an empty environment) would otherwise have no Bedrock provider at
+#: all. ``default`` is what the SDK resolves anyway when nothing is set.
+_OPENCODE_DEFAULT_AWS_PROFILE = "default"
+
+#: Environment variables OpenCode's Bedrock loader already treats as a
+#: credential source. When any is present the config must NOT name a
+#: profile: an explicit profile makes the AWS SDK's default chain skip
+#: ``fromEnv`` entirely ("AWS_PROFILE is set, skipping fromEnv provider"),
+#: which would silently discard exported static keys and, worse, fall back
+#: to a ``[default]`` profile that may be a different identity.
+_OPENCODE_AWS_CREDENTIAL_SOURCE_ENV: tuple[str, ...] = (
+    "AWS_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+)
+
+#: Bedrock model lines OpenCode's models.dev catalog does not list yet. The
+#: generated config declares the selected model so OpenCode can load it (an
+#: undeclared, uncatalogued model is a hard ``ModelNotFoundError``), and the
+#: metadata lets OpenCode size context compaction and report cost. Keys are
+#: geography-stripped inference-profile ids, matching the allowlist discipline
+#: in :mod:`gco.bedrock`; values follow OpenCode's config model schema. The
+#: Kimi K3 entry mirrors the Amazon Bedrock model card (1M-token context,
+#: native vision, always-on reasoning, tool calling, Global CRIS pricing per
+#: million tokens).
+_OPENCODE_BEDROCK_MODEL_METADATA: dict[str, dict[str, object]] = {
+    "moonshotai.kimi-k3": {
+        "name": "Kimi K3",
+        "family": "kimi-k3",
+        "attachment": True,
+        "reasoning": True,
+        "tool_call": True,
+        "temperature": False,
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "limit": {"context": 1_048_576, "output": 131_072},
+        "cost": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75},
+        "release_date": "2026-09-18",
+    },
+}
+
+#: Geography prefixes Bedrock uses for cross-Region inference profiles.
+_OPENCODE_MODEL_GEO_PREFIX_RE = re.compile(r"^(?:global|us|us-gov|eu|apac|jp|au|ca|sa|il|mx)\.")
 
 #: Model override environment variable (the ``--model`` flag wins over it).
 _MODEL_ENV = "GCO_AUTOPILOT_MODEL"
@@ -488,6 +569,160 @@ def write_codex_config(content: str) -> Path:
     return path
 
 
+def opencode_home() -> Path:
+    """Return GCO's persistent OpenCode directory under the autopilot config dir."""
+    return config_path().parent / _OPENCODE_HOME_DIRNAME
+
+
+def opencode_config_path() -> Path:
+    """Return the generated ``opencode.json`` path GCO hands to ``OPENCODE_CONFIG``."""
+    return opencode_home() / _OPENCODE_CONFIG_FILENAME
+
+
+def opencode_model_selector(model: str) -> str:
+    """Return OpenCode's ``provider/model`` selector for a Bedrock model id."""
+    return f"{OPENCODE_BEDROCK_PROVIDER}/{model}"
+
+
+def opencode_aws_profile() -> str | None:
+    """Return the AWS named profile the generated OpenCode config pins, if any.
+
+    When the environment already carries a credential source OpenCode
+    recognises (see :data:`_OPENCODE_AWS_CREDENTIAL_SOURCE_ENV`), nothing is
+    pinned and the SDK's standard default chain runs untouched — static keys,
+    ``AWS_PROFILE``, web-identity and container credentials all keep working
+    exactly as they do for the AWS CLI. Only a completely empty environment
+    names ``default`` (see :data:`_OPENCODE_DEFAULT_AWS_PROFILE`) so the
+    provider loads for ``~/.aws`` and instance-role users.
+    """
+    if any(os.environ.get(name, "").strip() for name in _OPENCODE_AWS_CREDENTIAL_SOURCE_ENV):
+        return None
+    return _OPENCODE_DEFAULT_AWS_PROFILE
+
+
+def opencode_model_declaration(model: str) -> dict[str, object]:
+    """Return the ``provider.amazon-bedrock.models`` entry for one model id.
+
+    Every selected model is declared so a brand-new inference profile that
+    OpenCode's models.dev catalog has not picked up yet still launches instead
+    of failing with ``ModelNotFoundError``. Catalogued models get an empty
+    declaration, which OpenCode merges over its own entry field by field, so
+    nothing changes for them. Lines listed in
+    :data:`_OPENCODE_BEDROCK_MODEL_METADATA` carry their full metadata, with
+    the geography folded into the display name the way models.dev does.
+    """
+    base = _OPENCODE_MODEL_GEO_PREFIX_RE.sub("", model)
+    metadata = _OPENCODE_BEDROCK_MODEL_METADATA.get(base)
+    if metadata is None:
+        return {}
+    declaration: dict[str, object] = json.loads(json.dumps(metadata))
+    geography = model[: len(model) - len(base)].rstrip(".")
+    if geography:
+        label = geography.capitalize() if geography == "global" else geography.upper()
+        declaration["name"] = f"{metadata['name']} ({label})"
+    return declaration
+
+
+def build_opencode_config(
+    mcp_config: dict[str, dict[str, dict[str, object]]],
+    *,
+    model: str,
+    region: str,
+    small_model: str | None = None,
+    skills_paths: tuple[Path, ...] = (),
+) -> dict[str, object]:
+    """Render the complete ``opencode.json`` for an Autopilot session.
+
+    OpenCode merges this file above the user's global config (and GCO
+    disables project-level config for the session), so every key here is
+    authoritative: the Bedrock provider and model, the update and sharing
+    policy, the MCP server set, and the ``ask`` permission floor for edits and
+    shell commands (OpenCode's native default is allow-all; pass ``-- --auto``
+    to opt back in for one session). MCP entries follow OpenCode's ``local``
+    shape: ``command`` is a single argv list and the timeout is in
+    milliseconds.
+
+    ``small_model`` is always pinned. Left unset, OpenCode picks a "cheaper"
+    catalog model for title generation on its own — on Bedrock that is a
+    Claude Haiku profile, so every Kimi session would silently invoke an
+    Anthropic model the caller never chose (and that needs the one-time
+    Anthropic first-time-use form). The session model is the default; the
+    fast-model option overrides it.
+    """
+    resolved_small_model = small_model or model
+    models: dict[str, object] = {model: opencode_model_declaration(model)}
+    models.setdefault(resolved_small_model, opencode_model_declaration(resolved_small_model))
+    options: dict[str, object] = {"region": region}
+    profile = opencode_aws_profile()
+    if profile is not None:
+        options["profile"] = profile
+    provider: dict[str, object] = {"options": options, "models": models}
+    config: dict[str, object] = {
+        "$schema": _OPENCODE_CONFIG_SCHEMA,
+        "model": opencode_model_selector(model),
+        "small_model": opencode_model_selector(resolved_small_model),
+        "autoupdate": False,
+        "share": "disabled",
+        "permission": {"edit": "ask", "bash": "ask"},
+        "provider": {OPENCODE_BEDROCK_PROVIDER: provider},
+    }
+    servers = mcp_config["mcpServers"]
+    rendered: dict[str, object] = {}
+    for name in sorted(servers):
+        entry = servers[name]
+        command = entry.get("command")
+        args = entry.get("args", [])
+        if not isinstance(command, str) or not command:
+            raise ValueError(f"OpenCode MCP server {name!r} has no command")
+        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+            raise ValueError(f"OpenCode MCP server {name!r} args must be strings")
+        server: dict[str, object] = {
+            "type": "local",
+            "command": [command, *args],
+            "enabled": True,
+            "timeout": OPENCODE_MCP_TIMEOUT_MS,
+        }
+        environment = entry.get("env")
+        if environment:
+            if not isinstance(environment, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in environment.items()
+            ):
+                raise ValueError(f"OpenCode MCP server {name!r} env must contain strings")
+            server["environment"] = dict(sorted(environment.items()))
+        rendered[name] = server
+    config["mcp"] = rendered
+    if skills_paths:
+        config["skills"] = {"paths": [str(path) for path in skills_paths]}
+    return config
+
+
+def write_opencode_config(config: dict[str, object]) -> Path:
+    """Write the generated ``opencode.json`` and return its path."""
+    path = opencode_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def resolve_opencode_skills_paths(skills_dirs: tuple[str, ...]) -> tuple[Path, ...]:
+    """Validate ``--skills`` sources and return the absolute paths OpenCode scans.
+
+    OpenCode discovers ``**/SKILL.md`` under each ``skills.paths`` entry, so
+    the validated source directories are referenced in place — nothing is
+    copied, and edits to a skill are live on the next launch.
+    """
+    validate_imports(skills_dirs, ())
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for item in skills_dirs:
+        path = Path(item).expanduser().resolve()
+        if path not in seen:
+            seen.add(path)
+            resolved.append(path)
+    return tuple(resolved)
+
+
 def _selected_model_override(
     explicit: str | None,
     env_names: tuple[str, ...],
@@ -565,6 +800,31 @@ def resolve_codex_reasoning_effort(explicit_model: str | None = None) -> str | N
     return get_default_codex_reasoning_effort()
 
 
+def resolve_opencode_model(explicit: str | None) -> tuple[str, list[str]]:
+    """Resolve OpenCode model: flag > OpenCode env > generic env > cdk.json.
+
+    OpenCode is vendor-neutral, so unlike the Claude and Codex resolvers no
+    model family is preferred. The advisory check catches the one likely
+    mistake instead: pasting a vendor or models.dev name (``kimi-k3``) rather
+    than the Bedrock id. Bedrock ids and inference profiles are dotted
+    (``provider.model`` or ``geo.provider.model``) and application inference
+    profiles are ARNs; anything else is almost certainly not addressable.
+    """
+    warnings: list[str] = []
+    override, _source = _selected_model_override(
+        explicit,
+        (_OPENCODE_MODEL_ENV, _MODEL_ENV),
+    )
+    model = override if override is not None else get_default_opencode_model_id()
+    if "." not in model and not model.startswith("arn:"):
+        warnings.append(
+            f"Model id {model!r} does not look like a Bedrock model id or inference "
+            "profile (expected provider.model, geo.provider.model, or an ARN); "
+            "continuing anyway."
+        )
+    return model, warnings
+
+
 def resolve_small_fast_model(explicit: str | None) -> str | None:
     """Resolve Claude's optional fast model, rejecting configured blank values."""
     if explicit is not None:
@@ -612,6 +872,25 @@ def build_codex_env(region: str) -> dict[str, str]:
     return env
 
 
+def build_opencode_env(region: str) -> dict[str, str]:
+    """Return the OpenCode environment while preserving AWS credentials.
+
+    ``OPENCODE_CONFIG`` points at the generated ``opencode.json``, which
+    OpenCode merges above the user's global ``~/.config/opencode`` config so
+    GCO's keys win on every conflict. ``OPENCODE_DISABLE_PROJECT_CONFIG`` is
+    the OpenCode equivalent of Codex's untrusted-project policy: no
+    ``opencode.json`` or ``.opencode/`` directory in the launch tree can layer
+    over the plan. Autoupdate is disabled at the environment level too so the
+    pinned binary stays pinned even when the config key is overridden.
+    """
+    env = dict(os.environ)
+    env.setdefault("AWS_REGION", region)
+    env["OPENCODE_CONFIG"] = str(opencode_config_path())
+    env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    return env
+
+
 def effective_aws_region(default_region: str) -> str:
     """Resolve the AWS SDK region Codex and its generated config should share."""
     return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or default_region
@@ -625,6 +904,11 @@ def find_claude_binary() -> str | None:
 def find_codex_binary() -> str | None:
     """Return the resolved ``codex`` executable path, or ``None``."""
     return shutil.which("codex")
+
+
+def find_opencode_binary() -> str | None:
+    """Return the resolved ``opencode`` executable path, or ``None``."""
+    return shutil.which("opencode")
 
 
 def plugin_paths_requested(cli_plugins: tuple[str, ...]) -> bool:
@@ -825,6 +1109,31 @@ def install_codex() -> int:
     return subprocess.call(codex_install_command())
 
 
+def opencode_install_command() -> list[str]:
+    """Return the pinned, reproducible OpenCode install command.
+
+    Like Claude Code, ``opencode-ai`` ships a shim whose postinstall fetches
+    the platform-native binary; when npm >= 12 blocks lifecycle scripts the
+    shim on PATH only prints "postinstall script was not run" and exits 1.
+    ``--allow-scripts`` names exactly this one package and is ignored by older
+    npm, so one command form works everywhere.
+    """
+    return [
+        "npm",
+        "install",
+        "-g",
+        f"--allow-scripts={OPENCODE_PACKAGE}",
+        f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}",
+    ]
+
+
+def install_opencode() -> int:
+    """Install the pinned OpenCode release; return the npm exit code."""
+    if shutil.which("npm") is None:
+        return 127
+    return subprocess.call(opencode_install_command())
+
+
 def build_launch_argv(
     claude_binary: str,
     mcp_config: Path,
@@ -946,4 +1255,75 @@ def exec_claude(argv: list[str], env: dict[str, str]) -> int:
 
 def exec_codex(argv: list[str], env: dict[str, str]) -> int:
     """Hand the terminal over to Codex using the same process semantics."""
+    return exec_claude(argv, env)
+
+
+def build_opencode_owned_args(*, model: str) -> tuple[str, ...]:
+    """Return the session-precedence controls that keep the OpenCode plan authoritative.
+
+    The generated config already names the model, but OpenCode's CLI flags
+    outrank every config file, so the selector is repeated on argv as defense
+    in depth against ``OPENCODE_CONFIG_CONTENT`` or a stray global default.
+    """
+    return ("--model", opencode_model_selector(model))
+
+
+#: OpenCode subcommands that are utilities rather than sessions (``mcp list``,
+#: ``models``, ``providers``, ...). Each parses a strict option set of its
+#: own, so the session flags (``--model``, ``--continue``/``--session``) are
+#: withheld for them: passing ``--model`` to ``mcp list`` makes OpenCode print
+#: usage and exit instead of running the command. The generated config still
+#: carries the model, so nothing about the plan is lost. The root TUI (a
+#: flag, a project path, or nothing) and ``run`` remain sessions.
+_OPENCODE_UTILITY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "acp",
+        "agent",
+        "attach",
+        "auth",
+        "completion",
+        "db",
+        "debug",
+        "export",
+        "github",
+        "import",
+        "mcp",
+        "models",
+        "plug",
+        "plugin",
+        "providers",
+        "serve",
+        "session",
+        "stats",
+        "uninstall",
+        "web",
+    }
+)
+
+
+def opencode_utility_invocation(extra_args: tuple[str, ...]) -> bool:
+    """Return True when the passthrough targets a non-session OpenCode subcommand."""
+    return bool(extra_args) and extra_args[0] in _OPENCODE_UTILITY_SUBCOMMANDS
+
+
+def build_opencode_launch_argv(
+    opencode_binary: str,
+    *,
+    root_args: tuple[str, ...] = (),
+    resume_args: tuple[str, ...] = (),
+    extra_args: tuple[str, ...] = (),
+) -> list[str]:
+    """Return OpenCode argv in owned-flags → resume-selector → passthrough order.
+
+    Utility subcommands (see :data:`_OPENCODE_UTILITY_SUBCOMMANDS`) receive the
+    passthrough verbatim: they reject the session flags, and they read the
+    model and MCP set from the generated config anyway.
+    """
+    if opencode_utility_invocation(extra_args):
+        return [opencode_binary, *extra_args]
+    return [opencode_binary, *root_args, *resume_args, *extra_args]
+
+
+def exec_opencode(argv: list[str], env: dict[str, str]) -> int:
+    """Hand the terminal over to OpenCode using the same process semantics."""
     return exec_claude(argv, env)

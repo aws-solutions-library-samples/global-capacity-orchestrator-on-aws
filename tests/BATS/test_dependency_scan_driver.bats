@@ -97,7 +97,7 @@ case "$url" in
         pkg="${url#*registry.npmjs.org/}"; pkg="${pkg%/latest}"; pkg="${pkg//%2F//}"
         known="$(catalog_get npm "$pkg")"
         case "$pkg" in
-            @anthropic-ai/claude-code|@openai/codex)
+            @anthropic-ai/claude-code|@openai/codex|opencode-ai)
                 if [ "${FAKE_ENGINE_PACKAGES:-ok}" = "deprecated" ]; then
                     reply 200 '{"version": "9.9.9", "deprecated": "this engine has moved to a new package"}'; exit 0
                 fi
@@ -415,6 +415,7 @@ build_catalog() {
             done
             echo "npm|@anthropic-ai/claude-code|$(extract_claude_code_pin cli/autopilot.py)"
             echo "npm|@openai/codex|$(extract_codex_pin cli/autopilot.py)"
+            echo "npm|opencode-ai|$(extract_opencode_pin cli/autopilot.py)"
             extract_build_system_pins pyproject.toml | while IFS='|' read -r name version _raw; do
                 [ -n "$version" ] && echo "pypi|$name|$version"
             done
@@ -486,7 +487,7 @@ PY
             echo "k8s|current|$(extract_k8s_version cdk.json)"
             extract_aurora_versions gco/stacks/regional_stack.py | sed 's/^/aurora|current|/'
             extract_emr_versions gco/stacks/constants.py | sed 's/^/emr|current|/'
-            for leaf in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id codex_default_model_id; do
+            for leaf in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id codex_default_model_id opencode_default_model_id; do
                 echo "bedrock-profile|${leaf}|$(extract_default_bedrock_model cdk.json "$leaf")"
             done
             echo "bedrock-embedding|bedrock|$(extract_default_bedrock_model cdk.json embedding_model_id)"
@@ -502,7 +503,11 @@ PY
 # every upstream answering "current" finds nothing at all.
 make_consistent_checkout() {
     local root="$1" today
-    today="$(date -u +%Y-%m-%d)"
+    # The scan's days_since/days_until helpers compare against the local date
+    # (Python's ``datetime.date.today()``), so stamp fixtures with the same
+    # clock: ``date -u`` is a day ahead of a US-timezone workstation every
+    # evening and would make a "0 days" expiry read as 1.
+    today="$(date +%Y-%m-%d)"
     mkdir -p "$root"/{.github/workflows,.github/actions/install-trivy,.github/config,gco/stacks,gco/services,cli,lambda/helm-installer,lambda/kubectl-applier-simple/manifests,examples,scripts/live_release_validation/manifests,dockerfiles}
     cat > "$root/pyproject.toml" <<'TOML'
 [build-system]
@@ -583,6 +588,7 @@ YAML
              "capacity_advisor_default_model_id": "global.anthropic.claude-opus-5",
              "claude_code_default_model_id": "global.anthropic.claude-opus-5",
              "codex_default_model_id": "global.openai.gpt-5.6-sol",
+             "opencode_default_model_id": "global.moonshotai.kimi-k3",
              "embedding_model_id": "amazon.titan-embed-text-v2:0"},
  "vector_store": {"embedding_model_id": "amazon.titan-embed-text-v2:0"}}}
 JSON
@@ -603,6 +609,7 @@ PY
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
 CODEX_VERSION = "0.152.0"
+OPENCODE_VERSION = "1.18.31"
 COMPANION_MCP_SERVERS = (
     CompanionServer(name="aws-docs", registry="pypi", package="awslabs.aws-documentation-mcp-server", command="uvx"),
     CompanionServer(name="memory", registry="npm", package="@modelcontextprotocol/server-memory", command="npx"),
@@ -747,10 +754,16 @@ report_path() {
     [[ "$output" == *"  - aurora-postgresql: 17.10 -> 18.10"* ]]
     [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-7.14.1"* ]]
     [[ "$output" == *"  - bedrock mission_default_model_id: global.anthropic.claude-opus-5 -> global.anthropic.claude-opus-6"* ]]
+    # The Kimi generation marker (k3 -> k4) folds into one model family, so the
+    # OpenCode default is flagged just like the Claude and Codex defaults.
+    [[ "$output" == *"  - bedrock codex_default_model_id: global.openai.gpt-5.6-sol -> global.openai.gpt-6.6-sol"* ]]
+    [[ "$output" == *"  - bedrock opencode_default_model_id: global.moonshotai.kimi-k3 -> global.moonshotai.kimi-k4"* ]]
     [[ "$output" == *"  - vector_store embedding_model_id: amazon.titan-embed-text-v2:0 -> amazon.titan-embed-text-v3:0"* ]]
     [[ "$output" == *"  - NODE_VERSION: v24.21.0 -> v25.21.0"* ]]
     [[ "$output" == *"  - UV_VERSION: 0.12.11 -> 1.12.11"* ]]
     [[ "$output" == *"  - CLAUDE_CODE_VERSION: 2.1.252 -> 3.1.252"* ]]
+    [[ "$output" == *"  - CODEX_VERSION: 0.152.0 -> 1.152.0"* ]]
+    [[ "$output" == *"  - OPENCODE_VERSION: 1.18.31 -> 2.18.31"* ]]
     [[ "$output" == *"  - https://github.com/astral-sh/ruff-pre-commit: v0.16.5 -> v1.16.5"* ]]
     [[ "$output" == *"  - LAMBDA_PYTHON_RUNTIME: PYTHON_3_14 -> PYTHON_4_14"* ]]
     [[ "$output" == *"  - LAMBDA_NODEJS_RUNTIME: NODEJS_24_X -> NODEJS_25_X"* ]]
@@ -999,7 +1012,7 @@ YAML
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
     sed -i.bak 's/^ARG APT_SECURITY_EPOCH=.*/ARG APT_SECURITY_EPOCH=2020-01-01/' "$root/Dockerfile.dev"
-    printf 'CVE-2026-0002 exp:%s justification\n' "$(date -u +%Y-%m-%d)" > "$root/.github/config/.trivyignore"
+    printf 'CVE-2026-0002 exp:%s justification\n' "$(date +%Y-%m-%d)" > "$root/.github/config/.trivyignore"
     printf 'boto3==1.39.0\nruff==0.16.5\n' > "$root/requirements-lock.txt"
     rm -f "$root"/*.bak
     build_catalog "$root"
@@ -1166,7 +1179,9 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"  - @anthropic-ai/claude-code: deprecated"* ]]
     [[ "$output" == *"  - @openai/codex: deprecated"* ]]
+    [[ "$output" == *"  - opencode-ai: deprecated"* ]]
     grep -qF -- "| @anthropic-ai/claude-code (CLAUDE_CODE_VERSION) | \`2.1.252\` | deprecated | [registry](https://www.npmjs.com/package/@anthropic-ai/claude-code) |" "$(report_path)"
+    grep -qF -- "| opencode-ai (OPENCODE_VERSION) | \`1.18.31\` | deprecated | [registry](https://www.npmjs.com/package/opencode-ai) |" "$(report_path)"
 
     run_scan "$root" FAKE_COMPANIONS=unreachable
     [ "$status" -eq 0 ]

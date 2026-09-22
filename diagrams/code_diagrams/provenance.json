@@ -22,9 +22,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "cli/commands/autopilot_cmd.py": {
-      "digest": "db8ccc4102635cebb660c3d1e10f4d3a500b82743fe8e1a7618a32bc24e73134",
-      "generated_at": "2026-09-08T04:02:10Z",
-      "source_commit": "90f6f6b1fc98467cbe695cbef78b92ccfc8ee8c4"
+      "digest": "d7d53e45018c903a9a6905592f76bd3ecbe80f0dd0103091684a03898b4f5033",
+      "generated_at": "2026-09-22T01:41:35Z",
+      "source_commit": "e43f6110f7bed86e6c879a3f03c1f1ca34674311"
     },
     "cli/images.py": {
       "digest": "a1265707b813d74c15df5ec462889ba99aad9b565ce578e39edc6659d344a3ec",

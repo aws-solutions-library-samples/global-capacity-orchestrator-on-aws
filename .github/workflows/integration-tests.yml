@@ -14,6 +14,7 @@
 #   - gate:integration-tests                      — the single required check: needs every job here
 #   - integration:autopilot:claude-code-boot      — `gco autopilot` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:autopilot:codex-boot            — `gco autopilot --engine codex` self-installs the pin + boots MCP/Bedrock to the cred boundary
+#   - integration:autopilot:opencode-boot         — `gco autopilot --engine opencode` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
@@ -482,6 +483,58 @@ jobs:
         with:
           name: autopilot-codex-boot-evidence
           path: ${{ runner.temp }}/autopilot-codex-boot-probe/
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # integration:autopilot:opencode-boot — the OpenCode twin of the probes above.
+  # `gco autopilot --engine opencode` on a bare runner: autopilot npm-installs
+  # the pinned OpenCode release itself (`opencode` is absent on purpose; the
+  # install allows only opencode-ai's own postinstall, which fetches the
+  # native binary), writes the isolated OPENCODE_CONFIG file, and execs
+  # opencode, which launches the in-tree gco MCP server plus every curated
+  # companion and dispatches to Amazon Bedrock (Converse, via the AI SDK's
+  # amazon-bedrock provider) with the shipped default OpenCode model.
+  # Fabricated fail-closed credentials stop the launch at the exact
+  # credential boundary — SigV4 rejecting the signed request is the success
+  # condition. Complements unit:cli:autopilot (plan/config/pin-install, no
+  # boot) with the boot itself; assertions, the engine-delta rationale
+  # (OpenCode logs MCP servers only when they fail, so per-server connection
+  # proof comes from `opencode mcp list`), the small_model pin check and the
+  # credential-chain regression guard live in the probe script.
+  # --------------------------------------------------------------------------
+
+  integration-autopilot-opencode-boot:
+    name: "integration:autopilot:opencode-boot"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install the CLI and the in-tree MCP server dependencies
+        # [mcp] brings fastmcp so the gco server entry in the generated
+        # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
+        # can actually boot under opencode.
+        run: pip install -e ".[mcp]"
+      - name: Install uv (uvx launches the PyPI companion MCP servers)
+        run: pip install uv
+      - name: Boot the opencode autopilot session to the credential boundary
+        run: bash .github/scripts/autopilot_opencode_boot_probe.sh
+      - name: Upload session evidence
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: autopilot-opencode-boot-evidence
+          path: ${{ runner.temp }}/autopilot-opencode-boot-probe/
           retention-days: 7
 
   # --------------------------------------------------------------------------
@@ -1211,11 +1264,12 @@ jobs:
         run: >-
           python3 .github/scripts/verify_container_tool_versions.py
           dev --image gco-dev
-      - name: Exercise both Autopilot engines inside the dev container
+      - name: Exercise all three Autopilot engines inside the dev container
         # The setup-dev-alias front door persists /root/.npm-global and
-        # /root/.gco. Prove both engine plans/configs, then use two separate
-        # --rm containers with the same volumes to prove Codex's lazily
-        # installed binary and isolated CODEX_HOME survive container removal.
+        # /root/.gco. Prove every engine's plan/config, then use separate
+        # --rm containers with the same volumes to prove the lazily installed
+        # Codex and OpenCode binaries and their isolated configs (CODEX_HOME,
+        # OPENCODE_CONFIG) survive container removal side by side.
         run: |
           set -euo pipefail
           docker run --rm gco-dev bash -c '
@@ -1231,12 +1285,17 @@ jobs:
             gco autopilot --dry-run
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
             gco autopilot --engine codex --dry-run
+          docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
+            gco autopilot --engine opencode --dry-run
 
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
             gco autopilot -e all-tools --print-config > /tmp/autopilot-config.json
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
             gco autopilot --engine codex -e all-tools --print-config \
               > /tmp/autopilot-codex.toml
+          docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
+            gco autopilot --engine opencode -e all-tools --print-config \
+              > /tmp/autopilot-opencode.json
 
           docker run --rm -v "$PWD":/workspace -w /workspace \
             -v /tmp/autopilot-config.json:/tmp/autopilot-config.json:ro gco-dev \
@@ -1250,25 +1309,43 @@ jobs:
               verify-codex-config /tmp/autopilot-codex.toml \
               --expect-gco-env GCO_ENABLE_ALL_TOOLS=true \
               --gco-args /workspace/gco_mcp/run_mcp.py
+          # The container carries no AWS credential-source variables, so the
+          # generated OpenCode config must pin the default AWS profile (the
+          # ~/.aws and instance-role case); with static keys exported it must
+          # not — the boot probe asserts that side.
+          docker run --rm -v "$PWD":/workspace -w /workspace \
+            -v /tmp/autopilot-opencode.json:/tmp/autopilot-opencode.json:ro gco-dev \
+            python3 .github/scripts/autopilot_ci_contract.py \
+              verify-opencode-config /tmp/autopilot-opencode.json \
+              --profile default \
+              --expect-gco-env GCO_ENABLE_ALL_TOOLS=true \
+              --gco-args /workspace/gco_mcp/run_mcp.py
 
-          tools_volume="gco-codex-tools-${{ matrix.arch }}-${GITHUB_RUN_ID}"
-          state_volume="gco-codex-state-${{ matrix.arch }}-${GITHUB_RUN_ID}"
-          cleanup_codex_volumes() {
+          tools_volume="gco-autopilot-tools-${{ matrix.arch }}-${GITHUB_RUN_ID}"
+          state_volume="gco-autopilot-state-${{ matrix.arch }}-${GITHUB_RUN_ID}"
+          cleanup_autopilot_volumes() {
             docker volume rm -f "$tools_volume" "$state_volume" >/dev/null 2>&1 || true
           }
-          trap cleanup_codex_volumes EXIT
+          trap cleanup_autopilot_volumes EXIT
           docker volume create "$tools_volume" >/dev/null
           docker volume create "$state_volume" >/dev/null
 
-          # First disposable container installs the exact pin and writes
-          # /root/.gco/autopilot/codex/config.toml before execing --version.
+          # Disposable containers install each exact pin and write the
+          # isolated config (/root/.gco/autopilot/codex/config.toml,
+          # /root/.gco/autopilot/opencode/opencode.json) before execing
+          # --version.
           docker run --rm -v "$PWD":/workspace -w /workspace \
             -v "${tools_volume}:/root/.npm-global" \
             -v "${state_volume}:/root/.gco" gco-dev \
             gco autopilot --engine codex --yes -- --version
+          docker run --rm -v "$PWD":/workspace -w /workspace \
+            -v "${tools_volume}:/root/.npm-global" \
+            -v "${state_volume}:/root/.gco" gco-dev \
+            gco autopilot --engine opencode --yes -- --version
 
-          # A second disposable container sees both persisted artifacts and
-          # validates the generated TOML with the production-derived contract.
+          # A further disposable container sees every persisted artifact and
+          # validates each generated config with the production-derived
+          # contract.
           docker run --rm -v "$PWD":/workspace -w /workspace \
             -v "${tools_volume}:/root/.npm-global" \
             -v "${state_volume}:/root/.gco" gco-dev bash -c '
@@ -1280,6 +1357,15 @@ jobs:
               codex --version | grep -qF "$expected"
               python3 .github/scripts/autopilot_ci_contract.py \
                 verify-codex-config /root/.gco/autopilot/codex/config.toml
+
+              test -x /root/.npm-global/bin/opencode
+              test -f /root/.gco/autopilot/opencode/opencode.json
+              expected="$(python3 .github/scripts/autopilot_ci_contract.py \
+                pin --engine opencode)"
+              opencode --version | grep -qF "$expected"
+              python3 .github/scripts/autopilot_ci_contract.py \
+                verify-opencode-config /root/.gco/autopilot/opencode/opencode.json \
+                --profile default
             '
       - name: Verify image contains native ${{ matrix.arch }} binaries
         # Two layers of verification:
@@ -4472,6 +4558,7 @@ jobs:
     needs:
       - integration-autopilot-claude-code-boot
       - integration-autopilot-codex-boot
+      - integration-autopilot-opencode-boot
       - integration-dev-alias-docker
       - integration-dev-alias-finch
       - integration-dev-alias-none

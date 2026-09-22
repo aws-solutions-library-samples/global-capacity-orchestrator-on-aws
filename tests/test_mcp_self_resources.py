@@ -216,6 +216,7 @@ class TestFeatureFlags:
                 "set_claude_code_default_model",
                 "set_codex_default_model",
                 "set_codex_reasoning_effort",
+                "set_opencode_default_model",
             },
             "GCO_ENABLE_SWARM": {
                 "swarm_start",

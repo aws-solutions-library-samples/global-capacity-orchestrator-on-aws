@@ -302,6 +302,7 @@ with _contextlib.suppress(ImportError):
         set_deployment_region,
         set_eks_endpoint_access,
         set_mission_default_model,
+        set_opencode_default_model,
     )
 
 # Destructive-operations gated tools — present only when
@@ -449,6 +450,7 @@ if _IS_RELOAD and (
         "set_claude_code_default_model",
         "set_codex_default_model",
         "set_codex_reasoning_effort",
+        "set_opencode_default_model",
     ):
         if hasattr(_stacks_mod, _name):
             globals()[_name] = getattr(_stacks_mod, _name)
@@ -783,6 +785,7 @@ _PUBLIC_EXPORTS = [
     "set_eks_endpoint_access",
     "set_mission_default_model",
     "set_mooncake_topology",
+    "set_opencode_default_model",
     "setup_cluster_access",
     "spot_prices",
     "stack_diff",

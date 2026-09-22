@@ -84,6 +84,7 @@ UMBRELLA_FLAG_TOOLS = (
     "set_claude_code_default_model",
     "set_codex_default_model",
     "set_codex_reasoning_effort",
+    "set_opencode_default_model",
     # Mission family.
     "mission_start",
     "mission_status",

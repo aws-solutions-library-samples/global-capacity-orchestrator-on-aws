@@ -273,16 +273,18 @@ RUN case "${TARGETARCH}" in \
     && uvx --version
 
 # Runtime npm prefix for tools installed *inside* a running container —
-# notably the pinned Claude Code or Codex release that `gco autopilot`
-# installs on first use. Every image-baked npm global above (npm itself, the
-# CDK CLI) was already installed under /usr/local before this line, so those
-# stay in the image; this prefix only affects `npm install -g` at runtime. The
-# setup-dev-alias.sh `gco` function mounts a named volume here, so either
-# Autopilot engine install survives the `--rm` container lifecycle instead of
-# re-downloading on every launch.
+# notably the pinned Claude Code, Codex, or OpenCode release that
+# `gco autopilot` installs on first use. Every image-baked npm global above
+# (npm itself, the CDK CLI) was already installed under /usr/local before this
+# line, so those stay in the image; this prefix only affects `npm install -g`
+# at runtime. The setup-dev-alias.sh `gco` function mounts a named volume
+# here, so every Autopilot engine install survives the `--rm` container
+# lifecycle instead of re-downloading on every launch. OpenCode's session
+# database lives under /root/.local/share/opencode; the same function mounts a
+# second named volume there so --continue/--resume also survive.
 ENV NPM_CONFIG_PREFIX=/root/.npm-global \
     PATH="/root/.npm-global/bin:${PATH}"
-RUN mkdir -p /root/.npm-global/bin
+RUN mkdir -p /root/.npm-global/bin /root/.local/share/opencode
 
 # Set working directory
 WORKDIR /workspace

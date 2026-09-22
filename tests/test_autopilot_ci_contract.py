@@ -26,21 +26,79 @@ from cli.autopilot import (  # noqa: E402
     CODEX_PACKAGE,
     CODEX_VERSION,
     COMPANION_MCP_SERVERS,
+    OPENCODE_BEDROCK_PROVIDER,
+    OPENCODE_MCP_TIMEOUT_MS,
+    OPENCODE_PACKAGE,
+    OPENCODE_VERSION,
     AutopilotEngine,
     build_codex_config_toml,
     build_mcp_config,
+    build_opencode_config,
     claude_install_command,
     codex_install_command,
+    opencode_install_command,
 )
 from gco.bedrock import (  # noqa: E402
     get_default_claude_code_model_id,
     get_default_codex_model_id,
     get_default_codex_reasoning_effort,
+    get_default_opencode_model_id,
 )
+
+#: The engine-specific plan fields and CLI options ``verify_plan`` reads.
+_BINARY_KEYWORDS = {
+    AutopilotEngine.CLAUDE_CODE: "claude_binary",
+    AutopilotEngine.CODEX: "codex_binary",
+    AutopilotEngine.OPENCODE: "opencode_binary",
+}
+_BINARY_OPTIONS = {
+    AutopilotEngine.CLAUDE_CODE: "--claude-binary",
+    AutopilotEngine.CODEX: "--codex-binary",
+    AutopilotEngine.OPENCODE: "--opencode-binary",
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_aws_credential_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render OpenCode's provider block the way an empty environment does.
+
+    ``build_opencode_config`` pins ``profile: default`` only when none of
+    these variables is set, so a developer's exported ``AWS_PROFILE`` would
+    otherwise change the shape every OpenCode assertion below relies on.
+    """
+    for name in (
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _real_config(**kwargs) -> dict:
     return build_mcp_config(Path("/tmp/workspace"), **kwargs)
+
+
+def _real_opencode_config(
+    *,
+    include_companions: bool = True,
+    gco_mcp_env: dict[str, str] | None = None,
+    region: str = "us-east-2",
+    small_model: str | None = None,
+) -> dict:
+    mcp_config = build_mcp_config(
+        Path("/tmp/workspace"),
+        include_companions=include_companions,
+        gco_mcp_env=gco_mcp_env,
+    )
+    return build_opencode_config(
+        mcp_config,
+        model=get_default_opencode_model_id(),
+        region=region,
+        small_model=small_model,
+    )
 
 
 def _real_codex_config(
@@ -69,6 +127,9 @@ def _real_plan(
     binary: str | None = None,
     **overrides,
 ) -> dict:
+    codex_config = None
+    opencode_config = None
+    reasoning = None
     if engine is AutopilotEngine.CODEX:
         model = get_default_codex_model_id()
         reasoning = get_default_codex_reasoning_effort()
@@ -80,35 +141,34 @@ def _real_plan(
             region="us-east-2",
             reasoning_effort=reasoning,
         )
-        claude_binary = None
-        claude_pin = None
-        codex_binary = binary
-        codex_pin = pin
+    elif engine is AutopilotEngine.OPENCODE:
+        model = get_default_opencode_model_id()
+        pin = f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}"
+        install_command = " ".join(opencode_install_command())
+        opencode_config = _real_opencode_config()
     else:
         model = get_default_claude_code_model_id()
-        reasoning = None
         pin = f"{CLAUDE_CODE_PACKAGE}@{CLAUDE_CODE_VERSION}"
         install_command = " ".join(claude_install_command())
-        codex_config = None
-        claude_binary = binary
-        claude_pin = pin
-        codex_binary = None
-        codex_pin = None
 
     plan = {
         "engine": engine.value,
         "engine_binary": binary,
         "engine_pin": pin,
         "model": model,
+        "small_fast_model": None,
         "reasoning_effort": reasoning,
         "region": "us-east-2",
         "mcp_servers": contract.expected_servers(),
         "install_command": install_command,
-        "claude_binary": claude_binary,
-        "claude_code_pin": claude_pin,
-        "codex_binary": codex_binary,
-        "codex_pin": codex_pin,
+        "claude_binary": binary if engine is AutopilotEngine.CLAUDE_CODE else None,
+        "claude_code_pin": pin if engine is AutopilotEngine.CLAUDE_CODE else None,
+        "codex_binary": binary if engine is AutopilotEngine.CODEX else None,
+        "codex_pin": pin if engine is AutopilotEngine.CODEX else None,
+        "opencode_binary": binary if engine is AutopilotEngine.OPENCODE else None,
+        "opencode_pin": pin if engine is AutopilotEngine.OPENCODE else None,
         "codex_config": codex_config,
+        "opencode_config": opencode_config,
     }
     plan.update(overrides)
     return plan
@@ -135,6 +195,12 @@ class TestFactsDeriveFromProduction:
                 CODEX_VERSION,
                 codex_install_command(),
                 get_default_codex_model_id(),
+            ),
+            (
+                AutopilotEngine.OPENCODE,
+                OPENCODE_VERSION,
+                opencode_install_command(),
+                get_default_opencode_model_id(),
             ),
         ],
     )
@@ -254,10 +320,263 @@ class TestVerifyCodexConfig:
         assert contract.verify_codex_config(config) != []
 
 
+class TestVerifyOpenCodeConfig:
+    def test_real_generated_config_is_valid(self) -> None:
+        config = _real_opencode_config()
+        assert (
+            contract.verify_opencode_config(
+                config,
+                expected_region="us-east-2",
+                expected_profile="default",
+            )
+            == []
+        )
+
+    def test_model_small_model_update_share_and_permission_drift_are_reported(self) -> None:
+        config = _real_opencode_config()
+        config["model"] = f"{OPENCODE_BEDROCK_PROVIDER}/global.other.model"
+        config["small_model"] = "anthropic/claude-haiku"
+        config["autoupdate"] = True
+        config["share"] = "auto"
+        config["permission"]["bash"] = "allow"
+        del config["permission"]["edit"]
+
+        problems = "\n".join(contract.verify_opencode_config(config))
+
+        assert "shipped default" in problems
+        assert "small_model" in problems
+        assert "auto-update must be disabled" in problems
+        assert "share policy" in problems
+        assert "permission 'bash' must be 'ask', got 'allow'" in problems
+        assert "permission 'edit' must be 'ask', got None" in problems
+
+    def test_a_missing_permission_mapping_is_a_single_problem(self) -> None:
+        config = _real_opencode_config()
+        config["permission"] = "ask"
+
+        problems = contract.verify_opencode_config(config)
+
+        assert "OpenCode config carries no permission mapping" in problems
+        assert not any("permission 'bash'" in problem for problem in problems)
+
+    def test_the_small_model_pin_follows_the_fast_model_option(self) -> None:
+        config = _real_opencode_config(small_model="us.anthropic.claude-haiku-4-5-v1:0")
+
+        assert (
+            contract.verify_opencode_config(
+                config,
+                expected_small_model="us.anthropic.claude-haiku-4-5-v1:0",
+            )
+            == []
+        )
+        assert any("small_model" in problem for problem in contract.verify_opencode_config(config))
+        del config["provider"][OPENCODE_BEDROCK_PROVIDER]["models"][
+            "us.anthropic.claude-haiku-4-5-v1:0"
+        ]
+        assert any(
+            "does not declare model 'us.anthropic.claude-haiku-4-5-v1:0'" in problem
+            for problem in contract.verify_opencode_config(
+                config,
+                expected_small_model="us.anthropic.claude-haiku-4-5-v1:0",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda config: config.__setitem__("provider", "amazon"), id="no-table"),
+            pytest.param(
+                lambda config: config.__setitem__("provider", {"anthropic": {}}),
+                id="other-provider-only",
+            ),
+            pytest.param(
+                lambda config: config["provider"].__setitem__(OPENCODE_BEDROCK_PROVIDER, []),
+                id="provider-not-a-mapping",
+            ),
+        ],
+    )
+    def test_a_missing_bedrock_provider_table_is_reported(self, mutate) -> None:
+        config = _real_opencode_config()
+        mutate(config)
+
+        problems = contract.verify_opencode_config(config)
+
+        assert f"OpenCode config carries no provider.{OPENCODE_BEDROCK_PROVIDER} table" in problems
+
+    def test_missing_provider_options_and_models_are_reported(self) -> None:
+        config = _real_opencode_config()
+        provider = config["provider"][OPENCODE_BEDROCK_PROVIDER]
+        provider["options"] = ["region"]
+        provider["models"] = "global.moonshotai.kimi-k3"
+
+        problems = contract.verify_opencode_config(config)
+
+        assert f"OpenCode provider.{OPENCODE_BEDROCK_PROVIDER} carries no options" in problems
+        assert "OpenCode provider carries no models declaration" in problems
+
+    @pytest.mark.parametrize("region", ["", None, 7], ids=("empty", "absent", "not-a-string"))
+    def test_an_unusable_provider_region_is_reported(self, region: object) -> None:
+        config = _real_opencode_config()
+        options = config["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]
+        if region is None:
+            del options["region"]
+        else:
+            options["region"] = region
+
+        problems = contract.verify_opencode_config(config, expected_region="us-east-2")
+
+        assert any("region must be non-empty" in problem for problem in problems)
+
+    def test_a_region_mismatch_is_reported(self) -> None:
+        config = _real_opencode_config(region="eu-west-1")
+
+        problems = contract.verify_opencode_config(config, expected_region="us-east-2")
+
+        assert "OpenCode provider region 'eu-west-1' != expected 'us-east-2'" in problems
+
+    def test_the_profile_pin_is_checked_both_ways(self) -> None:
+        pinned = _real_opencode_config()
+        assert pinned["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["profile"] == "default"
+        assert contract.verify_opencode_config(pinned, expected_profile="default") == []
+        assert any(
+            "profile 'default' != expected 'ci'" in problem
+            for problem in contract.verify_opencode_config(pinned, expected_profile="ci")
+        )
+        assert any(
+            "must be omitted" in problem
+            for problem in contract.verify_opencode_config(pinned, forbid_profile=True)
+        )
+
+        unpinned = _real_opencode_config()
+        del unpinned["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["profile"]
+        assert contract.verify_opencode_config(unpinned, forbid_profile=True) == []
+        assert contract.verify_opencode_config(unpinned) == []
+        assert any(
+            "profile None != expected 'default'" in problem
+            for problem in contract.verify_opencode_config(unpinned, expected_profile="default")
+        )
+
+    @pytest.mark.parametrize("profile", ["", 3], ids=("empty", "not-a-string"))
+    def test_an_unusable_pinned_profile_is_reported_without_expectations(
+        self, profile: object
+    ) -> None:
+        config = _real_opencode_config()
+        config["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["profile"] = profile
+
+        problems = contract.verify_opencode_config(config)
+
+        assert any("profile must be non-empty" in problem for problem in problems)
+
+    def test_an_undeclared_session_model_is_reported(self) -> None:
+        config = _real_opencode_config()
+        models = config["provider"][OPENCODE_BEDROCK_PROVIDER]["models"]
+        models[get_default_opencode_model_id()] = "declared-as-text"
+
+        problems = contract.verify_opencode_config(config)
+
+        assert any("does not declare model" in problem for problem in problems)
+
+    def test_server_contract_and_feature_env_are_shared_with_claude(self) -> None:
+        expect = {"GCO_ENABLE_ALL_TOOLS": "true"}
+        config = _real_opencode_config(gco_mcp_env=expect)
+        gco_args = list(config["mcp"]["gco"]["command"][1:])
+        assert (
+            contract.verify_opencode_config(
+                config,
+                expect_gco_env=expect,
+                gco_args=gco_args,
+            )
+            == []
+        )
+        assert any(
+            "GCO_ENABLE_ALL_TOOLS" in problem
+            for problem in contract.verify_opencode_config(
+                _real_opencode_config(),
+                expect_gco_env=expect,
+            )
+        )
+        assert contract.verify_opencode_config(config, gco_args=["/somewhere/else.py"]) != []
+
+    def test_local_type_enabled_and_timeout_are_enforced_per_server(self) -> None:
+        config = _real_opencode_config()
+        gco = config["mcp"]["gco"]
+        gco["type"] = "remote"
+        gco["enabled"] = False
+        gco["timeout"] = 5_000
+
+        problems = contract.verify_opencode_config(config)
+
+        assert "gco: OpenCode MCP server type must be 'local'" in problems
+        assert "gco: OpenCode MCP server must be enabled" in problems
+        assert f"gco: OpenCode MCP timeout must be {OPENCODE_MCP_TIMEOUT_MS} ms" in problems
+
+    def test_no_companions_shape(self) -> None:
+        config = _real_opencode_config(include_companions=False)
+        assert contract.verify_opencode_config(config, include_companions=False) == []
+        assert contract.verify_opencode_config(config) != []
+
+    def test_a_non_mapping_server_table_reports_once_and_skips_per_server_checks(
+        self,
+    ) -> None:
+        config = _real_opencode_config()
+        config["mcp"] = "not-a-table"
+
+        problems = contract.verify_opencode_config(config, expected_profile="default")
+
+        assert problems == ["config carries no MCP server mapping"]
+
+    def test_a_non_mapping_entry_is_reported_once_and_skipped(self) -> None:
+        config = _real_opencode_config(include_companions=False)
+        config["mcp"]["gco"] = "not-a-mapping"
+
+        problems = contract.verify_opencode_config(config, include_companions=False)
+
+        assert any("entry must be a mapping" in problem for problem in problems)
+        assert not any("type must be 'local'" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("uvx gco-mcp", "args must be a list of strings", id="string-command"),
+            pytest.param([], "command must be a non-empty string", id="empty-argv"),
+            pytest.param(["uvx", 7], "command must be a non-empty string", id="non-string-argv"),
+            pytest.param(None, "command must be a non-empty string", id="absent"),
+        ],
+    )
+    def test_a_malformed_local_command_is_projected_onto_the_shared_checks(
+        self, command: object, expected: str
+    ) -> None:
+        """OpenCode's ``command`` is the whole argv; the projection must not raise."""
+        config = _real_opencode_config(include_companions=False)
+        if command is None:
+            del config["mcp"]["gco"]["command"]
+        else:
+            config["mcp"]["gco"]["command"] = command
+
+        problems = contract.verify_opencode_config(config, include_companions=False)
+
+        assert any(expected in problem for problem in problems)
+
+    def test_the_environment_block_is_projected_onto_the_shared_env_check(self) -> None:
+        expect = {"GCO_ENABLE_MISSION": "true"}
+        config = _real_opencode_config(include_companions=True, gco_mcp_env=expect)
+        assert config["mcp"]["gco"]["environment"] == expect
+        config["mcp"]["memory"]["environment"] = dict(expect)
+
+        problems = contract.verify_opencode_config(config, expect_gco_env=expect)
+
+        assert any("leaked onto memory" in problem for problem in problems)
+
+    def test_normalizer_passes_non_mappings_through_untouched(self) -> None:
+        assert contract._normalize_opencode_servers("text") == "text"
+        assert contract._normalize_opencode_servers(None) is None
+        assert contract._normalize_opencode_servers({"gco": 7}) == {"gco": 7}
+
+
 class TestVerifyPlan:
     @pytest.mark.parametrize("engine", list(AutopilotEngine))
     def test_valid_plan_with_absent_and_present_binary(self, engine: AutopilotEngine) -> None:
-        keyword = "codex_binary" if engine is AutopilotEngine.CODEX else "claude_binary"
+        keyword = _BINARY_KEYWORDS[engine]
         assert contract.verify_plan(_real_plan(engine), engine=engine, **{keyword: "absent"}) == []
         assert (
             contract.verify_plan(
@@ -334,7 +653,7 @@ class TestCommandLine:
     def test_verify_plan_exit_codes(self, tmp_path: Path, engine: AutopilotEngine) -> None:
         plan = tmp_path / f"{engine.value}.json"
         plan.write_text(json.dumps(_real_plan(engine)), encoding="utf-8")
-        binary_option = "--codex-binary" if engine is AutopilotEngine.CODEX else "--claude-binary"
+        binary_option = _BINARY_OPTIONS[engine]
         assert (
             contract.main(
                 [
@@ -390,11 +709,11 @@ class TestConfigShapeRejections:
         assert problems == ["config carries no mcpServers mapping"]
 
     def test_the_shared_mapping_check_also_guards_its_own_input(self) -> None:
-        """Both engines funnel into ``_verify_server_mapping``.
+        """Every engine funnels into ``_verify_server_mapping``.
 
         ``verify_config`` rejects a bad ``mcpServers`` before delegating, but the
-        Codex path reaches the shared checker with a differently-shaped document,
-        so the guard has to exist on both sides of the call.
+        Codex and OpenCode paths reach the shared checker with differently-shaped
+        documents, so the guard has to exist on both sides of the call.
         """
         problems = contract._verify_server_mapping(
             ["not", "a", "mapping"],
@@ -614,3 +933,136 @@ class TestPlanRejections:
         plan.pop("codex_config", None)
 
         assert contract.verify_plan(plan, engine=AutopilotEngine.CODEX, codex_binary="absent") == []
+
+    def test_an_opencode_plan_without_the_rendered_config_is_still_valid(self) -> None:
+        plan = _real_plan(AutopilotEngine.OPENCODE)
+        plan.pop("opencode_config", None)
+
+        assert (
+            contract.verify_plan(plan, engine=AutopilotEngine.OPENCODE, opencode_binary="absent")
+            == []
+        )
+
+    def test_a_non_object_opencode_config_in_the_plan_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.OPENCODE)
+        plan["opencode_config"] = '{"model": "text"}'
+
+        problems = contract.verify_plan(
+            plan, engine=AutopilotEngine.OPENCODE, opencode_binary="absent"
+        )
+
+        assert "OpenCode plan config must be a JSON object when present" in problems
+
+    def test_an_opencode_plan_config_is_verified_against_the_plan_region_and_fast_model(
+        self,
+    ) -> None:
+        plan = _real_plan(AutopilotEngine.OPENCODE, region="eu-west-1")
+        problems = contract.verify_plan(
+            plan, engine=AutopilotEngine.OPENCODE, opencode_binary="absent"
+        )
+        assert "OpenCode provider region 'us-east-2' != expected 'eu-west-1'" in problems
+
+        fast = _real_plan(
+            AutopilotEngine.OPENCODE,
+            small_fast_model="us.anthropic.claude-haiku-4-5-v1:0",
+            opencode_config=_real_opencode_config(small_model="us.anthropic.claude-haiku-4-5-v1:0"),
+        )
+        assert (
+            contract.verify_plan(fast, engine=AutopilotEngine.OPENCODE, opencode_binary="absent")
+            == []
+        )
+        fast["small_fast_model"] = None
+        assert any(
+            "small_model" in problem
+            for problem in contract.verify_plan(
+                fast, engine=AutopilotEngine.OPENCODE, opencode_binary="absent"
+            )
+        )
+
+    @pytest.mark.parametrize(
+        ("engine", "foreign_field", "foreign_value"),
+        [
+            (AutopilotEngine.CODEX, "opencode_config", {"model": "x"}),
+            (AutopilotEngine.OPENCODE, "codex_config", 'model = "x"'),
+            (AutopilotEngine.CLAUDE_CODE, "opencode_config", {"model": "x"}),
+        ],
+    )
+    def test_a_plan_carrying_another_engines_config_is_reported(
+        self,
+        engine: AutopilotEngine,
+        foreign_field: str,
+        foreign_value: object,
+    ) -> None:
+        plan = _real_plan(engine)
+        plan[foreign_field] = foreign_value
+        owner = contract._PLAN_GENERATED_CONFIG_FIELDS[foreign_field]
+
+        problems = contract.verify_plan(plan, engine=engine, **{_BINARY_KEYWORDS[engine]: "absent"})
+
+        assert (
+            f"{engine.value} plan unexpectedly carries a {owner.value} config ({foreign_field})"
+            in problems
+        )
+
+    def test_selected_engine_state_leaking_into_opencode_fields_is_reported(self) -> None:
+        plan = _real_plan(AutopilotEngine.CLAUDE_CODE, opencode_pin="opencode-ai@0.0.0")
+
+        problems = contract.verify_plan(plan, claude_binary="absent")
+
+        assert "plan leaks selected-engine state into opencode_pin/opencode_binary" in problems
+
+
+class TestOpenCodeCommandLine:
+    def test_verify_opencode_config_exit_codes(self, tmp_path: Path) -> None:
+        good = tmp_path / "opencode.json"
+        good.write_text(json.dumps(_real_opencode_config()), encoding="utf-8")
+        assert (
+            contract.main(
+                [
+                    "verify-opencode-config",
+                    str(good),
+                    "--region",
+                    "us-east-2",
+                    "--profile",
+                    "default",
+                ]
+            )
+            == 0
+        )
+        assert contract.main(["verify-opencode-config", str(good), "--region", "eu-west-1"]) == 1
+        assert contract.main(["verify-opencode-config", str(good), "--no-profile"]) == 1
+
+        unpinned = _real_opencode_config(small_model="us.anthropic.claude-haiku-4-5-v1:0")
+        del unpinned["provider"][OPENCODE_BEDROCK_PROVIDER]["options"]["profile"]
+        keys = tmp_path / "opencode-env-credentials.json"
+        keys.write_text(json.dumps(unpinned), encoding="utf-8")
+        assert (
+            contract.main(
+                [
+                    "verify-opencode-config",
+                    str(keys),
+                    "--no-profile",
+                    "--small-model",
+                    "us.anthropic.claude-haiku-4-5-v1:0",
+                ]
+            )
+            == 0
+        )
+        assert contract.main(["verify-opencode-config", str(keys), "--profile", "default"]) == 1
+
+    def test_profile_and_no_profile_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        config = tmp_path / "opencode.json"
+        config.write_text(json.dumps(_real_opencode_config()), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            contract.main(
+                ["verify-opencode-config", str(config), "--profile", "default", "--no-profile"]
+            )
+
+    def test_no_companions_flag_reaches_the_opencode_checker(self, tmp_path: Path) -> None:
+        config = tmp_path / "opencode.json"
+        config.write_text(
+            json.dumps(_real_opencode_config(include_companions=False)),
+            encoding="utf-8",
+        )
+        assert contract.main(["verify-opencode-config", str(config), "--no-companions"]) == 0
+        assert contract.main(["verify-opencode-config", str(config)]) == 1

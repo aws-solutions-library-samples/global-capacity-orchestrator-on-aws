@@ -1927,6 +1927,42 @@ EOF
     [ "$opus" != "$sonnet" ]
 }
 
+@test "bedrock_model_family: Kimi folds the single-letter generation marker (OpenCode default)" {
+    # Moonshot spells the generation as a letter-prefixed token (k2.5, k3)
+    # instead of a bare number. Without folding it the OpenCode default would
+    # sit alone in a phantom kimi-k3 family and a Kimi K4 release would never
+    # register as drift.
+    result="$(bedrock_model_family "global.moonshotai.kimi-k3")"
+    [ "$result" = "global.moonshotai.kimi" ]
+}
+
+@test "bedrock_model_family: every Kimi generation shape lands in one family" {
+    a="$(bedrock_model_family "global.moonshotai.kimi-k2.5")"
+    b="$(bedrock_model_family "global.moonshotai.kimi-k3")"
+    c="$(bedrock_model_family "global.moonshotai.kimi-k4")"
+    d="$(bedrock_model_family "global.moonshotai.kimi-k3.5-v1:0")"
+    [ "$a" = "global.moonshotai.kimi" ]
+    [ "$a" = "$b" ]
+    [ "$b" = "$c" ]
+    [ "$c" = "$d" ]
+}
+
+@test "bedrock_model_family: a leading letter+digit token is a model name, not a marker" {
+    # The marker rule only applies after the first name token: DeepSeek's r1
+    # and v3 ARE the model names, so they must stay distinct families rather
+    # than collapsing into a shared 'deepseek' bucket.
+    r1="$(bedrock_model_family "us.deepseek.r1-v1:0")"
+    v3="$(bedrock_model_family "deepseek.v3-v1:0")"
+    [ "$r1" = "us.deepseek.r1" ]
+    [ "$v3" = "deepseek.v3" ]
+    [ "$r1" != "$v3" ]
+}
+
+@test "bedrock_model_family: a trailing letter+digit marker folds for other vendors too" {
+    result="$(bedrock_model_family "writer.palmyra-x5-v1:0")"
+    [ "$result" = "writer.palmyra" ]
+}
+
 # ── compare_bedrock_model ─────────────────────────────────────────
 
 @test "compare_bedrock_model: v1:0 vs v2:0 is newer" {
@@ -1962,6 +1998,15 @@ EOF
 @test "compare_bedrock_model: GPT 5.6 -> GPT 5.7 is newer" {
     result="$(compare_bedrock_model "global.openai.gpt-5.6-sol" "global.openai.gpt-5.7-sol")"
     [ "$result" = "newer" ]
+}
+
+@test "compare_bedrock_model: Kimi K3 -> Kimi K4 is newer, K2.5 is older" {
+    newer="$(compare_bedrock_model "global.moonshotai.kimi-k3" "global.moonshotai.kimi-k4")"
+    older="$(compare_bedrock_model "global.moonshotai.kimi-k3" "global.moonshotai.kimi-k2.5")"
+    same="$(compare_bedrock_model "global.moonshotai.kimi-k3" "global.moonshotai.kimi-k3")"
+    [ "$newer" = "newer" ]
+    [ "$older" = "older" ]
+    [ "$same" = "same" ]
 }
 
 @test "compare_bedrock_model: Opus 5 -> a dated Opus 4.5 profile is older" {
@@ -2091,6 +2136,53 @@ SHIM
         "global.anthropic.claude-opus-5" us-east-1
     [ "$status" -eq 0 ]
     [ "$output" = "global.anthropic.claude-opus-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: selects Kimi K4 for the Kimi K3 OpenCode default" {
+    # The single-letter generation marker (k3 -> k4) has to fold into the
+    # family on the aws-listing path too, not just in bedrock_model_family;
+    # the inner family() helper is a separate copy of the tokenizer.
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"global.moonshotai.kimi-k2.5","status":"ACTIVE"},
+  {"inferenceProfileId":"global.moonshotai.kimi-k3","status":"ACTIVE"},
+  {"inferenceProfileId":"global.moonshotai.kimi-k4","status":"ACTIVE"},
+  {"inferenceProfileId":"global.moonshotai.kimi-k9","status":"LEGACY"},
+  {"inferenceProfileId":"us.moonshotai.kimi-k9","status":"ACTIVE"},
+  {"inferenceProfileId":"us.deepseek.r1-v1:0","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model \
+        "global.moonshotai.kimi-k3" us-east-1
+    [ "$status" -eq 0 ]
+    # k4 is the newest ACTIVE global Kimi; the LEGACY k9, the us-scoped
+    # profile, and the DeepSeek family are all excluded.
+    [ "$output" = "global.moonshotai.kimi-k4" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: no drift when the Kimi K3 default is newest" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"global.moonshotai.kimi-k2.5","status":"ACTIVE"},
+  {"inferenceProfileId":"global.moonshotai.kimi-k3","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model \
+        "global.moonshotai.kimi-k3" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "global.moonshotai.kimi-k3" ]
     rm -rf "$tmpdir"
 }
 
@@ -3150,6 +3242,69 @@ EOF
 
 @test "extract_codex_pin: empty when file is missing" {
     run extract_codex_pin "/nonexistent/cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── extract_opencode_pin ────────────────────────────────────────────────────
+
+@test "extract_opencode_pin: reads the pin from cli/autopilot.py" {
+    run extract_opencode_pin "cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_opencode_pin: parses the constant from a fixture" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        cat > "$tmpfile" <<EOF
+# comment line
+OPENCODE_VERSION = "1.2.3"
+EOF
+        extract_opencode_pin "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.2.3" ]
+}
+
+@test "extract_opencode_pin: ignores the other agent pins in the same file" {
+    # The three agent constants live side by side in cli/autopilot.py; each
+    # extractor must anchor on its own name so a Codex or Claude Code bump
+    # never reads as an OpenCode bump (or vice versa).
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        cat > "$tmpfile" <<EOF
+CLAUDE_CODE_VERSION = "9.9.9"
+CODEX_VERSION = "8.7.6"
+OPENCODE_VERSION = "1.2.3"
+EOF
+        printf "%s|%s|%s\n" \
+            "$(extract_claude_code_pin "$tmpfile")" \
+            "$(extract_codex_pin "$tmpfile")" \
+            "$(extract_opencode_pin "$tmpfile")"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "9.9.9|8.7.6|1.2.3" ]
+}
+
+@test "extract_opencode_pin: empty when constant absent" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        echo "no pin constant here" > "$tmpfile"
+        extract_opencode_pin "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_opencode_pin: empty when file is missing" {
+    run extract_opencode_pin "/nonexistent/cli/autopilot.py"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

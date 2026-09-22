@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Records a short terminal session of `gco autopilot` and converts it to a
 # GIF with agg. Select the engine with DEMO_ENGINE (``claude-code`` by
-# default, or ``codex``) and the scenario with DEMO_MODE:
+# default, ``codex`` or ``opencode``) and the scenario with DEMO_MODE:
 #
 #   live (default)  A real interactive session on Amazon Bedrock. The recorder
 #                   launches the selected TUI, types a GCO question, waits for
@@ -12,7 +12,7 @@
 #                   engine binary, expect(1), and Bedrock-enabled credentials.
 #   plan            Credential-free recording of the selected engine's
 #                   `--dry-run` plan: model, reasoning, MCP set, config path,
-#                   and exact lazy-install pin. This is the Codex demo mode.
+#                   and exact lazy-install pin.
 #
 # The recording drives the *checked-out* CLI through a `gco` PATH shim
 # (`python3 -m cli.main`), never a globally installed gco, so the GIF always
@@ -20,8 +20,9 @@
 # asciinema's --idle-time-limit, so the live mode stays a short GIF.
 #
 # Output files (deposited in demo/):
-#   Claude: demo/autopilot-claude-code.cast + demo/autopilot-claude-code.gif
-#   Codex:  demo/autopilot-codex.cast + demo/autopilot-codex.gif
+#   Claude:   demo/autopilot-claude-code.cast + demo/autopilot-claude-code.gif
+#   Codex:    demo/autopilot-codex.cast + demo/autopilot-codex.gif
+#   OpenCode: demo/autopilot-opencode.cast + demo/autopilot-opencode.gif
 #
 # Prerequisites:
 #   - asciinema: brew install asciinema  (or pip install asciinema)
@@ -33,7 +34,7 @@
 #   bash demo/record_autopilot.sh
 #
 # Options (via environment variables):
-#   DEMO_ENGINE=claude-code  "claude-code" (default) or "codex"
+#   DEMO_ENGINE=claude-code  "claude-code" (default), "codex" or "opencode"
 #   DEMO_MODE=live       "live" (real selected-engine Bedrock session, default)
 #                        or "plan" (credential-free engine launch plan)
 #   DEMO_COLS=110        Terminal width for recording (default: 110)
@@ -80,7 +81,11 @@ case "$DEMO_ENGINE" in
         CAST_FILE="${DEMO_DIR}/autopilot-codex.cast"
         GIF_FILE="${DEMO_DIR}/autopilot-codex.gif"
         ;;
-    *) echo "error: DEMO_ENGINE must be 'claude-code' or 'codex', got '$DEMO_ENGINE'" >&2; exit 1 ;;
+    opencode)
+        CAST_FILE="${DEMO_DIR}/autopilot-opencode.cast"
+        GIF_FILE="${DEMO_DIR}/autopilot-opencode.gif"
+        ;;
+    *) echo "error: DEMO_ENGINE must be 'claude-code', 'codex' or 'opencode', got '$DEMO_ENGINE'" >&2; exit 1 ;;
 esac
 
 COLS="${DEMO_COLS:-110}"
@@ -140,22 +145,32 @@ else
 fi
 
 if [ "$DEMO_MODE" = "live" ]; then
-    if [ "$DEMO_ENGINE" = "codex" ]; then
-        ENGINE_BINARY="codex"
-        ENGINE_LABEL="Codex"
-        INSTALL_HINT="gco autopilot --engine codex -y"
-    else
-        ENGINE_BINARY="claude"
-        ENGINE_LABEL="Claude Code"
-        INSTALL_HINT="gco autopilot -y"
-    fi
+    case "$DEMO_ENGINE" in
+        codex)
+            ENGINE_BINARY="codex"
+            ENGINE_LABEL="Codex"
+            INSTALL_HINT="gco autopilot --engine codex -y"
+            ;;
+        opencode)
+            ENGINE_BINARY="opencode"
+            ENGINE_LABEL="OpenCode"
+            INSTALL_HINT="gco autopilot --engine opencode -y"
+            ;;
+        *)
+            ENGINE_BINARY="claude"
+            ENGINE_LABEL="Claude Code"
+            INSTALL_HINT="gco autopilot -y"
+            ;;
+    esac
     if command -v "$ENGINE_BINARY" &>/dev/null; then
         preflight_pass "$ENGINE_LABEL installed ($("$ENGINE_BINARY" --version 2>&1 | head -1))"
     else
         preflight_fail "$ENGINE_LABEL not installed (live mode launches a real session)" \
             "Run '$INSTALL_HINT' once to install the pin, or set DEMO_MODE=plan"
     fi
-    if [ "$DEMO_ENGINE" != "codex" ]; then
+    # Only the Claude recording starts the companion servers; the Codex and
+    # OpenCode recordings run --no-companions (GCO's documentation tools only).
+    if [ "$DEMO_ENGINE" = "claude-code" ]; then
         for companion_runtime in uvx npx; do
             if command -v "$companion_runtime" &>/dev/null; then
                 preflight_pass "$companion_runtime installed"
@@ -278,6 +293,10 @@ EXPECT_DRIVER
     cat > "$DRIVER" <<DRIVER_SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
 cd "\$REPO_ROOT"
 export PATH="\${SHIM_DIR}:\${PATH}"
 export COLUMNS="\${COLS}" LINES="\${ROWS}"
@@ -303,6 +322,116 @@ spacer
 highlight "A real session: Codex used only GCO's approved documentation tools."
 narrate "Default Autopilot can include companions; this recording is least-privilege."
 narrate "Get started:  gco autopilot --engine codex"
+sleep 4
+DRIVER_SCRIPT
+elif [ "$DEMO_MODE" = "live" ] && [ "$DEMO_ENGINE" = "opencode" ]; then
+    # Mirror the Codex recording with OpenCode's real full-screen TUI. Every
+    # built-in tool (shell, file read/edit/write, search, web, subagents,
+    # todo, skills, the interactive question dialog) is denied through
+    # OpenCode's own config override (OPENCODE_CONFIG_CONTENT, merged last),
+    # so the answer can only come from GCO's MCP documentation tools. It has
+    # to be the permission map: in OpenCode 1.18 `permission` governs the
+    # bash/edit/read tools and a bare `tools: {bash: false}` is overridden by
+    # the permission-derived default. That is hidden recording plumbing —
+    # nothing is persisted, and an interactive user running the plain command
+    # gets OpenCode's ordinary tool set with the ask-first permission floor.
+    EXPECT_SCRIPT="$(mktemp)"
+    cat > "$EXPECT_SCRIPT" <<'EXPECT_DRIVER'
+#!/usr/bin/expect -f
+set timeout 420
+set stty_init "rows 30 columns 110"
+
+set env(OPENCODE_CONFIG_CONTENT) {{"permission":{"bash":"deny","edit":"deny","read":"deny","glob":"deny","grep":"deny","list":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","task":"deny","todowrite":"deny","skill":"deny","question":"deny","lsp":"deny"}}}
+set prompt {Use only the GCO MCP find_docs tool, then read_resource on a returned documentation URI; do not use shell commands or other tools. Which gco command submits a job through SQS, and why is that recommended? Answer in two short lines.}
+log_user 0
+spawn gco autopilot --engine opencode --no-companions
+log_user 1
+
+# Wait for the composer (its "Ask anything…" placeholder). A permission
+# prompt at startup is a failure, never something the driver answers.
+set timeout 90
+expect {
+    -nocase -re {permission required|allow once|allow always} { exit 7 }
+    -re {Ask anything} {}
+    timeout { exit 8 }
+    eof { exit 3 }
+}
+sleep 3
+# OpenCode's composer takes the whole prompt as pasted text; a plain
+# carriage return submits it.
+send -- $prompt
+sleep 1
+send -- "\r"
+
+# Wait for the grounded answer (it inevitably names submit-sqs; a
+# find_docs query may name it first, which is fine because the quiet-wait
+# below runs until the turn is really over). A permission prompt means the
+# model reached for a tool this recording does not allow — fail rather
+# than approve.
+set timeout 420
+expect {
+    -nocase -re {permission required|allow once|allow always} { exit 7 }
+    -re {submit-sqs} {}
+    timeout { exit 4 }
+    eof { exit 5 }
+}
+# OpenCode redraws its spinner continuously while a turn is running and goes
+# completely quiet once the answer is on screen, so six seconds without
+# output is the end-of-turn signal. The deadline keeps a runaway tool loop
+# from recording forever.
+set deadline [expr {[clock seconds] + 300}]
+expect {
+    -nocase -re {permission required|allow once|allow always} { exit 7 }
+    -timeout 6 -re {.+} {
+        if {[clock seconds] < $deadline} { exp_continue }
+        exit 4
+    }
+    timeout {}
+    eof { exit 5 }
+}
+# Leave the complete two-line answer on screen before exiting.
+sleep 30
+
+# /exit is OpenCode's terminating slash command: type it, let the command
+# palette resolve it, confirm with Enter.
+send -- "/exit"
+sleep 1
+send -- "\r"
+expect eof
+EXPECT_DRIVER
+
+    cat > "$DRIVER" <<DRIVER_SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
+cd "\$REPO_ROOT"
+export PATH="\${SHIM_DIR}:\${PATH}"
+export COLUMNS="\${COLS}" LINES="\${ROWS}"
+
+# shellcheck source=demo/lib_demo.sh
+source "\${REPO_ROOT}/demo/lib_demo.sh"
+setup_colors
+
+banner "GCO Autopilot — OpenCode"
+narrate "A live OpenCode session scoped to GCO documentation tools:"
+narrate "Amazon Bedrock + the GCO MCP server; no shell or companion servers."
+sleep 3
+
+echo ""
+echo "  \${MAGENTA}\\\$ \${WHITE}\${BOLD}gco autopilot --engine opencode --no-companions\${RESET}"
+sleep 1
+
+expect -f "$EXPECT_SCRIPT"
+
+printf '\033[2J\033[H'
+banner "GCO Autopilot — OpenCode"
+spacer
+highlight "A real session: OpenCode used only GCO's documentation tools."
+narrate "Default Autopilot can include companions; this recording is least-privilege."
+narrate "Get started:  gco autopilot --engine opencode"
 sleep 4
 DRIVER_SCRIPT
 elif [ "$DEMO_MODE" = "live" ]; then
@@ -385,6 +514,10 @@ EXPECT_DRIVER
     cat > "$DRIVER" <<DRIVER_SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
 cd "\$REPO_ROOT"
 export PATH="\${SHIM_DIR}:\${PATH}"
 # tput cols runs inside command substitutions in lib_demo.sh, where stdout
@@ -422,6 +555,10 @@ elif [ "$DEMO_ENGINE" = "codex" ]; then
     cat > "$DRIVER" <<'DRIVER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
 cd "$REPO_ROOT"
 export PATH="${SHIM_DIR}:${PATH}"
 export COLUMNS="${COLS}" LINES="${ROWS}"
@@ -443,10 +580,43 @@ highlight "Launch it for real with:  gco autopilot --engine codex"
 narrate "The exact Codex pin and isolated CODEX_HOME persist in gco-dev."
 sleep 4
 DRIVER_SCRIPT
+elif [ "$DEMO_ENGINE" = "opencode" ]; then
+    cat > "$DRIVER" <<'DRIVER_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
+cd "$REPO_ROOT"
+export PATH="${SHIM_DIR}:${PATH}"
+export COLUMNS="${COLS}" LINES="${ROWS}"
+
+# shellcheck source=demo/lib_demo.sh
+source "${REPO_ROOT}/demo/lib_demo.sh"
+setup_colors
+
+banner "GCO Autopilot — OpenCode"
+narrate "Choose OpenCode without giving up GCO's one-command setup:"
+narrate "OpenCode + the GCO MCP server + companion MCPs on Amazon Bedrock."
+sleep 3
+
+run_cmd "gco autopilot --engine opencode --dry-run"
+sleep 5
+
+spacer
+highlight "Launch it for real with:  gco autopilot --engine opencode"
+narrate "The exact OpenCode pin and isolated OPENCODE_CONFIG persist in gco-dev."
+sleep 4
+DRIVER_SCRIPT
 else
     cat > "$DRIVER" <<'DRIVER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+# Bash 5 enables checkwinsize by default and would overwrite the exported
+# COLUMNS with the outer terminal's width after the first external command,
+# wrapping every later banner in the COLS-wide render.
+shopt -u checkwinsize
 cd "$REPO_ROOT"
 export PATH="${SHIM_DIR}:${PATH}"
 # See the live driver: COLUMNS keeps tput-in-substitution honest so the
@@ -503,8 +673,9 @@ echo "✓ Recording saved: ${CAST_FILE}"
 if [ "$DEMO_MODE" = "live" ]; then
     # TUI redraws interleave ANSI escapes and can split words across output
     # events, so checks join the rendered stream and normalize to alphanumerics.
-    # Codex has a stricter contract: successful calls to both approved GCO docs
-    # tools, no shell/companions/prompts, and no live credential values.
+    # Codex and OpenCode have a stricter contract: successful calls to both
+    # approved GCO docs tools, no shell/companions/prompts, and no live
+    # credential values.
     if python3 - "$CAST_FILE" "$DEMO_ENGINE" <<'PYEOF'
 import json
 import os
@@ -539,6 +710,18 @@ plain = re.sub(
 normalized = re.sub(r"[^a-z0-9]", "", plain.lower())
 required = ["submitsqs"]
 forbidden = []
+companions = (
+    "awsdocs",
+    "awspricing",
+    "ddgsearch",
+    "deepwiki",
+    "filesystem",
+    "innermonologue",
+    "mcptasks",
+    "memorymcp",
+    "playwright",
+    "sequentialthinking",
+)
 if sys.argv[2] == "codex":
     required.extend(("calledgcofinddocs", "calledgcoreadresource"))
     forbidden.extend(
@@ -551,16 +734,20 @@ if sys.argv[2] == "codex":
             "doyouwanttoproceed",
             "doyouwanttoallow",
             "allowthistool",
-            "awsdocs",
-            "awspricing",
-            "ddgsearch",
-            "deepwiki",
-            "filesystem",
-            "innermonologue",
-            "mcptasks",
-            "memorymcp",
-            "playwright",
-            "sequentialthinking",
+            *companions,
+        )
+    )
+elif sys.argv[2] == "opencode":
+    # OpenCode renders MCP tool calls as <server>_<tool>; the prompt text
+    # itself only ever says "GCO MCP find_docs", so these spellings are
+    # evidence of calls, not of the question.
+    required.extend(("gcofinddocs", "gcoreadresource"))
+    forbidden.extend(
+        (
+            "permissionrequired",
+            "allowonce",
+            "allowalways",
+            *companions,
         )
     )
 credential_names = (
@@ -584,11 +771,11 @@ raise SystemExit(
 )
 PYEOF
     then
-        if [ "$DEMO_ENGINE" = "codex" ]; then
-            echo "✓ Live Codex recording verified (GCO docs tools only; no credentials/prompts)"
-        else
-            echo "✓ Live answer verified in the recording (mentions submit-sqs)"
-        fi
+        case "$DEMO_ENGINE" in
+            codex) echo "✓ Live Codex recording verified (GCO docs tools only; no credentials/prompts)" ;;
+            opencode) echo "✓ Live OpenCode recording verified (GCO docs tools only; no credentials/prompts)" ;;
+            *) echo "✓ Live answer verified in the recording (mentions submit-sqs)" ;;
+        esac
     else
         echo "✗ The recording failed its required answer/tool/security contract." >&2
         echo "  The session may have stalled, used another tool, prompted, or exposed credentials." >&2
@@ -606,22 +793,29 @@ strip_emoji_from_cast "$CAST_FILE"
 echo "✓ Tofu-triggering codepoints stripped"
 
 # ── Strip terminal query/response artifacts and TUI tofu glyphs ─────────────
-# Two Claude-Code-specific cleanups on top of lib_demo.sh's shared passes:
+# Two engine-TUI cleanups on top of lib_demo.sh's shared passes:
 #
-# 1. The TUI probes the terminal (focus tracking, OSC 11 background color,
+# 1. The TUIs probe the terminal (focus tracking, OSC 11 background color,
 #    device attributes, XTVERSION), and pieces of those query/response
 #    exchanges land in the recorded output stream. agg's renderer doesn't
 #    understand them and paints fragments like ``^[[O`` or ``^[]11;rgb:...``
 #    literally. They carry no visual content, so they are removed outright.
 #
-# 2. The TUI emits three codepoints Menlo has no glyph for, and agg's
+# 2. The TUIs emit codepoints Menlo has no glyph for, and agg's
 #    first-family-wins renderer paints them as tofu boxes (same root cause
 #    strip_emoji_from_cast documents). Verified against Menlo.ttc's cmap:
+#      Claude Code
 #      ⏺ U+23FA BLACK CIRCLE FOR RECORD  → ● U+25CF (in Menlo, same intent)
 #      ⏸ U+23F8 DOUBLE VERTICAL BAR      → ║ U+2551 (in Menlo, same width)
 #      ⎿ U+23BF DENTISTRY SYMBOL ...     → └ U+2514 (in Menlo, same elbow)
-#    Everything else the TUI uses (box drawing, quadrant blocks, the
-#    spinner asterisks ✻✶✳✢✽, ❯, arrows) is covered by Menlo.
+#      OpenCode
+#      ⬝ U+2B1D BLACK VERY SMALL SQUARE  → ▪ U+25AA (in Menlo; the idle cell
+#                                          of its ■/⬝ block spinner)
+#      ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ Braille spinner       → | / - \ (Menlo has no Braille
+#                                          block at all; the ASCII cycle
+#                                          keeps the rotation legible)
+#    Everything else the TUIs use (box drawing, quadrant/half blocks, ■ ●
+#    ⚙ ⊙, the Claude spinner asterisks ✻✶✳✢✽, ❯, arrows) is covered by Menlo.
 python3 - "$CAST_FILE" <<'PYEOF'
 import json
 import re
@@ -642,7 +836,17 @@ TUI_TOFU = {
     0x23FA: "\u25cf",  # ⏺ → ●
     0x23F8: "\u2551",  # ⏸ → ║
     0x23BF: "\u2514",  # ⎿ → └
+    0x2B1D: "\u25aa",  # ⬝ → ▪
 }
+# The whole Braille block is tofu in Menlo; OpenCode's ten spinner frames get
+# the matching ASCII spinner phase, anything else in the block a plain dot.
+TUI_TOFU.update({codepoint: "\u00b7" for codepoint in range(0x2800, 0x2900)})
+TUI_TOFU.update(
+    zip(
+        (0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827, 0x2807, 0x280F),
+        "|/-\\|/-\\|/",
+    )
+)
 
 path = Path(sys.argv[1])
 documents = []

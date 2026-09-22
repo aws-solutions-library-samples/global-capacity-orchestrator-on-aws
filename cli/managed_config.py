@@ -315,6 +315,15 @@ CODEX_REASONING_EFFORT = ManagedScalarKey(
     validate_result=_codex_reasoning_effort_validator,
 )
 
+OPENCODE_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.opencode_default_model_id",
+    container="bedrock",
+    leaf="opencode_default_model_id",
+    description="Bedrock model/inference-profile ID gco autopilot hands to OpenCode",
+    default="",  # the reader has no fallback: it requires the key when consulted
+    validate_result=_bedrock_model_id_validator("bedrock.opencode_default_model_id"),
+)
+
 
 def _resolve_config_path(config_path: Path | str | None) -> Path:
     """Return the cdk.json to edit, refusing unusable resolutions early."""
@@ -667,6 +676,7 @@ def get_bedrock_model_status(*, config_path: Path | str | None = None) -> dict[s
         "claude_code_default_model_id": _current_scalar(document, CLAUDE_CODE_DEFAULT_MODEL),
         "codex_default_model_id": _current_scalar(document, CODEX_DEFAULT_MODEL),
         "codex_reasoning_effort": _current_scalar(document, CODEX_REASONING_EFFORT),
+        "opencode_default_model_id": _current_scalar(document, OPENCODE_DEFAULT_MODEL),
     }
 
 
@@ -707,3 +717,10 @@ def set_codex_reasoning_effort(
         reasoning_effort,
         config_path=config_path,
     )
+
+
+def set_opencode_default_model(
+    model_id: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set ``bedrock.opencode_default_model_id`` (OpenCode session model)."""
+    return managed_scalar_set(OPENCODE_DEFAULT_MODEL, model_id, config_path=config_path)

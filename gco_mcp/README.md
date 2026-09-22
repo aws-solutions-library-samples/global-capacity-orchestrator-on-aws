@@ -15,6 +15,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [Claude Desktop](#claude-desktop)
   - [Claude Code](#claude-code)
   - [OpenAI Codex](#openai-codex)
+  - [OpenCode](#opencode)
   - [Cursor](#cursor)
   - [Other MCP Clients](#other-mcp-clients)
 - [Feature Flags](#feature-flags)
@@ -70,7 +71,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 139 tools by default (up to 196 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 139 tools by default (up to 197 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -335,7 +336,7 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 
 ### Claude Code
 
-> **Shortcut: `gco autopilot`.** If you have the [GCO CLI](../docs/CLI.md) installed, `gco autopilot` launches Claude Code by default and `gco autopilot --engine codex` launches OpenAI Codex. Both run on Amazon Bedrock with this GCO MCP server and every [recommended companion server](#recommended-companion-mcp-servers) below already wired up. See [docs/AUTOPILOT.md](../docs/AUTOPILOT.md). The manual steps below remain the right path for adding GCO to an existing Claude Code setup.
+> **Shortcut: `gco autopilot`.** If you have the [GCO CLI](../docs/CLI.md) installed, `gco autopilot` launches Claude Code by default, `gco autopilot --engine codex` launches OpenAI Codex, and `gco autopilot --engine opencode` launches OpenCode. All three run on Amazon Bedrock with this GCO MCP server and every [recommended companion server](#recommended-companion-mcp-servers) below already wired up. See [docs/AUTOPILOT.md](../docs/AUTOPILOT.md). The manual steps below remain the right path for adding GCO to an existing Claude Code setup.
 
 [Claude Code](https://code.claude.com/docs/en/mcp) registers stdio servers with the `claude mcp add` CLI. The recommended `uvx` form needs no clone — everything after `--` is the launch command:
 
@@ -394,6 +395,35 @@ startup_timeout_sec = 60.0
 ```
 
 That table configures the MCP server only; it does not select Codex's model provider, Bedrock profile, reasoning effort, or isolation policy. Use `gco autopilot --engine codex` for the complete reviewed session configuration. The configuration pins the current reviewed release exactly; update that tag deliberately when adopting a newer release. For a local clone, replace `command`/`args` with the interpreter and absolute `gco_mcp/run_mcp.py` path used by the other clone-based examples above.
+
+### OpenCode
+
+> **Shortcut: `gco autopilot --engine opencode`.** This is the recommended path: Autopilot selects the reviewed Amazon Bedrock provider and model (Moonshot AI's Kimi K3 by default), generates an isolated `opencode.json` that OpenCode reads through `OPENCODE_CONFIG` with project configuration disabled, pins `small_model` so title generation never drifts to another vendor, and wires in this GCO MCP server plus the [recommended companions](#recommended-companion-mcp-servers). See [docs/AUTOPILOT.md](../docs/AUTOPILOT.md).
+
+To add only the GCO server to an existing [OpenCode](https://opencode.ai/docs/mcp-servers/) setup instead, add this `mcp` entry to `~/.config/opencode/opencode.json` (or a project-level `opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "gco": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "--python",
+        "3.14",
+        "--from",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v8.4.0",
+        "gco-mcp"
+      ],
+      "enabled": true,
+      "timeout": 60000
+    }
+  }
+}
+```
+
+OpenCode's `local` servers take the whole launch command as one `command` array; feature flags go in an `environment` map on the same entry (for example `"environment": {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"}`). The `timeout` is in milliseconds — the 60-second value leaves room for a first-use `uvx` download, which OpenCode's five-second default cuts off. That entry configures the MCP server only; it does not select OpenCode's Bedrock provider, model, `small_model`, ask-first permission floor, or isolation policy. Use `gco autopilot --engine opencode` for the complete reviewed session configuration. The configuration pins the current reviewed release exactly; update that tag deliberately when adopting a newer release. For a local clone, replace the `command` array with the interpreter and absolute `gco_mcp/run_mcp.py` path used by the other clone-based examples above.
 
 ### Cursor
 
@@ -473,7 +503,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
 | `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
 | `GCO_ENABLE_SEMANTIC_PROGRESS` | `false` | `metrics_semantic_progress` | Invokes an LLM-as-judge progress scorer, which can incur model-call cost and sends the supplied scoring inputs to the configured model. |
-| `GCO_ENABLE_CONFIG_MANAGEMENT` | `false` | `list_deployment_regions`, `add_deployment_region`, `remove_deployment_region`, `set_deployment_region`, `set_eks_endpoint_access`, `set_mission_default_model`, `set_capacity_advisor_default_model`, `set_claude_code_default_model`, `set_codex_default_model`, `set_codex_reasoning_effort` | Edits the deployment configuration (`cdk.json`) on the MCP host through the managed-config engine — validated against the same rules CDK synth enforces, atomic, idempotent, and audited. Config-only (deploying is separately gated), but still a local-file mutation an agent could chain into a topology change, so the operator must opt in. Installed (`uvx`/`pip`) servers see a read-only packaged `cdk.json` and refuse with guidance; run from a checkout to use these tools. |
+| `GCO_ENABLE_CONFIG_MANAGEMENT` | `false` | `list_deployment_regions`, `add_deployment_region`, `remove_deployment_region`, `set_deployment_region`, `set_eks_endpoint_access`, `set_mission_default_model`, `set_capacity_advisor_default_model`, `set_claude_code_default_model`, `set_codex_default_model`, `set_codex_reasoning_effort`, `set_opencode_default_model` | Edits the deployment configuration (`cdk.json`) on the MCP host through the managed-config engine — validated against the same rules CDK synth enforces, atomic, idempotent, and audited. Config-only (deploying is separately gated), but still a local-file mutation an agent could chain into a topology change, so the operator must opt in. Installed (`uvx`/`pip`) servers see a read-only packaged `cdk.json` and refuse with guidance; run from a checkout to use these tools. |
 
 ### Enabling a Flag
 

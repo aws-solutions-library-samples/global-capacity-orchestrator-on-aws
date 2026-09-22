@@ -16,6 +16,12 @@ Verification subcommands:
 
     verify-config PATH          validate Claude's --print-config JSON
     verify-codex-config PATH    validate Codex's --print-config TOML
+        [--region REGION]         require the Bedrock provider region
+    verify-opencode-config PATH validate OpenCode's --print-config JSON
+        [--region REGION]         require the Bedrock provider region
+        [--small-model MODEL]     expected small_model (default: session model)
+        [--profile NAME]          require this pinned AWS profile
+        [--no-profile]            require no pinned AWS profile (env creds)
         [--no-companions]         expect only the gco server
         [--expect-gco-env K=V]    require a gco-only env pair (repeatable)
         [--gco-args ARG]          require exact gco args (repeatable, ordered)
@@ -23,9 +29,11 @@ Verification subcommands:
         [--engine ENGINE]
         [--claude-binary present|absent]
         [--codex-binary present|absent]
+        [--opencode-binary present|absent]
 
 Importable for pytest: ``expected_servers()``, ``verify_config()``,
-``verify_codex_config()``, ``verify_plan()``, ``main()``.
+``verify_codex_config()``, ``verify_opencode_config()``, ``verify_plan()``,
+``main()``.
 """
 
 from __future__ import annotations
@@ -49,20 +57,43 @@ from cli.autopilot import (  # noqa: E402
     CODEX_PACKAGE,
     CODEX_VERSION,
     COMPANION_MCP_SERVERS,
+    OPENCODE_BEDROCK_PROVIDER,
+    OPENCODE_MCP_TIMEOUT_MS,
+    OPENCODE_PACKAGE,
+    OPENCODE_VERSION,
     AutopilotEngine,
     claude_install_command,
     codex_install_command,
+    opencode_install_command,
 )
 from gco.bedrock import (  # noqa: E402
     get_default_claude_code_model_id,
     get_default_codex_model_id,
     get_default_codex_reasoning_effort,
+    get_default_opencode_model_id,
 )
 
 #: Companions deliberately pruned from the curated registry; their names
 #: must never reappear anywhere in a generated session config.
 PRUNED_PACKAGES: tuple[str, ...] = ("mcp-server-fetch", "mcp-server-calculator")
 _ENGINE_CHOICES = tuple(engine.value for engine in AutopilotEngine)
+
+#: Dry-run plan fields that must be populated for the selected engine and
+#: ``None`` for every other engine (``(pin_field, binary_field)``).
+_PLAN_ENGINE_FIELDS: dict[AutopilotEngine, tuple[str, str]] = {
+    AutopilotEngine.CLAUDE_CODE: ("claude_code_pin", "claude_binary"),
+    AutopilotEngine.CODEX: ("codex_pin", "codex_binary"),
+    AutopilotEngine.OPENCODE: ("opencode_pin", "opencode_binary"),
+}
+
+#: Generated-config plan fields, keyed by the only engine allowed to fill them.
+_PLAN_GENERATED_CONFIG_FIELDS: dict[str, AutopilotEngine] = {
+    "codex_config": AutopilotEngine.CODEX,
+    "opencode_config": AutopilotEngine.OPENCODE,
+}
+
+#: Permission floor the generated OpenCode config must carry.
+OPENCODE_PERMISSION_FLOOR: dict[str, str] = {"edit": "ask", "bash": "ask"}
 
 
 def expected_servers(include_companions: bool = True) -> list[str]:
@@ -214,6 +245,143 @@ def verify_codex_config(
     return problems
 
 
+def _normalize_opencode_servers(servers: Any) -> Any:
+    """Project OpenCode's ``local`` MCP entries onto the shared launch-recipe shape.
+
+    OpenCode stores the whole argv under ``command`` and the environment
+    under ``environment``; the shared checks expect ``command``/``args``/
+    ``env``. Non-mapping entries and non-list commands pass through so the
+    shared checker reports them instead of this helper raising.
+    """
+    if not isinstance(servers, dict):
+        return servers
+    normalized: dict[str, Any] = {}
+    for name, entry in servers.items():
+        if not isinstance(entry, dict):
+            normalized[name] = entry
+            continue
+        projected: dict[str, Any] = {}
+        argv = entry.get("command")
+        if isinstance(argv, list) and argv and all(isinstance(item, str) for item in argv):
+            projected["command"] = argv[0]
+            projected["args"] = argv[1:]
+        else:
+            projected["command"] = argv if isinstance(argv, str) else None
+            projected["args"] = None
+        if "environment" in entry:
+            projected["env"] = entry["environment"]
+        normalized[name] = projected
+    return normalized
+
+
+def verify_opencode_config(
+    config: dict[str, Any],
+    include_companions: bool = True,
+    expect_gco_env: dict[str, str] | None = None,
+    gco_args: list[str] | None = None,
+    expected_region: str | None = None,
+    expected_small_model: str | None = None,
+    expected_profile: str | None = None,
+    forbid_profile: bool = False,
+) -> list[str]:
+    """Return every problem with OpenCode's generated JSON config (empty = valid).
+
+    ``expected_small_model`` is the bare Bedrock model id the session pins for
+    title generation; it defaults to the session model because GCO never lets
+    OpenCode auto-pick a "cheaper" catalog model (see ``build_opencode_config``).
+
+    The provider ``profile`` is only pinned when the environment carries no
+    AWS credential source (see ``opencode_aws_profile``). ``forbid_profile``
+    asserts it is absent — the shape a session with exported static keys must
+    have, because a pinned profile makes the SDK skip those keys — while
+    ``expected_profile`` asserts a specific pinned name.
+    """
+    problems: list[str] = []
+    expected_model = get_default_opencode_model_id()
+    expected_selector = f"{OPENCODE_BEDROCK_PROVIDER}/{expected_model}"
+    if config.get("model") != expected_selector:
+        problems.append(
+            f"OpenCode model {config.get('model')!r} != shipped default {expected_selector!r}"
+        )
+    small_selector = f"{OPENCODE_BEDROCK_PROVIDER}/{expected_small_model or expected_model}"
+    if config.get("small_model") != small_selector:
+        problems.append(f"OpenCode small_model {config.get('small_model')!r} != {small_selector!r}")
+    if config.get("autoupdate") is not False:
+        problems.append("OpenCode auto-update must be disabled in the generated config")
+    if config.get("share") != "disabled":
+        problems.append(f"OpenCode share policy {config.get('share')!r} != 'disabled'")
+    permission = config.get("permission")
+    if not isinstance(permission, dict):
+        problems.append("OpenCode config carries no permission mapping")
+    else:
+        for key, expected in sorted(OPENCODE_PERMISSION_FLOOR.items()):
+            if permission.get(key) != expected:
+                problems.append(
+                    f"OpenCode permission {key!r} must be {expected!r}, got {permission.get(key)!r}"
+                )
+
+    providers = config.get("provider")
+    provider = providers.get(OPENCODE_BEDROCK_PROVIDER) if isinstance(providers, dict) else None
+    if not isinstance(provider, dict):
+        problems.append(f"OpenCode config carries no provider.{OPENCODE_BEDROCK_PROVIDER} table")
+    else:
+        options = provider.get("options")
+        if not isinstance(options, dict):
+            problems.append(f"OpenCode provider.{OPENCODE_BEDROCK_PROVIDER} carries no options")
+        else:
+            region = options.get("region")
+            if not isinstance(region, str) or not region:
+                problems.append(f"OpenCode provider region must be non-empty, got {region!r}")
+            elif expected_region is not None and region != expected_region:
+                problems.append(
+                    f"OpenCode provider region {region!r} != expected {expected_region!r}"
+                )
+            profile = options.get("profile")
+            if forbid_profile:
+                if "profile" in options:
+                    problems.append(
+                        f"OpenCode provider pins profile {profile!r}; with credentials in the "
+                        "environment it must be omitted (the SDK would skip them otherwise)"
+                    )
+            elif expected_profile is not None:
+                if profile != expected_profile:
+                    problems.append(
+                        f"OpenCode provider profile {profile!r} != expected {expected_profile!r}"
+                    )
+            elif "profile" in options and (not isinstance(profile, str) or not profile):
+                problems.append(f"OpenCode provider profile must be non-empty, got {profile!r}")
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            problems.append("OpenCode provider carries no models declaration")
+        else:
+            for model_id in sorted({expected_model, expected_small_model or expected_model}):
+                if not isinstance(models.get(model_id), dict):
+                    problems.append(f"OpenCode provider does not declare model {model_id!r}")
+
+    servers = config.get("mcp")
+    problems.extend(
+        _verify_server_mapping(
+            _normalize_opencode_servers(servers),
+            include_companions=include_companions,
+            expect_gco_env=expect_gco_env,
+            gco_args=gco_args,
+        )
+    )
+    if isinstance(servers, dict):
+        for name, entry in sorted(servers.items()):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") != "local":
+                problems.append(f"{name}: OpenCode MCP server type must be 'local'")
+            if entry.get("enabled") is not True:
+                problems.append(f"{name}: OpenCode MCP server must be enabled")
+            if entry.get("timeout") != OPENCODE_MCP_TIMEOUT_MS:
+                problems.append(
+                    f"{name}: OpenCode MCP timeout must be {OPENCODE_MCP_TIMEOUT_MS} ms"
+                )
+    return problems
+
+
 def _engine_facts(engine: AutopilotEngine) -> tuple[str, str, list[str], str | None]:
     if engine is AutopilotEngine.CODEX:
         return (
@@ -221,6 +389,13 @@ def _engine_facts(engine: AutopilotEngine) -> tuple[str, str, list[str], str | N
             f"{CODEX_PACKAGE}@{CODEX_VERSION}",
             codex_install_command(),
             get_default_codex_reasoning_effort(),
+        )
+    if engine is AutopilotEngine.OPENCODE:
+        return (
+            OPENCODE_VERSION,
+            f"{OPENCODE_PACKAGE}@{OPENCODE_VERSION}",
+            opencode_install_command(),
+            None,
         )
     return (
         CLAUDE_CODE_VERSION,
@@ -233,6 +408,8 @@ def _engine_facts(engine: AutopilotEngine) -> tuple[str, str, list[str], str | N
 def _default_model(engine: AutopilotEngine) -> str:
     if engine is AutopilotEngine.CODEX:
         return get_default_codex_model_id()
+    if engine is AutopilotEngine.OPENCODE:
+        return get_default_opencode_model_id()
     return get_default_claude_code_model_id()
 
 
@@ -242,6 +419,7 @@ def verify_plan(
     *,
     engine: str | AutopilotEngine = AutopilotEngine.CLAUDE_CODE,
     codex_binary: str | None = None,
+    opencode_binary: str | None = None,
 ) -> list[str]:
     """Return every problem with a JSON dry-run plan (empty = valid)."""
     resolved_engine = AutopilotEngine(engine)
@@ -268,39 +446,45 @@ def verify_plan(
             "plan install command does not match the selected engine's production command"
         )
 
-    binary_state = codex_binary if resolved_engine is AutopilotEngine.CODEX else claude_binary
+    binary_states = {
+        AutopilotEngine.CLAUDE_CODE: claude_binary,
+        AutopilotEngine.CODEX: codex_binary,
+        AutopilotEngine.OPENCODE: opencode_binary,
+    }
+    binary_state = binary_states[resolved_engine]
     binary = plan.get("engine_binary")
     if binary_state == "absent" and binary is not None:
         problems.append(f"expected no {resolved_engine.value} binary, plan found {binary!r}")
     if binary_state == "present" and not binary:
         problems.append(f"expected an installed {resolved_engine.value} binary, plan detected none")
 
-    selected_pin_field = (
-        "codex_pin" if resolved_engine is AutopilotEngine.CODEX else "claude_code_pin"
-    )
-    selected_binary_field = (
-        "codex_binary" if resolved_engine is AutopilotEngine.CODEX else "claude_binary"
-    )
-    other_pin_field = "claude_code_pin" if resolved_engine is AutopilotEngine.CODEX else "codex_pin"
-    other_binary_field = (
-        "claude_binary" if resolved_engine is AutopilotEngine.CODEX else "codex_binary"
-    )
+    selected_pin_field, selected_binary_field = _PLAN_ENGINE_FIELDS[resolved_engine]
     if plan.get(selected_pin_field) != expected_pin:
         problems.append(
             f"plan {selected_pin_field} {plan.get(selected_pin_field)!r} != {expected_pin!r}"
         )
     if plan.get(selected_binary_field) != binary:
         problems.append(f"plan {selected_binary_field} disagrees with engine_binary")
-    if plan.get(other_pin_field) is not None or plan.get(other_binary_field) is not None:
-        problems.append(
-            f"plan leaks selected-engine state into {other_pin_field}/{other_binary_field}"
-        )
+    for other_engine, (other_pin_field, other_binary_field) in _PLAN_ENGINE_FIELDS.items():
+        if other_engine is resolved_engine:
+            continue
+        if plan.get(other_pin_field) is not None or plan.get(other_binary_field) is not None:
+            problems.append(
+                f"plan leaks selected-engine state into {other_pin_field}/{other_binary_field}"
+            )
 
-    if resolved_engine is AutopilotEngine.CODEX:
-        # The public JSON formatter intentionally omits the large generated
-        # config; when an in-process caller supplies it, validate it too.
-        rendered = plan.get("codex_config")
-        if rendered is not None:
+    # The public JSON formatter intentionally omits the large generated
+    # configs; when an in-process caller supplies one, validate it too, and
+    # make sure no engine carries another engine's document.
+    for field, owner in _PLAN_GENERATED_CONFIG_FIELDS.items():
+        rendered = plan.get(field)
+        if rendered is None:
+            continue
+        if owner is not resolved_engine:
+            problems.append(
+                f"{resolved_engine.value} plan unexpectedly carries a {owner.value} config ({field})"
+            )
+        elif owner is AutopilotEngine.CODEX:
             if not isinstance(rendered, str):
                 problems.append("Codex plan config must be TOML text when present")
             else:
@@ -312,8 +496,17 @@ def verify_plan(
                     problems.extend(
                         verify_codex_config(codex_config, expected_region=plan.get("region"))
                     )
-    elif plan.get("codex_config") is not None:
-        problems.append("Claude plan unexpectedly carries a Codex config")
+        else:
+            if not isinstance(rendered, dict):
+                problems.append("OpenCode plan config must be a JSON object when present")
+            else:
+                problems.extend(
+                    verify_opencode_config(
+                        rendered,
+                        expected_region=plan.get("region"),
+                        expected_small_model=plan.get("small_fast_model"),
+                    )
+                )
 
     return problems
 
@@ -364,11 +557,20 @@ def main(argv: list[str] | None = None) -> int:
     _add_config_arguments(codex_config_parser)
     codex_config_parser.add_argument("--region", default=None)
 
+    opencode_config_parser = sub.add_parser("verify-opencode-config")
+    _add_config_arguments(opencode_config_parser)
+    opencode_config_parser.add_argument("--region", default=None)
+    opencode_config_parser.add_argument("--small-model", default=None)
+    profile_group = opencode_config_parser.add_mutually_exclusive_group()
+    profile_group.add_argument("--profile", default=None)
+    profile_group.add_argument("--no-profile", action="store_true")
+
     plan_parser = sub.add_parser("verify-plan")
     plan_parser.add_argument("path")
     _add_engine_argument(plan_parser)
     plan_parser.add_argument("--claude-binary", choices=("present", "absent"), default=None)
     plan_parser.add_argument("--codex-binary", choices=("present", "absent"), default=None)
+    plan_parser.add_argument("--opencode-binary", choices=("present", "absent"), default=None)
 
     args = parser.parse_args(argv)
 
@@ -404,12 +606,25 @@ def main(argv: list[str] | None = None) -> int:
             expected_region=args.region,
         )
         label = "Codex config"
+    elif args.command == "verify-opencode-config":
+        problems = verify_opencode_config(
+            _load_json(args.path),
+            include_companions=not args.no_companions,
+            expect_gco_env=expect_gco_env,
+            gco_args=args.gco_args,
+            expected_region=args.region,
+            expected_small_model=args.small_model,
+            expected_profile=args.profile,
+            forbid_profile=args.no_profile,
+        )
+        label = "OpenCode config"
     else:
         problems = verify_plan(
             _load_json(args.path),
             engine=args.engine,
             claude_binary=args.claude_binary,
             codex_binary=args.codex_binary,
+            opencode_binary=args.opencode_binary,
         )
         label = f"{args.engine} plan"
 

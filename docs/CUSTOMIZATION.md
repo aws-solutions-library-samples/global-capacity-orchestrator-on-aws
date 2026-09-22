@@ -2090,10 +2090,11 @@ remaining controls select an Autopilot engine/model for one environment:
 
 ```bash
 export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-6"
-export GCO_MISSION_BEDROCK_REGION="eu-west-1"                 # default: us-east-1
-export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # shared/Claude model
-export GCO_AUTOPILOT_ENGINE="codex"
-export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-5.6-sol"  # Codex-specific
+export GCO_MISSION_BEDROCK_REGION="eu-west-1"                    # default: us-east-1
+export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"      # shared/Claude model
+export GCO_AUTOPILOT_ENGINE="codex"                              # or "opencode"
+export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-5.6-sol"     # Codex-specific
+export GCO_AUTOPILOT_OPENCODE_MODEL="global.moonshotai.kimi-k3"  # OpenCode-specific
 ```
 
 **3. Change the defaults for everyone** — from a writable checkout, use the managed-config commands for every generation/session default:
@@ -2104,6 +2105,7 @@ gco stacks bedrock set-capacity-advisor-model global.anthropic.claude-opus-5 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
 gco stacks bedrock set-codex-model global.openai.gpt-5.6-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
+gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```
 
 | File | Keys |
@@ -2111,10 +2113,11 @@ gco stacks bedrock set-codex-reasoning-effort xhigh -y
 | `cdk.json` | `context.bedrock.mission_default_model_id` (Mission sampling) and `context.bedrock.capacity_advisor_default_model_id` (capacity advisor), sharing `context.bedrock.generation_reasoning.effort` |
 | `cdk.json` | `context.bedrock.claude_code_default_model_id` (the model `gco autopilot` hands to Claude Code) |
 | `cdk.json` | `context.bedrock.codex_default_model_id` and `context.bedrock.codex.reasoning_effort` (the reviewed Codex model/effort pair) |
+| `cdk.json` | `context.bedrock.opencode_default_model_id` (the model `gco autopilot --engine opencode` hands to OpenCode; the shipped Kimi K3 profile reasons on its own, so there is no effort sibling) |
 | `cdk.json` | `context.bedrock.embedding_model_id` (the text-embedding model [mission memory](MISSION.md#mission-memory) uses for its vector index) |
 
 Each consumer has its own key, deliberately independent, so repointing one
-feature never silently repoints another. The five managed setters above are
+feature never silently repoints another. The six managed setters above are
 validated, atomic, idempotent, and audited; each changes only its target leaf
 and preserves every sibling. In particular, the Codex model and reasoning
 effort are separate managed edits so neither replaces the other—review the pair
@@ -2155,7 +2158,12 @@ Resolution order (Codex Autopilot): `--model` / `-m` →
 `GCO_AUTOPILOT_CODEX_MODEL` → `GCO_AUTOPILOT_MODEL` →
 `context.bedrock.codex_default_model_id`; the canonical
 `context.bedrock.codex.reasoning_effort` is omitted whenever a model override
-wins. See [Autopilot → Choosing a Model](AUTOPILOT.md#choosing-a-model-and-reasoning).
+wins. Resolution order (OpenCode Autopilot): `--model` / `-m` →
+`GCO_AUTOPILOT_OPENCODE_MODEL` → `GCO_AUTOPILOT_MODEL` →
+`context.bedrock.opencode_default_model_id`; OpenCode addresses the result as
+`amazon-bedrock/<model-id>` and declares it in the generated config so a model
+newer than OpenCode's catalog still launches. See
+[Autopilot → Choosing a Model](AUTOPILOT.md#choosing-a-model-and-reasoning).
 
 ### What to check when choosing a model
 
@@ -2166,7 +2174,7 @@ wins. See [Autopilot → Choosing a Model](AUTOPILOT.md#choosing-a-model-and-rea
   may route worldwide; use a geography-scoped profile (`us.`, `eu.`, `jp.`,
   etc.) where a residency boundary is required. Prefer a profile id over a
   bare model id where one exists.
-- **Converse API support** — GCO calls the Bedrock **Converse** API, so the model must support it (the defaults and every entry in the curated set in `scripts/capture_scaffold_fixtures.py` do).
+- **Converse API support** — GCO calls the Bedrock **Converse** API, so the model must support it (the defaults and every entry in the curated set in `scripts/capture_scaffold_fixtures.py` do). Some lines reject individual sampling controls — OpenAI GPT, xAI Grok, and Moonshot AI Kimi K3 refuse `temperature` — and the shared request builder in `gco/bedrock.py` drops those fields for the verified lines so Mission and the capacity advisor keep working with them.
 
 ### Staying current
 

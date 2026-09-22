@@ -9,7 +9,7 @@
 # printed, expect plays a scripted TUI transcript, the repository CLI is
 # answered by a python3 that delegates everything else — the sanitizer, the
 # verifier, the glyph and artifact passes, the live-answer contract — to the
-# real interpreter. Both engines, both modes, SKIP_GIF, every preflight
+# real interpreter. All three engines, both modes, SKIP_GIF, every preflight
 # refusal and the post-recording contract failures are covered.
 #
 # Run:  bats tests/BATS/test_record_autopilot.bats
@@ -31,6 +31,11 @@ LIB="$REPO_ROOT/demo/lib_demo.sh"
     grep -q 'asciinema rec \\' "$SCRIPT"
     grep -q -- '--idle-time-limit 1.5' "$SCRIPT"
     grep -q 'spawn gco autopilot -- --allowedTools mcp__gco' "$SCRIPT"
+    grep -q 'spawn gco autopilot --engine opencode --no-companions' "$SCRIPT"
+    # The OpenCode recording denies every built-in tool through OpenCode's
+    # own last-merged permission override, so only GCO's docs tools remain
+    # (in OpenCode 1.18 `permission`, not `tools`, governs bash/edit/read).
+    grep -q 'set env(OPENCODE_CONFIG_CONTENT) {{"permission":{"bash":"deny","edit":"deny","read":"deny"' "$SCRIPT"
     grep -q 'exec python3 -m cli.main "\$@"' "$SCRIPT"
 }
 
@@ -48,7 +53,7 @@ make_fixture() {
     # $FAKE_BIN or reached through a PATH mirror that hides the machine's own
     # copies, so removing a fake makes the tool absent everywhere.
     if [ ! -d "$BATS_TEST_TMPDIR/tools" ]; then
-        path_without "$BATS_TEST_TMPDIR/tools" asciinema agg python3 expect aws claude codex uvx npx sleep gco
+        path_without "$BATS_TEST_TMPDIR/tools" asciinema agg python3 expect aws claude codex opencode uvx npx sleep gco
     fi
     RECORD_PATH="$FAKE_BIN:$BATS_TEST_TMPDIR/tools"
     REAL_PYTHON3="$(command -v python3)"
@@ -121,7 +126,9 @@ FAKE_PYTHON
     # The scripted TUI: a transcript with the markers the post-recording
     # contract looks for. FAKE_EXPECT_EXIT ends the session with that status,
     # FAKE_EXPECT_ANSWER=stalled leaves the answer out, FAKE_EXPECT_LEAK=1
-    # echoes the secret access key the way a careless TUI might.
+    # echoes the secret access key the way a careless TUI might, and
+    # FAKE_EXPECT_PERMISSION=1 shows OpenCode's permission dialog (a tool the
+    # recording does not allow was requested).
     write_stub "$FAKE_BIN" expect <<'FAKE_EXPECT'
 #!/usr/bin/env bash
 script="${2:-}"
@@ -132,6 +139,21 @@ if grep -q -- '--engine codex' "$script" 2>/dev/null; then
     echo "Called gco.read_resource"
     if [ "${FAKE_EXPECT_ANSWER:-answered}" = "answered" ]; then
         echo "gco jobs submit-sqs job.yaml — recommended because the queue is durable, asynchronous and retried."
+    fi
+elif grep -q -- '--engine opencode' "$script" 2>/dev/null; then
+    # OpenCode's composer placeholder, its Braille thinking spinner and the
+    # ■/⬝ block spinner (both tofu in Menlo), MCP tools as <server>_<tool>.
+    printf 'Ask anything\xe2\x80\xa6\n'
+    printf '\xe2\xa0\x8b Thinking\n'
+    printf '\xe2\x96\xa0 \xe2\xac\x9d \xe2\xac\x9d build\n'
+    echo "gco_find_docs [query=submit job SQS]"
+    echo "gco_read_resource [uri=docs://gco/docs/CLI]"
+    if [ "${FAKE_EXPECT_PERMISSION:-0}" = "1" ]; then
+        echo "Permission required: bash"
+        echo "Allow once   Allow always   Reject"
+    fi
+    if [ "${FAKE_EXPECT_ANSWER:-answered}" = "answered" ]; then
+        echo "Use gco jobs submit-sqs job.yaml — the queue is durable, asynchronous and retried."
     fi
 else
     echo "Welcome to Claude Code!"
@@ -157,6 +179,10 @@ FAKE_CLAUDE
 #!/usr/bin/env bash
 echo "codex-cli 0.152.0"
 FAKE_CODEX
+    write_stub "$FAKE_BIN" opencode <<'FAKE_OPENCODE'
+#!/usr/bin/env bash
+echo "1.19.4"
+FAKE_OPENCODE
     stub_noop "$FAKE_BIN" uvx npx sleep
 }
 
@@ -213,7 +239,46 @@ run_recorder() {
     grep -q '\[0.1,"x","0"\]\|\[0,"x","0"\]' "$FIXTURE/demo/autopilot-codex.cast"
 }
 
-@test "plan mode records the credential-free dry run for either engine" {
+@test "the live OpenCode recording drives the real TUI, skips companions and rewrites its tofu glyphs" {
+    make_fixture
+    run_recorder DEMO_ENGINE=opencode
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"=== GCO Autopilot Demo Recorder (opencode, live) ==="* ]]
+    [[ "$output" == *"OpenCode installed (1.19.4)"* ]]
+    # OpenCode runs --no-companions, so uvx/npx are not preflight requirements.
+    [[ "$output" != *"uvx installed"* ]]
+    [[ "$output" != *"npx installed"* ]]
+    [[ "$output" == *"expect installed (drives the interactive TUI)"* ]]
+    [[ "$output" == *"AWS credentials resolve"* ]]
+    [[ "$output" == *"Recording saved: ${FIXTURE}/demo/autopilot-opencode.cast"* ]]
+    [[ "$output" == *"✓ Live OpenCode recording verified (GCO docs tools only; no credentials/prompts)"* ]]
+    [[ "$output" == *"✓ GIF saved: ${FIXTURE}/demo/autopilot-opencode.gif"* ]]
+    [[ "$output" == *"![GCO Autopilot](demo/autopilot-opencode.gif)"* ]]
+    grep -q 'GCO Autopilot — OpenCode' "$FIXTURE/demo/autopilot-opencode.cast"
+    grep -q 'gco autopilot --engine opencode --no-companions' "$FIXTURE/demo/autopilot-opencode.cast"
+    grep -q 'gco_read_resource' "$FIXTURE/demo/autopilot-opencode.cast"
+    grep -q 'submit-sqs' "$FIXTURE/demo/autopilot-opencode.cast"
+    # Menlo has no Braille block and no ⬝: the thinking spinner frame becomes
+    # the matching ASCII phase and the block-spinner idle cell becomes ▪.
+    grep -q '| Thinking' "$FIXTURE/demo/autopilot-opencode.cast"
+    grep -q $'\u25a0 \u25aa \u25aa build' "$FIXTURE/demo/autopilot-opencode.cast"
+    ! grep -q $'\u280b' "$FIXTURE/demo/autopilot-opencode.cast"
+    ! grep -q $'\u2b1d' "$FIXTURE/demo/autopilot-opencode.cast"
+    [ "$(cat "$FIXTURE/demo/autopilot-opencode.gif")" = "rendered gif" ]
+}
+
+@test "an OpenCode session that reached for a disallowed tool fails the contract on its permission dialog" {
+    make_fixture
+    run_recorder DEMO_ENGINE=opencode FAKE_CAST_VERSION=3 FAKE_EXPECT_PERMISSION=1
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Recording saved"* ]]
+    [[ "$output" == *"✗ The recording failed its required answer/tool/security contract."* ]]
+    [ ! -e "$FIXTURE/demo/autopilot-opencode.gif" ]
+}
+
+@test "plan mode records the credential-free dry run for every engine" {
     make_fixture
     run_recorder DEMO_MODE=plan SKIP_GIF=1
     [ "$status" -eq 0 ]
@@ -232,13 +297,23 @@ run_recorder() {
     grep -qx -- 'autopilot --engine codex --dry-run' "$CLI_CALLS"
     grep -q 'GCO Autopilot — Codex' "$FIXTURE/demo/autopilot-codex.cast"
     [ "$(cat "$FIXTURE/demo/autopilot-codex.gif")" = "rendered gif" ]
+
+    : > "$CLI_CALLS"
+    run_recorder DEMO_MODE=plan DEMO_ENGINE=opencode
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"=== GCO Autopilot Demo Recorder (opencode, plan) ==="* ]]
+    [[ "$output" != *"OpenCode installed"* ]]
+    grep -qx -- 'autopilot --engine opencode --dry-run' "$CLI_CALLS"
+    grep -q 'GCO Autopilot — OpenCode' "$FIXTURE/demo/autopilot-opencode.cast"
+    grep -q 'isolated OPENCODE_CONFIG persist' "$FIXTURE/demo/autopilot-opencode.cast"
+    [ "$(cat "$FIXTURE/demo/autopilot-opencode.gif")" = "rendered gif" ]
 }
 
 @test "an unknown engine or mode is refused before preflight" {
     make_fixture
     run_recorder DEMO_ENGINE=gemini
     [ "$status" -eq 1 ]
-    [[ "$output" == *"error: DEMO_ENGINE must be 'claude-code' or 'codex', got 'gemini'"* ]]
+    [[ "$output" == *"error: DEMO_ENGINE must be 'claude-code', 'codex' or 'opencode', got 'gemini'"* ]]
 
     run_recorder DEMO_MODE=rehearsal
     [ "$status" -eq 1 ]
@@ -276,6 +351,22 @@ run_recorder() {
     [[ "$output" == *"Run 'gco autopilot --engine codex -y' once to install the pin, or set DEMO_MODE=plan"* ]]
     [[ "$output" != *"agg not installed"* ]]
     [[ "$output" == *"1 check(s) failed."* ]]
+}
+
+@test "a missing OpenCode binary names its own install hint and never asks for companion runtimes" {
+    make_fixture
+    # uvx/npx are gone too: only the Claude recording starts companions, so
+    # their absence must not count against an OpenCode recording.
+    rm -f "$FAKE_BIN/opencode" "$FAKE_BIN/uvx" "$FAKE_BIN/npx"
+    run_recorder DEMO_ENGINE=opencode
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"✗ OpenCode not installed (live mode launches a real session)"* ]]
+    [[ "$output" == *"Run 'gco autopilot --engine opencode -y' once to install the pin, or set DEMO_MODE=plan"* ]]
+    [[ "$output" != *"uvx"* ]]
+    [[ "$output" != *"npx"* ]]
+    [[ "$output" == *"1 check(s) failed."* ]]
+    [ ! -s "$ASCIINEMA_ARGV" ]
 }
 
 @test "a session the expect driver abandons propagates its exit status and publishes nothing" {
