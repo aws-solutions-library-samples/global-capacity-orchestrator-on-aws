@@ -1102,7 +1102,7 @@ if isinstance(value, str) and value.strip():
 #   global.anthropic.claude-opus-4-6-v1           -> global.anthropic.claude-opus
 #   global.anthropic.claude-opus-9                -> global.anthropic.claude-opus
 #   global.openai.gpt-5.7-sol                     -> global.openai.gpt-sol
-#   us.moonshotai.kimi-k4                         -> us.moonshotai.kimi
+#   global.moonshotai.kimi-k4                     -> global.moonshotai.kimi
 #
 # The trailing revision appears in three shapes across live profiles:
 # ``-vMAJOR:MINOR``, ``-vMAJOR`` alone (newer Anthropic profiles), and
