@@ -896,10 +896,11 @@ read_ruby_version_pin() {
 # ``X.Y.Z`` / ``X.Y`` shapes, drop pre-release suffixes (``-rc1``,
 # ``-beta``), and take the highest by semver.
 #
-# Unauthenticated. The monthly scan calls this once per hook (four
-# times against today's config) — the unauthenticated GitHub API
-# limit is 60 req/h per IP, so a per-PAT/GITHUB_TOKEN bump to the
-# 5000 req/h authenticated bucket isn't worth the extra coupling.
+# Goes through ``github_api_get``, so the call is authenticated whenever
+# ``GITHUB_TOKEN`` is set. The scan only makes a handful of these calls,
+# but the anonymous 60 req/h bucket is keyed on the runner's *shared*
+# egress IP, and a run that starts with that bucket empty loses every
+# GitHub lookup at once (see github_api_get).
 get_latest_precommit_hook_release() {
   local repo_url="$1"
   [ -n "$repo_url" ] || return 0
@@ -922,10 +923,7 @@ get_latest_precommit_hook_release() {
     *) return 0 ;;
   esac
 
-  curl -fsSL --max-time 15 \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${owner_repo}/tags?per_page=100" 2>/dev/null \
+  github_api_get "https://api.github.com/repos/${owner_repo}/tags?per_page=100" \
     | python3 -c "
 import json, re, sys
 try:
@@ -1336,6 +1334,144 @@ if cands:
 # input so the caller treats an empty result as "skip", never as drift.
 # =============================================================================
 
+# github_api_get <url>
+#
+# The one code path for every ``api.github.com`` read the scan makes
+# (release and tag lookups for the CI tooling, the pre-commit hooks, and the
+# Dockerfile.dev pins). Prints the response body on success and nothing on
+# failure, like the ``curl -fsSL`` calls it replaces, so callers keep treating
+# empty as "skip".
+#
+# Authentication is the point. Unauthenticated requests draw from a 60 req/h
+# bucket keyed on the *client IP*, and on a GitHub-hosted runner that IP is
+# shared with every other tenant's job on the same host — so a scan can start
+# with the bucket already empty and every GitHub lookup fails at once while
+# PyPI, npm and the OCI registries (different hosts, different limits) all
+# succeed. That is exactly the failure shape of a partial monthly report. When
+# ``GITHUB_TOKEN`` (the workflow passes the job's own token) or ``GH_TOKEN``
+# (what a developer running ``gco deps scan`` has for the gh CLI) is set, the
+# call is sent with a bearer header and lands in the 5 000 req/h per-token
+# bucket instead; ``contents: read`` is enough because everything read here is
+# public. With neither set the call stays anonymous, so the scan still works
+# from a laptop with no token at all.
+#
+# A refused token falls back to an anonymous read. Some organisations block
+# the GitHub Actions app, and then a workflow's token gets 401/403 on their
+# *public* repositories while an anonymous request to the same URL returns
+# 200 — aquasecurity, whose Trivy releases this scan reads, behaves this way
+# (``verify_action_pins.py`` carries the same fallback for the same reason).
+# A refusal is told apart from a rate limit by the quota headers: a limit
+# leaves ``x-ratelimit-remaining: 0`` (or answers 429, or sets
+# ``retry-after``); a refusal leaves quota on the table.
+#
+# Failure diagnostics: the scan used to hide *why* a GitHub call failed
+# (``-f ... 2>/dev/null``), which made a rate-limited run indistinguishable
+# from an upstream outage in the report. The cause of the last failed call is
+# written to the file named by ``GITHUB_API_FAILURE_FILE`` so
+# ``github_api_failure_hint`` can put it in the incomplete-lookup line. A
+# file rather than a variable because every caller runs this helper inside a
+# ``$(...)`` capture, where a shell variable would die with the subshell (the
+# same reason ``mark_scan_incomplete`` appends to a file). A successful call
+# clears it and the hint consumes it, so it can only ever describe the call
+# that just failed.
+GITHUB_API_FAILURE_FILE="${GITHUB_API_FAILURE_FILE:-$(mktemp)}"
+
+_github_api_record_failure() {
+  printf '%s\n' "$1" > "$GITHUB_API_FAILURE_FILE"
+}
+
+# _github_api_request <url> <token>
+#
+# One request. Prints the body and returns 0 on HTTP 200; otherwise records
+# the failure and returns 1 (no response), 2 (rate limited), 3 (the token was
+# refused with quota left, so an anonymous retry is worth making), or 4 (any
+# other status). ``<token>`` may be empty for an anonymous request.
+_github_api_request() {
+  local url="$1" token="$2"
+  local headers body code remaining retry_after
+  headers="$(mktemp)"
+  local -a auth=()
+  if [ -n "$token" ]; then
+    auth=(-H "Authorization: Bearer ${token}")
+  fi
+  # ``-f`` is deliberately absent: the headers of a failed call are what tell
+  # a rate limit apart from an outage. ``--retry`` covers transport flakes
+  # (timeouts, resets) with curl's own backoff, capped so a ``retry-after``
+  # of a minute cannot stall the scan; a 403 is a policy answer and is not
+  # retried. The empty-array expansion is written the bash 3.2 way because
+  # ``gco deps scan`` runs this under whatever ``bash`` is on PATH, which on
+  # macOS is 3.2 with ``set -u`` active.
+  if ! body="$(curl -sSL --max-time 15 --retry 2 --retry-connrefused --retry-max-time 30 \
+      -D "$headers" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      ${auth[@]+"${auth[@]}"} \
+      "$url" 2>/dev/null)"; then
+    rm -f "$headers"
+    _github_api_record_failure "transport error"
+    return 1
+  fi
+  # With ``-L`` the header dump holds one block per hop; the final status is
+  # the last one. Header names are case-insensitive and lines end in CRLF.
+  code="$(awk 'toupper($1) ~ /^HTTP\// { code = $2 } END { print code }' "$headers")"
+  remaining="$(awk 'tolower($1) == "x-ratelimit-remaining:" { v = $2 } END { gsub(/\r/, "", v); print v }' "$headers")"
+  retry_after="$(awk 'tolower($1) == "retry-after:" { v = $2 } END { gsub(/\r/, "", v); print v }' "$headers")"
+  rm -f "$headers"
+  if [ "$code" = "200" ]; then
+    : > "$GITHUB_API_FAILURE_FILE"
+    printf '%s' "$body"
+    return 0
+  fi
+  if [ "$code" = "429" ] \
+     || { [ "$code" = "403" ] && { [ "${remaining:-}" = "0" ] || [ -n "$retry_after" ]; }; }; then
+    if [ -n "$token" ]; then
+      _github_api_record_failure "rate limit exceeded for the authenticated token"
+    else
+      _github_api_record_failure "rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN"
+    fi
+    return 2
+  fi
+  if [ -n "$token" ] && { [ "$code" = "401" ] || [ "$code" = "403" ]; }; then
+    _github_api_record_failure "HTTP ${code}, token refused"
+    return 3
+  fi
+  _github_api_record_failure "HTTP ${code:-000}"
+  return 4
+}
+
+github_api_get() {
+  local url="$1"
+  [ -n "$url" ] || return 1
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local rc=0 refused
+  _github_api_request "$url" "$token" || rc=$?
+  if [ "$rc" -ne 3 ]; then
+    return "$rc"
+  fi
+  refused="$(< "$GITHUB_API_FAILURE_FILE")"
+  rc=0
+  _github_api_request "$url" "" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _github_api_record_failure "${refused}, then anonymous retry: $(< "$GITHUB_API_FAILURE_FILE")"
+  fi
+  return "$rc"
+}
+
+# github_api_failure_hint
+#
+# Prints a parenthesised suffix for an incomplete-lookup reason describing
+# the last ``github_api_get`` failure, or nothing when the last call
+# succeeded or none was made, and clears the record so a later reason for an
+# unrelated lookup can never inherit it. The rate-limit text says which
+# bucket ran dry, which is the one-line remediation (export ``GITHUB_TOKEN``).
+github_api_failure_hint() {
+  local failure=""
+  [ -s "$GITHUB_API_FAILURE_FILE" ] && failure="$(< "$GITHUB_API_FAILURE_FILE")"
+  : > "$GITHUB_API_FAILURE_FILE"
+  [ -n "$failure" ] || return 0
+  printf ' (GitHub API: %s)' "$failure"
+}
+
 # get_latest_github_release_tag <owner/repo>
 #
 # Prints the ``tag_name`` of the latest non-prerelease GitHub Release for
@@ -1345,8 +1481,9 @@ if cands:
 #
 # Empty output on network failure, a non ``owner/repo`` argument, or a repo
 # with no published Release — callers treat empty as "skip", same as the
-# other lookups here. Unauthenticated: the monthly scan makes a handful of
-# these calls, well under the 60 req/h anonymous GitHub limit.
+# other lookups here. Goes through ``github_api_get`` so the call is
+# authenticated whenever ``GITHUB_TOKEN`` is set (see that helper for why the
+# anonymous bucket is not enough on a shared runner).
 get_latest_github_release_tag() {
   local owner_repo="$1"
   [ -n "$owner_repo" ] || return 0
@@ -1357,10 +1494,7 @@ get_latest_github_release_tag() {
     */*) ;;
     *) return 0 ;;
   esac
-  curl -fsSL --max-time 15 \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${owner_repo}/releases/latest" 2>/dev/null \
+  github_api_get "https://api.github.com/repos/${owner_repo}/releases/latest" \
     | jq -r '.tag_name // empty' 2>/dev/null
 }
 
