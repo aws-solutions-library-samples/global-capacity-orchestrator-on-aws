@@ -354,7 +354,15 @@ jobs:
   unit-bats-shell:
     name: "unit:bats:shell"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The suite runs twice below — once plain, once under bashcov — and the
+    # traced pass costs about twice the plain one (bashcov follows xtrace, so
+    # every executed line is a write down a pipe). The job grew from 9 to 15
+    # minutes across September 2026 as the dependency-scan and autopilot
+    # suites landed, and 97d98157 hit the old 15-minute limit exactly. Kept at
+    # about twice the current worst case, the margin the other jobs carry, so
+    # a script that genuinely hangs is still killed promptly instead of idling
+    # a runner for hours.
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
