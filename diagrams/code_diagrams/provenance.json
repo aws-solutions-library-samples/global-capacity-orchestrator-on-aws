@@ -167,9 +167,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "gco_mcp/mission/sampling.py": {
-      "digest": "2c67192460c9313e73496d60419cf3415417953969a523fec3e217bade586cff",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "7aa0506372b049da83d8f9c59b9fff7c1f3eab8acb843e3cabb5ffc31027b4ad",
+      "generated_at": "2026-09-23T11:36:55Z",
+      "source_commit": "c28a947089a90cba72adeefc0fa4debf25662e9d"
     },
     "gco_mcp/mission/sandbox.py": {
       "digest": "7d78a34a54200d073d9cb9a43ce253665aa5495c29d6ca83a9319704f9762d23",
