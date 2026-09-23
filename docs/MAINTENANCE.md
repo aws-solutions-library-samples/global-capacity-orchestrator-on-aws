@@ -356,11 +356,12 @@ graphs *are* tracked by Dependabot; see
 
 GCO's two optional, advisory Bedrock features — Mission sampling (`gco mission
 ...`) and the capacity advisor (`gco capacity ai-recommend` / `predict` and the
-`ai_recommend` MCP tool) — default to **Anthropic Claude Opus 5** through its
-global cross-Region inference profile (`global.anthropic.claude-opus-5`). The
+`ai_recommend` MCP tool) — default to **Anthropic Claude Opus 5.5** through its
+global cross-Region inference profile (`global.anthropic.claude-opus-5-5`). The
 model id and reasoning preference have one checked-in source: `cdk.json`
-`context.bedrock`, whose stock `generation_reasoning.effort` is `high` (Claude's default
-adaptive-thinking level). Mission sampling and the capacity advisor resolve both
+`context.bedrock`, whose stock `generation_reasoning.effort` is `high` (Opus 5.5
+always thinks adaptively; the effort level is its only reasoning control). Mission
+sampling and the capacity advisor resolve both
 values through the lightweight `gco.bedrock` module; the same file is shipped
 as package data for installed CLI/MCP use. The consistency test guards the
 compatibility aliases, reasoning translation, packaging, inference-profile

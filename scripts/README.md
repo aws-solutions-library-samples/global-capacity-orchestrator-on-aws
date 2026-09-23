@@ -117,10 +117,10 @@ Captures raw Bedrock model output for the Mission scaffolder prompt across a cur
 # access, transient errors) are reported and never abort the run.
 python3 scripts/capture_scaffold_fixtures.py
 
-# Capture the canonical global Claude Opus 5 fixture. This makes three
+# Capture the canonical global Claude Opus 5.5 fixture. This makes three
 # sequential paid Converse calls and applies the stock high reasoning effort.
 python3 scripts/capture_scaffold_fixtures.py \
-  --model global.anthropic.claude-opus-5 \
+  --model global.anthropic.claude-opus-5-5 \
   --region us-east-1
 
 # Capture a different single model.

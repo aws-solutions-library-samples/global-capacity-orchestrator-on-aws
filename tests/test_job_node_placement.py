@@ -1537,8 +1537,17 @@ class TestJobsGetOutput:
 
 class TestMcpToolDocumentsTheFields:
     def test_get_job_docstring_names_every_pod_state_field(self) -> None:
-        """The tool description is what an agent reads to know the fields exist."""
-        from gco_mcp.tools import jobs as mcp_jobs
+        """The tool description is what an agent reads to know the fields exist.
+
+        Import through the ``gco_mcp`` sys.path entry (as ``tools.jobs``), the
+        way run_mcp and the other MCP tests do. Importing the same file under
+        the package path ``gco_mcp.tools.jobs`` creates a second module object
+        that re-executes every ``@mcp.tool`` decorator against the shared
+        ``server.mcp`` instance, replacing the registrations; a later
+        ``test_tools_are_importable`` on the same xdist worker then sees
+        ``fn.__module__ == "gco_mcp.tools.jobs"`` and fails.
+        """
+        from tools import jobs as mcp_jobs
 
         doc = mcp_jobs.get_job.__doc__ or ""
         for name in (

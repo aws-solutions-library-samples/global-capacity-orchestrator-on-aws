@@ -1967,8 +1967,8 @@ GCO uses an Amazon Bedrock model for three optional, **advisory** features:
 - **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
 - **Mission memory embedding** — [mission memory](MISSION.md#mission-memory) embeds directives with a separate text-embedding model (`context.bedrock.embedding_model_id`, stock value `amazon.titan-embed-text-v2:0`) to write and query the mission-memory vector index.
 
-Both default to **Anthropic Claude Opus 5** through its system-defined global
-cross-Region inference profile (`global.anthropic.claude-opus-5`). It is the
+Both default to **Anthropic Claude Opus 5.5** through its system-defined global
+cross-Region inference profile (`global.anthropic.claude-opus-5-5`). It is the
 default because:
 
 - The global profile maximizes throughput by allowing Bedrock to route across
@@ -1979,10 +1979,11 @@ default because:
   capacity data, and Mission strategy revision.
 - The stock `cdk.json` configuration runs Claude
   [adaptive thinking](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html)
-  at `high` effort, its default level, where Claude decides per request how
-  much to think. GCO translates that setting to Converse `thinking` +
-  `output_config` fields and skips the leading `reasoningContent` block when
-  reading the final answer.
+  at `high` effort, where Claude decides per request how much to think (on
+  Opus 5.5 adaptive thinking is always on; the effort level is the only
+  reasoning control, and the model's own default is `medium`). GCO translates
+  that setting to Converse `thinking` + `output_config` fields and skips the
+  leading `reasoningContent` block when reading the final answer.
 
 > **One-time setup:** Anthropic models require a **first-time-use (FTU) case
 > form** per AWS account before the first invocation. See
@@ -2054,7 +2055,7 @@ aws bedrock put-use-case-for-model-access \
 access afterwards — `AVAILABLE` means the model is usable:
 
 ```bash
-aws bedrock get-foundation-model-availability --model-id anthropic.claude-opus-5
+aws bedrock get-foundation-model-availability --model-id anthropic.claude-opus-5-5
 ```
 
 The full field reference (including length limits) is in the AWS guide on
@@ -2093,17 +2094,17 @@ export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-6"
 export GCO_MISSION_BEDROCK_REGION="eu-west-1"                    # default: us-east-1
 export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"      # shared/Claude model
 export GCO_AUTOPILOT_ENGINE="codex"                              # or "opencode"
-export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-5.6-sol"     # Codex-specific
+export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-6-sol"       # Codex-specific
 export GCO_AUTOPILOT_OPENCODE_MODEL="global.moonshotai.kimi-k3"  # OpenCode-specific
 ```
 
 **3. Change the defaults for everyone** — from a writable checkout, use the managed-config commands for every generation/session default:
 
 ```bash
-gco stacks bedrock set-mission-model global.anthropic.claude-opus-5 -y
-gco stacks bedrock set-capacity-advisor-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-mission-model global.anthropic.claude-opus-5-5 -y
+gco stacks bedrock set-capacity-advisor-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
-gco stacks bedrock set-codex-model global.openai.gpt-5.6-sol -y
+gco stacks bedrock set-codex-model global.openai.gpt-6-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
 gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```

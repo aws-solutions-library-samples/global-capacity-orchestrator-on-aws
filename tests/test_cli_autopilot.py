@@ -1309,7 +1309,7 @@ def test_engine_environment_selects_codex(
 
     config = _parse_codex_config(_invoke(runner, ["--print-config"]))
 
-    assert config["model"] == "global.openai.gpt-5.6-sol"
+    assert config["model"] == "global.openai.gpt-6-sol"
 
 
 def test_engine_flag_beats_the_environment_and_preserves_claude_json(
@@ -1343,7 +1343,7 @@ def test_codex_print_config_matches_the_official_bedrock_runtime_schema(
     result = _invoke(runner, ["--engine", "codex", "--print-config"])
     config = _parse_codex_config(result)
 
-    assert config["model"] == "global.openai.gpt-5.6-sol"
+    assert config["model"] == "global.openai.gpt-6-sol"
     assert config["model"] == get_default_codex_model_id()
     assert config["model_provider"] == "amazon-bedrock-runtime" == CODEX_BEDROCK_PROVIDER
     assert config["model_reasoning_effort"] == "xhigh"

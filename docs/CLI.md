@@ -458,7 +458,7 @@ gco autopilot --engine opencode --dry-run
 # Any explicit Codex override intentionally omits canonical reasoning,
 # even when its ID equals the configured default.
 gco autopilot -m global.anthropic.claude-sonnet-4-6
-gco autopilot --engine codex -m global.openai.gpt-5.6-sol
+gco autopilot --engine codex -m global.openai.gpt-6-sol
 gco autopilot --engine opencode -m us.moonshotai.kimi-k3
 
 # Resume the previous workspace session using engine-native semantics
@@ -647,10 +647,10 @@ is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
 B200, B300).
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
-`context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5's
+`context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5.5's
 global inference profile in the stock configuration). The stock
-`context.bedrock.generation_reasoning.effort=high` runs Claude adaptive thinking at its
-default effort; reasoning tokens are billed as output and can materially
+`context.bedrock.generation_reasoning.effort=high` runs Claude adaptive thinking at
+`high` effort; reasoning tokens are billed as output and can materially
 increase latency. Explicit model overrides do not inherit the default's
 thinking fields.
 
@@ -4730,10 +4730,10 @@ gco stacks bedrock COMMAND [OPTIONS]
 
 ```bash
 gco stacks bedrock show
-gco stacks bedrock set-mission-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-mission-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
-gco stacks bedrock set-codex-model global.openai.gpt-5.6-sol -y
+gco stacks bedrock set-codex-model global.openai.gpt-6-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
 gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```
@@ -5936,7 +5936,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the `cdk.json` `context.bedrock.mission_default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `generation_reasoning.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the `cdk.json` `context.bedrock.mission_default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5.5, `global.anthropic.claude-opus-5-5`). Explicit overrides do not inherit the stock `generation_reasoning.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

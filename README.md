@@ -236,7 +236,7 @@ Real terminal recordings, not mock-ups. Each one is reproducible from the script
 
 ![GCO Autopilot with Claude Code](demo/autopilot-claude-code.gif)
 
-*A real session: `gco autopilot` launches [Claude Code](https://code.claude.com/docs/en/overview) on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) (GCO's default Claude Opus 5 profile) with the [GCO MCP server](gco_mcp/README.md) + [companion MCPs](gco_mcp/README.md#recommended-companion-mcp-servers) wired in, and it answers from the project's own MCP tools ([docs](docs/AUTOPILOT.md) · [re-record](demo/record_autopilot.sh)).*
+*A real session: `gco autopilot` launches [Claude Code](https://code.claude.com/docs/en/overview) on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) (GCO's default Claude Opus profile) with the [GCO MCP server](gco_mcp/README.md) + [companion MCPs](gco_mcp/README.md#recommended-companion-mcp-servers) wired in, and it answers from the project's own MCP tools ([docs](docs/AUTOPILOT.md) · [re-record](demo/record_autopilot.sh)).*
 
 </details>
 
