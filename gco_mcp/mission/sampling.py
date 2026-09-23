@@ -285,7 +285,7 @@ ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 ENV_BEDROCK_REGION: str = "GCO_MISSION_BEDROCK_REGION"
 
 #: Sampling temperature requested for Bedrock models that accept one. The
-#: canonical Claude Opus 5 default does not: Opus 4.7 onward deprecated
+#: canonical Claude Opus 5.5 default does not: Opus 4.7 onward deprecated
 #: ``temperature``, ``topP``, and ``topK``, so
 #: :func:`build_bedrock_converse_options` drops this field for every restricted
 #: Claude line — default or explicit override — and for OpenAI and xAI

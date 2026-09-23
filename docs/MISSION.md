@@ -545,9 +545,9 @@ On success the judge returns the **canonical metrics shape** — the very shape 
 {
   "metrics": {"progress_score": 0.72},
   "rationale": "Two of the three regions report healthy nodepools; the third is still scaling.",
-  "source": "bedrock:global.anthropic.claude-opus-5",
+  "source": "bedrock:global.anthropic.claude-opus-5-5",
   "backend_name": "bedrock",
-  "model_id": "global.anthropic.claude-opus-5",
+  "model_id": "global.anthropic.claude-opus-5-5",
   "rubric_version": "spj-v1",
   "raw_score": 0.72
 }
@@ -813,9 +813,10 @@ Resolution precedence at session start:
 Defaults:
 
 - Model — `cdk.json` `context.bedrock.mission_default_model_id` (stock value:
-  `global.anthropic.claude-opus-5`, Anthropic Claude Opus 5's global inference
-  profile). The stock `context.bedrock.generation_reasoning.effort` is `high`, Claude's
-  default adaptive-thinking level; it can materially increase billed output
+  `global.anthropic.claude-opus-5-5`, Anthropic Claude Opus 5.5's global inference
+  profile). The stock `context.bedrock.generation_reasoning.effort` is `high`
+  adaptive thinking (Opus 5.5 always thinks adaptively; the effort level is its
+  only reasoning control); it can materially increase billed output
   tokens and latency. Explicit model overrides do not inherit this reasoning
   field. Anthropic models need the one-time
   [first-time-use form](CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form);

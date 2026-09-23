@@ -2,8 +2,8 @@
 
 Captured raw model output for the Mission scaffolder prompt. Each
 `*.json` file holds one model's response to a small set of canonical
-directives. The checked-in catalog currently covers 64 models from 15
-providers: 192 real, paid Converse responses. The replay test
+directives. The checked-in catalog currently covers 67 models from 15
+providers: 201 real, paid Converse responses. The replay test
 (`tests/test_scaffold_fixture_replay.py`) drives every captured response
 through the full scaffolder pipeline — JSON extraction, model-output
 normalisation, predicate autofix, and strict structural validation — so
@@ -36,7 +36,7 @@ tests/fixtures/
 ├── scaffold_response_capture_provenance.json  # prompt hashes for capture cohorts
 └── scaffold_responses/
     ├── README.md                              # this file
-    ├── global_anthropic_claude_opus_5.json    # canonical default
+    ├── global_anthropic_claude_opus_5_5.json  # canonical default
     ├── global_amazon_nova_2_lite_v1_0.json    # historical capture
     ├── us_amazon_nova_premier_v1_0.json       # historical capture
     ├── us_anthropic_claude_sonnet_4_5_*.json
@@ -90,10 +90,10 @@ model — or when you just want to add a model to the safety net — run
 the capture script once and commit the resulting JSON:
 
 ```bash
-# Capture the canonical global Claude Opus 5 default. This makes exactly
+# Capture the canonical global Claude Opus 5.5 default. This makes exactly
 # three sequential paid Converse calls, one per canonical directive.
 python3 scripts/capture_scaffold_fixtures.py \
-  --model global.anthropic.claude-opus-5 \
+  --model global.anthropic.claude-opus-5-5 \
   --region us-east-1
 
 # Capture against a different single model.

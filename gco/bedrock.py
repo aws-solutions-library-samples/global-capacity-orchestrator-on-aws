@@ -52,10 +52,13 @@ _INFERENCE_PROFILE_GEO_PREFIX_RE = re.compile(r"^(?:global|us|us-gov|eu|apac|jp|
 # older Claude models (Sonnet 4.5, Opus 4.5, ...) require the legacy
 # ``enabled`` + ``budget_tokens`` form and reject ``adaptive`` outright. An
 # unlisted model therefore falls through to "no reasoning translation", which
-# is the safe default rather than a guessed request shape.
+# is the safe default rather than a guessed request shape. Opus 5.5 (the
+# shipped default) goes further: adaptive thinking is always on and cannot be
+# disabled, so the effort in ``output_config`` is its only reasoning control.
 # Source: https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
 _CLAUDE_ADAPTIVE_THINKING_MODELS = frozenset(
     {
+        "anthropic.claude-opus-5-5",
         "anthropic.claude-opus-5",
         "anthropic.claude-mythos-5",
         "anthropic.claude-fable-5",
@@ -68,7 +71,7 @@ _CLAUDE_ADAPTIVE_THINKING_MODELS = frozenset(
 # Claude request compatibility is deliberately independent of adaptive-thinking
 # support. Explicit model overrides never receive canonical reasoning fields,
 # but they still need model-safe sampling controls before the provenance return.
-# Opus 4.7/4.8/5 and Sonnet 5 deprecate these controls. Fable 5/5.1 accept
+# Opus 4.7/4.8/5/5.5 and Sonnet 5 deprecate these controls. Fable 5/5.1 accept
 # only constrained values (temperature unset or 1.0, topP unset or >= 0.99,
 # and no topK), so GCO's generic 0.1/0.2 temperatures are invalid there too.
 # Enumerate verified model lines rather than guessing from version-like names.
@@ -79,6 +82,7 @@ _CLAUDE_RESTRICTED_SAMPLING_MODELS = frozenset(
         "anthropic.claude-opus-4-7",
         "anthropic.claude-opus-4-8",
         "anthropic.claude-opus-5",
+        "anthropic.claude-opus-5-5",
         "anthropic.claude-sonnet-5",
     }
 )

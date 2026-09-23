@@ -56,15 +56,15 @@ from tests._scaffold_replay import (  # noqa: E402
 # Pin the intended defaults independently from the loader so accidental model
 # or reasoning changes are visible in review and CI. Every consumer moves its
 # own key; equality between today's three Anthropic defaults is incidental.
-_EXPECTED_MISSION_MODEL_ID = "global.anthropic.claude-opus-5"
-_EXPECTED_CAPACITY_ADVISOR_MODEL_ID = "global.anthropic.claude-opus-5"
-_EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5"
-_EXPECTED_CODEX_MODEL_ID = "global.openai.gpt-5.6-sol"
+_EXPECTED_MISSION_MODEL_ID = "global.anthropic.claude-opus-5-5"
+_EXPECTED_CAPACITY_ADVISOR_MODEL_ID = "global.anthropic.claude-opus-5-5"
+_EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5-5"
+_EXPECTED_CODEX_MODEL_ID = "global.openai.gpt-6-sol"
 _EXPECTED_CODEX = {"reasoning_effort": "xhigh"}
 _EXPECTED_OPENCODE_MODEL_ID = "global.moonshotai.kimi-k3"
 _EXPECTED_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
-_EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5.json"
-_EXPECTED_CODEX_FIXTURE_NAME = "global_openai_gpt_5_6_sol.json"
+_EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5_5.json"
+_EXPECTED_CODEX_FIXTURE_NAME = "global_openai_gpt_6_sol.json"
 _EXPECTED_OPENCODE_FIXTURE_NAME = "global_moonshotai_kimi_k3.json"
 _EXPECTED_GENERATION_REASONING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
@@ -383,7 +383,7 @@ def test_default_model_is_a_system_defined_inference_profile_id(model_id: str) -
 
     A profile id is ``<geography>.<provider>.<model>``. The trailing
     ``-vMAJOR:MINOR`` revision is optional — Anthropic ships newer profiles
-    without one (``global.anthropic.claude-opus-5``) — but when it is present it
+    without one (``global.anthropic.claude-opus-5-5``) — but when it is present it
     must carry the ``:MINOR`` half, because the scanner strips exactly that
     form when deriving a model family. The scanner reads every generation
     default, so all must satisfy the comparator's contract (the embedding
@@ -468,7 +468,7 @@ def test_default_high_thinking_translates_to_native_converse_fields() -> None:
 def test_openai_gpt_converse_options_drop_unsupported_temperature() -> None:
     """Mission can explicitly use the Codex default through Converse.
 
-    GPT-5.6 rejects ``temperature`` at the service boundary, while an explicit
+    GPT-6 Sol rejects ``temperature`` at the service boundary, while an explicit
     output cap remains a supported caller choice and no Claude/Nova reasoning
     dialect should be attached.
     """
@@ -1176,7 +1176,7 @@ def test_codex_payload_validation_fails_closed(payload: Any, message: str) -> No
 
 def test_codex_payload_trims_the_model_and_preserves_xhigh() -> None:
     configuration = bedrock_config._codex_configuration_from_payload(
-        _bedrock_payload(codex_model_id="  global.openai.gpt-5.6-sol\n"),
+        _bedrock_payload(codex_model_id="  global.openai.gpt-6-sol\n"),
         Path("/canonical/cdk.json"),
     )
 
