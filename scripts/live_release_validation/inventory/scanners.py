@@ -568,6 +568,68 @@ def _list_cloudwatch_log_groups(
     return sorted(log_groups)
 
 
+def _list_codecommit_repositories(session: Any, region: str, project_name: str) -> list[str]:
+    """Project-owned CodeCommit repositories (the ``<cluster>-gitops`` GitOps hand-off repositories)."""
+    client = session.client("codecommit", region_name=region)
+    names: set[str] = set()
+    for page in client.get_paginator("list_repositories").paginate():
+        for repository in page.get("repositories", []):
+            name = str(repository.get("repositoryName") or "")
+            if _project_owned_name(name, project_name):
+                names.add(name)
+    return sorted(names)
+
+
+def _list_identity_center_resources(
+    session: Any,
+    region: str,
+    project_name: str,
+    expected_account: str,
+) -> list[str]:
+    """Project-owned IAM Identity Center instances and groups visible in ``region``.
+
+    The live harness may create an *account instance* named
+    ``<project>-live-validation`` and a group ``<project>-live-validation-argocd``
+    for the Argo CD capability; ``gco stacks capabilities argocd
+    bootstrap-identity`` creates ``<project>-identity-center`` /
+    ``<project>-argocd-admins``. Instances are recognized by their ``Name``;
+    groups by a project-prefixed ``DisplayName`` inside any instance this
+    account owns (an organization instance's identity store belongs to the
+    management account and is not scanned for groups).
+    """
+    sso = session.client("sso-admin", region_name=region)
+    found: set[str] = set()
+    for page in sso.get_paginator("list_instances").paginate():
+        for instance in page.get("Instances", []):
+            instance_arn = str(instance.get("InstanceArn") or "")
+            store_id = str(instance.get("IdentityStoreId") or "")
+            name = str(instance.get("Name") or "")
+            owner = str(instance.get("OwnerAccountId") or "")
+            if not instance_arn:
+                raise RuntimeError(
+                    f"Identity Center returned an instance without an ARN in {region}"
+                )
+            if name and _project_owned_name(name, project_name):
+                found.add(f"instance:{instance_arn}")
+            if not store_id or (owner and owner != expected_account):
+                continue
+            identitystore = session.client("identitystore", region_name=region)
+            for group_page in identitystore.get_paginator("list_groups").paginate(
+                IdentityStoreId=store_id
+            ):
+                for group in group_page.get("Groups", []):
+                    display_name = str(group.get("DisplayName") or "")
+                    group_id = str(group.get("GroupId") or "")
+                    if display_name and _project_owned_name(display_name, project_name):
+                        if not group_id:
+                            raise RuntimeError(
+                                "Identity Center returned a project-owned group without an id "
+                                f"in {region}"
+                            )
+                        found.add(f"group:{store_id}/{group_id}:{display_name}")
+    return sorted(found)
+
+
 def _list_secrets(session: Any, region: str, project_name: str) -> list[str]:
     client = session.client("secretsmanager", region_name=region)
     secrets: set[str] = set()

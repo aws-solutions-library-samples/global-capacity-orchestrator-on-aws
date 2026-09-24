@@ -21,7 +21,6 @@ from gco.inference_proxy_config import (
 from .checks.eks_capabilities import (
     GITOPS_FIXTURE_PATH,
     build_eks_capabilities_overrides,
-    default_gitops_repository_url,
     overrides_json,
 )
 from .checks.schedulers import OPTIONAL_SCHEDULERS
@@ -147,17 +146,26 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME[,NAME...]",
         help=(
             "Enable off-by-default EKS Capabilities for this run's deploy so the "
-            "eks-capabilities action can prove them (argocd, ack, kro, or all); "
-            "argocd needs --argocd-idc-instance-arn and --argocd-identity"
+            "eks-capabilities action can prove them (argocd, ack, kro, or all). Self-contained: "
+            "without --argocd-idc-instance-arn/--argocd-identity the argocd-identity action "
+            "provisions an Identity Center account instance and group, and without "
+            "--argocd-gitops-repo-url the hand-off uses a GCO-managed CodeCommit repository "
+            "the run pushes the fixture into"
         ),
     )
     parser.add_argument(
         "--argocd-idc-instance-arn",
-        help="IAM Identity Center instance ARN the hosted Argo CD authenticates against",
+        help=(
+            "Use this IAM Identity Center instance for the hosted Argo CD instead of "
+            "discovering or creating one"
+        ),
     )
     parser.add_argument(
         "--argocd-idc-region",
-        help="Region of the Identity Center instance when it differs from the cluster's",
+        help=(
+            "Region of the Identity Center instance (or the Region the argocd-identity action "
+            "creates one in; default: the first deployment Region)"
+        ),
     )
     parser.add_argument(
         "--argocd-identity",
@@ -165,25 +173,32 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="TYPE:ID",
         help=(
-            "Identity Center user or group granted the Argo CD ADMIN role "
-            "(SSO_USER:<id> or SSO_GROUP:<id>; repeatable)"
+            "Existing Identity Center user or group granted the Argo CD ADMIN role "
+            "(SSO_USER:<id> or SSO_GROUP:<id>; repeatable). Without it the run creates and "
+            "maps its own group"
         ),
     )
     parser.add_argument(
         "--argocd-gitops-repo-url",
         help=(
-            "Git repository the GitOps hand-off points Argo CD at "
-            "(default: this checkout's origin remote as HTTPS)"
+            "Point the GitOps hand-off at this operator repository (source: git) instead of the "
+            "GCO-managed CodeCommit repository; must be reachable by the hosted Argo CD"
         ),
     )
     parser.add_argument(
         "--argocd-gitops-revision",
-        help="Revision Argo CD syncs (default: the run's --expected-sha)",
+        help=(
+            "Revision Argo CD syncs from --argocd-gitops-repo-url "
+            "(default: the run's --expected-sha)"
+        ),
     )
     parser.add_argument(
         "--argocd-gitops-path",
         default=GITOPS_FIXTURE_PATH,
-        help="Repository path Argo CD syncs into gco-jobs (default: %(default)s)",
+        help=(
+            "Fixture directory Argo CD must sync into gco-jobs: pushed into the CodeCommit "
+            "repository, or the path inside --argocd-gitops-repo-url (default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--argocd-gitops-sync-policy",
@@ -330,7 +345,7 @@ def _settings_from_args(
                 idc_region=args.argocd_idc_region,
                 identities=tuple(args.argocd_identity),
                 gitops=not args.no_argocd_gitops,
-                repo_url=args.argocd_gitops_repo_url or default_gitops_repository_url(root),
+                repo_url=args.argocd_gitops_repo_url,
                 revision=args.argocd_gitops_revision or args.expected_sha.lower(),
                 path=args.argocd_gitops_path,
                 sync_policy=args.argocd_gitops_sync_policy,
@@ -406,6 +421,8 @@ def _settings_from_args(
             else tuple(sorted(set(args.optional_schedulers)))
         ),
         eks_capabilities_overrides_json=capabilities_overrides_json,
+        argocd_idc_region=args.argocd_idc_region or "",
+        argocd_gitops_fixture_path=args.argocd_gitops_path,
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

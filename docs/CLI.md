@@ -4407,7 +4407,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
 | [`gco stacks eks`](#gco-stacks-eks) | Set the EKS API endpoint access mode and CIDR allowlist in cdk.json. |
-| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) per region, and the hosted Argo CD UI (open it, screenshot it). |
+| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) per region; the hosted Argo CD UI (open it, screenshot it); the Identity Center bootstrap for Argo CD sign-in; and `gitops push` into the per-cluster CodeCommit GitOps repository. |
 | [`gco stacks regions`](#gco-stacks-regions) | Manage deployment Regions in cdk.json (managed-config engine). |
 | [`gco stacks bedrock`](#gco-stacks-bedrock) | Manage Bedrock model and reasoning defaults in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
@@ -4685,16 +4685,21 @@ gco stacks deploy gco-us-east-1 -y                                     # apply t
 
 #### `gco stacks capabilities`
 
-Read-only view of the opt-in [EKS Capabilities](EKS_CAPABILITIES.md) — the
-AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/), [ACK](https://aws-controllers-k8s.github.io/community/)
+The opt-in [EKS Capabilities](EKS_CAPABILITIES.md) — the AWS-managed
+[Argo CD](https://argo-cd.readthedocs.io/en/stable/), [ACK](https://aws-controllers-k8s.github.io/docs/)
 and [kro](https://kro.run/) installations declared in `cdk.json`
 `eks_capabilities` (every type off by default) and attached to each regional
-cluster by `gco stacks deploy`. Nothing here mutates AWS or `cdk.json`.
+cluster by `gco stacks deploy`. `status` and `argocd open` / `argocd screenshot`
+are read-only (they mutate neither AWS nor `cdk.json`);
+`argocd bootstrap-identity` and `gitops push` are the two write paths, and both
+confirm before acting unless `--yes` is given.
 
 ```bash
 gco stacks capabilities status [OPTIONS]
 gco stacks capabilities argocd open [OPTIONS]
 gco stacks capabilities argocd screenshot [OPTIONS]
+gco stacks capabilities argocd bootstrap-identity [OPTIONS]
+gco stacks capabilities gitops push [OPTIONS]
 ```
 
 **Subcommands:**
@@ -4722,6 +4727,36 @@ gco stacks capabilities argocd screenshot [OPTIONS]
   with Identity Center and later runs can pass `--headless`. This is how the
   Argo CD UI screenshot in [EKS Capabilities](EKS_CAPABILITIES.md#argo-cd-ui)
   is produced.
+- `argocd bootstrap-identity` - Resolve or create the
+  [IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html)
+  inputs the Argo CD capability needs (`idc_instance_arn`, `idc_region` and at
+  least one `rbac_role_mappings` entry). It discovers the instance visible from
+  the account (the `--idc-region`, then every Identity Center Region),
+  optionally creates an *account instance* when there is none
+  (`--create-account-instance`; standalone and Organizations member accounts
+  only — a management account enables an organization instance from the
+  console), ensures one group (`<project>-argocd-admins` by default) mapped to
+  `--role`, adds the `--user` names to it, and prints the `cdk.json` fragment
+  or writes it with `--write-cdk-json` through the managed-config engine.
+  `--identity SSO_USER:<id>` / `SSO_GROUP:<id>` maps existing identities
+  instead of creating a group and is the only mode that works against an
+  organization instance owned by another account. The one thing it cannot do
+  is set a password — a user who wants to open the UI signs in once through
+  the Identity Center console.
+- `gitops push` - Mirror a local directory into a cluster's GitOps repository:
+  the per-cluster [CodeCommit](https://docs.aws.amazon.com/codecommit/latest/userguide/welcome.html)
+  repository (`<cluster>-gitops`) that the regional stack creates when
+  `eks_capabilities.argocd.gitops.source` is `codecommit` (the default). After
+  the push the branch holds exactly the directory's files (tracked plus
+  untracked-but-not-ignored when the directory is inside a Git work tree):
+  new and changed files are written, files that disappeared are deleted,
+  unchanged files are left alone, and nothing is committed when nothing
+  changed. Argo CD then syncs the new commit (immediately with
+  `sync_policy.automated`, from the UI otherwise). The push goes through the
+  CodeCommit API with your AWS credentials (`codecommit:GetBranch`,
+  `GetDifferences`, `CreateCommit`) — no Git remote helper or credential
+  helper to install. Symlinks, files over 6 MiB and an empty directory are
+  refused; `--dry-run` prints the plan without committing.
 
 **Options (`status`):**
 
@@ -4747,6 +4782,35 @@ gco stacks capabilities argocd screenshot [OPTIONS]
 | `--login-timeout` | | Seconds to wait for the Identity Center sign-in to land on the Applications view (default 300) |
 | `--profile-dir` | | Persistent browser profile directory (default: `~/.gco/argocd-browser/<region>`) |
 
+**Options (`argocd bootstrap-identity`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region of the cluster (default: first deployment region) |
+| `--idc-region` | | Region to look for (and, with `--create-account-instance`, create) the Identity Center instance in (default: `--region`) |
+| `--instance-arn` | | Use this Identity Center instance instead of the first one discovered |
+| `--create-account-instance` | | Create an account instance of Identity Center when none is visible (one per account across all Regions; it outlives GCO stacks and is deleted only by hand) |
+| `--instance-name` | | Name of a created account instance (default: `<project>-identity-center`) |
+| `--group` | | Identity Center group to create/reuse and map (default: `<project>-argocd-admins`) |
+| `--role` | | Argo CD role the group (or `--identity` entries) receives: `ADMIN` (default), `EDITOR` or `VIEWER` |
+| `--user` | | Existing Identity Center user to add to the group (repeatable) |
+| `--identity` | | Map an existing `SSO_USER:<id>` or `SSO_GROUP:<id>` instead of creating a group (repeatable; not combinable with `--user`/`--group`) |
+| `--write-cdk-json` | | Write `idc_instance_arn`, `idc_region` and the role mapping into `cdk.json` |
+| `--config-path` | | Explicit cdk.json to use (default: nearest in cwd/parents) |
+| `--yes` | `-y` | Skip confirmation |
+
+**Options (`gitops push`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--path` | | Local directory whose files become the branch content (default: `.`) |
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--all-regions` | `-A` | Push to every deployment region |
+| `--branch` | | Repository branch (default: `main`, the branch the stack seeds and Argo CD tracks) |
+| `--message` | `-m` | Commit message (default: names the directory and its Git revision) |
+| `--dry-run` | | Show what would change without committing |
+| `--yes` | `-y` | Skip confirmation |
+
 **Examples:**
 
 ```bash
@@ -4756,6 +4820,12 @@ gco stacks capabilities argocd open                                 # browser, I
 gco stacks capabilities argocd open --print-url -r us-west-2
 gco stacks capabilities argocd screenshot -o images/argocd-ui.png   # first run: sign in in the window
 gco stacks capabilities argocd screenshot --headless                # later runs reuse the saved session
+gco stacks capabilities argocd bootstrap-identity                   # discover the instance, print the fragment
+gco stacks capabilities argocd bootstrap-identity --create-account-instance --user alice --write-cdk-json -y
+gco stacks capabilities argocd bootstrap-identity --identity SSO_GROUP:9067... --write-cdk-json
+gco stacks capabilities gitops push --path ./manifests              # first deployment region, confirms first
+gco stacks capabilities gitops push --path ./manifests -A --dry-run # plan for every region, no commit
+gco stacks capabilities gitops push --path examples/gitops/tenant-smoke -r us-west-2 -y
 ```
 
 #### `gco stacks regions`

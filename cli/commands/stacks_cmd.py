@@ -1,8 +1,10 @@
 """Stack deployment and management commands."""
 
+import json
 import re
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import click
@@ -1107,8 +1109,12 @@ def capabilities_cmd(config: Any) -> None:
     """EKS Capabilities (AWS-managed Argo CD, ACK, kro) attached to GCO clusters.
 
     The capabilities themselves are declared in cdk.json (eks_capabilities,
-    all off by default) and created by 'gco stacks deploy'. These commands
-    read what is configured and what is live; see docs/EKS_CAPABILITIES.md.
+    all off by default) and created by 'gco stacks deploy'. 'status' and the
+    'argocd open/screenshot' commands read what is configured and what is
+    live; 'argocd bootstrap-identity' prepares the Identity Center inputs the
+    Argo CD capability needs, and 'gitops push' mirrors a local directory
+    into the per-cluster CodeCommit GitOps repository. See
+    docs/EKS_CAPABILITIES.md.
     """
 
 
@@ -1191,6 +1197,19 @@ def _print_capabilities_status(
                 f"[{region}] Argo CD UI: {row['argocd_server_url']} "
                 "(Identity Center sign-in; 'gco stacks capabilities argocd open')"
             )
+        gitops = row.get("gitops") if row["type"] == "argocd" else None
+        if isinstance(gitops, dict) and gitops.get("enabled"):
+            if gitops.get("source") == "codecommit":
+                formatter.print_info(
+                    f"[{region}] GitOps repository (GCO-managed CodeCommit): "
+                    f"{gitops['codecommit_repository']} @ {gitops['codecommit_branch']} — "
+                    "'gco stacks capabilities gitops push --path <dir>' mirrors a directory into it"
+                )
+            else:
+                formatter.print_info(
+                    f"[{region}] GitOps repository (yours): {gitops['repo_url']} "
+                    f"@ {gitops['revision']} path {gitops['path']}"
+                )
     for item in status["unmanaged"]:
         formatter.print_warning(
             f"[{region}] capability {item['capability_name']} ({item['type']}, "
@@ -1335,6 +1354,359 @@ def capabilities_argocd_screenshot(
         formatter.print(document)
         return
     formatter.print_success(f"Argo CD UI screenshot written to {written}")
+
+
+@capabilities_argocd_cmd.command("bootstrap-identity")
+@click.option("--region", "-r", help="AWS region of the cluster (default: first deployment region)")
+@click.option(
+    "--idc-region",
+    help=(
+        "Region to look for (and, with --create-account-instance, create) the Identity "
+        "Center instance in (default: --region)"
+    ),
+)
+@click.option(
+    "--instance-arn",
+    help="Use this Identity Center instance instead of the first one discovered",
+)
+@click.option(
+    "--create-account-instance",
+    is_flag=True,
+    help=(
+        "Create an account instance of Identity Center when none is visible (standalone and "
+        "Organizations member accounts; a management account enables an organization instance "
+        "from the console instead)"
+    ),
+)
+@click.option(
+    "--instance-name",
+    help="Name of a created account instance (default: <project>-identity-center)",
+)
+@click.option(
+    "--group",
+    "group_name",
+    help="Identity Center group to create/reuse and map (default: <project>-argocd-admins)",
+)
+@click.option(
+    "--role",
+    type=click.Choice(["ADMIN", "EDITOR", "VIEWER"], case_sensitive=True),
+    default="ADMIN",
+    show_default=True,
+    help="Argo CD role the group (or --identity entries) receives",
+)
+@click.option(
+    "--user",
+    "user_names",
+    multiple=True,
+    metavar="USERNAME",
+    help="Existing Identity Center user to add to the group (repeatable)",
+)
+@click.option(
+    "--identity",
+    "identities",
+    multiple=True,
+    metavar="TYPE:ID",
+    help=(
+        "Map an existing SSO_USER:<id> or SSO_GROUP:<id> instead of creating a group "
+        "(repeatable; the only option that works with an organization instance)"
+    ),
+)
+@click.option(
+    "--write-cdk-json",
+    is_flag=True,
+    help="Write idc_instance_arn, idc_region and the role mapping into cdk.json",
+)
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def capabilities_argocd_bootstrap_identity(
+    config: Any,
+    region: Any,
+    idc_region: Any,
+    instance_arn: Any,
+    create_account_instance: bool,
+    instance_name: Any,
+    group_name: Any,
+    role: str,
+    user_names: tuple[str, ...],
+    identities: tuple[str, ...],
+    write_cdk_json: bool,
+    config_path: Any,
+    yes: bool,
+) -> None:
+    """Resolve or create the Identity Center inputs the Argo CD capability needs.
+
+    The hosted Argo CD signs users in only through IAM Identity Center, so
+    enabling it needs an instance ARN and a user or group mapped to an Argo CD
+    role. This command discovers the instance visible from the account (any
+    Identity Center Region), optionally creates an account instance when there
+    is none, ensures one group mapped to the role, adds the named users to it,
+    and prints the cdk.json fragment — or writes it with --write-cdk-json.
+    The only thing it cannot do is set a password: a user who wants to open
+    the UI signs in once through the Identity Center console.
+
+    Examples:
+        gco stacks capabilities argocd bootstrap-identity
+        gco stacks capabilities argocd bootstrap-identity --create-account-instance --user alice --write-cdk-json -y
+        gco stacks capabilities argocd bootstrap-identity --identity SSO_GROUP:9067... --write-cdk-json
+    """
+    from ..argocd_identity import ArgoCdIdentityError, bootstrap_argocd_identity
+    from ..managed_config import (
+        ManagedConfigError,
+        ensure_argocd_role_mapping,
+        set_argocd_identity_center,
+    )
+
+    formatter = get_output_formatter(config)
+    target = _target_regions(config, region, False)[0]
+    lookup_region = idc_region or target
+    parsed_identities: list[dict[str, str]] = []
+    for item in identities:
+        kind, _, identity_id = item.partition(":")
+        if kind not in ("SSO_USER", "SSO_GROUP") or not identity_id.strip():
+            formatter.print_error(
+                f"--identity expects SSO_USER:<id> or SSO_GROUP:<id>, got {item!r}"
+            )
+            sys.exit(1)
+        parsed_identities.append({"id": identity_id.strip(), "type": kind})
+    if parsed_identities and (user_names or group_name):
+        formatter.print_error("--identity maps existing identities; drop --user/--group with it")
+        sys.exit(1)
+
+    if create_account_instance and not yes:
+        formatter.print_warning(
+            f"An account instance of IAM Identity Center will be created in {lookup_region} if "
+            "none is visible (one per account across all Regions; it outlives GCO stacks and is "
+            "deleted only by hand)."
+        )
+        confirm("Continue?", abort=True)
+
+    try:
+        import boto3
+
+        account_id = str(boto3.client("sts", region_name=target).get_caller_identity()["Account"])
+        result = bootstrap_argocd_identity(
+            account_id=account_id,
+            project_name=_project_name(),
+            preferred_region=lookup_region,
+            instance_arn=instance_arn,
+            create_account_instance_if_missing=create_account_instance,
+            instance_name=instance_name,
+            instance_tags={"gco:project": _project_name()},
+            group_name=group_name,
+            role=role,
+            user_names=tuple(user_names),
+            identities=tuple(parsed_identities),
+        )
+    except ArgoCdIdentityError as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+    except Exception as exc:
+        formatter.print_error(f"Identity Center bootstrap failed: {exc}")
+        sys.exit(1)
+
+    document = result.to_dict()
+    document["region"] = target
+    document["cdk_json_written"] = False
+    if write_cdk_json:
+        try:
+            arn_report, region_report = set_argocd_identity_center(
+                result.instance.instance_arn, result.instance.region, config_path=config_path
+            )
+            mapping_reports = [
+                ensure_argocd_role_mapping(
+                    result.role, identity["id"], identity["type"], config_path=config_path
+                )
+                for identity in result.identities
+            ]
+        except ManagedConfigError as exc:
+            formatter.print_error(str(exc))
+            sys.exit(1)
+        document["cdk_json_written"] = True
+        document["cdk_json_changes"] = [
+            report.summary() for report in (arn_report, region_report, *mapping_reports)
+        ]
+
+    if config.output_format != "table":
+        formatter.print(document)
+        return
+    instance = result.instance
+    verb = "Created" if result.instance_created else "Using"
+    formatter.print_success(
+        f"{verb} Identity Center instance {instance.instance_arn} in {instance.region}"
+    )
+    if result.group_id:
+        group_verb = "Created" if result.group_created else "Using"
+        formatter.print_success(
+            f"{group_verb} group {result.group_name} ({result.group_id}) mapped to Argo CD "
+            f"{result.role}"
+        )
+        for name in result.members_added:
+            formatter.print_info(f"Added {name} to {result.group_name}")
+        for name in result.members_already_present:
+            formatter.print_info(f"{name} was already in {result.group_name}")
+    else:
+        formatter.print_success(
+            f"Mapping {len(result.identities)} existing identit"
+            f"{'y' if len(result.identities) == 1 else 'ies'} to Argo CD {result.role}"
+        )
+    if write_cdk_json:
+        for change in document["cdk_json_changes"]:
+            formatter.print_info(change)
+        formatter.print_info(
+            "cdk.json updated — set eks_capabilities.argocd.enabled: true and run "
+            "'gco stacks deploy-all' to attach the capability"
+        )
+    else:
+        formatter.print_info(
+            "Add to cdk.json context.eks_capabilities.argocd (or re-run with --write-cdk-json):"
+        )
+        interactive_echo(json.dumps(result.cdk_json_fragment(), indent=2))
+    formatter.print_info(
+        "Users sign in to the Argo CD UI with their Identity Center password; set one in the "
+        "Identity Center console if the user is new."
+    )
+
+
+@capabilities_cmd.group("gitops")
+@pass_config
+def capabilities_gitops_cmd(config: Any) -> None:
+    """The GitOps hand-off's GCO-managed CodeCommit repositories."""
+
+
+@capabilities_gitops_cmd.command("push")
+@click.option(
+    "--path",
+    "source_path",
+    default=".",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, resolve_path=True),
+    help="Local directory whose files become the branch content",
+)
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Push to every deployment region")
+@click.option("--branch", help="Repository branch (default: main)")
+@click.option(
+    "--message", "-m", help="Commit message (default: names the directory and its Git revision)"
+)
+@click.option("--dry-run", is_flag=True, help="Show what would change without committing")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def capabilities_gitops_push(
+    config: Any,
+    source_path: str,
+    region: Any,
+    all_regions: bool,
+    branch: Any,
+    message: Any,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Mirror a local directory into a cluster's GitOps repository.
+
+    The repository is the per-cluster CodeCommit repository GCO created for
+    the Argo CD GitOps hand-off (eks_capabilities.argocd.gitops with the
+    default source: codecommit). After the push its branch holds exactly the
+    directory's files (tracked and untracked-but-not-ignored when the
+    directory is in a Git work tree): new and changed files are written,
+    files that disappeared are deleted, unchanged files are left alone, and
+    nothing is committed when nothing changed. Argo CD then syncs the new
+    commit (immediately with sync_policy automated; from the UI otherwise).
+
+    Uses your AWS credentials through the CodeCommit API — no Git remote
+    helper or credential setup — and needs codecommit:GetBranch,
+    GetDifferences and CreateCommit on the repository.
+
+    Examples:
+        gco stacks capabilities gitops push --path ./manifests
+        gco stacks capabilities gitops push --path ./manifests -A --dry-run
+        gco stacks capabilities gitops push --path examples/gitops/tenant-smoke -r us-west-2 -y
+    """
+    from ..eks_capabilities import load_eks_capabilities_config
+    from ..gitops_push import (
+        GitOpsPushError,
+        collect_local_tree,
+        push_gitops_repository,
+        resolve_gitops_repository,
+    )
+
+    formatter = get_output_formatter(config)
+    project = _project_name()
+    source_dir = Path(source_path)
+    try:
+        capabilities_config = load_eks_capabilities_config()
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to read eks_capabilities from cdk.json: {exc}")
+        sys.exit(1)
+
+    targets = _target_regions(config, region, all_regions)
+    try:
+        repositories = {
+            target: resolve_gitops_repository(target, project, capabilities_config)
+            for target in targets
+        }
+        local_files = collect_local_tree(source_dir)
+    except GitOpsPushError as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+
+    if not dry_run and not yes:
+        formatter.print_warning(
+            f"{len(local_files)} file(s) from {source_dir} will replace the branch content of "
+            + ", ".join(f"{name} ({target})" for target, (name, _url) in repositories.items())
+            + "; Argo CD will reconcile the result into the tenant namespaces."
+        )
+        confirm("Push?", abort=True)
+
+    results: list[dict[str, Any]] = []
+    failures = 0
+    for target in targets:
+        try:
+            result = push_gitops_repository(
+                target,
+                project,
+                source_dir,
+                config=capabilities_config,
+                branch=branch,
+                message=message,
+                dry_run=dry_run,
+                local_files=local_files,
+            )
+        except GitOpsPushError as exc:
+            formatter.print_error(f"[{target}] {exc}")
+            failures += 1
+            continue
+        except Exception as exc:
+            formatter.print_error(f"[{target}] Push to CodeCommit failed: {exc}")
+            failures += 1
+            continue
+        results.append(result.to_dict())
+        if config.output_format == "table":
+            summary = (
+                f"+{result.added} added, ~{result.modified} modified, -{result.deleted} deleted, "
+                f"{result.unchanged} unchanged"
+            )
+            if dry_run:
+                formatter.print_info(
+                    f"[{target}] dry run: {result.repository_name}@{result.branch} would change: "
+                    f"{summary}"
+                )
+            elif result.changed:
+                formatter.print_success(
+                    f"[{target}] {result.repository_name}@{result.branch} -> "
+                    f"{(result.head_commit_id or '')[:12]} ({summary}"
+                    + (f"; {len(result.commit_ids)} commits" if len(result.commit_ids) > 1 else "")
+                    + ")"
+                )
+            else:
+                formatter.print_info(
+                    f"[{target}] {result.repository_name}@{result.branch} already matches "
+                    f"{source_dir.name} ({summary}); nothing committed"
+                )
+    if results and config.output_format != "table":
+        formatter.print(results if all_regions else results[0])
+    if failures:
+        sys.exit(1)
 
 
 # =============================================================================

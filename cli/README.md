@@ -38,6 +38,8 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `cluster_doctor.py` | Diagnosis of the three layers of cluster access: reachability, authentication, authorization (`gco cluster doctor`) |
 | `eks_capabilities.py` | Configured-vs-live view of the [EKS Capabilities](../docs/EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) on a regional cluster: cdk.json intent merged with `ListCapabilities`/`DescribeCapability`, drift sentences, unmanaged capabilities (`gco stacks capabilities status`) |
 | `argocd_ui.py` | Hosted Argo CD UI of the Argo CD capability: server-URL resolution from the EKS API and the Playwright persistent-profile screenshot of the Applications view (`gco stacks capabilities argocd open` / `screenshot`) |
+| `argocd_identity.py` | IAM Identity Center bootstrap for the Argo CD capability: instance discovery across Identity Center Regions, opt-in account-instance creation, one group mapped to an Argo CD role, user membership (`gco stacks capabilities argocd bootstrap-identity`, the harness's `argocd-identity` action) |
+| `gitops_push.py` | Mirror a local directory into a cluster's GCO-managed CodeCommit GitOps repository through the CodeCommit API — git-aware file listing, blob-SHA diff against the branch, chunked `CreateCommit`, no Git remote helper (`gco stacks capabilities gitops push`) |
 | `ssm_tunnel.py` | SSM Session Manager tunnel helpers for private EKS endpoints |
 | `ephemeral_bastion.py` | Ephemeral SSM bastion lifecycle (`--via-ssm auto`) |
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |

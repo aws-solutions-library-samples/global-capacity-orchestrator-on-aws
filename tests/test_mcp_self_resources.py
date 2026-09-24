@@ -171,6 +171,8 @@ class TestFeatureFlags:
                 "deploy_all",
                 "bootstrap_cdk",
                 "addons_install",
+                "gitops_push",
+                "argocd_bootstrap_identity",
             },
             "GCO_ENABLE_INFRASTRUCTURE_DESTROY": {"destroy_stack", "destroy_all"},
             "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": {

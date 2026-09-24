@@ -90,16 +90,31 @@ real traffic.
 capabilities (`docs/EKS_CAPABILITIES.md`). Because the shipped `cdk.json`
 leaves every type off and preflight requires a clean worktree, the run enables
 them the way it enables optional schedulers: `__main__.py` turns
-`--eks-capabilities` plus the Argo CD Identity Center inputs into the
-`eks_capabilities_overrides` CDK context (`build_eks_capabilities_overrides`),
-and the action resolves the same merged block to know what to prove. The AWS
-side reuses `cli.eks_capabilities.build_status` — the merge behind
-`gco stacks capabilities status` — so the harness and the CLI cannot disagree
-about drift; the cluster side goes through `checks/cluster.py` to read the
-`local-cluster` Secret and the access-entry RBAC, then polls the root
-`Application` to `Synced`/`Healthy` at the run's commit and requires the
-fixture ConfigMap from `examples/gitops/tenant-smoke` in `gco-jobs` with Argo
-CD's tracking label. With nothing enabled the action passes with a note.
+`--eks-capabilities` (and any Argo CD inputs the operator chose to supply)
+into the static `eks_capabilities_overrides` CDK context
+(`build_eks_capabilities_overrides`), and the action resolves the same merged
+block to know what to prove. The run is self-contained: `argocd-identity`
+(`actions/argocd_identity.py`, before `deploy`) discovers or creates the IAM
+Identity Center account instance and the admin group the hosted Argo CD
+authenticates against through `cli.argocd_identity`, records them in the
+checkpoint, and `effective_cdk_context` layers them over the static overrides
+for every synthesis (the resume identity covers only the static part); the
+`cleanup/retained.py` phase `argocd-identity` deletes them again after the
+stacks are gone, and a run that stopped before `deploy` cleans them up from
+`destroy_deployment`'s early return. The AWS side reuses
+`cli.eks_capabilities.build_status` — the merge behind `gco stacks
+capabilities status` — so the harness and the CLI cannot disagree about drift;
+with the default `gitops.source: codecommit` the action then pushes
+`examples/gitops/tenant-smoke` into the GCO-managed CodeCommit repository the
+deploy created through `cli.gitops_push` (the code behind `gco stacks
+capabilities gitops push`); the cluster side goes through `checks/cluster.py`
+to read the `local-cluster` Secret and the access-entry RBAC, then polls the
+root `Application` to `Synced`/`Healthy` at exactly the pushed commit (or the
+run's revision of an operator repository under `--argocd-gitops-repo-url`) and
+requires the fixture ConfigMap in `gco-jobs` with Argo CD's tracking label.
+With nothing enabled both actions pass with a note. The inventory scanners
+`codecommit_repositories` and `identity_center` report leftover
+`<project>-*` repositories, instances and groups.
 
 ## How a run executes
 

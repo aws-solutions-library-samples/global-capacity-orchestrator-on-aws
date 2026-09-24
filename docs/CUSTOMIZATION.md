@@ -635,7 +635,7 @@ through the NAT gateways.
 ### EKS Capabilities
 
 The AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/),
-[ACK](https://aws-controllers-k8s.github.io/community/) and [kro](https://kro.run/)
+[ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/)
 installations EKS can attach to a cluster are three opt-in knobs under
 `eks_capabilities`, every one off by default because each bills per
 capability-hour:
@@ -650,9 +650,7 @@ capability-hour:
     ],
     "gitops": {
       "enabled": true,
-      "repo_url": "https://github.com/your-org/gco-tenants.git",
-      "revision": "main",
-      "path": "clusters/{region}",
+      "source": "codecommit",
       "sync_policy": "manual"
     }
   },
@@ -664,10 +662,17 @@ capability-hour:
 Each enabled type synthesizes one capability IAM role and one
 `AWS::EKS::Capability` per selected regional cluster (`regions: []` means all
 of them). Argo CD requires an IAM Identity Center instance and at least one
-RBAC mapping because the hosted control plane has no local users; its
+RBAC mapping because the hosted control plane has no local users;
+`gco stacks capabilities argocd bootstrap-identity --write-cdk-json` discovers
+(or creates) the instance, creates the group and writes both values. Its
 optional `gitops` block is GCO's declarative hand-off — a fenced
-`AppProject` and one root `Application` per cluster pointing Argo CD at your
-tenant repository path, restricted to `gco-jobs` and `gco-inference`.
+`AppProject` and one root `Application` per cluster pointing Argo CD at a
+repository path, restricted to `gco-jobs` and `gco-inference`. With the
+default `source: codecommit` the regional stack creates one CodeCommit
+repository per cluster that the capability role may pull, and
+`gco stacks capabilities gitops push --path ./manifests` mirrors a local
+directory into it; `source: git` plus `repo_url` (and `path`, default
+`clusters/{region}`) points at a repository of your own instead.
 `gco stacks capabilities status` reports configured-versus-live state and
 `gco stacks capabilities argocd open` opens the hosted Argo CD UI. Every knob,
 the IAM grants, the fence and the operating notes are in

@@ -113,10 +113,11 @@ never reach `ACTIVE`, so in-cluster behavior cannot be exercised honestly.
 
 ## Known emulator gaps
 
-Each gap below was probed empirically; the first three have narrow,
-documented answers in `tests/_floci_gap_shims.py` (a botocore `before-send`
-handler per read-only operation — production code is untouched; harness
-subprocesses receive them via `tests/_floci_sitecustomize/`):
+Each gap below was probed empirically; the first three and the last two have
+narrow, documented answers in `tests/_floci_gap_shims.py` (a botocore
+`before-send` handler per read-only operation — production code is
+untouched; harness subprocesses receive them via
+`tests/_floci_sitecustomize/`):
 
 1. **CloudFormation `GetStackPolicy`** responses omit the result wrapper and
    are unparseable by botocore. The shim answers with real AWS's no-policy
@@ -145,6 +146,19 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    eventually-reports-zero contract therefore stays in the unit suite; the
    wire-level tests cover start/stop/adopt/describe semantics, which the
    emulator models faithfully.
+7. **CodeCommit** is absent from Floci 2.0.1's catalog
+   (`UnknownOperationException` for `ListRepositories`), while the
+   inventory scans every Region for the GCO-managed GitOps repositories
+   (`<cluster>-gitops`) the [Argo CD capability](EKS_CAPABILITIES.md)
+   reads. The shim answers `ListRepositories` with the truthful empty list.
+8. **Identity Store** is absent as well (`ListGroups`, `GetGroupId`,
+   `CreateGroup` all unknown), although `sso-admin ListInstances` is modeled
+   and answers with one built-in ACTIVE instance owned by the emulator
+   account. The inventory lists groups in every account-owned instance to
+   catch a leftover `<project>-live-validation-argocd` group; the shim
+   answers `ListGroups` with the empty page. The harness's Identity Center
+   provisioning itself (`argocd-identity`) is unit-tested against in-memory
+   clients and proven live, not under Floci.
 
 ## Where the E2E stops, and why
 

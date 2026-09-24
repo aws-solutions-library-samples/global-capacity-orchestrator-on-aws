@@ -45,7 +45,12 @@ _SERVER_URL = "https://a1b2c3d4.argocd.us-east-1.eks.amazonaws.com"
 _ADMIN_MAPPING = {"role": "ADMIN", "identities": [{"id": "u-admin", "type": "SSO_USER"}]}
 
 
-def _argocd_config(*, gitops: bool = False, regions: list[str] | None = None) -> dict[str, Any]:
+def _argocd_config(
+    *,
+    gitops: bool = False,
+    regions: list[str] | None = None,
+    source: str = "git",
+) -> dict[str, Any]:
     block: dict[str, Any] = {
         "argocd": {
             "enabled": True,
@@ -54,15 +59,18 @@ def _argocd_config(*, gitops: bool = False, regions: list[str] | None = None) ->
             "regions": regions or [],
         }
     }
-    if gitops:
+    if gitops and source == "git":
         block["argocd"]["gitops"] = {
             "enabled": True,
+            "source": "git",
             "repo_url": "https://github.com/example/gco-tenants.git",
             "revision": "main",
             "path": "clusters/{region}",
             "destination_namespaces": ["gco-jobs"],
             "sync_policy": "automated",
         }
+    elif gitops:
+        block["argocd"]["gitops"] = {"enabled": True, "sync_policy": "automated"}
     return caps.normalize_eks_capabilities_config(block)
 
 
@@ -257,6 +265,7 @@ class TestBuildStatus:
         assert argo["drift"] is None
         assert argo["gitops"] == {
             "enabled": True,
+            "source": "git",
             "repo_url": "https://github.com/example/gco-tenants.git",
             "revision": "main",
             "path": f"clusters/{_REGION}",
@@ -265,6 +274,23 @@ class TestBuildStatus:
             "project": caps.GITOPS_PROJECT_NAME,
             "application": caps.GITOPS_ROOT_APPLICATION_NAME,
         }
+
+    def test_codecommit_source_names_the_managed_repository(self) -> None:
+        status = self._status(
+            _argocd_config(gitops=True, source="codecommit"),
+            [_live("argocd", server_url=_SERVER_URL)],
+        )
+        gitops = status["capabilities"][0]["gitops"]
+        assert gitops["source"] == "codecommit"
+        assert gitops["codecommit_repository"] == f"{_CLUSTER}-gitops"
+        assert gitops["codecommit_branch"] == "main"
+        assert (
+            gitops["repo_url"]
+            == f"https://git-codecommit.{_REGION}.amazonaws.com/v1/repos/{_CLUSTER}-gitops"
+        )
+        # The source default: the repository root.
+        assert gitops["path"] == "."
+        assert gitops["destination_namespaces"] == ["gco-jobs", "gco-inference"]
 
     def test_configured_but_not_attached_is_drift_naming_the_deploy(self) -> None:
         status = self._status(_argocd_config(), [])

@@ -14,7 +14,7 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
 default registration the server exposes 141 tools; with every flag enabled the
-ceiling is 199. See [Feature Flags](../README.md#feature-flags) for the
+ceiling is 201. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -38,7 +38,7 @@ flag-to-tool mapping.
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
-| `stacks.py` | 35 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `eks_capabilities_status`, `argocd_ui_url`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_eks_endpoint_access` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated), `set_codex_default_model` (gated), `set_codex_reasoning_effort` (gated), `set_opencode_default_model` (gated) |
+| `stacks.py` | 37 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `eks_capabilities_status`, `argocd_ui_url`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `gitops_push` (gated), `argocd_bootstrap_identity` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_eks_endpoint_access` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated), `set_codex_default_model` (gated), `set_codex_reasoning_effort` (gated), `set_opencode_default_model` (gated) |
 | `status.py` | 1 | `fleet_status` |
 | `storage.py` | 8 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `s3_inventory`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `swarm.py` | 6 | `swarm_start`, `swarm_iterate`, `swarm_status`, `swarm_abort`, `swarm_list`, `swarm_plan` — all gated by `GCO_ENABLE_SWARM`; the in-process supervisor tools (`mission_spawn`, `children_status`, `child_abort`) are deliberately not MCP tools |
@@ -289,6 +289,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `add_deployment_region` | `gco stacks regions add` — add a workload Region to cdk.json `deployment_regions.regional`, validated and config-only (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `addons_install` | `gco stacks addons install` — start an idempotent Helm add-on re-convergence (gated by `GCO_ENABLE_INFRASTRUCTURE_DEPLOY`). |
 | `addons_status` | `gco stacks addons status` — show per-chart Helm add-on status from SSM. |
+| `argocd_bootstrap_identity` | `gco stacks capabilities argocd bootstrap-identity` — discover or create the [IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html) instance and admin group the [Argo CD EKS Capability](../../docs/EKS_CAPABILITIES.md) authenticates against, optionally writing them into cdk.json (gated by `GCO_ENABLE_INFRASTRUCTURE_DEPLOY`). |
 | `argocd_ui_url` | `gco stacks capabilities argocd open --print-url` — the hosted Argo CD UI URL of the [Argo CD EKS Capability](../../docs/EKS_CAPABILITIES.md) for a region (Identity Center sign-in; never launches a browser). |
 | `aurora_status` | `gco stacks aurora status` — show [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) database stack status. |
 | `bootstrap_cdk` | `gco stacks bootstrap` — bootstrap [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) in an AWS account/region. |
@@ -304,6 +305,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `enable_fsx` | `gco stacks fsx enable` — flip FSx Lustre on in cdk.json. |
 | `enable_valkey` | `gco stacks valkey enable` — flip Valkey Serverless on in cdk.json. |
 | `fsx_status` | Check FSx for Lustre configuration status. |
+| `gitops_push` | `gco stacks capabilities gitops push` — mirror a local directory of manifests into a cluster's GCO-managed [CodeCommit](https://docs.aws.amazon.com/codecommit/latest/userguide/welcome.html) GitOps repository for the hosted Argo CD to reconcile; one commit per push, none when nothing changed (gated by `GCO_ENABLE_INFRASTRUCTURE_DEPLOY`). |
 | `list_deployment_regions` | `gco stacks regions list` — show the cdk.json deployment-region topology and its resolved partition (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `list_stacks` | List all GCO CDK stacks. |
 | `remove_deployment_region` | `gco stacks regions remove` — remove a workload Region from cdk.json `deployment_regions.regional`; never destroys stacks (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |

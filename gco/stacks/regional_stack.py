@@ -93,6 +93,7 @@ from aws_cdk import (
     Stack,
     Validations,
 )
+from aws_cdk import aws_codecommit as codecommit
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_efs as efs
@@ -118,8 +119,11 @@ from gco.config.config_loader import ConfigLoader
 from gco.eks_capabilities_config import (
     ARGOCD_NAMESPACE,
     CAPABILITY_TYPE_API_NAMES,
+    GITOPS_CODECOMMIT_DEFAULT_BRANCH,
     compute_eks_capabilities_replacements,
     enabled_capability_types,
+    gitops_codecommit_enabled_in_region,
+    gitops_codecommit_repository_name,
     normalize_eks_capabilities_config,
 )
 from gco.inference_proxy_config import (
@@ -1741,7 +1745,11 @@ class GCORegionalStack(Stack):
           with ``RETAIN`` delete propagation (the only supported value) so
           workloads the tools created survive a capability removal;
         * ``CfnOutput``s for the capability and role ARNs and, for Argo CD, the
-          hosted server URL operators sign in to.
+          hosted server URL operators sign in to;
+        * when the GitOps hand-off uses ``source: codecommit``, the
+          GCO-managed CodeCommit repository the root ``Application`` reads
+          (see :meth:`_create_gitops_codecommit_repository`), which the Argo CD
+          capability role may ``codecommit:GitPull``.
 
         The convergence trigger in :meth:`_create_kubectl_lambda` depends on
         every capability so the Argo CD CRDs exist before the applier renders
@@ -1749,12 +1757,20 @@ class GCORegionalStack(Stack):
         """
         self.eks_capabilities: dict[str, eks_l1.CfnCapability] = {}
         self.eks_capability_roles: dict[str, iam.Role] = {}
+        self.gitops_repository: codecommit.Repository | None = None
         self.eks_capabilities_config = self._eks_capabilities_config()
         enabled_types = enabled_capability_types(
             self.eks_capabilities_config, self.deployment_region
         )
         if not enabled_types:
             return
+
+        if gitops_codecommit_enabled_in_region(
+            self.eks_capabilities_config, self.deployment_region
+        ):
+            # Created before the Argo CD role so the role's inline policy can
+            # name the repository ARN.
+            self.gitops_repository = self._create_gitops_codecommit_repository()
 
         project_name = self.config.get_project_name()
         for type_name in enabled_types:
@@ -1801,12 +1817,80 @@ class GCORegionalStack(Stack):
                     description="Hosted Argo CD server URL (IAM Identity Center sign-in)",
                 )
 
+    #: Seed content of every GCO-managed GitOps repository: a README only, so
+    #: the root Application is Synced/Healthy (zero resources) from the first
+    #: reconciliation instead of reporting an empty-repository error until the
+    #: operator's first ``gitops push``. CloudFormation applies ``Code`` at
+    #: repository creation only; later pushes are never overwritten.
+    _GITOPS_CODECOMMIT_SEED_DIR: ClassVar[Path] = (
+        Path(__file__).resolve().parents[2] / "examples" / "gitops" / "codecommit-seed"
+    )
+
+    def _create_gitops_codecommit_repository(self) -> codecommit.Repository:
+        """The per-cluster CodeCommit repository behind ``gitops.source: codecommit``.
+
+        One repository per selected cluster, named ``<cluster>-gitops`` (so the
+        inventory scanners recognize it by the project prefix), seeded from
+        :attr:`_GITOPS_CODECOMMIT_SEED_DIR` on the ``main`` branch. Operators
+        fill it with ``gco stacks capabilities gitops push``, which mirrors a
+        local directory into the branch through the CodeCommit API — no Git
+        credentials, no repository Secret: the hosted Argo CD authenticates to
+        CodeCommit with the capability role's ``codecommit:GitPull`` grant.
+        ``codecommit.removal_policy`` decides whether ``cdk destroy`` deletes
+        the repository (the default; the operator's checkout is the source of
+        truth) or retains its history.
+        """
+        gitops = self.eks_capabilities_config["argocd"]["gitops"]
+        retain = str(gitops["codecommit"]["removal_policy"]) == "retain"
+        cluster_name = self.cluster_config.cluster_name
+        repository = codecommit.Repository(
+            self,
+            "EksCapabilityArgoCdGitOpsRepository",
+            repository_name=gitops_codecommit_repository_name(cluster_name),
+            description=(
+                f"GCO GitOps hand-off for cluster {cluster_name}: the hosted Argo CD "
+                "capability reconciles this repository into the tenant namespaces. "
+                "Push with `gco stacks capabilities gitops push`."
+            ),
+            code=codecommit.Code.from_directory(
+                str(self._GITOPS_CODECOMMIT_SEED_DIR), GITOPS_CODECOMMIT_DEFAULT_BRANCH
+            ),
+        )
+        repository.apply_removal_policy(RemovalPolicy.RETAIN if retain else RemovalPolicy.DESTROY)
+        CfnOutput(
+            self,
+            "EksCapabilityArgoCdGitOpsRepositoryName",
+            value=repository.repository_name,
+            description="GCO-managed CodeCommit repository the Argo CD GitOps hand-off reads",
+        )
+        CfnOutput(
+            self,
+            "EksCapabilityArgoCdGitOpsRepositoryCloneUrlHttp",
+            value=repository.repository_clone_url_http,
+            description=(
+                "HTTPS clone URL of the GitOps repository (the root Application's repoURL)"
+            ),
+        )
+        return repository
+
     def _create_eks_capability_role(self, type_name: str, block: Mapping[str, Any]) -> iam.Role:
         """The IAM role one capability assumes, carrying only configured grants."""
         suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
         statements: list[iam.PolicyStatement] = []
         wildcard_arns: list[str] = []
         if type_name == "argocd":
+            if self.gitops_repository is not None:
+                # Direct CodeCommit integration: the hosted Argo CD clones with
+                # the capability role, so GitPull on exactly this repository is
+                # the whole grant (no repository Secret involved).
+                statements.append(
+                    iam.PolicyStatement(
+                        sid="PullGitOpsRepository",
+                        effect=iam.Effect.ALLOW,
+                        actions=["codecommit:GitPull"],
+                        resources=[self.gitops_repository.repository_arn],
+                    )
+                )
             secret_arns = [str(arn) for arn in block.get("repo_credentials_secret_arns") or []]
             if secret_arns:
                 statements.append(
@@ -4203,9 +4287,13 @@ class GCORegionalStack(Stack):
                 getattr(self, "eks_capabilities_config", None)
                 or normalize_eks_capabilities_config(None),
                 region=self.deployment_region,
-                cluster_name=self.cluster.cluster_name,
+                # The configured (literal) cluster name: it also names the
+                # GCO-managed CodeCommit repository, so a token here would turn
+                # the repository URL into a deploy-time join for no gain.
+                cluster_name=self.cluster_config.cluster_name,
                 cluster_arn=self.cluster.cluster_arn,
                 argocd_role_arn=argocd_role.role_arn if argocd_role is not None else None,
+                url_suffix=self.url_suffix,
             )
         )
 

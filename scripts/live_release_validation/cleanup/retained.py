@@ -8,6 +8,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+from ..checks.eks_capabilities import cleanup_validation_identity
 from ..cleanup.ecr import _cleanup_new_ecr_images, _cleanup_new_ecr_repositories
 from ..cleanup.log_groups import (
     _cleanup_owned_log_groups,
@@ -121,6 +122,14 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
         result["kms"] = _schedule_retained_kms_keys(ctx)
     except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "kms", "error": f"{type(exc).__name__}: {exc}"})
+    # After the stacks: the Argo CD capability's Identity Center managed
+    # application must be gone before the account instance can be deleted.
+    try:
+        result["argocd_identity"] = cleanup_validation_identity(ctx)
+    except Exception as exc:  # preserve partial evidence
+        result["errors"].append(
+            {"phase": "argocd-identity", "error": f"{type(exc).__name__}: {exc}"}
+        )
     result["ended_at"] = utc_now()
     ctx.checkpoint.state.setdefault("retained_cleanup_attempts", []).append(result)
     ctx.persist()

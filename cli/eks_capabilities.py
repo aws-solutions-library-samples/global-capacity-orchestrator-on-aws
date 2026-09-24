@@ -31,10 +31,16 @@ from gco.eks_capabilities_config import (
     CAPABILITY_TYPE_API_NAMES,
     EKS_CAPABILITIES_CONTEXT_KEY,
     EKS_CAPABILITY_TYPES,
+    GITOPS_CODECOMMIT_DEFAULT_BRANCH,
     GITOPS_PROJECT_NAME,
     GITOPS_ROOT_APPLICATION_NAME,
+    aws_url_suffix_for_region,
     capability_enabled_in_region,
+    effective_gitops_path,
+    gitops_codecommit_repository_name,
     gitops_enabled_in_region,
+    gitops_repository_url,
+    gitops_source,
     merge_eks_capabilities_overrides,
     parse_eks_capabilities_overrides,
     render_gitops_path,
@@ -149,18 +155,30 @@ def _gitops_summary(config: Mapping[str, Any], *, region: str, cluster_name: str
         return {"enabled": False}
     gitops = config["argocd"]["gitops"]
     namespaces = [str(namespace) for namespace in gitops["destination_namespaces"]]
-    return {
+    source = gitops_source(config)
+    summary: dict[str, Any] = {
         "enabled": True,
-        "repo_url": str(gitops["repo_url"]).strip(),
+        "source": source,
+        "repo_url": gitops_repository_url(
+            config,
+            region=region,
+            cluster_name=cluster_name,
+            url_suffix=aws_url_suffix_for_region(region),
+        ),
         "revision": str(gitops["revision"]).strip(),
         "path": render_gitops_path(
-            str(gitops["path"]).strip(), region=region, cluster_name=cluster_name
+            effective_gitops_path(gitops), region=region, cluster_name=cluster_name
         ),
         "destination_namespaces": namespaces,
         "sync_policy": str(gitops["sync_policy"]),
         "project": GITOPS_PROJECT_NAME,
         "application": GITOPS_ROOT_APPLICATION_NAME,
     }
+    if source == "codecommit":
+        # The GCO-managed repository: what `gitops push` targets.
+        summary["codecommit_repository"] = gitops_codecommit_repository_name(cluster_name)
+        summary["codecommit_branch"] = GITOPS_CODECOMMIT_DEFAULT_BRANCH
+    return summary
 
 
 def _drift(*, configured: bool, detail: Mapping[str, Any] | None, stack_name: str) -> str | None:

@@ -234,10 +234,12 @@ from tools.nodepools import (  # noqa: E402, F401
 from tools.queue import queue_get, queue_list, queue_stats, queue_submit  # noqa: E402, F401
 from tools.stacks import (  # noqa: E402, F401
     addons_status,
+    argocd_ui_url,
     aurora_status,
     disable_aurora,
     disable_fsx,
     disable_valkey,
+    eks_capabilities_status,
     enable_aurora,
     enable_fsx,
     enable_valkey,
@@ -283,7 +285,14 @@ with _contextlib.suppress(ImportError):
     )
 
 with _contextlib.suppress(ImportError):
-    from tools.stacks import addons_install, bootstrap_cdk, deploy_all, deploy_stack  # noqa: F401
+    from tools.stacks import (  # noqa: F401
+        addons_install,
+        argocd_bootstrap_identity,
+        bootstrap_cdk,
+        deploy_all,
+        deploy_stack,
+        gitops_push,
+    )
 
 with _contextlib.suppress(ImportError):
     from tools.stacks import destroy_all, destroy_stack  # noqa: F401
@@ -438,6 +447,8 @@ if _IS_RELOAD and (
         "deploy_all",
         "bootstrap_cdk",
         "addons_install",
+        "gitops_push",
+        "argocd_bootstrap_identity",
         "destroy_stack",
         "destroy_all",
         "list_deployment_regions",
@@ -623,6 +634,8 @@ _PUBLIC_EXPORTS = [
     "analytics_user_add",
     "analytics_user_remove",
     "analytics_users_list",
+    "argocd_bootstrap_identity",
+    "argocd_ui_url",
     "assume_mcp_role",
     "audit_logged",
     "audit_logger",
@@ -678,6 +691,7 @@ _PUBLIC_EXPORTS = [
     "disable_fsx",
     "disable_monitoring",
     "disable_valkey",
+    "eks_capabilities_status",
     "emit_startup_log",
     "enable_analytics",
     "enable_aurora",
@@ -701,6 +715,7 @@ _PUBLIC_EXPORTS = [
     "get_model_uri",
     "get_pod_logs",
     "get_project_version",
+    "gitops_push",
     "images_build",
     "images_cleanup",
     "images_delete_repo",

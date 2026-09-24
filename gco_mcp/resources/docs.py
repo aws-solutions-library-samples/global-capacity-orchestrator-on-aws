@@ -719,7 +719,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["CLUSTER_SHARED_BUCKET", "ARCHITECTURE"],
     },
     "EKS_CAPABILITIES": {
-        "summary": "Opt-in EKS Capabilities — the AWS-managed Argo CD, ACK and kro installations GCO can attach per regional cluster — and the GitOps hand-off that points the hosted Argo CD at a fenced tenant repository path.",
+        "summary": "Opt-in EKS Capabilities — the AWS-managed Argo CD, ACK and kro installations GCO can attach per regional cluster — and the GitOps hand-off that points the hosted Argo CD at a fenced repository path: a GCO-managed per-cluster CodeCommit repository filled with `gitops push`, or a repository of your own.",
         "topics": ["eks", "gitops", "customization", "security", "cli"],
         "keywords": [
             "eks capabilities",
@@ -732,7 +732,10 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "appproject",
             "application",
             "identity center",
+            "bootstrap-identity",
             "capability role",
+            "codecommit",
+            "gitops push",
             "gco stacks capabilities",
             "argocd ui",
             "tenant repository",

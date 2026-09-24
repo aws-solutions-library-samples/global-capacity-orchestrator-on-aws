@@ -191,12 +191,13 @@ class TestToolRegistration:
         # tools (139 before the EKS Capabilities pair eks_capabilities_status +
         # argocd_ui_url; 138 before deps_scan; 134 before fleet_status; 125
         # before the cost allocation/k8s/report family added 9). Optional
-        # families add 58 more when every flag is enabled: capacity purchase
+        # families add 60 more when every flag is enabled: capacity purchase
         # (2), image publish (3), destructive operations (15), model upload
-        # (2), infrastructure deploy (4), infrastructure destroy (2), local
-        # metrics (1), semantic progress (1), local storage sync (1), config
-        # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 199.
+        # (2), infrastructure deploy (6: the CDK lifecycle four plus the
+        # GitOps push and the Argo CD identity bootstrap), infrastructure
+        # destroy (2), local metrics (1), semantic progress (1), local storage
+        # sync (1), config management (11), Mission (10), and Swarm (6). The
+        # all-flags ceiling is therefore 201.
         base_count = 141
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -215,7 +216,9 @@ class TestToolRegistration:
         if "models_upload" in tool_names:
             expected += 2  # central + regional upload tools share the model-upload gate
         if "deploy_stack" in tool_names:
-            expected += 4  # deploy_stack + deploy_all + bootstrap_cdk + addons_install
+            # deploy_stack + deploy_all + bootstrap_cdk + addons_install +
+            # gitops_push + argocd_bootstrap_identity
+            expected += 6
         if "destroy_stack" in tool_names:
             expected += 2  # destroy_stack + destroy_all
         if "metrics_from_local_file" in tool_names:
@@ -486,7 +489,16 @@ class TestToolRegistration:
         # Infrastructure-deploy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DEPLOY.
         if "deploy_stack" in names:
-            expected.update({"deploy_stack", "deploy_all", "bootstrap_cdk", "addons_install"})
+            expected.update(
+                {
+                    "deploy_stack",
+                    "deploy_all",
+                    "bootstrap_cdk",
+                    "addons_install",
+                    "gitops_push",
+                    "argocd_bootstrap_identity",
+                }
+            )
         # Infrastructure-destroy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DESTROY.
         if "destroy_stack" in names:

@@ -716,6 +716,46 @@ CONFIGS.extend(
                 },
             },
         ),
+        # EKS Capabilities, all three types on with the batteries-included
+        # GitOps hand-off: Argo CD (Identity Center + a role mapping, a
+        # private-endpoint VPCE, repository-credential grants), the
+        # GCO-managed CodeCommit repository with the retain removal policy,
+        # ACK with role selectors and kro. Exercises the capability roles, the
+        # AWS::EKS::Capability resources, the CodeCommit repository + seed
+        # asset, and the {{ARGOCD_*}} applier tokens through the real loader.
+        (
+            "eks-capabilities-enabled",
+            {
+                "eks_capabilities": {
+                    "argocd": {
+                        "enabled": True,
+                        "idc_instance_arn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+                        "idc_region": "us-east-2",
+                        "rbac_role_mappings": [
+                            {
+                                "role": "ADMIN",
+                                "identities": [{"id": "9067f2a3-c1d4-4e5f", "type": "SSO_GROUP"}],
+                            }
+                        ],
+                        "vpce_ids": ["vpce-0123456789abcdef0"],
+                        "repo_credentials_secret_arns": [
+                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:gco/git-token-AbCdEf"
+                        ],
+                        "gitops": {
+                            "enabled": True,
+                            "sync_policy": "automated",
+                            "codecommit": {"removal_policy": "retain"},
+                        },
+                    },
+                    "ack": {
+                        "enabled": True,
+                        "disabled_services": ["ec2"],
+                        "assume_role_arns": ["arn:aws:iam::123456789012:role/ack-s3-controller"],
+                    },
+                    "kro": {"enabled": True},
+                }
+            },
+        ),
     ]
 )
 
@@ -729,6 +769,13 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "release and the EKS standard-support window, both owned by the "
         "monthly dependency scan and the documented upgrade runbook — a "
         "matrix entry would hardcode a second copy of that moving target."
+    ),
+    "eks_capabilities_overrides": (
+        "Run-scoped sibling of feature_enabled_overrides for the EKS Capabilities "
+        "block (a JSON object the live-validation harness deep-merges over "
+        "eks_capabilities for one deploy). It reaches the very same loader path as "
+        "the eks_capabilities entry above, which the matrix varies; the merge "
+        "itself is pinned in tests/test_eks_capabilities.py."
     ),
 }
 

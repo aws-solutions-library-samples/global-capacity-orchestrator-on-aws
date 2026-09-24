@@ -2795,10 +2795,10 @@ jobs:
 
           from gco.eks_capabilities_config import (
               compute_eks_capabilities_replacements,
-              normalize_eks_capabilities_config,
+              validate_eks_capabilities_config,
           )
 
-          config = normalize_eks_capabilities_config(
+          config = validate_eks_capabilities_config(
               {
                   "argocd": {
                       "enabled": True,
@@ -2808,6 +2808,10 @@ jobs:
                       ],
                       "gitops": {
                           "enabled": True,
+                          # The operator-owned source: the CodeCommit default
+                          # would render a clone URL for a repository that
+                          # only exists once the regional stack has deployed.
+                          "source": "git",
                           "repo_url": "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git",
                           "revision": "main",
                           "path": "examples/gitops/tenant-smoke",

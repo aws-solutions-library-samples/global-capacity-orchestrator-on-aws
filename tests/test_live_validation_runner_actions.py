@@ -465,7 +465,16 @@ class TestRunnerActionResolution:
             settings=_run_settings(tmp_path, requested_actions=("api", "topology")),
         )
 
-        assert instance.selected_actions == ("preflight", "baseline", "deploy", "topology", "api")
+        # argocd-identity rides in as deploy's dependency (a no-op unless the
+        # run requested the Argo CD capability without Identity Center inputs).
+        assert instance.selected_actions == (
+            "preflight",
+            "baseline",
+            "argocd-identity",
+            "deploy",
+            "topology",
+            "api",
+        )
 
     def test_empty_request_means_the_whole_registry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -506,6 +515,7 @@ class TestRunnerActionResolution:
         assert derived == frozenset(registry) - {
             "preflight",
             "baseline",
+            "argocd-identity",
             "destroy",
             "final-inventory",
         }
@@ -1056,6 +1066,7 @@ class TestRunnerRun:
         assert instance.checkpoint.completed_actions == [
             "preflight",
             "baseline",
+            "argocd-identity",
             "deploy",
             "destroy",
             "final-inventory",
@@ -1064,6 +1075,7 @@ class TestRunnerRun:
         assert statuses == {
             "preflight": "passed",
             "baseline": "passed",
+            "argocd-identity": "passed",
             "deploy": "passed",
             "topology": "failed",
             "destroy": "passed",
@@ -2304,7 +2316,7 @@ class TestMainArgumentValidation:
 
         assert args.protected_stack == ["SharedNetwork", "Audit"]
         assert parser.epilog is not None
-        assert parser.epilog.startswith("Actions: preflight, baseline, deploy")
+        assert parser.epilog.startswith("Actions: preflight, baseline, argocd-identity, deploy")
         assert args.inference_vllm_port == 8000
         assert args.inference_sglang_port == 30000
 

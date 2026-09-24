@@ -345,6 +345,105 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
             args += ["-r", region]
         return await asyncio.to_thread(cli_runner._run_cli, *args)
 
+    @mcp.tool(tags={"infrastructure", "stacks"})
+    @audit_logged
+    async def gitops_push(
+        path: str,
+        region: str | None = None,
+        all_regions: bool = False,
+        branch: str | None = None,
+        message: str | None = None,
+        dry_run: bool = False,
+    ) -> str:
+        """[gated by GCO_ENABLE_INFRASTRUCTURE_DEPLOY] deploys tenant workloads.
+
+        `gco stacks capabilities gitops push` — mirror a local directory of
+        Kubernetes manifests into a cluster's GCO-managed CodeCommit GitOps
+        repository (eks_capabilities.argocd.gitops, source codecommit). The
+        branch ends up holding exactly the directory's files; the hosted Argo
+        CD then reconciles the commit into the tenant namespaces, so this is a
+        deployment, not a config edit. Nothing is committed when nothing
+        changed. Uses the MCP host's AWS credentials through the CodeCommit
+        API (no Git credential setup).
+
+        Args:
+            path: Local directory whose files become the branch content.
+            region: Cluster region. Omit for the first deployment region.
+            all_regions: Push the same tree to every deployment region.
+            branch: Repository branch (default main).
+            message: Commit message (default names the directory and its Git revision).
+            dry_run: Report what would change without committing.
+        """
+        args = ["stacks", "capabilities", "gitops", "push", "--path", path]
+        if all_regions:
+            args.append("--all-regions")
+        elif region:
+            args += ["-r", region]
+        if branch:
+            args += ["--branch", branch]
+        if message:
+            args += ["--message", message]
+        if dry_run:
+            args.append("--dry-run")
+        args.append("-y")
+        return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+    @mcp.tool(tags={"infrastructure", "stacks"})
+    @audit_logged
+    async def argocd_bootstrap_identity(
+        region: str | None = None,
+        idc_region: str | None = None,
+        instance_arn: str | None = None,
+        create_account_instance: bool = False,
+        group: str | None = None,
+        role: str = "ADMIN",
+        users: list[str] | None = None,
+        identities: list[str] | None = None,
+        write_cdk_json: bool = False,
+    ) -> str:
+        """[gated by GCO_ENABLE_INFRASTRUCTURE_DEPLOY] creates Identity Center resources.
+
+        `gco stacks capabilities argocd bootstrap-identity` — resolve (or
+        create) the IAM Identity Center inputs the Argo CD capability needs:
+        discover the instance visible from the account, optionally create an
+        account instance when there is none, ensure one group mapped to an
+        Argo CD role, add existing users to it, and return the cdk.json
+        fragment (written in place with write_cdk_json). Passwords are the one
+        thing it cannot set: a user who wants to open the Argo CD UI signs in
+        once through the Identity Center console.
+
+        Args:
+            region: Cluster region (default: first deployment region).
+            idc_region: Region to look for / create the instance in (default: region).
+            instance_arn: Use this Identity Center instance instead of the first found.
+            create_account_instance: Create an account instance when none is visible.
+            group: Group to create/reuse (default <project>-argocd-admins).
+            role: Argo CD role for the group or identities: ADMIN, EDITOR or VIEWER.
+            users: Existing Identity Center user names to add to the group.
+            identities: Existing SSO_USER:<id> / SSO_GROUP:<id> entries to map instead of a group.
+            write_cdk_json: Write idc_instance_arn, idc_region and the mapping into cdk.json.
+        """
+        args = ["stacks", "capabilities", "argocd", "bootstrap-identity"]
+        if region:
+            args += ["-r", region]
+        if idc_region:
+            args += ["--idc-region", idc_region]
+        if instance_arn:
+            args += ["--instance-arn", instance_arn]
+        if create_account_instance:
+            args.append("--create-account-instance")
+        if group:
+            args += ["--group", group]
+        args += ["--role", role]
+        for user in users or []:
+            args += ["--user", user]
+        for identity in identities or []:
+            args += ["--identity", identity]
+        if write_cdk_json:
+            args.append("--write-cdk-json")
+        args.append("-y")
+        return await asyncio.to_thread(cli_runner._run_cli, *args)
+
     @mcp.tool(tags={"infrastructure", "stacks"}, task=_TASK_CONFIG_OPTIONAL)
     @audit_logged
     async def deploy_stack(

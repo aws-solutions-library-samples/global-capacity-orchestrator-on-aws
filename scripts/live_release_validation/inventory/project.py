@@ -22,9 +22,11 @@ from .scanners import (
     _list_api_gateway_v2_apis,
     _list_cloudwatch_log_groups,
     _list_cluster_volumes,
+    _list_codecommit_repositories,
     _list_dynamodb_tables,
     _list_eks_clusters,
     _list_global_accelerators,
+    _list_identity_center_resources,
     _list_instance_inventory,
     _list_instances,
     _list_lambda_functions,
@@ -182,6 +184,8 @@ def collect_project_resources(
         "logs",
         "secretsmanager",
         "backup",
+        "codecommit",
+        "sso-admin",
     )
     service_regions = {
         service: set(session.get_available_regions(service, partition_name=partition))
@@ -292,6 +296,23 @@ def collect_project_resources(
     for region in backup_regions:
         regional[region].update(_list_project_backup_resources(session, region, project_name))
     completed_scanners.append("aws_backup")
+    codecommit_regions = sorted(set(regions) & service_regions["codecommit"])
+    scanner_regions["codecommit_repositories"] = codecommit_regions
+    for region in codecommit_regions:
+        regional[region]["codecommit_repositories"] = _list_codecommit_repositories(
+            session, region, project_name
+        )
+    completed_scanners.append("codecommit_repositories")
+    # Identity Center is Regional in the API (an account instance is visible
+    # only where it was enabled), so every enabled Region is scanned; the
+    # account id decides which instances' identity stores may hold GCO groups.
+    identity_center_regions = sorted(set(regions) & service_regions["sso-admin"])
+    scanner_regions["identity_center"] = identity_center_regions
+    for region in identity_center_regions:
+        regional[region]["identity_center_resources"] = _list_identity_center_resources(
+            session, region, project_name, expected_account
+        )
+    completed_scanners.append("identity_center")
 
     s3_buckets = _list_project_s3_buckets(session, seed_region, project_name)
     scanner_regions["s3_buckets"] = ["global"]

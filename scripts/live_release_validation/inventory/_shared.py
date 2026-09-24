@@ -51,6 +51,8 @@ _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "backup_plans",
     "backup_selections",
     "backup_recovery_points",
+    "codecommit_repositories",
+    "identity_center_resources",
 )
 
 
@@ -91,6 +93,8 @@ _PROJECT_RESOURCE_SCANNERS = (
     "secrets_manager",
     "cluster_volumes",
     "aws_backup",
+    "codecommit_repositories",
+    "identity_center",
     "s3_buckets",
     "iam",
     "global_accelerators",

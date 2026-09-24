@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..checks.cluster import cluster_kubectl
 from ..checks.eks_capabilities import (
+    GITOPS_FIXTURE_PATH,
     effective_eks_capabilities_config,
     enabled_types_by_region,
     gitops_expectations,
+    push_gitops_fixture,
     verify_argocd_cluster_access,
     verify_capabilities_attached,
     verify_gitops_fixture,
@@ -35,10 +38,15 @@ def action_eks_capabilities(ctx: RunContext) -> dict[str, Any]:
       group;
     * when the GitOps hand-off is enabled, the fenced ``AppProject`` must allow
       the run's repository, the root ``Application`` must reach ``Synced`` /
-      ``Healthy`` at the run's commit within a bounded wait, and the fixture
+      ``Healthy`` at the expected commit within a bounded wait, and the fixture
       ConfigMap under ``examples/gitops/tenant-smoke`` must exist in
       ``gco-jobs`` carrying Argo CD's tracking label — the hosted Argo CD
-      really pulled this repository and wrote into the tenant namespace.
+      really pulled the repository and wrote into the tenant namespace. With
+      the default ``source: codecommit`` the action first pushes the fixture
+      directory into the GCO-managed repository the deploy created (the same
+      code path as ``gco stacks capabilities gitops push``) and expects the
+      resulting commit; with ``source: git`` it expects the run's
+      ``--argocd-gitops-revision`` in the operator repository.
 
     The Argo CD server URL is recorded in the evidence so the operator can
     open it (``gco stacks capabilities argocd open``) or capture the docs
@@ -83,7 +91,18 @@ def action_eks_capabilities(ctx: RunContext) -> dict[str, Any]:
             continue
 
         record["argocd_server_url"] = argo["argocd_server_url"]
-        expectations = gitops_expectations(config, region)
+        expectations = gitops_expectations(config, region, project_name=ctx.config.project_name)
+        expected_revision = expectations["revision"] if expectations else None
+        if expectations is not None and expectations["source"] == "codecommit":
+            # Seed the GCO-managed repository with the fixture; the synced
+            # revision must then be exactly the commit this push produced.
+            fixture_dir = Path(ctx.settings.repo_root) / getattr(
+                ctx.settings, "argocd_gitops_fixture_path", GITOPS_FIXTURE_PATH
+            )
+            pushed = push_gitops_fixture(ctx, region, config, fixture_dir=fixture_dir)
+            record["gitops_push"] = pushed.to_dict()
+            ctx.persist()
+            expected_revision = pushed.head_commit_id
         with cluster_kubectl(ctx, region) as kubectl:
             record["cluster_access"] = verify_argocd_cluster_access(
                 kubectl,
@@ -92,13 +111,13 @@ def action_eks_capabilities(ctx: RunContext) -> dict[str, Any]:
                 role_arn=str(argo["role_arn"]),
                 timeout=command_timeout,
             )
-            if expectations is None:
+            if expectations is None or expected_revision is None:
                 record["gitops"] = {"enabled": False}
             else:
                 synced = wait_for_gitops_sync(
                     kubectl,
                     record,
-                    expected_revision=expectations["revision"],
+                    expected_revision=expected_revision,
                     expected_repo_url=expectations["repo_url"],
                     poll_interval=poll_interval,
                     timeout=command_timeout,
@@ -106,8 +125,9 @@ def action_eks_capabilities(ctx: RunContext) -> dict[str, Any]:
                 fixture = verify_gitops_fixture(kubectl, record, timeout=command_timeout)
                 record["gitops"] = {
                     "enabled": True,
+                    "source": expectations["source"],
                     "repo_url": expectations["repo_url"],
-                    "revision": expectations["revision"],
+                    "revision": expected_revision,
                     "path": expectations["path"],
                     "application": synced,
                     "fixture": fixture,

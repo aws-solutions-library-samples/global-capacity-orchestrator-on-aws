@@ -7,7 +7,9 @@ per-type knobs: every type is **off by default**, each enabled type
 synthesizes one capability IAM role and one capability per selected regional
 cluster, and Argo CD additionally supports a declarative GitOps hand-off (a
 fenced ``AppProject`` plus one root ``Application``) that points each selected
-cluster's Argo CD at an operator-owned repository path.
+cluster's Argo CD at a repository path: by default a GCO-managed per-cluster
+AWS CodeCommit repository (``source: codecommit``), otherwise an
+operator-owned repository (``source: git``).
 
 This module owns the block's shape so the config loader, the regional stack,
 the CLI and the live-validation harness all agree on names and defaults. Like
@@ -69,6 +71,32 @@ ARGOCD_RBAC_ROLES: tuple[str, ...] = ("ADMIN", "EDITOR", "VIEWER")
 ARGOCD_SSO_IDENTITY_TYPES: tuple[str, ...] = ("SSO_USER", "SSO_GROUP")
 GITOPS_SYNC_POLICIES: tuple[str, ...] = ("manual", "automated")
 
+#: Where the hand-off's manifests come from. ``codecommit`` (the default) is
+#: the batteries-included source: the regional stack creates one AWS
+#: CodeCommit repository per selected cluster, grants the capability role
+#: ``codecommit:GitPull`` on exactly that repository, and operators fill it
+#: with ``gco stacks capabilities gitops push`` — no credentials, no
+#: repository Secret, nothing to reach over the public internet (the hosted
+#: Argo CD authenticates to CodeCommit with its own IAM role). ``git`` points
+#: at an operator-owned repository ``repo_url`` instead (public, or private
+#: through Secrets Manager credentials / CodeConnections).
+GITOPS_SOURCES: tuple[str, ...] = ("codecommit", "git")
+
+#: ``path`` used when the block leaves it empty, per source: a per-cluster
+#: CodeCommit repository is read from its root, a shared operator repository
+#: from a per-cluster overlay directory.
+GITOPS_DEFAULT_PATHS: dict[str, str] = {"codecommit": ".", "git": "clusters/{region}"}
+
+#: Branch the seeded CodeCommit repository starts with (also what
+#: ``gitops push`` targets by default); ``revision: HEAD`` follows it.
+GITOPS_CODECOMMIT_DEFAULT_BRANCH = "main"
+
+#: What ``cdk destroy`` does with a GCO-managed CodeCommit repository. The
+#: operator's local checkout is the source of truth (the repository only ever
+#: receives what ``gitops push`` mirrors into it), so the default follows the
+#: project convention of leaving nothing behind; ``retain`` keeps the history.
+GITOPS_CODECOMMIT_REMOVAL_POLICIES: tuple[str, ...] = ("destroy", "retain")
+
 #: Placeholders the GitOps ``path`` may carry; substituted per cluster so one
 #: repository can hold a per-cluster overlay directory.
 GITOPS_PATH_PLACEHOLDERS: tuple[str, ...] = ("{region}", "{cluster_name}")
@@ -98,11 +126,20 @@ EKS_CAPABILITIES_DEFAULTS: dict[str, Any] = {
         "repo_credentials_kms_key_arns": [],
         "gitops": {
             "enabled": False,
+            # codecommit: one GCO-managed CodeCommit repository per selected
+            # cluster (push with `gco stacks capabilities gitops push`);
+            # git: the operator-owned repository in repo_url.
+            "source": "codecommit",
             "repo_url": "",
             "revision": "HEAD",
-            "path": "clusters/{region}",
+            # "" means the source's default (GITOPS_DEFAULT_PATHS).
+            "path": "",
             "destination_namespaces": list(GITOPS_TENANT_NAMESPACES),
             "sync_policy": "manual",
+            "codecommit": {
+                # destroy | retain — what cdk destroy does with the repository.
+                "removal_policy": "destroy",
+            },
         },
     },
     "ack": {
@@ -282,9 +319,27 @@ def _validate_rbac_role_mappings(value: object, path: str) -> None:
 def _validate_gitops(gitops: Mapping[str, Any], argocd_enabled: bool, path: str) -> None:
     _reject_unknown_keys(gitops, EKS_CAPABILITIES_DEFAULTS["argocd"]["gitops"].keys(), path)
     _require_bool(gitops["enabled"], f"{path}.enabled")
-    for key in ("repo_url", "revision", "path"):
+    for key in ("source", "repo_url", "revision", "path"):
         if not isinstance(gitops[key], str):
             raise EksCapabilitiesConfigError(f"{path}.{key} must be a string, got {gitops[key]!r}")
+    source = gitops["source"]
+    if source not in GITOPS_SOURCES:
+        raise EksCapabilitiesConfigError(
+            f"{path}.source must be one of {', '.join(GITOPS_SOURCES)}, got {source!r}"
+        )
+    codecommit = gitops["codecommit"]
+    if not isinstance(codecommit, Mapping):
+        raise EksCapabilitiesConfigError(f"{path}.codecommit must be an object, got {codecommit!r}")
+    _reject_unknown_keys(
+        codecommit,
+        EKS_CAPABILITIES_DEFAULTS["argocd"]["gitops"]["codecommit"].keys(),
+        f"{path}.codecommit",
+    )
+    if codecommit["removal_policy"] not in GITOPS_CODECOMMIT_REMOVAL_POLICIES:
+        raise EksCapabilitiesConfigError(
+            f"{path}.codecommit.removal_policy must be one of "
+            f"{', '.join(GITOPS_CODECOMMIT_REMOVAL_POLICIES)}, got {codecommit['removal_policy']!r}"
+        )
     namespaces = _require_string_list(
         gitops["destination_namespaces"], f"{path}.destination_namespaces"
     )
@@ -300,6 +355,12 @@ def _validate_gitops(gitops: Mapping[str, Any], argocd_enabled: bool, path: str)
             f"{path}.sync_policy must be one of {', '.join(GITOPS_SYNC_POLICIES)}, "
             f"got {gitops['sync_policy']!r}"
         )
+    repo_url = gitops["repo_url"].strip()
+    if source == "codecommit" and repo_url:
+        raise EksCapabilitiesConfigError(
+            f"{path}.repo_url applies to source: git only; with source: codecommit GCO creates "
+            "and names the repository itself (drop repo_url, or set source: git to use yours)"
+        )
     if not gitops["enabled"]:
         return
     if not argocd_enabled:
@@ -307,16 +368,15 @@ def _validate_gitops(gitops: Mapping[str, Any], argocd_enabled: bool, path: str)
             f"{path}.enabled requires eks_capabilities.argocd.enabled: true "
             "(the hand-off needs the hosted Argo CD it points at)"
         )
-    repo_url = gitops["repo_url"].strip()
-    if not (repo_url.startswith(("https://", "ssh://", "git@")) or repo_url.endswith(".git")):
+    if source == "git" and not (
+        repo_url.startswith(("https://", "ssh://", "git@")) or repo_url.endswith(".git")
+    ):
         raise EksCapabilitiesConfigError(
-            f"{path}.repo_url must be a Git repository URL (https://, ssh:// or git@), got "
-            f"{gitops['repo_url']!r}"
+            f"{path}.repo_url must be a Git repository URL (https://, ssh:// or git@) when "
+            f"source is git, got {gitops['repo_url']!r}"
         )
     if not gitops["revision"].strip():
         raise EksCapabilitiesConfigError(f"{path}.revision must be a non-empty branch, tag or SHA")
-    if not gitops["path"].strip():
-        raise EksCapabilitiesConfigError(f"{path}.path must be a non-empty repository path")
     if not namespaces:
         raise EksCapabilitiesConfigError(f"{path}.destination_namespaces must not be empty")
 
@@ -427,6 +487,54 @@ def gitops_enabled_in_region(config: Mapping[str, Any], region: str) -> bool:
     return isinstance(gitops, Mapping) and gitops.get("enabled") is True
 
 
+def gitops_source(config: Mapping[str, Any]) -> str:
+    """The hand-off's manifest source (``codecommit`` or ``git``) for a normalized block."""
+    gitops = config.get("argocd", {}).get("gitops")
+    if not isinstance(gitops, Mapping):
+        return "codecommit"
+    return str(gitops.get("source") or "codecommit")
+
+
+def gitops_codecommit_enabled_in_region(config: Mapping[str, Any], region: str) -> bool:
+    """True when ``region`` gets a GCO-managed CodeCommit repository for the hand-off."""
+    return gitops_enabled_in_region(config, region) and gitops_source(config) == "codecommit"
+
+
+def gitops_codecommit_repository_name(cluster_name: str) -> str:
+    """Name of the GCO-managed CodeCommit repository for one cluster (``<cluster>-gitops``).
+
+    CodeCommit repository names are per account per region; the cluster name
+    already carries the project prefix and the region, so the inventory
+    scanners recognize the repository as project-owned by name.
+    """
+    return f"{cluster_name}-gitops"
+
+
+def aws_url_suffix_for_region(region: str) -> str:
+    """The partition DNS suffix a region's regional endpoints hang off."""
+    return "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
+
+
+def codecommit_clone_url_http(
+    region: str, repository_name: str, *, url_suffix: str = "amazonaws.com"
+) -> str:
+    """The HTTPS clone URL the hosted Argo CD reads a CodeCommit repository from.
+
+    ``https://git-codecommit.<region>.<suffix>/v1/repos/<name>`` is the form
+    the EKS Argo CD documentation gives for direct (IAM-authenticated)
+    CodeCommit sources; ``url_suffix`` may be a CloudFormation token.
+    """
+    return f"https://git-codecommit.{region}.{url_suffix}/v1/repos/{repository_name}"
+
+
+def effective_gitops_path(gitops: Mapping[str, Any]) -> str:
+    """The repository ``path`` template: the configured one, or the source default."""
+    configured = str(gitops.get("path") or "").strip()
+    if configured:
+        return configured
+    return GITOPS_DEFAULT_PATHS[str(gitops.get("source") or "codecommit")]
+
+
 def render_gitops_path(path_template: str, *, region: str, cluster_name: str) -> str:
     """Substitute the per-cluster placeholders in a GitOps ``path``.
 
@@ -434,6 +542,27 @@ def render_gitops_path(path_template: str, *, region: str, cluster_name: str) ->
     path (a Kustomize overlay dir named ``{prod}`` for instance) is left alone.
     """
     return path_template.replace("{region}", region).replace("{cluster_name}", cluster_name)
+
+
+def gitops_repository_url(
+    config: Mapping[str, Any],
+    *,
+    region: str,
+    cluster_name: str,
+    url_suffix: str = "amazonaws.com",
+) -> str:
+    """The repository URL the root ``Application`` in ``region`` points at.
+
+    ``source: git`` returns the configured ``repo_url``; ``source: codecommit``
+    derives the GCO-managed repository's clone URL from the cluster name, so
+    the stack, the CLI and the live harness never disagree about it.
+    """
+    gitops = config["argocd"]["gitops"]
+    if gitops_source(config) == "git":
+        return str(gitops["repo_url"]).strip()
+    return codecommit_clone_url_http(
+        region, gitops_codecommit_repository_name(cluster_name), url_suffix=url_suffix
+    )
 
 
 #: kubectl-applier tokens rendered for the Argo CD capability manifests.
@@ -458,6 +587,7 @@ def compute_eks_capabilities_replacements(
     cluster_name: str,
     cluster_arn: str,
     argocd_role_arn: str | None,
+    url_suffix: str = "amazonaws.com",
 ) -> dict[str, str]:
     """Build the kubectl-applier replacements for the Argo CD capability manifests.
 
@@ -479,8 +609,10 @@ def compute_eks_capabilities_replacements(
     observability gates. The two list-valued tokens render as single-line JSON
     (valid YAML flow style) so they are indentation-independent; the Argo CD
     destinations use the EKS cluster ARN because the hosted capability
-    identifies clusters by ARN, not by API-server URL. ``cluster_arn`` may be
-    a CloudFormation token: it is only ever concatenated into strings.
+    identifies clusters by ARN, not by API-server URL. ``cluster_arn`` and
+    ``url_suffix`` (the partition DNS suffix a ``source: codecommit``
+    repository URL is built from) may be CloudFormation tokens: they are only
+    ever concatenated into strings.
     """
     if argocd_role_arn is None:
         return {}
@@ -499,10 +631,15 @@ def compute_eks_capabilities_replacements(
         sync_policy = {}
     replacements.update(
         {
-            "{{ARGOCD_GITOPS_REPO_URL}}": str(gitops["repo_url"]).strip(),
+            "{{ARGOCD_GITOPS_REPO_URL}}": gitops_repository_url(
+                capabilities_config,
+                region=region,
+                cluster_name=cluster_name,
+                url_suffix=url_suffix,
+            ),
             "{{ARGOCD_GITOPS_REVISION}}": str(gitops["revision"]).strip(),
             "{{ARGOCD_GITOPS_PATH}}": render_gitops_path(
-                str(gitops["path"]).strip(), region=region, cluster_name=cluster_name
+                effective_gitops_path(gitops), region=region, cluster_name=cluster_name
             ),
             "{{ARGOCD_GITOPS_DEFAULT_NAMESPACE}}": namespaces[0],
             "{{ARGOCD_GITOPS_DESTINATIONS}}": json.dumps(destinations),

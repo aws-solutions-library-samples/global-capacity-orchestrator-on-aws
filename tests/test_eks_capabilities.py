@@ -67,7 +67,15 @@ def _argocd(**overrides: Any) -> dict[str, Any]:
 
 
 def _gitops(**overrides: Any) -> dict[str, Any]:
-    block: dict[str, Any] = {"enabled": True, "repo_url": _REPO_URL}
+    """An enabled hand-off pointed at an operator-owned repository (``source: git``)."""
+    block: dict[str, Any] = {"enabled": True, "source": "git", "repo_url": _REPO_URL}
+    block.update(overrides)
+    return block
+
+
+def _gitops_codecommit(**overrides: Any) -> dict[str, Any]:
+    """An enabled hand-off on the GCO-managed CodeCommit repository (the default source)."""
+    block: dict[str, Any] = {"enabled": True}
     block.update(overrides)
     return block
 
@@ -95,13 +103,32 @@ class TestDefaultsAndNormalization:
 
     def test_normalize_deep_merges_nested_blocks(self) -> None:
         normalized = caps.normalize_eks_capabilities_config(
-            {"argocd": {"enabled": True, "gitops": {"repo_url": _REPO_URL}}}
+            {"argocd": {"enabled": True, "gitops": {"source": "git", "repo_url": _REPO_URL}}}
         )
         assert normalized["argocd"]["enabled"] is True
         assert normalized["argocd"]["gitops"]["repo_url"] == _REPO_URL
         assert normalized["argocd"]["gitops"]["revision"] == "HEAD"
-        assert normalized["argocd"]["gitops"]["path"] == "clusters/{region}"
+        # An empty path means "the source's default" (resolved at render time).
+        assert normalized["argocd"]["gitops"]["path"] == ""
+        assert normalized["argocd"]["gitops"]["codecommit"] == {"removal_policy": "destroy"}
         assert normalized["ack"] == caps.EKS_CAPABILITIES_DEFAULTS["ack"]
+
+    def test_codecommit_is_the_default_source(self) -> None:
+        # Batteries included: `gitops: {enabled: true}` alone gives every
+        # selected cluster its own GCO-managed CodeCommit repository.
+        defaults = caps.EKS_CAPABILITIES_DEFAULTS["argocd"]["gitops"]
+        assert defaults["source"] == "codecommit"
+        assert defaults["repo_url"] == ""
+        assert caps.GITOPS_SOURCES == ("codecommit", "git")
+        assert caps.GITOPS_DEFAULT_PATHS == {"codecommit": ".", "git": "clusters/{region}"}
+        assert caps.GITOPS_CODECOMMIT_DEFAULT_BRANCH == "main"
+
+    def test_effective_gitops_path_falls_back_per_source(self) -> None:
+        assert caps.effective_gitops_path({"source": "codecommit", "path": ""}) == "."
+        assert caps.effective_gitops_path({"source": "git", "path": " "}) == "clusters/{region}"
+        assert caps.effective_gitops_path({"source": "codecommit", "path": " apps "}) == "apps"
+        # A block that predates the source knob reads as the default source.
+        assert caps.effective_gitops_path({"path": ""}) == "."
 
     def test_normalize_does_not_mutate_the_defaults(self) -> None:
         before = copy.deepcopy(caps.EKS_CAPABILITIES_DEFAULTS)
@@ -288,14 +315,55 @@ class TestValidationRejects:
         )
         assert config["argocd"]["gitops"]["repo_url"] == repo_url
 
-    def test_gitops_revision_and_path_must_not_be_blank(self) -> None:
+    def test_gitops_revision_must_not_be_blank(self) -> None:
         self._reject(
             {"argocd": _argocd(gitops=_gitops(revision=" "))},
             r"gitops\.revision must be a non-empty",
         )
+
+    def test_gitops_blank_path_is_the_source_default(self) -> None:
+        for gitops in (_gitops(path=""), _gitops_codecommit(path=" ")):
+            config = caps.validate_eks_capabilities_config({"argocd": _argocd(gitops=gitops)})
+            assert config["argocd"]["gitops"]["path"] == gitops["path"]
+
+    def test_gitops_source_enum(self) -> None:
         self._reject(
-            {"argocd": _argocd(gitops=_gitops(path=""))}, r"gitops\.path must be a non-empty"
+            {"argocd": _argocd(gitops=_gitops_codecommit(source="gitea"))},
+            r"gitops\.source must be one of codecommit, git, got 'gitea'",
         )
+        self._reject({"argocd": {"gitops": {"source": 1}}}, r"gitops\.source must be a string")
+
+    def test_codecommit_source_refuses_a_repo_url(self) -> None:
+        # The most likely confusion: keeping repo_url while leaving the default
+        # source. Say what GCO does instead of silently ignoring the URL.
+        self._reject(
+            {"argocd": _argocd(gitops=_gitops_codecommit(repo_url=_REPO_URL))},
+            r"gitops\.repo_url applies to source: git only.*GCO creates and names the repository",
+        )
+        # ...even when the hand-off is disabled, so the block never carries a
+        # dead setting.
+        self._reject(
+            {"argocd": {"gitops": {"repo_url": _REPO_URL}}},
+            r"gitops\.repo_url applies to source: git only",
+        )
+
+    def test_codecommit_block_shapes(self) -> None:
+        self._reject(
+            {"argocd": {"gitops": {"codecommit": {"removal_policy": "keep"}}}},
+            r"codecommit\.removal_policy must be one of destroy, retain, got 'keep'",
+        )
+        self._reject(
+            {"argocd": {"gitops": {"codecommit": {"branch": "main"}}}},
+            r"gitops\.codecommit contains unknown key\(s\): branch",
+        )
+        self._reject(
+            {"argocd": {"gitops": {"codecommit": "destroy"}}},
+            r"gitops\.codecommit must be an object",
+        )
+        config = caps.validate_eks_capabilities_config(
+            {"argocd": _argocd(gitops=_gitops_codecommit(codecommit={"removal_policy": "retain"}))}
+        )
+        assert config["argocd"]["gitops"]["codecommit"]["removal_policy"] == "retain"
 
     def test_gitops_destination_namespaces_are_fenced_to_the_tenant_namespaces(self) -> None:
         self._reject(
@@ -418,6 +486,43 @@ class TestRegionHelpers:
         )
         assert rendered == "clusters/us-east-1/gco-us-east-1/{prod}"
         assert caps.render_gitops_path("apps", region=_REGION, cluster_name="x") == "apps"
+
+    def test_codecommit_source_helpers(self) -> None:
+        codecommit_config = caps.normalize_eks_capabilities_config(
+            {"argocd": _argocd(regions=[_REGION], gitops=_gitops_codecommit())}
+        )
+        assert caps.gitops_source(codecommit_config) == "codecommit"
+        assert caps.gitops_source(self._CONFIG) == "git"
+        assert caps.gitops_source({}) == "codecommit"
+        assert caps.gitops_codecommit_enabled_in_region(codecommit_config, _REGION)
+        # Region subset and source both gate the repository.
+        assert not caps.gitops_codecommit_enabled_in_region(codecommit_config, _OTHER_REGION)
+        assert not caps.gitops_codecommit_enabled_in_region(self._CONFIG, _REGION)
+        assert caps.gitops_codecommit_repository_name("gco-us-east-1") == "gco-us-east-1-gitops"
+        assert (
+            caps.codecommit_clone_url_http("us-east-1", "gco-us-east-1-gitops")
+            == "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/gco-us-east-1-gitops"
+        )
+        assert caps.aws_url_suffix_for_region("cn-north-1") == "amazonaws.com.cn"
+        assert caps.aws_url_suffix_for_region("us-gov-west-1") == "amazonaws.com"
+
+    def test_gitops_repository_url_follows_the_source(self) -> None:
+        assert (
+            caps.gitops_repository_url(self._CONFIG, region=_REGION, cluster_name="gco-us-east-1")
+            == _REPO_URL
+        )
+        codecommit_config = caps.normalize_eks_capabilities_config(
+            {"argocd": _argocd(gitops=_gitops_codecommit())}
+        )
+        assert (
+            caps.gitops_repository_url(
+                codecommit_config,
+                region=_REGION,
+                cluster_name="gco-us-east-1",
+                url_suffix="${AWS::URLSuffix}",
+            )
+            == "https://git-codecommit.us-east-1.${AWS::URLSuffix}/v1/repos/gco-us-east-1-gitops"
+        )
 
 
 # ─── ConfigLoader wiring ─────────────────────────────────────────────────────
@@ -600,6 +705,17 @@ _SUBSET: dict[str, Any] = caps.normalize_eks_capabilities_config(
     }
 )
 
+# The batteries-included shape: `gitops: {enabled: true}` and nothing else,
+# so the stack owns the repository (default source, default path, default
+# removal policy).
+_CODECOMMIT: dict[str, Any] = caps.normalize_eks_capabilities_config(
+    {"argocd": _argocd(gitops=_gitops_codecommit())}
+)
+
+_CODECOMMIT_RETAINED: dict[str, Any] = caps.normalize_eks_capabilities_config(
+    {"argocd": _argocd(gitops=_gitops_codecommit(codecommit={"removal_policy": "retain"}))}
+)
+
 
 def _synth(block: dict[str, Any]) -> tuple[GCORegionalStack, dict[str, Any]]:
     app = cdk.App()
@@ -642,6 +758,16 @@ def everything_on() -> tuple[GCORegionalStack, dict[str, Any]]:
 @pytest.fixture(scope="module")
 def subset() -> tuple[GCORegionalStack, dict[str, Any]]:
     return _synth(_SUBSET)
+
+
+@pytest.fixture(scope="module")
+def codecommit_on() -> tuple[GCORegionalStack, dict[str, Any]]:
+    return _synth(_CODECOMMIT)
+
+
+@pytest.fixture(scope="module")
+def codecommit_retained() -> tuple[GCORegionalStack, dict[str, Any]]:
+    return _synth(_CODECOMMIT_RETAINED)
 
 
 def _resources(template: dict[str, Any], resource_type: str) -> dict[str, dict[str, Any]]:
@@ -914,9 +1040,13 @@ class TestEverythingOn:
         assert replacements["{{ARGOCD_GITOPS_SYNC_POLICY}}"] == json.dumps(
             {"automated": {"selfHeal": True, "prune": False}}
         )
-        # {cluster_name} resolves through the cluster's name token.
-        path = replacements["{{ARGOCD_GITOPS_PATH}}"]
-        assert path == {"Fn::Join": ["", ["clusters/us-east-1/", {"Ref": cluster}]]}
+        # {cluster_name} resolves through the configured (literal) cluster name,
+        # not the cluster resource's token: the same name also names the
+        # CodeCommit repository, so nothing here is a deploy-time join.
+        assert replacements["{{ARGOCD_GITOPS_PATH}}"] == "clusters/us-east-1/gco-test-us-east-1"
+        # source: git leaves the operator's repository URL untouched and creates
+        # no repository of its own.
+        assert _resources(template, "AWS::CodeCommit::Repository") == {}
         # Destinations carry the cluster ARN (the hosted capability identifies
         # clusters by ARN) once per configured namespace, in config order.
         destinations = replacements["{{ARGOCD_GITOPS_DESTINATIONS}}"]["Fn::Join"][1]
@@ -953,6 +1083,94 @@ class TestPerRegionSubset:
         assert not [key for key in replacements if key.startswith("{{ARGOCD_")]
         outputs = {key for key in template["Outputs"] if key.startswith("EksCapability")}
         assert outputs == {"EksCapabilityAckArn", "EksCapabilityAckRoleArn"}
+        assert _resources(template, "AWS::CodeCommit::Repository") == {}
+
+
+def _gitops_repository(template: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    repositories = _resources(template, "AWS::CodeCommit::Repository")
+    assert len(repositories) == 1, list(repositories)
+    logical_id, repository = next(iter(repositories.items()))
+    # L2 construct: the logical id carries CDK's hash suffix.
+    assert logical_id.startswith("EksCapabilityArgoCdGitOpsRepository"), logical_id
+    return logical_id, repository
+
+
+class TestCodeCommitSource:
+    """``gitops: {enabled: true}`` alone gives the cluster a GCO-managed repository."""
+
+    def test_one_repository_named_after_the_cluster_and_seeded(self, codecommit_on) -> None:
+        stack, template = codecommit_on
+        _logical_id, repository = _gitops_repository(template)
+        properties = repository["Properties"]
+        assert properties["RepositoryName"] == "gco-test-us-east-1-gitops"
+        assert "gco stacks capabilities gitops push" in properties["RepositoryDescription"]
+        # Seeded from the checked-in README so the root Application is
+        # Synced/Healthy before the first push; CloudFormation applies the
+        # seed at creation only.
+        assert properties["Code"]["BranchName"] == "main"
+        assert set(properties["Code"]["S3"]) >= {"Bucket", "Key"}
+        assert stack.gitops_repository is not None
+        assert GCORegionalStack._GITOPS_CODECOMMIT_SEED_DIR.is_dir()
+        seed_files = sorted(
+            path.name for path in GCORegionalStack._GITOPS_CODECOMMIT_SEED_DIR.iterdir()
+        )
+        assert seed_files == ["README.md"], "the seed must stay a README-only tree"
+
+    def test_destroy_is_the_default_removal_policy(self, codecommit_on) -> None:
+        _stack, template = codecommit_on
+        _logical_id, repository = _gitops_repository(template)
+        assert repository["DeletionPolicy"] == "Delete"
+        assert repository["UpdateReplacePolicy"] == "Delete"
+
+    def test_retain_keeps_the_history(self, codecommit_retained) -> None:
+        _stack, template = codecommit_retained
+        _logical_id, repository = _gitops_repository(template)
+        assert repository["DeletionPolicy"] == "Retain"
+        assert repository["UpdateReplacePolicy"] == "Retain"
+
+    def test_argocd_role_may_only_git_pull_that_repository(self, codecommit_on) -> None:
+        _stack, template = codecommit_on
+        logical_id, _repository = _gitops_repository(template)
+        role = _capability_roles(template)[_role_logical_id(template, "ArgoCd")]
+        assert role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"] == [
+            {
+                "Action": "codecommit:GitPull",
+                "Effect": "Allow",
+                "Resource": {"Fn::GetAtt": [logical_id, "Arn"]},
+                "Sid": "PullGitOpsRepository",
+            }
+        ]
+
+    def test_repository_outputs(self, codecommit_on) -> None:
+        _stack, template = codecommit_on
+        logical_id, _repository = _gitops_repository(template)
+        outputs = template["Outputs"]
+        assert outputs["EksCapabilityArgoCdGitOpsRepositoryName"]["Value"] == {
+            "Fn::GetAtt": [logical_id, "Name"]
+        }
+        assert outputs["EksCapabilityArgoCdGitOpsRepositoryCloneUrlHttp"]["Value"] == {
+            "Fn::GetAtt": [logical_id, "CloneUrlHttp"]
+        }
+
+    def test_root_application_reads_the_repository_root(self, codecommit_on) -> None:
+        _stack, template = codecommit_on
+        replacements = _replacements(template)
+        # The URL is derived from the deterministic repository name (the same
+        # form the CLI and the live harness compute), with the partition
+        # suffix left to CloudFormation.
+        assert replacements["{{ARGOCD_GITOPS_REPO_URL}}"] == {
+            "Fn::Join": [
+                "",
+                [
+                    "https://git-codecommit.us-east-1.",
+                    {"Ref": "AWS::URLSuffix"},
+                    "/v1/repos/gco-test-us-east-1-gitops",
+                ],
+            ]
+        }
+        assert replacements["{{ARGOCD_GITOPS_PATH}}"] == "."
+        assert replacements["{{ARGOCD_GITOPS_REVISION}}"] == "HEAD"
+        assert replacements["{{ARGOCD_GITOPS_SYNC_POLICY}}"] == "{}"
 
 
 # ─── The pure replacements helper ────────────────────────────────────────────
@@ -1011,6 +1229,35 @@ class TestComputeReplacements:
         assert replacements["{{ARGOCD_GITOPS_REVISION}}"] == "v1"
         assert replacements["{{ARGOCD_GITOPS_PATH}}"] == "apps/gco-us-east-1"
 
+    def test_codecommit_source_derives_the_repository_url_and_reads_the_root(self) -> None:
+        replacements = self._compute({"argocd": _argocd(gitops=_gitops_codecommit())})
+        assert set(replacements) == set(caps.EKS_CAPABILITIES_MANIFEST_TOKENS)
+        assert (
+            replacements["{{ARGOCD_GITOPS_REPO_URL}}"]
+            == "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/gco-us-east-1-gitops"
+        )
+        assert replacements["{{ARGOCD_GITOPS_PATH}}"] == "."
+        # An explicit path still wins, placeholders included.
+        custom = self._compute(
+            {"argocd": _argocd(gitops=_gitops_codecommit(path="overlays/{cluster_name}"))}
+        )
+        assert custom["{{ARGOCD_GITOPS_PATH}}"] == "overlays/gco-us-east-1"
+        # The partition suffix is a parameter so the stack can hand in a token.
+        china = caps.compute_eks_capabilities_replacements(
+            caps.normalize_eks_capabilities_config(
+                {"argocd": _argocd(gitops=_gitops_codecommit())}
+            ),
+            region="cn-north-1",
+            cluster_name="gco-cn-north-1",
+            cluster_arn=self._CLUSTER_ARN,
+            argocd_role_arn=self._ROLE_ARN,
+            url_suffix=caps.aws_url_suffix_for_region("cn-north-1"),
+        )
+        assert (
+            china["{{ARGOCD_GITOPS_REPO_URL}}"]
+            == "https://git-codecommit.cn-north-1.amazonaws.com.cn/v1/repos/gco-cn-north-1-gitops"
+        )
+
     def test_rendered_json_never_forms_an_unresolved_placeholder(self) -> None:
         """The applier gates on ``{{UPPER_SNAKE}}``; JSON braces must not look like one."""
         replacements = self._compute({"argocd": _argocd(gitops=_gitops(sync_policy="automated"))})
@@ -1027,8 +1274,19 @@ class TestComputeReplacements:
             'name: "integration:kind:cost-pipeline"', 1
         )[0]
         assert "07-argocd-cluster-access.yaml" in e2e and "08-argocd-gitops.yaml" in e2e
-        # The same pure renderer the stack uses, not a hand-copied substitution.
+        # The same pure renderer the stack uses, not a hand-copied substitution,
+        # fed a *validated* block that names the operator-owned source: with the
+        # CodeCommit default the renderer would point the Application at a
+        # repository that exists only after a regional stack deploys, and the
+        # job's sourceRepos assertion below pins the GitHub URL.
         assert "compute_eks_capabilities_replacements(" in e2e
+        assert "validate_eks_capabilities_config(" in e2e
+        assert '"source": "git",' in e2e
+        assert (
+            "test \"$(project '{.spec.sourceRepos[0]}')\" = \\\n"
+            '            "https://github.com/aws-solutions-library-samples/'
+            'global-capacity-orchestrator-on-aws.git"'
+        ) in e2e
         # CRDs come from a pinned upstream tag and must be Established first.
         assert re.search(r"ARGOCD_CRD_TAG: v\d+\.\d+\.\d+", e2e)
         assert "argoproj/argo-cd/${ARGOCD_CRD_TAG}/manifests/crds/" in e2e

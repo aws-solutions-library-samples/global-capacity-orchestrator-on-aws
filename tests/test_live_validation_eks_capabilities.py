@@ -92,6 +92,7 @@ class TestBuildOverrides:
             ],
             "gitops": {
                 "enabled": True,
+                "source": "git",
                 "repo_url": REPO_URL,
                 "revision": SHA,
                 "path": "examples/gitops/tenant-smoke",
@@ -101,6 +102,83 @@ class TestBuildOverrides:
         }
         config = caps.validate_eks_capabilities_config(overrides, [REGION])
         assert caps.gitops_enabled_in_region(config, REGION)
+        assert not checks.needs_identity_bootstrap(overrides)
+
+    def test_self_contained_argocd_defaults_to_codecommit_and_defers_identity(self) -> None:
+        """No Identity Center inputs, no repository: the run provisions both itself."""
+        overrides = checks.build_eks_capabilities_overrides(
+            types=("argocd",),
+            idc_instance_arn=None,
+            idc_region=None,
+            identities=(),
+            gitops=True,
+            repo_url=None,
+            revision=SHA,
+            path=checks.GITOPS_FIXTURE_PATH,
+            sync_policy="automated",
+        )
+        assert overrides["argocd"] == {
+            "enabled": True,
+            "gitops": {
+                "enabled": True,
+                "source": "codecommit",
+                "destination_namespaces": ["gco-jobs"],
+                "sync_policy": "automated",
+            },
+        }
+        assert checks.needs_identity_bootstrap(overrides)
+        # Incomplete until the argocd-identity action fills the block in...
+        with pytest.raises(caps.EksCapabilitiesConfigError, match="idc_instance_arn"):
+            caps.validate_eks_capabilities_config(overrides, [REGION])
+        # ...which effective_overrides does from the checkpoint record.
+        merged = checks.effective_overrides(
+            checks.overrides_json(overrides),
+            {"instance_arn": IDC_ARN, "idc_region": "us-east-2", "group_id": "g-live"},
+        )
+        assert merged["argocd"]["idc_instance_arn"] == IDC_ARN
+        assert merged["argocd"]["idc_region"] == "us-east-2"
+        assert merged["argocd"]["rbac_role_mappings"] == [
+            {"role": "ADMIN", "identities": [{"id": "g-live", "type": "SSO_GROUP"}]}
+        ]
+        config = caps.validate_eks_capabilities_config(merged, [REGION])
+        assert caps.gitops_codecommit_enabled_in_region(config, REGION)
+        assert not checks.needs_identity_bootstrap(merged)
+
+    def test_supplied_identities_without_an_instance_still_bootstrap_the_instance(self) -> None:
+        overrides = checks.build_eks_capabilities_overrides(
+            types=("argocd",),
+            idc_instance_arn=None,
+            idc_region=None,
+            identities=("SSO_GROUP:g-1",),
+            gitops=False,
+            repo_url=None,
+            revision=None,
+            path=checks.GITOPS_FIXTURE_PATH,
+            sync_policy="manual",
+        )
+        assert overrides["argocd"]["rbac_role_mappings"][0]["identities"] == [
+            {"id": "g-1", "type": "SSO_GROUP"}
+        ]
+        assert checks.needs_identity_bootstrap(overrides)
+        # The operator's identities win; only the instance is filled in.
+        merged = checks.effective_overrides(
+            checks.overrides_json(overrides),
+            {"instance_arn": IDC_ARN, "idc_region": REGION, "group_id": None},
+        )
+        assert merged["argocd"]["rbac_role_mappings"][0]["identities"] == [
+            {"id": "g-1", "type": "SSO_GROUP"}
+        ]
+        assert merged["argocd"]["idc_instance_arn"] == IDC_ARN
+
+    def test_effective_overrides_leave_other_shapes_alone(self) -> None:
+        identity = {"instance_arn": IDC_ARN, "idc_region": REGION, "group_id": "g"}
+        assert checks.effective_overrides("", identity) == {}
+        assert checks.effective_overrides('{"kro":{"enabled":true}}', identity) == {
+            "kro": {"enabled": True}
+        }
+        assert checks.effective_overrides('{"argocd":{"enabled":true}}', None) == {
+            "argocd": {"enabled": True}
+        }
 
     def test_argocd_without_gitops(self) -> None:
         overrides = checks.build_eks_capabilities_overrides(
@@ -120,16 +198,13 @@ class TestBuildOverrides:
     @pytest.mark.parametrize(
         ("kwargs", "match"),
         [
-            ({"idc_instance_arn": None}, "--argocd-idc-instance-arn"),
             ({"idc_instance_arn": "ssoins-1"}, "--argocd-idc-instance-arn"),
-            ({"identities": ()}, "--argocd-identity"),
             ({"identities": ("USER:u-1",)}, "expected TYPE:ID"),
             ({"identities": ("SSO_USER:",)}, "expected TYPE:ID"),
-            ({"repo_url": None}, "--argocd-gitops-repo-url"),
             ({"revision": ""}, "--argocd-gitops-revision"),
         ],
     )
-    def test_incomplete_argocd_requests_are_rejected(
+    def test_inconsistent_argocd_requests_are_rejected(
         self, kwargs: dict[str, Any], match: str
     ) -> None:
         arguments: dict[str, Any] = {
@@ -426,12 +501,40 @@ class TestEffectiveConfig:
         config = checks.effective_eks_capabilities_config(
             _context(overrides_json=_argocd_overrides())
         )
-        assert checks.gitops_expectations(config, REGION) == {
+        assert checks.gitops_expectations(config, REGION, project_name=PROJECT) == {
+            "source": "git",
             "repo_url": REPO_URL,
             "revision": SHA,
             "path": "examples/gitops/tenant-smoke",
         }
-        assert checks.gitops_expectations(caps.EKS_CAPABILITIES_DEFAULTS, REGION) is None
+        assert (
+            checks.gitops_expectations(caps.EKS_CAPABILITIES_DEFAULTS, REGION, project_name=PROJECT)
+            is None
+        )
+
+    def test_gitops_expectations_for_the_managed_repository(self) -> None:
+        overrides = checks.build_eks_capabilities_overrides(
+            types=("argocd",),
+            idc_instance_arn=IDC_ARN,
+            idc_region=None,
+            identities=("SSO_USER:u-1",),
+            gitops=True,
+            repo_url=None,
+            revision=SHA,
+            path=checks.GITOPS_FIXTURE_PATH,
+            sync_policy="automated",
+        )
+        config = checks.effective_eks_capabilities_config(
+            _context(overrides_json=checks.overrides_json(overrides))
+        )
+        assert checks.gitops_expectations(config, REGION, project_name=PROJECT) == {
+            "source": "codecommit",
+            "repository_name": f"{CLUSTER}-gitops",
+            "repo_url": f"https://git-codecommit.{REGION}.amazonaws.com/v1/repos/{CLUSTER}-gitops",
+            # HEAD: the action pins the revision to the commit its push produced.
+            "revision": "HEAD",
+            "path": ".",
+        }
 
 
 # ─── AWS side ────────────────────────────────────────────────────────────────
@@ -714,6 +817,83 @@ class TestAction:
         assert sessions == [(ctx, REGION)]
         assert ctx.checkpoint.state["eks_capabilities_validation"] == evidence
 
+    def test_codecommit_source_pushes_the_fixture_then_expects_that_commit(
+        self, instant_clock: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The self-contained default: seed the managed repository, then require its commit synced."""
+        overrides = checks.build_eks_capabilities_overrides(
+            types=("argocd",),
+            idc_instance_arn=IDC_ARN,
+            idc_region=None,
+            identities=("SSO_USER:u-1",),
+            gitops=True,
+            repo_url=None,
+            revision=SHA,
+            path="fixtures/tenant",
+            sync_policy="automated",
+        )
+        fixture_dir = tmp_path / "fixtures" / "tenant"
+        fixture_dir.mkdir(parents=True)
+        (fixture_dir / "configmap.yaml").write_text("kind: ConfigMap\n")
+        repo_url = f"https://git-codecommit.{REGION}.amazonaws.com/v1/repos/{CLUSTER}-gitops"
+        pushed_commit = "f" * 40
+        session = _FakeSession(_FakeEks([_capability("argocd", server_url=SERVER_URL)]))
+        ctx = _context(overrides_json=checks.overrides_json(overrides), session=session)
+        ctx.settings.repo_root = tmp_path
+        ctx.settings.argocd_gitops_fixture_path = "fixtures/tenant"
+        # Argo CD synced the commit the push produced, from the managed repository.
+        kubectl = _ScriptedKubectl(
+            _all_objects(
+                {
+                    ("appproject", "gco-tenants"): _project([repo_url]),
+                    ("application", "gco-gitops-root"): _application(revision=pushed_commit),
+                }
+            )
+        )
+        monkeypatch.setattr(action_module, "cluster_kubectl", lambda *_: nullcontext(kubectl))
+        pushes: list[dict[str, Any]] = []
+
+        def fake_push(ctx_arg: Any, region: str, config: Any, *, fixture_dir: Path) -> Any:
+            pushes.append({"region": region, "fixture_dir": fixture_dir})
+            return SimpleNamespace(
+                head_commit_id=pushed_commit,
+                to_dict=lambda: {"head_commit_id": pushed_commit, "added": 1},
+            )
+
+        monkeypatch.setattr(action_module, "push_gitops_fixture", fake_push)
+        evidence = action_module.action_eks_capabilities(ctx)
+
+        assert pushes == [{"region": REGION, "fixture_dir": fixture_dir}]
+        region = evidence["regions"][REGION]
+        assert region["gitops_push"] == {"head_commit_id": pushed_commit, "added": 1}
+        assert region["gitops"]["source"] == "codecommit"
+        assert region["gitops"]["repo_url"] == repo_url
+        assert region["gitops"]["revision"] == pushed_commit
+        assert region["gitops"]["path"] == "."
+        assert region["gitops"]["application"]["revision"] == pushed_commit
+
+    def test_push_gitops_fixture_uses_the_run_session_and_message(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        calls: dict[str, Any] = {}
+
+        def fake_push_gitops_repository(region: str, project: str, source_dir: Path, **kwargs: Any):
+            calls.update({"region": region, "project": project, "source_dir": source_dir, **kwargs})
+            return "result"
+
+        monkeypatch.setattr(checks, "push_gitops_repository", fake_push_gitops_repository)
+        codecommit = object()
+        session = SimpleNamespace(client=lambda service, region_name: codecommit)
+        ctx = _context(session=session)
+        ctx.settings.expected_sha = SHA
+        result = checks.push_gitops_fixture(ctx, REGION, {"cfg": True}, fixture_dir=tmp_path)
+        assert result == "result"
+        assert calls["region"] == REGION and calls["project"] == PROJECT
+        assert calls["source_dir"] == tmp_path
+        assert calls["config"] == {"cfg": True}
+        assert calls["codecommit_client"] is codecommit
+        assert calls["message"] == f"gco live release validation run-123: {tmp_path.name} @ {SHA}"
+
     def test_kro_alone_never_opens_a_tunnel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = _FakeSession(_FakeEks([_capability("kro")]))
         ctx = _context(overrides_json='{"kro": {"enabled": true}}', session=session)
@@ -778,3 +958,357 @@ def test_overrides_ride_the_cdk_context_and_the_resume_identity(tmp_path: Path) 
     # The context value round-trips through the parser the CDK app uses.
     parsed = caps.parse_eks_capabilities_overrides(context["eks_capabilities_overrides"])
     assert parsed["argocd"]["gitops"]["path"] == "examples/gitops/tenant-smoke"
+
+
+def test_effective_cdk_context_layers_the_provisioned_identity(tmp_path: Path) -> None:
+    """Settings carry the static part; the checkpoint carries what argocd-identity created."""
+    static = checks.overrides_json(
+        checks.build_eks_capabilities_overrides(
+            types=("argocd",),
+            idc_instance_arn=None,
+            idc_region=None,
+            identities=(),
+            gitops=True,
+            repo_url=None,
+            revision=SHA,
+            path=checks.GITOPS_FIXTURE_PATH,
+            sync_policy="automated",
+        )
+    )
+    settings = _settings(
+        tmp_path, eks_capabilities_overrides_json=static, argocd_idc_region="us-east-2"
+    )
+    before = SimpleNamespace(state={})
+    assert checks.effective_cdk_context(settings, before) == settings.extra_cdk_context()
+    identity = settings.identity()
+    assert identity["argocd_idc_region"] == "us-east-2"
+    assert identity["argocd_gitops_fixture_path"] == "examples/gitops/tenant-smoke"
+
+    after = SimpleNamespace(
+        state={
+            checks.IDENTITY_STATE_KEY: {
+                "instance_arn": IDC_ARN,
+                "idc_region": "us-east-2",
+                "group_id": "g-live",
+            }
+        }
+    )
+    context = checks.effective_cdk_context(settings, after)
+    merged = caps.parse_eks_capabilities_overrides(context["eks_capabilities_overrides"])
+    assert merged["argocd"]["idc_instance_arn"] == IDC_ARN
+    assert merged["argocd"]["rbac_role_mappings"][0]["identities"] == [
+        {"id": "g-live", "type": "SSO_GROUP"}
+    ]
+    # The resume identity is the static part only, so provisioning between
+    # runs of the same checkpoint never trips the identity check.
+    assert settings.identity()["extra_cdk_context"] == settings.extra_cdk_context()
+    # Plain settings stay untouched.
+    assert checks.effective_cdk_context(_settings(tmp_path), after) == {
+        **_settings(tmp_path).extra_cdk_context()
+    }
+
+
+# ─── the argocd-identity action ──────────────────────────────────────────────
+
+
+def _identity_context(overrides_json: str, *, state: dict[str, Any] | None = None) -> Any:
+    from scripts.live_release_validation.models import RunCheckpoint
+
+    settings = SimpleNamespace(
+        run_id="run-123",
+        expected_account="123456789012",
+        eks_capabilities_overrides_json=overrides_json,
+        argocd_idc_region="",
+        extra_cdk_context=lambda: (
+            {"eks_capabilities_overrides": overrides_json} if overrides_json else {}
+        ),
+    )
+    checkpoint = RunCheckpoint(identity={})
+    checkpoint.state.update(state or {})
+    stack_manager = MagicMock()
+    ctx = SimpleNamespace(
+        settings=settings,
+        checkpoint=checkpoint,
+        state_lock=threading.RLock(),
+        deployment_regions=(REGION,),
+        config=SimpleNamespace(project_name=PROJECT),
+        session=MagicMock(),
+        stack_manager=stack_manager,
+        persist=MagicMock(),
+    )
+    return ctx
+
+
+class TestArgoCdIdentityAction:
+    def _self_contained(self) -> str:
+        return checks.overrides_json(
+            checks.build_eks_capabilities_overrides(
+                types=("argocd",),
+                idc_instance_arn=None,
+                idc_region=None,
+                identities=(),
+                gitops=True,
+                repo_url=None,
+                revision=SHA,
+                path=checks.GITOPS_FIXTURE_PATH,
+                sync_policy="automated",
+            )
+        )
+
+    def test_not_requested_or_fully_supplied_is_a_note(self) -> None:
+        from scripts.live_release_validation.actions import argocd_identity as action
+
+        assert action.action_argocd_identity(_identity_context("")) == {
+            "bootstrapped": False,
+            "detail": "The argocd capability is not requested for this run",
+        }
+        supplied = _identity_context(_argocd_overrides())
+        evidence = action.action_argocd_identity(supplied)
+        assert evidence["bootstrapped"] is False
+        assert "supplied on the command line" in evidence["detail"]
+        supplied.stack_manager.set_extra_cdk_context.assert_not_called()
+
+    def test_provisions_records_and_reapplies_the_cdk_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli import argocd_identity as ident
+        from scripts.live_release_validation.actions import argocd_identity as action
+
+        instance = ident.IdentityCenterInstance(
+            instance_arn=IDC_ARN,
+            identity_store_id="d-live",
+            region=REGION,
+            owner_account_id="123456789012",
+            name=f"{PROJECT}-live-validation",
+            status="ACTIVE",
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_bootstrap(**kwargs: Any) -> ident.BootstrapResult:
+            captured.update(kwargs)
+            return ident.BootstrapResult(
+                instance=instance,
+                instance_created=True,
+                group_id="g-live",
+                group_name=f"{PROJECT}-live-validation-argocd",
+                group_created=True,
+                members_added=(),
+                members_already_present=(),
+                role="ADMIN",
+                identities=({"id": "g-live", "type": "SSO_GROUP"},),
+            )
+
+        monkeypatch.setattr(ident, "bootstrap_argocd_identity", fake_bootstrap)
+        ctx = _identity_context(self._self_contained())
+        evidence = action.action_argocd_identity(ctx)
+
+        assert captured["account_id"] == "123456789012"
+        assert captured["project_name"] == PROJECT
+        assert captured["preferred_region"] == REGION
+        assert captured["create_account_instance_if_missing"] is True
+        assert captured["instance_name"] == f"{PROJECT}-live-validation"
+        assert captured["group_name"] == f"{PROJECT}-live-validation-argocd"
+        assert captured["instance_tags"] == {
+            "gco:project": PROJECT,
+            "gco:live-validation-run": "run-123",
+        }
+        assert captured["identities"] == ()
+        # The factory routes through the run session.
+        captured["client_factory"]("sso-admin", REGION)
+        ctx.session.client.assert_called_with("sso-admin", region_name=REGION)
+
+        assert evidence["bootstrapped"] is True and evidence["resumed"] is False
+        assert evidence["instance_created"] is True
+        assert evidence["instance_harness_owned"] is True
+        assert evidence["group_id"] == "g-live"
+        record = ctx.checkpoint.state[checks.IDENTITY_STATE_KEY]
+        assert record["instance_arn"] == IDC_ARN and record["run_tag"] == "run-123"
+        assert record["role_mapping"]["identities"] == [{"id": "g-live", "type": "SSO_GROUP"}]
+        # Every later synthesis carries the complete Argo CD block.
+        context = ctx.stack_manager.set_extra_cdk_context.call_args.args[0]
+        merged = caps.parse_eks_capabilities_overrides(context["eks_capabilities_overrides"])
+        assert merged["argocd"]["idc_instance_arn"] == IDC_ARN
+        assert merged["argocd"]["idc_region"] == REGION
+        caps.validate_eks_capabilities_config(merged, [REGION])
+        ctx.persist.assert_called()
+
+    def test_resume_reuses_the_record_without_touching_aws(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli import argocd_identity as ident
+        from scripts.live_release_validation.actions import argocd_identity as action
+
+        monkeypatch.setattr(
+            ident,
+            "bootstrap_argocd_identity",
+            MagicMock(side_effect=AssertionError("must not call AWS on resume")),
+        )
+        record = {
+            "instance_arn": IDC_ARN,
+            "identity_store_id": "d-live",
+            "idc_region": REGION,
+            "instance_created": False,
+            "instance_harness_owned": False,
+            "group_id": "g-live",
+            "group_name": f"{PROJECT}-live-validation-argocd",
+            "group_created": True,
+            "run_tag": "run-123",
+        }
+        ctx = _identity_context(self._self_contained(), state={checks.IDENTITY_STATE_KEY: record})
+        evidence = action.action_argocd_identity(ctx)
+        assert evidence["resumed"] is True and evidence["group_id"] == "g-live"
+        ctx.stack_manager.set_extra_cdk_context.assert_called_once()
+
+    def test_supplied_identities_reach_the_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli import argocd_identity as ident
+        from scripts.live_release_validation.actions import argocd_identity as action
+
+        captured: dict[str, Any] = {}
+
+        def fake_bootstrap(**kwargs: Any) -> ident.BootstrapResult:
+            captured.update(kwargs)
+            return ident.BootstrapResult(
+                instance=ident.IdentityCenterInstance(
+                    IDC_ARN, "d-org", "us-east-2", "999", None, "ACTIVE"
+                ),
+                instance_created=False,
+                group_id=None,
+                group_name=None,
+                group_created=False,
+                members_added=(),
+                members_already_present=(),
+                role="ADMIN",
+                identities=({"id": "g-1", "type": "SSO_GROUP"},),
+            )
+
+        monkeypatch.setattr(ident, "bootstrap_argocd_identity", fake_bootstrap)
+        overrides = checks.overrides_json(
+            checks.build_eks_capabilities_overrides(
+                types=("argocd",),
+                idc_instance_arn=None,
+                idc_region="us-east-2",
+                identities=("SSO_GROUP:g-1",),
+                gitops=False,
+                repo_url=None,
+                revision=None,
+                path=checks.GITOPS_FIXTURE_PATH,
+                sync_policy="manual",
+            )
+        )
+        ctx = _identity_context(overrides)
+        evidence = action.action_argocd_identity(ctx)
+        assert captured["identities"] == ({"id": "g-1", "type": "SSO_GROUP"},)
+        assert captured["preferred_region"] == "us-east-2"
+        assert evidence["group_id"] is None
+        record = ctx.checkpoint.state[checks.IDENTITY_STATE_KEY]
+        assert record["instance_harness_owned"] is False  # not ours by name or owner
+
+
+class TestIdentityCleanup:
+    def test_nothing_recorded_is_a_no_op(self) -> None:
+        ctx = _identity_context("")
+        assert checks.cleanup_validation_identity(ctx) == {
+            "performed": False,
+            "group_deleted": False,
+            "instance_deleted": False,
+        }
+        assert "argocd_identity_cleanup" not in ctx.checkpoint.state
+
+    def test_deletes_the_harness_group_and_a_created_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli import argocd_identity as ident
+
+        deleted: dict[str, Any] = {}
+        monkeypatch.setattr(
+            ident,
+            "delete_group",
+            lambda client, *, identity_store_id, group_id: (
+                deleted.update({"group": (identity_store_id, group_id)}) or True
+            ),
+        )
+        monkeypatch.setattr(
+            ident,
+            "delete_account_instance",
+            lambda factory, region, arn: deleted.update({"instance": (region, arn)}) or True,
+        )
+        record = {
+            "instance_arn": IDC_ARN,
+            "identity_store_id": "d-live",
+            "idc_region": REGION,
+            "instance_created": True,
+            "instance_harness_owned": True,
+            "group_id": "g-live",
+            "group_name": f"{PROJECT}-live-validation-argocd",
+        }
+        ctx = _identity_context("", state={checks.IDENTITY_STATE_KEY: record})
+        result = checks.cleanup_validation_identity(ctx)
+        assert result == {"performed": True, "group_deleted": True, "instance_deleted": True}
+        assert deleted == {"group": ("d-live", "g-live"), "instance": (REGION, IDC_ARN)}
+        assert ctx.checkpoint.state["argocd_identity_cleanup"] == [result]
+
+    def test_reused_operator_instance_and_foreign_group_are_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli import argocd_identity as ident
+
+        monkeypatch.setattr(
+            ident, "delete_group", MagicMock(side_effect=AssertionError("not ours"))
+        )
+        monkeypatch.setattr(
+            ident, "delete_account_instance", MagicMock(side_effect=AssertionError("not ours"))
+        )
+        record = {
+            "instance_arn": IDC_ARN,
+            "identity_store_id": "d-corp",
+            "idc_region": REGION,
+            "instance_created": False,
+            "instance_harness_owned": False,
+            "group_id": "g-operator",
+            "group_name": "platform-admins",
+        }
+        ctx = _identity_context("", state={checks.IDENTITY_STATE_KEY: record})
+        result = checks.cleanup_validation_identity(ctx)
+        assert result == {"performed": True, "group_deleted": False, "instance_deleted": False}
+
+    def test_retained_cleanup_and_pre_deploy_destroy_run_the_identity_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.live_release_validation.actions import destroy as destroy_module
+        from scripts.live_release_validation.cleanup import retained
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            retained,
+            "cleanup_validation_identity",
+            lambda ctx: calls.append("retained") or {"performed": True},
+        )
+        for name in (
+            "_cleanup_owned_log_groups",
+            "_cleanup_new_ecr_images",
+            "_cleanup_new_ecr_repositories",
+            "_schedule_retained_kms_keys",
+        ):
+            monkeypatch.setattr(retained, name, lambda ctx: {})
+        ctx = _identity_context("")
+        result = retained._retained_resource_cleanup(ctx)
+        assert result["argocd_identity"] == {"performed": True}
+        assert calls == ["retained"]
+
+        # A run that never reached deploy still cleans up what argocd-identity made.
+        monkeypatch.setattr(
+            destroy_module,
+            "cleanup_validation_identity",
+            lambda ctx: calls.append("destroy") or {"performed": True},
+        )
+        pristine = _identity_context("")
+        assert destroy_module.destroy_deployment(pristine) == {"needed": False, "attempts": []}
+        with_identity = _identity_context(
+            "", state={checks.IDENTITY_STATE_KEY: {"instance_arn": IDC_ARN}}
+        )
+        assert destroy_module.destroy_deployment(with_identity) == {
+            "needed": False,
+            "attempts": [],
+            "argocd_identity_cleanup": {"performed": True},
+        }
+        assert calls == ["retained", "destroy"]

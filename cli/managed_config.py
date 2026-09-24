@@ -30,9 +30,11 @@ because the engine round-trips the whole document with ``json.load`` /
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
+import re
 import stat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -724,3 +726,158 @@ def set_opencode_default_model(
 ) -> ChangeReport:
     """Set ``bedrock.opencode_default_model_id`` (OpenCode session model)."""
     return managed_scalar_set(OPENCODE_DEFAULT_MODEL, model_id, config_path=config_path)
+
+
+# ---------------------------------------------------------------------------
+# EKS Capabilities: Argo CD Identity Center wiring
+# (``gco stacks capabilities argocd bootstrap-identity --write-cdk-json``).
+# ---------------------------------------------------------------------------
+
+
+def _validate_idc_instance_arn(_document: dict[str, Any], value: str) -> None:
+    if not value.startswith("arn:") or ":sso:" not in value or "/ssoins-" not in value:
+        raise ValueError(
+            f"{value!r} is not an IAM Identity Center instance ARN "
+            "(arn:<partition>:sso:::instance/ssoins-...)"
+        )
+
+
+def _validate_idc_region(_document: dict[str, Any], value: str) -> None:
+    if value and not re.fullmatch(r"[a-z]{2}(-[a-z]+)+-\d", value):
+        raise ValueError(f"{value!r} is not an AWS Region name")
+
+
+ARGOCD_IDC_INSTANCE_ARN = ManagedScalarKey(
+    key_id="eks_capabilities.argocd.idc_instance_arn",
+    container="eks_capabilities",
+    nested=("argocd",),
+    leaf="idc_instance_arn",
+    description="IAM Identity Center instance the hosted Argo CD authenticates against",
+    default="",
+    validate_result=_validate_idc_instance_arn,
+)
+
+ARGOCD_IDC_REGION = ManagedScalarKey(
+    key_id="eks_capabilities.argocd.idc_region",
+    container="eks_capabilities",
+    nested=("argocd",),
+    leaf="idc_region",
+    description="Region of the Identity Center instance (empty: the cluster's Region)",
+    default="",
+    validate_result=_validate_idc_region,
+)
+
+
+def set_argocd_identity_center(
+    instance_arn: str, idc_region: str, *, config_path: Path | str | None = None
+) -> tuple[ChangeReport, ChangeReport]:
+    """Set ``eks_capabilities.argocd.idc_instance_arn`` and ``idc_region``."""
+    return (
+        managed_scalar_set(ARGOCD_IDC_INSTANCE_ARN, instance_arn, config_path=config_path),
+        managed_scalar_set(ARGOCD_IDC_REGION, idc_region, config_path=config_path),
+    )
+
+
+def ensure_argocd_role_mapping(
+    role: str,
+    identity_id: str,
+    identity_type: str,
+    *,
+    config_path: Path | str | None = None,
+) -> ChangeReport:
+    """Grant one Identity Center identity an Argo CD role in ``rbac_role_mappings``.
+
+    Idempotent: an identity already listed under ``role`` is a reported
+    no-op; a mapping for ``role`` that exists gains the identity; otherwise a
+    new mapping is appended. Other roles' mappings are untouched. Shapes are
+    checked against the same schema the CDK app validates at synth so a
+    hand-edited file cannot be made invalid by this edit.
+    """
+    from gco.eks_capabilities_config import (
+        ARGOCD_RBAC_ROLES,
+        ARGOCD_SSO_IDENTITY_TYPES,
+        EksCapabilitiesConfigError,
+        validate_eks_capabilities_config,
+    )
+
+    key_id = "eks_capabilities.argocd.rbac_role_mappings"
+    if role not in ARGOCD_RBAC_ROLES:
+        raise ManagedConfigError(
+            f"role must be one of {', '.join(ARGOCD_RBAC_ROLES)}, got {role!r}"
+        )
+    if identity_type not in ARGOCD_SSO_IDENTITY_TYPES:
+        raise ManagedConfigError(
+            f"identity type must be one of {', '.join(ARGOCD_SSO_IDENTITY_TYPES)}, "
+            f"got {identity_type!r}"
+        )
+    if not identity_id.strip():
+        raise ManagedConfigError("identity id must not be empty")
+    identity = {"id": identity_id, "type": identity_type}
+    value = f"{role}:{identity_type}:{identity_id}"
+
+    path = _resolve_config_path(config_path)
+    with _config_mutation_lock(path):
+        document, raw = _load_document(path)
+        capabilities = document["context"].get("eks_capabilities")
+        if capabilities is None:
+            capabilities = {}
+        if not isinstance(capabilities, dict):
+            raise ManagedConfigError("context.eks_capabilities must be a JSON object")
+        argocd = capabilities.get("argocd")
+        if argocd is None:
+            argocd = {}
+        if not isinstance(argocd, dict):
+            raise ManagedConfigError("context.eks_capabilities.argocd must be a JSON object")
+        mappings = argocd.get("rbac_role_mappings")
+        if mappings is None:
+            mappings = []
+        if not isinstance(mappings, list):
+            raise ManagedConfigError(
+                "context.eks_capabilities.argocd.rbac_role_mappings must be a JSON array"
+            )
+        old = tuple(json.dumps(item, sort_keys=True) for item in mappings)
+
+        candidate = copy.deepcopy(mappings)
+        target = next(
+            (item for item in candidate if isinstance(item, dict) and item.get("role") == role),
+            None,
+        )
+        if target is None:
+            candidate.append({"role": role, "identities": [identity]})
+            changed = True
+        else:
+            identities = target.setdefault("identities", [])
+            if not isinstance(identities, list):
+                raise ManagedConfigError(
+                    f"{key_id}: identities of role {role} must be a JSON array"
+                )
+            changed = identity not in identities
+            if changed:
+                identities.append(identity)
+        if not changed:
+            report = ChangeReport(key_id, "add", value, False, old, old, path)
+            logger.info(
+                "managed-config no-op: key=%s action=add value=%s path=%s", key_id, value, path
+            )
+            return report
+
+        # Validate the whole block as synth would (mappings only; the rest of
+        # the block is whatever the operator already had).
+        trial = copy.deepcopy(capabilities)
+        trial.setdefault("argocd", {})["rbac_role_mappings"] = candidate
+        try:
+            validate_eks_capabilities_config(
+                {**trial, "argocd": {**trial["argocd"], "enabled": False}}
+            )
+        except EksCapabilitiesConfigError as exc:
+            raise ManagedConfigError(f"refusing to update {key_id}: {exc}") from exc
+
+        _require_writable(path)
+        capabilities = document["context"].setdefault("eks_capabilities", {})
+        argocd = capabilities.setdefault("argocd", {})
+        argocd["rbac_role_mappings"] = candidate
+        _write_document(path, document, raw)
+        new = tuple(json.dumps(item, sort_keys=True) for item in candidate)
+        report = ChangeReport(key_id, "add", value, True, old, new, path)
+        logger.info("managed-config write: key=%s action=add value=%s path=%s", key_id, value, path)
+        return report

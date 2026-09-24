@@ -279,6 +279,10 @@ class TestManifestTemplatePlaceholderCoverage:
     REPLACEMENT_SOURCES = (
         Path("gco/stacks/regional_stack.py"),
         Path("gco/inference_proxy_config.py"),
+        # The {{ARGOCD_*}} tokens gating 07-argocd-cluster-access.yaml and
+        # 08-argocd-gitops.yaml are rendered by this CDK-free module (the stack,
+        # the kind CI job and the live harness all call its renderer).
+        Path("gco/eks_capabilities_config.py"),
     )
 
     # Placeholders that are intentionally only provided for specific

@@ -844,6 +844,96 @@ class TestLambdaApiGatewayLogSecretScanners:
                 _session_for(client, "secretsmanager"), _REGION, _PROJECT
             )
 
+    def test_codecommit_repositories_are_matched_by_project_prefix(self) -> None:
+        client = _paginated_client(
+            {
+                "list_repositories": [
+                    {
+                        "repositories": [
+                            {"repositoryName": f"{_PROJECT}-{_REGION}-gitops"},
+                            {"repositoryName": "unrelated"},
+                        ]
+                    },
+                    {"repositories": [{"repositoryName": f"{_PROJECT}-us-west-2-gitops"}]},
+                ]
+            }
+        )
+        assert inventory_scanners._list_codecommit_repositories(
+            _session_for(client, "codecommit"), _REGION, _PROJECT
+        ) == [f"{_PROJECT}-{_REGION}-gitops", f"{_PROJECT}-us-west-2-gitops"]
+
+    def test_identity_center_instances_by_name_and_groups_only_in_owned_stores(self) -> None:
+        owned_arn = "arn:aws:sso:::instance/ssoins-owned"
+        org_arn = "arn:aws:sso:::instance/ssoins-org"
+        client = _paginated_client(
+            {
+                "list_instances": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceArn": owned_arn,
+                                "IdentityStoreId": "d-owned",
+                                "OwnerAccountId": _ACCOUNT,
+                                "Name": f"{_PROJECT}-live-validation",
+                            },
+                            {
+                                "InstanceArn": org_arn,
+                                "IdentityStoreId": "d-org",
+                                "OwnerAccountId": "999999999999",
+                                "Name": f"{_PROJECT}-looks-owned-but-is-not-ours",
+                            },
+                            {
+                                "InstanceArn": "arn:aws:sso:::instance/ssoins-other",
+                                "IdentityStoreId": "d-other",
+                                "OwnerAccountId": _ACCOUNT,
+                                "Name": "corporate",
+                            },
+                        ]
+                    }
+                ],
+                "list_groups": lambda **kwargs: (
+                    [
+                        {
+                            "Groups": [
+                                {
+                                    "GroupId": "g-1",
+                                    "DisplayName": f"{_PROJECT}-live-validation-argocd",
+                                },
+                                {"GroupId": "g-2", "DisplayName": "platform-admins"},
+                            ]
+                        }
+                    ]
+                    if kwargs["IdentityStoreId"] == "d-owned"
+                    else [
+                        {"Groups": [{"GroupId": "g-3", "DisplayName": f"{_PROJECT}-argocd-admins"}]}
+                    ]
+                ),
+            }
+        )
+        session = _session_for(client, "sso-admin", "identitystore")
+        found = inventory_scanners._list_identity_center_resources(
+            session, _REGION, _PROJECT, _ACCOUNT
+        )
+        # Both project-named instances are flagged (the org one too: its Name
+        # is ours to explain), but groups are read only from the stores this
+        # account owns — the corporate instance's leftover group included.
+        assert found == [
+            f"group:d-other/g-3:{_PROJECT}-argocd-admins",
+            f"group:d-owned/g-1:{_PROJECT}-live-validation-argocd",
+            f"instance:{org_arn}",
+            f"instance:{owned_arn}",
+        ]
+        stores = [
+            call.kwargs["IdentityStoreId"]
+            for call in client.get_paginator("list_groups").paginate.call_args_list
+        ]
+        assert stores == ["d-owned", "d-other"]
+        client = _paginated_client({"list_instances": [{"Instances": [{"Name": f"{_PROJECT}-x"}]}]})
+        with pytest.raises(RuntimeError, match="instance without an ARN"):
+            inventory_scanners._list_identity_center_resources(
+                _session_for(client, "sso-admin", "identitystore"), _REGION, _PROJECT, _ACCOUNT
+            )
+
 
 class TestS3AndIamScanners:
     @pytest.mark.parametrize("code", ["NoSuchTagSet", "NoSuchTagSetError"])
@@ -1924,6 +2014,19 @@ class TestProjectInventory:
                     "backup_recovery_points": [],
                 }
             ),
+            "_list_codecommit_repositories": self._regional(
+                {_REGION: [f"{_PROJECT}-{_REGION}-gitops"]}
+            ),
+            "_list_identity_center_resources": MagicMock(
+                side_effect=lambda session, region, project_name, expected_account: (
+                    [
+                        "instance:arn:aws:sso:::instance/ssoins-live",
+                        f"group:d-1/g-1:{_PROJECT}-live-validation-argocd",
+                    ]
+                    if region == _REGION
+                    else []
+                )
+            ),
             "_list_project_s3_buckets": MagicMock(return_value=[f"{_PROJECT}-assets"]),
             "_list_project_iam_resources": MagicMock(
                 return_value={
@@ -2014,6 +2117,18 @@ class TestProjectInventory:
         assert east["cluster_volumes"] == ["vol-1"]
         assert east["backup_vaults"] == ["vault-arn"]
         assert east["sqs_queues"] == []
+        # The Argo CD GitOps hand-off's leftovers: the GCO-managed CodeCommit
+        # repository and the harness's Identity Center instance/group.
+        assert east["codecommit_repositories"] == [f"{_PROJECT}-{_REGION}-gitops"]
+        assert east["identity_center_resources"] == [
+            "instance:arn:aws:sso:::instance/ssoins-live",
+            f"group:d-1/g-1:{_PROJECT}-live-validation-argocd",
+        ]
+        assert coverage["scanner_regions"]["codecommit_repositories"] == [_REGION, "us-west-2"]
+        assert coverage["scanner_regions"]["identity_center"] == [_REGION, "us-west-2"]
+        fakes["_list_identity_center_resources"].assert_any_call(
+            session, _REGION, _PROJECT, _ACCOUNT
+        )
         assert inventory["s3_buckets"] == [f"{_PROJECT}-assets"]
         assert inventory["iam_roles"] == ["role-arn"]
         assert inventory["global_accelerators"] == ["accelerator-arn"]
