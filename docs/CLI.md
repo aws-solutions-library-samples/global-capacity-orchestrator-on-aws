@@ -4737,8 +4737,11 @@ gco stacks capabilities gitops push [OPTIONS]
   [IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html)
   inputs the Argo CD capability needs (`idc_instance_arn`, `idc_region` and at
   least one `rbac_role_mappings` entry). It discovers the instance visible from
-  the account (the `--idc-region`, then every Identity Center Region),
-  optionally creates an *account instance* when there is none
+  the account (the `--idc-region`, then every other Identity Center Region
+  asked together under a 30-second deadline — a Region whose endpoint does not
+  answer in time is warned about and read as holding none, so name such a
+  Region explicitly if your instance lives there), optionally creates an
+  *account instance* when there is none
   (`--create-account-instance`; standalone and Organizations member accounts
   only — a management account enables an organization instance from the
   console), ensures one group (`<project>-argocd-admins` by default) mapped to

@@ -9,9 +9,11 @@ role — inputs an operator would otherwise dig out of two consoles. Everything
 here is API-driven:
 
 * **Instance discovery** — ``sso-admin ListInstances`` in the preferred
-  Region, then every Region Identity Center serves. Organization instances
-  (owned by the management account) and account instances (owned by this
-  account) are both found.
+  Region, then every Region Identity Center serves, asked concurrently under
+  one deadline (``SWEEP_TIMEOUT_SECONDS``) so an endpoint this network path
+  cannot reach reads as "no instance" instead of stalling the caller.
+  Organization instances (owned by the management account) and account
+  instances (owned by this account) are both found.
 * **Instance creation** — an *account instance* through ``CreateInstance``,
   which a standalone account or an Organizations member account may create
   (one per account, all Regions). Never an organization instance: those are
@@ -36,18 +38,30 @@ session.
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from gco.eks_capabilities_config import ARGOCD_RBAC_ROLES
 
+logger = logging.getLogger(__name__)
+
 #: ``DescribeInstance`` status that means the instance can be used.
 INSTANCE_ACTIVE = "ACTIVE"
 #: How long an account instance may take to leave CREATE_IN_PROGRESS.
 INSTANCE_ACTIVE_TIMEOUT_SECONDS = 300
+#: How long the discovery sweep waits for the Identity Center Regions other
+#: than the preferred one before a Region that has not answered is treated as
+#: holding no instance. A ``ListInstances`` that reaches the service answers
+#: in about a second, allowed or not; one whose endpoint cannot be reached
+#: from this network only fails after the client's full connect-timeout and
+#: retry budget — the first live run of the harness sat in
+#: ``sso.me-south-1`` for over half an hour that way.
+SWEEP_TIMEOUT_SECONDS = 30.0
 
 #: Default names, derived from the project name at call time.
 DEFAULT_INSTANCE_NAME_SUFFIX = "identity-center"
@@ -156,16 +170,9 @@ def _instance_from(item: Mapping[str, Any], region: str) -> IdentityCenterInstan
     )
 
 
-def list_instances(client_factory: ClientFactory, region: str) -> list[IdentityCenterInstance]:
-    """Every Identity Center instance visible from this account in ``region``.
-
-    Regions where Identity Center is not offered (or the account may not call
-    it) read as "none" rather than as a failure, so a discovery sweep never
-    aborts on an opt-in Region.
-    """
+def _list_instances_with(client: Any, region: str) -> list[IdentityCenterInstance]:
     from botocore.exceptions import BotoCoreError, ClientError
 
-    client = client_factory("sso-admin", region)
     instances: list[IdentityCenterInstance] = []
     try:
         paginator = client.get_paginator("list_instances")
@@ -175,6 +182,55 @@ def list_instances(client_factory: ClientFactory, region: str) -> list[IdentityC
     except ClientError, BotoCoreError:
         return []
     return instances
+
+
+def list_instances(client_factory: ClientFactory, region: str) -> list[IdentityCenterInstance]:
+    """Every Identity Center instance visible from this account in ``region``.
+
+    Regions where Identity Center is not offered (or the account may not call
+    it) read as "none" rather than as a failure, so a discovery sweep never
+    aborts on an opt-in Region.
+    """
+    return _list_instances_with(client_factory("sso-admin", region), region)
+
+
+def sweep_instances(
+    client_factory: ClientFactory,
+    regions: Sequence[str],
+    *,
+    timeout_seconds: float = SWEEP_TIMEOUT_SECONDS,
+) -> tuple[list[IdentityCenterInstance], list[str]]:
+    """:func:`list_instances` over ``regions`` at once, bounded by one deadline.
+
+    Every Region is asked concurrently: the clients are built on the calling
+    thread (a boto3 session is not thread-safe for client construction; the
+    clients themselves are for calls) and each ``ListInstances`` runs on a
+    daemon thread, so a Region whose endpoint never answers can neither stall
+    the sweep past ``timeout_seconds`` nor hold up interpreter exit. Returns
+    the instances found, in ``regions`` order, and the Regions that had not
+    answered when the deadline passed.
+    """
+    results: dict[str, list[IdentityCenterInstance]] = {}
+    lock = threading.Lock()
+    threads: list[threading.Thread] = []
+    for region in regions:
+        client = client_factory("sso-admin", region)
+
+        def work(client: Any = client, region: str = region) -> None:
+            found = _list_instances_with(client, region)
+            with lock:
+                results[region] = found
+
+        thread = threading.Thread(target=work, name=f"identity-center-sweep-{region}", daemon=True)
+        thread.start()
+        threads.append(thread)
+    deadline = time.monotonic() + timeout_seconds
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:
+        instances = [instance for region in regions for instance in results.get(region, [])]
+        unanswered = [region for region in regions if region not in results]
+    return instances, unanswered
 
 
 def identity_center_regions(client_factory: ClientFactory, partition_seed_region: str) -> list[str]:
@@ -193,25 +249,46 @@ def discover_instance(
     preferred_region: str,
     sweep_regions: bool = True,
     instance_arn: str | None = None,
+    sweep_timeout_seconds: float = SWEEP_TIMEOUT_SECONDS,
 ) -> IdentityCenterInstance | None:
     """Find the instance to use: by ARN when given, else the first one found.
 
     Looks in ``preferred_region`` first, then (when ``sweep_regions``) in every
     other Identity Center Region — an account instance is visible only in the
     Region it was enabled in, and an organization instance only in its home
-    Region, so a single-Region look would miss either.
+    Region, so a single-Region look would miss either. The other Regions are
+    asked together under ``sweep_timeout_seconds`` (:func:`sweep_instances`);
+    a Region that does not answer in time is logged and read as holding none,
+    so an instance living there must be named by its Region (or ARN and
+    Region) explicitly.
     """
-    regions = [preferred_region]
-    if sweep_regions:
-        regions.extend(
-            region
-            for region in identity_center_regions(client_factory, preferred_region)
-            if region != preferred_region
+
+    def matches(instance: IdentityCenterInstance) -> bool:
+        return instance_arn is None or instance.instance_arn == instance_arn
+
+    for instance in list_instances(client_factory, preferred_region):
+        if matches(instance):
+            return instance
+    if not sweep_regions:
+        return None
+    others = [
+        region
+        for region in identity_center_regions(client_factory, preferred_region)
+        if region != preferred_region
+    ]
+    instances, unanswered = sweep_instances(
+        client_factory, others, timeout_seconds=sweep_timeout_seconds
+    )
+    if unanswered:
+        logger.warning(
+            "Identity Center Region(s) %s did not answer ListInstances within %ss and were "
+            "treated as holding no instance; name the Region explicitly if yours is there",
+            ", ".join(unanswered),
+            int(sweep_timeout_seconds),
         )
-    for region in regions:
-        for instance in list_instances(client_factory, region):
-            if instance_arn is None or instance.instance_arn == instance_arn:
-                return instance
+    for instance in instances:
+        if matches(instance):
+            return instance
     return None
 
 

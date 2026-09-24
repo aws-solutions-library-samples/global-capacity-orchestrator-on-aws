@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -198,6 +199,19 @@ class TestDiscovery:
         )
         found = ident.discover_instance(fakes, preferred_region=_REGION, instance_arn=_ARN)
         assert found is not None and found.instance_arn == _ARN
+        # The same filter applies to what the sweep of the other Regions returns.
+        swept = Fakes(
+            {
+                _OTHER_REGION: FakeSsoAdmin(
+                    _OTHER_REGION, [_account_instance(arn=_ORG_ARN), _account_instance()]
+                )
+            }
+        )
+        found = ident.discover_instance(swept, preferred_region=_REGION, instance_arn=_ARN)
+        assert found is not None and found.instance_arn == _ARN and found.region == _OTHER_REGION
+        assert (
+            ident.discover_instance(swept, preferred_region=_REGION, instance_arn="arn:x") is None
+        )
 
     def test_unavailable_region_reads_as_none(self) -> None:
         class Broken(FakeSsoAdmin):
@@ -206,6 +220,82 @@ class TestDiscovery:
 
         fakes = Fakes({_REGION: Broken(_REGION, [])})
         assert ident.list_instances(fakes, _REGION) == []
+
+    def test_a_region_that_never_answers_cannot_stall_the_sweep(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The first live run sat in a Region whose sso endpoint connect-timed
+        out under the full retry budget. The sweep asks every other Region at
+        once under one deadline; a Region still silent when it passes reads as
+        holding no instance and is named in a warning, while the instances the
+        answering Regions returned are still found."""
+        import threading
+
+        release = threading.Event()
+
+        class Silent(FakeSsoAdmin):
+            def get_paginator(self, operation: str) -> Any:
+                release.wait(timeout=30)  # a hung connection, released by the test
+                return super().get_paginator(operation)
+
+        silent_region = "me-south-1"
+        answering = FakeSsoAdmin(_OTHER_REGION, [_account_instance()])
+        fakes = Fakes({silent_region: Silent(silent_region, []), _OTHER_REGION: answering})
+        try:
+            with (
+                patch.object(
+                    ident,
+                    "identity_center_regions",
+                    return_value=[_REGION, silent_region, _OTHER_REGION],
+                ),
+                caplog.at_level("WARNING", logger=ident.__name__),
+            ):
+                started = time.monotonic()
+                found = ident.discover_instance(
+                    fakes, preferred_region=_REGION, sweep_timeout_seconds=0.5
+                )
+            assert time.monotonic() - started < 5, "the deadline must bound the sweep"
+            assert found is not None and found.region == _OTHER_REGION
+            # Clients are built on the calling thread, preferred Region first.
+            assert fakes.calls == [
+                ("sso-admin", _REGION),
+                ("sso-admin", silent_region),
+                ("sso-admin", _OTHER_REGION),
+            ]
+            assert any(
+                silent_region in record.getMessage() and "did not answer" in record.getMessage()
+                for record in caplog.records
+            ), caplog.text
+        finally:
+            release.set()
+
+    def test_sweep_reports_the_unanswered_regions_and_keeps_region_order(self) -> None:
+        import threading
+
+        release = threading.Event()
+
+        class Silent(FakeSsoAdmin):
+            def get_paginator(self, operation: str) -> Any:
+                release.wait(timeout=30)
+                return super().get_paginator(operation)
+
+        first = FakeSsoAdmin("eu-west-1", [_account_instance(arn=_ORG_ARN)])
+        second = FakeSsoAdmin(_OTHER_REGION, [_account_instance()])
+        fakes = Fakes(
+            {"eu-west-1": first, "ap-south-1": Silent("ap-south-1", []), _OTHER_REGION: second}
+        )
+        try:
+            instances, unanswered = ident.sweep_instances(
+                fakes, ["eu-west-1", "ap-south-1", _OTHER_REGION], timeout_seconds=0.5
+            )
+        finally:
+            release.set()
+        assert [instance.instance_arn for instance in instances] == [_ORG_ARN, _ARN]
+        assert unanswered == ["ap-south-1"]
+        # Every Region answering means nothing is reported unanswered.
+        instances, unanswered = ident.sweep_instances(fakes, ["eu-west-1", _OTHER_REGION])
+        assert len(instances) == 2 and unanswered == []
+        assert ident.sweep_instances(fakes, []) == ([], [])
 
     def test_create_account_instance_waits_for_active(self) -> None:
         sso = FakeSsoAdmin(_REGION, [], activation_polls=3)
