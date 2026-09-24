@@ -180,6 +180,28 @@ class TestBuildOverrides:
             "argocd": {"enabled": True}
         }
 
+    def test_effective_overrides_without_an_identity_region_leave_idc_region_unset(self) -> None:
+        """An identity record from a reused operator instance may carry no Region."""
+        merged = checks.effective_overrides(
+            '{"argocd":{"enabled":true}}', {"instance_arn": IDC_ARN, "group_id": "g"}
+        )
+        assert merged["argocd"]["idc_instance_arn"] == IDC_ARN
+        assert "idc_region" not in merged["argocd"]
+        assert merged["argocd"]["rbac_role_mappings"][0]["identities"] == [
+            {"id": "g", "type": "SSO_GROUP"}
+        ]
+
+    def test_apply_effective_cdk_context_skips_an_empty_context(self) -> None:
+        """Nothing to pass to CDK means the stack manager is left untouched."""
+        stack_manager = MagicMock()
+        ctx = SimpleNamespace(
+            settings=SimpleNamespace(eks_capabilities_overrides_json="", extra_cdk_context=dict),
+            checkpoint=SimpleNamespace(state={}),
+            stack_manager=stack_manager,
+        )
+        assert checks.apply_effective_cdk_context(ctx) == {}
+        stack_manager.set_extra_cdk_context.assert_not_called()
+
     def test_argocd_without_gitops(self) -> None:
         overrides = checks.build_eks_capabilities_overrides(
             types=("argocd",),
@@ -245,12 +267,96 @@ class TestBuildOverrides:
         }
 
 
+class TestCommandLine:
+    """``--eks-capabilities`` and its ``--argocd-*`` companions through the real parser."""
+
+    _BASE = [
+        "--expected-account",
+        "123456789012",
+        "--expected-sha",
+        SHA,
+        "--expected-branch",
+        "chore/test",
+        "--actions",
+        "preflight",
+    ]
+
+    def _settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str
+    ) -> RunSettings:
+        from scripts.live_release_validation import __main__ as live_main
+
+        monkeypatch.setattr(live_main, "_repository_root", lambda _value: tmp_path)
+        parser = live_main._build_parser()
+        return live_main._settings_from_args(parser, parser.parse_args([*self._BASE, *extra]))
+
+    def test_self_contained_argocd_run_carries_the_codecommit_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = self._settings(
+            tmp_path,
+            monkeypatch,
+            "--eks-capabilities",
+            "argocd",
+            "--argocd-idc-region",
+            "us-east-2",
+        )
+        overrides = caps.parse_eks_capabilities_overrides(settings.eks_capabilities_overrides_json)
+        assert overrides["argocd"]["enabled"] is True
+        gitops = overrides["argocd"]["gitops"]
+        assert gitops["source"] == "codecommit" and gitops["enabled"] is True
+        # The managed repository is read at HEAD of main from its root; the
+        # pushed commit, not a pinned revision, is what the action waits for.
+        assert "revision" not in gitops and "path" not in gitops and "repo_url" not in gitops
+        assert "idc_instance_arn" not in overrides["argocd"]  # provisioned by argocd-identity
+        assert settings.argocd_idc_region == "us-east-2"
+        assert settings.argocd_gitops_fixture_path == checks.GITOPS_FIXTURE_PATH
+
+    def test_all_selects_every_type_and_no_request_leaves_the_overrides_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        everything = self._settings(tmp_path, monkeypatch, "--eks-capabilities", "all")
+        overrides = caps.parse_eks_capabilities_overrides(
+            everything.eks_capabilities_overrides_json
+        )
+        assert set(overrides) == set(caps.EKS_CAPABILITY_TYPES)
+        assert all(block["enabled"] for block in overrides.values())
+        nothing = self._settings(tmp_path, monkeypatch)
+        assert nothing.eks_capabilities_overrides_json == ""
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (["--eks-capabilities", "flux"], "--eks-capabilities accepts"),
+            (["--eks-capabilities", "all,argocd"], "cannot be combined with individual names"),
+            (
+                # An inconsistent Argo CD request is refused by the parser, not deep in the run.
+                ["--eks-capabilities", "argocd", "--argocd-identity", "USER:u-1"],
+                "expected TYPE:ID",
+            ),
+        ],
+    )
+    def test_bad_requests_are_parser_errors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        extra: list[str],
+        message: str,
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            self._settings(tmp_path, monkeypatch, *extra)
+        assert excinfo.value.code == 2
+        assert message in capsys.readouterr().err
+
+
 class TestRepositoryUrl:
     @pytest.mark.parametrize(
         ("remote", "expected"),
         [
             ("git@github.com:example/gco.git", "https://github.com/example/gco.git"),
             ("ssh://git@github.com/example/gco.git", "https://github.com/example/gco.git"),
+            ("ssh://github.com/example/gco.git", "https://github.com/example/gco.git"),
             ("https://github.com/example/gco.git", "https://github.com/example/gco.git"),
             (" https://github.com/example/gco\n", "https://github.com/example/gco"),
         ],
@@ -630,6 +736,13 @@ class TestClusterAccess:
         )
         with pytest.raises(checks.EksCapabilitiesValidationError, match="access-entry group"):
             self._verify(objects)
+
+    def test_missing_cluster_role_binding(self) -> None:
+        with pytest.raises(
+            checks.EksCapabilitiesValidationError,
+            match="ClusterRoleBinding gco-argocd-read-all is absent",
+        ):
+            self._verify(_all_objects({("clusterrolebinding", "gco-argocd-read-all"): "absent"}))
 
     def test_missing_tenant_rolebinding(self) -> None:
         objects = _all_objects()
@@ -1312,3 +1425,33 @@ class TestIdentityCleanup:
             "argocd_identity_cleanup": {"performed": True},
         }
         assert calls == ["retained", "destroy"]
+
+    def test_identity_cleanup_failure_is_recorded_beside_the_other_phases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An Identity Center error keeps the rest of the retained-cleanup evidence."""
+        from scripts.live_release_validation.cleanup import retained
+
+        for name in (
+            "_cleanup_owned_log_groups",
+            "_cleanup_new_ecr_images",
+            "_cleanup_new_ecr_repositories",
+            "_schedule_retained_kms_keys",
+        ):
+            monkeypatch.setattr(retained, name, lambda ctx: {"ok": True})
+
+        def boom(ctx: Any) -> dict[str, Any]:
+            raise RuntimeError("DeleteInstance throttled")
+
+        monkeypatch.setattr(retained, "cleanup_validation_identity", boom)
+        ctx = _identity_context("")
+        with pytest.raises(RuntimeError, match="Retained resource cleanup failed"):
+            retained._retained_resource_cleanup(ctx)
+        # The attempt is checkpointed with every other phase's evidence intact.
+        result = ctx.checkpoint.state["retained_cleanup_attempts"][-1]
+        assert "argocd_identity" not in result
+        assert result["kms"] == {"ok": True}
+        assert result["errors"] == [
+            {"phase": "argocd-identity", "error": "RuntimeError: DeleteInstance throttled"}
+        ]
+        ctx.persist.assert_called()

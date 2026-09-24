@@ -19,7 +19,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -244,6 +244,38 @@ class TestLocalTree:
         with pytest.raises(gitops_push.GitOpsPushError, match="is not a directory"):
             gitops_push.collect_local_tree(tmp_path / "missing")
 
+    def test_gitlink_files_and_special_files_are_skipped(self, tmp_path: Path) -> None:
+        """A ``.git`` *file* (worktree / submodule gitlink) and non-regular files never ship."""
+        _write_tree(tmp_path, {"a.yaml": "a", ".git": "gitdir: /elsewhere/.git/worktrees/x\n"})
+        os.mkfifo(tmp_path / "pipe")
+        with patch.object(gitops_push, "_git_listed_paths", return_value=None):
+            files = gitops_push.collect_local_tree(tmp_path)
+        assert [item.path for item in files] == ["a.yaml"]
+
+    def test_without_a_git_binary_the_tree_is_walked_and_the_author_is_the_placeholder(
+        self, tmp_path: Path
+    ) -> None:
+        _write_tree(tmp_path, {"a.yaml": "a"})
+        with patch.object(gitops_push.shutil, "which", return_value=None):
+            assert gitops_push._git(tmp_path, "rev-parse", "HEAD") is None
+            assert gitops_push._git_listed_paths(tmp_path) is None
+            assert [item.path for item in gitops_push.collect_local_tree(tmp_path)] == ["a.yaml"]
+            assert gitops_push.default_author() == (
+                gitops_push.DEFAULT_AUTHOR_NAME,
+                gitops_push.DEFAULT_AUTHOR_EMAIL,
+            )
+
+    def test_a_work_tree_whose_listing_fails_falls_back_to_the_walk(self, tmp_path: Path) -> None:
+        """``rev-parse`` says work tree but ``ls-files`` fails: walk rather than push nothing."""
+        _write_tree(tmp_path, {"a.yaml": "a"})
+
+        def fake_git(source_dir: Path, *args: str) -> str | None:
+            return "true\n" if args[0] == "rev-parse" else None
+
+        with patch.object(gitops_push, "_git", side_effect=fake_git):
+            assert gitops_push._git_listed_paths(tmp_path) is None
+            assert [item.path for item in gitops_push.collect_local_tree(tmp_path)] == ["a.yaml"]
+
     def test_source_revision_marks_dirty_trees(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
         _write_tree(tmp_path, {"a.yaml": "a"})
@@ -448,6 +480,62 @@ class TestPushTree:
         assert document["commit_ids"] == result.commit_ids
         json.dumps(document)  # JSON-safe for --output json
 
+    def test_delete_only_push_sends_no_put_files(self) -> None:
+        """Files removed locally, nothing else changed: the commit carries only deletions."""
+        client = FakeCodeCommit(tree={"keep.yaml": (b"k", "NORMAL"), "gone.yaml": (b"g", "NORMAL")})
+        result = _push(client, _local({"keep.yaml": b"k"}))
+        assert (result.added, result.modified, result.deleted, result.unchanged) == (0, 0, 1, 1)
+        request = client.create_calls[0]
+        assert "putFiles" not in request
+        assert request["deleteFiles"] == [{"filePath": "gone.yaml"}]
+        assert set(client.branch_tree()) == {"keep.yaml"}
+
+    def test_delete_batches_split_at_the_file_limit_and_an_empty_plan_has_no_batches(
+        self,
+    ) -> None:
+        plan = gitops_push.PushPlan()
+        plan.delete = [f"old-{index:03}.yaml" for index in range(150)]
+        assert plan.deleted == 150
+        batches = gitops_push._chunks(plan)
+        assert [(len(puts), len(deletes)) for puts, deletes in batches] == [(0, 100), (0, 50)]
+        assert gitops_push._chunks(gitops_push.PushPlan()) == []
+
+    def test_remote_tree_skips_differences_without_a_blob(self) -> None:
+        """Deletions and malformed entries in GetDifferences carry no afterBlob path/id."""
+
+        class Sparse(FakeCodeCommit):
+            def get_paginator(self, operation: str) -> Any:
+                class _Paginator:
+                    def paginate(self, **kwargs: Any) -> list[dict[str, Any]]:
+                        return [
+                            {
+                                "differences": [
+                                    {"changeType": "D", "beforeBlob": {"path": "gone.yaml"}},
+                                    {"afterBlob": {"path": "no-id.yaml"}},
+                                    {"afterBlob": {"blobId": "abc", "mode": "100644"}},
+                                    {
+                                        "afterBlob": {
+                                            "blobId": "def",
+                                            "path": "ok.yaml",
+                                            "mode": "100644",
+                                        }
+                                    },
+                                ]
+                            }
+                        ]
+
+                return _Paginator()
+
+        assert gitops_push.remote_tree(Sparse(), _REPOSITORY, "c1") == {
+            "ok.yaml": ("def", "NORMAL")
+        }
+
+    def test_client_error_code_reads_only_botocore_shaped_errors(self) -> None:
+        assert gitops_push._client_error_code(_client_error("Throttling", "GetBranch")) == (
+            "Throttling"
+        )
+        assert gitops_push._client_error_code(RuntimeError("plain")) == ""
+
 
 # ─── resolution against cdk.json ─────────────────────────────────────────────
 
@@ -504,13 +592,18 @@ class TestResolveRepository:
 
 class TestPushCommand:
     def _invoke(
-        self, args: list[str], client: FakeCodeCommit, config: dict[str, Any] | None = None
+        self,
+        args: list[str],
+        client: FakeCodeCommit,
+        config: dict[str, Any] | None = None,
+        *,
+        config_error: Exception | None = None,
     ) -> Any:
+        loader = MagicMock(return_value=config or _config())
+        if config_error is not None:
+            loader.side_effect = config_error
         with (
-            patch(
-                "cli.eks_capabilities.load_eks_capabilities_config",
-                return_value=config or _config(),
-            ),
+            patch("cli.eks_capabilities.load_eks_capabilities_config", loader),
             patch("cli.gitops_push.load_eks_capabilities_config", return_value=config or _config()),
             patch("cli.gitops_push._git_listed_paths", return_value=None),
             patch("cli.gitops_push.default_author", return_value=("t", "t@example.com")),
@@ -631,6 +724,39 @@ class TestPushCommand:
         assert result.exit_code == 0, result.output
         assert "already matches" in result.output
         assert client.create_calls == []
+
+    def test_unreadable_cdk_json_block_exits_before_any_aws_call(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path, {"cm.yaml": "x"})
+        client = FakeCodeCommit()
+        result = self._invoke(
+            ["stacks", "capabilities", "gitops", "push", "--path", str(tmp_path), "-y"],
+            client,
+            config_error=caps.EksCapabilitiesConfigError(
+                "eks_capabilities.argocd.gitops.source must be one of codecommit, git"
+            ),
+        )
+        assert result.exit_code == 1
+        assert "Failed to read eks_capabilities from cdk.json" in result.output
+        assert "gitops.source must be one of" in result.output
+        assert client.create_calls == []
+
+    def test_unexpected_codecommit_errors_are_reported_per_region(self, tmp_path: Path) -> None:
+        """A throttle or outage mid-push is reported with its Region and fails the command."""
+        _write_tree(tmp_path, {"cm.yaml": "x"})
+
+        class Throttled(FakeCodeCommit):
+            def create_commit(self, **request: Any) -> dict[str, Any]:
+                raise _client_error("ThrottlingException", "CreateCommit")
+
+        result = self._invoke(
+            ["stacks", "capabilities", "gitops", "push", "--path", str(tmp_path), "-A", "-y"],
+            Throttled(),
+        )
+        assert result.exit_code == 1
+        assert f"[{_REGION}] Push to CodeCommit failed" in result.output
+        assert "[us-west-2] Push to CodeCommit failed" in result.output
+        assert "ThrottlingException" in result.output
+        assert "Traceback" not in result.output
 
 
 def test_gitops_push_module_imports_without_aws_cdk() -> None:

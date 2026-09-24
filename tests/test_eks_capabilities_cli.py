@@ -355,6 +355,30 @@ class TestBuildStatus:
         assert status["healthy"] is False
         assert status["capabilities"][0]["configured"] is True
 
+    def test_loosely_shaped_live_details_are_tolerated(self) -> None:
+        """Real DescribeCapability bodies: datetimes, half-formed issues, nameless entries."""
+        from datetime import UTC, datetime
+
+        modified = datetime(2026, 9, 24, 3, 4, 5, tzinfo=UTC)
+        argo = _live("argocd", server_url=_SERVER_URL, status="DEGRADED")
+        argo["modifiedAt"] = modified
+        # One issue is not an object at all; it is skipped, the others render.
+        argo["health"] = {"issues": ["garbage", {"code": "Throttled"}]}
+        nameless = {"type": "KRO", "status": "ACTIVE"}  # no capabilityName: never a match
+        status = self._status(_argocd_config(), [argo, nameless])
+        row = status["capabilities"][0]
+        assert row["modified_at"] == modified.isoformat()
+        assert row["health_issues"] == ["Throttled"]
+        assert row["drift"] == "status is DEGRADED, expected ACTIVE (Throttled)"
+        assert status["unmanaged"] == []
+
+
+def test_load_config_tolerates_a_cdk_json_without_a_context_object(tmp_path: Path) -> None:
+    """A cdk.json whose ``context`` is missing or not an object reads as all-off."""
+    path = tmp_path / "cdk.json"
+    path.write_text(json.dumps({"app": "python3 app.py", "context": []}), encoding="utf-8")
+    assert eks_capabilities.load_eks_capabilities_config(path) == caps.EKS_CAPABILITIES_DEFAULTS
+
 
 class TestCapabilitiesStatus:
     def test_merges_config_with_the_described_cluster(self) -> None:
@@ -464,11 +488,31 @@ class TestResolveArgoCdServerUrl:
         with pytest.raises(ClientError):
             argocd_ui.resolve_argocd_server_url(_REGION, _PROJECT, eks_client=client)
 
+    def test_response_without_a_capability_detail_is_an_error(self) -> None:
+        """A malformed DescribeCapability body must not read as "no URL yet"."""
+
+        class _Empty:
+            def describe_capability(self, **kwargs: Any) -> dict[str, Any]:
+                return {}
+
+        with pytest.raises(RuntimeError, match="EKS returned no detail for capability"):
+            argocd_ui.resolve_argocd_server_url(_REGION, _PROJECT, eks_client=_Empty())
+
     def test_builds_a_boto3_client_by_default(self) -> None:
         client = self._client(_live("argocd", server_url=_SERVER_URL))
         with patch("boto3.client", return_value=client) as boto_client:
             assert argocd_ui.resolve_argocd_server_url(_REGION, _PROJECT) == _SERVER_URL
         boto_client.assert_called_once_with("eks", region_name=_REGION)
+
+
+def test_sso_button_probe_swallows_page_errors() -> None:
+    """A page whose role query itself fails (mid-navigation, odd layout) means "no button"."""
+
+    class _Exploding:
+        def get_by_role(self, role: str, name: Any = None) -> Any:
+            raise RuntimeError("Execution context was destroyed")
+
+    assert argocd_ui._click_sso_button_if_present(_Exploding()) is False
 
 
 # ─── Fake Playwright ─────────────────────────────────────────────────────────
@@ -768,17 +812,45 @@ class TestStatusCommand:
         assert "is not deployed" in result.output
         assert "team-argocd" in result.output
 
+    def test_table_mode_points_at_the_managed_codecommit_repository(self) -> None:
+        """Under the CodeCommit source the hint names the repository and the push command."""
+        status = eks_capabilities.build_status(
+            region=_REGION,
+            project_name=_PROJECT,
+            config=_argocd_config(gitops=True, source="codecommit"),
+            live=[_live("argocd", server_url=_SERVER_URL)],
+        )
+        result, _ = self._invoke(["stacks", "capabilities", "status"], [status])
+        assert result.exit_code == 0, result.output
+        assert "GCO-managed CodeCommit" in result.output
+        assert f"{_CLUSTER}-gitops @ main" in result.output
+        assert "gco stacks capabilities gitops push" in result.output
+        # The operator-repository wording belongs to the git source only.
+        assert "GitOps repository (yours)" not in result.output
+
 
 class TestArgoCdOpenCommand:
-    def _invoke(self, args: list[str], resolver: Any) -> Any:
+    def _invoke(self, args: list[str], resolver: Any, *, launch_result: int = 0) -> Any:
         with (
             patch("cli.argocd_ui.resolve_argocd_server_url", resolver),
             patch("cli.commands.stacks_cmd._project_name", return_value=_PROJECT),
             patch("cli.commands.stacks_cmd._load_cdk_json", return_value={"regional": [_REGION]}),
-            patch("cli.commands.stacks_cmd.click.launch", return_value=0) as launch,
+            patch("cli.commands.stacks_cmd.click.launch", return_value=launch_result) as launch,
         ):
             result = CliRunner().invoke(cli, args)
         return result, launch
+
+    def test_a_browser_that_will_not_launch_leaves_the_url_on_screen(self) -> None:
+        """Headless hosts: click.launch fails, the command still succeeds with the URL printed."""
+        result, launch = self._invoke(
+            ["stacks", "capabilities", "argocd", "open"],
+            MagicMock(return_value=_SERVER_URL),
+            launch_result=1,
+        )
+        assert result.exit_code == 0, result.output
+        launch.assert_called_once_with(_SERVER_URL)
+        assert _SERVER_URL in result.output
+        assert "open the URL above manually" in result.output
 
     def test_print_url_never_launches_a_browser(self) -> None:
         resolver = MagicMock(return_value=_SERVER_URL)

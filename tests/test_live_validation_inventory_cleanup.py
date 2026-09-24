@@ -933,6 +933,30 @@ class TestLambdaApiGatewayLogSecretScanners:
             inventory_scanners._list_identity_center_resources(
                 _session_for(client, "sso-admin", "identitystore"), _REGION, _PROJECT, _ACCOUNT
             )
+        # A project-owned group the store reports without an id cannot be
+        # deleted by id later, so the scan fails closed instead of skipping it.
+        client = _paginated_client(
+            {
+                "list_instances": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceArn": owned_arn,
+                                "IdentityStoreId": "d-owned",
+                                "OwnerAccountId": _ACCOUNT,
+                            }
+                        ]
+                    }
+                ],
+                "list_groups": [
+                    {"Groups": [{"DisplayName": f"{_PROJECT}-live-validation-argocd"}]}
+                ],
+            }
+        )
+        with pytest.raises(RuntimeError, match="project-owned group without an id"):
+            inventory_scanners._list_identity_center_resources(
+                _session_for(client, "sso-admin", "identitystore"), _REGION, _PROJECT, _ACCOUNT
+            )
 
 
 class TestS3AndIamScanners:

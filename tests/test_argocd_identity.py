@@ -34,6 +34,8 @@ _OTHER_REGION = "us-west-2"
 _PROJECT = "gco"
 _ARN = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
 _ORG_ARN = "arn:aws:sso:::instance/ssoins-org000000000001"
+#: Captured before the autouse fixture below patches the module attribute.
+_REAL_IDENTITY_CENTER_REGIONS = ident.identity_center_regions
 
 
 def _client_error(code: str, operation: str) -> ClientError:
@@ -293,6 +295,136 @@ class TestGroups:
         assert ident.delete_group(store, identity_store_id="d-1", group_id=group_id) is True
         assert ident.delete_group(store, identity_store_id="d-1", group_id=group_id) is False
 
+    def test_ensure_group_conflict_from_a_racing_creator_resolves_to_the_existing_group(
+        self,
+    ) -> None:
+        """A ConflictException whose group can then be looked up is a reuse, not an error."""
+
+        class Racing(FakeIdentityStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lookups = 0
+
+            def get_group_id(self, **kwargs: Any) -> dict:
+                self.lookups += 1
+                if self.lookups == 1:
+                    # Not there yet when we look ...
+                    raise _client_error("ResourceNotFoundException", "GetGroupId")
+                return {"GroupId": "g-raced"}
+
+            def create_group(self, **kwargs: Any) -> dict:
+                # ... but someone else created it between the lookup and the create.
+                raise _client_error("ConflictException", "CreateGroup")
+
+        assert ident.ensure_group(
+            Racing(), identity_store_id="d-1", display_name="g", description="d"
+        ) == ("g-raced", False)
+
+    def test_ensure_group_conflict_that_never_resolves_propagates(self) -> None:
+        class Ghost(FakeIdentityStore):
+            def get_group_id(self, **kwargs: Any) -> dict:
+                raise _client_error("ResourceNotFoundException", "GetGroupId")
+
+            def create_group(self, **kwargs: Any) -> dict:
+                raise _client_error("ConflictException", "CreateGroup")
+
+        with pytest.raises(ClientError, match="ConflictException"):
+            ident.ensure_group(Ghost(), identity_store_id="d-1", display_name="g", description="d")
+
+
+class TestUnexpectedErrorsPropagate:
+    """Only the documented refusal codes are translated; anything else surfaces as-is.
+
+    Each helper narrows on one or two error codes (``ResourceNotFoundException``,
+    ``ConflictException``, ``AccessDeniedException``); a throttle or an internal
+    error must not be mistaken for "already gone" or "already present".
+    """
+
+    def test_client_error_code_reads_only_botocore_shaped_errors(self) -> None:
+        assert ident._client_error_code(_client_error("ThrottlingException", "Op")) == (
+            "ThrottlingException"
+        )
+        assert ident._client_error_code(RuntimeError("no response attribute")) == ""
+
+    def test_create_account_instance_other_errors(self) -> None:
+        sso = FakeSsoAdmin(_REGION, [])
+        sso.create_error = "ThrottlingException"
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.create_account_instance(Fakes({_REGION: sso}), region=_REGION, name="x")
+
+    def test_delete_account_instance_other_errors(self) -> None:
+        class Throttled(FakeSsoAdmin):
+            def delete_instance(self, **kwargs: Any) -> dict[str, Any]:
+                raise _client_error("ThrottlingException", "DeleteInstance")
+
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.delete_account_instance(Fakes({_REGION: Throttled(_REGION, [])}), _REGION, _ARN)
+
+    def test_group_lookup_other_errors(self) -> None:
+        class Throttled(FakeIdentityStore):
+            def get_group_id(self, **kwargs: Any) -> dict:
+                raise _client_error("ThrottlingException", "GetGroupId")
+
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.find_group_id(Throttled(), "d-1", "g")
+
+    def test_user_lookup_other_errors(self) -> None:
+        class Throttled(FakeIdentityStore):
+            def get_user_id(self, **kwargs: Any) -> dict:
+                raise _client_error("ThrottlingException", "GetUserId")
+
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.find_user_id(Throttled(), "d-1", "alice")
+
+    def test_membership_other_errors(self) -> None:
+        class Throttled(FakeIdentityStore):
+            def create_group_membership(self, **kwargs: Any) -> dict:
+                raise _client_error("ThrottlingException", "CreateGroupMembership")
+
+        store = Throttled(users={"alice": "u-alice"})
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.add_group_members(
+                store, identity_store_id="d-1", group_id="g-1", user_names=("alice",)
+            )
+
+    def test_delete_group_other_errors(self) -> None:
+        class Throttled(FakeIdentityStore):
+            def delete_group(self, **kwargs: Any) -> dict:
+                raise _client_error("ThrottlingException", "DeleteGroup")
+
+        with pytest.raises(ClientError, match="ThrottlingException"):
+            ident.delete_group(Throttled(), identity_store_id="d-1", group_id="g-1")
+
+
+class TestDefaultWiring:
+    """The boto3-backed defaults: a plain client factory and the Region list."""
+
+    def test_default_client_factory_builds_a_regional_boto3_client(self) -> None:
+        import boto3
+
+        with patch.object(boto3, "client", return_value="client") as client:
+            assert ident.default_client_factory("sso-admin", _OTHER_REGION) == "client"
+        client.assert_called_once_with("sso-admin", region_name=_OTHER_REGION)
+
+    def test_identity_center_regions_come_from_the_partition_endpoint_list(self) -> None:
+        """The sweep list is the partition's sso-admin endpoints, de-duplicated and sorted."""
+        import boto3
+
+        class FakeSession:
+            def get_partition_for_region(self, region: str) -> str:
+                assert region == "cn-north-1"
+                return "aws-cn"
+
+            def get_available_regions(self, service: str, partition_name: str) -> list[str]:
+                assert (service, partition_name) == ("sso-admin", "aws-cn")
+                return ["cn-northwest-1", "cn-north-1", "cn-north-1"]
+
+        # The autouse fixture patches ident.identity_center_regions for every
+        # test; the module-level alias captured at import time is the real one.
+        with patch.object(boto3.session, "Session", FakeSession):
+            regions = _REAL_IDENTITY_CENTER_REGIONS(Fakes({}), "cn-north-1")
+        assert regions == ["cn-north-1", "cn-northwest-1"]
+
 
 # ─── the bootstrap decision table ────────────────────────────────────────────
 
@@ -452,6 +584,34 @@ class TestManagedConfigWriters:
                 "ADMIN", "g", "SSO_GROUP", config_path=cdk_json
             )
 
+    @pytest.mark.parametrize(
+        ("capabilities", "message"),
+        [
+            ("nope", "context.eks_capabilities must be a JSON object"),
+            ({"argocd": []}, r"context\.eks_capabilities\.argocd must be a JSON object"),
+            (
+                {"argocd": {"rbac_role_mappings": [{"role": "ADMIN", "identities": "u-1"}]}},
+                "identities of role ADMIN must be a JSON array",
+            ),
+            (
+                # A hand-edited mapping for another role that synth would reject:
+                # the writer refuses rather than committing an invalid block.
+                {"argocd": {"rbac_role_mappings": [{"role": "OWNER", "identities": []}]}},
+                r"refusing to update eks_capabilities\.argocd\.rbac_role_mappings",
+            ),
+        ],
+    )
+    def test_role_mapping_refuses_hand_edited_shapes_it_cannot_extend(
+        self, cdk_json: Path, capabilities: Any, message: str
+    ) -> None:
+        cdk_json.write_text(json.dumps({"context": {"eks_capabilities": capabilities}}) + "\n")
+        before = cdk_json.read_text()
+        with pytest.raises(managed_config.ManagedConfigError, match=message):
+            managed_config.ensure_argocd_role_mapping(
+                "ADMIN", "g-1", "SSO_GROUP", config_path=cdk_json
+            )
+        assert cdk_json.read_text() == before
+
 
 # ─── the Click command ───────────────────────────────────────────────────────
 
@@ -603,3 +763,49 @@ class TestBootstrapIdentityCommand:
         result = self._invoke(["stacks", "capabilities", "argocd", "bootstrap-identity"], Fakes({}))
         assert result.exit_code == 1
         assert "--create-account-instance" in result.output
+
+    def test_members_already_in_the_group_are_reported_as_such(self) -> None:
+        store = FakeIdentityStore(users={"alice": "u-alice", "bob": "u-bob"})
+        fakes = Fakes({_REGION: FakeSsoAdmin(_REGION, [_account_instance()])}, store)
+        args = ["stacks", "capabilities", "argocd", "bootstrap-identity", "--user", "alice"]
+        assert self._invoke(args, fakes).exit_code == 0
+        result = self._invoke([*args, "--user", "bob"], fakes)
+        assert result.exit_code == 0, result.output
+        assert "Using group gco-argocd-admins" in result.output
+        assert "alice was already in gco-argocd-admins" in result.output
+        assert "Added bob to gco-argocd-admins" in result.output
+
+    def test_unexpected_aws_errors_are_reported_not_traced(self) -> None:
+        class Throttled(FakeSsoAdmin):
+            def get_paginator(self, operation: str) -> Any:
+                raise RuntimeError("Endpoint request timed out")
+
+        result = self._invoke(
+            ["stacks", "capabilities", "argocd", "bootstrap-identity"],
+            Fakes({_REGION: Throttled(_REGION, [])}),
+        )
+        assert result.exit_code == 1
+        assert "Identity Center bootstrap failed: Endpoint request timed out" in result.output
+        assert "Traceback" not in result.output
+
+    def test_write_cdk_json_refusal_exits_nonzero(self, tmp_path: Path) -> None:
+        """A cdk.json the managed-config engine cannot update fails the command, after AWS."""
+        cdk_json = tmp_path / "cdk.json"
+        cdk_json.write_text(json.dumps({"context": {"eks_capabilities": "not-an-object"}}) + "\n")
+        fakes = Fakes({_REGION: FakeSsoAdmin(_REGION, [_account_instance()])})
+        result = self._invoke(
+            [
+                "stacks",
+                "capabilities",
+                "argocd",
+                "bootstrap-identity",
+                "--write-cdk-json",
+                "--config-path",
+                str(cdk_json),
+            ],
+            fakes,
+        )
+        assert result.exit_code == 1
+        assert "context.eks_capabilities must be a JSON object" in result.output
+        # The group was still ensured: the refusal is about the file, not AWS.
+        assert fakes.store.groups == {"gco-argocd-admins": "g-0001"}

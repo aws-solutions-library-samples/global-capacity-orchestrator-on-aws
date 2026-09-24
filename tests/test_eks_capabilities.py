@@ -249,10 +249,23 @@ class TestValidationRejects:
                 r"rbac_role_mappings\[0\] contains unknown key\(s\): scope",
             ),
             ("ADMIN", r"rbac_role_mappings\[0\] must be an object"),
+            (
+                {"role": "ADMIN", "identities": ["u-admin"]},
+                r"identities\[0\] must be an object with id and type",
+            ),
         ],
     )
     def test_rbac_role_mapping_shapes(self, mapping: object, match: str) -> None:
         self._reject({"argocd": _argocd(rbac_role_mappings=[mapping])}, match)
+
+    def test_string_lists_reject_blank_entries(self) -> None:
+        self._reject(
+            {"argocd": {"vpce_ids": ["vpce-1", " "]}},
+            r"eks_capabilities\.argocd\.vpce_ids must not contain empty strings",
+        )
+
+    def test_validate_rejects_a_non_object_block_like_normalize(self) -> None:
+        self._reject(["argocd"], r"eks_capabilities must be an object, got list")  # type: ignore[arg-type]
 
     def test_rbac_mappings_are_validated_even_when_argocd_is_off(self) -> None:
         self._reject(
@@ -586,6 +599,19 @@ class TestConfigLoaderWiring:
                 valid_cdk_context,
                 {"argocd": _argocd(gitops=_gitops(destination_namespaces=["default"]))},
             )
+
+    def test_getter_revalidates_and_wraps_the_module_error(self, valid_cdk_context) -> None:
+        """Construction validates once; the getter validates again and speaks the loader's type."""
+        loader = _loader(valid_cdk_context)
+        with (
+            patch.object(
+                loader, "_raw_eks_capabilities_config", return_value={"kro": {"enabled": "yes"}}
+            ),
+            pytest.raises(
+                ConfigValidationError, match=r"eks_capabilities\.kro\.enabled must be a boolean"
+            ),
+        ):
+            loader.get_eks_capabilities_config()
 
     def test_run_scoped_overrides_context_is_deep_merged(self, valid_cdk_context) -> None:
         """``--context eks_capabilities_overrides=<json>`` enables types without editing cdk.json."""
