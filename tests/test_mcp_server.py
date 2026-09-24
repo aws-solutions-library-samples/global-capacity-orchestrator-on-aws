@@ -187,15 +187,17 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 139 read-only or low-risk
-        # tools (138 before deps_scan; 134 before fleet_status; 125 before the
-        # cost allocation/k8s/report family added 9). Optional families add 58
-        # more when every flag is enabled: capacity purchase (2), image publish
-        # (3), destructive operations (15), model upload (2), infrastructure
-        # deploy (4), infrastructure destroy (2), local metrics (1), semantic
-        # progress (1), local storage sync (1), config management (11), Mission
-        # (10), and Swarm (6). The all-flags ceiling is therefore 197.
-        base_count = 139
+        # The default registry intentionally contains 141 read-only or low-risk
+        # tools (139 before the EKS Capabilities pair eks_capabilities_status +
+        # argocd_ui_url; 138 before deps_scan; 134 before fleet_status; 125
+        # before the cost allocation/k8s/report family added 9). Optional
+        # families add 58 more when every flag is enabled: capacity purchase
+        # (2), image publish (3), destructive operations (15), model upload
+        # (2), infrastructure deploy (4), infrastructure destroy (2), local
+        # metrics (1), semantic progress (1), local storage sync (1), config
+        # management (11), Mission (10), and Swarm (6). The all-flags ceiling
+        # is therefore 199.
+        base_count = 141
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -343,6 +345,9 @@ class TestToolRegistration:
             "stack_synth",
             "valkey_status",
             "aurora_status",
+            # EKS Capabilities (AWS-managed Argo CD / ACK / kro)
+            "eks_capabilities_status",
+            "argocd_ui_url",
             # Stacks mutating (cdk.json toggles)
             "enable_fsx",
             "disable_fsx",

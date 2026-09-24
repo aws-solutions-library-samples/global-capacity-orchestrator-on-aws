@@ -26,6 +26,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Distributed Training](DISTRIBUTED_TRAINING.md) | ML engineers | Multi-node training through the [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) `TrainJob` API (on by default): runtimes, validation semantics, GPU variants, Kueue gang scheduling, and Spot guidance |
 | [API Reference](API.md) | Developers | Every HTTP surface: the control plane (manifests, jobs, queue, templates, webhooks, cost), cross-region aggregation, inference, and health/observability |
 | [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/[Valkey](https://valkey.io/)/EFA, configure queue processor |
+| [EKS Capabilities](EKS_CAPABILITIES.md) | Platform teams | Opt-in AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/), [ACK](https://aws-controllers-k8s.github.io/community/) and [kro](https://kro.run/) per regional cluster (off by default), the fenced GitOps hand-off that points Argo CD at your tenant repository, and the `gco stacks capabilities` CLI including the hosted Argo CD UI |
 | [Analytics Environment](ANALYTICS.md) | Data scientists / ML engineers | Optional [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio + [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment for interactive analysis of cluster data |
 | [Cluster Observability](MONITORING.md) | Operators | Self-hosted per-cluster [Prometheus](https://prometheus.io/docs/introduction/overview/) + [Grafana](https://grafana.com/docs/grafana/latest/) + Alertmanager (on by default), private port-forward access, and the `gco monitoring` CLI |
 | [Cost Monitoring](COST_MONITORING.md) | Operators, FinOps | Per-cluster [OpenCost](https://opencost.io/) + Grafana cost dashboard (on by default), scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to S3, cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s`, ad-hoc reports via `/api/v1/cost/*`, and spot price-aware central-queue scheduling |
@@ -81,10 +82,11 @@ If you're customizing or operating:
 1. [Project Tenets](../TENETS.md) — apply the project's prioritized decision framework
 2. [Architecture](ARCHITECTURE.md) — understand the infrastructure
 3. [Customization](CUSTOMIZATION.md) — tune for your needs
-4. [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — the always-on shared storage layer
-5. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
-6. [Mission](MISSION.md) — run goal-directed iteration loops
-7. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
-8. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
-9. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
-10. [Maintenance](MAINTENANCE.md) — keep the accelerator catalog, EKS version, and pinned tooling current
+4. [EKS Capabilities](EKS_CAPABILITIES.md) — opt into AWS-managed Argo CD, ACK and kro, and hand tenant workloads to GitOps
+5. [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — the always-on shared storage layer
+6. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
+7. [Mission](MISSION.md) — run goal-directed iteration loops
+8. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
+9. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
+10. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
+11. [Maintenance](MAINTENANCE.md) — keep the accelerator catalog, EKS version, and pinned tooling current

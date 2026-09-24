@@ -1097,6 +1097,247 @@ def eks_endpoint_set(config: Any, mode: str, cidrs: tuple[str, ...], yes: bool) 
 
 
 # =============================================================================
+# EKS Capabilities (AWS-managed Argo CD / ACK / kro) — read-only surface
+# =============================================================================
+
+
+@stacks.group("capabilities")
+@pass_config
+def capabilities_cmd(config: Any) -> None:
+    """EKS Capabilities (AWS-managed Argo CD, ACK, kro) attached to GCO clusters.
+
+    The capabilities themselves are declared in cdk.json (eks_capabilities,
+    all off by default) and created by 'gco stacks deploy'. These commands
+    read what is configured and what is live; see docs/EKS_CAPABILITIES.md.
+    """
+
+
+@capabilities_cmd.command("status")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Show status across all deployment regions")
+@pass_config
+def capabilities_status(config: Any, region: Any, all_regions: bool) -> None:
+    """Show configured versus live EKS Capabilities for a regional cluster.
+
+    Reads cdk.json eks_capabilities and the EKS API (ListCapabilities /
+    DescribeCapability) and reports, per capability type, whether it is
+    configured for the region, whether it is attached, its status, and any
+    drift between the two. Exits nonzero when a region drifts (a configured
+    capability missing, an attached one disabled in cdk.json, or a status
+    other than ACTIVE).
+
+    Examples:
+        gco stacks capabilities status
+        gco stacks capabilities status -r us-west-2
+        gco stacks capabilities status --all-regions --output json
+    """
+    from ..eks_capabilities import capabilities_status as _capabilities_status
+    from ..eks_capabilities import load_eks_capabilities_config
+
+    formatter = get_output_formatter(config)
+    project = _project_name()
+    try:
+        capabilities_config = load_eks_capabilities_config()
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to read eks_capabilities from cdk.json: {exc}")
+        sys.exit(1)
+
+    failures = 0
+    documents: list[dict[str, Any]] = []
+    for target in _target_regions(config, region, all_regions):
+        try:
+            status = _capabilities_status(target, project, config=capabilities_config)
+        except Exception as exc:
+            formatter.print_error(f"[{target}] Failed to describe EKS Capabilities: {exc}")
+            failures += 1
+            continue
+        documents.append(status)
+        _print_capabilities_status(formatter, status, structured=config.output_format != "table")
+        if not status["healthy"]:
+            failures += 1
+    if documents and config.output_format != "table":
+        # One machine-readable document per invocation: a list under
+        # --all-regions, the single region's document otherwise.
+        formatter.print(documents if all_regions else documents[0])
+    if failures:
+        sys.exit(1)
+
+
+def _print_capabilities_status(
+    formatter: Any, status: Mapping[str, Any], *, structured: bool = False
+) -> None:
+    """Render one region's status: the table plus human hints (stderr) about drift.
+
+    In structured (json/yaml) mode the caller prints the documents once at the
+    end, so only the stderr hints are emitted here.
+    """
+    region = status["region"]
+    if not structured:
+        formatter.print_info(f"EKS Capabilities for {status['cluster_name']} in {region}:")
+        formatter.print(
+            status["capabilities"],
+            columns=["type", "configured", "deployed", "status", "version", "drift"],
+        )
+    if not status["cluster_found"]:
+        formatter.print_warning(
+            f"[{region}] Cluster {status['cluster_name']} is not deployed; only the "
+            "configured intent is shown."
+        )
+    for row in status["capabilities"]:
+        if row["drift"]:
+            formatter.print_warning(f"[{region}] {row['type']}: {row['drift']}")
+        if row["type"] == "argocd" and row.get("argocd_server_url"):
+            formatter.print_info(
+                f"[{region}] Argo CD UI: {row['argocd_server_url']} "
+                "(Identity Center sign-in; 'gco stacks capabilities argocd open')"
+            )
+    for item in status["unmanaged"]:
+        formatter.print_warning(
+            f"[{region}] capability {item['capability_name']} ({item['type']}, "
+            f"{item['status']}) is attached but not managed by GCO"
+        )
+
+
+@capabilities_cmd.group("argocd")
+@pass_config
+def capabilities_argocd_cmd(config: Any) -> None:
+    """The hosted Argo CD UI of the Argo CD capability (open it, screenshot it)."""
+
+
+@capabilities_argocd_cmd.command("open")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option(
+    "--print-url",
+    is_flag=True,
+    help="Print the server URL instead of launching a browser (also what --output json does)",
+)
+@pass_config
+def capabilities_argocd_open(config: Any, region: Any, print_url: bool) -> None:
+    """Open the hosted Argo CD UI for a regional cluster in your browser.
+
+    The URL comes from the EKS API (DescribeCapability); sign-in is IAM
+    Identity Center, using the users and groups named in cdk.json
+    eks_capabilities.argocd.rbac_role_mappings. With vpce_ids configured the
+    UI is private to the VPC, so open it from a host inside it.
+
+    Examples:
+        gco stacks capabilities argocd open
+        gco stacks capabilities argocd open -r us-west-2 --print-url
+    """
+    from ..argocd_ui import resolve_argocd_server_url
+
+    formatter = get_output_formatter(config)
+    target = _target_regions(config, region, False)[0]
+    try:
+        url = resolve_argocd_server_url(target, _project_name())
+    except Exception as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+
+    document = {"region": target, "argocd_server_url": url}
+    if print_url or config.output_format != "table":
+        formatter.print(document)
+        return
+    formatter.print_info(f"Argo CD UI for {target}: {url}")
+    formatter.print_info("Sign in with IAM Identity Center when prompted.")
+    if click.launch(url) != 0:
+        formatter.print_warning("Could not launch a browser; open the URL above manually.")
+
+
+@capabilities_argocd_cmd.command("screenshot")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=str),
+    help="PNG to write (default: ./argocd-ui.png; docs use images/argocd-ui.png)",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="Run the browser headless (requires a session saved by an earlier headed run)",
+)
+@click.option(
+    "--login-timeout",
+    type=int,
+    default=None,
+    help="Seconds to wait for the Identity Center sign-in to land on the Applications view",
+)
+@click.option(
+    "--profile-dir",
+    type=click.Path(file_okay=False, path_type=str),
+    help="Persistent browser profile (default: ~/.gco/argocd-browser/<region>)",
+)
+@pass_config
+def capabilities_argocd_screenshot(
+    config: Any,
+    region: Any,
+    output_path: str | None,
+    headless: bool,
+    login_timeout: int | None,
+    profile_dir: str | None,
+) -> None:
+    """Capture a full-page screenshot of the hosted Argo CD Applications view.
+
+    Drives Playwright's Chromium (pip install 'gco[diagrams]' and
+    'playwright install chromium' once). The browser profile persists per
+    region, so the first run opens a window for you to sign in with Identity
+    Center and later runs can pass --headless. This is how
+    images/argocd-ui.png in the docs is produced.
+
+    Examples:
+        gco stacks capabilities argocd screenshot
+        gco stacks capabilities argocd screenshot -o images/argocd-ui.png
+        gco stacks capabilities argocd screenshot --headless -r us-west-2
+    """
+    from pathlib import Path
+
+    from ..argocd_ui import (
+        DEFAULT_LOGIN_TIMEOUT_SECONDS,
+        DEFAULT_SCREENSHOT_FILENAME,
+        capture_argocd_screenshot,
+        default_profile_dir,
+        resolve_argocd_server_url,
+    )
+
+    formatter = get_output_formatter(config)
+    target = _target_regions(config, region, False)[0]
+    output = Path(output_path) if output_path else Path.cwd() / DEFAULT_SCREENSHOT_FILENAME
+    profile = Path(profile_dir) if profile_dir else default_profile_dir(target)
+    timeout = login_timeout if login_timeout is not None else DEFAULT_LOGIN_TIMEOUT_SECONDS
+    try:
+        url = resolve_argocd_server_url(target, _project_name())
+        if not headless:
+            formatter.print_info(
+                f"Opening {url} — sign in with IAM Identity Center in the browser window "
+                f"(waiting up to {timeout}s)."
+            )
+        written = capture_argocd_screenshot(
+            url,
+            output,
+            profile_dir=profile,
+            headless=headless,
+            login_timeout_seconds=timeout,
+        )
+    except Exception as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+
+    document = {
+        "region": target,
+        "argocd_server_url": url,
+        "screenshot": str(written),
+        "profile_dir": str(profile),
+        "headless": headless,
+    }
+    if config.output_format != "table":
+        formatter.print(document)
+        return
+    formatter.print_success(f"Argo CD UI screenshot written to {written}")
+
+
+# =============================================================================
 # Deployment-region commands (managed-config engine veneers)
 # =============================================================================
 

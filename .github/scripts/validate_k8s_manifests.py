@@ -134,8 +134,19 @@ _PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z_]+\}\}")
 #   list entries (see regional_stack.py::_compute... / the NetworkPolicy
 #   `to:` block in 03-network-policies.yaml) — the placeholder sits at the
 #   start of a YAML sequence, so it needs a real sequence item, not a string.
+#
+#   {{ARGOCD_GITOPS_DESTINATIONS}} / {{ARGOCD_GITOPS_SYNC_POLICY}} are rendered
+#   by regional_stack.py::_compute_eks_capabilities_replacements as single-line
+#   JSON (a YAML flow sequence / mapping) into 08-argocd-gitops.yaml — the
+#   AppProject ``destinations`` list and the Application ``syncPolicy`` object
+#   — so their stubs must be JSON of the same shape, not a string.
 _STRUCTURAL_STUBS: dict[str, str] = {
     "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
+    "{{ARGOCD_GITOPS_DESTINATIONS}}": (
+        '[{"server": "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1", '
+        '"namespace": "gco-jobs"}]'
+    ),
+    "{{ARGOCD_GITOPS_SYNC_POLICY}}": '{"automated": {"selfHeal": true, "prune": false}}',
 }
 
 # Placeholders that sit in a bare (unquoted) numeric scalar position — e.g.

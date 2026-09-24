@@ -85,6 +85,22 @@ harness die first. Both run after the workload actions on purpose: a zero
 restart count and an intact posture mean more once the services have carried
 real traffic.
 
+`eks-capabilities` (`actions/eks_capabilities.py`, logic in
+`checks/eks_capabilities.py`) proves the opt-in AWS-managed Argo CD / ACK / kro
+capabilities (`docs/EKS_CAPABILITIES.md`). Because the shipped `cdk.json`
+leaves every type off and preflight requires a clean worktree, the run enables
+them the way it enables optional schedulers: `__main__.py` turns
+`--eks-capabilities` plus the Argo CD Identity Center inputs into the
+`eks_capabilities_overrides` CDK context (`build_eks_capabilities_overrides`),
+and the action resolves the same merged block to know what to prove. The AWS
+side reuses `cli.eks_capabilities.build_status` — the merge behind
+`gco stacks capabilities status` — so the harness and the CLI cannot disagree
+about drift; the cluster side goes through `checks/cluster.py` to read the
+`local-cluster` Secret and the access-entry RBAC, then polls the root
+`Application` to `Synced`/`Healthy` at the run's commit and requires the
+fixture ConfigMap from `examples/gitops/tenant-smoke` in `gco-jobs` with Argo
+CD's tracking label. With nothing enabled the action passes with a note.
+
 ## How a run executes
 
 `runner.py` resolves the requested actions (expanding dependencies), then for

@@ -718,6 +718,27 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["CLUSTER_SHARED_BUCKET", "ARCHITECTURE"],
     },
+    "EKS_CAPABILITIES": {
+        "summary": "Opt-in EKS Capabilities — the AWS-managed Argo CD, ACK and kro installations GCO can attach per regional cluster — and the GitOps hand-off that points the hosted Argo CD at a fenced tenant repository path.",
+        "topics": ["eks", "gitops", "customization", "security", "cli"],
+        "keywords": [
+            "eks capabilities",
+            "argo cd",
+            "argocd",
+            "ack",
+            "aws controllers for kubernetes",
+            "kro",
+            "gitops",
+            "appproject",
+            "application",
+            "identity center",
+            "capability role",
+            "gco stacks capabilities",
+            "argocd ui",
+            "tenant repository",
+        ],
+        "related": ["CUSTOMIZATION", "CLI", "LIVE_RELEASE_VALIDATION", "ARCHITECTURE"],
+    },
     "CONCEPTS": {
         "summary": "Fundamental concepts behind GCO — what it is, the problems it solves, and how the key components fit together.",
         "topics": [

@@ -204,6 +204,9 @@ class TestActionRegistry:
                 "convergence",
                 "platform-workloads",
                 "network-posture",
+                # Reads the EKS Capabilities and the Argo CD objects of the
+                # deployed cluster; nothing to describe once it is torn down.
+                "eks-capabilities",
             }
         )
 

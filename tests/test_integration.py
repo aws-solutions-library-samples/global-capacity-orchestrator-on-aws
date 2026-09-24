@@ -284,6 +284,10 @@ class TestKubernetesManifests:
             # (post-helm-kubeflow-trainer-runtimes.yaml); keep in lockstep
             # with TRAINJOB_API_VERSION in gco/services/manifest_processor.py.
             "trainer.kubeflow.org/v1alpha1",
+            # Argo CD GitOps hand-off (08-argocd-gitops.yaml); CRDs come from
+            # the AWS-managed Argo CD EKS Capability. Keep in lockstep with
+            # _ARGOCD_CUSTOM_OBJECTS in the applier.
+            "argoproj.io/v1alpha1",
         }
 
         for filepath in manifest_files:

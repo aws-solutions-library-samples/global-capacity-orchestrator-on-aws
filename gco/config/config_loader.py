@@ -32,6 +32,14 @@ from typing import Any, cast
 import boto3
 from aws_cdk import App
 
+from gco.eks_capabilities_config import (
+    EKS_CAPABILITIES_CONTEXT_KEY,
+    EKS_CAPABILITIES_OVERRIDES_CONTEXT_KEY,
+    EksCapabilitiesConfigError,
+    merge_eks_capabilities_overrides,
+    parse_eks_capabilities_overrides,
+    validate_eks_capabilities_config,
+)
 from gco.inference_proxy_config import (
     INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
     INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
@@ -214,6 +222,9 @@ class ConfigLoader:
 
         # Validate EKS cluster config
         self._validate_eks_cluster_config()
+
+        # Validate the opt-in EKS Capabilities block (Argo CD / ACK / kro)
+        self._validate_eks_capabilities_config()
 
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
@@ -793,6 +804,52 @@ class ConfigLoader:
                 )
             if len(set(value)) != len(value):
                 raise ConfigValidationError(f"vpc_endpoints.{key} lists a service twice")
+
+    def _validate_eks_capabilities_config(self) -> None:
+        """Validate the optional ``eks_capabilities`` block.
+
+        Every capability type is off by default, so an absent block is valid.
+        When present, the shape rules live in
+        :mod:`gco.eks_capabilities_config`; per-type ``regions`` subsets must
+        name regional deployment regions, Argo CD needs an Identity Center
+        instance plus at least one RBAC mapping when enabled, and the GitOps
+        hand-off needs Argo CD on and a repository URL. The run-scoped
+        ``eks_capabilities_overrides`` context (a JSON object) is merged in
+        first, so an override that would produce an invalid block fails the
+        same way an invalid cdk.json does.
+        """
+        raw = self._raw_eks_capabilities_config()
+        if raw is None:
+            return
+        try:
+            validate_eks_capabilities_config(raw, self.get_regions())
+        except EksCapabilitiesConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def _raw_eks_capabilities_config(self) -> object:
+        """The cdk.json ``eks_capabilities`` block with run-scoped overrides merged in."""
+        raw = self.app.node.try_get_context(EKS_CAPABILITIES_CONTEXT_KEY)
+        try:
+            overrides = parse_eks_capabilities_overrides(
+                self.app.node.try_get_context(EKS_CAPABILITIES_OVERRIDES_CONTEXT_KEY)
+            )
+        except EksCapabilitiesConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+        return merge_eks_capabilities_overrides(raw, overrides)
+
+    def get_eks_capabilities_config(self) -> dict[str, Any]:
+        """Return the ``eks_capabilities`` block with defaults merged in.
+
+        Keys: ``argocd`` / ``ack`` / ``kro``, each ``{enabled, regions, ...}``
+        (see :data:`gco.eks_capabilities_config.EKS_CAPABILITIES_DEFAULTS`).
+        All three are disabled by default; ``regions: []`` means every
+        regional deployment region. Honors the run-scoped
+        ``eks_capabilities_overrides`` context like the validator does.
+        """
+        try:
+            return validate_eks_capabilities_config(self._raw_eks_capabilities_config(), None)
+        except EksCapabilitiesConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
 
     def get_vpc_endpoints_config(self) -> dict[str, list[str]]:
         """Return the VPC endpoint selection with defaults merged in.

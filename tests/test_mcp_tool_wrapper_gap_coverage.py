@@ -1212,6 +1212,31 @@ def test_stacks_expected_count_swallows_loader_failure() -> None:
             {"region": "ignored", "all_regions": True},
             ("stacks", "addons", "status", "--all-regions"),
         ),
+        ("eks_capabilities_status", (), {}, ("stacks", "capabilities", "status")),
+        (
+            "eks_capabilities_status",
+            (),
+            {"region": "us-east-1"},
+            ("stacks", "capabilities", "status", "-r", "us-east-1"),
+        ),
+        (
+            "eks_capabilities_status",
+            (),
+            {"region": "ignored", "all_regions": True},
+            ("stacks", "capabilities", "status", "--all-regions"),
+        ),
+        (
+            "argocd_ui_url",
+            (),
+            {},
+            ("stacks", "capabilities", "argocd", "open", "--print-url"),
+        ),
+        (
+            "argocd_ui_url",
+            (),
+            {"region": "us-west-2"},
+            ("stacks", "capabilities", "argocd", "open", "--print-url", "-r", "us-west-2"),
+        ),
     ],
 )
 def test_stacks_wrapper_option_matrix(

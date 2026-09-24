@@ -23,6 +23,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Job Submission with Private Endpoints](#job-submission-with-private-endpoints)
   - [Network Policy Enforcement](#network-policy-enforcement)
   - [VPC Endpoints](#vpc-endpoints)
+  - [EKS Capabilities](#eks-capabilities)
 - [Configuring GPU Nodepools](#configuring-gpu-nodepools)
   - [Which instance types can actually launch](#which-instance-types-can-actually-launch)
   - [Modify Instance Types](#modify-instance-types)
@@ -630,6 +631,47 @@ port, so job pods keep working whether S3 is reached through the gateway
 endpoint or the NAT gateways. Calls to the global region (the job tables, the
 cluster-shared bucket, the SSM registry) are cross-region and always leave
 through the NAT gateways.
+
+### EKS Capabilities
+
+The AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/),
+[ACK](https://aws-controllers-k8s.github.io/community/) and [kro](https://kro.run/)
+installations EKS can attach to a cluster are three opt-in knobs under
+`eks_capabilities`, every one off by default because each bills per
+capability-hour:
+
+```json
+"eks_capabilities": {
+  "argocd": {
+    "enabled": true,
+    "idc_instance_arn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+    "rbac_role_mappings": [
+      {"role": "ADMIN", "identities": [{"id": "<identity-center-user-id>", "type": "SSO_USER"}]}
+    ],
+    "gitops": {
+      "enabled": true,
+      "repo_url": "https://github.com/your-org/gco-tenants.git",
+      "revision": "main",
+      "path": "clusters/{region}",
+      "sync_policy": "manual"
+    }
+  },
+  "ack": {"enabled": false},
+  "kro": {"enabled": false}
+}
+```
+
+Each enabled type synthesizes one capability IAM role and one
+`AWS::EKS::Capability` per selected regional cluster (`regions: []` means all
+of them). Argo CD requires an IAM Identity Center instance and at least one
+RBAC mapping because the hosted control plane has no local users; its
+optional `gitops` block is GCO's declarative hand-off — a fenced
+`AppProject` and one root `Application` per cluster pointing Argo CD at your
+tenant repository path, restricted to `gco-jobs` and `gco-inference`.
+`gco stacks capabilities status` reports configured-versus-live state and
+`gco stacks capabilities argocd open` opens the hosted Argo CD UI. Every knob,
+the IAM grants, the fence and the operating notes are in
+[EKS Capabilities](EKS_CAPABILITIES.md).
 
 ## Configuring GPU Nodepools
 

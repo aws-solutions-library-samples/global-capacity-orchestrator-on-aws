@@ -3957,7 +3957,9 @@ class TestActionPreflight:
 
         ctx.session.client.assert_not_called()
 
-    @pytest.mark.parametrize("action", ["platform-workloads", "network-posture"])
+    @pytest.mark.parametrize(
+        "action", ["platform-workloads", "network-posture", "eks-capabilities"]
+    )
     def test_every_cluster_facing_action_needs_the_tunnel_plugin(
         self, tmp_path: Path, action: str
     ) -> None:

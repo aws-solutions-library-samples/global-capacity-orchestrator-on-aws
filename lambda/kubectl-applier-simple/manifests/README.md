@@ -59,7 +59,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | Range | Group | Description |
 |-------|-------|-------------|
-| `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes |
+| `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes, Argo CD capability registration + GitOps hand-off |
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor, inference-proxy, cost-monitor — every Deployment follows the [platform workload contract](#platform-workload-contract) |
 | `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
@@ -79,6 +79,8 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 | `05-priority-classes.yaml` | `gco-platform-critical` `PriorityClass` (value 1000000) — referenced by every platform-service pod spec (30–34 + the post-Helm SQS consumer) so control-plane pods preempt default-priority user workloads under node pressure instead of being starved by them |
 | `06-network-policy-controller.yaml` | The `kube-system/amazon-vpc-cni` ConfigMap that switches the EKS Auto Mode network policy controller on (rendered from `cdk.json` `eks_cluster.network_policy_enforcement`, default `true`) — without it every NetworkPolicy above is stored and enforced by nothing; inert on kind, where Calico enforces |
+| `07-argocd-cluster-access.yaml` | [Argo CD EKS Capability](../../../docs/EKS_CAPABILITIES.md) wiring: the `argocd` `Namespace`, the `local-cluster` Secret registering the hosting cluster as a deployment target by EKS cluster ARN (the hosted capability does not register it itself), and the Kubernetes RBAC for the capability role's access-entry group (`eks-access-entry:<role ARN>`): cluster-wide read (`gco-argocd-read-all`) plus an allow-listed write grant over tenant workload kinds in `gco-jobs` and `gco-inference` only (`gco-argocd-deploy`; no wildcard, and never `ResourceQuota`, `LimitRange`, `NetworkPolicy`, `Role` or `RoleBinding` — the same five kinds the `AppProject` in `08-argocd-gitops.yaml` blacklists) — **skipped and pruned (all but the Namespace) when `eks_capabilities.argocd` is disabled** (`{{ARGOCD_CAPABILITY_ROLE_ARN}}`) |
+| `08-argocd-gitops.yaml` | The GitOps hand-off: `AppProject` `gco-tenants` fenced to the configured tenant namespaces on this cluster (no cluster-scoped kinds; quotas, limits, NetworkPolicies and RBAC blacklisted) and the root `Application` `gco-gitops-root` pointing Argo CD at `eks_capabilities.argocd.gitops` `repo_url` / `revision` / `path` with the configured sync policy; both CRDs are installed by the capability, so this is a base-pass file — **skipped and pruned (Application, then AppProject; no cascade delete of workloads) when the hand-off is disabled** (`{{ARGOCD_GITOPS_REPO_URL}}`) |
 
 ### Storage (20–29)
 
@@ -199,6 +201,15 @@ the `MP_HPA_*` tokens are resolved only when
 `.github/scripts/validate_k8s_manifests.py` (`_INTEGER_PLACEHOLDER_TOKENS`,
 `_QUANTITY_PLACEHOLDER_TOKENS`) so kubeconform renders them with the right
 type.
+
+Two tokens are *structural* rather than scalar: `{{ARGOCD_GITOPS_DESTINATIONS}}`
+(the `AppProject` `destinations` list) and `{{ARGOCD_GITOPS_SYNC_POLICY}}` (the
+`Application` `syncPolicy` object) in `08-argocd-gitops.yaml`. The regional
+stack renders each as single-line JSON, which YAML reads as a flow collection,
+so they sit unquoted in the manifest and `_STRUCTURAL_STUBS` in
+`validate_k8s_manifests.py` renders them with the same shape (the
+`{{VPC_ENDPOINT_CIDR_BLOCKS}}` sequence in `03-network-policies.yaml` is the
+other structural token).
 
 Lower- or mixed-case double-brace tokens (e.g. Grafana dashboard legends like
 `{{gpu}}` or `{{Hostname}}`) are **not** placeholders — the handler's skip

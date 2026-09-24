@@ -12,11 +12,18 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES, GITOPS_SYNC_POLICIES
 from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
 
+from .checks.eks_capabilities import (
+    GITOPS_FIXTURE_PATH,
+    build_eks_capabilities_overrides,
+    default_gitops_repository_url,
+    overrides_json,
+)
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
@@ -134,6 +141,62 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--eks-capabilities",
+        type=_split_actions,
+        default=(),
+        metavar="NAME[,NAME...]",
+        help=(
+            "Enable off-by-default EKS Capabilities for this run's deploy so the "
+            "eks-capabilities action can prove them (argocd, ack, kro, or all); "
+            "argocd needs --argocd-idc-instance-arn and --argocd-identity"
+        ),
+    )
+    parser.add_argument(
+        "--argocd-idc-instance-arn",
+        help="IAM Identity Center instance ARN the hosted Argo CD authenticates against",
+    )
+    parser.add_argument(
+        "--argocd-idc-region",
+        help="Region of the Identity Center instance when it differs from the cluster's",
+    )
+    parser.add_argument(
+        "--argocd-identity",
+        action="append",
+        default=[],
+        metavar="TYPE:ID",
+        help=(
+            "Identity Center user or group granted the Argo CD ADMIN role "
+            "(SSO_USER:<id> or SSO_GROUP:<id>; repeatable)"
+        ),
+    )
+    parser.add_argument(
+        "--argocd-gitops-repo-url",
+        help=(
+            "Git repository the GitOps hand-off points Argo CD at "
+            "(default: this checkout's origin remote as HTTPS)"
+        ),
+    )
+    parser.add_argument(
+        "--argocd-gitops-revision",
+        help="Revision Argo CD syncs (default: the run's --expected-sha)",
+    )
+    parser.add_argument(
+        "--argocd-gitops-path",
+        default=GITOPS_FIXTURE_PATH,
+        help="Repository path Argo CD syncs into gco-jobs (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--argocd-gitops-sync-policy",
+        choices=GITOPS_SYNC_POLICIES,
+        default="automated",
+        help="Sync policy of the root Application (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-argocd-gitops",
+        action="store_true",
+        help="Enable the Argo CD capability without the GitOps hand-off",
+    )
+    parser.add_argument(
         "--inference-region",
         help="Deployed Region used by the inference action",
     )
@@ -203,6 +266,15 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         )
     if "all" in args.optional_schedulers and len(args.optional_schedulers) != 1:
         parser.error("--optional-schedulers 'all' cannot be combined with individual names")
+    unknown_capabilities = sorted(set(args.eks_capabilities) - set(EKS_CAPABILITY_TYPES) - {"all"})
+    if unknown_capabilities:
+        parser.error(
+            "--eks-capabilities accepts "
+            + ", ".join((*EKS_CAPABILITY_TYPES, "all"))
+            + f"; got: {', '.join(unknown_capabilities)}"
+        )
+    if "all" in args.eks_capabilities and len(args.eks_capabilities) != 1:
+        parser.error("--eks-capabilities 'all' cannot be combined with individual names")
     if _inference_selected(args.actions):
         required = (
             "inference_region",
@@ -244,6 +316,28 @@ def _settings_from_args(
         report_dir / "checkpoint.json",
     )
     protected = tuple(dict.fromkeys(("CDKToolkit", "GCOGitHubOIDCStack", *args.protected_stack)))
+    capability_types = (
+        EKS_CAPABILITY_TYPES
+        if "all" in args.eks_capabilities
+        else tuple(name for name in EKS_CAPABILITY_TYPES if name in args.eks_capabilities)
+    )
+    capabilities_overrides_json = ""
+    if capability_types:
+        try:
+            overrides = build_eks_capabilities_overrides(
+                types=capability_types,
+                idc_instance_arn=args.argocd_idc_instance_arn,
+                idc_region=args.argocd_idc_region,
+                identities=tuple(args.argocd_identity),
+                gitops=not args.no_argocd_gitops,
+                repo_url=args.argocd_gitops_repo_url or default_gitops_repository_url(root),
+                revision=args.argocd_gitops_revision or args.expected_sha.lower(),
+                path=args.argocd_gitops_path,
+                sync_policy=args.argocd_gitops_sync_policy,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        capabilities_overrides_json = overrides_json(overrides)
     inference_enabled = _inference_selected(args.actions)
     proxy_config: dict[str, object] = {
         "tls_proxy_cpu_request_millicores": (INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT),
@@ -311,6 +405,7 @@ def _settings_from_args(
             if "all" in args.optional_schedulers
             else tuple(sorted(set(args.optional_schedulers)))
         ),
+        eks_capabilities_overrides_json=capabilities_overrides_json,
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

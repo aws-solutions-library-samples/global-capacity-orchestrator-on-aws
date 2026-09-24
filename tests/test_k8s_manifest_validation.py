@@ -164,6 +164,23 @@ class TestRenderPlaceholders:
         assert "ipBlock" in out
         assert "{{" not in out
 
+    def test_structural_argocd_tokens_become_flow_collections(self) -> None:
+        # 08-argocd-gitops.yaml: the regional stack renders the AppProject
+        # destinations and the Application syncPolicy as single-line JSON, so
+        # the stubs must parse as a list of destinations and a mapping — a
+        # string stub would fail the argoproj.io schema's type checks.
+        out = validator.render_placeholders(
+            "spec:\n"
+            "  destinations: {{ARGOCD_GITOPS_DESTINATIONS}}\n"
+            "  syncPolicy: {{ARGOCD_GITOPS_SYNC_POLICY}}\n"
+        )
+        assert "{{" not in out
+        spec = yaml.safe_load(out)["spec"]
+        assert isinstance(spec["destinations"], list) and spec["destinations"]
+        assert {"server", "namespace"} <= set(spec["destinations"][0])
+        assert spec["destinations"][0]["server"].startswith("arn:aws:eks:")
+        assert isinstance(spec["syncPolicy"], dict)
+
     def test_text_without_placeholders_is_unchanged(self) -> None:
         text = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: gco-jobs\n"
         assert validator.render_placeholders(text) == text

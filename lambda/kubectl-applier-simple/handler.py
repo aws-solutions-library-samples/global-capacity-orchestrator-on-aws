@@ -129,6 +129,18 @@ _CERT_MANAGER_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "Certificate": ("cert-manager.io", "v1", "certificates", False),
 }
 
+# Argo CD GitOps hand-off objects applied by 08-argocd-gitops.yaml. Their CRDs
+# are installed into the cluster by the AWS-managed Argo CD EKS Capability (not
+# by a Helm chart), and the regional stack orders the convergence trigger after
+# the capability, so they belong to the BASE pass. Ordinary namespaced CRs in
+# the capability's ``argocd`` namespace; readiness is exact existence only — a
+# tenant repository that fails to sync must never fail a GCO deployment (the
+# CLI and the live checks surface sync/health instead).
+_ARGOCD_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "AppProject": ("argoproj.io", "v1alpha1", "appprojects", False),
+    "Application": ("argoproj.io", "v1alpha1", "applications", False),
+}
+
 # Services annotated with this marker are validated for exact existence only;
 # a ready EndpointSlice endpoint is not required. Reserved for Services whose
 # backends schedule exclusively onto accelerator nodes that a fresh cluster
@@ -141,6 +153,8 @@ _ALLOW_EMPTY_ENDPOINTS_ANNOTATION = "gco.io/allow-empty-endpoints"
 _SUPPORTED_MANIFEST_KINDS = frozenset(
     {
         "APIService",
+        "AppProject",
+        "Application",
         "Certificate",
         "ClusterRole",
         "ClusterRoleBinding",
@@ -754,6 +768,29 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ),
     ("{{COST_MONITORING_ENABLED}}", True): (
         ("v1", "ConfigMap", "monitoring", "gco-dashboard-cost"),
+    ),
+    # Argo CD EKS Capability (cdk.json eks_capabilities.argocd):
+    # 07-argocd-cluster-access.yaml registers the hosting cluster as an Argo CD
+    # deployment target and grants the capability role its Kubernetes RBAC.
+    # The ``argocd`` Namespace is deliberately NOT inventoried: deleting it
+    # would take every operator-created Application/AppProject with it, and
+    # the capability's RETAIN delete policy exists precisely to keep those.
+    ("{{ARGOCD_CAPABILITY_ROLE_ARN}}", False): (
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "gco-argocd-read-all"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "gco-argocd-read-all"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-argocd-deploy"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-argocd-deploy"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-inference", "gco-argocd-deploy"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-inference", "gco-argocd-deploy"),
+        ("v1", "Secret", "argocd", "local-cluster"),
+    ),
+    # 08-argocd-gitops.yaml: the GitOps hand-off (eks_capabilities.argocd.gitops).
+    # Application before the AppProject it belongs to. The Application carries
+    # no resources-finalizer, so deleting it detaches the tenant workloads from
+    # Git instead of deleting them.
+    ("{{ARGOCD_GITOPS_REPO_URL}}", False): (
+        ("argoproj.io/v1alpha1", "Application", "argocd", "gco-gitops-root"),
+        ("argoproj.io/v1alpha1", "AppProject", "argocd", "gco-tenants"),
     ),
 }
 
@@ -1465,11 +1502,13 @@ def apply_manifests(
                         kind in _GATEWAY_CUSTOM_OBJECTS
                         or kind in _QUEUEING_CUSTOM_OBJECTS
                         or kind in _CERT_MANAGER_CUSTOM_OBJECTS
+                        or kind in _ARGOCD_CUSTOM_OBJECTS
                     ):
                         group, version, plural, cluster_scoped = (
                             _GATEWAY_CUSTOM_OBJECTS.get(kind)
                             or _QUEUEING_CUSTOM_OBJECTS.get(kind)
-                            or _CERT_MANAGER_CUSTOM_OBJECTS[kind]
+                            or _CERT_MANAGER_CUSTOM_OBJECTS.get(kind)
+                            or _ARGOCD_CUSTOM_OBJECTS[kind]
                         )
                         try:
                             if cluster_scoped:

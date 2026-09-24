@@ -36,6 +36,8 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `vector_store.py` | Operator client for the vector store (`gco vector`) |
 | `cluster_tunnel.py` | Shared helpers for reaching a possibly-private EKS API endpoint (`gco cluster tunnel`) |
 | `cluster_doctor.py` | Diagnosis of the three layers of cluster access: reachability, authentication, authorization (`gco cluster doctor`) |
+| `eks_capabilities.py` | Configured-vs-live view of the [EKS Capabilities](../docs/EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) on a regional cluster: cdk.json intent merged with `ListCapabilities`/`DescribeCapability`, drift sentences, unmanaged capabilities (`gco stacks capabilities status`) |
+| `argocd_ui.py` | Hosted Argo CD UI of the Argo CD capability: server-URL resolution from the EKS API and the Playwright persistent-profile screenshot of the Applications view (`gco stacks capabilities argocd open` / `screenshot`) |
 | `ssm_tunnel.py` | SSM Session Manager tunnel helpers for private EKS endpoints |
 | `ephemeral_bastion.py` | Ephemeral SSM bastion lifecycle (`--via-ssm auto`) |
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |

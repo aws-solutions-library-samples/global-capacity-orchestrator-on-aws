@@ -4394,7 +4394,7 @@ gco release validate --expected-account 123456789012 \
 Manage CDK infrastructure stacks.
 
 <details>
-<summary>All <code>gco stacks</code> commands (18) — click to expand</summary>
+<summary>All <code>gco stacks</code> commands (19) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -4407,6 +4407,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
 | [`gco stacks eks`](#gco-stacks-eks) | Set the EKS API endpoint access mode and CIDR allowlist in cdk.json. |
+| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) per region, and the hosted Argo CD UI (open it, screenshot it). |
 | [`gco stacks regions`](#gco-stacks-regions) | Manage deployment Regions in cdk.json (managed-config engine). |
 | [`gco stacks bedrock`](#gco-stacks-bedrock) | Manage Bedrock model and reasoning defaults in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
@@ -4680,6 +4681,81 @@ gco stacks eks endpoint set MODE [OPTIONS]
 gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr 203.0.113.7/32   # dev access from one IP
 gco stacks eks endpoint set PRIVATE -y                                 # back to production posture
 gco stacks deploy gco-us-east-1 -y                                     # apply the change
+```
+
+#### `gco stacks capabilities`
+
+Read-only view of the opt-in [EKS Capabilities](EKS_CAPABILITIES.md) — the
+AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/), [ACK](https://aws-controllers-k8s.github.io/community/)
+and [kro](https://kro.run/) installations declared in `cdk.json`
+`eks_capabilities` (every type off by default) and attached to each regional
+cluster by `gco stacks deploy`. Nothing here mutates AWS or `cdk.json`.
+
+```bash
+gco stacks capabilities status [OPTIONS]
+gco stacks capabilities argocd open [OPTIONS]
+gco stacks capabilities argocd screenshot [OPTIONS]
+```
+
+**Subcommands:**
+
+- `status` - Configured versus live: for each capability type, whether
+  `cdk.json` enables it for the region, whether it is attached
+  (`ListCapabilities` / `DescribeCapability`), its status and version, the
+  Argo CD server URL and GitOps hand-off, and a `drift` sentence when the two
+  disagree (configured but not attached, attached but disabled, or a status
+  other than `ACTIVE`). Capabilities on the cluster that GCO did not create
+  are listed under `unmanaged`. Exits nonzero when any inspected region
+  drifts; with `--output json` the document is one object per region (a list
+  under `--all-regions`).
+- `argocd open` - Resolve the hosted Argo CD UI URL from the EKS API and open
+  it in your browser (`--print-url` only prints it; `--output json` returns
+  `{"region", "argocd_server_url"}`). Sign-in is IAM Identity Center with the
+  users and groups named in `eks_capabilities.argocd.rbac_role_mappings`.
+  When `vpce_ids` is configured the UI is private to the VPC, so open it from
+  a host inside it.
+- `argocd screenshot` - Capture a full-page PNG of the Applications view with
+  Playwright's Chromium (`pip install 'gco[diagrams]'` and
+  `playwright install chromium` once). The browser profile persists per region
+  under `~/.gco/argocd-browser/<region>` (`$GCO_ARGOCD_BROWSER_PROFILE_DIR`
+  overrides the root), so the first run opens a window for you to sign in
+  with Identity Center and later runs can pass `--headless`. This is how the
+  Argo CD UI screenshot in [EKS Capabilities](EKS_CAPABILITIES.md#argo-cd-ui)
+  is produced.
+
+**Options (`status`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--all-regions` | `-A` | Inspect every configured deployment region |
+
+**Options (`argocd open`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--print-url` | | Print the server URL instead of launching a browser |
+
+**Options (`argocd screenshot`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--output` | `-o` | PNG to write (default: `./argocd-ui.png`; the docs use `images/argocd-ui.png`) |
+| `--headless` | | Run the browser headless (needs a session saved by an earlier headed run) |
+| `--login-timeout` | | Seconds to wait for the Identity Center sign-in to land on the Applications view (default 300) |
+| `--profile-dir` | | Persistent browser profile directory (default: `~/.gco/argocd-browser/<region>`) |
+
+**Examples:**
+
+```bash
+gco stacks capabilities status                                      # first deployment region
+gco stacks capabilities status --all-regions --output json          # one document per region
+gco stacks capabilities argocd open                                 # browser, Identity Center sign-in
+gco stacks capabilities argocd open --print-url -r us-west-2
+gco stacks capabilities argocd screenshot -o images/argocd-ui.png   # first run: sign in in the window
+gco stacks capabilities argocd screenshot --headless                # later runs reuse the saved session
 ```
 
 #### `gco stacks regions`

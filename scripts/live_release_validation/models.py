@@ -122,6 +122,11 @@ class RunSettings:
     #: action). Part of the resume identity: a resumed run must deploy and
     #: validate the same chart set it started with.
     optional_schedulers: tuple[str, ...] = ()
+    #: Canonical JSON of the ``eks_capabilities_overrides`` CDK context this
+    #: run deploys with (``--eks-capabilities`` and the Argo CD Identity Center
+    #: inputs; see the ``eks-capabilities`` action), or ``""`` for none. Part
+    #: of the resume identity like the scheduler overrides.
+    eks_capabilities_overrides_json: str = ""
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -189,6 +194,8 @@ class RunSettings:
         context = {_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT: "true"}
         if self.optional_schedulers:
             context["helm_enabled_overrides"] = ",".join(self.optional_schedulers)
+        if self.eks_capabilities_overrides_json:
+            context["eks_capabilities_overrides"] = self.eks_capabilities_overrides_json
         return context
 
     def identity(self) -> dict[str, Any]:

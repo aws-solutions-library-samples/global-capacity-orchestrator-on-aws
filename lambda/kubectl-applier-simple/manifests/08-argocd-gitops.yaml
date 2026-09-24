@@ -1,0 +1,79 @@
+# Argo CD GitOps hand-off — one fenced project and one root Application.
+#
+# Applied only when cdk.json eks_capabilities.argocd.gitops is enabled for this
+# region (which itself requires the Argo CD capability). The whole file is
+# gated on {{ARGOCD_GITOPS_REPO_URL}}; when the hand-off is disabled the token
+# stays unreplaced, the applier skips the file and prunes the Application and
+# then the AppProject (see _FEATURE_RESOURCE_INVENTORY in ../handler.py). The
+# Application carries no resources-finalizer on purpose: removing it detaches
+# the tenant workloads from Git, it does not delete them.
+#
+# The hand-off points the hosted Argo CD at an operator-owned repository path
+# for THIS cluster (``path`` may carry {region} / {cluster_name} so one
+# repository holds a per-cluster overlay). Everything under that path is
+# reconciled into the tenant namespaces and nowhere else:
+#
+#   * destinations — rendered by the regional stack as a JSON list (valid YAML
+#     flow style) of {server: <EKS cluster ARN>, namespace: <tenant ns>} from
+#     eks_capabilities.argocd.gitops.destination_namespaces, which the config
+#     loader restricts to gco-jobs / gco-inference (the namespaces GCO grants
+#     Argo CD write RBAC in; 07-argocd-cluster-access.yaml). The server is the
+#     cluster ARN because the hosted capability identifies clusters by ARN.
+#   * clusterResourceWhitelist: [] — no cluster-scoped kind may be synced, so a
+#     tenant repository cannot create CRDs, ClusterRoles, NodePools or
+#     Namespaces.
+#   * namespaceResourceBlacklist — the kinds GCO uses as guardrails inside the
+#     tenant namespaces (quotas, limits, network posture, RBAC) are refused
+#     here AND left out of the Kubernetes Role in 07-argocd-cluster-access.yaml
+#     (tests pin the two lists to each other), so the Argo CD fence and the
+#     apiserver agree on what Git may never touch.
+#   * syncPolicy — rendered as JSON from gitops.sync_policy: {} for manual
+#     (sync from the Argo CD UI/CLI) or automated with selfHeal on and prune
+#     off, so a bad commit can drift-correct but never delete workloads.
+#
+# Readiness for both kinds is exact existence only: a tenant repository that
+# fails to sync must never fail a GCO deployment. Sync and health status are
+# surfaced by ``gco stacks capabilities`` and the live-validation harness.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gco-tenants
+  namespace: argocd
+  labels:
+    project: gco
+spec:
+  description: GCO tenant workloads reconciled from Git; fenced to the tenant namespaces
+  sourceRepos:
+    - "{{ARGOCD_GITOPS_REPO_URL}}"
+  destinations: {{ARGOCD_GITOPS_DESTINATIONS}}
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gco-gitops-root
+  namespace: argocd
+  labels:
+    project: gco
+spec:
+  project: gco-tenants
+  source:
+    repoURL: "{{ARGOCD_GITOPS_REPO_URL}}"
+    targetRevision: "{{ARGOCD_GITOPS_REVISION}}"
+    path: "{{ARGOCD_GITOPS_PATH}}"
+  destination:
+    server: "{{EKS_CLUSTER_ARN}}"
+    namespace: "{{ARGOCD_GITOPS_DEFAULT_NAMESPACE}}"
+  syncPolicy: {{ARGOCD_GITOPS_SYNC_POLICY}}

@@ -295,7 +295,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 139 tools by default (up to 197 with all flags enabled) spanning the CLI and project-aware resources. The recommended install needs no clone: the one-click buttons in the [README](README.md#install-the-mcp-server) add it to Kiro, Cursor or VS Code pinned to the latest release, and [`gco_mcp/README.md`](gco_mcp/README.md#install-with-uv-recommended) has the equivalent `uvx` command for any other client.
+GCO includes an MCP server with 141 tools by default (up to 199 with all flags enabled) spanning the CLI and project-aware resources. The recommended install needs no clone: the one-click buttons in the [README](README.md#install-the-mcp-server) add it to Kiro, Cursor or VS Code pinned to the latest release, and [`gco_mcp/README.md`](gco_mcp/README.md#install-with-uv-recommended) has the equivalent `uvx` command for any other client.
 
 To run it from this checkout instead — when developing GCO, or for the clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`) and the stack lifecycle tools — the dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 

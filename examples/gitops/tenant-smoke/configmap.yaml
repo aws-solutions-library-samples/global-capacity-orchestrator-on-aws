@@ -1,0 +1,22 @@
+# The one object the GitOps smoke fixture deploys.
+#
+# The Argo CD EKS Capability's root Application (08-argocd-gitops.yaml, project
+# gco-tenants) syncs this directory into gco-jobs when cdk.json
+# eks_capabilities.argocd.gitops points at this repository with
+# path: examples/gitops/tenant-smoke — the live-validation harness does exactly
+# that with the commit under validation. No namespace is set on purpose: the
+# Application's destination namespace supplies it, which is also what keeps the
+# fixture inside the project's fence. A ConfigMap is the smallest object that
+# proves the whole path (hosted Argo CD pulled the repository, the AppProject
+# admitted the kind, the capability role's RBAC allowed the write) without
+# scheduling a pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-gitops-tenant-smoke
+  labels:
+    project: gco
+    gco.aws/gitops-fixture: tenant-smoke
+data:
+  delivered-by: argocd-eks-capability
+  source: examples/gitops/tenant-smoke

@@ -2755,6 +2755,190 @@ jobs:
             exit 1
           fi
           echo "queue drained: the consumer acknowledged the message it applied"
+      - name: Apply the Argo CD capability manifests against the real argoproj.io CRDs
+        # 07-argocd-cluster-access.yaml and 08-argocd-gitops.yaml are the two
+        # base-pass files the Argo CD EKS Capability switches on (cdk.json
+        # eks_capabilities.argocd; docs/EKS_CAPABILITIES.md). In production
+        # the AWS-managed capability installs the Application/AppProject CRDs
+        # into the cluster before the applier runs; here the same CRDs come
+        # from the pinned upstream Argo CD tag (--server-side: the Application
+        # CRD's schema overflows the client-side last-applied annotation).
+        #
+        # Both files are rendered with the tokens the regional stack emits —
+        # the cluster ARN, the capability role ARN, and the JSON-rendered
+        # destinations / sync policy from the SAME pure renderer the stack
+        # uses (gco.eks_capabilities_config.compute_eks_capabilities_replacements)
+        # — and applied, so the apiserver validates the AppProject and the
+        # Application against real schemas and the RBAC binds the access-entry
+        # group. The fence is then proved with impersonation: the group Argo
+        # CD's capability role maps to may read cluster-wide and write in the
+        # two tenant namespaces, and nowhere else.
+        env:
+          # Upstream Argo CD tag the CRDs are fetched from (no chart or image is
+          # pinned for Argo CD elsewhere: the hosted capability is AWS-managed).
+          ARGOCD_CRD_TAG: v3.5.3
+          CI_CLUSTER_ARN: arn:aws:eks:us-east-1:123456789012:cluster/gco-ci
+          CI_ARGOCD_ROLE_ARN: arn:aws:iam::123456789012:role/gco-ci-EksCapabilityArgoCdRole
+        run: |
+          set -euo pipefail
+          for crd in application-crd.yaml appproject-crd.yaml; do
+            curl -fsSL --retry 5 --retry-delay 5 \
+              "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_CRD_TAG}/manifests/crds/${crd}" \
+              | kubectl apply --server-side -f -
+          done
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/applications.argoproj.io crd/appprojects.argoproj.io
+          python3 - <<'PY' > "${RUNNER_TEMP}/argocd-capability.yaml"
+          import os
+          import re
+          from pathlib import Path
+
+          from gco.eks_capabilities_config import (
+              compute_eks_capabilities_replacements,
+              normalize_eks_capabilities_config,
+          )
+
+          config = normalize_eks_capabilities_config(
+              {
+                  "argocd": {
+                      "enabled": True,
+                      "idc_instance_arn": "arn:aws:sso:::instance/ssoins-ci",
+                      "rbac_role_mappings": [
+                          {"role": "ADMIN", "identities": [{"id": "ci-admin", "type": "SSO_USER"}]}
+                      ],
+                      "gitops": {
+                          "enabled": True,
+                          "repo_url": "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git",
+                          "revision": "main",
+                          "path": "examples/gitops/tenant-smoke",
+                          "destination_namespaces": ["gco-jobs", "gco-inference"],
+                          "sync_policy": "automated",
+                      },
+                  }
+              }
+          )
+          values = {
+              "{{EKS_CLUSTER_ARN}}": os.environ["CI_CLUSTER_ARN"],
+              **compute_eks_capabilities_replacements(
+                  config,
+                  region="us-east-1",
+                  cluster_name="gco-ci",
+                  cluster_arn=os.environ["CI_CLUSTER_ARN"],
+                  argocd_role_arn=os.environ["CI_ARGOCD_ROLE_ARN"],
+              ),
+          }
+          manifests = Path("lambda/kubectl-applier-simple/manifests")
+          rendered = []
+          for name in ("07-argocd-cluster-access.yaml", "08-argocd-gitops.yaml"):
+              text = (manifests / name).read_text(encoding="utf-8")
+              for token, value in values.items():
+                  text = text.replace(token, value)
+              if re.search(r"\{\{[A-Z0-9_]+\}\}", text):
+                  raise SystemExit(f"{name}: unsubstituted token(s) remain")
+              rendered.append(text)
+          print("\n---\n".join(rendered))
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/argocd-capability.yaml"
+
+          # Cluster registration: the Secret names the cluster by EKS ARN and
+          # carries the label the hosted Argo CD selects clusters by.
+          test "$(kubectl -n argocd get secret local-cluster -o jsonpath='{.data.server}' | base64 -d)" = "${CI_CLUSTER_ARN}"
+          test "$(kubectl -n argocd get secret local-cluster -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/secret-type}')" = "cluster"
+          # RBAC binds the access-entry group of the capability role.
+          group="eks-access-entry:${CI_ARGOCD_ROLE_ARN}"
+          test "$(kubectl get clusterrolebinding gco-argocd-read-all -o jsonpath='{.subjects[0].kind}:{.subjects[0].name}')" = "Group:${group}"
+          for ns in gco-jobs gco-inference; do
+            test "$(kubectl -n "${ns}" get rolebinding gco-argocd-deploy -o jsonpath='{.subjects[0].name}')" = "${group}"
+            test "$(kubectl -n "${ns}" get rolebinding gco-argocd-deploy -o jsonpath='{.roleRef.name}')" = "gco-argocd-deploy"
+          done
+          # The fence, evaluated by the apiserver itself under impersonation.
+          as=(--as=argocd-capability --as-group="${group}")
+          test "$(kubectl auth can-i list secrets --all-namespaces "${as[@]}")" = "yes"
+          test "$(kubectl auth can-i list customresourcedefinitions "${as[@]}")" = "yes"
+          test "$(kubectl auth can-i create deployments -n gco-jobs "${as[@]}")" = "yes"
+          test "$(kubectl auth can-i create jobs -n gco-inference "${as[@]}")" = "yes"
+          test "$(kubectl auth can-i create deployments -n gco-system "${as[@]}")" = "no"
+          test "$(kubectl auth can-i delete configmaps -n kube-system "${as[@]}")" = "no"
+          test "$(kubectl auth can-i create namespaces "${as[@]}")" = "no"
+          test "$(kubectl auth can-i create clusterroles "${as[@]}")" = "no"
+          # Inside the tenant namespaces the write grant is an allow-list: the
+          # guardrail kinds the AppProject blacklists are refused by the
+          # apiserver too, so neither fence is the only thing in the way.
+          for ns in gco-jobs gco-inference; do
+            test "$(kubectl auth can-i create networkpolicies -n "${ns}" "${as[@]}")" = "no"
+            test "$(kubectl auth can-i update resourcequotas -n "${ns}" "${as[@]}")" = "no"
+            test "$(kubectl auth can-i delete limitranges -n "${ns}" "${as[@]}")" = "no"
+            test "$(kubectl auth can-i create rolebindings -n "${ns}" "${as[@]}")" = "no"
+            test "$(kubectl auth can-i create roles -n "${ns}" "${as[@]}")" = "no"
+          done
+          # The GitOps hand-off landed as real, schema-valid objects with the
+          # JSON-rendered collections parsed into structure.
+          project() { kubectl -n argocd get appproject gco-tenants -o "jsonpath=$1"; }
+          application() { kubectl -n argocd get application gco-gitops-root -o "jsonpath=$1"; }
+          test "$(project '{.spec.destinations[*].namespace}')" = "gco-jobs gco-inference"
+          test "$(project '{.spec.destinations[0].server}')" = "${CI_CLUSTER_ARN}"
+          test "$(project '{.spec.sourceRepos[0]}')" = \
+            "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git"
+          test "$(project '{.spec.namespaceResourceBlacklist[*].kind}')" = \
+            "ResourceQuota LimitRange NetworkPolicy Role RoleBinding"
+          test "$(application '{.spec.project}')" = "gco-tenants"
+          test "$(application '{.spec.source.path}')" = "examples/gitops/tenant-smoke"
+          test "$(application '{.spec.destination.server}:{.spec.destination.namespace}')" = \
+            "${CI_CLUSTER_ARN}:gco-jobs"
+          test "$(application '{.spec.syncPolicy.automated.selfHeal}:{.spec.syncPolicy.automated.prune}')" = \
+            "true:false"
+          test -z "$(application '{.metadata.finalizers}')"
+          echo "Argo CD capability manifests applied and the RBAC fence holds"
+      - name: Prune the Argo CD capability manifests through the applier's disable path
+        # Turning eks_capabilities.argocd (or its gitops sub-block) off leaves
+        # the two gate tokens unreplaced; the applier then deletes exactly the
+        # objects inventoried for each gate. Run those inventories through the
+        # applier's own deletion routine against the live cluster and require
+        # that every named object is gone while the argocd Namespace — home to
+        # every operator-authored Application — survives by design.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+
+          from kubernetes import config as kube_config
+
+          kube_config.load_kube_config()
+          sys.path.insert(0, "lambda/kubectl-applier-simple")
+          import handler
+
+          for placeholder in ("{{ARGOCD_GITOPS_REPO_URL}}", "{{ARGOCD_CAPABILITY_ROLE_ARN}}"):
+              inventory = handler._FEATURE_RESOURCE_INVENTORY[(placeholder, False)]
+              result = handler._delete_exact_resources(inventory, "ci-disable")
+              if result["failed"]:
+                  raise SystemExit(f"{placeholder}: prune failures {result['failed']}")
+              if len(result["pruned"]) != len(inventory):
+                  raise SystemExit(
+                      f"{placeholder}: pruned {len(result['pruned'])} of {len(inventory)} objects: "
+                      f"{result['pruned']}"
+                  )
+              print(f"{placeholder}: pruned {len(result['pruned'])} objects")
+          PY
+          for object in appproject/gco-tenants application/gco-gitops-root secret/local-cluster; do
+            if kubectl -n argocd get "${object}" >/dev/null 2>&1; then
+              echo "::error::${object} survived the disable-path prune"
+              exit 1
+            fi
+          done
+          if kubectl get clusterrole gco-argocd-read-all >/dev/null 2>&1 \
+              || kubectl get clusterrolebinding gco-argocd-read-all >/dev/null 2>&1; then
+            echo "::error::cluster-wide Argo CD RBAC survived the disable-path prune"
+            exit 1
+          fi
+          for ns in gco-jobs gco-inference; do
+            if kubectl -n "${ns}" get role gco-argocd-deploy >/dev/null 2>&1 \
+                || kubectl -n "${ns}" get rolebinding gco-argocd-deploy >/dev/null 2>&1; then
+              echo "::error::${ns} Argo CD RBAC survived the disable-path prune"
+              exit 1
+            fi
+          done
+          kubectl get namespace argocd
+          echo "disable path pruned every inventoried object; the argocd Namespace survives"
       - name: Verify all namespaces exist
         run: |
           set -euo pipefail

@@ -200,6 +200,47 @@ async def aurora_status() -> str:
     return await asyncio.to_thread(cli_runner._run_cli, "stacks", "aurora", "status")
 
 
+@mcp.tool(tags={"safe", "stacks"})
+@audit_logged
+async def eks_capabilities_status(region: str | None = None, all_regions: bool = False) -> str:
+    """`gco stacks capabilities status` — configured vs. live EKS Capabilities.
+
+    Reports, per AWS-managed capability type (Argo CD, ACK, kro), whether
+    cdk.json ``eks_capabilities`` enables it for the region, whether it is
+    attached to the cluster, its status/version, the Argo CD server URL and
+    GitOps hand-off, and any drift between configuration and the cluster.
+
+    Args:
+        region: Region to inspect. Omit for the first deployment region.
+        all_regions: Inspect every configured deployment region.
+    """
+    args = ["stacks", "capabilities", "status"]
+    if all_regions:
+        args.append("--all-regions")
+    elif region:
+        args += ["-r", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
+@mcp.tool(tags={"safe", "stacks"})
+@audit_logged
+async def argocd_ui_url(region: str | None = None) -> str:
+    """`gco stacks capabilities argocd open --print-url` — the hosted Argo CD UI URL.
+
+    The AWS-managed Argo CD of the Argo CD EKS Capability serves its UI at a
+    server URL EKS publishes on the capability; sign-in is IAM Identity Center.
+    Returns the URL (never launches a browser).
+
+    Args:
+        region: Region whose cluster's Argo CD to resolve. Omit for the first
+            deployment region.
+    """
+    args = ["stacks", "capabilities", "argocd", "open", "--print-url"]
+    if region:
+        args += ["-r", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
 # =============================================================================
 # Mutating cdk.json toggles (low-risk)
 # =============================================================================

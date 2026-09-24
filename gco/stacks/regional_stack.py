@@ -115,6 +115,13 @@ from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
+from gco.eks_capabilities_config import (
+    ARGOCD_NAMESPACE,
+    CAPABILITY_TYPE_API_NAMES,
+    compute_eks_capabilities_replacements,
+    enabled_capability_types,
+    normalize_eks_capabilities_config,
+)
 from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
@@ -1624,6 +1631,11 @@ class GCORegionalStack(Stack):
         # exactly today's entries.
         self._create_developer_access_entries(eks_config)
 
+        # EKS Capabilities (eks_capabilities): AWS-managed Argo CD, ACK and kro
+        # attached as AWS::EKS::Capability resources. Every type is off by
+        # default; the shipped cdk.json synthesizes exactly today's template.
+        self._create_eks_capabilities()
+
         # Create IRSA role for service account to access secrets
         self._create_service_account_role()
 
@@ -1688,6 +1700,241 @@ class GCORegionalStack(Stack):
                 principal=principal_arn,
                 access_policies=[access_policy],
             )
+
+    # ── EKS Capabilities (AWS-managed Argo CD / ACK / kro) ────────────────
+    #: cdk.json type name -> construct-id / CfnOutput suffix.
+    _EKS_CAPABILITY_CONSTRUCT_SUFFIXES: ClassVar[dict[str, str]] = {
+        "argocd": "ArgoCd",
+        "ack": "Ack",
+        "kro": "Kro",
+    }
+
+    def _eks_capabilities_config(self) -> dict[str, Any]:
+        """The normalized ``eks_capabilities`` block, or the all-off defaults.
+
+        Many stack tests build the regional stack with hand-rolled config
+        doubles that predate this knob (or with ``MagicMock``), so the accessor
+        is optional: a missing method or a non-dict result reads as "every
+        capability off", which is also the shipped cdk.json default.
+        """
+        getter = getattr(self.config, "get_eks_capabilities_config", None)
+        raw = getter() if callable(getter) else None
+        if not isinstance(raw, dict):
+            return normalize_eks_capabilities_config(None)
+        return raw
+
+    def _create_eks_capabilities(self) -> None:
+        """Attach the enabled EKS Capabilities to this region's cluster.
+
+        For every type enabled for this region (``eks_capabilities.<type>``
+        with ``enabled: true`` and either an empty ``regions`` list or one
+        naming this region) synthesize:
+
+        * one capability IAM role trusted by ``capabilities.eks.amazonaws.com``
+          (``sts:AssumeRole`` + ``sts:TagSession``, the documented trust
+          policy). The role carries only what the operator configured: Argo CD
+          may read exactly the ``repo_credentials_secret_arns`` Git-credential
+          secrets, ACK may assume exactly the ``assume_role_arns`` (ACK IAM Role
+          Selectors), kro gets no AWS permissions at all;
+        * one ``AWS::EKS::Capability`` named ``<project>-<type>`` (a
+          deterministic name the CLI and the live checks describe directly),
+          with ``RETAIN`` delete propagation (the only supported value) so
+          workloads the tools created survive a capability removal;
+        * ``CfnOutput``s for the capability and role ARNs and, for Argo CD, the
+          hosted server URL operators sign in to.
+
+        The convergence trigger in :meth:`_create_kubectl_lambda` depends on
+        every capability so the Argo CD CRDs exist before the applier renders
+        ``07-argocd-cluster-access.yaml`` / ``08-argocd-gitops.yaml``.
+        """
+        self.eks_capabilities: dict[str, eks_l1.CfnCapability] = {}
+        self.eks_capability_roles: dict[str, iam.Role] = {}
+        self.eks_capabilities_config = self._eks_capabilities_config()
+        enabled_types = enabled_capability_types(
+            self.eks_capabilities_config, self.deployment_region
+        )
+        if not enabled_types:
+            return
+
+        project_name = self.config.get_project_name()
+        for type_name in enabled_types:
+            block = self.eks_capabilities_config[type_name]
+            suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
+            role = self._create_eks_capability_role(type_name, block)
+            capability = eks_l1.CfnCapability(
+                self,
+                f"EksCapability{suffix}",
+                capability_name=f"{project_name}-{type_name}",
+                cluster_name=self.cluster.cluster_name,
+                type=CAPABILITY_TYPE_API_NAMES[type_name],
+                role_arn=role.role_arn,
+                # RETAIN is the only value the API accepts today; spelled out so
+                # a future PURGE option is an explicit decision, not a default.
+                delete_propagation_policy="RETAIN",
+                configuration=self._eks_capability_configuration(type_name, block),
+            )
+            # The cluster_name token already orders creation after the cluster;
+            # the explicit edge keeps deletion ordered too (capability before
+            # cluster) when CloudFormation reverses the graph.
+            capability.node.add_dependency(self.cluster)
+            capability.node.add_dependency(role)
+            self.eks_capabilities[type_name] = capability
+            self.eks_capability_roles[type_name] = role
+
+            CfnOutput(
+                self,
+                f"EksCapability{suffix}Arn",
+                value=capability.attr_arn,
+                description=f"ARN of the AWS-managed {type_name} EKS Capability",
+            )
+            CfnOutput(
+                self,
+                f"EksCapability{suffix}RoleArn",
+                value=role.role_arn,
+                description=f"IAM role the {type_name} EKS Capability runs as",
+            )
+            if type_name == "argocd":
+                CfnOutput(
+                    self,
+                    "EksCapabilityArgoCdServerUrl",
+                    value=capability.attr_configuration_argo_cd_server_url,
+                    description="Hosted Argo CD server URL (IAM Identity Center sign-in)",
+                )
+
+    def _create_eks_capability_role(self, type_name: str, block: Mapping[str, Any]) -> iam.Role:
+        """The IAM role one capability assumes, carrying only configured grants."""
+        suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
+        statements: list[iam.PolicyStatement] = []
+        wildcard_arns: list[str] = []
+        if type_name == "argocd":
+            secret_arns = [str(arn) for arn in block.get("repo_credentials_secret_arns") or []]
+            if secret_arns:
+                statements.append(
+                    iam.PolicyStatement(
+                        sid="ReadGitRepositoryCredentials",
+                        effect=iam.Effect.ALLOW,
+                        actions=[
+                            "secretsmanager:GetSecretValue",
+                            "secretsmanager:DescribeSecret",
+                        ],
+                        resources=secret_arns,
+                    )
+                )
+                wildcard_arns.extend(arn for arn in secret_arns if "*" in arn)
+            # Secrets encrypted with a customer-managed key also need Decrypt on
+            # that key; confining it to Secrets Manager in this region
+            # (kms:ViaService) is the same posture the job-pod role takes for
+            # S3. Secrets under the AWS-managed aws/secretsmanager key need no
+            # grant, so nothing is emitted unless the operator names keys.
+            kms_key_arns = [str(arn) for arn in block.get("repo_credentials_kms_key_arns") or []]
+            if kms_key_arns:
+                statements.append(
+                    iam.PolicyStatement(
+                        sid="DecryptGitRepositoryCredentials",
+                        effect=iam.Effect.ALLOW,
+                        actions=["kms:Decrypt"],
+                        resources=kms_key_arns,
+                        conditions={
+                            "StringEquals": {
+                                "kms:ViaService": f"secretsmanager.{self.region}.{self.url_suffix}"
+                            }
+                        },
+                    )
+                )
+                wildcard_arns.extend(arn for arn in kms_key_arns if "*" in arn)
+        elif type_name == "ack":
+            target_role_arns = [str(arn) for arn in block.get("assume_role_arns") or []]
+            if target_role_arns:
+                statements.append(
+                    iam.PolicyStatement(
+                        sid="AssumeAckControllerRoles",
+                        effect=iam.Effect.ALLOW,
+                        actions=["sts:AssumeRole"],
+                        resources=target_role_arns,
+                    )
+                )
+                wildcard_arns.extend(arn for arn in target_role_arns if "*" in arn)
+
+        # role_name intentionally omitted - let CDK generate a unique name.
+        # inline_policies keeps the grants inside the AWS::IAM::Role resource
+        # itself, so the capability never observes a role whose policy has
+        # not been attached yet.
+        role = iam.Role(
+            self,
+            f"EksCapability{suffix}Role",
+            assumed_by=iam.ServicePrincipal("capabilities.eks.amazonaws.com").with_session_tags(),
+            description=f"Capability role for the AWS-managed {type_name} EKS Capability",
+            inline_policies=(
+                {f"EksCapability{suffix}Grants": iam.PolicyDocument(statements=statements)}
+                if statements
+                else None
+            ),
+        )
+        if wildcard_arns:
+            # An operator may deliberately configure an ARN pattern (a Secrets
+            # Manager ARN with its random suffix wildcarded, or one role per
+            # account under a naming scheme). Acknowledge exactly those
+            # patterns so cdk-nag still flags any other wildcard on this role.
+            from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+            acknowledge_nag_findings(
+                role,
+                [
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            f"eks_capabilities.{type_name} names these resource ARN "
+                            "patterns explicitly in cdk.json; the capability role is "
+                            "granted nothing else."
+                        ),
+                        "appliesTo": [f"Resource::{arn}" for arn in sorted(set(wildcard_arns))],
+                    }
+                ],
+            )
+        return role
+
+    def _eks_capability_configuration(
+        self, type_name: str, block: Mapping[str, Any]
+    ) -> eks_l1.CfnCapability.CapabilityConfigurationProperty | None:
+        """Type-specific ``Configuration``; kro takes none."""
+        if type_name == "argocd":
+            vpce_ids = [str(vpce_id) for vpce_id in block.get("vpce_ids") or []]
+            idc_region = str(block.get("idc_region") or "").strip()
+            return eks_l1.CfnCapability.CapabilityConfigurationProperty(
+                argo_cd=eks_l1.CfnCapability.ArgoCdProperty(
+                    aws_idc=eks_l1.CfnCapability.AwsIdcProperty(
+                        idc_instance_arn=str(block["idc_instance_arn"]),
+                        idc_region=idc_region or None,
+                    ),
+                    namespace=ARGOCD_NAMESPACE,
+                    network_access=(
+                        eks_l1.CfnCapability.NetworkAccessProperty(vpce_ids=vpce_ids)
+                        if vpce_ids
+                        else None
+                    ),
+                    rbac_role_mappings=[
+                        eks_l1.CfnCapability.ArgoCdRoleMappingProperty(
+                            role=str(mapping["role"]),
+                            identities=[
+                                eks_l1.CfnCapability.SsoIdentityProperty(
+                                    id=str(identity["id"]), type=str(identity["type"])
+                                )
+                                for identity in mapping["identities"]
+                            ],
+                        )
+                        for mapping in block.get("rbac_role_mappings") or []
+                    ],
+                )
+            )
+        if type_name == "ack":
+            disabled_services = [str(service) for service in block.get("disabled_services") or []]
+            return eks_l1.CfnCapability.CapabilityConfigurationProperty(
+                ack=eks_l1.CfnCapability.AckProperty(
+                    disabled_services=disabled_services or None,
+                    enable_cross_namespace=bool(block.get("enable_cross_namespace", False)),
+                )
+            )
+        return None
 
     # ── Shared toleration config for EKS add-ons ──────────────────────────
     # All GCO nodepools apply taints (nvidia.com/gpu, aws.amazon.com/neuron,
@@ -3538,6 +3785,10 @@ class GCORegionalStack(Stack):
             # role pods; per-endpoint spec.mooncake.store.master_image overrides.
             "{{MOONCAKE_MASTER_IMAGE}}": MOONCAKE_MASTER_DEFAULT_IMAGE,
             "{{CLUSTER_NAME}}": self.cluster.cluster_name,
+            # The hosted Argo CD capability identifies clusters by EKS ARN (its
+            # cluster Secret ``server`` field and AppProject destinations), so
+            # the ARN is a first-class token like the name.
+            "{{EKS_CLUSTER_ARN}}": self.cluster.cluster_arn,
             "{{REGION}}": self.deployment_region,
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,
             "{{SERVICE_ACCOUNT_ROLE_ARN}}": self.service_account_role.role_arn,
@@ -3941,6 +4192,23 @@ class GCORegionalStack(Stack):
                 self.fsx_security_group.security_group_id
             )
 
+        # Argo CD capability manifests (07-argocd-cluster-access.yaml,
+        # 08-argocd-gitops.yaml). Tokens are emitted only when the capability
+        # (and, for 08, the GitOps hand-off) is enabled for this region; a
+        # disabled feature leaves them unreplaced so the applier skips the
+        # file and prunes the registered inventory.
+        argocd_role = getattr(self, "eks_capability_roles", {}).get("argocd")
+        image_replacements.update(
+            compute_eks_capabilities_replacements(
+                getattr(self, "eks_capabilities_config", None)
+                or normalize_eks_capabilities_config(None),
+                region=self.deployment_region,
+                cluster_name=self.cluster.cluster_name,
+                cluster_arn=self.cluster.cluster_arn,
+                argocd_role_arn=argocd_role.role_arn if argocd_role is not None else None,
+            )
+        )
+
         # ── Trigger the convergence pipeline (fire-and-forget) ───────────────
         # A single custom resource starts the HelmInstallStateMachine, which now
         # owns the WHOLE cluster convergence: apply base manifests -> install
@@ -4026,6 +4294,12 @@ class GCORegionalStack(Stack):
                 converge_trigger.node.add_dependency(access_entry)
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
+        # EKS Capabilities install their CRDs (Argo CD's Application and
+        # AppProject) into the cluster once ACTIVE; the base manifest pass
+        # renders objects of those kinds, so it must not start before every
+        # enabled capability has stabilized.
+        for capability in getattr(self, "eks_capabilities", {}).values():
+            converge_trigger.node.add_dependency(capability)
 
         # Deletion must run in the opposite safety order: synchronous Helm
         # teardown first (quiescing endpoint writers and removing Gateway

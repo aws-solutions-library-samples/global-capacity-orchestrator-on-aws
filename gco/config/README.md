@@ -41,4 +41,4 @@ CDK context.
 |------|-------------|
 | `__init__.py` | Exports the package's public configuration API. |
 | `accelerator_catalog.json` | Reviewed NVIDIA GPU and AWS Neuron instance catalog consumed by configuration and capacity validation. |
-| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. |
+| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed Argo CD / ACK / kro and the Argo CD GitOps hand-off) is validated through the CDK-free `gco/eks_capabilities_config.py`, which the CLI and live validation share. |

@@ -17,6 +17,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [EFA Distributed Training](#efa-distributed-training)
   - [EFS Output Job](#efs-output-job)
   - [FSx for Lustre Job](#fsx-for-lustre-job)
+  - [GitOps Tenant Smoke](#gitops-tenant-smoke)
   - [GPU Job](#gpu-job)
   - [Inference Frameworks](#inference-frameworks)
   - [Inferentia Job](#inferentia-job)
@@ -57,6 +58,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [EFA Training](#efa-distributed-training) | `efa-distributed-training.yaml` | Jobs | ✅ | — |
 | [EFS Output](#efs-output-job) | `efs-output-job.yaml` | Storage | — | — |
 | [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) |
+| [GitOps Tenant Smoke](#gitops-tenant-smoke) | `gitops/tenant-smoke/configmap.yaml` | GitOps | — | [Argo CD EKS Capability](../docs/EKS_CAPABILITIES.md) |
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
 | [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
@@ -287,6 +289,27 @@ gco files download fsx-lustre-example ./fsx-results -r us-east-1 -t fsx
 | Best for | General purpose | HPC, ML training |
 
 **When to use:** Large-scale ML training with big datasets, HPC workloads, jobs requiring high I/O throughput, checkpoint/restart for long-running jobs.
+
+---
+
+### GitOps Tenant Smoke
+
+**File:** `gitops/tenant-smoke/configmap.yaml` (see [`gitops/README.md`](gitops/README.md))
+
+Not a Job: a repository path the [Argo CD EKS Capability](../docs/EKS_CAPABILITIES.md)'s GitOps hand-off pulls and reconciles into `gco-jobs`. One ConfigMap with no namespace of its own, so the root `Application`'s destination supplies it and the `gco-tenants` project fence applies.
+
+**Usage:**
+
+```bash
+# cdk.json: eks_capabilities.argocd.gitops.path = "examples/gitops/tenant-smoke"
+gco stacks deploy gco-us-east-1 -y
+gco stacks capabilities status          # capability ACTIVE, hand-off configured
+gco stacks capabilities argocd open     # watch gco-gitops-root sync in the hosted UI
+```
+
+**Requirements:** `eks_capabilities.argocd` enabled with an IAM Identity Center instance and at least one RBAC mapping; `gitops.repo_url` pointing at a clone Argo CD can reach.
+
+**When to use:** proving a new deployment's GitOps hand-off end to end (the live-validation harness does exactly this), or as the template for your own tenant path.
 
 ---
 
