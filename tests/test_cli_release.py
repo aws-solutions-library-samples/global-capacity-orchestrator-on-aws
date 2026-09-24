@@ -11,6 +11,7 @@ and nothing here may ever actually launch a validation run.
 from __future__ import annotations
 
 import subprocess
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -252,6 +253,103 @@ class TestHarnessInvocation:
         result = _invoke(*BASE)
         assert result.exit_code == 0
         assert "--optional-schedulers" not in fake_processes.harness_calls[0]["command"]
+
+
+ARGOCD_OPTIONS = (
+    "--argocd-idc-instance-arn",
+    "arn:aws:sso:::instance/ssoins-0123456789abcdef",
+    "--argocd-idc-region",
+    "us-east-2",
+    "--argocd-identity",
+    "SSO_GROUP:g-1",
+    "--argocd-identity",
+    "SSO_USER:u-2",
+    "--argocd-gitops-repo-url",
+    "https://github.com/example/gitops.git",
+    "--argocd-gitops-revision",
+    "main",
+    "--argocd-gitops-path",
+    "clusters/dev",
+    "--argocd-gitops-sync-policy",
+    "manual",
+)
+
+
+class TestEksCapabilitiesPassThrough:
+    """`gco release validate` is the documented one-command path for the live
+    leg, so the harness's `--eks-capabilities` surface must reach it verbatim."""
+
+    def test_eks_capabilities_and_argocd_options_are_forwarded_verbatim(self, fake_processes):
+        result = _invoke(*BASE, "--eks-capabilities", "argocd,kro", *ARGOCD_OPTIONS)
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        harness_start = command.index("scripts.live_release_validation")
+        tail = command[harness_start:]
+        assert tail[tail.index("--eks-capabilities") + 1] == "argocd,kro"
+        adjacent_pairs = set(pairwise(tail))
+        for flag, value in zip(ARGOCD_OPTIONS[::2], ARGOCD_OPTIONS[1::2], strict=True):
+            assert (flag, value) in adjacent_pairs, (flag, value, tail)
+        assert tail.count("--argocd-identity") == 2, "the repeatable option must repeat"
+        assert "--no-argocd-gitops" not in tail
+        assert "capabilities: argocd,kro" in result.output, "the echo must show the enablement"
+
+    def test_no_argocd_gitops_is_forwarded_as_a_bare_flag(self, fake_processes):
+        result = _invoke(*BASE, "--eks-capabilities", "all", "--no-argocd-gitops")
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        assert "--no-argocd-gitops" in command
+        assert command[command.index("--eks-capabilities") + 1] == "all"
+
+    def test_eks_capabilities_absent_by_default(self, fake_processes):
+        result = _invoke(*BASE)
+        assert result.exit_code == 0
+        command = fake_processes.harness_calls[0]["command"]
+        assert not any(flag.startswith(("--eks-capabilities", "--argocd-")) for flag in command)
+        assert "--no-argocd-gitops" not in command
+        assert "capabilities:" not in result.output
+
+    def test_argocd_options_require_the_argocd_capability(self, fake_processes):
+        for extra in (
+            ("--argocd-identity", "SSO_GROUP:g-1"),
+            ("--eks-capabilities", "ack,kro", "--no-argocd-gitops"),
+            ("--eks-capabilities", "kro", "--argocd-gitops-sync-policy", "manual"),
+        ):
+            result = _invoke(*BASE, *extra)
+            assert result.exit_code != 0, extra
+            assert "--eks-capabilities argocd" in result.output, result.output
+        assert fake_processes.harness_calls == [], "the harness would ignore them silently"
+
+    def test_gitops_options_conflict_with_no_argocd_gitops(self, fake_processes):
+        result = _invoke(
+            *BASE,
+            "--eks-capabilities",
+            "argocd",
+            "--no-argocd-gitops",
+            "--argocd-gitops-path",
+            "clusters/dev",
+        )
+        assert result.exit_code != 0
+        assert "--no-argocd-gitops" in result.output and "--argocd-gitops-path" in result.output
+        assert fake_processes.harness_calls == []
+
+    def test_malformed_capability_lists_are_rejected_before_launch(self, fake_processes):
+        for value, fragment in (
+            (" , ", "at least one capability"),
+            ("argocd,flux", "flux"),
+            ("all,argocd", "cannot be combined"),
+        ):
+            result = _invoke(*BASE, "--eks-capabilities", value)
+            assert result.exit_code != 0, value
+            assert fragment in result.output, result.output
+        assert fake_processes.harness_calls == []
+
+    def test_sync_policy_is_a_closed_choice(self, fake_processes):
+        result = _invoke(
+            *BASE, "--eks-capabilities", "argocd", "--argocd-gitops-sync-policy", "yolo"
+        )
+        assert result.exit_code != 0
+        assert "manual" in result.output and "automated" in result.output
+        assert fake_processes.harness_calls == []
 
 
 class TestRepoRootValidation:
