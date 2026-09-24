@@ -168,6 +168,11 @@ discovery, a full `cdk list` (which synthesizes the entire five-stack app),
 per-region CDKToolkit health checks, refusal of pre-existing project stacks,
 protected-baseline capture, report/checkpoint writing, and PARTIAL-status
 semantics — plus the negative proof that an account mismatch fails the run.
+The run is started with `--eks-capabilities all`, so that synth also proves
+the self-contained [EKS Capabilities](EKS_CAPABILITIES.md) leg's pre-deploy
+shape: before the `argocd-identity` action has provisioned an Identity Center
+instance, the Argo CD block stays out of the CDK context (the CDK app rightly
+refuses one without an instance) while the static identity still records it.
 
 The `deploy` action and everything behind it (topology, job lifecycles,
 destroy of a deployed topology) is not run against the emulator. Reasons,

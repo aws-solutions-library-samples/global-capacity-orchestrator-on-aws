@@ -258,7 +258,10 @@ def identity_state(checkpoint: RunCheckpoint) -> dict[str, Any] | None:
 
 
 def effective_overrides(
-    static_overrides_json: str, identity: Mapping[str, Any] | None
+    static_overrides_json: str,
+    identity: Mapping[str, Any] | None,
+    *,
+    require_identity: bool = False,
 ) -> dict[str, Any]:
     """The run's overrides with the provisioned Identity Center inputs merged in.
 
@@ -266,12 +269,32 @@ def effective_overrides(
     Center inputs) is fixed at settings time and is part of the resume
     identity; the provisioned part lives in the checkpoint and is layered on
     here, so every CDK invocation and every check sees one block.
+
+    Until the ``argocd-identity`` action has recorded that part there is no
+    Identity Center instance to bind the capability to, and the CDK app
+    rightly refuses an Argo CD block without one. A block that still needs
+    the bootstrap therefore synthesizes *without* Argo CD: the only CDK
+    invocation that precedes the action is preflight's ``cdk list``, which
+    enumerates the same stacks either way (capabilities are resources inside
+    the regional stack), and ``deploy`` depends on ``argocd-identity``
+    re-registering the merged context. Callers that read the block to learn
+    what was deployed pass ``require_identity=True`` and fail closed instead
+    of silently seeing a run without Argo CD.
     """
     overrides = parse_eks_capabilities_overrides(static_overrides_json or None)
-    if not identity or not overrides:
+    if not overrides:
         return overrides
     argocd = overrides.get("argocd")
     if not isinstance(argocd, dict) or argocd.get("enabled") is not True:
+        return overrides
+    if not identity:
+        if needs_identity_bootstrap(overrides):
+            if require_identity:
+                raise EksCapabilitiesValidationError(
+                    "Argo CD is enabled for this run but the argocd-identity action has not "
+                    "recorded its Identity Center inputs in the checkpoint"
+                )
+            del overrides["argocd"]
         return overrides
     argocd.setdefault("idc_instance_arn", str(identity["instance_arn"]))
     if identity.get("idc_region"):
@@ -287,12 +310,20 @@ def effective_overrides(
 
 
 def effective_cdk_context(settings: RunSettings, checkpoint: RunCheckpoint) -> dict[str, str]:
-    """``settings.extra_cdk_context()`` with the provisioned identity merged into the overrides."""
+    """``settings.extra_cdk_context()`` with the provisioned identity merged into the overrides.
+
+    Before ``argocd-identity`` has run, a block that still needs the bootstrap
+    carries no Argo CD (see :func:`effective_overrides`); when nothing is left
+    to override the key is dropped rather than passed as an empty object.
+    """
     context = dict(settings.extra_cdk_context())
     static = getattr(settings, "eks_capabilities_overrides_json", "")
     if static:
         merged = effective_overrides(static, identity_state(checkpoint))
-        context["eks_capabilities_overrides"] = overrides_json(merged)
+        if merged:
+            context["eks_capabilities_overrides"] = overrides_json(merged)
+        else:
+            context.pop("eks_capabilities_overrides", None)
     return context
 
 
@@ -424,6 +455,7 @@ def effective_eks_capabilities_config(ctx: RunContext) -> dict[str, Any]:
         overrides = effective_overrides(
             getattr(ctx.settings, "eks_capabilities_overrides_json", ""),
             identity_state(ctx.checkpoint),
+            require_identity=True,
         )
         raw = merge_eks_capabilities_overrides(ctx.cdk_context.get("eks_capabilities"), overrides)
         return validate_eks_capabilities_config(raw, ctx.deployment_regions)

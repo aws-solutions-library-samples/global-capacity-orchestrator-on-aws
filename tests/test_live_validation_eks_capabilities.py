@@ -176,9 +176,57 @@ class TestBuildOverrides:
         assert checks.effective_overrides('{"kro":{"enabled":true}}', identity) == {
             "kro": {"enabled": True}
         }
-        assert checks.effective_overrides('{"argocd":{"enabled":true}}', None) == {
-            "argocd": {"enabled": True}
+        assert checks.effective_overrides('{"argocd":{"enabled":false}}', None) == {
+            "argocd": {"enabled": False}
         }
+
+    def test_effective_overrides_before_the_identity_action_leave_argocd_out(self) -> None:
+        """No Identity Center instance yet, so the pre-deploy CDK invocations
+        (preflight's `cdk list`) must synthesize without the Argo CD block the
+        CDK app would otherwise reject for its missing idc_instance_arn — the
+        failure the first live run of this leg hit inside preflight."""
+        self_contained = checks.overrides_json(
+            checks.build_eks_capabilities_overrides(
+                types=("argocd", "ack", "kro"),
+                idc_instance_arn=None,
+                idc_region=None,
+                identities=(),
+                gitops=True,
+                repo_url=None,
+                revision=SHA,
+                path=checks.GITOPS_FIXTURE_PATH,
+                sync_policy="automated",
+            )
+        )
+        pre_identity = checks.effective_overrides(self_contained, None)
+        assert pre_identity == {"ack": {"enabled": True}, "kro": {"enabled": True}}
+        # What is left validates for the CDK app on its own.
+        caps.validate_eks_capabilities_config(pre_identity, [REGION])
+        assert checks.effective_overrides('{"argocd":{"enabled":true}}', None) == {}
+        # Reading the deployed block without the identity must fail closed
+        # rather than report a run without Argo CD.
+        with pytest.raises(checks.EksCapabilitiesValidationError, match="argocd-identity"):
+            checks.effective_overrides(self_contained, None, require_identity=True)
+        # An operator-supplied complete block never needed the bootstrap and
+        # is untouched either way.
+        complete = checks.overrides_json(
+            checks.build_eks_capabilities_overrides(
+                types=("argocd",),
+                idc_instance_arn=IDC_ARN,
+                idc_region=None,
+                identities=("SSO_GROUP:g-1",),
+                gitops=False,
+                repo_url=None,
+                revision=None,
+                path=checks.GITOPS_FIXTURE_PATH,
+                sync_policy="manual",
+            )
+        )
+        assert (
+            checks.effective_overrides(complete, None, require_identity=True)
+            == checks.effective_overrides(complete, None)
+            == caps.parse_eks_capabilities_overrides(complete)
+        )
 
     def test_effective_overrides_without_an_identity_region_leave_idc_region_unset(self) -> None:
         """An identity record from a reused operator instance may carry no Region."""
@@ -1092,7 +1140,16 @@ def test_effective_cdk_context_layers_the_provisioned_identity(tmp_path: Path) -
         tmp_path, eks_capabilities_overrides_json=static, argocd_idc_region="us-east-2"
     )
     before = SimpleNamespace(state={})
-    assert checks.effective_cdk_context(settings, before) == settings.extra_cdk_context()
+    # Before argocd-identity there is nothing to bind Argo CD to: the static
+    # context (still the resume identity) carries the block, the effective
+    # context handed to CDK does not — and with Argo CD the only type
+    # requested, the key disappears rather than becoming an empty object.
+    assert "eks_capabilities_overrides" in settings.extra_cdk_context()
+    assert checks.effective_cdk_context(settings, before) == {
+        key: value
+        for key, value in settings.extra_cdk_context().items()
+        if key != "eks_capabilities_overrides"
+    }
     identity = settings.identity()
     assert identity["argocd_idc_region"] == "us-east-2"
     assert identity["argocd_gitops_fixture_path"] == "examples/gitops/tenant-smoke"

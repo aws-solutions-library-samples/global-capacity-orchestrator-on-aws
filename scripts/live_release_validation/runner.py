@@ -111,7 +111,10 @@ class LiveValidationRunner:
                 # overrides are part of the checkpoint identity. The Identity
                 # Center inputs the argocd-identity action provisioned come
                 # from the checkpoint, so a resumed run (destroy included)
-                # synthesizes the same complete Argo CD block.
+                # synthesizes the same complete Argo CD block; before that
+                # action has run, an Argo CD block that still needs them is
+                # left out (preflight's `cdk list` lists the same stacks) and
+                # the action re-registers the merged context itself.
                 self.stack_manager.set_extra_cdk_context(extra_cdk_context)
             self.context = RunContext(
                 settings=settings,
