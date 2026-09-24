@@ -49,6 +49,9 @@ _KMS_KEY_ARN = f"arn:aws:kms:{_REGION}:{_ACCOUNT}:key/11111111-2222-3333-4444-55
 _ACK_TARGET_ROLE = f"arn:aws:iam::{_ACCOUNT}:role/ack-s3-controller"
 _ACK_TARGET_PATTERN = f"arn:aws:iam::{_ACCOUNT}:role/ack-*"
 _REPO_URL = "https://github.com/example/gco-tenants.git"
+# This repository, which the kind CI job points the root Application at (one
+# line, so scripts/migrate_fork.py can classify and rewrite it on a fork).
+_CI_REPO = "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws"
 _MANIFESTS_DIR = Path(__file__).resolve().parent.parent / "lambda/kubectl-applier-simple/manifests"
 
 _ADMIN_MAPPING = {"role": "ADMIN", "identities": [{"id": "u-admin", "type": "SSO_USER"}]}
@@ -1283,9 +1286,7 @@ class TestComputeReplacements:
         assert "validate_eks_capabilities_config(" in e2e
         assert '"source": "git",' in e2e
         assert (
-            "test \"$(project '{.spec.sourceRepos[0]}')\" = \\\n"
-            '            "https://github.com/aws-solutions-library-samples/'
-            'global-capacity-orchestrator-on-aws.git"'
+            "test \"$(project '{.spec.sourceRepos[0]}')\" = \\\n" + f'            "{_CI_REPO}.git"'
         ) in e2e
         # CRDs come from a pinned upstream release (ARGOCD_VERSION, a job-level
         # env pin the monthly dependency scan tracks and the supply-chain tests
