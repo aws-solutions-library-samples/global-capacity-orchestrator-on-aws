@@ -382,36 +382,38 @@ The HTTP API surface has its own catalogue: [`diagrams/api_specs/`](diagrams/api
 
 | AWS Service | Usage |
 |-------------|-------|
-| [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/), CPU nodepools) |
-| [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
-| [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
-| [Elastic Load Balancing](https://aws.amazon.com/elasticloadbalancing/) | Internal Application Load Balancers provisioned from the shared Gateway API resources; terminate deployment-local private-root TLS |
 | [Amazon API Gateway](https://aws.amazon.com/api-gateway/) | IAM-authenticated (SigV4) REST entry point for job submission and inference |
-| [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
-| [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
-| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
-| [Amazon SQS](https://aws.amazon.com/sqs/) | Regional job ingestion queue with dead-letter queue and KEDA-driven scale-to-zero consumer |
-| [Amazon S3](https://aws.amazon.com/s3/) | Model weight storage (KMS-encrypted), cluster shared bucket, CDK asset staging |
-| [Amazon EFS](https://aws.amazon.com/efs/) | Shared elastic storage for job outputs, model weights, and inter-pod data sharing |
-| [Amazon FSx for Lustre](https://aws.amazon.com/fsx/lustre/) | Optional high-performance parallel file system for ML training workloads |
-| [Amazon ElastiCache (Valkey)](https://aws.amazon.com/elasticache/) | Optional serverless key-value cache for prompt caching and session state |
-| [Amazon Aurora](https://aws.amazon.com/rds/aurora/) | Optional Serverless v2 PostgreSQL with pgvector for RAG and semantic search |
-| [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/) | Optional Studio domain for interactive notebook analytics (`gco analytics enable`) |
-| [Amazon EMR Serverless](https://aws.amazon.com/emr/serverless/) | Optional Spark application paired with the Studio domain for large-scale notebook analytics |
-| [Amazon Cognito](https://aws.amazon.com/cognito/) | Optional user pool authenticating analytics users to presigned Studio sessions |
-| [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
-| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
-| [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
-| [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
-| [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
-| [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Stable regional certificate ARNs; rotating deployment-local ALB leaf certificates are reimported into them |
-| [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, and SigV4 authentication |
-| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates ([cdk-nag](https://github.com/cdklabs/cdk-nag)), and deploys all stacks |
-| [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
-| [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
 | [Amazon Athena](https://aws.amazon.com/athena/) | Cross-region cost analytics — a KMS-enforced workgroup queried by `gco costs k8s` |
-| [AWS Glue](https://aws.amazon.com/glue/) | Data Catalog database and table (partition projection) over the Parquet cost reports — no crawlers or scheduled repair jobs |
+| [Amazon Aurora](https://aws.amazon.com/rds/aurora/) | Optional Serverless v2 PostgreSQL with pgvector for RAG and semantic search |
 | [Amazon Bedrock](https://aws.amazon.com/bedrock/) | Multi-engine Autopilot (`gco autopilot` for Claude Code, `--engine codex` for OpenAI Codex, or `--engine opencode` for OpenCode), the optional AI capacity advisor (`gco capacity ai-recommend` / `predict`), and Mission strategy sampling |
+| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
+| [Amazon Cognito](https://aws.amazon.com/cognito/) | Optional user pool authenticating analytics users to presigned Studio sessions |
+| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
+| [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
+| [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
+| [Amazon EFS](https://aws.amazon.com/efs/) | Shared elastic storage for job outputs, model weights, and inter-pod data sharing |
+| [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/), CPU nodepools); optional [EKS Capabilities](https://docs.aws.amazon.com/eks/latest/userguide/capabilities.html) — the AWS-managed Argo CD, ACK and kro — attached per cluster |
+| [Amazon ElastiCache (Valkey)](https://aws.amazon.com/elasticache/) | Optional serverless key-value cache for prompt caching and session state |
+| [Amazon EMR Serverless](https://aws.amazon.com/emr/serverless/) | Optional Spark application paired with the Studio domain for large-scale notebook analytics |
+| [Amazon FSx for Lustre](https://aws.amazon.com/fsx/lustre/) | Optional high-performance parallel file system for ML training workloads |
+| [Amazon S3](https://aws.amazon.com/s3/) | Model weight storage (KMS-encrypted), cluster shared bucket, CDK asset staging |
+| [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/) | Optional Studio domain for interactive notebook analytics (`gco analytics enable`) |
+| [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
+| [Amazon SQS](https://aws.amazon.com/sqs/) | Regional job ingestion queue with dead-letter queue and KEDA-driven scale-to-zero consumer |
+| [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
+| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates ([cdk-nag](https://github.com/cdklabs/cdk-nag)), and deploys all stacks |
+| [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Stable regional certificate ARNs; rotating deployment-local ALB leaf certificates are reimported into them |
+| [AWS CodeCommit](https://aws.amazon.com/codecommit/) | Optional per-cluster Git repository behind the Argo CD GitOps hand-off (`gitops.source: codecommit`, the default): created by the regional stack, pulled by the hosted Argo CD with its own IAM role, and filled with `gco stacks capabilities gitops push` |
+| [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
+| [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
+| [AWS Glue](https://aws.amazon.com/glue/) | Data Catalog database and table (partition projection) over the Parquet cost reports — no crawlers or scheduled repair jobs |
+| [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, the per-type roles the optional EKS Capabilities assume, and SigV4 authentication |
+| [AWS IAM Identity Center](https://aws.amazon.com/iam/identity-center/) | Sign-in for the optional hosted Argo CD UI; `gco stacks capabilities argocd bootstrap-identity` discovers (or creates) the instance and maps a group to an Argo CD role |
+| [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
+| [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
+| [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
+| [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
+| [Elastic Load Balancing](https://aws.amazon.com/elasticloadbalancing/) | Internal Application Load Balancers provisioned from the shared Gateway API resources; terminate deployment-local private-root TLS |
 
 ## Sample Cost Table
 
@@ -441,7 +443,7 @@ The following estimates are for a single-region deployment with default settings
 - Platform costs (~$210/month) are fixed regardless of workload volume.
 - GPU costs dominate and scale with the number of instances and hours run. Use `gco costs summary` to track actual spend.
 - GPU estimates assume an on-demand g5.xlarge in us-east-1 at \~$1.006/hr (\~$734/month over 730 hours); rates vary by region and instance type.
-- Optional services (FSx, Valkey, Aurora) add additional cost depending on configuration.
+- Optional services (FSx, Valkey, Aurora, EKS Capabilities — billed per capability-hour) add additional cost depending on configuration.
 - The cost table above uses US East (N. Virginia) pricing as of June 2025.
 
 ## Supported AWS Regions
