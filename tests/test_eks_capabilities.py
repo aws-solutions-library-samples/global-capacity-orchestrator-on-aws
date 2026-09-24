@@ -1287,9 +1287,13 @@ class TestComputeReplacements:
             '            "https://github.com/aws-solutions-library-samples/'
             'global-capacity-orchestrator-on-aws.git"'
         ) in e2e
-        # CRDs come from a pinned upstream tag and must be Established first.
-        assert re.search(r"ARGOCD_CRD_TAG: v\d+\.\d+\.\d+", e2e)
-        assert "argoproj/argo-cd/${ARGOCD_CRD_TAG}/manifests/crds/" in e2e
+        # CRDs come from a pinned upstream release (ARGOCD_VERSION, a job-level
+        # env pin the monthly dependency scan tracks and the supply-chain tests
+        # bind to a committed checksum per manifest) and must be Established
+        # before the manifests are applied.
+        assert re.search(r'ARGOCD_VERSION: "v\d+\.\d+\.\d+"', e2e)
+        assert "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml" in e2e
+        assert "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml" in e2e
         assert "crd/applications.argoproj.io crd/appprojects.argoproj.io" in e2e
         # The fence is proved by impersonating the access-entry group.
         assert '--as-group="${group}"' in e2e

@@ -1494,6 +1494,14 @@ jobs:
       # env block at the top of this file.
       METRICS_SERVER_VERSION: "v0.9.0"
       METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
+      # Upstream Argo CD release whose Application/AppProject CRDs stand in for
+      # the ones the AWS-managed Argo CD capability installs (no chart or image
+      # is pinned for Argo CD elsewhere: the capability is hosted). Two
+      # manifests, one checksum each; the monthly drift scan compares the
+      # version against the latest argoproj/argo-cd release.
+      ARGOCD_VERSION: "v3.5.3"
+      ARGOCD_APPLICATION_CRD_SHA256: "5dde0e229249b6b707beb98674c1deae3949d5c319a6c45b9f5a80c99618e40c"
+      ARGOCD_APPPROJECT_CRD_SHA256: "ab225266944322750136f1198d93786e4a79a0e43c8d149abfba44da30a3eac8"
       # The SQS wire API the queue-processor end-to-end test consumes from,
       # running inside the cluster as the regional queue's stand-in. Same
       # digest-pinned emulator the floci suites and
@@ -2774,18 +2782,31 @@ jobs:
         # CD's capability role maps to may read cluster-wide and write in the
         # two tenant namespaces, and nowhere else.
         env:
-          # Upstream Argo CD tag the CRDs are fetched from (no chart or image is
-          # pinned for Argo CD elsewhere: the hosted capability is AWS-managed).
-          ARGOCD_CRD_TAG: v3.5.3
           CI_CLUSTER_ARN: arn:aws:eks:us-east-1:123456789012:cluster/gco-ci
           CI_ARGOCD_ROLE_ARN: arn:aws:iam::123456789012:role/gco-ci-EksCapabilityArgoCdRole
         run: |
           set -euo pipefail
-          for crd in application-crd.yaml appproject-crd.yaml; do
-            curl -fsSL --retry 5 --retry-delay 5 \
-              "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_CRD_TAG}/manifests/crds/${crd}" \
-              | kubectl apply --server-side -f -
-          done
+          # ARGOCD_VERSION and the two checksums are job-level env (see the top
+          # of this job): a Git tag can be moved, so each CRD manifest is
+          # authenticated against its committed digest before it is applied.
+          application_crd="${RUNNER_TEMP}/argocd-application-crd.yaml"
+          appproject_crd="${RUNNER_TEMP}/argocd-appproject-crd.yaml"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${application_crd}" \
+            "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${appproject_crd}" \
+            "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml"
+          echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -
+          echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -
+          kubectl apply --server-side -f "${application_crd}"
+          kubectl apply --server-side -f "${appproject_crd}"
           kubectl wait --for=condition=Established --timeout=60s \
             crd/applications.argoproj.io crd/appprojects.argoproj.io
           python3 - <<'PY' > "${RUNNER_TEMP}/argocd-capability.yaml"

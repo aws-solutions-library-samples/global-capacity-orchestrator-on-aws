@@ -46,8 +46,9 @@
 #     composite action's version default),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
-#     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind + its
-#     node image — public endpoints, no AWS creds
+#     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), the Argo CD
+#     CRDs (ARGOCD_VERSION), and kind + its node image — public endpoints,
+#     no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, duplicated *_VERSION
@@ -1626,6 +1627,15 @@ check_github_tool \
 CALICO_PIN="$(extract_workflow_env_pin CALICO_VERSION | head -1)"
 check_github_tool "Calico (CALICO_VERSION)" "$CALICO_PIN" "projectcalico/calico" \
   "https://github.com/projectcalico/calico/releases"
+
+# Argo CD (argoproj/argo-cd) — the kind E2E job applies the Application /
+# AppProject CRDs of this upstream release to validate the Argo CD capability
+# manifests against real schemas. Production runs the AWS-managed capability,
+# so no chart or image pins Argo CD anywhere else; the CRD schema stays
+# current only if this tag follows upstream.
+ARGOCD_PIN="$(extract_workflow_env_pin ARGOCD_VERSION | head -1)"
+check_github_tool "Argo CD CRDs (ARGOCD_VERSION)" "$ARGOCD_PIN" "argoproj/argo-cd" \
+  "https://github.com/argoproj/argo-cd/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
 # Both kind-action steps (cluster-e2e and examples-smoke) must pin the same

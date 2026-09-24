@@ -102,6 +102,16 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
             "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
         ),
         (
+            ".github/workflows/integration-tests.yml",
+            "v3.5.3",
+            "5dde0e229249b6b707beb98674c1deae3949d5c319a6c45b9f5a80c99618e40c",
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "v3.5.3",
+            "ab225266944322750136f1198d93786e4a79a0e43c8d149abfba44da30a3eac8",
+        ),
+        (
             "lambda/helm-installer/Dockerfile",
             "v4.3.0",
             "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
@@ -177,6 +187,25 @@ def test_downloaded_release_assets_have_committed_checksums(
             'METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"',
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
+        ),
+        (
+            # The Argo CD capability manifests are validated against the
+            # upstream Application/AppProject CRDs; a Git tag can be moved, so
+            # each CRD manifest carries its own committed digest.
+            ".github/workflows/integration-tests.yml",
+            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
+            'ARGOCD_VERSION: "v3.5.3"',
+            'ARGOCD_APPLICATION_CRD_SHA256: "5dde0e229249b6b707beb98674c1deae3949d5c319a6c45b9f5a80c99618e40c"',
+            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml",
+            'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
+            'ARGOCD_VERSION: "v3.5.3"',
+            'ARGOCD_APPPROJECT_CRD_SHA256: "ab225266944322750136f1198d93786e4a79a0e43c8d149abfba44da30a3eac8"',
+            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml",
+            'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -',
         ),
         (
             ".github/workflows/deps-scan.yml",
@@ -351,6 +380,18 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             "Install Metrics Server for HPA reconciliation",
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
+        ),
+        (
+            "integration-kind-cluster-e2e",
+            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
+            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml",
+            'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -',
+        ),
+        (
+            "integration-kind-cluster-e2e",
+            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
+            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml",
+            'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -',
         ),
         (
             "integration-kind-cost-pipeline",
@@ -688,6 +729,17 @@ def test_kind_manifests_are_authenticated_before_local_apply() -> None:
     assert 'kubectl apply -f "${metrics_manifest}"' in workflow
     assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in workflow
     assert 'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -' in workflow
+    # The Argo CD CRDs are fetched from a Git tag rather than a release asset,
+    # and a tag can be moved; they too land in a file, are checked against a
+    # committed digest, and only then reach the apiserver. Piping curl into
+    # kubectl would evade the URL regex above while skipping the check.
+    assert not re.search(r"curl[^\n]*\|\s*kubectl\s+apply", workflow)
+    assert 'kubectl apply --server-side -f "${application_crd}"' in workflow
+    assert 'kubectl apply --server-side -f "${appproject_crd}"' in workflow
+    assert (
+        'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -' in workflow
+    )
+    assert 'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -' in workflow
 
 
 def test_finch_repository_key_is_pinned_by_primary_fingerprint() -> None:
@@ -745,6 +797,11 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert '"rhysd/actionlint"' in scanner
     assert "CALICO_PIN=" in scanner
     assert '"projectcalico/calico"' in scanner
+    # The Argo CD CRD tag the kind E2E job applies is the only place Argo CD's
+    # version is written down (production runs the AWS-managed capability), so
+    # nothing but this scan would notice it ageing.
+    assert 'ARGOCD_PIN="$(extract_workflow_env_pin ARGOCD_VERSION' in scanner
+    assert '"argoproj/argo-cd"' in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
     # The digest-freshness mechanics moved into shared lib helpers so every

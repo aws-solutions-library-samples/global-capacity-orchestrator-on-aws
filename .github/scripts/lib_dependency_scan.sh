@@ -1503,7 +1503,7 @@ get_latest_github_release_tag() {
 # Prints the unique value(s) of a ``<VAR_NAME>: "<value>"`` env assignment
 # found across the workflow YAML under <workflows_dir> (default
 # ``.github/workflows``). Used by the CI-tooling drift check to read the
-# pinned ``HELM_VERSION`` / ``KUBECTL_VERSION`` / ``CALICO_VERSION`` the
+# pinned ``KUBECONFORM_VERSION`` / ``CALICO_VERSION`` / ``ARGOCD_VERSION`` the
 # workflows install their own tooling from — pins Dependabot doesn't watch
 # (they're plain env strings, not ``uses:`` refs or Dockerfile ``FROM``
 # lines).

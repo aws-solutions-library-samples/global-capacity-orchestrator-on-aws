@@ -473,6 +473,7 @@ PY
             echo "github-release|yannh/kubeconform|$(extract_workflow_env_pin KUBECONFORM_VERSION | head -1)"
             echo "github-release|kubernetes-sigs/metrics-server|$(extract_workflow_env_pin METRICS_SERVER_VERSION | head -1)"
             echo "github-release|projectcalico/calico|$(extract_workflow_env_pin CALICO_VERSION | head -1)"
+            echo "github-release|argoproj/argo-cd|$(extract_workflow_env_pin ARGOCD_VERSION | head -1)"
             echo "github-release|kubernetes-sigs/kind|$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
             kind_node="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
             [ -n "$kind_node" ] && echo "image|docker.io/${kind_node%%:*}|${kind_node##*:}"
@@ -591,6 +592,9 @@ env:
   METRICS_SERVER_SHA256: "aaaa"
   CALICO_VERSION: "v3.30.0"
   CALICO_SHA256: "bbbb"
+  ARGOCD_VERSION: "v3.5.3"
+  ARGOCD_APPLICATION_CRD_SHA256: "cccc"
+  ARGOCD_APPPROJECT_CRD_SHA256: "dddd"
 jobs:
   e2e:
     runs-on: ubuntu-latest
@@ -802,6 +806,7 @@ report_path() {
     [[ "$output" == *"  - ruby (.ruby-version): 4.0.1 -> 5.0"* ]]
     [[ "$output" == *"  - runner ubuntu-latest: ubuntu-22.04 -> ubuntu-24.04"* ]]
     [[ "$output" == *"  - Trivy (install-trivy action default): v0.74.0 -> v1.74.0"* ]]
+    [[ "$output" == *"  - Argo CD CRDs (ARGOCD_VERSION): v3.5.3 -> v4.5.3"* ]]
     [[ "$output" == *"  - kubectl (helm-installer Dockerfile): v1.36.4 -> v2.36.4"* ]]
     [[ "$output" == *"  - kind node image (kindest/node): v1.36.4 -> v1.36.5"* ]]
     [[ "$output" == *"Found 2 offline accelerator policy finding(s)."* ]]
@@ -929,11 +934,12 @@ report_path() {
 
     [ "$status" -eq 0 ]
     local why=" (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)."
-    # The seven CI-tooling releases, the two GitHub-hosted pre-commit hooks and
+    # The eight CI-tooling releases, the two GitHub-hosted pre-commit hooks and
     # the four GitHub-backed Dockerfile.dev pins all read api.github.com, so all
-    # thirteen go incomplete together and every line says the same thing.
+    # fourteen go incomplete together and every line says the same thing.
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Argo CD CRDs (ARGOCD_VERSION) (argoproj/argo-cd)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/DavidAnson/markdownlint-cli2${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin AWSCLI_VERSION${why}"* ]]
@@ -943,7 +949,7 @@ report_path() {
     # Surfaces on other hosts are untouched: the npm-backed CDK pin still
     # resolves, and nothing else went incomplete.
     [[ "$output" != *"Dockerfile.dev pin CDK_VERSION"* ]]
-    [[ "$output" == *"Incomplete lookups:       13"* ]]
+    [[ "$output" == *"Incomplete lookups:       14"* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     # No token was offered, so no request carried one.
     ! grep -q '\[bearer\]' "$CALLS"

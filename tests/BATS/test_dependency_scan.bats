@@ -2706,6 +2706,15 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
+@test "extract_workflow_env_pin: reads the ARGOCD_VERSION pin from integration-tests.yml" {
+    # The kind E2E job applies this upstream release's Application/AppProject
+    # CRDs to validate the Argo CD capability manifests; production runs the
+    # AWS-managed capability, so this env pin is the only place Argo CD's
+    # version is written down and the only handle the drift scan has on it.
+    run extract_workflow_env_pin ARGOCD_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
 
 @test "extract_workflow_env_pin: reads actionlint and Calico maintenance pins" {
     run extract_workflow_env_pin ACTIONLINT_VERSION
