@@ -45,6 +45,18 @@ prints every change of answer; the harness keeps those lines as ``samples``,
 the closing line as ``settled``, and flags ``attach_window_observed`` when the
 first answer differed from the steady state.
 
+A disruption is not a verdict. Probe and listener pods ask Karpenter to leave
+their node alone (``karpenter.sh/do-not-disrupt``) and prefer on-demand
+capacity, but an interruption — a Spot reclaim, scheduled maintenance — can
+still evict one: a live run lost the HTTPS egress probe 46 seconds into its
+sampling and then waited out the whole pod timeout on a pod that no longer
+existed. A probe whose Job failed with no terminated pod left, or whose pod
+carries ``DisruptionTarget`` without a verdict exit code, is read at once and
+re-run once from a fresh Job; a second disruption is reported as one. A
+listener pod that did not last the matrix (either ``httpd`` target, or the
+inference-monitor pod the metrics probe dialed) voids every verdict dialed
+against it, so the action names it instead of reporting mismatches.
+
 When cdk.json turns the controller off (``eks_cluster.network_policy_enforcement:
 false``) the deny verdicts are not promised and those probes are recorded as
 skipped; the reachability probes still have to pass.
@@ -78,6 +90,10 @@ _REACHABLE_EXIT_CODE = 0
 _BLOCKED_EXIT_CODE = 42
 #: The answer kept changing for the probe's whole budget; never a verdict.
 _UNSETTLED_EXIT_CODE = 43
+#: Exit codes the probe script chose; anything else means it never finished.
+_SCRIPT_EXIT_CODES = frozenset({_REACHABLE_EXIT_CODE, _BLOCKED_EXIT_CODE, _UNSETTLED_EXIT_CODE})
+#: A probe a disruption voided is re-run from a fresh Job, once.
+_PROBE_ATTEMPTS = 2
 #: Auto Mode may have to launch a node for the first pod; a probe then still
 #: has the image pull and its own three-minute sampling budget ahead of it.
 _POD_TIMEOUT_SECONDS = 600
@@ -245,8 +261,11 @@ class NetworkPostureProbe:
         namespace = job["metadata"]["namespace"]
         name = job["metadata"]["name"]
         # Record before creating: a Job that exists without a record could not
-        # be cleaned up, so the record is what authorizes the delete.
-        self.record["jobs"].append({"namespace": namespace, "name": name, "deleted": False})
+        # be cleaned up, so the record is what authorizes the delete. A re-run
+        # of a disrupted probe reuses its Job's record.
+        entry = {"namespace": namespace, "name": name, "deleted": False}
+        if entry not in self.record["jobs"]:
+            self.record["jobs"].append(entry)
         self._persist()
         # Start from a clean slate so a retry of this run never reads a stale
         # verdict; foreground cascading waits for the old pod to be gone.
@@ -279,7 +298,8 @@ class NetworkPostureProbe:
             }
             raise self._fail(f"could not create {namespace}/{name}")
 
-    def _job_pod(self, namespace: str, name: str) -> dict[str, Any] | None:
+    def _live_pods(self, namespace: str, selector: str) -> list[dict[str, Any]]:
+        """The selector's pods that are not being deleted."""
         payload = kubectl_json(
             self.kubectl,
             self.record,
@@ -288,12 +308,50 @@ class NetworkPostureProbe:
             "--namespace",
             namespace,
             "--selector",
-            f"job-name={name}",
+            selector,
             timeout=self.timeout,
         )
-        for item in _list(_dict(payload).get("items")):
-            if not _dict(_dict(item).get("metadata")).get("deletionTimestamp"):
-                return _dict(item)
+        return [
+            _dict(item)
+            for item in _list(_dict(payload).get("items"))
+            if not _dict(_dict(item).get("metadata")).get("deletionTimestamp")
+        ]
+
+    def _job_pod(self, namespace: str, name: str) -> dict[str, Any] | None:
+        pods = self._live_pods(namespace, f"job-name={name}")
+        return pods[0] if pods else None
+
+    def _job_failure(self, namespace: str, name: str) -> dict[str, str] | None:
+        """The Job's ``Failed`` condition as ``{reason, message}``, or ``None``."""
+        payload = kubectl_json(
+            self.kubectl,
+            self.record,
+            "get",
+            "job",
+            name,
+            "--namespace",
+            namespace,
+            timeout=self.timeout,
+        )
+        for entry in _list(_dict(_dict(payload).get("status")).get("conditions")):
+            condition = _dict(entry)
+            if condition.get("type") == "Failed" and condition.get("status") == "True":
+                return {
+                    "reason": str(condition.get("reason") or "Failed"),
+                    "message": str(condition.get("message") or "")[:_LOG_LIMIT],
+                }
+        return None
+
+    @staticmethod
+    def _disruption_condition(pod: dict[str, Any]) -> dict[str, str] | None:
+        """The pod's ``DisruptionTarget`` condition as ``{reason, message}``, or ``None``."""
+        for entry in _list(_dict(pod.get("status")).get("conditions")):
+            condition = _dict(entry)
+            if condition.get("type") == "DisruptionTarget" and condition.get("status") == "True":
+                return {
+                    "reason": str(condition.get("reason") or "DisruptionTarget"),
+                    "message": str(condition.get("message") or "")[:_LOG_LIMIT],
+                }
         return None
 
     def _wait(self, deadline: float, what: str) -> None:
@@ -321,19 +379,26 @@ class NetworkPostureProbe:
             self._wait(deadline, f"listener {namespace}/{name} readiness")
 
     def _wait_for_verdict(self, namespace: str, name: str) -> dict[str, Any]:
-        """Return the probe pod's terminal phase, exit code, and log tail."""
+        """Return the probe pod's terminal phase, exit code, log tail, and disruption.
+
+        ``disruption`` is ``None`` for a verdict. It holds the reason when a
+        disruption took the verdict away: the Job failed with no terminated pod
+        left to read (the pod was evicted and deleted), or the pod stopped with
+        an exit code the script never chose while carrying ``DisruptionTarget``.
+        Both return at once instead of waiting out the deadline.
+        """
         deadline = time.monotonic() + _POD_TIMEOUT_SECONDS
         while True:
             pod = self._job_pod(namespace, name)
             status = _dict(pod.get("status")) if pod else {}
             phase = status.get("phase")
-            if phase in ("Succeeded", "Failed"):
+            if pod is not None and phase in ("Succeeded", "Failed"):
                 containers = [_dict(entry) for entry in _list(status.get("containerStatuses"))]
                 terminated = (
                     _dict(_dict(containers[0].get("state")).get("terminated")) if containers else {}
                 )
                 exit_code = terminated.get("exitCode")
-                pod_name = str(_dict(_dict(pod).get("metadata")).get("name"))
+                pod_name = str(_dict(pod.get("metadata")).get("name"))
                 _code, stdout, stderr = self._run(
                     "logs",
                     pod_name,
@@ -341,13 +406,80 @@ class NetworkPostureProbe:
                     namespace,
                     f"--tail={_LOG_TAIL_LINES}",
                 )
+                disruption = (
+                    None if exit_code in _SCRIPT_EXIT_CODES else self._disruption_condition(pod)
+                )
                 return {
                     "pod": pod_name,
                     "phase": phase,
                     "exit_code": exit_code,
                     "output": (stdout or stderr)[-_LOG_LIMIT:],
+                    "disruption": disruption,
+                }
+            if pod is None and (failure := self._job_failure(namespace, name)) is not None:
+                return {
+                    "pod": None,
+                    "phase": "Failed",
+                    "exit_code": None,
+                    "output": "",
+                    "disruption": failure,
                 }
             self._wait(deadline, f"probe {namespace}/{name} completion")
+
+    def _probe_verdict(
+        self, spec: ProbeSpec, job: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Wait for one probe, re-running it from a fresh Job if a disruption voided it."""
+        namespace = job["metadata"]["namespace"]
+        name = job["metadata"]["name"]
+        disruptions: list[dict[str, Any]] = []
+        for attempt in range(1, _PROBE_ATTEMPTS + 1):
+            verdict = self._wait_for_verdict(namespace, name)
+            disruption = verdict.pop("disruption")
+            if disruption is None:
+                break
+            disruptions.append({"attempt": attempt, "pod": verdict["pod"], **disruption})
+            self.record.setdefault("disruptions", []).append(
+                {"probe": spec.name, "attempt": attempt, **disruption}
+            )
+            self._persist()
+            if attempt < _PROBE_ATTEMPTS:
+                self._create_job(job)
+        return verdict, disruptions
+
+    def _disrupted_listeners(
+        self, targets: dict[str, dict[str, str]], monitor_pod: str
+    ) -> list[str]:
+        """Listeners whose pod did not last the matrix; verdicts dialed at them are void.
+
+        The inference-monitor pod the metrics probe dialed is one of them: a
+        replaced pod answers on a different IP, so the probe that dialed the
+        old one would read ``blocked`` for a reason no policy chose.
+        """
+        dialed = [
+            (namespace, f"job-name={target['job']}", target["pod"], f"{namespace}/{target['job']}")
+            for namespace, target in targets.items()
+        ]
+        dialed.append(
+            ("gco-system", "app=inference-monitor", monitor_pod, f"gco-system/{monitor_pod}")
+        )
+        broken: list[str] = []
+        for namespace, selector, pod_name, label in dialed:
+            pod = next(
+                (
+                    item
+                    for item in self._live_pods(namespace, selector)
+                    if _dict(item.get("metadata")).get("name") == pod_name
+                ),
+                None,
+            )
+            if (
+                pod is None
+                or _dict(pod.get("status")).get("phase") != "Running"
+                or self._disruption_condition(pod) is not None
+            ):
+                broken.append(label)
+        return broken
 
     def _delete_jobs(self) -> list[dict[str, Any]]:
         problems: list[dict[str, Any]] = []
@@ -373,24 +505,12 @@ class NetworkPostureProbe:
     # -- the matrix ---------------------------------------------------------
 
     def _inference_monitor_ip(self) -> tuple[str, str]:
-        payload = kubectl_json(
-            self.kubectl,
-            self.record,
-            "get",
-            "pods",
-            "--namespace",
-            "gco-system",
-            "--selector",
-            "app=inference-monitor",
-            timeout=self.timeout,
-        )
-        for item in _list(_dict(payload).get("items")):
-            metadata = _dict(_dict(item).get("metadata"))
-            status = _dict(_dict(item).get("status"))
+        for item in self._live_pods("gco-system", "app=inference-monitor"):
+            metadata = _dict(item.get("metadata"))
+            status = _dict(item.get("status"))
             containers = [_dict(entry) for entry in _list(status.get("containerStatuses"))]
             if (
-                not metadata.get("deletionTimestamp")
-                and status.get("phase") == "Running"
+                status.get("phase") == "Running"
                 and containers
                 and all(entry.get("ready") is True for entry in containers)
                 and status.get("podIP")
@@ -453,7 +573,7 @@ class NetworkPostureProbe:
             self._persist()
 
             specs = _probe_specs(targets["gco-system"]["ip"], targets["gco-jobs"]["ip"], monitor_ip)
-            launched: list[tuple[ProbeSpec, str]] = []
+            launched: list[tuple[ProbeSpec, dict[str, Any]]] = []
             for spec in specs:
                 if spec.enforcement_only and not enforcement:
                     results.append(
@@ -467,31 +587,36 @@ class NetworkPostureProbe:
                         }
                     )
                     continue
-                name = f"gco-live-netpol-{spec.name}-{self.token}"
-                self._create_job(
-                    self._job_manifest(
-                        _PROBE_MANIFEST,
-                        name=name,
-                        namespace=spec.client_namespace,
-                        replacements={"__PROBE_URL__": spec.url},
-                    )
+                job = self._job_manifest(
+                    _PROBE_MANIFEST,
+                    name=f"gco-live-netpol-{spec.name}-{self.token}",
+                    namespace=spec.client_namespace,
+                    replacements={"__PROBE_URL__": spec.url},
                 )
-                launched.append((spec, name))
-            for spec, name in launched:
-                verdict = self._wait_for_verdict(spec.client_namespace, name)
+                self._create_job(job)
+                launched.append((spec, job))
+            for spec, job in launched:
+                verdict, disruptions = self._probe_verdict(spec, job)
                 observed = self._observed(verdict)
                 results.append(
                     {
                         **asdict(spec),
                         **verdict,
                         **self._trace(verdict["output"]),
-                        "job": name,
+                        "job": job["metadata"]["name"],
+                        "disruptions": disruptions,
                         "observed": observed,
                         "status": "matched" if observed == spec.expected else "mismatch",
                     }
                 )
                 self.record["probes"] = results
                 self._persist()
+            if disrupted := self._disrupted_listeners(targets, monitor_pod):
+                self.record["disrupted_listeners"] = disrupted
+                raise self._fail(
+                    f"listener(s) {', '.join(disrupted)} did not last the probe matrix "
+                    "(evicted or replaced), so the verdicts dialed against them are void"
+                )
         finally:
             try:
                 evidence["cleanup_problems"] = self._delete_jobs()
@@ -502,6 +627,12 @@ class NetworkPostureProbe:
             f"{item['name']} ({item['client_namespace']} -> {item['url']}) expected "
             f"{item['expected']}, observed {item['observed']} "
             f"[phase={item['phase']} exit={item['exit_code']}]"
+            + (
+                f" after {len(item['disruptions'])} disruption(s), last: "
+                f"{item['disruptions'][-1]['reason']}"
+                if item["disruptions"]
+                else ""
+            )
             for item in results
             if item["status"] == "mismatch"
         ]

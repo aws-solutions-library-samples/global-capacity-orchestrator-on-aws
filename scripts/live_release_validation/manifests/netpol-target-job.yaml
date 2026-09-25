@@ -21,12 +21,29 @@ spec:
   ttlSecondsAfterFinished: 600
   template:
     metadata:
+      annotations:
+        # Karpenter (EKS Auto Mode) must not consolidate or drift the node
+        # away mid-verdict: the answer is one pod's uninterrupted connection.
+        # Interruptions cannot be refused; the action re-runs a probe that one
+        # disrupted and names a listener that did not last.
+        karpenter.sh/do-not-disrupt: "true"
       labels:
         app.kubernetes.io/name: gco-live-release-validation
         gco.aws/validation-run: __RUN_TOKEN__
         gco.aws/validation-path: network-posture
     spec:
       restartPolicy: Never
+      # Prefer on-demand capacity, where no Spot reclaim can interrupt the
+      # verdict; any node still works, so scheduling never waits on it.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: karpenter.sh/capacity-type
+                    operator: In
+                    values: ["on-demand"]
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

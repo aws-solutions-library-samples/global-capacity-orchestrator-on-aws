@@ -79,7 +79,13 @@ least 45 seconds have passed) rather than dialing once: the VPC CNI attaches a
 new pod's policies in parallel with its start and admits everything until they
 are in place, so a first dial can read that window instead of the policy. The
 changes of answer are kept as `samples` evidence, with `attach_window_observed`
-set when the first answer differed from the steady state. Every Job is
+set when the first answer differed from the steady state. A disruption is
+never a verdict: probe and listener pods carry `karpenter.sh/do-not-disrupt`
+and prefer on-demand capacity, a probe whose pod an interruption evicted (its
+Job failed with no pod left, or its pod carries `DisruptionTarget` without a
+verdict exit code) is read at once and re-run once from a fresh Job, and a
+listener or inference-monitor pod that did not last the matrix fails the action
+by name, since the verdicts dialed against it are void. Every Job is
 run-labelled, deleted before the action returns, and self-expiring should the
 harness die first. Both run after the workload actions on purpose: a zero
 restart count and an intact posture mean more once the services have carried
