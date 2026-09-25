@@ -183,9 +183,9 @@ returns the same document. The state of XRs and packages is in their own
 
 Set `enabled: false` and deploy. Before it uninstalls the charts, the helm
 installer deletes every object of Crossplane's own API groups in dependency
-order — usages first, then the definitions and Compositions, and the packages
-last; namespaced before cluster-scoped, with one retry that strips finalizers
-if a delete stalls. Deleting an XRD makes Crossplane delete its composite
+order — the namespaced usages first, then the definitions and Compositions,
+and the packages in a pass of their own once those are gone — with one retry
+that strips finalizers if a delete stalls. Deleting an XRD makes Crossplane delete its composite
 resources, and with them what they composed, before the definition goes, all
 while Crossplane is still running. Crossview and Crossplane are then
 uninstalled, and the applier prunes the Function and the RBAC above.

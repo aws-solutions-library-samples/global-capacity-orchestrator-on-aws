@@ -294,7 +294,9 @@ Set `enabled: false` and deploy. Before it uninstalls the chart, the helm
 installer deletes every `argoproj.io` object: Argo CD processes each
 Application's resources finalizer while its controller is still running, so an
 Application that carries one deletes what it synced, and the root Application,
-which carries none, leaves its workloads in place. The chart is then
+which carries none, leaves its workloads in place. The AppProjects go in a
+later pass, once the Applications are gone, because the controller does not
+finalize an Application whose project no longer exists. The chart is then
 uninstalled (the CRDs stay), and the applier prunes the RBAC, the project and
 the root Application. A stack delete runs the same cleanup.
 

@@ -4920,22 +4920,41 @@ jobs:
         # The example Application DOES carry the resources finalizer: when the
         # helm installer's pre-uninstall cleanup deletes every argoproj.io
         # object (what a disabled chart or a stack delete runs), Argo CD
-        # deletes the Job before the Application goes.
+        # deletes the Job before the Application goes. The projects get a
+        # later pass (the controller finalizes nothing whose project is
+        # gone), so the cascade must finish inside the wait: needing the
+        # finalizer-strip fallback fails the step.
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import logging
           import os
           import sys
 
           sys.path.insert(0, "lambda/helm-installer")
           import handler
 
+
+          class StallRecorder(logging.Handler):
+              def __init__(self):
+                  super().__init__(logging.WARNING)
+                  self.stalls = []
+
+              def emit(self, record):
+                  if "stalled" in record.getMessage():
+                      self.stalls.append(record.getMessage())
+
+
+          recorder = StallRecorder()
+          handler.logger.addHandler(recorder)
           ok, message = handler._delete_chart_custom_resources(
               "argocd", os.path.expanduser("~/.kube/config")
           )
           print(message)
           if not ok:
               raise SystemExit(message)
+          if recorder.stalls:
+              raise SystemExit(f"the cascade fell back to stripping finalizers: {recorder.stalls}")
           PY
           if kubectl get applications.argoproj.io,appprojects.argoproj.io -A -o name | grep -q .; then
             echo "::error::argoproj.io objects survived the installer cleanup"
@@ -5081,6 +5100,8 @@ jobs:
           metadata:
             name: gco-ci-denied
             namespace: gco-system
+          spec:
+            message: Refused in gco-system
           EOF
           deadline=$((SECONDS + 180))
           until kubectl -n gco-system get batchjob.examples.gco.io gco-ci-denied \
@@ -5155,18 +5176,34 @@ jobs:
           done
           kubectl delete -f examples/crossplane-batch-api.yaml --wait=true
           python3 - <<'PY'
+          import logging
           import os
           import sys
 
           sys.path.insert(0, "lambda/helm-installer")
           import handler
 
+
+          class StallRecorder(logging.Handler):
+              def __init__(self):
+                  super().__init__(logging.WARNING)
+                  self.stalls = []
+
+              def emit(self, record):
+                  if "stalled" in record.getMessage():
+                      self.stalls.append(record.getMessage())
+
+
+          recorder = StallRecorder()
+          handler.logger.addHandler(recorder)
           ok, message = handler._delete_chart_custom_resources(
               "crossplane", os.path.expanduser("~/.kube/config")
           )
           print(message)
           if not ok:
               raise SystemExit(message)
+          if recorder.stalls:
+              raise SystemExit(f"the cleanup fell back to stripping finalizers: {recorder.stalls}")
           PY
           python3 - <<'PY'
           import sys

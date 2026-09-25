@@ -530,14 +530,82 @@ class TestHelmInstallerCleanup:
         deletes = [command for command in commands if "delete" in command]
         assert deletes[0][deletes[0].index("delete") + 1] == "usages.protection.crossplane.io"
         assert "--all-namespaces" in deletes[0]
-        # XRDs go before the packages whose functions their compositions run.
-        assert deletes[1][deletes[1].index("delete") + 1] == (
+        # The definitions are gone before the packages get a pass of their own.
+        assert [command[command.index("delete") + 1] for command in deletes[1:]] == [
             "compositeresourcedefinitions.apiextensions.crossplane.io,"
-            "compositions.apiextensions.crossplane.io,"
-            "functions.pkg.crossplane.io"
-        )
-        assert "--all-namespaces" not in deletes[1]
+            "compositions.apiextensions.crossplane.io",
+            "functions.pkg.crossplane.io",
+        ]
+        assert all("--all-namespaces" not in command for command in deletes[1:])
         assert message == "Deleted and waited for 4 crossplane custom resource type(s)"
+
+    def test_projects_and_packages_wait_for_a_pass_of_their_own(self, helm_handler: Any) -> None:
+        deferred = helm_handler.CHART_CUSTOM_RESOURCES_DELETED_LAST
+        assert deferred == {
+            "argocd": frozenset({"appprojects.argoproj.io"}),
+            "crossplane": frozenset({"pkg.crossplane.io"}),
+        }
+        for chart, entries in deferred.items():
+            groups = helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS[chart]
+            # Each entry is one of the chart's groups or a type inside one.
+            assert all(entry in groups or entry.partition(".")[2] in groups for entry in entries)
+
+    @staticmethod
+    def _argocd_run(commands: list[list[str]], failing_delete: str | None = None) -> Any:
+        """A ``subprocess.run`` double serving the argo-cd chart's three kinds."""
+
+        def fake_run(command: list[str], **_kwargs: Any) -> Any:
+            commands.append(command)
+            if "api-resources" in command:
+                stdout = ""
+                if "--namespaced=true" in command:
+                    stdout = (
+                        "applications.argoproj.io\n"
+                        "applicationsets.argoproj.io\n"
+                        "appprojects.argoproj.io\n"
+                    )
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            if "delete" in command and command[command.index("delete") + 1] == failing_delete:
+                return SimpleNamespace(returncode=1, stdout="", stderr="webhook unavailable")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        return fake_run
+
+    def test_argocd_projects_go_after_the_applications_they_finalize(
+        self, helm_handler: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The controller finalizes an Application only while its project exists."""
+        commands: list[list[str]] = []
+        monkeypatch.setattr(helm_handler.subprocess, "run", self._argocd_run(commands))
+        ok, message = helm_handler._delete_chart_custom_resources("argocd", "/tmp/kc")
+        assert ok, message
+        deletes = [command for command in commands if "delete" in command]
+        assert [command[command.index("delete") + 1] for command in deletes] == [
+            "applications.argoproj.io,applicationsets.argoproj.io",
+            "appprojects.argoproj.io",
+        ]
+        assert all("--wait=true" in command for command in deletes)
+        assert all("--all-namespaces" in command for command in deletes)
+        assert message == "Deleted and waited for 3 argocd custom resource type(s)"
+
+    def test_a_failed_application_pass_keeps_the_projects(
+        self, helm_handler: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands: list[list[str]] = []
+        monkeypatch.setattr(
+            helm_handler.subprocess,
+            "run",
+            self._argocd_run(
+                commands, failing_delete="applications.argoproj.io,applicationsets.argoproj.io"
+            ),
+        )
+        ok, message = helm_handler._delete_chart_custom_resources("argocd", "/tmp/kc")
+        assert not ok
+        assert "even after finalizer removal: webhook unavailable" in message
+        deleted = [
+            command[command.index("delete") + 1] for command in commands if "delete" in command
+        ]
+        assert "appprojects.argoproj.io" not in deleted
 
 
 class TestHelmInstallerConvergence:
