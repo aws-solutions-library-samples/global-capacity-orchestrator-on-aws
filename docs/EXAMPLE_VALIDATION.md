@@ -125,6 +125,33 @@ harness provisions the ephemeral bastion, points kubeconfig at the tunnel
 bastion down with the session — so `gco jobs submit-direct`, which shells
 out to kubectl, works unmodified too.
 
+The session also keeps that tunnel carrying traffic, because a Session
+Manager port-forward can stall with its local listener still accepting
+connections. One run lost seven examples that way: no TLS handshake
+completed for over an hour, five `submit-direct` calls failed on `TLS
+handshake timeout`, and two watchers read submitted Jobs as missing until they
+timed out. Now a watchdog completes a TLS handshake through the tunnel every
+30 seconds. After two failures in a row, or at once when the session process
+exits, it reopens the session on the same local port through the same
+bastion, so the kubeconfig stays valid. Around that:
+
+- a kubectl call that fails on the transport and finds the tunnel broken
+  reopens it at once and is repeated one time, and so is a `submit-direct`
+  while none of the example's Jobs exists yet (the CLI renames a second
+  submission of a Job that is still running, which would start a duplicate);
+- a Job read that is not the API server's NotFound answer reports
+  `unreachable` with kubectl's error, never `missing`, so neither a watcher
+  nor cleanup mistakes a read it could not make for a Job that is gone;
+- each example first checks the tunnel and fails at once, with the reason,
+  when it cannot be reopened;
+- the bastion's self-termination backstop is sized to the pending examples'
+  worst case (their timeouts plus overhead, across the workers), within the
+  one day a bastion accepts, instead of the two-hour default a sequential
+  pass over the catalog outlasts.
+
+The summary's `tunnel` block records that lifetime and every reopen the
+session attempted (`reopens`, with the reason and the result).
+
 Special drivers, fully reverted afterwards (a spec naming a driver the
 dispatcher does not implement fails in CI and at dispatch — never a silent
 skip):

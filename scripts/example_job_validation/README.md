@@ -28,6 +28,7 @@ below is what this harness adds on top.
 - [Adding a success criterion](#adding-a-success-criterion)
 - [Adding a setup driver](#adding-a-setup-driver)
 - [Mutations are disclosed, never silent](#mutations-are-disclosed-never-silent)
+- [Keeping the tunnel up](#keeping-the-tunnel-up)
 - [Layering rules](#layering-rules)
 - [Testing your change](#testing-your-change)
 
@@ -42,7 +43,7 @@ below is what this harness adds on top.
 | `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces (and the Argo CD fence), resource-governance fit, and the same rules for what an Application syncs or an RGD / Composition composes. No AWS, no cluster. |
 | `actions.py` | The two new action handlers: `action_static` and `action_examples` (per-example lifecycle, capacity skips, parallelism). |
 | `drivers.py` | The per-example machinery `actions.py` orchestrates: submission through the real CLI or `kubectl`, the success-criteria waiters, setup drivers, and cleanup. Returns evidence dictionaries for the report. |
-| `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling (an isolated path when asked, so a run never rewrites `~/.kube/config`), and kubectl execution. |
+| `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling (an isolated path when asked, so a run never rewrites `~/.kube/config`), and kubectl execution. A tunnelled session keeps its tunnel carrying traffic: a TLS-handshake watchdog reopens a stalled or exited SSM session on the same port through the same bastion, and `SessionKubectl.through_tunnel` repeats a call the tunnel broke once it is back (see [Keeping the tunnel up](#keeping-the-tunnel-up)). |
 
 ## How a run executes
 
@@ -177,6 +178,37 @@ disclosed temp copy (`write_temp_manifest`), and reported. The shipped example
 is never edited, and the report always states what ran instead of what ships.
 `REMOVE_VALUE` deletes a key rather than replacing it.
 
+## Keeping the tunnel up
+
+Every live example reaches the private API through one SSM port-forward, and
+a Session Manager session can stall with its local listener still accepting
+connections: a run lost seven examples to one that completed no TLS handshake
+for over an hour. `kube.cluster_session` therefore yields a `SessionKubectl`
+backed by a tunnel keeper whenever the session has a tunnel (the release
+harness's cluster-facing actions share it):
+
+- the keeper's watchdog completes a TLS handshake through the tunnel every 30
+  seconds and, after two failures in a row (or at once when the session
+  process exits), reopens the session on the same local port through the
+  same bastion, so the kubeconfig and every `gco` process reading it keep
+  working;
+- `SessionKubectl.through_tunnel(call, safe_to_repeat=...)` runs anything that
+  crosses the tunnel and repeats it once when it failed on the transport and
+  the keeper found the tunnel broken (and reopened it) or already replaced. A
+  healthy tunnel is never reopened for a failed call, so a failure that was
+  not the tunnel's is reported as it happened. `kube.through_tunnel` and
+  `kube.ensure_tunnel` accept any runner, so drivers and tests can pass a
+  plain function;
+- drivers treat an unreadable object as unreadable: `_job_status` returns
+  `missing` only for the API server's NotFound, and `unreachable` with the
+  error otherwise;
+- a driver whose repetition could duplicate work passes `safe_to_repeat`
+  (`submit-direct` repeats only while none of the example's Jobs exists).
+
+`action_examples` sizes the bastion's self-termination backstop with
+`_bastion_ttl_minutes` and reports it, with every reopen the keeper attempted,
+in the summary's `tunnel` block.
+
 ## Layering rules
 
 Imports flow one way, from the entry point down to the data, and
@@ -203,17 +235,20 @@ __main__.py → registry.py → actions.py → drivers.py → kube.py
 
 ## Testing your change
 
-`tests/test_example_job_validation.py` is the whole offline suite: the static
+`tests/test_example_job_validation.py` is the core offline suite: the static
 checks as a CI gate, plus the harness plumbing (spec enumeration, derived
 overrides, action registry order and dependencies, argument surface, mutation
 application, waiters and cleanup against a scripted kubectl, parallelism).
-Every AWS, Kubernetes, and subprocess boundary is stubbed, so the suite is
-hermetic.
+`tests/test_example_job_validation_platform_addons.py` covers the platform
+add-on and EKS Capability examples, and
+`tests/test_example_job_validation_tunnel.py` the tunnel keeper and the
+drivers that lean on it. Every AWS, Kubernetes, and subprocess boundary is
+stubbed, so the suites are hermetic.
 
 Add coverage next to the layer you touched, then:
 
 ```bash
-pytest tests/test_example_job_validation.py -q
+pytest tests/test_example_job_validation*.py -q
 python -m scripts.example_job_validation --static-only
 ```
 

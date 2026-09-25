@@ -590,16 +590,20 @@ class TestParallelExamples:
         )
 
     @staticmethod
-    def _fake_session(monkeypatch) -> None:
+    def _fake_session(monkeypatch) -> list[dict]:
         import contextlib
 
         from scripts.example_job_validation import actions
 
+        sessions: list[dict] = []
+
         @contextlib.contextmanager
-        def fake_session(_repo_root, _cluster, _region):
+        def fake_session(_repo_root, _cluster, _region, **kwargs):
+            sessions.append(kwargs)
             yield lambda *args, **kwargs: (0, "", "")
 
         monkeypatch.setattr(actions.kube, "cluster_session", fake_session)
+        return sessions
 
     def test_examples_overlap_and_summary_keeps_registry_order(self, monkeypatch, tmp_path):
         import threading
@@ -607,7 +611,7 @@ class TestParallelExamples:
         from scripts.example_job_validation import actions
 
         names = sorted(EXAMPLE_SPECS)[:3]
-        self._fake_session(monkeypatch)
+        sessions = self._fake_session(monkeypatch)
         barrier = threading.Barrier(len(names), timeout=15)
         finished: list[str] = []
 
@@ -626,6 +630,15 @@ class TestParallelExamples:
         assert summary["max_parallel"] == len(names)
         assert [item["name"] for item in summary["results"]] == names
         assert sorted(ctx.checkpoint.state["examples"]) == names
+        # One session, its bastion sized to the pending examples, and the
+        # keeper's reopen log is the very list the summary reports.
+        assert len(sessions) == 1
+        assert summary["tunnel"] == {
+            "bastion_ttl_minutes": actions._bastion_ttl_minutes(names, len(names)),
+            "reopens": [],
+        }
+        assert sessions[0]["bastion_ttl_minutes"] == summary["tunnel"]["bastion_ttl_minutes"]
+        assert sessions[0]["tunnel_events"] is summary["tunnel"]["reopens"]
 
     def test_max_parallel_one_runs_serially(self, monkeypatch, tmp_path):
         import threading
@@ -1824,12 +1837,32 @@ class TestSubmitExample:
 
 class TestJobStatus:
     @staticmethod
-    def _status(code: int, payload: str) -> tuple[str, str]:
-        kubectl = _ScriptedKubectl({("get", "job"): (code, payload, "")})
+    def _status(code: int, payload: str, stderr: str = "") -> tuple[str, str]:
+        kubectl = _ScriptedKubectl({("get", "job"): (code, payload, stderr)})
         return drivers._job_status(kubectl, "gco-jobs", "j")
 
-    def test_missing_job(self) -> None:
-        assert self._status(1, "") == ("missing", "")
+    def test_missing_job_is_only_a_not_found_answer(self) -> None:
+        not_found = 'Error from server (NotFound): jobs.batch "j" not found'
+        assert self._status(1, "", not_found) == ("missing", "")
+
+    @pytest.mark.parametrize(
+        ("stdout", "stderr", "detail"),
+        [
+            (
+                "",
+                "Unable to connect to the server: net/http: TLS handshake timeout\n",
+                "Unable to connect to the server: net/http: TLS handshake timeout",
+            ),
+            ("partial output", "", "partial output"),
+            ("", "", ""),
+        ],
+    )
+    def test_any_other_failed_read_is_unreachable_with_the_error(
+        self, stdout: str, stderr: str, detail: str
+    ) -> None:
+        """A live run's watchers read submitted Jobs as missing through a stalled tunnel."""
+        kubectl = _ScriptedKubectl({("get", "job"): (1, stdout, stderr)})
+        assert drivers._job_status(kubectl, "gco-jobs", "j") == ("unreachable", detail)
 
     def test_complete_job(self) -> None:
         payload = '{"status": {"conditions": [{"type": "Complete", "status": "True"}]}}'
@@ -2933,6 +2966,8 @@ class TestActionExamplesCheckpointShortCircuit:
         assert [item["detail"] for item in summary["results"]] == [
             "checkpoint: already passed in this run"
         ] * len(names)
+        # No session, so no tunnel evidence to report.
+        assert "tunnel" not in summary
         assert ctx.checkpoint.state["examples_summary"] == summary
 
 

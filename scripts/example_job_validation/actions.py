@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -125,6 +126,20 @@ def _run_one_example(
             name=name, status="skipped", submission=spec.submission, detail=skip_reason
         )
 
+    try:
+        # A tunnel that stalled between examples is reopened before anything
+        # is submitted; one that cannot be reopened fails the example at once
+        # rather than letting its watchers wait out the whole timeout.
+        kube.ensure_tunnel(kubectl)
+    except kube.TunnelUnavailableError as exc:
+        return ExampleRunResult(
+            name=name,
+            status="failed",
+            submission=spec.submission,
+            duration_seconds=time.monotonic() - started,
+            detail=f"the cluster API was unreachable before the example started: {exc}"[:1500],
+        )
+
     manifest_path, mutations = drivers.apply_mutations(parsed)
     evidence: dict[str, Any] = {}
     keda_queue: drivers.KedaDemoQueue | None = None
@@ -235,6 +250,31 @@ def _run_one_example(
                 companion.destroy()
 
 
+#: What one example may spend outside its criteria wait: a setup driver's
+#: readiness wait (up to 600 s), the submission (``gco`` allows 600 s, a DAG
+#: run 1800 s), and cleanup (a 300 s delete plus 180 s for derived Jobs).
+_EXAMPLE_OVERHEAD_SECONDS = 1800
+
+
+def _bastion_ttl_minutes(names: list[str], workers: int) -> int:
+    """The tunnel bastion's self-termination backstop, sized to the pending examples.
+
+    The bastion lives exactly as long as the session in the normal path; the
+    TTL only stops an orphan (a harness killed outright). The bastion's
+    two-hour default is shorter than a sequential pass over the catalog, and
+    a bastion that terminates mid-run takes the tunnel with it, so the TTL is
+    the worst case a thread pool can take — the total over the workers plus
+    the longest single example — within the one day a bastion accepts.
+    """
+    from cli import ephemeral_bastion
+
+    budgets = [EXAMPLE_SPECS[name].timeout_seconds + _EXAMPLE_OVERHEAD_SECONDS for name in names]
+    minutes = math.ceil((sum(budgets) / workers + max(budgets)) / 60)
+    return max(
+        ephemeral_bastion.DEFAULT_TTL_MINUTES, min(ephemeral_bastion.MAX_TTL_MINUTES, minutes)
+    )
+
+
 def action_examples(ctx: RunContext) -> dict[str, Any]:
     """Run the selected examples in parallel inside one cluster session.
 
@@ -278,8 +318,16 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
 
     limit = int(getattr(ctx.settings, "max_parallel_examples", 0) or 0)
     workers = min(len(pending), limit) if limit > 0 else len(pending)
+    tunnel: dict[str, Any] | None = None
     if pending:
-        with kube.cluster_session(ctx.settings.repo_root, cluster_name, region) as kubectl:
+        tunnel = {"bastion_ttl_minutes": _bastion_ttl_minutes(pending, workers), "reopens": []}
+        with kube.cluster_session(
+            ctx.settings.repo_root,
+            cluster_name,
+            region,
+            bastion_ttl_minutes=tunnel["bastion_ttl_minutes"],
+            tunnel_events=tunnel["reopens"],
+        ) as kubectl:
             if workers == 1:
                 for name in pending:
                     run_example(name, kubectl)
@@ -304,6 +352,10 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
         "skipped": sum(1 for item in ordered if item.status == "skipped"),
         "failed": sum(1 for item in ordered if item.status == "failed"),
     }
+    if tunnel is not None:
+        # Every reopen the tunnel keeper attempted, so a pass that needed one
+        # says so, and the bastion lifetime the run asked for.
+        summary["tunnel"] = tunnel
     ctx.checkpoint.state["examples_summary"] = summary
     ctx.persist()
     if summary["failed"]:

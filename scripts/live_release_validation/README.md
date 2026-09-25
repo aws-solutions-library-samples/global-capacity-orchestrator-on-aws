@@ -62,7 +62,11 @@ gated manifests, and the probes all resolve enablement identically.
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that
-distinguishes "absent" from "the read broke"). `platform-workloads`
+distinguishes "absent" from "the read broke"). That session keeps its tunnel
+carrying traffic: a watchdog reopens a stalled or exited SSM session on the
+same port through the same bastion, and a kubectl call the tunnel broke is
+repeated once it is back (see
+[Keeping the tunnel up](../example_job_validation/README.md#keeping-the-tunnel-up)). `platform-workloads`
 (`actions/platform_workloads.py`, snapshot logic in
 `checks/platform_workloads.py`) polls every Region's `gco-system` Deployments,
 PodDisruptionBudgets, HPAs, and the Auto Mode network-policy switch against the

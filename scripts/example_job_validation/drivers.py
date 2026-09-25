@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from .kube import KubectlRunner
+from .kube import KubectlRunner, through_tunnel
 from .specs import (
     ACK_RESOURCE_SYNCED,
     ARGOCD_APP_HEALTHY,
@@ -160,7 +160,22 @@ def submit_example(
         raise ExampleValidationError(f"No live submission for {spec.submission}")
 
     timeout = 1800 if spec.submission == DAG_RUN else 600
-    code, out, err = _run_cli(args, repo_root, timeout=timeout)
+
+    def submit() -> tuple[int, str, str]:
+        return _run_cli(args, repo_root, timeout=timeout)
+
+    if spec.submission == SUBMIT_DIRECT:
+        # submit-direct is the one submission that shells out to kubectl
+        # through this session's tunnel (a live run lost five examples to a
+        # stalled tunnel at exactly this step). It is repeated once the tunnel
+        # is back, but only while none of the example's Jobs exists: the CLI
+        # renames a second submission of a Job that is still running, which
+        # would start a duplicate the harness never cleans up.
+        code, out, err = through_tunnel(
+            kubectl, submit, safe_to_repeat=lambda: _no_job_landed(parsed, kubectl)
+        )
+    else:
+        code, out, err = submit()
     if code != 0:
         raise ExampleValidationError(
             f"{' '.join(args[:3])} failed (exit {code}): {(err or out).strip()[:800]}"
@@ -177,10 +192,34 @@ def _workload_documents(parsed: ParsedExample, kinds: set[str]) -> list[dict[str
     return [doc for doc in parsed.documents if doc.get("kind") in kinds]
 
 
+def _no_job_landed(parsed: ParsedExample, kubectl: KubectlRunner) -> bool:
+    """True when the API server answers NotFound for every Job the example defines."""
+    return all(
+        _job_status(
+            kubectl,
+            (doc.get("metadata") or {}).get("namespace", "gco-jobs"),
+            doc["metadata"]["name"],
+        )[0]
+        == "missing"
+        for doc in _workload_documents(parsed, {"Job"})
+    )
+
+
 def _job_status(kubectl: KubectlRunner, namespace: str, name: str) -> tuple[str, str]:
-    code, out, _ = kubectl("get", "job", name, "-n", namespace, "-o", "json")
+    """``(state, detail)``: complete, failed, running, missing, or unreachable.
+
+    ``missing`` is only ever the API server answering NotFound. Any other
+    failed read — a stalled tunnel, a timeout — is ``unreachable`` with
+    kubectl's error, so a watcher keeps polling a Job it cannot see and a
+    cleanup check never takes a read it could not make for a Job that is gone
+    (a live run's watchers reported submitted Jobs as missing for 40 minutes
+    while every read failed with ``TLS handshake timeout``).
+    """
+    code, out, err = kubectl("get", "job", name, "-n", namespace, "-o", "json")
     if code != 0:
-        return "missing", ""
+        if "(NotFound)" in err:
+            return "missing", ""
+        return "unreachable", (err or out).strip()[:300]
     payload = json.loads(out)
     for condition in payload.get("status", {}).get("conditions", []) or []:
         if condition.get("type") == "Complete" and condition.get("status") == "True":
@@ -254,7 +293,7 @@ def wait_jobs_complete(
     while time.monotonic() < deadline:
         for namespace, name in jobs:
             state, message = _job_status(kubectl, namespace, name)
-            pending[(namespace, name)] = state
+            pending[(namespace, name)] = f"{state} ({message})" if state == "unreachable" else state
             if state == "failed":
                 _, logs, _ = kubectl(
                     "logs", f"job/{name}", "-n", namespace, "--tail", "40", timeout=60
@@ -768,17 +807,19 @@ def _wait_jobs_gone(
     deadline = time.monotonic() + timeout
     remaining = list(jobs)
     while True:
-        remaining = [
-            (namespace, name)
-            for namespace, name in remaining
-            if _job_status(kubectl, namespace, name)[0] != "missing"
-        ]
+        states = {job: _job_status(kubectl, *job)[0] for job in remaining}
+        remaining = [job for job in remaining if states[job] != "missing"]
         if not remaining:
             return [f"{namespace}/{name}" for namespace, name in jobs]
         if time.monotonic() >= deadline:
+            # "unreachable" is named as such: a Job the reads could not see
+            # is not proven gone, and it is not proven present either.
             raise ExampleValidationError(
                 "derived Job(s) still present after cleanup: "
-                + ", ".join(f"{namespace}/{name}" for namespace, name in remaining)
+                + ", ".join(
+                    f"{namespace}/{name} ({states[(namespace, name)]})"
+                    for namespace, name in remaining
+                )
             )
         time.sleep(_POLL_SECONDS)
 

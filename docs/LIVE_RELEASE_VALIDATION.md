@@ -108,6 +108,8 @@ session-manager-plugin --version
 
 The main `preflight` action performs the same plugin lookup before `deploy` whenever a cluster-facing action is selected, so a missing local tunnel prerequisite cannot strand a newly deployed topology before cluster validation begins. It also measures free disk space at the same point: a host that fills up mid-deploy fails an image build and then the checkpoint write, and that second failure aborts the guaranteed cleanup, so the floor is enforced before anything is created. After each `deploy` the harness removes the local `cdkasset-*` images (and their bootstrap ECR repository tags) it just published, plus dangling build layers, and records what it removed in the deploy evidence; images an operator keeps in the local store for other purposes are never touched.
 
+A cluster-facing action's session keeps its tunnel carrying traffic. A Session Manager port-forward can stall with its local listener still accepting connections, so a watchdog completes a TLS handshake through the tunnel every 30 seconds and reopens a stalled or exited session on the same local port through the same bastion, and a kubectl call the tunnel broke is repeated once the tunnel is back (see [Keeping the tunnel up](../scripts/example_job_validation/README.md#keeping-the-tunnel-up)).
+
 Select local credentials and verify their identity before authorizing a run:
 
 ```bash
