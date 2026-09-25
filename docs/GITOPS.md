@@ -257,6 +257,12 @@ Dex through the chart values in `charts.yaml` (`configs.cm`) if you need it.
 as a PNG without a browser sign-in; see [the CLI reference](CLI.md#gitops-commands)
 for every option.
 
+![Argo CD Applications view — the gco-gitops-hello Application in the gco-tenants project, Synced and Healthy at the commit it is pinned to, syncing examples/gitops/hello-job into gco-jobs](../images/argocd-ui.png)
+
+The Application above is
+[`examples/argocd-gitops-job.yaml`](../examples/argocd-gitops-job.yaml),
+captured by the kind CI job with the `gco gitops screenshot` code.
+
 ## Adding Applications by hand
 
 Operators with cluster access create further Applications in the `argocd`

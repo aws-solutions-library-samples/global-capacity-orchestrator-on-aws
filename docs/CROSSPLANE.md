@@ -164,6 +164,12 @@ read-only, so nothing reached through it can change the cluster.
 `gco crossplane screenshot` captures the landing page as a PNG; see
 [the CLI reference](CLI.md#crossplane-commands) for every option.
 
+![Crossview dashboard — one XRD, one Composition and the go-templating Function, with the gco-crossplane-hello BatchJob in gco-jobs Synced and Ready](../images/crossview-dashboard.png)
+
+The composite resource above is
+[`examples/crossplane-batch-job.yaml`](../examples/crossplane-batch-job.yaml),
+captured by the kind CI job with the `gco crossplane screenshot` code.
+
 ## Operating Crossplane
 
 ### Status
