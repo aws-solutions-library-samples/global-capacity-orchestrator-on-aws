@@ -158,7 +158,14 @@ spec:
             initialDelaySeconds: 0
             periodSeconds: 15
             timeoutSeconds: 10
-            failureThreshold: 4
+            # Two minutes of continuous failure before a restart, twice the
+            # floor in tests/test_workload_probe_timing_contract.py. The
+            # scheduled report pass runs in this process; during a live
+            # release validation a pass on a CPU-saturated node left the event
+            # loop unanswered for about 55 s, and the kubelet restarted the
+            # container two seconds after that pass had written its report.
+            # Readiness still takes a stalled pod out of the Service in 15 s.
+            failureThreshold: 8
           readinessProbe:
             exec:
               command:

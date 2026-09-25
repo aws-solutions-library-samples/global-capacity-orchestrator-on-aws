@@ -5,7 +5,8 @@ Exercises the probe endpoints, /internal/status, /internal/reports (list +
 ad-hoc generation with error mapping: OpenCost outages and a not-yet-published
 report bucket to 503, S3 failures to 502, window validation to 422),
 readiness coupling to the scheduled
-reporter task, and the scheduled report loop's failure isolation. The
+reporter task, the startup order (the Parquet writer loads before the server
+listens), and the scheduled report loop's failure isolation. The
 CostMonitor is a mock patched into the module global; no lifespan
 initialization or AWS access occurs.
 """
@@ -55,6 +56,23 @@ def _result(rows=None) -> ReportResult:
         window_end="2026-07-26T10:00:00+00:00",
         rows=rows or [],
     )
+
+
+class TestStartup:
+    def test_report_writer_loads_before_the_monitor_and_the_server(self, monitor, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            cost_api_module, "preload_report_writer", lambda: calls.append("preload") or True
+        )
+
+        def factory():
+            calls.append("monitor")
+            return monitor
+
+        monkeypatch.setattr(cost_api_module, "create_cost_monitor_from_env", factory)
+        with TestClient(app, raise_server_exceptions=False) as test_client:
+            assert test_client.get("/healthz").status_code == 200
+        assert calls == ["preload", "monitor"]
 
 
 class TestProbes:

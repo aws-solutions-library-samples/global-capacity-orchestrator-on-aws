@@ -33,6 +33,7 @@ from gco.services.cost_monitor import (
     aligned_window,
     allocations_to_rows,
     create_cost_monitor_from_env,
+    preload_report_writer,
     rows_to_parquet_bytes,
     scheduled_report_key,
 )
@@ -233,6 +234,27 @@ class TestParquetSerialization:
         table = pq.read_table(io.BytesIO(payload))
         assert table.num_rows == 0
         assert table.column_names == list(ALLOCATION_REPORT_FIELDS)
+
+
+class TestReportWriterPreload:
+    """The service loads pyarrow at startup, not on the first scheduled pass."""
+
+    def test_loads_the_parquet_writer(self):
+        import sys
+
+        assert preload_report_writer() is True
+        assert "pyarrow.parquet" in sys.modules
+
+    def test_missing_pyarrow_is_logged_not_raised(self, caplog):
+        def missing(name):
+            raise ImportError(f"No module named {name!r}")
+
+        with (
+            patch("gco.services.cost_monitor.importlib.import_module", side_effect=missing),
+            caplog.at_level("WARNING", logger="gco.services.cost_monitor"),
+        ):
+            assert preload_report_writer() is False
+        assert "cost reports cannot be written" in caplog.text
 
 
 class TestReportKeys:

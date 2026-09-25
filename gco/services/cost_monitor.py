@@ -28,6 +28,7 @@ override for kind/CI.
 
 from __future__ import annotations
 
+import importlib
 import io
 import logging
 import math
@@ -348,14 +349,35 @@ def allocations_to_rows(
     return rows
 
 
+def preload_report_writer() -> bool:
+    """Load the Parquet writer now instead of on the first report.
+
+    :func:`rows_to_parquet_bytes` imports ``pyarrow`` lazily, so without this
+    the first scheduled pass — a minute after start, outside the startup
+    probe's window — maps pyarrow's native libraries (about 130 MB) and runs
+    its module initialization under the GIL, in the process that answers the
+    kubelet's probes. The service calls this during startup instead, where the
+    startup probe budgets for a slow node, so every scheduled pass costs what
+    a warm one does. Returns ``False`` (and logs) when pyarrow is missing; the
+    report path then fails with :class:`ReportWriteError` as before.
+    """
+    try:
+        importlib.import_module("pyarrow.parquet")
+    except ImportError:
+        logger.warning("pyarrow is not installed; cost reports cannot be written")
+        return False
+    return True
+
+
 def rows_to_parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     """Serialize normalized report rows to a Parquet byte payload.
 
     ``pyarrow`` is imported lazily so environments that never write reports
     (unit tests exercising only transformations, or a future reader-only
-    consumer) do not need the dependency at import time. The window bound
-    columns are stored as real timestamps so the Glue ``timestamp`` columns
-    read them natively.
+    consumer) do not need the dependency at import time; the service loads it
+    at startup with :func:`preload_report_writer`. The window bound columns
+    are stored as real timestamps so the Glue ``timestamp`` columns read them
+    natively.
     """
     try:
         import pyarrow as pa
