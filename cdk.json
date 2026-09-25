@@ -67,36 +67,15 @@
       "network_policy_enforcement": true
     },
 
-    "_comment_eks_capabilities": "Opt-in EKS Capabilities: AWS-managed Argo CD, AWS Controllers for Kubernetes (ACK) and kro attached to each regional cluster as AWS::EKS::Capability resources (billed for every hour a capability is active on a cluster plus hourly for specific Kubernetes resources it manages — see the Amazon EKS pricing page; every type is off by default). Each enabled type synthesizes one capability IAM role (trust capabilities.eks.amazonaws.com, sts:AssumeRole + sts:TagSession, no service permissions unless listed here) and one capability per cluster; regions [] means every regional deployment region, a non-empty list selects a subset. argocd requires an IAM Identity Center instance (idc_instance_arn, plus idc_region when the instance lives elsewhere) and at least one rbac_role_mappings entry ([{role: ADMIN|EDITOR|VIEWER, identities: [{id, type: SSO_USER|SSO_GROUP}]}]) because hosted Argo CD has no local users; vpce_ids makes the Argo CD UI/API private over an eks-capabilities interface endpoint; repo_credentials_secret_arns grants the capability role read on those Secrets Manager secrets for private Git repositories (repo_credentials_kms_key_arns adds kms:Decrypt, confined to Secrets Manager, when they use customer-managed keys). argocd.gitops is the declarative hand-off: GCO registers the hosting cluster as an Argo CD target, grants the capability role read-all plus an allow-listed write grant in gco-jobs and gco-inference, and creates the fenced AppProject gco-tenants and the root Application gco-gitops-root. source codecommit (default) makes GCO create one AWS CodeCommit repository per selected cluster (<cluster>-gitops, seeded with a README, read from path . unless set; codecommit.removal_policy destroy|retain says what cdk destroy does with it) that the capability role may GitPull and that `gco stacks capabilities gitops push --path <dir>` mirrors a local directory into — no credentials, no repository Secret; source git points the Application at your own repo_url instead. revision and path (which may use {region} and {cluster_name} for per-cluster overlays) apply to both; sync_policy manual leaves the first sync to a human, automated syncs with self-heal (prune off). `gco stacks capabilities argocd bootstrap-identity` discovers or creates the Identity Center instance and admin group and writes idc_instance_arn / rbac_role_mappings here. ack.disabled_services lists ACK controllers to leave out, enable_cross_namespace is ACK's cross-namespace flag, assume_role_arns are the per-service roles the capability role may assume (IAM Role Selectors, the least-privilege model). Inspect live state with `gco stacks capabilities status -r <region>` and open the hosted Argo CD UI with `gco stacks capabilities argocd open`. See docs/EKS_CAPABILITIES.md.",
+    "_comment_eks_capabilities": "Opt-in EKS Capabilities: AWS-managed AWS Controllers for Kubernetes (ACK) and kro attached to each regional cluster as AWS::EKS::Capability resources (billed for every hour a capability is active on a cluster plus hourly for specific Kubernetes resources it manages — see the Amazon EKS pricing page; every type is off by default). Each enabled type synthesizes one capability IAM role (trust capabilities.eks.amazonaws.com, sts:AssumeRole + sts:TagSession, no service permissions unless listed here) and one capability per cluster; regions [] means every regional deployment region, a non-empty list selects a subset. ack.disabled_services lists ACK controllers to leave out, enable_cross_namespace is ACK's cross-namespace flag, assume_role_arns are the per-service roles the capability role may assume (IAM Role Selectors, the least-privilege model) and iam_policy_arns are managed policies attached to the capability role itself (the simple setup); with both empty ACK can call no AWS API. kro gets write access to an allow-listed set of workload kinds in gco-jobs and gco-inference (07-kro-tenant-access.yaml) so ResourceGraphDefinitions can compose tenant workloads. Argo CD is not an EKS Capability here: GCO runs it in the cluster (helm.argocd, docs/GITOPS.md). Inspect live state with `gco stacks capabilities status -r <region>`. See docs/EKS_CAPABILITIES.md.",
     "eks_capabilities": {
-      "argocd": {
-        "enabled": false,
-        "regions": [],
-        "idc_instance_arn": "",
-        "idc_region": "",
-        "rbac_role_mappings": [],
-        "vpce_ids": [],
-        "repo_credentials_secret_arns": [],
-        "repo_credentials_kms_key_arns": [],
-        "gitops": {
-          "enabled": false,
-          "source": "codecommit",
-          "repo_url": "",
-          "revision": "HEAD",
-          "path": "",
-          "destination_namespaces": ["gco-jobs", "gco-inference"],
-          "sync_policy": "manual",
-          "codecommit": {
-            "removal_policy": "destroy"
-          }
-        }
-      },
       "ack": {
         "enabled": false,
         "regions": [],
         "disabled_services": [],
         "enable_cross_namespace": false,
-        "assume_role_arns": []
+        "assume_role_arns": [],
+        "iam_policy_arns": []
       },
       "kro": {
         "enabled": false,
@@ -464,6 +443,29 @@
       },
       "_comment_yunikorn": "Apache YuniKorn — alternative batch scheduler with hierarchical queues. Pods opt in via schedulerName: yunikorn, so it coexists cleanly with Volcano and the default scheduler. Off by default. See docs/YUNIKORN.md.",
       "yunikorn": {
+        "enabled": false
+      },
+      "_comment_argocd": "Argo CD — self-managed GitOps controller installed from the upstream argo-cd chart in namespaced mode: no ClusterRoles, and it deploys only into gco-jobs and gco-inference through the fenced gco-tenants AppProject (quotas, limits, NetworkPolicies and RBAC are never syncable). Off by default. source_repos is the AppProject's allowed repositories (glob patterns; [\"*\"] admits any). Setting gitops.repo_url to a Git URL adds the root Application gco-gitops-root, which syncs revision/path (path may use {region} and {cluster_name} for per-cluster overlays); sync_policy manual leaves syncs to a human, automated syncs with self-heal (prune off). repo_server sizes the manifest-generation tier: replicas is the fixed count (exact integer 1-50, default 1); set repo_server.autoscaling.enabled=true to hand the count to a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 5) at cpu_target_utilization_percentage of the repo-server container's CPU request in charts.yaml (1-100, default 70). The application controller and the UI server keep one replica (one cluster is one controller shard; the UI is reached through a port-forward to one pod). Open the UI with `gco gitops open` and read the admin password with `gco gitops password`. See docs/GITOPS.md.",
+      "argocd": {
+        "enabled": false,
+        "source_repos": ["*"],
+        "gitops": {
+          "repo_url": "",
+          "revision": "HEAD",
+          "path": ".",
+          "sync_policy": "manual"
+        },
+        "repo_server": {
+          "replicas": 1,
+          "autoscaling": {
+            "enabled": false,
+            "max_replicas": 5,
+            "cpu_target_utilization_percentage": 70
+          }
+        }
+      },
+      "_comment_crossplane": "Crossplane — self-managed control plane for platform APIs (v2: namespaced composite resources compose any Kubernetes resource) plus the Crossview dashboard, both installed from their upstream charts. Off by default. GCO installs the go-templating composition function, lets Crossplane compose the tenant workload kinds and gives Crossview a read-only view; no provider packages ship (AWS resources come from the ACK EKS Capability). Open the dashboard with `gco crossplane open`. See docs/CROSSPLANE.md.",
+      "crossplane": {
         "enabled": false
       },
       "_comment_kueue": "Kueue — job-queueing layer for fair sharing across teams. Must install last because its mutating webhook intercepts every Job/Deployment. See docs/KUEUE.md.",

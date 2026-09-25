@@ -252,42 +252,6 @@ class TestRunnerConstruction:
         assert instance._identity_verified is False
         assert Path.cwd().resolve() == tmp_path.resolve()
 
-    def test_self_contained_argocd_run_registers_no_argocd_before_the_identity_action(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A fresh `--eks-capabilities all` run has no Identity Center instance
-        yet when the runner registers the CDK context for preflight's
-        `cdk list`; passing the Argo CD block anyway made the CDK app refuse
-        the synth (`idc_instance_arn must be an ARN`) and failed preflight in
-        the first live run of the leg. The static identity keeps the block;
-        the registered context does not, until argocd-identity re-registers."""
-        from scripts.live_release_validation.checks import eks_capabilities as caps_checks
-
-        static = caps_checks.overrides_json(
-            caps_checks.build_eks_capabilities_overrides(
-                types=("argocd", "ack", "kro"),
-                idc_instance_arn=None,
-                idc_region=None,
-                identities=(),
-                gitops=True,
-                repo_url=None,
-                revision=_SHA,
-                path=caps_checks.GITOPS_FIXTURE_PATH,
-                sync_policy="automated",
-            )
-        )
-        settings = _run_settings(tmp_path, eks_capabilities_overrides_json=static)
-
-        instance = _build_runner(tmp_path, monkeypatch, settings=settings)
-
-        registered = instance.stack_manager.set_extra_cdk_context.call_args.args[0]
-        assert registered == {
-            **_EFS_CONTEXT,
-            "eks_capabilities_overrides": '{"ack":{"enabled":true},"kro":{"enabled":true}}',
-        }
-        assert settings.identity()["extra_cdk_context"]["eks_capabilities_overrides"] == static
-        assert _read_json(settings.checkpoint_path)["identity"] == settings.identity()
-
     def test_sibling_settings_without_extra_context_skip_cdk_override(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -501,16 +465,7 @@ class TestRunnerActionResolution:
             settings=_run_settings(tmp_path, requested_actions=("api", "topology")),
         )
 
-        # argocd-identity rides in as deploy's dependency (a no-op unless the
-        # run requested the Argo CD capability without Identity Center inputs).
-        assert instance.selected_actions == (
-            "preflight",
-            "baseline",
-            "argocd-identity",
-            "deploy",
-            "topology",
-            "api",
-        )
+        assert instance.selected_actions == ("preflight", "baseline", "deploy", "topology", "api")
 
     def test_empty_request_means_the_whole_registry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -551,7 +506,6 @@ class TestRunnerActionResolution:
         assert derived == frozenset(registry) - {
             "preflight",
             "baseline",
-            "argocd-identity",
             "destroy",
             "final-inventory",
         }
@@ -1102,7 +1056,6 @@ class TestRunnerRun:
         assert instance.checkpoint.completed_actions == [
             "preflight",
             "baseline",
-            "argocd-identity",
             "deploy",
             "destroy",
             "final-inventory",
@@ -1111,7 +1064,6 @@ class TestRunnerRun:
         assert statuses == {
             "preflight": "passed",
             "baseline": "passed",
-            "argocd-identity": "passed",
             "deploy": "passed",
             "topology": "failed",
             "destroy": "passed",
@@ -2352,7 +2304,7 @@ class TestMainArgumentValidation:
 
         assert args.protected_stack == ["SharedNetwork", "Audit"]
         assert parser.epilog is not None
-        assert parser.epilog.startswith("Actions: preflight, baseline, argocd-identity, deploy")
+        assert parser.epilog.startswith("Actions: preflight, baseline, deploy")
         assert args.inference_vllm_port == 8000
         assert args.inference_sglang_port == 30000
 
@@ -4005,9 +3957,7 @@ class TestActionPreflight:
 
         ctx.session.client.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "action", ["platform-workloads", "network-posture", "eks-capabilities"]
-    )
+    @pytest.mark.parametrize("action", ["platform-workloads", "network-posture"])
     def test_every_cluster_facing_action_needs_the_tunnel_plugin(
         self, tmp_path: Path, action: str
     ) -> None:

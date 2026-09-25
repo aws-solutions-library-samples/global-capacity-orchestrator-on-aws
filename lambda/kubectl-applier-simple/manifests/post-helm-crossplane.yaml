@@ -1,0 +1,328 @@
+# Self-managed Crossplane — the composition function, the kinds Crossplane may
+# compose, and the Crossview dashboard's read-only view.
+#
+# Applied in the post-Helm pass when cdk.json helm.crossplane is enabled (or a
+# run-scoped helm_enabled_overrides forces it): GCORegionalStack substitutes
+# {{CROSSPLANE_ENABLED}} only then. With Crossplane disabled the token stays
+# unreplaced, the applier skips this file and prunes exactly the objects below
+# (_FEATURE_RESOURCE_INVENTORY in ../handler.py).
+#
+#   * crossplane-contrib-function-go-templating (Function): the templated-YAML
+#     composition function the Crossplane v2 docs use, pinned by tag. Crossplane
+#     pulls the package from xpkg.crossplane.io and runs it in
+#     crossplane-system. Compositions reference it by this name. Readiness is
+#     exact existence only; the package pull is Crossplane's to report
+#     (``kubectl get functions``, the Crossview dashboard).
+#   * gco-crossplane-read (ClusterRole aggregated into Crossplane's own role
+#     through rbac.crossplane.io/aggregate-to-crossplane): get/list/watch on
+#     the tenant workload kinds cluster-wide, so Crossplane can watch what it
+#     composes. Identical to kro's gco-kro-read (07-kro-tenant-access.yaml).
+#   * gco-crossplane-compose (Role in gco-jobs and gco-inference, bound to the
+#     crossplane ServiceAccount): the apply/prune verbs on the same kinds, only
+#     in the two tenant namespaces. Crossplane v2 composite resources (XRs) are
+#     namespaced and compose into their own namespace, so an XR in gco-jobs
+#     gets workloads in gco-jobs; an XR anywhere else cannot compose these
+#     kinds. The rules are identical to Argo CD's and kro's tenant write grant
+#     (post-helm-argocd-access.yaml, 07-kro-tenant-access.yaml); tests pin the
+#     three lists to each other. ResourceQuota, LimitRange, NetworkPolicy,
+#     Role and RoleBinding are deliberately absent. Crossplane's upstream
+#     ClusterRole already covers Deployments, Services, ServiceAccounts,
+#     ConfigMaps and Secrets cluster-wide for its own package runtime; that
+#     grant is the chart's, not GCO's (docs/CROSSPLANE.md).
+#   * Crossview (the dashboard chart runs with rbac.create false): bound to
+#     Crossplane's crossplane-view ClusterRole — every Crossplane type plus the
+#     per-XRD view roles the RBAC manager aggregates into it, Secrets excluded
+#     — and to gco-crossview-read for the CRDs it discovers and the composed
+#     tenant kinds it draws in the relationship graph. Read-only throughout.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-go-templating
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5
+
+# ─── Cluster-wide read: Crossplane watches what it composes ─────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gco-crossplane-read
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+    rbac.crossplane.io/aggregate-to-crossplane: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["get", "list", "watch"]
+
+# ─── Namespace write: the tenant namespaces only ────────────────────
+#
+# The two Roles below are identical by design (tests pin it); the RoleBindings
+# are what scope them. Never ``*``, never ``bind``/``escalate``/``impersonate``.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-crossplane-compose
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-crossplane-compose
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: crossplane
+    namespace: crossplane-system
+roleRef:
+  kind: Role
+  name: gco-crossplane-compose
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-crossplane-compose
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+rules:
+  # Identical to the gco-jobs Role above — see its comments.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-crossplane-compose
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: crossplane
+    namespace: crossplane-system
+roleRef:
+  kind: Role
+  name: gco-crossplane-compose
+  apiGroup: rbac.authorization.k8s.io
+
+# ─── Crossview: a read-only view ─────────────────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gco-crossview-crossplane-view
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: crossview
+    namespace: crossplane-system
+roleRef:
+  kind: ClusterRole
+  name: crossplane-view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gco-crossview-read
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+rules:
+  # Discovering composite and managed resource types.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  # The composed tenant kinds the relationship graph draws (never Secrets).
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gco-crossview-read
+  labels:
+    project: gco
+    gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: crossview
+    namespace: crossplane-system
+roleRef:
+  kind: ClusterRole
+  name: gco-crossview-read
+  apiGroup: rbac.authorization.k8s.io

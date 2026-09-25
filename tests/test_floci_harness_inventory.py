@@ -31,11 +31,10 @@ def harness_session(verified_floci_endpoint):
     from tests._floci import apply_known_floci_gap_shims
 
     session = ThrottleResilientSession()
-    # The documented Floci gaps get local answers (unparseable
-    # GetStackPolicy responses; Global Accelerator, CodeCommit and the
-    # Identity Store absent entirely) so every other scanner runs against
-    # the emulator for real. See tests/_floci_gap_shims.py for the per-gap
-    # rationale.
+    # Two documented Floci 1.6.0 gaps get local answers (unparseable
+    # GetStackPolicy responses; Global Accelerator absent entirely) so the
+    # other twelve scanners run against the emulator for real. See
+    # tests/_floci.py for the per-gap rationale.
     apply_known_floci_gap_shims(session.events)
     return session
 

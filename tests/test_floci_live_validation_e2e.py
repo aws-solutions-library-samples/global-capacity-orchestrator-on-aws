@@ -146,11 +146,9 @@ class TestPreflightAndBaselineAgainstTheEmulator:
         self, verified_floci_endpoint, emulated_topology, tmp_path_factory
     ):
         report_root = tmp_path_factory.mktemp("floci-e2e-reports")
-        # The self-contained EKS Capabilities leg rides along: before its
-        # argocd-identity action has provisioned an Identity Center instance,
-        # preflight's real `cdk list` must still synthesize (the Argo CD block
-        # is left out of the CDK context until then) — the first live run of
-        # the leg failed exactly there.
+        # The EKS Capabilities leg rides along: preflight's real `cdk list`
+        # must synthesize with the run-scoped capability overrides in the
+        # CDK context, and the overrides are part of the resume identity.
         result, report_dir = _run_release_validate(
             verified_floci_endpoint,
             report_root,
@@ -168,10 +166,7 @@ class TestPreflightAndBaselineAgainstTheEmulator:
         overrides = json.loads(
             report["identity"]["extra_cdk_context"]["eks_capabilities_overrides"]
         )
-        assert overrides["argocd"]["enabled"] is True, (
-            "the static identity must still carry the requested Argo CD block"
-        )
-        assert "idc_instance_arn" not in overrides["argocd"], "nothing was provisioned yet"
+        assert overrides == {"ack": {"enabled": True}, "kro": {"enabled": True}}
         assert report["status"] == "partial", (
             "a subset run must report PARTIAL, never PASSED — passed is reserved for "
             f"the complete action registry; got {report['status']}"

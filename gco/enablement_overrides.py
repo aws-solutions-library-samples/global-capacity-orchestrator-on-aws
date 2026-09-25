@@ -54,6 +54,8 @@ HELM_CHART_CONFIG_KEYS = frozenset(
         "slurm",
         "yunikorn",
         "kubeflow_trainer",
+        "argocd",
+        "crossplane",
         "kueue",
     }
 )

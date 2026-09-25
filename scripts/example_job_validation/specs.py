@@ -9,7 +9,8 @@ catalog). Each spec answers, for its example:
   companion artifact with no live path);
 * **what** infrastructure it needs beyond the stock deploy (optional helm
   charts via ``helm_enabled_overrides``, optional features via
-  ``feature_enabled_overrides``, GPU/Neuron capacity, special setup drivers);
+  ``feature_enabled_overrides``, EKS Capabilities via
+  ``eks_capabilities_overrides``, GPU/Neuron capacity, special setup drivers);
 * **when** it counts as passed (workload-specific success criteria); and
 * **which** deliberate mutations the harness applies before submission
   (e.g. replacing a gated HuggingFace model with an ungated one) — every
@@ -41,7 +42,18 @@ VCJOB_COMPLETES = "vcjob-completes"  # batch.volcano.sh Job phase Completed
 SCALEDJOB_SCALES = "scaledjob-scales"  # KEDA ScaledJob spawns >=1 Job from queue depth
 TRAINJOB_COMPLETES = "trainjob-completes"  # trainer.kubeflow.org TrainJob condition Complete
 DAG_SUCCEEDS = "dag-succeeds"  # gco dag run exits 0 with all steps completed
+#: argoproj.io Application Synced + Healthy at the applied revision, and every
+#: Job it syncs from Git Complete.
+ARGOCD_APP_HEALTHY = "argocd-app-healthy"
+#: A kro / Crossplane instance's composed Job (named after the instance, in the
+#: instance's namespace) reaches Complete.
+COMPOSED_JOB_COMPLETES = "composed-job-completes"
+#: Every ACK resource reports ACK.ResourceSynced=True (the AWS resource exists).
+ACK_RESOURCE_SYNCED = "ack-resource-synced"
 NONE = "none"  # companion artifacts: static checks only
+
+#: EKS Capability types an example may require (cdk.json ``eks_capabilities``).
+CAPABILITY_TYPES = ("ack", "kro")
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,17 @@ class ExampleSpec:
     #: Optional infrastructure features that must be force-enabled
     #: (threaded to CDK as ``feature_enabled_overrides``).
     feature_overrides: tuple[str, ...] = ()
+    #: EKS Capabilities (one of :data:`CAPABILITY_TYPES`) that must be enabled
+    #: (threaded to CDK as ``eks_capabilities_overrides``).
+    capability_overrides: tuple[str, ...] = ()
+    #: Managed IAM policies the ACK capability role must hold for this
+    #: example (merged into ``eks_capabilities.ack.iam_policy_arns``); only
+    #: valid together with ``capability_overrides=("ack",)``.
+    ack_iam_policy_arns: tuple[str, ...] = ()
+    #: Companion example (file stem, a :data:`COMPANION` spec) the setup driver
+    #: applies before submission and deletes after cleanup — the API
+    #: definition an instance example needs (kro RGD, Crossplane XRD).
+    companion: str = ""
     #: Accelerator requirement: "" (none), "nvidia", "neuron", or "efa".
     accelerator: str = ""
     #: Named setup/teardown driver hook, implemented in ``drivers.py`` and
@@ -305,6 +328,72 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
                 "deletes the queue afterwards"
             ),
         ),
+        # --- self-managed platform add-ons (helm.argocd, helm.crossplane) --
+        ExampleSpec(
+            "argocd-gitops-job",
+            KUBECTL_APPLY,
+            ARGOCD_APP_HEALTHY,
+            helm_overrides=("argocd",),
+            setup_driver="argocd-revision-pin",
+            notes=(
+                "an Application syncing examples/gitops/hello-job from this "
+                "repository into gco-jobs through the fenced gco-tenants project; "
+                "the setup driver waits for Argo CD and pins targetRevision to the "
+                "commit under validation, so the run syncs exactly the code it tests"
+            ),
+        ),
+        ExampleSpec(
+            "crossplane-batch-api",
+            COMPANION,
+            NONE,
+            notes="XRD + Composition applied by crossplane-batch-job's setup driver",
+        ),
+        ExampleSpec(
+            "crossplane-batch-job",
+            KUBECTL_APPLY,
+            COMPOSED_JOB_COMPLETES,
+            helm_overrides=("crossplane",),
+            setup_driver="crossplane-api",
+            companion="crossplane-batch-api",
+            notes=(
+                "a namespaced BatchJob XR; the setup driver waits for the "
+                "go-templating function, applies the companion XRD + Composition "
+                "and waits for the API to be served; Crossplane composes the Job"
+            ),
+        ),
+        # --- AWS-managed EKS Capabilities (eks_capabilities) ---------------
+        ExampleSpec(
+            "kro-batch-api",
+            COMPANION,
+            NONE,
+            notes="ResourceGraphDefinition applied by kro-batch-job's setup driver",
+        ),
+        ExampleSpec(
+            "kro-batch-job",
+            KUBECTL_APPLY,
+            COMPOSED_JOB_COMPLETES,
+            capability_overrides=("kro",),
+            setup_driver="kro-api",
+            companion="kro-batch-api",
+            notes=(
+                "a BatchJob instance; the setup driver applies the companion "
+                "ResourceGraphDefinition and waits for it to be Active and its API "
+                "served; the kro capability composes the Job"
+            ),
+        ),
+        ExampleSpec(
+            "ack-sqs-queue",
+            KUBECTL_APPLY,
+            ACK_RESOURCE_SYNCED,
+            capability_overrides=("ack",),
+            ack_iam_policy_arns=("arn:aws:iam::aws:policy/AmazonSQSFullAccess",),
+            setup_driver="ack-sqs",
+            notes=(
+                "the ACK capability role gets AmazonSQSFullAccess for this run "
+                "(the documented simple setup); the driver confirms the queue in "
+                "SQS after sync and its deletion after cleanup"
+            ),
+        ),
         # --- DAG pipeline --------------------------------------------------
         ExampleSpec("pipeline-dag", DAG_RUN, DAG_SUCCEEDS, timeout_seconds=1800),
         ExampleSpec(
@@ -334,3 +423,21 @@ def required_feature_overrides(names: list[str]) -> tuple[str, ...]:
     for name in names:
         needed.update(EXAMPLE_SPECS[name].feature_overrides)
     return tuple(sorted(needed))
+
+
+def required_capability_overrides(names: list[str]) -> tuple[str, ...]:
+    """Union of EKS Capability types needed by the selected examples (sorted)."""
+    needed: set[str] = set()
+    for name in names:
+        needed.update(EXAMPLE_SPECS[name].capability_overrides)
+    return tuple(sorted(needed))
+
+
+def required_capability_settings(names: list[str]) -> dict[str, dict[str, list[str]]]:
+    """Per-type capability settings the selected examples need.
+
+    Today only ACK carries settings: the union of the managed policies the
+    selected examples name, attached to the ACK capability role.
+    """
+    policies = sorted({arn for name in names for arn in EXAMPLE_SPECS[name].ack_iam_policy_arns})
+    return {"ack": {"iam_policy_arns": policies}} if policies else {}

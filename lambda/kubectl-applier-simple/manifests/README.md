@@ -59,12 +59,12 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | Range | Group | Description |
 |-------|-------|-------------|
-| `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes, Argo CD capability registration + GitOps hand-off |
+| `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes, the kro capability's tenant RBAC |
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor, inference-proxy, cost-monitor — every Deployment follows the [platform workload contract](#platform-workload-contract) |
 | `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
 | `50-59` | GPU observability | DCGM exporter |
-| `post-helm-*` | Post-Helm | Resources needing Helm CRDs: cert-manager API workload certificates, Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
+| `post-helm-*` | Post-Helm | Resources needing Helm CRDs: cert-manager API workload certificates, Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC, the self-managed Argo CD fence and root Application, the Crossplane composition function and RBAC |
 
 ## Files
 
@@ -79,8 +79,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 | `05-priority-classes.yaml` | `gco-platform-critical` `PriorityClass` (value 1000000) — referenced by every platform-service pod spec (30–34 + the post-Helm SQS consumer) so control-plane pods preempt default-priority user workloads under node pressure instead of being starved by them |
 | `06-network-policy-controller.yaml` | The `kube-system/amazon-vpc-cni` ConfigMap that switches the EKS Auto Mode network policy controller on (rendered from `cdk.json` `eks_cluster.network_policy_enforcement`, default `true`) — without it every NetworkPolicy above is stored and enforced by nothing; inert on kind, where Calico enforces |
-| `07-argocd-cluster-access.yaml` | [Argo CD EKS Capability](../../../docs/EKS_CAPABILITIES.md) wiring: the `argocd` `Namespace`, the `local-cluster` Secret registering the hosting cluster as a deployment target by EKS cluster ARN (the hosted capability does not register it itself), and the Kubernetes RBAC for the capability role's access-entry group (`eks-access-entry:<role ARN>`): cluster-wide read (`gco-argocd-read-all`) plus an allow-listed write grant over tenant workload kinds in `gco-jobs` and `gco-inference` only (`gco-argocd-deploy`; no wildcard, and never `ResourceQuota`, `LimitRange`, `NetworkPolicy`, `Role` or `RoleBinding` — the same five kinds the `AppProject` in `08-argocd-gitops.yaml` blacklists) — **skipped and pruned (all but the Namespace) when `eks_capabilities.argocd` is disabled** (`{{ARGOCD_CAPABILITY_ROLE_ARN}}`) |
-| `08-argocd-gitops.yaml` | The GitOps hand-off: `AppProject` `gco-tenants` fenced to the configured tenant namespaces on this cluster (no cluster-scoped kinds; quotas, limits, NetworkPolicies and RBAC blacklisted) and the root `Application` `gco-gitops-root` pointing Argo CD at the hand-off's repository (the GCO-managed per-cluster CodeCommit repository's clone URL under `eks_capabilities.argocd.gitops.source: codecommit`, or `repo_url` under `source: git`) at `revision` / `path` with the configured sync policy; both CRDs are installed by the capability, so this is a base-pass file — **skipped and pruned (Application, then AppProject; no cascade delete of workloads) when the hand-off is disabled** (`{{ARGOCD_GITOPS_REPO_URL}}`) |
+| `07-kro-tenant-access.yaml` | [kro EKS Capability](../../../docs/EKS_CAPABILITIES.md) tenant RBAC, bound to the Kubernetes user the capability acts as (`{{KRO_CAPABILITY_USERNAME}}`, `arn:<partition>:sts::<account>:assumed-role/<role>/KRO`): ClusterRole/Binding `gco-kro-read` (get/list/watch on the tenant workload kinds cluster-wide, never Secrets) and Role/RoleBinding `gco-kro-compose` in `gco-jobs` and `gco-inference` (the apply/prune verbs on the same kinds). No `ResourceQuota`, `LimitRange`, `NetworkPolicy`, `Role` or `RoleBinding` — **skipped and pruned when kro is disabled** |
 
 ### Storage (20–29)
 
@@ -146,6 +145,9 @@ here from upgraded clusters.
 | File | Contents |
 |------|----------|
 | `post-helm-api-workload-certificates.yaml` | Namespaced self-signed `Issuer` plus rotating ECDSA `Certificate` resources for health-monitor, manifest-processor, and inference-proxy; generated TLS Secrets are mounted only by the hot-reloading TLS proxy sidecars |
+| `post-helm-argocd-access.yaml` | Self-managed [Argo CD](../../../docs/GITOPS.md) tenant RBAC and fence: Role/RoleBinding `gco-argocd-read` (read everything in `gco-jobs` and `gco-inference`, for the application controller and the API server) and `gco-argocd-deploy` (the tenant workload allow-list, controller only, no guardrail kinds), and the `AppProject` `gco-tenants` (sources `{{ARGOCD_SOURCE_REPOS}}`, the two tenant namespaces as the only destinations, nothing cluster-scoped, quotas, limits, NetworkPolicies and RBAC blacklisted) — **skipped and pruned when Argo CD is disabled** |
+| `post-helm-argocd-gitops.yaml` | The GitOps hand-off: `Application` `gco-gitops-root` in project `gco-tenants`, syncing `{{ARGOCD_GITOPS_REPO_URL}}` @ revision / path into `gco-jobs` with the configured sync policy and no resources finalizer — **skipped and pruned unless `helm.argocd.gitops.repo_url` is set** |
+| `post-helm-crossplane.yaml` | Self-managed [Crossplane](../../../docs/CROSSPLANE.md): the `crossplane-contrib-function-go-templating` `Function`, ClusterRole `gco-crossplane-read` (aggregated into Crossplane's role; read on the tenant kinds), Role/RoleBinding `gco-crossplane-compose` in `gco-jobs` and `gco-inference` (writes, no guardrail kinds) and Crossview's read-only bindings — **skipped and pruned when Crossplane is disabled** |
 | `post-helm-gateway.yaml` | Gateway API entrypoint: `GatewayClass`; default `TargetGroupConfiguration` (`/healthz` HTTPS checks + 900-second drain) plus one service-level configuration tagging each AWS target group as health-monitor, manifest-processor, or inference-proxy; `LoadBalancerConfiguration` (internal HTTPS ALB, `gco.aws/gateway` ownership tag, TLS certificate); `Gateway` `gco-system/gco-gateway`; and the shared `HTTPRoute` routing `/api/v1/health` + `/api/v1/metrics` + `/healthz` to health-monitor, `/inference` to inference-proxy, and everything else to manifest-processor via the `/` catch-all — the ALB re-encrypts traffic to each pod's TLS-only proxy sidecar. Every prefix must name a Service that actually serves it; `tests/test_gateway_route_coverage.py` fails otherwise |
 | `post-helm-grafana-cost-dashboard.yaml` | The *GCO Cost (OpenCost)* Grafana dashboard `ConfigMap` (sidecar-imported) — **skipped and pruned when cost monitoring is disabled** |
 | `post-helm-grafana-credential-rotation.yaml` | `CronJob` (+ `ServiceAccount`/`Role`/`RoleBinding`) that rotates the Grafana admin password — **skipped when observability disabled** |
@@ -202,14 +204,15 @@ the `MP_HPA_*` tokens are resolved only when
 `_QUANTITY_PLACEHOLDER_TOKENS`) so kubeconform renders them with the right
 type.
 
-Two tokens are *structural* rather than scalar: `{{ARGOCD_GITOPS_DESTINATIONS}}`
-(the `AppProject` `destinations` list) and `{{ARGOCD_GITOPS_SYNC_POLICY}}` (the
-`Application` `syncPolicy` object) in `08-argocd-gitops.yaml`. The regional
-stack renders each as single-line JSON, which YAML reads as a flow collection,
-so they sit unquoted in the manifest and `_STRUCTURAL_STUBS` in
-`validate_k8s_manifests.py` renders them with the same shape (the
-`{{VPC_ENDPOINT_CIDR_BLOCKS}}` sequence in `03-network-policies.yaml` is the
-other structural token).
+Two tokens are *structural* rather than scalar: `{{ARGOCD_SOURCE_REPOS}}`
+(the `AppProject` `sourceRepos` list in `post-helm-argocd-access.yaml`) and
+`{{ARGOCD_GITOPS_SYNC_POLICY}}` (the `Application` `syncPolicy` object in
+`post-helm-argocd-gitops.yaml`). `gco.argocd_config.compute_argocd_replacements`,
+which the regional stack calls, renders each as single-line JSON, which YAML
+reads as a flow collection, so they sit unquoted in the manifests and
+`_STRUCTURAL_STUBS` in `validate_k8s_manifests.py` renders them with the same
+shape (the `{{VPC_ENDPOINT_CIDR_BLOCKS}}` sequence in `03-network-policies.yaml`
+is the other structural token).
 
 Lower- or mixed-case double-brace tokens (e.g. Grafana dashboard legends like
 `{{gpu}}` or `{{Hostname}}`) are **not** placeholders — the handler's skip

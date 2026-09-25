@@ -165,21 +165,36 @@ class TestRenderPlaceholders:
         assert "{{" not in out
 
     def test_structural_argocd_tokens_become_flow_collections(self) -> None:
-        # 08-argocd-gitops.yaml: the regional stack renders the AppProject
-        # destinations and the Application syncPolicy as single-line JSON, so
-        # the stubs must parse as a list of destinations and a mapping — a
-        # string stub would fail the argoproj.io schema's type checks.
+        # post-helm-argocd-*.yaml: the regional stack renders the AppProject
+        # sourceRepos and the root Application syncPolicy as single-line JSON,
+        # so the stubs must parse as a list of repository patterns and a
+        # mapping — a string stub would fail the argoproj.io schema's type
+        # checks.
         out = validator.render_placeholders(
             "spec:\n"
-            "  destinations: {{ARGOCD_GITOPS_DESTINATIONS}}\n"
+            "  sourceRepos: {{ARGOCD_SOURCE_REPOS}}\n"
             "  syncPolicy: {{ARGOCD_GITOPS_SYNC_POLICY}}\n"
         )
         assert "{{" not in out
         spec = yaml.safe_load(out)["spec"]
-        assert isinstance(spec["destinations"], list) and spec["destinations"]
-        assert {"server", "namespace"} <= set(spec["destinations"][0])
-        assert spec["destinations"][0]["server"].startswith("arn:aws:eks:")
+        assert isinstance(spec["sourceRepos"], list) and spec["sourceRepos"]
+        assert all(isinstance(repo, str) for repo in spec["sourceRepos"])
         assert isinstance(spec["syncPolicy"], dict)
+
+    @pytest.mark.parametrize(
+        "manifest_name",
+        [
+            "post-helm-argocd-access.yaml",
+            "post-helm-argocd-gitops.yaml",
+            "post-helm-crossplane.yaml",
+            "07-kro-tenant-access.yaml",
+        ],
+    )
+    def test_platform_add_on_manifests_render_to_parseable_yaml(self, manifest_name: str) -> None:
+        raw = (MANIFESTS_DIR / manifest_name).read_text(encoding="utf-8")
+        assert "{{" in raw, "fixture drifted: expected a templated manifest"
+        docs = [doc for doc in yaml.safe_load_all(validator.render_placeholders(raw)) if doc]
+        assert docs and all({"apiVersion", "kind", "metadata"} <= set(doc) for doc in docs)
 
     def test_text_without_placeholders_is_unchanged(self) -> None:
         text = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: gco-jobs\n"

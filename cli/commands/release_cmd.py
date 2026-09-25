@@ -36,7 +36,7 @@ from typing import NoReturn
 
 import click
 
-from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES, GITOPS_SYNC_POLICIES
+from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES
 
 from .._image_reference import immutable_sha256_digest
 
@@ -143,73 +143,9 @@ def release() -> None:
     default=None,
     metavar="NAME[,NAME...]",
     help=(
-        "Enable off-by-default EKS Capabilities (argocd, ack, kro, or all) for this "
-        "run's deploy so the eks-capabilities action proves them. Self-contained: "
-        "without --argocd-idc-instance-arn/--argocd-identity the argocd-identity "
-        "action provisions an Identity Center account instance and group, and "
-        "without --argocd-gitops-repo-url the GitOps hand-off uses the GCO-managed "
-        "CodeCommit repository the run pushes its fixture into."
+        "Enable off-by-default EKS Capabilities (ack, kro, or all) for this run's "
+        "deploy so the eks-capabilities action proves each one attaches ACTIVE."
     ),
-)
-@click.option(
-    "--argocd-idc-instance-arn",
-    default=None,
-    metavar="ARN",
-    help="Existing IAM Identity Center instance for the hosted Argo CD (requires argocd).",
-)
-@click.option(
-    "--argocd-idc-region",
-    default=None,
-    metavar="REGION",
-    help=(
-        "Region of the Identity Center instance, or where argocd-identity creates one "
-        "(default: the first deployment Region)."
-    ),
-)
-@click.option(
-    "--argocd-identity",
-    multiple=True,
-    metavar="TYPE:ID",
-    help=(
-        "Existing Identity Center user or group granted the Argo CD ADMIN role "
-        "(SSO_USER:<id> or SSO_GROUP:<id>; repeatable)."
-    ),
-)
-@click.option(
-    "--argocd-gitops-repo-url",
-    default=None,
-    metavar="URL",
-    help=(
-        "Point the GitOps hand-off at this operator repository (source: git) instead "
-        "of the GCO-managed CodeCommit repository."
-    ),
-)
-@click.option(
-    "--argocd-gitops-revision",
-    default=None,
-    metavar="REVISION",
-    help="Revision Argo CD syncs from --argocd-gitops-repo-url (default: the run's SHA).",
-)
-@click.option(
-    "--argocd-gitops-path",
-    default=None,
-    metavar="PATH",
-    help=(
-        "Fixture directory Argo CD must sync into gco-jobs "
-        "(default: the harness's examples/gitops/tenant-smoke)."
-    ),
-)
-@click.option(
-    "--argocd-gitops-sync-policy",
-    type=click.Choice(list(GITOPS_SYNC_POLICIES)),
-    default=None,
-    help="Sync policy of the root Application (default: automated).",
-)
-@click.option(
-    "--no-argocd-gitops",
-    is_flag=True,
-    default=False,
-    help="Enable the Argo CD capability without the GitOps hand-off.",
 )
 @click.option(
     "--profile",
@@ -261,14 +197,6 @@ def release_validate(
     inference_gpu_count: int,
     optional_schedulers: str | None,
     eks_capabilities: str | None,
-    argocd_idc_instance_arn: str | None,
-    argocd_idc_region: str | None,
-    argocd_identity: tuple[str, ...],
-    argocd_gitops_repo_url: str | None,
-    argocd_gitops_revision: str | None,
-    argocd_gitops_path: str | None,
-    argocd_gitops_sync_policy: str | None,
-    no_argocd_gitops: bool,
     profile: str,
     run_id: str | None,
     report_dir: Path | None,
@@ -328,39 +256,6 @@ def release_validate(
         )
     if "all" in capability_names and len(capability_names) != 1:
         _fail("--eks-capabilities 'all' cannot be combined with individual names")
-    argocd_options = {
-        "--argocd-idc-instance-arn": bool(argocd_idc_instance_arn),
-        "--argocd-idc-region": bool(argocd_idc_region),
-        "--argocd-identity": bool(argocd_identity),
-        "--argocd-gitops-repo-url": bool(argocd_gitops_repo_url),
-        "--argocd-gitops-revision": bool(argocd_gitops_revision),
-        "--argocd-gitops-path": bool(argocd_gitops_path),
-        "--argocd-gitops-sync-policy": bool(argocd_gitops_sync_policy),
-        "--no-argocd-gitops": no_argocd_gitops,
-    }
-    stray_argocd = [name for name, given in argocd_options.items() if given]
-    if stray_argocd and not capability_names & {"argocd", "all"}:
-        # The harness would silently ignore these without the Argo CD capability;
-        # a wrapper that exists to remove ambiguity must not let that pass.
-        _fail(
-            ", ".join(stray_argocd)
-            + " configure the Argo CD capability; add --eks-capabilities argocd (or all)."
-        )
-    gitops_options = [
-        name
-        for name in (
-            "--argocd-gitops-repo-url",
-            "--argocd-gitops-revision",
-            "--argocd-gitops-path",
-            "--argocd-gitops-sync-policy",
-        )
-        if argocd_options[name]
-    ]
-    if no_argocd_gitops and gitops_options:
-        _fail(
-            ", ".join(gitops_options)
-            + " configure the GitOps hand-off that --no-argocd-gitops disables; drop one side."
-        )
     if inference_selected:
         required_inference = {
             "--inference-region": inference_region,
@@ -461,20 +356,6 @@ def release_validate(
         command.extend(["--optional-schedulers", optional_schedulers])
     if eks_capabilities:
         command.extend(["--eks-capabilities", eks_capabilities])
-    for option, value in (
-        ("--argocd-idc-instance-arn", argocd_idc_instance_arn),
-        ("--argocd-idc-region", argocd_idc_region),
-        ("--argocd-gitops-repo-url", argocd_gitops_repo_url),
-        ("--argocd-gitops-revision", argocd_gitops_revision),
-        ("--argocd-gitops-path", argocd_gitops_path),
-        ("--argocd-gitops-sync-policy", argocd_gitops_sync_policy),
-    ):
-        if value:
-            command.extend([option, value])
-    for identity in argocd_identity:
-        command.extend(["--argocd-identity", identity])
-    if no_argocd_gitops:
-        command.append("--no-argocd-gitops")
     if resume:
         command.append("--resume")
     for name in protected_stack:

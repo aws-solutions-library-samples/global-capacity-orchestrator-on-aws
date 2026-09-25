@@ -359,10 +359,12 @@ def test_every_registered_cli_subsystem_is_owned_by_the_structured_root() -> Non
     from cli.main import cli
 
     assert isinstance(cli, StructuredOutputGroup)
-    assert len(cli.commands) == 28
+    assert len(cli.commands) == 30
     assert {
         "analytics",
         "capacity",
+        "crossplane",
+        "gitops",
         "inference",
         "jobs",
         "mission",

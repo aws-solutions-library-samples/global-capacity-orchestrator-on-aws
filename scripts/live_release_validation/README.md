@@ -86,35 +86,23 @@ restart count and an intact posture mean more once the services have carried
 real traffic.
 
 `eks-capabilities` (`actions/eks_capabilities.py`, logic in
-`checks/eks_capabilities.py`) proves the opt-in AWS-managed Argo CD / ACK / kro
+`checks/eks_capabilities.py`) proves the opt-in AWS-managed ACK / kro
 capabilities (`docs/EKS_CAPABILITIES.md`). Because the shipped `cdk.json`
 leaves every type off and preflight requires a clean worktree, the run enables
 them the way it enables optional schedulers: `__main__.py` turns
-`--eks-capabilities` (and any Argo CD inputs the operator chose to supply)
-into the static `eks_capabilities_overrides` CDK context
-(`build_eks_capabilities_overrides`), and the action resolves the same merged
-block to know what to prove. The run is self-contained: `argocd-identity`
-(`actions/argocd_identity.py`, before `deploy`) discovers or creates the IAM
-Identity Center account instance and the admin group the hosted Argo CD
-authenticates against through `cli.argocd_identity`, records them in the
-checkpoint, and `effective_cdk_context` layers them over the static overrides
-for every synthesis (the resume identity covers only the static part); the
-`cleanup/retained.py` phase `argocd-identity` deletes them again after the
-stacks are gone, and a run that stopped before `deploy` cleans them up from
-`destroy_deployment`'s early return. The AWS side reuses
+`--eks-capabilities` into the static `eks_capabilities_overrides` CDK context
+(`build_eks_capabilities_overrides`, part of the resume identity), and the
+action resolves the same merged block to know what to prove. For every Region
+with an enabled type the EKS API must report each capability attached to the
+Region's cluster and `ACTIVE` with no drift, judged by
 `cli.eks_capabilities.build_status` — the merge behind `gco stacks
-capabilities status` — so the harness and the CLI cannot disagree about drift;
-with the default `gitops.source: codecommit` the action then pushes
-`examples/gitops/tenant-smoke` into the GCO-managed CodeCommit repository the
-deploy created through `cli.gitops_push` (the code behind `gco stacks
-capabilities gitops push`); the cluster side goes through `checks/cluster.py`
-to read the `local-cluster` Secret and the access-entry RBAC, then polls the
-root `Application` to `Synced`/`Healthy` at exactly the pushed commit (or the
-run's revision of an operator repository under `--argocd-gitops-repo-url`) and
-requires the fixture ConfigMap in `gco-jobs` with Argo CD's tracking label.
-With nothing enabled both actions pass with a note. The inventory scanners
-`codecommit_repositories` and `identity_center` report leftover
-`<project>-*` repositories, instances and groups.
+capabilities status` — so the harness and the CLI cannot disagree about
+drift. The action is AWS API only: what each capability does in the cluster
+(a kro `ResourceGraphDefinition` composing a Job, an ACK SQS queue) is proved
+by the [example harness](../example_job_validation/README.md)
+(`examples/kro-batch-job.yaml`, `examples/ack-sqs-queue.yaml`), as are the
+self-managed Argo CD and Crossplane add-ons. With nothing enabled the action
+passes with a note.
 
 ## How a run executes
 

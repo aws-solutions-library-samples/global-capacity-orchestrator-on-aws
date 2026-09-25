@@ -8,7 +8,6 @@ import json
 import time
 from typing import Any
 
-from ..checks.eks_capabilities import cleanup_validation_identity, identity_state
 from ..cleanup.retained import _retained_resource_cleanup
 from ..cleanup.workloads import cleanup_workloads
 from ..models import RunContext, to_jsonable, utc_now
@@ -136,12 +135,7 @@ def _record_target_stack_absence(
 def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
     """Retry exact-owned teardown, preserving every structured attempt."""
     if not ctx.checkpoint.deployment_attempted:
-        result: dict[str, Any] = {"needed": False, "attempts": []}
-        if identity_state(ctx.checkpoint) is not None:
-            # The argocd-identity action runs before deploy; a run that stopped
-            # in between still owns Identity Center resources to remove.
-            result["argocd_identity_cleanup"] = cleanup_validation_identity(ctx)
-        return result
+        return {"needed": False, "attempts": []}
 
     initial_absence = _verify_target_stack_absence(ctx)
     if ctx.checkpoint.destroyed and initial_absence["all_absent"]:

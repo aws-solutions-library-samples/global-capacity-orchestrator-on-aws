@@ -473,7 +473,7 @@ PY
             echo "github-release|yannh/kubeconform|$(extract_workflow_env_pin KUBECONFORM_VERSION | head -1)"
             echo "github-release|kubernetes-sigs/metrics-server|$(extract_workflow_env_pin METRICS_SERVER_VERSION | head -1)"
             echo "github-release|projectcalico/calico|$(extract_workflow_env_pin CALICO_VERSION | head -1)"
-            echo "github-release|argoproj/argo-cd|$(extract_workflow_env_pin ARGOCD_VERSION | head -1)"
+            echo "github-release|crossplane-contrib/function-go-templating|$(extract_crossplane_function_pin lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating | head -1)"
             echo "github-release|kubernetes-sigs/kind|$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
             kind_node="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
             [ -n "$kind_node" ] && echo "image|docker.io/${kind_node%%:*}|${kind_node##*:}"
@@ -592,9 +592,6 @@ env:
   METRICS_SERVER_SHA256: "aaaa"
   CALICO_VERSION: "v3.30.0"
   CALICO_SHA256: "bbbb"
-  ARGOCD_VERSION: "v3.5.3"
-  ARGOCD_APPLICATION_CRD_SHA256: "cccc"
-  ARGOCD_APPPROJECT_CRD_SHA256: "dddd"
 jobs:
   e2e:
     runs-on: ubuntu-latest
@@ -688,6 +685,7 @@ charts:
     use_oci: true
 YAML
     printf 'kind: Pod\nspec:\n  containers:\n    - image: busybox:1.38.0\n    - image: gco/api:1.0.0\n' > "$root/lambda/kubectl-applier-simple/manifests/10-probe.yaml"
+    printf 'kind: Function\nspec:\n  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5\n' > "$root/lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml"
     printf 'kind: Job\nspec:\n  containers:\n    - image: rayproject/ray:2.58.0\n    - image: busybox:latest\n' > "$root/examples/ray-job.yaml"
     printf 'kind: Pod\nspec:\n  containers:\n    - image: public.ecr.aws/docker/library/busybox:1.38.0@sha256:%s\n' "$DIGEST_B" > "$root/scripts/live_release_validation/manifests/smoke.yaml"
     cat > "$root/.pre-commit-config.yaml" <<'YAML'
@@ -806,7 +804,7 @@ report_path() {
     [[ "$output" == *"  - ruby (.ruby-version): 4.0.1 -> 5.0"* ]]
     [[ "$output" == *"  - runner ubuntu-latest: ubuntu-22.04 -> ubuntu-24.04"* ]]
     [[ "$output" == *"  - Trivy (install-trivy action default): v0.74.0 -> v1.74.0"* ]]
-    [[ "$output" == *"  - Argo CD CRDs (ARGOCD_VERSION): v3.5.3 -> v4.5.3"* ]]
+    [[ "$output" == *"  - Crossplane function-go-templating (post-helm-crossplane.yaml): v0.12.5 -> v1.12.5"* ]]
     [[ "$output" == *"  - kubectl (helm-installer Dockerfile): v1.36.4 -> v2.36.4"* ]]
     [[ "$output" == *"  - kind node image (kindest/node): v1.36.4 -> v1.36.5"* ]]
     [[ "$output" == *"Found 2 offline accelerator policy finding(s)."* ]]
@@ -939,7 +937,7 @@ report_path() {
     # fourteen go incomplete together and every line says the same thing.
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
-    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Argo CD CRDs (ARGOCD_VERSION) (argoproj/argo-cd)${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Crossplane function-go-templating (post-helm-crossplane.yaml) (crossplane-contrib/function-go-templating)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/DavidAnson/markdownlint-cli2${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin AWSCLI_VERSION${why}"* ]]

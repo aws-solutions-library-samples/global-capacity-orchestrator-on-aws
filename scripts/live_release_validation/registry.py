@@ -19,7 +19,6 @@ from typing import Any
 
 from .actions import (
     action_api_lifecycle,
-    action_argocd_identity,
     action_baseline,
     action_central_queue_lifecycle,
     action_convergence,
@@ -67,22 +66,10 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             ("preflight",),
             action_baseline,
         ),
-        # Before deploy on purpose: the run's Argo CD block must be complete
-        # (Identity Center instance + a mapped identity) before the first
-        # synthesis, and every later synthesis (destroy included) reads the
-        # same provisioned inputs from the checkpoint. A no-op when Argo CD is
-        # not requested or the operator supplied the inputs.
-        ActionDefinition(
-            "argocd-identity",
-            "Provision the Identity Center instance and group the Argo CD capability needs "
-            "(self-contained runs)",
-            ("preflight",),
-            action_argocd_identity,
-        ),
         ActionDefinition(
             "deploy",
             "Deploy the configured GCO topology",
-            ("baseline", "argocd-identity"),
+            ("baseline",),
             action_deploy,
         ),
         ActionDefinition(
@@ -157,9 +144,7 @@ def build_action_registry() -> dict[str, ActionDefinition]:
         ),
         ActionDefinition(
             "eks-capabilities",
-            "Require every configured EKS Capability attached and ACTIVE, and the Argo CD "
-            "GitOps hand-off synced (the fixture pushed into the GCO-managed CodeCommit "
-            "repository, or the run's revision of an operator repository)",
+            "Require every configured EKS Capability (ACK, kro) attached, ACTIVE and drift-free",
             ("topology",),
             action_eks_capabilities,
         ),

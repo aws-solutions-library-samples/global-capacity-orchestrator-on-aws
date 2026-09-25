@@ -12,17 +12,13 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES, GITOPS_SYNC_POLICIES
+from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES
 from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
 
-from .checks.eks_capabilities import (
-    GITOPS_FIXTURE_PATH,
-    build_eks_capabilities_overrides,
-    overrides_json,
-)
+from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides_json
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
@@ -146,70 +142,8 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME[,NAME...]",
         help=(
             "Enable off-by-default EKS Capabilities for this run's deploy so the "
-            "eks-capabilities action can prove them (argocd, ack, kro, or all). Self-contained: "
-            "without --argocd-idc-instance-arn/--argocd-identity the argocd-identity action "
-            "provisions an Identity Center account instance and group, and without "
-            "--argocd-gitops-repo-url the hand-off uses a GCO-managed CodeCommit repository "
-            "the run pushes the fixture into"
+            "eks-capabilities action can prove each one attaches ACTIVE (ack, kro, or all)"
         ),
-    )
-    parser.add_argument(
-        "--argocd-idc-instance-arn",
-        help=(
-            "Use this IAM Identity Center instance for the hosted Argo CD instead of "
-            "discovering or creating one"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-idc-region",
-        help=(
-            "Region of the Identity Center instance (or the Region the argocd-identity action "
-            "creates one in; default: the first deployment Region)"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-identity",
-        action="append",
-        default=[],
-        metavar="TYPE:ID",
-        help=(
-            "Existing Identity Center user or group granted the Argo CD ADMIN role "
-            "(SSO_USER:<id> or SSO_GROUP:<id>; repeatable). Without it the run creates and "
-            "maps its own group"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-gitops-repo-url",
-        help=(
-            "Point the GitOps hand-off at this operator repository (source: git) instead of the "
-            "GCO-managed CodeCommit repository; must be reachable by the hosted Argo CD"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-gitops-revision",
-        help=(
-            "Revision Argo CD syncs from --argocd-gitops-repo-url "
-            "(default: the run's --expected-sha)"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-gitops-path",
-        default=GITOPS_FIXTURE_PATH,
-        help=(
-            "Fixture directory Argo CD must sync into gco-jobs: pushed into the CodeCommit "
-            "repository, or the path inside --argocd-gitops-repo-url (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--argocd-gitops-sync-policy",
-        choices=GITOPS_SYNC_POLICIES,
-        default="automated",
-        help="Sync policy of the root Application (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--no-argocd-gitops",
-        action="store_true",
-        help="Enable the Argo CD capability without the GitOps hand-off",
     )
     parser.add_argument(
         "--inference-region",
@@ -338,21 +272,9 @@ def _settings_from_args(
     )
     capabilities_overrides_json = ""
     if capability_types:
-        try:
-            overrides = build_eks_capabilities_overrides(
-                types=capability_types,
-                idc_instance_arn=args.argocd_idc_instance_arn,
-                idc_region=args.argocd_idc_region,
-                identities=tuple(args.argocd_identity),
-                gitops=not args.no_argocd_gitops,
-                repo_url=args.argocd_gitops_repo_url,
-                revision=args.argocd_gitops_revision or args.expected_sha.lower(),
-                path=args.argocd_gitops_path,
-                sync_policy=args.argocd_gitops_sync_policy,
-            )
-        except ValueError as error:
-            parser.error(str(error))
-        capabilities_overrides_json = overrides_json(overrides)
+        capabilities_overrides_json = overrides_json(
+            build_eks_capabilities_overrides(types=capability_types)
+        )
     inference_enabled = _inference_selected(args.actions)
     proxy_config: dict[str, object] = {
         "tls_proxy_cpu_request_millicores": (INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT),
@@ -421,8 +343,6 @@ def _settings_from_args(
             else tuple(sorted(set(args.optional_schedulers)))
         ),
         eks_capabilities_overrides_json=capabilities_overrides_json,
-        argocd_idc_region=args.argocd_idc_region or "",
-        argocd_gitops_fixture_path=args.argocd_gitops_path,
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

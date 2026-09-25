@@ -1,17 +1,15 @@
 """Configured-vs-live view of the EKS Capabilities on a GCO regional cluster.
 
 Backs ``gco stacks capabilities status`` and the ``eks_capabilities_status`` MCP
-tool. EKS Capabilities are AWS-managed Argo CD, ACK and kro installations that
-GCO attaches per cluster from the opt-in ``cdk.json`` ``eks_capabilities``
-block (see ``docs/EKS_CAPABILITIES.md``). This module answers the operator's
+tool. EKS Capabilities are AWS-managed ACK and kro installations that GCO
+attaches per cluster from the opt-in ``cdk.json`` ``eks_capabilities`` block
+(see ``docs/EKS_CAPABILITIES.md``). This module answers the operator's
 question in one document: what does cdk.json say should be attached here, what
 is actually attached (``ListCapabilities`` / ``DescribeCapability``), is each
 one ``ACTIVE``, and where do the two disagree.
 
 Deliberately AWS-API only: no kubectl, so it works from any host with AWS
-credentials, including against a private-endpoint cluster. The Argo CD GitOps
-hand-off's in-cluster sync/health state is the live-validation harness's job
-(``scripts/live_release_validation``), not this command's.
+credentials, including against a private-endpoint cluster.
 
 Pure functions (``build_status``) are separated from the AWS calls
 (``describe_live_capabilities``) so the merge logic is unit-testable without a
@@ -31,19 +29,9 @@ from gco.eks_capabilities_config import (
     CAPABILITY_TYPE_API_NAMES,
     EKS_CAPABILITIES_CONTEXT_KEY,
     EKS_CAPABILITY_TYPES,
-    GITOPS_CODECOMMIT_DEFAULT_BRANCH,
-    GITOPS_PROJECT_NAME,
-    GITOPS_ROOT_APPLICATION_NAME,
-    aws_url_suffix_for_region,
     capability_enabled_in_region,
-    effective_gitops_path,
-    gitops_codecommit_repository_name,
-    gitops_enabled_in_region,
-    gitops_repository_url,
-    gitops_source,
     merge_eks_capabilities_overrides,
     parse_eks_capabilities_overrides,
-    render_gitops_path,
     validate_eks_capabilities_config,
 )
 
@@ -104,8 +92,8 @@ def describe_live_capabilities(eks_client: Any, cluster_name: str) -> list[dict[
     """Every capability attached to ``cluster_name``, fully described.
 
     ``ListCapabilities`` returns summaries (name, type, status, version);
-    ``DescribeCapability`` adds the role ARN, health issues and the Argo CD
-    server URL, so each summary is described in turn. Raises whatever boto3
+    ``DescribeCapability`` adds the role ARN and health issues, so each
+    summary is described in turn. Raises whatever boto3
     raises (the caller decides how a missing cluster reads).
     """
     summaries: list[dict[str, Any]] = []
@@ -140,45 +128,6 @@ def _health_issues(detail: Mapping[str, Any]) -> list[str]:
         message = str(issue.get("message") or "").strip()
         rendered.append(f"{code}: {message}" if message else code)
     return rendered
-
-
-def _argocd_server_url(detail: Mapping[str, Any]) -> str | None:
-    configuration = detail.get("configuration")
-    argo = configuration.get("argoCd") if isinstance(configuration, Mapping) else None
-    url = argo.get("serverUrl") if isinstance(argo, Mapping) else None
-    return str(url) if url else None
-
-
-def _gitops_summary(config: Mapping[str, Any], *, region: str, cluster_name: str) -> dict[str, Any]:
-    """The rendered GitOps hand-off for this cluster, or ``{"enabled": False}``."""
-    if not gitops_enabled_in_region(config, region):
-        return {"enabled": False}
-    gitops = config["argocd"]["gitops"]
-    namespaces = [str(namespace) for namespace in gitops["destination_namespaces"]]
-    source = gitops_source(config)
-    summary: dict[str, Any] = {
-        "enabled": True,
-        "source": source,
-        "repo_url": gitops_repository_url(
-            config,
-            region=region,
-            cluster_name=cluster_name,
-            url_suffix=aws_url_suffix_for_region(region),
-        ),
-        "revision": str(gitops["revision"]).strip(),
-        "path": render_gitops_path(
-            effective_gitops_path(gitops), region=region, cluster_name=cluster_name
-        ),
-        "destination_namespaces": namespaces,
-        "sync_policy": str(gitops["sync_policy"]),
-        "project": GITOPS_PROJECT_NAME,
-        "application": GITOPS_ROOT_APPLICATION_NAME,
-    }
-    if source == "codecommit":
-        # The GCO-managed repository: what `gitops push` targets.
-        summary["codecommit_repository"] = gitops_codecommit_repository_name(cluster_name)
-        summary["codecommit_branch"] = GITOPS_CODECOMMIT_DEFAULT_BRANCH
-    return summary
 
 
 def _drift(*, configured: bool, detail: Mapping[str, Any] | None, stack_name: str) -> str | None:
@@ -243,9 +192,6 @@ def build_status(
             "modified_at": _iso(detail.get("modifiedAt")) if detail else None,
             "drift": _drift(configured=configured, detail=detail, stack_name=stack_name),
         }
-        if type_name == "argocd":
-            row["argocd_server_url"] = _argocd_server_url(detail) if detail else None
-            row["gitops"] = _gitops_summary(config, region=region, cluster_name=cluster)
         rows.append(row)
 
     unmanaged = [

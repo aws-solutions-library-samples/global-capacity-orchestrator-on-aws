@@ -634,49 +634,32 @@ through the NAT gateways.
 
 ### EKS Capabilities
 
-The AWS-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/),
-[ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/)
-installations EKS can attach to a cluster are three opt-in knobs under
-`eks_capabilities`, every one off by default because each bills per
-capability-hour:
+The AWS-managed [ACK](https://aws-controllers-k8s.github.io/docs/) and
+[kro](https://kro.run/) installations EKS can attach to a cluster are two
+opt-in knobs under `eks_capabilities`, both off by default because each bills
+per capability-hour:
 
 ```json
 "eks_capabilities": {
-  "argocd": {
+  "ack": {
     "enabled": true,
-    "idc_instance_arn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
-    "rbac_role_mappings": [
-      {"role": "ADMIN", "identities": [{"id": "<identity-center-user-id>", "type": "SSO_USER"}]}
-    ],
-    "gitops": {
-      "enabled": true,
-      "source": "codecommit",
-      "sync_policy": "manual"
-    }
+    "iam_policy_arns": ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"]
   },
-  "ack": {"enabled": false},
-  "kro": {"enabled": false}
+  "kro": {"enabled": true}
 }
 ```
 
 Each enabled type synthesizes one capability IAM role and one
 `AWS::EKS::Capability` per selected regional cluster (`regions: []` means all
-of them). Argo CD requires an IAM Identity Center instance and at least one
-RBAC mapping because the hosted control plane has no local users;
-`gco stacks capabilities argocd bootstrap-identity --write-cdk-json` discovers
-(or creates) the instance, creates the group and writes both values. Its
-optional `gitops` block is GCO's declarative hand-off — a fenced
-`AppProject` and one root `Application` per cluster pointing Argo CD at a
-repository path, restricted to `gco-jobs` and `gco-inference`. With the
-default `source: codecommit` the regional stack creates one CodeCommit
-repository per cluster that the capability role may pull, and
-`gco stacks capabilities gitops push --path ./manifests` mirrors a local
-directory into it; `source: git` plus `repo_url` (and `path`, default
-`clusters/{region}`) points at a repository of your own instead.
-`gco stacks capabilities status` reports configured-versus-live state and
-`gco stacks capabilities argocd open` opens the hosted Argo CD UI. Every knob,
-the IAM grants, the fence and the operating notes are in
-[EKS Capabilities](EKS_CAPABILITIES.md).
+of them). The ACK role holds only the managed policies in `iam_policy_arns`
+and may assume only the roles in `assume_role_arns` (ACK's IAM Role
+Selectors); with both empty ACK can call no AWS API. kro needs no AWS
+permissions; GCO grants it the RBAC to compose the tenant workload kinds in
+`gco-jobs` and `gco-inference`. `gco stacks capabilities status` reports
+configured-versus-live state. Every knob, the IAM grants and the operating
+notes are in [EKS Capabilities](EKS_CAPABILITIES.md). Argo CD and Crossplane
+are self-managed Helm charts instead; see
+[Helm Chart Configuration](#helm-chart-configuration).
 
 ## Configuring GPU Nodepools
 
@@ -1398,6 +1381,8 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
       "slurm": { "enabled": false },
       "yunikorn": { "enabled": false },
       "kubeflow_trainer": { "enabled": true },
+      "argocd": { "enabled": false },
+      "crossplane": { "enabled": false },
       "kueue": { "enabled": true }
     }
   }
@@ -1417,6 +1402,8 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [MLflow](https://mlflow.org/) | Enabled | Experiment tracking server when `cluster_observability.enabled` AND `cluster_observability.mlflow.enabled` are true — see [MONITORING.md](MONITORING.md#mlflow-experiment-tracking) |
 | Slurm/Slinky | Disabled | Slurm operator and cluster |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
+| [Argo CD](https://argo-cd.readthedocs.io/en/stable/) | Disabled | Self-managed GitOps controller in namespaced mode, fenced to `gco-jobs` and `gco-inference`, with an optional root Application per cluster and a repo-server autoscaler (`helm.argocd.gitops`, `helm.argocd.repo_server`) — see [GitOps with Argo CD](GITOPS.md) |
+| [Crossplane](https://docs.crossplane.io/) + Crossview | Disabled | Crossplane v2 and its dashboard under one toggle; composite resources compose tenant workloads in the tenant namespaces only — see [Crossplane](CROSSPLANE.md) |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
 
 Disabling `helm.kubeflow_trainer` uninstalls the trainer on the next deploy, prunes the shipped `torch-distributed` runtime, and makes `TrainJob` submissions fail with an actionable enable-the-addon message (the kind stays in the [allowed-kinds policy](#allowed-resource-kinds); the addon gate is what rejects it). Disabling `cluster_observability.mlflow` removes the tracking server and deletes its run-metadata volume; artifacts in S3 survive.
@@ -1571,7 +1558,7 @@ Names are validated before any AWS call, so a typo fails immediately rather than
 | Category | Valid names | CDK context key |
 |----------|-------------|-----------------|
 | Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store` | `feature_enabled_overrides` |
-| Helm charts | `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
+| Helm charts | `argocd`, `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `crossplane`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
 
 Two properties matter:
 

@@ -33,12 +33,8 @@ _PATH_JOB_LABEL = "gco.aws/validation-path"
 
 #: Actions that open the private-endpoint kubectl tunnel and therefore need the
 #: AWS Session Manager plugin on PATH; preflight refuses to deploy without it
-#: whenever one of these is selected. ``eks-capabilities`` tunnels only when
-#: the run enables Argo CD, but the plugin is required up front regardless so a
-#: missing local prerequisite can never strand a deployed topology.
-_CLUSTER_TUNNEL_ACTIONS = frozenset(
-    {"inference", "platform-workloads", "network-posture", "eks-capabilities"}
-)
+#: whenever one of these is selected.
+_CLUSTER_TUNNEL_ACTIONS = frozenset({"inference", "platform-workloads", "network-posture"})
 
 
 _CENTRAL_MANAGED_BY_LABEL = "gco.io/managed-by"

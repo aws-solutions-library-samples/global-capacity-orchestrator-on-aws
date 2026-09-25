@@ -102,16 +102,6 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
             "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
         ),
         (
-            ".github/workflows/integration-tests.yml",
-            "v3.5.3",
-            "5dde0e229249b6b707beb98674c1deae3949d5c319a6c45b9f5a80c99618e40c",
-        ),
-        (
-            ".github/workflows/integration-tests.yml",
-            "v3.5.3",
-            "ab225266944322750136f1198d93786e4a79a0e43c8d149abfba44da30a3eac8",
-        ),
-        (
             "lambda/helm-installer/Dockerfile",
             "v4.3.0",
             "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
@@ -187,25 +177,6 @@ def test_downloaded_release_assets_have_committed_checksums(
             'METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"',
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
-        ),
-        (
-            # The Argo CD capability manifests are validated against the
-            # upstream Application/AppProject CRDs; a Git tag can be moved, so
-            # each CRD manifest carries its own committed digest.
-            ".github/workflows/integration-tests.yml",
-            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
-            'ARGOCD_VERSION: "v3.5.3"',
-            'ARGOCD_APPLICATION_CRD_SHA256: "5dde0e229249b6b707beb98674c1deae3949d5c319a6c45b9f5a80c99618e40c"',
-            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml",
-            'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -',
-        ),
-        (
-            ".github/workflows/integration-tests.yml",
-            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
-            'ARGOCD_VERSION: "v3.5.3"',
-            'ARGOCD_APPPROJECT_CRD_SHA256: "ab225266944322750136f1198d93786e4a79a0e43c8d149abfba44da30a3eac8"',
-            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml",
-            'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -',
         ),
         (
             ".github/workflows/deps-scan.yml",
@@ -382,18 +353,6 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
         ),
         (
-            "integration-kind-cluster-e2e",
-            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
-            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml",
-            'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -',
-        ),
-        (
-            "integration-kind-cluster-e2e",
-            "Apply the Argo CD capability manifests against the real argoproj.io CRDs",
-            "argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/appproject-crd.yaml",
-            'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -',
-        ),
-        (
             "integration-kind-cost-pipeline",
             "Install Helm",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
@@ -416,6 +375,12 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             "Install Calico for NetworkPolicy enforcement",
             "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
             'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
+        ),
+        (
+            "integration-kind-platform-addons",
+            "Install Helm",
+            "helm-${HELM_VERSION}-linux-amd64.tar.gz",
+            'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
         ),
     ],
 )
@@ -450,6 +415,7 @@ def test_kind_node_and_probe_images_are_prepulled_before_use() -> None:
         "integration-kind-cluster-e2e",
         "integration-kind-cost-pipeline",
         "integration-kind-examples-smoke",
+        "integration-kind-platform-addons",
     ):
         steps = jobs[job_id]["steps"]
         kind_index = next(
@@ -557,6 +523,95 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
         if str(step.get("uses", "")).startswith("helm/kind-action")
     )
     assert install_helm_index < prefetch_index < kind_index
+
+
+def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> None:
+    """The platform add-ons job installs the pinned charts from local archives.
+
+    Registry pulls retry; installs and every assertion stay single-shot. The
+    chart values and post-Helm manifests come from the helpers the regional
+    stack calls, Argo CD syncs this commit, and both dashboards are captured
+    by the CLI's own screenshot code and uploaded even when a later step fails.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    job = workflow["jobs"]["integration-kind-platform-addons"]
+    assert job["name"] == "integration:kind:platform-addons"
+    assert job["env"]["GITOPS_REVISION"] == (
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    )
+    assert "github.event.pull_request.head.repo.clone_url" in job["env"]["GITOPS_REPO_URL"]
+    steps = job["steps"]
+    by_name = {step.get("name"): step for step in steps if isinstance(step, dict)}
+    prefetch = by_name["Prefetch the pinned platform add-on charts with retry"]["run"]
+    assert "for attempt in 1 2 3 4" in prefetch
+    assert "timeout 60s helm pull" in prefetch
+    for chart, env_name in (
+        ("argocd", "ARGOCD_CHART_ARCHIVE"),
+        ("crossplane", "CROSSPLANE_CHART_ARCHIVE"),
+        ("crossview", "CROSSVIEW_CHART_ARCHIVE"),
+    ):
+        assert f"pull_chart {chart} {env_name}" in prefetch
+    for step_name, archive in (
+        ("Install the pinned argo-cd chart with the shipped values", "${ARGOCD_CHART_ARCHIVE}"),
+        (
+            "Install the pinned crossplane and crossview charts with the shipped values",
+            '"${!archive_var}"',
+        ),
+    ):
+        run = by_name[step_name]["run"]
+        assert archive in run, step_name
+        assert "helm pull" not in run, step_name
+        assert "helm repo" not in run, step_name
+        assert "for attempt in" not in run, step_name
+    render = by_name["Render the Argo CD chart values and post-Helm manifests like the stack"][
+        "run"
+    ]
+    assert "argocd_chart_values" in render
+    assert "compute_argocd_replacements" in render
+    assert '"autoscaling": {"enabled": True' in render
+    install = by_name["Install the pinned argo-cd chart with the shipped values"]["run"]
+    assert '--values "${RUNNER_TEMP}/argocd-gco-values.json"' in install
+    assert (
+        "argocd-repo-server"
+        in by_name["Prove the repo-server autoscaler owns the replica count"]["run"]
+    )
+    captures = {
+        "Capture the Argo CD UI with the gco gitops screenshot code": (
+            "gitops.capture_argocd_screenshot",
+            "gitops.create_session_token",
+        ),
+        "Check and capture the Crossview dashboard with the gco crossplane code": (
+            "crossplane.capture_dashboard_screenshot",
+            "/api/health",
+        ),
+    }
+    for step_name, fragments in captures.items():
+        run = by_name[step_name]["run"]
+        for fragment in fragments:
+            assert fragment in run, (step_name, fragment)
+        assert "build_port_forward_command" in run
+    chromium = by_name["Install the headless Chromium the captures drive (with retry)"]["run"]
+    assert "playwright install --with-deps --only-shell chromium" in chromium
+    assert "for attempt in 1 2 3" in chromium
+    assert by_name["Install project (renderers, Lambda helpers and the capture code)"]["run"] == (
+        'pip install -e ".[diagrams]"'
+    )
+    upload = by_name["Upload the dashboard captures"]
+    assert upload["if"] == "always()"
+    assert upload["uses"] == "./.github/actions/upload-artifact-with-retry"
+    assert upload["with"]["name"] == "platform-addon-dashboards"
+    order = [step.get("name") for step in steps]
+    assert (
+        order.index("Install the pinned argo-cd chart with the shipped values")
+        < order.index("Prove the repo-server autoscaler owns the replica count")
+        < order.index("Sync the GitOps fixture from this commit")
+        < order.index("Capture the Argo CD UI with the gco gitops screenshot code")
+        < order.index("Cascade the example Application through the installer cleanup")
+        < order.index("Compose the example BatchJob")
+        < order.index("Check and capture the Crossview dashboard with the gco crossplane code")
+        < order.index("Tear Crossplane down the way the stack does")
+        < order.index("Upload the dashboard captures")
+    )
 
 
 def test_kind_cluster_e2e_dry_runs_the_inference_deployments_the_monitor_renders() -> None:
@@ -729,17 +784,13 @@ def test_kind_manifests_are_authenticated_before_local_apply() -> None:
     assert 'kubectl apply -f "${metrics_manifest}"' in workflow
     assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in workflow
     assert 'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -' in workflow
-    # The Argo CD CRDs are fetched from a Git tag rather than a release asset,
-    # and a tag can be moved; they too land in a file, are checked against a
-    # committed digest, and only then reach the apiserver. Piping curl into
-    # kubectl would evade the URL regex above while skipping the check.
+    # Piping curl into kubectl would evade the URL regex above while skipping
+    # the checksum; every downloaded manifest lands in a file first.
     assert not re.search(r"curl[^\n]*\|\s*kubectl\s+apply", workflow)
-    assert 'kubectl apply --server-side -f "${application_crd}"' in workflow
-    assert 'kubectl apply --server-side -f "${appproject_crd}"' in workflow
-    assert (
-        'echo "${ARGOCD_APPLICATION_CRD_SHA256}  ${application_crd}" | sha256sum -c -' in workflow
-    )
-    assert 'echo "${ARGOCD_APPPROJECT_CRD_SHA256}  ${appproject_crd}" | sha256sum -c -' in workflow
+    # The retired hosted-Argo CD job fetched CRDs from a movable Git tag; the
+    # self-managed chart ships its CRDs, so no such download may come back.
+    assert "argoproj/argo-cd/" not in workflow
+    assert "ARGOCD_VERSION" not in workflow
 
 
 def test_finch_repository_key_is_pinned_by_primary_fingerprint() -> None:
@@ -797,11 +848,13 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert '"rhysd/actionlint"' in scanner
     assert "CALICO_PIN=" in scanner
     assert '"projectcalico/calico"' in scanner
-    # The Argo CD CRD tag the kind E2E job applies is the only place Argo CD's
-    # version is written down (production runs the AWS-managed capability), so
-    # nothing but this scan would notice it ageing.
-    assert 'ARGOCD_PIN="$(extract_workflow_env_pin ARGOCD_VERSION' in scanner
-    assert '"argoproj/argo-cd"' in scanner
+    # The Crossplane Function package in post-helm-crossplane.yaml is an xpkg
+    # reference, not an ``image:`` line or a charts.yaml pin, so nothing but
+    # this scan would notice it ageing. The retired Argo CD CRD tag is gone.
+    assert "FUNCTION_GO_TEMPLATING_PIN=" in scanner
+    assert "extract_crossplane_function_pin" in scanner
+    assert '"crossplane-contrib/function-go-templating"' in scanner
+    assert "ARGOCD_PIN" not in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
     # The digest-freshness mechanics moved into shared lib helpers so every

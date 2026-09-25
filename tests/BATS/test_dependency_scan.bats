@@ -2706,14 +2706,12 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
-@test "extract_workflow_env_pin: reads the ARGOCD_VERSION pin from integration-tests.yml" {
-    # The kind E2E job applies this upstream release's Application/AppProject
-    # CRDs to validate the Argo CD capability manifests; production runs the
-    # AWS-managed capability, so this env pin is the only place Argo CD's
-    # version is written down and the only handle the drift scan has on it.
+@test "extract_workflow_env_pin: the retired ARGOCD_VERSION pin is gone from the workflows" {
+    # Argo CD is a charts.yaml pin now (the self-managed chart); the kind job
+    # no longer applies release-tag CRDs, so no workflow env pin may linger.
     run extract_workflow_env_pin ARGOCD_VERSION
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    [ -z "$output" ]
 }
 
 @test "extract_workflow_env_pin: reads actionlint and Calico maintenance pins" {
@@ -2751,6 +2749,51 @@ EOF
     rm -rf "$tmpdir"
 }
 
+# ── extract_crossplane_function_pin ─────────────────────────────────────────
+@test "extract_crossplane_function_pin: reads the shipped function-go-templating tag" {
+    run extract_crossplane_function_pin \
+        lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+@test "extract_crossplane_function_pin: empty for a missing manifest, a blank name or another package" {
+    run extract_crossplane_function_pin /nonexistent/post-helm-crossplane.yaml function-go-templating
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_crossplane_function_pin \
+        lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    tmpdir="$(mktemp -d)"
+    printf 'spec:\n  package: xpkg.crossplane.io/crossplane-contrib/function-auto-ready:v0.6.1\n' \
+        > "$tmpdir/functions.yaml"
+    run extract_crossplane_function_pin "$tmpdir/functions.yaml" function-go-templating
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+@test "extract_crossplane_function_pin: quoted references, dedup and distinct tags" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/functions.yaml" <<'YAML'
+kind: Function
+spec:
+  package: "xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5"
+---
+kind: Function
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5
+---
+kind: Function
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.13.0
+  # image: busybox:1.0 is not a package reference
+YAML
+    run extract_crossplane_function_pin "$tmpdir/functions.yaml" function-go-templating
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    [ "$(printf '%s\n' "$output" | head -1)" = "v0.12.5" ]
+    [ "$(printf '%s\n' "$output" | tail -1)" = "v0.13.0" ]
+    rm -rf "$tmpdir"
+}
 # ── extract_kind_pins ───────────────────────────────────────────────────────
 
 @test "extract_kind_pins: reads kind + node image from integration-tests.yml" {

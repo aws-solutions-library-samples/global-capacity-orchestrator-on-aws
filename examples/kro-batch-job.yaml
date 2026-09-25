@@ -1,0 +1,25 @@
+# kro BatchJob Example
+#
+# An instance of the BatchJob API that examples/kro-batch-api.yaml defines. The
+# kro EKS Capability composes a batch/v1 Job with the same name in the same
+# namespace and runs it; the instance reports ACTIVE once the Job exists.
+#
+# Prerequisites:
+#   - kro enabled: "eks_capabilities": {"kro": {"enabled": true}} in cdk.json,
+#     then gco stacks deploy
+#   - kubectl apply -f examples/kro-batch-api.yaml (the API definition)
+#
+# Usage:
+#   kubectl apply -f examples/kro-batch-job.yaml
+#   kubectl get batchjob.kro.run gco-kro-hello -n gco-jobs   # STATE ACTIVE
+#   kubectl logs job/gco-kro-hello -n gco-jobs
+#   kubectl delete -f examples/kro-batch-job.yaml            # kro deletes the Job
+#
+# Docs: ../docs/EKS_CAPABILITIES.md
+apiVersion: kro.run/v1alpha1
+kind: BatchJob
+metadata:
+  name: gco-kro-hello
+  namespace: gco-jobs
+spec:
+  message: Hello from a kro BatchJob

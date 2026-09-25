@@ -129,16 +129,23 @@ _CERT_MANAGER_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "Certificate": ("cert-manager.io", "v1", "certificates", False),
 }
 
-# Argo CD GitOps hand-off objects applied by 08-argocd-gitops.yaml. Their CRDs
-# are installed into the cluster by the AWS-managed Argo CD EKS Capability (not
-# by a Helm chart), and the regional stack orders the convergence trigger after
-# the capability, so they belong to the BASE pass. Ordinary namespaced CRs in
-# the capability's ``argocd`` namespace; readiness is exact existence only — a
-# tenant repository that fails to sync must never fail a GCO deployment (the
-# CLI and the live checks surface sync/health instead).
+# Argo CD objects GCO owns for the self-managed Argo CD (helm.argocd): the
+# fenced AppProject (post-helm-argocd-access.yaml) and the optional root
+# Application (post-helm-argocd-gitops.yaml). The argo-cd chart installs their
+# CRDs, so they belong to the POST-HELM pass. Ordinary namespaced CRs in the
+# ``argocd`` namespace; readiness is exact existence only — a tenant
+# repository that fails to sync must never fail a GCO deployment (``gco gitops
+# status`` and the Argo CD UI surface sync/health instead).
 _ARGOCD_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "AppProject": ("argoproj.io", "v1alpha1", "appprojects", False),
     "Application": ("argoproj.io", "v1alpha1", "applications", False),
+}
+# The Crossplane composition function GCO installs for the self-managed
+# Crossplane (helm.crossplane; post-helm-crossplane.yaml). Cluster-scoped; the
+# chart installs its CRD, so it is a POST-HELM kind. Readiness is exact
+# existence only — the package pull is Crossplane's to report.
+_CROSSPLANE_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "Function": ("pkg.crossplane.io", "v1", "functions", True),
 }
 
 # Services annotated with this marker are validated for exact existence only;
@@ -166,6 +173,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "Deployment",
         "DeviceClass",
         "EC2NodeClass",
+        "Function",
         "Gateway",
         "GatewayClass",
         "HTTPRoute",
@@ -211,6 +219,7 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "CustomResourceDefinition",
         "DeviceClass",
         "EC2NodeClass",
+        "Function",
         "GatewayClass",
         "Namespace",
         "NodePool",
@@ -769,28 +778,56 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{COST_MONITORING_ENABLED}}", True): (
         ("v1", "ConfigMap", "monitoring", "gco-dashboard-cost"),
     ),
-    # Argo CD EKS Capability (cdk.json eks_capabilities.argocd):
-    # 07-argocd-cluster-access.yaml registers the hosting cluster as an Argo CD
-    # deployment target and grants the capability role its Kubernetes RBAC.
-    # The ``argocd`` Namespace is deliberately NOT inventoried: deleting it
-    # would take every operator-created Application/AppProject with it, and
-    # the capability's RETAIN delete policy exists precisely to keep those.
-    ("{{ARGOCD_CAPABILITY_ROLE_ARN}}", False): (
-        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "gco-argocd-read-all"),
-        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "gco-argocd-read-all"),
+    # Self-managed Argo CD (cdk.json helm.argocd; post-helm-argocd-access.yaml).
+    # Bindings before the roles they reference. The AppProject is normally
+    # gone already: the helm installer deletes every argoproj.io object before
+    # it uninstalls the chart (the CRDs stay, so this delete is a clean no-op).
+    ("{{ARGOCD_ENABLED}}", True): (
         ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-argocd-deploy"),
         ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-argocd-deploy"),
         ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-inference", "gco-argocd-deploy"),
         ("rbac.authorization.k8s.io/v1", "Role", "gco-inference", "gco-argocd-deploy"),
-        ("v1", "Secret", "argocd", "local-cluster"),
-    ),
-    # 08-argocd-gitops.yaml: the GitOps hand-off (eks_capabilities.argocd.gitops).
-    # Application before the AppProject it belongs to. The Application carries
-    # no resources-finalizer, so deleting it detaches the tenant workloads from
-    # Git instead of deleting them.
-    ("{{ARGOCD_GITOPS_REPO_URL}}", False): (
-        ("argoproj.io/v1alpha1", "Application", "argocd", "gco-gitops-root"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-argocd-read"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-argocd-read"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-inference", "gco-argocd-read"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-inference", "gco-argocd-read"),
         ("argoproj.io/v1alpha1", "AppProject", "argocd", "gco-tenants"),
+    ),
+    # post-helm-argocd-gitops.yaml: the GitOps hand-off (helm.argocd.gitops).
+    # The Application carries no resources-finalizer, so deleting it detaches
+    # the tenant workloads from Git instead of deleting them.
+    ("{{ARGOCD_GITOPS_REPO_URL}}", True): (
+        ("argoproj.io/v1alpha1", "Application", "argocd", "gco-gitops-root"),
+    ),
+    # Self-managed Crossplane (cdk.json helm.crossplane; post-helm-crossplane.yaml).
+    # Bindings before the roles they reference; the Function (and with it
+    # the function's Deployment) goes last. As with Argo CD, the helm
+    # installer has normally deleted every pkg.crossplane.io object already.
+    ("{{CROSSPLANE_ENABLED}}", True): (
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "gco-crossview-read"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "gco-crossview-read"),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRoleBinding",
+            None,
+            "gco-crossview-crossplane-view",
+        ),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-crossplane-compose"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-crossplane-compose"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-inference", "gco-crossplane-compose"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-inference", "gco-crossplane-compose"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "gco-crossplane-read"),
+        ("pkg.crossplane.io/v1", "Function", None, "crossplane-contrib-function-go-templating"),
+    ),
+    # kro EKS Capability tenant RBAC (cdk.json eks_capabilities.kro;
+    # 07-kro-tenant-access.yaml). Bindings before the roles they reference.
+    ("{{KRO_CAPABILITY_USERNAME}}", False): (
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "gco-kro-read"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "gco-kro-read"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-kro-compose"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-kro-compose"),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-inference", "gco-kro-compose"),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-inference", "gco-kro-compose"),
     ),
 }
 
@@ -1503,12 +1540,14 @@ def apply_manifests(
                         or kind in _QUEUEING_CUSTOM_OBJECTS
                         or kind in _CERT_MANAGER_CUSTOM_OBJECTS
                         or kind in _ARGOCD_CUSTOM_OBJECTS
+                        or kind in _CROSSPLANE_CUSTOM_OBJECTS
                     ):
                         group, version, plural, cluster_scoped = (
                             _GATEWAY_CUSTOM_OBJECTS.get(kind)
                             or _QUEUEING_CUSTOM_OBJECTS.get(kind)
                             or _CERT_MANAGER_CUSTOM_OBJECTS.get(kind)
-                            or _ARGOCD_CUSTOM_OBJECTS[kind]
+                            or _ARGOCD_CUSTOM_OBJECTS.get(kind)
+                            or _CROSSPLANE_CUSTOM_OBJECTS[kind]
                         )
                         try:
                             if cluster_scoped:

@@ -19,7 +19,6 @@ See ``scripts/live_release_validation/README.md`` for when to add a new
 action versus extending an existing one.
 """
 
-from .argocd_identity import action_argocd_identity
 from .baseline import action_baseline
 from .central_queue import action_central_queue_lifecycle
 from .convergence import action_convergence
@@ -39,7 +38,6 @@ from .topology import action_topology
 
 __all__ = [
     "action_api_lifecycle",
-    "action_argocd_identity",
     "action_baseline",
     "action_central_queue_lifecycle",
     "action_convergence",

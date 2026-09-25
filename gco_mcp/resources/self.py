@@ -97,8 +97,6 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "deploy_all": FLAG_INFRASTRUCTURE_DEPLOY,
     "bootstrap_cdk": FLAG_INFRASTRUCTURE_DEPLOY,
     "addons_install": FLAG_INFRASTRUCTURE_DEPLOY,
-    "gitops_push": FLAG_INFRASTRUCTURE_DEPLOY,
-    "argocd_bootstrap_identity": FLAG_INFRASTRUCTURE_DEPLOY,
     "destroy_stack": FLAG_INFRASTRUCTURE_DESTROY,
     "destroy_all": FLAG_INFRASTRUCTURE_DESTROY,
     # gco_mcp/tools/stacks.py — managed deployment config

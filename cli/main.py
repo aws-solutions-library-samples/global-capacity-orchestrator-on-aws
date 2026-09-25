@@ -28,10 +28,12 @@ from .commands import (
     cluster,
     config_cmd,
     costs,
+    crossplane,
     dag,
     deps,
     examples,
     files,
+    gitops,
     images,
     inference,
     jobs,
@@ -161,6 +163,8 @@ cli.add_command(files)
 cli.add_command(config_cmd)
 cli.add_command(analytics)
 cli.add_command(monitoring)
+cli.add_command(gitops)
+cli.add_command(crossplane)
 cli.add_command(tasks)
 cli.add_command(mission_cmd)
 cli.add_command(swarm_cmd)

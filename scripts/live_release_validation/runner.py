@@ -17,7 +17,6 @@ from cli.stacks import StackManager
 
 from .actions import action_final_inventory, destroy_deployment
 from .aws_session import ThrottleResilientSession
-from .checks.eks_capabilities import effective_cdk_context
 from .models import (
     ActionResult,
     RunCheckpoint,
@@ -102,19 +101,13 @@ class LiveValidationRunner:
             self.job_manager = JobManager(self.config)
             self.job_manager._aws_client = self.aws_client
             self.stack_manager = StackManager(self.config, project_root=settings.repo_root)
-            extra_cdk_context = effective_cdk_context(settings, self.checkpoint)
+            extra_cdk_context = settings.extra_cdk_context()
             if extra_cdk_context:
                 # Force-enable the requested off-by-default features for
                 # every CDK invocation of this run (deploy, destroy, list all
                 # synthesize the same graph) without touching cdk.json — the
-                # preflight clean-worktree rule stays intact and the static
-                # overrides are part of the checkpoint identity. The Identity
-                # Center inputs the argocd-identity action provisioned come
-                # from the checkpoint, so a resumed run (destroy included)
-                # synthesizes the same complete Argo CD block; before that
-                # action has run, an Argo CD block that still needs them is
-                # left out (preflight's `cdk list` lists the same stacks) and
-                # the action re-registers the merged context itself.
+                # preflight clean-worktree rule stays intact and the overrides
+                # are part of the checkpoint identity.
                 self.stack_manager.set_extra_cdk_context(extra_cdk_context)
             self.context = RunContext(
                 settings=settings,

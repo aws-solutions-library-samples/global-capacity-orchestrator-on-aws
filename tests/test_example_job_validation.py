@@ -67,6 +67,8 @@ class TestStaticChecksAsCiGate:
         for name, spec in EXAMPLE_SPECS.items():
             if spec.submission == COMPANION:
                 assert not spec.helm_overrides and not spec.feature_overrides, name
+                assert not spec.capability_overrides and not spec.ack_iam_policy_arns, name
+                assert not spec.setup_driver and not spec.companion, name
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ class TestDerivedOverrides:
         # kubeflow-trainjob and mlflow-tracking-job deliberately contribute
         # nothing here: the trainer chart and the observability/MLflow bundle
         # are on by default, so a stock deploy already satisfies them.
-        assert required_helm_overrides(names) == ("slurm", "yunikorn")
+        assert required_helm_overrides(names) == ("argocd", "crossplane", "slurm", "yunikorn")
         assert required_feature_overrides(names) == (
             "aurora_pgvector",
             "fsx_lustre",
@@ -204,8 +206,8 @@ class TestActionRegistry:
                 "convergence",
                 "platform-workloads",
                 "network-posture",
-                # Reads the EKS Capabilities and the Argo CD objects of the
-                # deployed cluster; nothing to describe once it is torn down.
+                # Reads the EKS Capabilities attached to the deployed
+                # cluster; nothing to describe once it is torn down.
                 "eks-capabilities",
             }
         )

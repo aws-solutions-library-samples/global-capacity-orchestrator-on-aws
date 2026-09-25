@@ -13,10 +13,12 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [cluster](#cluster-commands)
   - [config-cmd](#config-cmd-commands)
   - [costs](#costs-commands)
+  - [crossplane](#crossplane-commands)
   - [dag](#dag-commands)
   - [deps](#deps-commands)
   - [examples](#examples-commands)
   - [files](#files-commands)
+  - [gitops](#gitops-commands)
   - [images](#images-commands)
   - [inference](#inference-commands)
   - [jobs](#jobs-commands)
@@ -1770,6 +1772,86 @@ gco costs dashboard --via-ssm auto -y
 
 ---
 
+### Crossplane Commands
+
+Inspect and reach the self-managed [Crossplane](CROSSPLANE.md) control plane
+(`cdk.json` `helm.crossplane`, off by default) and its
+[Crossview](https://github.com/crossplane-contrib/crossview) dashboard.
+`status` reads the checkout only. The dashboard has no public endpoint and runs
+without a login, so `gco crossplane open` port-forwards it over the PRIVATE EKS
+API endpoint (optionally through an SSM-managed instance with `--via-ssm`) and
+the port-forward is the access control.
+
+<details>
+<summary>All <code>gco crossplane</code> commands (3) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco crossplane status`](#gco-crossplane-status) | Show the configured Crossplane: toggle, chart pins and composition functions. |
+| [`gco crossplane open`](#gco-crossplane-open) | Port-forward to the Crossview dashboard over the private EKS endpoint. |
+| [`gco crossplane screenshot`](#gco-crossplane-screenshot) | Capture the Crossview dashboard as a full-page PNG. |
+
+</details>
+
+#### `gco crossplane status`
+
+Show whether `helm.crossplane.enabled` is on, the pinned `crossplane` and
+`crossview` charts from `charts.yaml`, the composition functions GCO installs
+(read from the shipped `post-helm-crossplane.yaml`) and how to reach the
+dashboard. No AWS or cluster access. The
+[`crossplane_status`](../gco_mcp/tools/README.md#crossplanepy) MCP tool returns
+the same document.
+
+```bash
+gco crossplane status [--output json]
+```
+
+#### `gco crossplane open`
+
+Port-forward `svc/crossview-service` in `crossplane-system` to
+`http://localhost:3001`. Runs in the foreground; press Ctrl-C to stop.
+
+```bash
+gco crossplane open [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
+| `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+#### `gco crossplane screenshot`
+
+Forward the dashboard in the background and capture its landing page as a
+full-page PNG with Playwright's Chromium (`pip install 'gco[diagrams]'` and
+`playwright install chromium` once). This is the code behind
+`images/crossview-dashboard.png`.
+
+```bash
+gco crossplane screenshot [OPTIONS]
+```
+
+**Options:** the tunnel options of `gco crossplane open`, plus:
+
+| Option | Description |
+|--------|-------------|
+| `--output`, `-o` | PNG to write (default `./crossview-dashboard.png`). |
+| `--local-port` | Local port to bind (default `3001`). |
+| `--headed` | Show the browser window while capturing. |
+
+**Examples:**
+
+```bash
+gco crossplane status
+gco crossplane open --via-ssm auto -y
+gco crossplane screenshot -o images/crossview-dashboard.png --via-ssm auto -y
+```
+
 ### DAG Commands
 
 Run multi-step job pipelines with dependencies. Define a DAG in YAML, and GCO runs steps in dependency order, skipping downstream steps if a dependency fails.
@@ -2084,6 +2166,103 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 ```
 
 ---
+
+### GitOps Commands
+
+Inspect and reach the self-managed [Argo CD](GITOPS.md) (`cdk.json`
+`helm.argocd`, off by default), which reconciles tenant workloads from Git into
+`gco-jobs` and `gco-inference`. `status` reads the checkout only. The UI has no
+public endpoint, so `open`, `password` and `screenshot` go through the PRIVATE
+EKS API endpoint (optionally through an SSM-managed instance with `--via-ssm`),
+like `gco monitoring open`.
+
+<details>
+<summary>All <code>gco gitops</code> commands (4) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco gitops status`](#gco-gitops-status) | Show the configured Argo CD: toggle, chart pin, fence, GitOps hand-off and repo-server scaling. |
+| [`gco gitops open`](#gco-gitops-open) | Port-forward to the Argo CD UI over the private EKS endpoint. |
+| [`gco gitops password`](#gco-gitops-password) | Print the generated `admin` password from `argocd-initial-admin-secret`. |
+| [`gco gitops screenshot`](#gco-gitops-screenshot) | Capture the Argo CD Applications view as a full-page PNG. |
+
+</details>
+
+#### `gco gitops status`
+
+Show the validated `helm.argocd` block: whether Argo CD is enabled, the pinned
+`argo-cd` chart from `charts.yaml`, the `gco-tenants` project and its
+destinations, `source_repos`, the GitOps hand-off with its `path` rendered for
+every regional deployment region (or just `--region`), the repo-server size or
+autoscaler, and how to reach the UI. No AWS or cluster access; a
+`helm_enabled_overrides` deploy is not visible here. The
+[`gitops_status`](../gco_mcp/tools/README.md#gitopspy) MCP tool returns the same
+document.
+
+```bash
+gco gitops status [--region REGION] [--output json]
+```
+
+#### `gco gitops open`
+
+Port-forward `svc/argocd-server` in `argocd` to `http://localhost:8080`. Runs in
+the foreground; press Ctrl-C to stop. Sign in as `admin` with the password from
+`gco gitops password`.
+
+```bash
+gco gitops open [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--local-port` | Local port to bind (default `8080`). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
+| `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+#### `gco gitops password`
+
+Print the `admin` password Argo CD generated on first start (the `password` key
+of `argocd/argocd-initial-admin-secret`). Once you change the password, delete
+that Secret, as Argo CD recommends; the command then says the password was
+rotated. Takes the tunnel options of `gco gitops open`.
+
+```bash
+gco gitops password [--region REGION] [--via-ssm INSTANCE_ID|auto] [-y]
+```
+
+#### `gco gitops screenshot`
+
+Forward the UI in the background, log in to the Argo CD API as `admin` and
+capture `/applications` with the session cookie as a full-page PNG — no browser
+sign-in. Needs Playwright (`pip install 'gco[diagrams]'` and
+`playwright install chromium` once). This is the code behind
+`images/argocd-ui.png`.
+
+```bash
+gco gitops screenshot [OPTIONS]
+```
+
+**Options:** the tunnel options of `gco gitops open`, plus:
+
+| Option | Description |
+|--------|-------------|
+| `--output`, `-o` | PNG to write (default `./argocd-ui.png`). |
+| `--local-port` | Local port to bind (default `8080`). |
+| `--password` | Admin password (also `$GCO_ARGOCD_ADMIN_PASSWORD`; default: read from `argocd-initial-admin-secret`). |
+| `--headed` | Show the browser window while capturing. |
+
+**Examples:**
+
+```bash
+gco gitops status -r us-west-2
+gco gitops open --via-ssm auto -y
+gco gitops password --via-ssm i-0123456789abcdef0
+gco gitops screenshot -o images/argocd-ui.png --via-ssm auto -y
+```
 
 ### Images Commands
 
@@ -4380,12 +4559,7 @@ gco release validate --expected-account 123456789012 \
 | `--inference-vllm-model-revision` / `--inference-sglang-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |
 | `--optional-schedulers` | Force-enable the off-by-default schedulers (`yunikorn`, `slurm`, or `all`) for this run's deploy so the `schedulers` action proves them too. |
-| `--eks-capabilities` | Enable the off-by-default [EKS Capabilities](EKS_CAPABILITIES.md) (`argocd`, `ack`, `kro`, or `all`) for this run's deploy so the `eks-capabilities` action proves them. The run is self-contained: without `--argocd-idc-instance-arn`/`--argocd-identity` the `argocd-identity` action provisions an Identity Center account instance and group, and without `--argocd-gitops-repo-url` the GitOps hand-off uses the GCO-managed CodeCommit repository the run pushes its fixture into. |
-| `--argocd-idc-instance-arn` / `--argocd-idc-region` | Existing IAM Identity Center instance for the hosted Argo CD, and its Region (or the Region `argocd-identity` creates one in; default the first deployment Region). Require `--eks-capabilities argocd` (or `all`). |
-| `--argocd-identity` | Existing Identity Center user or group granted the Argo CD `ADMIN` role (`SSO_USER:<id>` or `SSO_GROUP:<id>`; repeatable). |
-| `--argocd-gitops-repo-url` / `--argocd-gitops-revision` / `--argocd-gitops-path` | Point the GitOps hand-off at an operator repository (`source: git`) instead of the GCO-managed CodeCommit repository, the revision Argo CD syncs from it (default the run's SHA), and the fixture directory it must sync into `gco-jobs` (default `examples/gitops/tenant-smoke`). |
-| `--argocd-gitops-sync-policy` | Sync policy of the root `Application`: `automated` (default) or `manual`. |
-| `--no-argocd-gitops` | Enable the Argo CD capability without the GitOps hand-off; rejected together with any `--argocd-gitops-*` option. |
+| `--eks-capabilities` | Enable the off-by-default [EKS Capabilities](EKS_CAPABILITIES.md) (`ack`, `kro`, or `all`) for this run's deploy so the `eks-capabilities` action proves each one attaches `ACTIVE` with no drift. Part of the checkpoint identity. |
 | `--profile` | Topology profile to validate against cdk.json: `configured` (default), `single-region`, or `multi-region`. |
 | `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
 | `--report-dir` | Report directory (default: `~/gco-live-release-validation-reports/<run-id>`, outside the checkout so the clean-worktree preflight holds). |
@@ -4413,7 +4587,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
 | [`gco stacks eks`](#gco-stacks-eks) | Set the EKS API endpoint access mode and CIDR allowlist in cdk.json. |
-| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed Argo CD, ACK, kro) per region; the hosted Argo CD UI (open it, screenshot it); the Identity Center bootstrap for Argo CD sign-in; and `gitops push` into the per-cluster CodeCommit GitOps repository. |
+| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed ACK and kro) per region. |
 | [`gco stacks regions`](#gco-stacks-regions) | Manage deployment Regions in cdk.json (managed-config engine). |
 | [`gco stacks bedrock`](#gco-stacks-bedrock) | Manage Bedrock model and reasoning defaults in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
@@ -4692,80 +4866,27 @@ gco stacks deploy gco-us-east-1 -y                                     # apply t
 #### `gco stacks capabilities`
 
 The opt-in [EKS Capabilities](EKS_CAPABILITIES.md) — the AWS-managed
-[Argo CD](https://argo-cd.readthedocs.io/en/stable/), [ACK](https://aws-controllers-k8s.github.io/docs/)
-and [kro](https://kro.run/) installations declared in `cdk.json`
-`eks_capabilities` (every type off by default) and attached to each regional
-cluster by `gco stacks deploy`. `status` and `argocd open` / `argocd screenshot`
-are read-only (they mutate neither AWS nor `cdk.json`);
-`argocd bootstrap-identity` and `gitops push` are the two write paths, and both
-confirm before acting unless `--yes` is given.
+[ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/)
+installations declared in `cdk.json` `eks_capabilities` (every type off by
+default) and attached to each regional cluster by `gco stacks deploy`.
+Read-only: it mutates neither AWS nor `cdk.json`. Argo CD and Crossplane are
+self-managed Helm charts rather than capabilities; see
+[`gco gitops`](#gitops-commands) and [`gco crossplane`](#crossplane-commands).
 
 ```bash
 gco stacks capabilities status [OPTIONS]
-gco stacks capabilities argocd open [OPTIONS]
-gco stacks capabilities argocd screenshot [OPTIONS]
-gco stacks capabilities argocd bootstrap-identity [OPTIONS]
-gco stacks capabilities gitops push [OPTIONS]
 ```
 
 **Subcommands:**
 
 - `status` - Configured versus live: for each capability type, whether
   `cdk.json` enables it for the region, whether it is attached
-  (`ListCapabilities` / `DescribeCapability`), its status and version, the
-  Argo CD server URL and GitOps hand-off, and a `drift` sentence when the two
-  disagree (configured but not attached, attached but disabled, or a status
-  other than `ACTIVE`). Capabilities on the cluster that GCO did not create
-  are listed under `unmanaged`. Exits nonzero when any inspected region
-  drifts; with `--output json` the document is one object per region (a list
-  under `--all-regions`).
-- `argocd open` - Resolve the hosted Argo CD UI URL from the EKS API and open
-  it in your browser (`--print-url` only prints it; `--output json` returns
-  `{"region", "argocd_server_url"}`). Sign-in is IAM Identity Center with the
-  users and groups named in `eks_capabilities.argocd.rbac_role_mappings`.
-  When `vpce_ids` is configured the UI is private to the VPC, so open it from
-  a host inside it.
-- `argocd screenshot` - Capture a full-page PNG of the Applications view with
-  Playwright's Chromium (`pip install 'gco[diagrams]'` and
-  `playwright install chromium` once). The browser profile persists per region
-  under `~/.gco/argocd-browser/<region>` (`$GCO_ARGOCD_BROWSER_PROFILE_DIR`
-  overrides the root), so the first run opens a window for you to sign in
-  with Identity Center and later runs can pass `--headless`. This is how the
-  Argo CD UI screenshot in [EKS Capabilities](EKS_CAPABILITIES.md#argo-cd-ui)
-  is produced.
-- `argocd bootstrap-identity` - Resolve or create the
-  [IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html)
-  inputs the Argo CD capability needs (`idc_instance_arn`, `idc_region` and at
-  least one `rbac_role_mappings` entry). It discovers the instance visible from
-  the account (the `--idc-region`, then every other Identity Center Region
-  asked together under a 30-second deadline — a Region whose endpoint does not
-  answer in time is warned about and read as holding none, so name such a
-  Region explicitly if your instance lives there), optionally creates an
-  *account instance* when there is none
-  (`--create-account-instance`; standalone and Organizations member accounts
-  only — a management account enables an organization instance from the
-  console), ensures one group (`<project>-argocd-admins` by default) mapped to
-  `--role`, adds the `--user` names to it, and prints the `cdk.json` fragment
-  or writes it with `--write-cdk-json` through the managed-config engine.
-  `--identity SSO_USER:<id>` / `SSO_GROUP:<id>` maps existing identities
-  instead of creating a group and is the only mode that works against an
-  organization instance owned by another account. The one thing it cannot do
-  is set a password — a user who wants to open the UI signs in once through
-  the Identity Center console.
-- `gitops push` - Mirror a local directory into a cluster's GitOps repository:
-  the per-cluster [CodeCommit](https://docs.aws.amazon.com/codecommit/latest/userguide/welcome.html)
-  repository (`<cluster>-gitops`) that the regional stack creates when
-  `eks_capabilities.argocd.gitops.source` is `codecommit` (the default). After
-  the push the branch holds exactly the directory's files (tracked plus
-  untracked-but-not-ignored when the directory is inside a Git work tree):
-  new and changed files are written, files that disappeared are deleted,
-  unchanged files are left alone, and nothing is committed when nothing
-  changed. Argo CD then syncs the new commit (immediately with
-  `sync_policy.automated`, from the UI otherwise). The push goes through the
-  CodeCommit API with your AWS credentials (`codecommit:GetBranch`,
-  `GetDifferences`, `CreateCommit`) — no Git remote helper or credential
-  helper to install. Symlinks, files over 6 MiB and an empty directory are
-  refused; `--dry-run` prints the plan without committing.
+  (`ListCapabilities` / `DescribeCapability`), its status and version, and a
+  `drift` sentence when the two disagree (configured but not attached,
+  attached but disabled, or a status other than `ACTIVE`). Capabilities on
+  the cluster that GCO did not create are listed under `unmanaged`. Exits
+  nonzero when any inspected region drifts; with `--output json` the document
+  is one object per region (a list under `--all-regions`).
 
 **Options (`status`):**
 
@@ -4774,67 +4895,11 @@ gco stacks capabilities gitops push [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Inspect every configured deployment region |
 
-**Options (`argocd open`):**
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--region` | `-r` | AWS region (default: first deployment region) |
-| `--print-url` | | Print the server URL instead of launching a browser |
-
-**Options (`argocd screenshot`):**
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--region` | `-r` | AWS region (default: first deployment region) |
-| `--output` | `-o` | PNG to write (default: `./argocd-ui.png`; the docs use `images/argocd-ui.png`) |
-| `--headless` | | Run the browser headless (needs a session saved by an earlier headed run) |
-| `--login-timeout` | | Seconds to wait for the Identity Center sign-in to land on the Applications view (default 300) |
-| `--profile-dir` | | Persistent browser profile directory (default: `~/.gco/argocd-browser/<region>`) |
-
-**Options (`argocd bootstrap-identity`):**
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--region` | `-r` | AWS region of the cluster (default: first deployment region) |
-| `--idc-region` | | Region to look for (and, with `--create-account-instance`, create) the Identity Center instance in (default: `--region`) |
-| `--instance-arn` | | Use this Identity Center instance instead of the first one discovered |
-| `--create-account-instance` | | Create an account instance of Identity Center when none is visible (one per account across all Regions; it outlives GCO stacks and is deleted only by hand) |
-| `--instance-name` | | Name of a created account instance (default: `<project>-identity-center`) |
-| `--group` | | Identity Center group to create/reuse and map (default: `<project>-argocd-admins`) |
-| `--role` | | Argo CD role the group (or `--identity` entries) receives: `ADMIN` (default), `EDITOR` or `VIEWER` |
-| `--user` | | Existing Identity Center user to add to the group (repeatable) |
-| `--identity` | | Map an existing `SSO_USER:<id>` or `SSO_GROUP:<id>` instead of creating a group (repeatable; not combinable with `--user`/`--group`) |
-| `--write-cdk-json` | | Write `idc_instance_arn`, `idc_region` and the role mapping into `cdk.json` |
-| `--config-path` | | Explicit cdk.json to use (default: nearest in cwd/parents) |
-| `--yes` | `-y` | Skip confirmation |
-
-**Options (`gitops push`):**
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--path` | | Local directory whose files become the branch content (default: `.`) |
-| `--region` | `-r` | AWS region (default: first deployment region) |
-| `--all-regions` | `-A` | Push to every deployment region |
-| `--branch` | | Repository branch (default: `main`, the branch the stack seeds and Argo CD tracks) |
-| `--message` | `-m` | Commit message (default: names the directory and its Git revision) |
-| `--dry-run` | | Show what would change without committing |
-| `--yes` | `-y` | Skip confirmation |
-
 **Examples:**
 
 ```bash
 gco stacks capabilities status                                      # first deployment region
 gco stacks capabilities status --all-regions --output json          # one document per region
-gco stacks capabilities argocd open                                 # browser, Identity Center sign-in
-gco stacks capabilities argocd open --print-url -r us-west-2
-gco stacks capabilities argocd screenshot -o images/argocd-ui.png   # first run: sign in in the window
-gco stacks capabilities argocd screenshot --headless                # later runs reuse the saved session
-gco stacks capabilities argocd bootstrap-identity                   # discover the instance, print the fragment
-gco stacks capabilities argocd bootstrap-identity --create-account-instance --user alice --write-cdk-json -y
-gco stacks capabilities argocd bootstrap-identity --identity SSO_GROUP:9067... --write-cdk-json
-gco stacks capabilities gitops push --path ./manifests              # first deployment region, confirms first
-gco stacks capabilities gitops push --path ./manifests -A --dry-run # plan for every region, no commit
-gco stacks capabilities gitops push --path examples/gitops/tenant-smoke -r us-west-2 -y
 ```
 
 #### `gco stacks regions`

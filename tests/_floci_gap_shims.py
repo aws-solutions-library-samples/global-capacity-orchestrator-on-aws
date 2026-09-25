@@ -1,6 +1,6 @@
 """Documented Floci-gap shims, importable without pytest.
 
-A handful of Floci gaps affect GCO's AWS surface (each probed empirically;
+Two Floci 1.6.0 gaps affect GCO's AWS surface (both probed empirically;
 see docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
@@ -11,19 +11,15 @@ see docs/FLOCI_TESTING.md):
 * Global Accelerator is absent from the emulator's service catalog
   (``UnknownOperationException``), while the harness's fail-closed
   inventory requires its scanner to complete.
-* Availability Zone ids are not modeled by the emulator's EC2.
-* CodeCommit and the Identity Store are absent from the catalog (Floci
-  2.0.1), while the inventory scans both for the Argo CD GitOps hand-off's
-  leftovers.
 
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
-resources GCO actually creates (no stack policy; no accelerators,
-repositories or groups an emulator could host). They live strictly in the
-test layer: in-process Floci tests apply them to their sessions, and the E2E
-injects them into harness subprocesses through
-``tests/_floci_sitecustomize/``. Production code never imports this module.
-Delete each shim when a Floci release closes its gap.
+resources GCO actually creates (no stack policy; no accelerators an
+emulator could host). They live strictly in the test layer: in-process
+Floci tests apply them to their sessions, and the E2E injects them into
+harness subprocesses through ``tests/_floci_sitecustomize/``. Production
+code never imports this module. Delete it when a Floci release closes both
+gaps.
 
 Kept free of pytest imports on purpose so harness subprocesses can load it
 through sitecustomize without dragging the test framework along.
@@ -137,48 +133,8 @@ def shim_floci_zone_id_lookup(events) -> None:
     events.register("before-send.ec2.DescribeAvailabilityZones", _synthesize)
 
 
-_EMPTY_REPOSITORIES_JSON = json.dumps({"repositories": []}).encode()
-_EMPTY_GROUPS_JSON = json.dumps({"Groups": []}).encode()
-
-
-def shim_floci_missing_codecommit(events) -> None:
-    """Answer CodeCommit ``ListRepositories`` with an empty list.
-
-    Floci 2.0.1 has no CodeCommit at all (``UnknownOperationException`` for
-    ``CodeCommit_20150413.ListRepositories``), while the harness's fail-closed
-    inventory scans for the GCO-managed GitOps repositories
-    (``<cluster>-gitops``) in every Region. No emulator test creates one, so
-    the truthful answer is the empty list.
-    """
-
-    def _synthesize(request, **_kwargs):
-        return _local_response(request, _EMPTY_REPOSITORIES_JSON, "application/x-amz-json-1.1")
-
-    events.register("before-send.codecommit.ListRepositories", _synthesize)
-
-
-def shim_floci_missing_identity_store(events) -> None:
-    """Answer Identity Store ``ListGroups`` with an empty list.
-
-    Floci 2.0.1 models ``sso-admin ListInstances`` (it answers with one
-    built-in ACTIVE instance owned by the emulator account) but has no
-    Identity Store service (``UnknownOperationException`` for
-    ``AWSIdentityStore.ListGroups``). The inventory scanner lists groups in
-    every account-owned instance to catch a leftover
-    ``<project>-live-validation-argocd`` group; against the emulator there is
-    none, so the empty page is the truthful answer.
-    """
-
-    def _synthesize(request, **_kwargs):
-        return _local_response(request, _EMPTY_GROUPS_JSON, "application/x-amz-json-1.1")
-
-    events.register("before-send.identitystore.ListGroups", _synthesize)
-
-
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
     shim_floci_missing_global_accelerator(events)
     shim_floci_zone_id_lookup(events)
-    shim_floci_missing_codecommit(events)
-    shim_floci_missing_identity_store(events)

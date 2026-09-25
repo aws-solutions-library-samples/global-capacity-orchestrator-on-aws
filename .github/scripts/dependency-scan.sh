@@ -46,9 +46,9 @@
 #     composite action's version default),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
-#     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), the Argo CD
-#     CRDs (ARGOCD_VERSION), and kind + its node image — public endpoints,
-#     no AWS creds
+#     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), kind + its
+#     node image, and the Crossplane function-go-templating package
+#     post-helm-crossplane.yaml installs — public endpoints, no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, duplicated *_VERSION
@@ -1628,14 +1628,18 @@ CALICO_PIN="$(extract_workflow_env_pin CALICO_VERSION | head -1)"
 check_github_tool "Calico (CALICO_VERSION)" "$CALICO_PIN" "projectcalico/calico" \
   "https://github.com/projectcalico/calico/releases"
 
-# Argo CD (argoproj/argo-cd) — the kind E2E job applies the Application /
-# AppProject CRDs of this upstream release to validate the Argo CD capability
-# manifests against real schemas. Production runs the AWS-managed capability,
-# so no chart or image pins Argo CD anywhere else; the CRD schema stays
-# current only if this tag follows upstream.
-ARGOCD_PIN="$(extract_workflow_env_pin ARGOCD_VERSION | head -1)"
-check_github_tool "Argo CD CRDs (ARGOCD_VERSION)" "$ARGOCD_PIN" "argoproj/argo-cd" \
-  "https://github.com/argoproj/argo-cd/releases"
+# Crossplane function-go-templating (crossplane-contrib/function-go-templating)
+# — the composition Function package post-helm-crossplane.yaml installs when
+# helm.crossplane is on. The Argo CD, Crossplane and Crossview charts (and
+# Crossview's image) are charts.yaml pins the Helm sections above cover; this
+# xpkg reference is the one add-on pin outside charts.yaml, and it is not an
+# ``image:`` line, so no image sweep would notice it ageing.
+FUNCTION_GO_TEMPLATING_PIN="$(extract_crossplane_function_pin \
+  lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating \
+  | head -1)"
+check_github_tool "Crossplane function-go-templating (post-helm-crossplane.yaml)" \
+  "$FUNCTION_GO_TEMPLATING_PIN" "crossplane-contrib/function-go-templating" \
+  "https://github.com/crossplane-contrib/function-go-templating/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
 # Both kind-action steps (cluster-e2e and examples-smoke) must pin the same

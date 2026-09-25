@@ -5,9 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from scripts.live_release_validation.checks.eks_capabilities import (
+    build_eks_capabilities_overrides,
+    overrides_json,
+)
 from scripts.live_release_validation.models import RunSettings
 
-from .specs import EXAMPLE_SPECS, required_feature_overrides, required_helm_overrides
+from .specs import (
+    EXAMPLE_SPECS,
+    required_capability_overrides,
+    required_capability_settings,
+    required_feature_overrides,
+    required_helm_overrides,
+)
 
 
 @dataclass(frozen=True)
@@ -15,8 +25,9 @@ class ExampleRunSettings(RunSettings):
     """Operator inputs for one example-validation run.
 
     Extends the live-release-validation settings with the example selection;
-    the required helm/feature enablement is DERIVED from the selection so the
-    deployed graph always matches exactly what the selected examples need.
+    the required helm/feature/EKS Capability enablement is DERIVED from the
+    selection so the deployed graph always matches exactly what the selected
+    examples need.
     """
 
     #: Example names (file stems) to validate this run, in registry order.
@@ -45,6 +56,25 @@ class ExampleRunSettings(RunSettings):
         object.__setattr__(
             self, "optional_schedulers", tuple(sorted({*self.optional_schedulers, *derived}))
         )
+        # EKS Capabilities travel as the base class's eks_capabilities_overrides
+        # JSON (the same context the live harness's --eks-capabilities builds),
+        # so extra_cdk_context() and the resume identity carry them unchanged.
+        capability_types = self.capability_overrides
+        if capability_types:
+            object.__setattr__(
+                self,
+                "eks_capabilities_overrides_json",
+                overrides_json(
+                    build_eks_capabilities_overrides(
+                        types=capability_types,
+                        extra=required_capability_settings(list(self.selected_examples)),
+                    )
+                ),
+            )
+
+    @property
+    def capability_overrides(self) -> tuple[str, ...]:
+        return required_capability_overrides(list(self.selected_examples))
 
     @property
     def feature_overrides(self) -> tuple[str, ...]:
@@ -60,4 +90,5 @@ class ExampleRunSettings(RunSettings):
         identity = super().identity()
         identity["selected_examples"] = list(self.selected_examples)
         identity["feature_overrides"] = list(self.feature_overrides)
+        identity["capability_overrides"] = list(self.capability_overrides)
         return identity

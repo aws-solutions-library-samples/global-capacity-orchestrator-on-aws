@@ -52,13 +52,11 @@ def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
     integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
     replacements: dict[str, str] = {
         "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
-        # 08-argocd-gitops.yaml: the regional stack renders these two as
-        # single-line JSON (YAML flow style) — a list of destinations and the
-        # syncPolicy object — so the stubs keep that shape.
-        "{{ARGOCD_GITOPS_DESTINATIONS}}": (
-            '[{"server": "arn:aws:eks:us-east-1:123456789012:cluster/stub", '
-            '"namespace": "gco-jobs"}]'
-        ),
+        # The Argo CD post-Helm manifests: the regional stack renders these two
+        # as single-line JSON (YAML flow style) — the AppProject sourceRepos
+        # list and the root Application syncPolicy object — so the stubs keep
+        # that shape.
+        "{{ARGOCD_SOURCE_REPOS}}": '["*"]',
         "{{ARGOCD_GITOPS_SYNC_POLICY}}": "{}",
     }
     for manifest in sorted(manifests_dir.glob("*.yaml")):
@@ -2424,6 +2422,7 @@ class TestAuthoritativeManifestPlanner:
             "_QUEUEING_CUSTOM_OBJECTS",
             "_CERT_MANAGER_CUSTOM_OBJECTS",
             "_ARGOCD_CUSTOM_OBJECTS",
+            "_CROSSPLANE_CUSTOM_OBJECTS",
         ):
             assert f"kind in {map_name}" in source, (
                 f"table-driven custom-object dispatch omitted {map_name}; update the apply loop"
@@ -2432,6 +2431,7 @@ class TestAuthoritativeManifestPlanner:
         dispatched.update(handler_module._QUEUEING_CUSTOM_OBJECTS)
         dispatched.update(handler_module._CERT_MANAGER_CUSTOM_OBJECTS)
         dispatched.update(handler_module._ARGOCD_CUSTOM_OBJECTS)
+        dispatched.update(handler_module._CROSSPLANE_CUSTOM_OBJECTS)
 
         supported = set(handler_module._SUPPORTED_MANIFEST_KINDS)
         assert supported - dispatched == set(), (
@@ -3238,92 +3238,104 @@ class TestQueueingCustomObjectMapConsistency:
         assert "{{MP_HPA_ENABLED}}" in gated.read_text(encoding="utf-8")
 
 
-_ARGOCD_CLUSTER_ACCESS_MANIFEST = "07-argocd-cluster-access.yaml"
-_ARGOCD_GITOPS_MANIFEST = "08-argocd-gitops.yaml"
-_ARGOCD_ROLE_ARN = "arn:aws:iam::123456789012:role/gco-EksCapabilityArgoCdRole-ABC"
-_ARGOCD_CLUSTER_ARN = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+_ARGOCD_ACCESS_MANIFEST = "post-helm-argocd-access.yaml"
+_ARGOCD_GITOPS_MANIFEST = "post-helm-argocd-gitops.yaml"
+_CROSSPLANE_MANIFEST = "post-helm-crossplane.yaml"
+_KRO_MANIFEST = "07-kro-tenant-access.yaml"
+_KRO_USER = "arn:aws:sts::123456789012:assumed-role/gco-EksCapabilityKroRole-ABC/KRO"
+
+#: (group, Kind) as an AppProject spells the guardrails -> (group, resource) as RBAC does.
+_GUARDRAIL_RESOURCES = {
+    ("", "ResourceQuota"): ("", "resourcequotas"),
+    ("", "LimitRange"): ("", "limitranges"),
+    ("networking.k8s.io", "NetworkPolicy"): ("networking.k8s.io", "networkpolicies"),
+    ("rbac.authorization.k8s.io", "Role"): ("rbac.authorization.k8s.io", "roles"),
+    ("rbac.authorization.k8s.io", "RoleBinding"): ("rbac.authorization.k8s.io", "rolebindings"),
+}
 
 
 def _argocd_replacements(*, gitops: bool) -> dict[str, str]:
-    """The Argo CD tokens the regional stack emits (capability on; GitOps optional)."""
-    replacements = {
-        "{{EKS_CLUSTER_ARN}}": _ARGOCD_CLUSTER_ARN,
-        "{{ARGOCD_CAPABILITY_ROLE_ARN}}": _ARGOCD_ROLE_ARN,
-    }
+    """The replacements the regional stack renders for the Argo CD manifests."""
+    from gco.argocd_config import compute_argocd_replacements, validate_argocd_config
+
+    block: dict = {"enabled": True, "source_repos": ["https://github.com/example/*"]}
     if gitops:
-        replacements.update(
-            {
-                "{{ARGOCD_GITOPS_REPO_URL}}": "https://github.com/example/gco-tenants.git",
-                "{{ARGOCD_GITOPS_REVISION}}": "main",
-                "{{ARGOCD_GITOPS_PATH}}": "clusters/us-east-1",
-                "{{ARGOCD_GITOPS_DEFAULT_NAMESPACE}}": "gco-jobs",
-                "{{ARGOCD_GITOPS_DESTINATIONS}}": json.dumps(
-                    [
-                        {"server": _ARGOCD_CLUSTER_ARN, "namespace": "gco-jobs"},
-                        {"server": _ARGOCD_CLUSTER_ARN, "namespace": "gco-inference"},
-                    ]
-                ),
-                "{{ARGOCD_GITOPS_SYNC_POLICY}}": json.dumps(
-                    {"automated": {"selfHeal": True, "prune": False}}
-                ),
-            }
-        )
-    return replacements
+        block["gitops"] = {
+            "repo_url": "https://github.com/example/gco-tenants.git",
+            "revision": "main",
+            "path": "clusters/{region}",
+            "sync_policy": "automated",
+        }
+    return compute_argocd_replacements(
+        validate_argocd_config(block),
+        enabled=True,
+        region="us-east-1",
+        cluster_name="gco-us-east-1",
+    )
 
 
-class TestArgoCdCapabilityManifests:
-    """The Argo CD EKS Capability manifests, their applier map, and their gates.
+class TestPlatformAddOnManifests:
+    """The self-managed Argo CD / Crossplane and the kro capability manifests.
 
-    07-argocd-cluster-access.yaml registers the hosting cluster as an Argo CD
-    target and grants the capability role its Kubernetes RBAC; it is gated on
-    ``{{ARGOCD_CAPABILITY_ROLE_ARN}}``. 08-argocd-gitops.yaml is the GitOps
-    hand-off (fenced AppProject + root Application) gated on
-    ``{{ARGOCD_GITOPS_REPO_URL}}``. Both are BASE-pass files: the CRDs come from
-    the capability, which the regional stack orders before the convergence
-    trigger, not from a Helm chart.
+    post-helm-argocd-access.yaml (tenant RBAC + the gco-tenants AppProject) is
+    gated on ``{{ARGOCD_ENABLED}}``; post-helm-argocd-gitops.yaml (the root
+    Application) on ``{{ARGOCD_GITOPS_REPO_URL}}``; post-helm-crossplane.yaml
+    (the go-templating Function, Crossplane's composed-kind role and
+    Crossview's read-only view) on ``{{CROSSPLANE_ENABLED}}``; and the base-pass
+    07-kro-tenant-access.yaml on ``{{KRO_CAPABILITY_USERNAME}}``. The chart-
+    installed CRDs make the first three POST-HELM files.
     """
 
     manifests_dir = Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
 
-    def _copy_argocd_manifests(self, tmp_path: Path) -> Path:
-        for name in (_ARGOCD_CLUSTER_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST):
+    def _copy(self, tmp_path: Path, *names: str) -> Path:
+        for name in names:
             (tmp_path / name).write_text(
                 (self.manifests_dir / name).read_text(encoding="utf-8"), encoding="utf-8"
             )
         return tmp_path
 
-    def test_manifest_argoproj_api_versions_match_the_applier_map(self, handler_module) -> None:
-        argocd_groups = {
-            group for group, _v, _p, _s in handler_module._ARGOCD_CUSTOM_OBJECTS.values()
-        }
+    def _documents(self, name: str) -> list[dict]:
+        return _parse_manifest_documents(self.manifests_dir / name)
+
+    @pytest.mark.parametrize(
+        ("map_name", "group", "manifests"),
+        [
+            (
+                "_ARGOCD_CUSTOM_OBJECTS",
+                "argoproj.io",
+                {_ARGOCD_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST},
+            ),
+            ("_CROSSPLANE_CUSTOM_OBJECTS", "pkg.crossplane.io", {_CROSSPLANE_MANIFEST}),
+        ],
+    )
+    def test_manifest_api_versions_match_the_applier_map(
+        self, handler_module, map_name: str, group: str, manifests: set[str]
+    ) -> None:
+        mapping = getattr(handler_module, map_name)
         seen: list[tuple[str, str]] = []
         for manifest in sorted(self.manifests_dir.glob("*.yaml")):
             for doc in _parse_manifest_documents(manifest):
-                api_version = str(doc.get("apiVersion", ""))
-                group, _, version = api_version.partition("/")
-                if group not in argocd_groups:
+                doc_group, _, version = str(doc.get("apiVersion", "")).partition("/")
+                if doc_group != group:
                     continue
                 kind = str(doc.get("kind", ""))
                 seen.append((manifest.name, kind))
-                mapped = handler_module._ARGOCD_CUSTOM_OBJECTS.get(kind)
-                assert mapped is not None, (
-                    f"{manifest.name}: {kind} has no _ARGOCD_CUSTOM_OBJECTS entry"
-                )
-                assert (group, version) == (mapped[0], mapped[1]), (
-                    f"{manifest.name}: {kind} is {api_version} but the map says {mapped[0]}/{mapped[1]}"
-                )
-                assert mapped[3] is False, f"{kind} is namespaced (lives in argocd)"
-        assert {kind for _f, kind in seen} == set(handler_module._ARGOCD_CUSTOM_OBJECTS), (
-            "every mapped Argo CD kind must appear in a manifest and vice versa"
-        )
-        assert all(name == _ARGOCD_GITOPS_MANIFEST for name, _k in seen)
+                mapped = mapping.get(kind)
+                assert mapped is not None, f"{manifest.name}: {kind} has no {map_name} entry"
+                assert (doc_group, version) == (mapped[0], mapped[1])
+                scoped = kind in handler_module._CLUSTER_SCOPED_KINDS
+                assert mapped[3] is scoped, f"{kind}: cluster scope disagrees with the map"
+        assert {kind for _f, kind in seen} == set(mapping)
+        assert {name for name, _k in seen} == manifests
 
-    def test_the_four_custom_object_maps_never_overlap(self, handler_module) -> None:
+    def test_the_custom_object_maps_never_overlap(self, handler_module) -> None:
         maps = (
             handler_module._GATEWAY_CUSTOM_OBJECTS,
             handler_module._QUEUEING_CUSTOM_OBJECTS,
             handler_module._CERT_MANAGER_CUSTOM_OBJECTS,
             handler_module._ARGOCD_CUSTOM_OBJECTS,
+            handler_module._CROSSPLANE_CUSTOM_OBJECTS,
         )
         seen: set[str] = set()
         for mapping in maps:
@@ -3331,235 +3343,204 @@ class TestArgoCdCapabilityManifests:
             assert not overlap, f"custom-object maps overlap on kinds: {sorted(overlap)}"
             seen |= set(mapping)
 
-    def test_argocd_manifests_are_base_pass_and_carry_their_gates(self) -> None:
-        access = (self.manifests_dir / _ARGOCD_CLUSTER_ACCESS_MANIFEST).read_text(encoding="utf-8")
+    def test_files_are_post_helm_and_carry_their_gates(self) -> None:
+        access = (self.manifests_dir / _ARGOCD_ACCESS_MANIFEST).read_text(encoding="utf-8")
         gitops = (self.manifests_dir / _ARGOCD_GITOPS_MANIFEST).read_text(encoding="utf-8")
-        # Base pass (numeric prefix), gated on exactly the token the stack
-        # emits per feature, and the cluster is identified by ARN throughout.
-        assert "{{ARGOCD_CAPABILITY_ROLE_ARN}}" in access
-        assert "{{ARGOCD_GITOPS" not in access
-        assert 'server: "{{EKS_CLUSTER_ARN}}"' in access
-        assert "{{ARGOCD_GITOPS_REPO_URL}}" in gitops
-        assert 'server: "{{EKS_CLUSTER_ARN}}"' in gitops
-        # The hosted capability rejects the in-cluster API hostname as a
-        # ``server`` (comments may mention it; documents must not).
-        yaml_lines = [
-            line for line in (access + gitops).splitlines() if not line.lstrip().startswith("#")
-        ]
-        assert "kubernetes.default.svc" not in "\n".join(yaml_lines)
-        # The two JSON-rendered tokens sit unquoted so they land as YAML flow
+        crossplane = (self.manifests_dir / _CROSSPLANE_MANIFEST).read_text(encoding="utf-8")
+        kro = (self.manifests_dir / _KRO_MANIFEST).read_text(encoding="utf-8")
+        assert '"{{ARGOCD_ENABLED}}"' in access
+        # The structural tokens sit unquoted so they land as YAML flow
         # collections, not strings.
-        assert "destinations: {{ARGOCD_GITOPS_DESTINATIONS}}" in gitops
+        assert "sourceRepos: {{ARGOCD_SOURCE_REPOS}}" in access
+        assert "{{ARGOCD_GITOPS" not in access
+        assert '"{{ARGOCD_GITOPS_REPO_URL}}"' in gitops
         assert "syncPolicy: {{ARGOCD_GITOPS_SYNC_POLICY}}" in gitops
+        assert '"{{CROSSPLANE_ENABLED}}"' in crossplane
+        assert '"{{KRO_CAPABILITY_USERNAME}}"' in kro
+        # The self-managed Argo CD addresses its own cluster in-cluster; the
+        # hosted capability's cluster-ARN registration is gone.
+        yaml_only = "\n".join(
+            line for line in (access + gitops).splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "{{EKS_CLUSTER_ARN}}" not in yaml_only
+        assert "server: https://kubernetes.default.svc" in yaml_only
         # No resources-finalizer: disabling the hand-off detaches, never deletes.
-        gitops_yaml = "\n".join(
+        assert "finalizers" not in "\n".join(
             line for line in gitops.splitlines() if not line.lstrip().startswith("#")
         )
-        assert "resources-finalizer" not in gitops_yaml
-        assert "finalizers" not in gitops_yaml
 
-    def test_cluster_access_prune_inventory_matches_the_gated_manifest_minus_namespace(
-        self, handler_module
+    @pytest.mark.parametrize(
+        ("gate", "post_helm", "manifest"),
+        [
+            ("{{ARGOCD_ENABLED}}", True, _ARGOCD_ACCESS_MANIFEST),
+            ("{{ARGOCD_GITOPS_REPO_URL}}", True, _ARGOCD_GITOPS_MANIFEST),
+            ("{{CROSSPLANE_ENABLED}}", True, _CROSSPLANE_MANIFEST),
+            ("{{KRO_CAPABILITY_USERNAME}}", False, _KRO_MANIFEST),
+        ],
+    )
+    def test_prune_inventory_is_exactly_the_gated_manifest(
+        self, handler_module, gate: str, post_helm: bool, manifest: str
     ) -> None:
-        """Disabling the capability prunes every 07 object except the argocd Namespace."""
-        documents = _parse_manifest_documents(self.manifests_dir / _ARGOCD_CLUSTER_ACCESS_MANIFEST)
-        namespaces = [doc for doc in documents if doc["kind"] == "Namespace"]
-        assert [doc["metadata"]["name"] for doc in namespaces] == ["argocd"]
         expected = {
             (
                 str(doc["apiVersion"]),
                 str(doc["kind"]),
-                str(doc["metadata"].get("namespace")),
+                doc["metadata"].get("namespace"),
                 str(doc["metadata"]["name"]),
             )
-            for doc in documents
-            if doc["kind"] != "Namespace"
+            for doc in self._documents(manifest)
         }
-        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[
-            ("{{ARGOCD_CAPABILITY_ROLE_ARN}}", False)
-        ]
-        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
-        assert pruned == expected
-        assert ("v1", "Namespace", None, "argocd") not in inventory
-        # Bindings go before the roles they reference.
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[(gate, post_helm)]
+        assert set(inventory) == expected
         kinds = [kind for _a, kind, _ns, _n in inventory]
-        assert kinds.index("ClusterRoleBinding") < kinds.index("ClusterRole")
-        assert kinds.index("RoleBinding") < kinds.index("Role")
+        # Bindings go before the roles they reference.
+        for binding, role in (("ClusterRoleBinding", "ClusterRole"), ("RoleBinding", "Role")):
+            if binding in kinds and role in kinds:
+                assert kinds.index(binding) < kinds.index(role)
 
-    def test_gitops_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
-        documents = _parse_manifest_documents(self.manifests_dir / _ARGOCD_GITOPS_MANIFEST)
-        expected = {
-            (
-                str(doc["apiVersion"]),
-                str(doc["kind"]),
-                str(doc["metadata"]["namespace"]),
-                str(doc["metadata"]["name"]),
-            )
-            for doc in documents
-        }
-        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[
-            ("{{ARGOCD_GITOPS_REPO_URL}}", False)
-        ]
-        pruned = {(api_version, kind, str(ns), name) for api_version, kind, ns, name in inventory}
-        assert pruned == expected
-        # The Application is removed before the AppProject it belongs to.
-        assert [kind for _a, kind, _ns, _n in inventory] == ["Application", "AppProject"]
-
-    def test_both_files_gate_out_when_the_capability_is_off(self, handler_module, tmp_path) -> None:
-        plan = handler_module.plan_manifests(
-            str(self._copy_argocd_manifests(tmp_path)),
-            {"{{EKS_CLUSTER_ARN}}": _ARGOCD_CLUSTER_ARN},
-        )
+    def test_everything_gates_out_when_the_add_ons_are_off(self, handler_module, tmp_path) -> None:
+        names = (_ARGOCD_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST, _CROSSPLANE_MANIFEST)
+        plan = handler_module.plan_manifests(str(self._copy(tmp_path, *names)), {})
         assert plan["phases"] == {"base": [], "post-helm": []}
-        assert set(plan["skipped"]["base"]) == {
-            f"{_ARGOCD_CLUSTER_ACCESS_MANIFEST}:unreplaced-placeholders",
-            f"{_ARGOCD_GITOPS_MANIFEST}:unreplaced-placeholders",
+        assert set(plan["skipped"]["post-helm"]) == {
+            f"{name}:unreplaced-placeholders" for name in names
         }
-        gates = set(plan["featureGates"]["base"])
-        assert {"{{ARGOCD_CAPABILITY_ROLE_ARN}}", "{{ARGOCD_GITOPS_REPO_URL}}"} <= gates
-        # Only the two inventoried gates prune; the other GitOps tokens have
-        # no inventory of their own and are ignored by the prune loop.
+        gates = set(plan["featureGates"]["post-helm"])
         inventoried = {
-            gate for gate in gates if (gate, False) in handler_module._FEATURE_RESOURCE_INVENTORY
+            gate for gate in gates if (gate, True) in handler_module._FEATURE_RESOURCE_INVENTORY
         }
-        assert inventoried == {"{{ARGOCD_CAPABILITY_ROLE_ARN}}", "{{ARGOCD_GITOPS_REPO_URL}}"}
+        assert inventoried == {
+            "{{ARGOCD_ENABLED}}",
+            "{{ARGOCD_GITOPS_REPO_URL}}",
+            "{{CROSSPLANE_ENABLED}}",
+        }
 
-    def test_cluster_access_plans_alone_when_gitops_is_off(self, handler_module, tmp_path) -> None:
+    def test_argocd_without_gitops_plans_the_fence_alone(self, handler_module, tmp_path) -> None:
         plan = handler_module.plan_manifests(
-            str(self._copy_argocd_manifests(tmp_path)), _argocd_replacements(gitops=False)
+            str(self._copy(tmp_path, _ARGOCD_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST)),
+            _argocd_replacements(gitops=False),
         )
         planned = {
-            (item["kind"], item["namespace"], item["name"]) for item in plan["phases"]["base"]
+            (item["kind"], item["namespace"], item["name"]) for item in plan["phases"]["post-helm"]
         }
         assert planned == {
-            ("Namespace", handler_module._CLUSTER_SCOPE, "argocd"),
-            ("Secret", "argocd", "local-cluster"),
-            ("ClusterRole", handler_module._CLUSTER_SCOPE, "gco-argocd-read-all"),
-            ("ClusterRoleBinding", handler_module._CLUSTER_SCOPE, "gco-argocd-read-all"),
+            ("Role", "gco-jobs", "gco-argocd-read"),
+            ("RoleBinding", "gco-jobs", "gco-argocd-read"),
+            ("Role", "gco-inference", "gco-argocd-read"),
+            ("RoleBinding", "gco-inference", "gco-argocd-read"),
             ("Role", "gco-jobs", "gco-argocd-deploy"),
             ("RoleBinding", "gco-jobs", "gco-argocd-deploy"),
             ("Role", "gco-inference", "gco-argocd-deploy"),
             ("RoleBinding", "gco-inference", "gco-argocd-deploy"),
+            ("AppProject", "argocd", "gco-tenants"),
         }
-        assert plan["skipped"]["base"] == [f"{_ARGOCD_GITOPS_MANIFEST}:unreplaced-placeholders"]
-        assert "{{ARGOCD_CAPABILITY_ROLE_ARN}}" not in plan["featureGates"]["base"]
-        assert "{{ARGOCD_GITOPS_REPO_URL}}" in plan["featureGates"]["base"]
-        # The rendered RBAC subjects name the access-entry group of the role.
-        binding = next(
-            item["document"]
-            for item in plan["phases"]["base"]
-            if item["kind"] == "ClusterRoleBinding"
-        )
-        assert binding["subjects"] == [
-            {
-                "kind": "Group",
-                "name": f"eks-access-entry:{_ARGOCD_ROLE_ARN}",
-                "apiGroup": "rbac.authorization.k8s.io",
-            }
+        assert plan["skipped"]["post-helm"] == [
+            f"{_ARGOCD_GITOPS_MANIFEST}:unreplaced-placeholders"
         ]
-        secret = next(
-            item["document"] for item in plan["phases"]["base"] if item["kind"] == "Secret"
+        project = next(
+            item["document"] for item in plan["phases"]["post-helm"] if item["kind"] == "AppProject"
         )
-        assert secret["stringData"] == {"name": "local-cluster", "server": _ARGOCD_CLUSTER_ARN}
-        assert secret["metadata"]["labels"]["argocd.argoproj.io/secret-type"] == "cluster"
-
-    def test_gitops_renders_fenced_project_and_root_application(
-        self, handler_module, tmp_path
-    ) -> None:
-        plan = handler_module.plan_manifests(
-            str(self._copy_argocd_manifests(tmp_path)), _argocd_replacements(gitops=True)
-        )
-        assert plan["skipped"]["base"] == []
-        assert plan["featureGates"]["base"] == []
-        by_kind = {item["kind"]: item for item in plan["phases"]["base"]}
-        project = by_kind["AppProject"]
-        application = by_kind["Application"]
-        assert (project["namespace"], project["name"]) == ("argocd", "gco-tenants")
-        assert (application["namespace"], application["name"]) == ("argocd", "gco-gitops-root")
-        assert project["sourceFile"] == application["sourceFile"] == _ARGOCD_GITOPS_MANIFEST
-        assert project["phase"] == application["phase"] == "base"
-
-        spec = project["document"]["spec"]
-        # The JSON tokens landed as real YAML collections with the cluster ARN.
+        spec = project["spec"]
+        assert spec["sourceRepos"] == ["https://github.com/example/*"]
         assert spec["destinations"] == [
-            {"server": _ARGOCD_CLUSTER_ARN, "namespace": "gco-jobs"},
-            {"server": _ARGOCD_CLUSTER_ARN, "namespace": "gco-inference"},
+            {"server": "https://kubernetes.default.svc", "namespace": "gco-jobs"},
+            {"server": "https://kubernetes.default.svc", "namespace": "gco-inference"},
         ]
-        assert spec["sourceRepos"] == ["https://github.com/example/gco-tenants.git"]
         assert spec["clusterResourceWhitelist"] == []
-        blacklisted = {
-            (entry["group"], entry["kind"]) for entry in spec["namespaceResourceBlacklist"]
+        # The controller writes; the server only reads.
+        bindings = {
+            (item["name"], item["namespace"]): item["document"]["subjects"]
+            for item in plan["phases"]["post-helm"]
+            if item["kind"] == "RoleBinding"
         }
-        assert blacklisted == {
-            ("", "ResourceQuota"),
-            ("", "LimitRange"),
-            ("networking.k8s.io", "NetworkPolicy"),
-            ("rbac.authorization.k8s.io", "Role"),
-            ("rbac.authorization.k8s.io", "RoleBinding"),
+        controller = {
+            "kind": "ServiceAccount",
+            "name": "argocd-application-controller",
+            "namespace": "argocd",
         }
+        server = {"kind": "ServiceAccount", "name": "argocd-server", "namespace": "argocd"}
+        for namespace in ("gco-jobs", "gco-inference"):
+            assert bindings[("gco-argocd-deploy", namespace)] == [controller]
+            assert bindings[("gco-argocd-read", namespace)] == [controller, server]
 
-        app_spec = application["document"]["spec"]
-        assert app_spec["project"] == "gco-tenants"
-        assert app_spec["source"] == {
+    def test_gitops_renders_the_root_application(self, handler_module, tmp_path) -> None:
+        plan = handler_module.plan_manifests(
+            str(self._copy(tmp_path, _ARGOCD_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST)),
+            _argocd_replacements(gitops=True),
+        )
+        assert plan["skipped"]["post-helm"] == []
+        application = next(
+            item for item in plan["phases"]["post-helm"] if item["kind"] == "Application"
+        )
+        assert (application["namespace"], application["name"]) == ("argocd", "gco-gitops-root")
+        spec = application["document"]["spec"]
+        assert spec["project"] == "gco-tenants"
+        assert spec["source"] == {
             "repoURL": "https://github.com/example/gco-tenants.git",
             "targetRevision": "main",
             "path": "clusters/us-east-1",
         }
-        assert app_spec["destination"] == {"server": _ARGOCD_CLUSTER_ARN, "namespace": "gco-jobs"}
-        assert app_spec["syncPolicy"] == {"automated": {"selfHeal": True, "prune": False}}
+        assert spec["destination"] == {
+            "server": "https://kubernetes.default.svc",
+            "namespace": "gco-jobs",
+        }
+        assert spec["syncPolicy"] == {"automated": {"selfHeal": True, "prune": False}}
         assert "finalizers" not in application["document"]["metadata"]
 
-    def test_tenant_write_rbac_is_an_allow_list_that_agrees_with_the_appproject_fence(
-        self,
-    ) -> None:
-        """The deploy Roles never grant what the AppProject blacklists, and never wildcard.
+    def test_tenant_write_grants_are_one_allow_list_that_agrees_with_the_fence(self) -> None:
+        """Argo CD, kro and Crossplane write exactly the same tenant kinds, never a guardrail.
 
-        Two layers fence the GitOps hand-off: Argo CD's AppProject refuses the
-        guardrail kinds, and the Kubernetes Role must not grant them either, so
-        a tenant repository cannot widen a quota, open the network posture or
-        grant itself permissions through either path. The Roles are also the
-        only write grant, so they carry no ``*`` and no privilege-escalating
-        verb (CIS 5.1.3; checkov CKV_K8S_49/157/158).
+        Two layers fence what Git (Argo CD), an RGD instance (kro) or an XR
+        (Crossplane) can create: the Kubernetes RBAC, and for Argo CD also the
+        AppProject blacklist. None may widen a quota, open the network posture
+        or grant itself permissions, so the grants carry no guardrail kind, no
+        ``*`` and no privilege-escalating verb (CIS 5.1.3; checkov
+        CKV_K8S_49/157/158), and the three controllers' lists never drift apart.
         """
-        access = _parse_manifest_documents(self.manifests_dir / _ARGOCD_CLUSTER_ACCESS_MANIFEST)
-        roles = {doc["metadata"]["namespace"]: doc for doc in access if doc["kind"] == "Role"}
-        assert set(roles) == {"gco-jobs", "gco-inference"}
-        assert roles["gco-jobs"]["rules"] == roles["gco-inference"]["rules"], (
-            "the two tenant Roles must stay identical; the RoleBindings scope them"
+        write_roles: dict[str, list] = {}
+        for manifest, kind, name in (
+            (_ARGOCD_ACCESS_MANIFEST, "Role", "gco-argocd-deploy"),
+            (_KRO_MANIFEST, "Role", "gco-kro-compose"),
+            (_CROSSPLANE_MANIFEST, "Role", "gco-crossplane-compose"),
+        ):
+            docs = [
+                doc
+                for doc in self._documents(manifest)
+                if doc["kind"] == kind and doc["metadata"]["name"] == name
+            ]
+            assert sorted(doc["metadata"]["namespace"] for doc in docs) == [
+                "gco-inference",
+                "gco-jobs",
+            ]
+            assert docs[0]["rules"] == docs[1]["rules"], f"{name}: the two Roles differ"
+            write_roles[name] = docs[0]["rules"]
+        # No write grant is cluster-wide: every write Role is namespaced.
+        for manifest in (_ARGOCD_ACCESS_MANIFEST, _KRO_MANIFEST, _CROSSPLANE_MANIFEST):
+            for doc in self._documents(manifest):
+                if doc["kind"] == "ClusterRole":
+                    for rule in doc.get("rules", []):
+                        assert set(rule["verbs"]) <= {"get", "list", "watch"}, (manifest, rule)
+        reference = write_roles["gco-argocd-deploy"]
+        assert all(rules == reference for rules in write_roles.values()), (
+            "the tenant write grant drifted between Argo CD, kro and Crossplane"
         )
-        rules = roles["gco-jobs"]["rules"]
-        assert rules, "the deploy Role must grant something"
         granted: set[tuple[str, str]] = set()
-        for rule in rules:
+        for rule in reference:
             for field in ("apiGroups", "resources", "verbs"):
                 assert "*" not in rule[field], f"wildcard in {field}: {rule}"
             assert not {"bind", "escalate", "impersonate", "deletecollection"} & set(rule["verbs"])
-            granted |= {
-                (group, resource) for group in rule["apiGroups"] for resource in rule["resources"]
-            }
-
-        # (group, Kind) as the AppProject spells it -> (group, resource) as RBAC does.
-        guardrail_resources = {
-            ("", "ResourceQuota"): ("", "resourcequotas"),
-            ("", "LimitRange"): ("", "limitranges"),
-            ("networking.k8s.io", "NetworkPolicy"): ("networking.k8s.io", "networkpolicies"),
-            ("rbac.authorization.k8s.io", "Role"): ("rbac.authorization.k8s.io", "roles"),
-            ("rbac.authorization.k8s.io", "RoleBinding"): (
-                "rbac.authorization.k8s.io",
-                "rolebindings",
-            ),
-        }
-        gitops = _parse_manifest_documents(self.manifests_dir / _ARGOCD_GITOPS_MANIFEST)
-        project = next(doc for doc in gitops if doc["kind"] == "AppProject")
+            granted |= {(g, r) for g in rule["apiGroups"] for r in rule["resources"]}
+        assert not granted & set(_GUARDRAIL_RESOURCES.values())
+        assert not any(group == "rbac.authorization.k8s.io" for group, _r in granted)
+        project = next(
+            doc for doc in self._documents(_ARGOCD_ACCESS_MANIFEST) if doc["kind"] == "AppProject"
+        )
         blacklisted = {
             (entry["group"], entry["kind"])
             for entry in project["spec"]["namespaceResourceBlacklist"]
         }
-        assert blacklisted == set(guardrail_resources), "the two fences must name the same kinds"
-        leaked = granted & set(guardrail_resources.values())
-        assert not leaked, f"Role grants guardrail kinds the AppProject refuses: {leaked}"
-        assert not any(group == "rbac.authorization.k8s.io" for group, _r in granted)
-        # The kinds the documentation promises a tenant repository may ship.
+        assert blacklisted == set(_GUARDRAIL_RESOURCES), "the two fences must name the same kinds"
+        # The kinds the documentation promises tenants may ship.
         assert {
             ("", "configmaps"),
             ("", "secrets"),
@@ -3571,26 +3552,129 @@ class TestArgoCdCapabilityManifests:
             ("ray.io", "rayclusters"),
         } <= granted
 
-    def test_manual_sync_policy_renders_as_an_empty_object(self, handler_module, tmp_path) -> None:
-        replacements = _argocd_replacements(gitops=True)
-        replacements["{{ARGOCD_GITOPS_SYNC_POLICY}}"] = "{}"
-        plan = handler_module.plan_manifests(
-            str(self._copy_argocd_manifests(tmp_path)), replacements
+    def test_read_grants_are_read_only_and_never_cluster_wide_secrets(self) -> None:
+        # Argo CD reads everything, but only inside the tenant namespaces.
+        argocd_reads = [
+            doc
+            for doc in self._documents(_ARGOCD_ACCESS_MANIFEST)
+            if doc["metadata"]["name"] == "gco-argocd-read" and doc["kind"] == "Role"
+        ]
+        assert sorted(doc["metadata"]["namespace"] for doc in argocd_reads) == [
+            "gco-inference",
+            "gco-jobs",
+        ]
+        assert not [
+            doc
+            for doc in self._documents(_ARGOCD_ACCESS_MANIFEST)
+            if doc["kind"].startswith("Cluster")
+        ]
+        for doc in argocd_reads:
+            assert doc["rules"] == [
+                {"apiGroups": ["*"], "resources": ["*"], "verbs": ["get", "list", "watch"]}
+            ]
+        # kro, Crossplane and Crossview read cluster-wide, so never Secrets and
+        # never a write.
+        cluster_reads: dict[str, list] = {}
+        for manifest, name in (
+            (_KRO_MANIFEST, "gco-kro-read"),
+            (_CROSSPLANE_MANIFEST, "gco-crossplane-read"),
+            (_CROSSPLANE_MANIFEST, "gco-crossview-read"),
+        ):
+            role = next(
+                doc
+                for doc in self._documents(manifest)
+                if doc["kind"] == "ClusterRole" and doc["metadata"]["name"] == name
+            )
+            for rule in role["rules"]:
+                assert set(rule["verbs"]) == {"get", "list", "watch"}, rule
+                assert "secrets" not in rule["resources"] and "*" not in rule["resources"], rule
+            cluster_reads[name] = role["rules"]
+        # kro and Crossplane watch exactly the kinds they may write.
+        assert cluster_reads["gco-crossplane-read"] == cluster_reads["gco-kro-read"]
+        write = next(
+            doc
+            for doc in self._documents(_KRO_MANIFEST)
+            if doc["kind"] == "Role" and doc["metadata"]["name"] == "gco-kro-compose"
         )
-        application = next(item for item in plan["phases"]["base"] if item["kind"] == "Application")
-        assert application["document"]["spec"]["syncPolicy"] == {}
+        written = {
+            (g, r) for rule in write["rules"] for g in rule["apiGroups"] for r in rule["resources"]
+        }
+        watched = {
+            (g, r)
+            for rule in cluster_reads["gco-kro-read"]
+            for g in rule["apiGroups"]
+            for r in rule["resources"]
+        }
+        assert written - watched == {("", "secrets")}
 
-    def test_argocd_kinds_apply_through_the_custom_objects_api(
+    def test_crossplane_wiring(self) -> None:
+        documents = self._documents(_CROSSPLANE_MANIFEST)
+        function = next(doc for doc in documents if doc["kind"] == "Function")
+        assert function["metadata"]["name"] == "crossplane-contrib-function-go-templating"
+        package = function["spec"]["package"]
+        assert package.startswith("xpkg.crossplane.io/crossplane-contrib/function-go-templating:v")
+        # Only the read role aggregates into Crossplane's cluster-wide role; the
+        # write grant reaches the crossplane ServiceAccount through namespaced
+        # RoleBindings in the tenant namespaces.
+        aggregated = [
+            doc["metadata"]["name"]
+            for doc in documents
+            if doc["metadata"]["labels"].get("rbac.crossplane.io/aggregate-to-crossplane") == "true"
+        ]
+        assert aggregated == ["gco-crossplane-read"]
+        crossplane = [
+            {"kind": "ServiceAccount", "name": "crossplane", "namespace": "crossplane-system"}
+        ]
+        compose_bindings = [
+            doc
+            for doc in documents
+            if doc["kind"] == "RoleBinding" and doc["metadata"]["name"] == "gco-crossplane-compose"
+        ]
+        assert sorted(doc["metadata"]["namespace"] for doc in compose_bindings) == [
+            "gco-inference",
+            "gco-jobs",
+        ]
+        for binding in compose_bindings:
+            assert binding["subjects"] == crossplane
+            assert binding["roleRef"] == {
+                "kind": "Role",
+                "name": "gco-crossplane-compose",
+                "apiGroup": "rbac.authorization.k8s.io",
+            }
+        bindings = {
+            doc["metadata"]["name"]: doc for doc in documents if doc["kind"] == "ClusterRoleBinding"
+        }
+        assert set(bindings) == {"gco-crossview-crossplane-view", "gco-crossview-read"}
+        crossview = [
+            {"kind": "ServiceAccount", "name": "crossview", "namespace": "crossplane-system"}
+        ]
+        assert bindings["gco-crossview-crossplane-view"]["subjects"] == crossview
+        assert bindings["gco-crossview-crossplane-view"]["roleRef"]["name"] == "crossplane-view"
+        assert bindings["gco-crossview-read"]["subjects"] == crossview
+
+    def test_kro_bindings_name_the_capability_session(self, handler_module, tmp_path) -> None:
+        plan = handler_module.plan_manifests(
+            str(self._copy(tmp_path, _KRO_MANIFEST)), {"{{KRO_CAPABILITY_USERNAME}}": _KRO_USER}
+        )
+        bindings = [
+            item["document"]
+            for item in plan["phases"]["base"]
+            if item["kind"] in {"RoleBinding", "ClusterRoleBinding"}
+        ]
+        assert len(bindings) == 3
+        for binding in bindings:
+            assert binding["subjects"] == [
+                {"kind": "User", "name": _KRO_USER, "apiGroup": "rbac.authorization.k8s.io"}
+            ]
+
+    def test_custom_kinds_apply_through_the_custom_objects_api(
         self, handler_module, tmp_path
     ) -> None:
-        """AppProject/Application dispatch to the argoproj.io custom-object API (create, then patch on 409)."""
+        """AppProject/Application are namespaced custom objects; Function is cluster-scoped."""
         from kubernetes.client.rest import ApiException
 
-        (tmp_path / _ARGOCD_GITOPS_MANIFEST).write_text(
-            (self.manifests_dir / _ARGOCD_GITOPS_MANIFEST).read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
-        replacements = _argocd_replacements(gitops=True)
+        self._copy(tmp_path, _ARGOCD_GITOPS_MANIFEST, _CROSSPLANE_MANIFEST)
+        replacements = {**_argocd_replacements(gitops=True), "{{CROSSPLANE_ENABLED}}": "true"}
         restart = {"restarted": [], "failed": []}
         with (
             patch.object(handler_module, "configure_k8s_client"),
@@ -3600,36 +3684,28 @@ class TestArgoCdCapabilityManifests:
             patch.object(handler_module, "restart_daemonsets", return_value=restart),
         ):
             custom_api = mock_client.CustomObjectsApi.return_value
-            custom_api.create_namespaced_custom_object.side_effect = [
-                None,  # AppProject created
-                ApiException(status=409, reason="Conflict"),  # Application exists -> patch
-            ]
+            custom_api.create_namespaced_custom_object.side_effect = ApiException(
+                status=409, reason="Conflict"
+            )
             result = handler_module.apply_manifests(
-                "gco-test", "us-east-1", str(tmp_path), replacements, post_helm=False
+                "gco-test", "us-east-1", str(tmp_path), replacements, post_helm=True
             )
 
-        created = [
+        assert [
             call.args[:4] for call in custom_api.create_namespaced_custom_object.call_args_list
-        ]
-        assert created == [
-            ("argoproj.io", "v1alpha1", "argocd", "appprojects"),
-            ("argoproj.io", "v1alpha1", "argocd", "applications"),
-        ]
+        ] == [("argoproj.io", "v1alpha1", "argocd", "applications")]
         custom_api.patch_namespaced_custom_object.assert_called_once()
-        patched = custom_api.patch_namespaced_custom_object.call_args.args
-        assert patched[:5] == (
+        assert custom_api.patch_namespaced_custom_object.call_args.args[:5] == (
             "argoproj.io",
             "v1alpha1",
             "argocd",
             "applications",
             "gco-gitops-root",
         )
-        assert result["FailedCount"] == 0
-        assert result["AppliedCount"] == result["ExpectedCount"] == 2
-        assert [(item["kind"], item["name"]) for item in result["ExpectedResources"]] == [
-            ("AppProject", "gco-tenants"),
-            ("Application", "gco-gitops-root"),
-        ]
+        assert [
+            call.args[:3] for call in custom_api.create_cluster_custom_object.call_args_list
+        ] == [("pkg.crossplane.io", "v1", "functions")]
+        assert result["FailedCount"] == 0, result
 
 
 class TestServiceAccountAutomountFlipDiagnostic:
@@ -4639,6 +4715,7 @@ _APPLY_DISPATCH = [
     _namespaced_custom("Certificate", "cert-manager.io/v1", "certificates"),
     _namespaced_custom("AppProject", "argoproj.io/v1alpha1", "appprojects"),
     _namespaced_custom("Application", "argoproj.io/v1alpha1", "applications"),
+    _cluster_custom("Function", "pkg.crossplane.io/v1", "functions"),
     _cluster_custom("NodePool", "karpenter.sh/v1", "nodepools"),
     _cluster_custom("EC2NodeClass", "karpenter.k8s.aws/v1", "ec2nodeclasses"),
     _typed(

@@ -828,7 +828,9 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
             assert state["Next"] == f"HelmUninstallChart-{non_lbc_reverse[index + 1]}"
         else:
             assert state["End"] is True
-        assert state["TimeoutSeconds"] == (240 if chart_name == "keda" else 120)
+        assert state["TimeoutSeconds"] == {"keda": 240, "argocd": 240, "crossplane": 360}.get(
+            chart_name, 120
+        )
         assert "Catch" not in state
         assert all("States.ALL" not in retry["ErrorEquals"] for retry in state.get("Retry", []))
         state_json = json.dumps(state, sort_keys=True)

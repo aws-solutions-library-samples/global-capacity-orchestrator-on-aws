@@ -284,10 +284,14 @@ class TestKubernetesManifests:
             # (post-helm-kubeflow-trainer-runtimes.yaml); keep in lockstep
             # with TRAINJOB_API_VERSION in gco/services/manifest_processor.py.
             "trainer.kubeflow.org/v1alpha1",
-            # Argo CD GitOps hand-off (08-argocd-gitops.yaml); CRDs come from
-            # the AWS-managed Argo CD EKS Capability. Keep in lockstep with
-            # _ARGOCD_CUSTOM_OBJECTS in the applier.
+            # Self-managed Argo CD fence and root Application
+            # (post-helm-argocd-*.yaml); the argo-cd chart installs the CRDs.
+            # Keep in lockstep with _ARGOCD_CUSTOM_OBJECTS in the applier.
             "argoproj.io/v1alpha1",
+            # The composition function GCO installs with Crossplane
+            # (post-helm-crossplane.yaml); keep in lockstep with
+            # _CROSSPLANE_CUSTOM_OBJECTS in the applier.
+            "pkg.crossplane.io/v1",
         }
 
         for filepath in manifest_files:
@@ -1504,6 +1508,11 @@ class TestHelmChartConsistency:
             "opencost",
         ]:
             del conflicts["monitoring"]
+        # The Crossview dashboard installs with Crossplane (one helm.crossplane
+        # toggle) into Crossplane's namespace, where GCO's read-only bindings
+        # name its ServiceAccount. Pin the exact pair.
+        if sorted(conflicts.get("crossplane-system", [])) == ["crossplane", "crossview"]:
+            del conflicts["crossplane-system"]
         assert not conflicts, f"Charts sharing unexpected namespaces: {conflicts}"
 
     def test_image_tags_in_values_are_semver(self):
@@ -1551,9 +1560,12 @@ class TestHelmChartConsistency:
         # monthly dependency scan enumerates charts.yaml without consulting
         # the enabled flag, so the human-facing header must keep pace.
         missing_sources = []
-        for chart_name in charts:
-            # Check if any source URL is plausibly related to this chart
-            chart_words = chart_name.lower().replace("-", " ").replace("_", " ").split()
+        for chart_name, cfg in charts.items():
+            # Check if any source URL is plausibly related to this chart. The
+            # key is the Helm release name, which can differ from the chart
+            # (release "argocd" installs chart "argo-cd"), so both count.
+            names = f"{chart_name} {cfg.get('chart', '')}"
+            chart_words = names.lower().replace("-", " ").replace("_", " ").split()
             found = any(any(word in url.lower() for word in chart_words) for url in source_urls)
             if not found:
                 missing_sources.append(chart_name)

@@ -1225,18 +1225,6 @@ def test_stacks_expected_count_swallows_loader_failure() -> None:
             {"region": "ignored", "all_regions": True},
             ("stacks", "capabilities", "status", "--all-regions"),
         ),
-        (
-            "argocd_ui_url",
-            (),
-            {},
-            ("stacks", "capabilities", "argocd", "open", "--print-url"),
-        ),
-        (
-            "argocd_ui_url",
-            (),
-            {"region": "us-west-2"},
-            ("stacks", "capabilities", "argocd", "open", "--print-url", "-r", "us-west-2"),
-        ),
     ],
 )
 def test_stacks_wrapper_option_matrix(
@@ -1247,6 +1235,36 @@ def test_stacks_wrapper_option_matrix(
 ) -> None:
     with _isolated_tool_module("stacks") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "function_name", "kwargs", "expected_argv"),
+    [
+        ("gitops", "gitops_status", {}, ("gitops", "status")),
+        (
+            "gitops",
+            "gitops_status",
+            {"region": "us-west-2"},
+            ("gitops", "status", "-r", "us-west-2"),
+        ),
+        ("crossplane", "crossplane_status", {}, ("crossplane", "status")),
+    ],
+)
+def test_platform_add_on_status_wrappers(
+    tool_name: str,
+    function_name: str,
+    kwargs: dict[str, Any],
+    expected_argv: tuple[str, ...],
+) -> None:
+    """Argo CD and Crossplane expose status only: no open/screenshot/password tool."""
+    with _isolated_tool_module(tool_name) as loaded:
+        _assert_cli_call(loaded, function_name, (), kwargs, expected_argv)
+        public = {
+            name
+            for name, value in vars(loaded.module).items()
+            if callable(value) and not name.startswith("_") and name.endswith(("_status", "_open"))
+        }
+        assert public == {function_name}
 
 
 @pytest.mark.parametrize(
@@ -1268,131 +1286,6 @@ def test_stacks_gated_addons_install_precedence(
 ) -> None:
     with _isolated_tool_module("stacks", FLAG_INFRASTRUCTURE_DEPLOY) as loaded:
         _assert_cli_call(loaded, "addons_install", (), kwargs, expected_argv)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected_argv"),
-    [
-        (
-            {"path": "./manifests"},
-            ("stacks", "capabilities", "gitops", "push", "--path", "./manifests", "-y"),
-        ),
-        (
-            {"path": "./manifests", "region": "us-west-2", "dry_run": True},
-            (
-                "stacks",
-                "capabilities",
-                "gitops",
-                "push",
-                "--path",
-                "./manifests",
-                "-r",
-                "us-west-2",
-                "--dry-run",
-                "-y",
-            ),
-        ),
-        (
-            {
-                "path": "./manifests",
-                "region": "ignored",
-                "all_regions": True,
-                "branch": "release",
-                "message": "ship it",
-            },
-            (
-                "stacks",
-                "capabilities",
-                "gitops",
-                "push",
-                "--path",
-                "./manifests",
-                "--all-regions",
-                "--branch",
-                "release",
-                "--message",
-                "ship it",
-                "-y",
-            ),
-        ),
-    ],
-)
-def test_stacks_gated_gitops_push_argv(
-    kwargs: dict[str, Any], expected_argv: tuple[str, ...]
-) -> None:
-    with _isolated_tool_module("stacks", FLAG_INFRASTRUCTURE_DEPLOY) as loaded:
-        _assert_cli_call(loaded, "gitops_push", (), kwargs, expected_argv)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected_argv"),
-    [
-        (
-            {},
-            ("stacks", "capabilities", "argocd", "bootstrap-identity", "--role", "ADMIN", "-y"),
-        ),
-        (
-            {
-                "region": "us-east-1",
-                "idc_region": "us-east-2",
-                "instance_arn": "arn:aws:sso:::instance/ssoins-1",
-                "create_account_instance": True,
-                "group": "ops",
-                "role": "VIEWER",
-                "users": ["alice", "bob"],
-                "write_cdk_json": True,
-            },
-            (
-                "stacks",
-                "capabilities",
-                "argocd",
-                "bootstrap-identity",
-                "-r",
-                "us-east-1",
-                "--idc-region",
-                "us-east-2",
-                "--instance-arn",
-                "arn:aws:sso:::instance/ssoins-1",
-                "--create-account-instance",
-                "--group",
-                "ops",
-                "--role",
-                "VIEWER",
-                "--user",
-                "alice",
-                "--user",
-                "bob",
-                "--write-cdk-json",
-                "-y",
-            ),
-        ),
-        (
-            {"identities": ["SSO_GROUP:g-1"]},
-            (
-                "stacks",
-                "capabilities",
-                "argocd",
-                "bootstrap-identity",
-                "--role",
-                "ADMIN",
-                "--identity",
-                "SSO_GROUP:g-1",
-                "-y",
-            ),
-        ),
-    ],
-)
-def test_stacks_gated_argocd_bootstrap_identity_argv(
-    kwargs: dict[str, Any], expected_argv: tuple[str, ...]
-) -> None:
-    with _isolated_tool_module("stacks", FLAG_INFRASTRUCTURE_DEPLOY) as loaded:
-        _assert_cli_call(loaded, "argocd_bootstrap_identity", (), kwargs, expected_argv)
-
-
-def test_stacks_gitops_and_identity_tools_stay_behind_the_deploy_flag() -> None:
-    with _isolated_tool_module("stacks") as disabled:
-        assert not hasattr(disabled.module, "gitops_push")
-        assert not hasattr(disabled.module, "argocd_bootstrap_identity")
 
 
 # ---------------------------------------------------------------------------

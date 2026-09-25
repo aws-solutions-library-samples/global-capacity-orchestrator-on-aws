@@ -156,10 +156,12 @@ from tools.costs import (  # noqa: E402, F401
     cost_trend,
     cost_workloads,
 )
+from tools.crossplane import crossplane_status  # noqa: E402, F401
 from tools.dag import dag_run, dag_validate  # noqa: E402, F401
 from tools.deps import deps_scan  # noqa: E402, F401
 from tools.docs import find_docs  # noqa: E402, F401
 from tools.examples import find_examples  # noqa: E402, F401
+from tools.gitops import gitops_status  # noqa: E402, F401
 from tools.images import (  # noqa: E402, F401
     images_describe,
     images_init,
@@ -234,7 +236,6 @@ from tools.nodepools import (  # noqa: E402, F401
 from tools.queue import queue_get, queue_list, queue_stats, queue_submit  # noqa: E402, F401
 from tools.stacks import (  # noqa: E402, F401
     addons_status,
-    argocd_ui_url,
     aurora_status,
     disable_aurora,
     disable_fsx,
@@ -285,14 +286,7 @@ with _contextlib.suppress(ImportError):
     )
 
 with _contextlib.suppress(ImportError):
-    from tools.stacks import (  # noqa: F401
-        addons_install,
-        argocd_bootstrap_identity,
-        bootstrap_cdk,
-        deploy_all,
-        deploy_stack,
-        gitops_push,
-    )
+    from tools.stacks import addons_install, bootstrap_cdk, deploy_all, deploy_stack  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.stacks import destroy_all, destroy_stack  # noqa: F401
@@ -447,8 +441,6 @@ if _IS_RELOAD and (
         "deploy_all",
         "bootstrap_cdk",
         "addons_install",
-        "gitops_push",
-        "argocd_bootstrap_identity",
         "destroy_stack",
         "destroy_all",
         "list_deployment_regions",
@@ -634,8 +626,6 @@ _PUBLIC_EXPORTS = [
     "analytics_user_add",
     "analytics_user_remove",
     "analytics_users_list",
-    "argocd_bootstrap_identity",
-    "argocd_ui_url",
     "assume_mcp_role",
     "audit_logged",
     "audit_logger",
@@ -671,6 +661,7 @@ _PUBLIC_EXPORTS = [
     "cost_trend",
     "cost_workloads",
     "create_reservation",
+    "crossplane_status",
     "dag_run",
     "dag_validate",
     "delete_inference",
@@ -715,7 +706,7 @@ _PUBLIC_EXPORTS = [
     "get_model_uri",
     "get_pod_logs",
     "get_project_version",
-    "gitops_push",
+    "gitops_status",
     "images_build",
     "images_cleanup",
     "images_delete_repo",

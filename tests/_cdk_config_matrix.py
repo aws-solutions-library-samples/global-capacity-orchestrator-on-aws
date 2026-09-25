@@ -716,44 +716,43 @@ CONFIGS.extend(
                 },
             },
         ),
-        # EKS Capabilities, all three types on with the batteries-included
-        # GitOps hand-off: Argo CD (Identity Center + a role mapping, a
-        # private-endpoint VPCE, repository-credential grants), the
-        # GCO-managed CodeCommit repository with the retain removal policy,
-        # ACK with role selectors and kro. Exercises the capability roles, the
-        # AWS::EKS::Capability resources, the CodeCommit repository + seed
-        # asset, and the {{ARGOCD_*}} applier tokens through the real loader.
+        # The EKS Capabilities (ACK with role selectors and a managed-policy
+        # grant, and kro) together with the self-managed platform add-ons:
+        # Argo CD with the GitOps hand-off and the repo-server autoscaler, and
+        # Crossplane with Crossview. Exercises the capability roles and their
+        # managed-policy attachment, the AWS::EKS::Capability resources, the
+        # kro tenant-RBAC token, the {{ARGOCD_*}} / {{CROSSPLANE_ENABLED}}
+        # applier tokens, the argocd chart values and the longer add-on
+        # uninstall tasks through the real loader.
         (
             "eks-capabilities-enabled",
             {
                 "eks_capabilities": {
-                    "argocd": {
-                        "enabled": True,
-                        "idc_instance_arn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
-                        "idc_region": "us-east-2",
-                        "rbac_role_mappings": [
-                            {
-                                "role": "ADMIN",
-                                "identities": [{"id": "9067f2a3-c1d4-4e5f", "type": "SSO_GROUP"}],
-                            }
-                        ],
-                        "vpce_ids": ["vpce-0123456789abcdef0"],
-                        "repo_credentials_secret_arns": [
-                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:gco/git-token-AbCdEf"
-                        ],
-                        "gitops": {
-                            "enabled": True,
-                            "sync_policy": "automated",
-                            "codecommit": {"removal_policy": "retain"},
-                        },
-                    },
                     "ack": {
                         "enabled": True,
                         "disabled_services": ["ec2"],
                         "assume_role_arns": ["arn:aws:iam::123456789012:role/ack-s3-controller"],
+                        "iam_policy_arns": ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"],
                     },
                     "kro": {"enabled": True},
-                }
+                },
+                "helm": {
+                    "argocd": {
+                        "enabled": True,
+                        "source_repos": ["https://github.com/example/*"],
+                        "gitops": {
+                            "repo_url": "https://github.com/example/gco-tenants.git",
+                            "revision": "main",
+                            "path": "clusters/{region}",
+                            "sync_policy": "automated",
+                        },
+                        "repo_server": {
+                            "replicas": 2,
+                            "autoscaling": {"enabled": True, "max_replicas": 6},
+                        },
+                    },
+                    "crossplane": {"enabled": True},
+                },
             },
         ),
     ]
@@ -848,6 +847,10 @@ _NAG_CONFIG_NAMES = {
     # it, so its acknowledgments were only ever exercised by the live examples
     # harness — which is where the missing X-Ray acknowledgment surfaced.
     "vector-store-enabled",
+    # The EKS Capability roles are an IAM surface no other config builds: one
+    # role per capability trusted by capabilities.eks.amazonaws.com, and the
+    # ACK role's opt-in AWS managed policies with their acknowledgment.
+    "eks-capabilities-enabled",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

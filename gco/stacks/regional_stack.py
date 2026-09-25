@@ -93,7 +93,6 @@ from aws_cdk import (
     Stack,
     Validations,
 )
-from aws_cdk import aws_codecommit as codecommit
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_efs as efs
@@ -115,15 +114,17 @@ from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
+from gco.argocd_config import (
+    argocd_chart_values,
+    compute_argocd_replacements,
+    validate_argocd_config,
+)
 from gco.config.config_loader import ConfigLoader
 from gco.eks_capabilities_config import (
-    ARGOCD_NAMESPACE,
     CAPABILITY_TYPE_API_NAMES,
-    GITOPS_CODECOMMIT_DEFAULT_BRANCH,
     compute_eks_capabilities_replacements,
     enabled_capability_types,
-    gitops_codecommit_enabled_in_region,
-    gitops_codecommit_repository_name,
+    kro_kubernetes_username,
     normalize_eks_capabilities_config,
 )
 from gco.inference_proxy_config import (
@@ -389,6 +390,8 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
         "slurm",
         "yunikorn",
         "kubeflow_trainer",
+        "argocd",
+        "crossplane",
         "kueue",
     }
 )
@@ -396,6 +399,18 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
 #: Charts that are mandatory platform components; the cdk.json toggle is
 #: ignored for these (see _get_enabled_charts for the rationale).
 _MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
+
+#: Opt-in platform add-ons: an absent cdk.json block (or one without
+#: ``enabled``) means OFF, unlike the historical charts whose missing key
+#: defaults to on. A fork or an older cdk.json that predates the add-on must
+#: never start installing Argo CD or Crossplane on its next deploy.
+_OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
+
+#: Stack-delete Helm uninstall task budgets (minutes) for charts whose
+#: installer first deletes their custom resources (every discovered type,
+#: namespaced then cluster-scoped, with a finalizer-strip retry) before the
+#: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
+_UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {"keda": 4, "argocd": 4, "crossplane": 6}
 
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant
@@ -560,12 +575,15 @@ def _helm_chart_enabled(
     kubectl-applier gate replacements so the installed chart set and the
     gated manifests can never disagree: mandatory charts are always on, a
     context override forces on, and otherwise the cdk.json toggle decides
-    (missing key defaults to enabled, matching the historical behavior).
+    (missing key defaults to enabled, matching the historical behavior —
+    except the opt-in add-ons in ``_OFF_BY_DEFAULT_CHART_KEYS``, which
+    default to disabled).
     """
     if config_key in _MANDATORY_CHART_KEYS or config_key in overrides:
         return True
+    default = config_key not in _OFF_BY_DEFAULT_CHART_KEYS
     chart_config = helm_config.get(config_key, {})
-    return bool(chart_config.get("enabled", True)) if isinstance(chart_config, dict) else True
+    return bool(chart_config.get("enabled", default)) if isinstance(chart_config, dict) else default
 
 
 def _compute_kubectl_scheduler_replacements(
@@ -1635,9 +1653,9 @@ class GCORegionalStack(Stack):
         # exactly today's entries.
         self._create_developer_access_entries(eks_config)
 
-        # EKS Capabilities (eks_capabilities): AWS-managed Argo CD, ACK and kro
-        # attached as AWS::EKS::Capability resources. Every type is off by
-        # default; the shipped cdk.json synthesizes exactly today's template.
+        # EKS Capabilities (eks_capabilities): AWS-managed ACK and kro attached
+        # as AWS::EKS::Capability resources. Every type is off by default; the
+        # shipped cdk.json synthesizes exactly today's template.
         self._create_eks_capabilities()
 
         # Create IRSA role for service account to access secrets
@@ -1705,10 +1723,9 @@ class GCORegionalStack(Stack):
                 access_policies=[access_policy],
             )
 
-    # ── EKS Capabilities (AWS-managed Argo CD / ACK / kro) ────────────────
+    # ── EKS Capabilities (AWS-managed ACK / kro) ─────────────────────────
     #: cdk.json type name -> construct-id / CfnOutput suffix.
     _EKS_CAPABILITY_CONSTRUCT_SUFFIXES: ClassVar[dict[str, str]] = {
-        "argocd": "ArgoCd",
         "ack": "Ack",
         "kro": "Kro",
     }
@@ -1727,6 +1744,20 @@ class GCORegionalStack(Stack):
             return normalize_eks_capabilities_config(None)
         return raw
 
+    def _argocd_config(self) -> dict[str, Any]:
+        """The validated ``helm.argocd`` block, or the all-default block.
+
+        Same optional-accessor posture as :meth:`_eks_capabilities_config`:
+        config doubles without ``get_argocd_config`` (or a ``MagicMock``
+        returning a non-dict) read as the shipped default (Argo CD off, no
+        GitOps hand-off).
+        """
+        getter = getattr(self.config, "get_argocd_config", None)
+        raw = getter() if callable(getter) else None
+        if not isinstance(raw, dict):
+            return validate_argocd_config(None)
+        return raw
+
     def _create_eks_capabilities(self) -> None:
         """Attach the enabled EKS Capabilities to this region's cluster.
 
@@ -1736,41 +1767,25 @@ class GCORegionalStack(Stack):
 
         * one capability IAM role trusted by ``capabilities.eks.amazonaws.com``
           (``sts:AssumeRole`` + ``sts:TagSession``, the documented trust
-          policy). The role carries only what the operator configured: Argo CD
-          may read exactly the ``repo_credentials_secret_arns`` Git-credential
-          secrets, ACK may assume exactly the ``assume_role_arns`` (ACK IAM Role
-          Selectors), kro gets no AWS permissions at all;
+          policy). The role carries only what the operator configured: ACK
+          may assume exactly the ``assume_role_arns`` (ACK IAM Role Selectors)
+          and holds exactly the ``iam_policy_arns`` managed policies; kro gets
+          no AWS permissions at all (it only needs Kubernetes RBAC, which
+          ``07-kro-tenant-access.yaml`` grants in the tenant namespaces);
         * one ``AWS::EKS::Capability`` named ``<project>-<type>`` (a
           deterministic name the CLI and the live checks describe directly),
           with ``RETAIN`` delete propagation (the only supported value) so
           workloads the tools created survive a capability removal;
-        * ``CfnOutput``s for the capability and role ARNs and, for Argo CD, the
-          hosted server URL operators sign in to;
-        * when the GitOps hand-off uses ``source: codecommit``, the
-          GCO-managed CodeCommit repository the root ``Application`` reads
-          (see :meth:`_create_gitops_codecommit_repository`), which the Argo CD
-          capability role may ``codecommit:GitPull``.
-
-        The convergence trigger in :meth:`_create_kubectl_lambda` depends on
-        every capability so the Argo CD CRDs exist before the applier renders
-        ``07-argocd-cluster-access.yaml`` / ``08-argocd-gitops.yaml``.
+        * ``CfnOutput``s for the capability and role ARNs.
         """
         self.eks_capabilities: dict[str, eks_l1.CfnCapability] = {}
         self.eks_capability_roles: dict[str, iam.Role] = {}
-        self.gitops_repository: codecommit.Repository | None = None
         self.eks_capabilities_config = self._eks_capabilities_config()
         enabled_types = enabled_capability_types(
             self.eks_capabilities_config, self.deployment_region
         )
         if not enabled_types:
             return
-
-        if gitops_codecommit_enabled_in_region(
-            self.eks_capabilities_config, self.deployment_region
-        ):
-            # Created before the Argo CD role so the role's inline policy can
-            # name the repository ARN.
-            self.gitops_repository = self._create_gitops_codecommit_repository()
 
         project_name = self.config.get_project_name()
         for type_name in enabled_types:
@@ -1809,124 +1824,15 @@ class GCORegionalStack(Stack):
                 value=role.role_arn,
                 description=f"IAM role the {type_name} EKS Capability runs as",
             )
-            if type_name == "argocd":
-                CfnOutput(
-                    self,
-                    "EksCapabilityArgoCdServerUrl",
-                    value=capability.attr_configuration_argo_cd_server_url,
-                    description="Hosted Argo CD server URL (IAM Identity Center sign-in)",
-                )
-
-    #: Seed content of every GCO-managed GitOps repository: a README only, so
-    #: the root Application is Synced/Healthy (zero resources) from the first
-    #: reconciliation instead of reporting an empty-repository error until the
-    #: operator's first ``gitops push``. CloudFormation applies ``Code`` at
-    #: repository creation only; later pushes are never overwritten.
-    _GITOPS_CODECOMMIT_SEED_DIR: ClassVar[Path] = (
-        Path(__file__).resolve().parents[2] / "examples" / "gitops" / "codecommit-seed"
-    )
-
-    def _create_gitops_codecommit_repository(self) -> codecommit.Repository:
-        """The per-cluster CodeCommit repository behind ``gitops.source: codecommit``.
-
-        One repository per selected cluster, named ``<cluster>-gitops`` (so the
-        inventory scanners recognize it by the project prefix), seeded from
-        :attr:`_GITOPS_CODECOMMIT_SEED_DIR` on the ``main`` branch. Operators
-        fill it with ``gco stacks capabilities gitops push``, which mirrors a
-        local directory into the branch through the CodeCommit API — no Git
-        credentials, no repository Secret: the hosted Argo CD authenticates to
-        CodeCommit with the capability role's ``codecommit:GitPull`` grant.
-        ``codecommit.removal_policy`` decides whether ``cdk destroy`` deletes
-        the repository (the default; the operator's checkout is the source of
-        truth) or retains its history.
-        """
-        gitops = self.eks_capabilities_config["argocd"]["gitops"]
-        retain = str(gitops["codecommit"]["removal_policy"]) == "retain"
-        cluster_name = self.cluster_config.cluster_name
-        repository = codecommit.Repository(
-            self,
-            "EksCapabilityArgoCdGitOpsRepository",
-            repository_name=gitops_codecommit_repository_name(cluster_name),
-            description=(
-                f"GCO GitOps hand-off for cluster {cluster_name}: the hosted Argo CD "
-                "capability reconciles this repository into the tenant namespaces. "
-                "Push with `gco stacks capabilities gitops push`."
-            ),
-            code=codecommit.Code.from_directory(
-                str(self._GITOPS_CODECOMMIT_SEED_DIR), GITOPS_CODECOMMIT_DEFAULT_BRANCH
-            ),
-        )
-        repository.apply_removal_policy(RemovalPolicy.RETAIN if retain else RemovalPolicy.DESTROY)
-        CfnOutput(
-            self,
-            "EksCapabilityArgoCdGitOpsRepositoryName",
-            value=repository.repository_name,
-            description="GCO-managed CodeCommit repository the Argo CD GitOps hand-off reads",
-        )
-        CfnOutput(
-            self,
-            "EksCapabilityArgoCdGitOpsRepositoryCloneUrlHttp",
-            value=repository.repository_clone_url_http,
-            description=(
-                "HTTPS clone URL of the GitOps repository (the root Application's repoURL)"
-            ),
-        )
-        return repository
 
     def _create_eks_capability_role(self, type_name: str, block: Mapping[str, Any]) -> iam.Role:
         """The IAM role one capability assumes, carrying only configured grants."""
         suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
         statements: list[iam.PolicyStatement] = []
         wildcard_arns: list[str] = []
-        if type_name == "argocd":
-            if self.gitops_repository is not None:
-                # Direct CodeCommit integration: the hosted Argo CD clones with
-                # the capability role, so GitPull on exactly this repository is
-                # the whole grant (no repository Secret involved).
-                statements.append(
-                    iam.PolicyStatement(
-                        sid="PullGitOpsRepository",
-                        effect=iam.Effect.ALLOW,
-                        actions=["codecommit:GitPull"],
-                        resources=[self.gitops_repository.repository_arn],
-                    )
-                )
-            secret_arns = [str(arn) for arn in block.get("repo_credentials_secret_arns") or []]
-            if secret_arns:
-                statements.append(
-                    iam.PolicyStatement(
-                        sid="ReadGitRepositoryCredentials",
-                        effect=iam.Effect.ALLOW,
-                        actions=[
-                            "secretsmanager:GetSecretValue",
-                            "secretsmanager:DescribeSecret",
-                        ],
-                        resources=secret_arns,
-                    )
-                )
-                wildcard_arns.extend(arn for arn in secret_arns if "*" in arn)
-            # Secrets encrypted with a customer-managed key also need Decrypt on
-            # that key; confining it to Secrets Manager in this region
-            # (kms:ViaService) is the same posture the job-pod role takes for
-            # S3. Secrets under the AWS-managed aws/secretsmanager key need no
-            # grant, so nothing is emitted unless the operator names keys.
-            kms_key_arns = [str(arn) for arn in block.get("repo_credentials_kms_key_arns") or []]
-            if kms_key_arns:
-                statements.append(
-                    iam.PolicyStatement(
-                        sid="DecryptGitRepositoryCredentials",
-                        effect=iam.Effect.ALLOW,
-                        actions=["kms:Decrypt"],
-                        resources=kms_key_arns,
-                        conditions={
-                            "StringEquals": {
-                                "kms:ViaService": f"secretsmanager.{self.region}.{self.url_suffix}"
-                            }
-                        },
-                    )
-                )
-                wildcard_arns.extend(arn for arn in kms_key_arns if "*" in arn)
-        elif type_name == "ack":
+        managed_policies: list[iam.IManagedPolicy] = []
+        aws_managed_policy_names: list[str] = []
+        if type_name == "ack":
             target_role_arns = [str(arn) for arn in block.get("assume_role_arns") or []]
             if target_role_arns:
                 statements.append(
@@ -1938,11 +1844,27 @@ class GCORegionalStack(Stack):
                     )
                 )
                 wildcard_arns.extend(arn for arn in target_role_arns if "*" in arn)
+            # The documented "simple permission setup": service permissions on
+            # the capability role itself. Only the managed policies the
+            # operator names are attached. AWS managed policies are rebuilt
+            # from their name so the ARN follows this stack's partition.
+            for index, raw_arn in enumerate(block.get("iam_policy_arns") or []):
+                arn = str(raw_arn)
+                if ":iam::aws:policy/" in arn:
+                    name = arn.split(":policy/", 1)[1]
+                    aws_managed_policy_names.append(name)
+                    managed_policies.append(iam.ManagedPolicy.from_aws_managed_policy_name(name))
+                else:
+                    managed_policies.append(
+                        iam.ManagedPolicy.from_managed_policy_arn(
+                            self, f"EksCapability{suffix}Policy{index}", arn
+                        )
+                    )
 
         # role_name intentionally omitted - let CDK generate a unique name.
         # inline_policies keeps the grants inside the AWS::IAM::Role resource
         # itself, so the capability never observes a role whose policy has
-        # not been attached yet.
+        # not been attached yet; managed_policies attach the same way.
         role = iam.Role(
             self,
             f"EksCapability{suffix}Role",
@@ -1953,11 +1875,11 @@ class GCORegionalStack(Stack):
                 if statements
                 else None
             ),
+            managed_policies=managed_policies or None,
         )
         if wildcard_arns:
-            # An operator may deliberately configure an ARN pattern (a Secrets
-            # Manager ARN with its random suffix wildcarded, or one role per
-            # account under a naming scheme). Acknowledge exactly those
+            # An operator may deliberately configure an ARN pattern (one role
+            # per account under a naming scheme). Acknowledge exactly those
             # patterns so cdk-nag still flags any other wildcard on this role.
             from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
@@ -1975,41 +1897,29 @@ class GCORegionalStack(Stack):
                     }
                 ],
             )
+        if aws_managed_policy_names:
+            from gco.stacks.nag_suppressions import suppress_managed_policy_opt_in
+
+            for name in sorted(set(aws_managed_policy_names)):
+                # ACK manages AWS resources on the operator's behalf; which AWS
+                # managed policies it holds is the operator's explicit choice,
+                # acknowledged policy by policy so any other managed policy on
+                # this role still surfaces.
+                suppress_managed_policy_opt_in(
+                    role,
+                    managed_policy_name=name,
+                    reason=(
+                        f"eks_capabilities.{type_name}.iam_policy_arns names this AWS managed "
+                        "policy explicitly in cdk.json (off by default: the capability role "
+                        "holds no service permissions unless the operator lists them)."
+                    ),
+                )
         return role
 
     def _eks_capability_configuration(
         self, type_name: str, block: Mapping[str, Any]
     ) -> eks_l1.CfnCapability.CapabilityConfigurationProperty | None:
         """Type-specific ``Configuration``; kro takes none."""
-        if type_name == "argocd":
-            vpce_ids = [str(vpce_id) for vpce_id in block.get("vpce_ids") or []]
-            idc_region = str(block.get("idc_region") or "").strip()
-            return eks_l1.CfnCapability.CapabilityConfigurationProperty(
-                argo_cd=eks_l1.CfnCapability.ArgoCdProperty(
-                    aws_idc=eks_l1.CfnCapability.AwsIdcProperty(
-                        idc_instance_arn=str(block["idc_instance_arn"]),
-                        idc_region=idc_region or None,
-                    ),
-                    namespace=ARGOCD_NAMESPACE,
-                    network_access=(
-                        eks_l1.CfnCapability.NetworkAccessProperty(vpce_ids=vpce_ids)
-                        if vpce_ids
-                        else None
-                    ),
-                    rbac_role_mappings=[
-                        eks_l1.CfnCapability.ArgoCdRoleMappingProperty(
-                            role=str(mapping["role"]),
-                            identities=[
-                                eks_l1.CfnCapability.SsoIdentityProperty(
-                                    id=str(identity["id"]), type=str(identity["type"])
-                                )
-                                for identity in mapping["identities"]
-                            ],
-                        )
-                        for mapping in block.get("rbac_role_mappings") or []
-                    ],
-                )
-            )
         if type_name == "ack":
             disabled_services = [str(service) for service in block.get("disabled_services") or []]
             return eks_l1.CfnCapability.CapabilityConfigurationProperty(
@@ -3869,10 +3779,6 @@ class GCORegionalStack(Stack):
             # role pods; per-endpoint spec.mooncake.store.master_image overrides.
             "{{MOONCAKE_MASTER_IMAGE}}": MOONCAKE_MASTER_DEFAULT_IMAGE,
             "{{CLUSTER_NAME}}": self.cluster.cluster_name,
-            # The hosted Argo CD capability identifies clusters by EKS ARN (its
-            # cluster Secret ``server`` field and AppProject destinations), so
-            # the ARN is a first-class token like the name.
-            "{{EKS_CLUSTER_ARN}}": self.cluster.cluster_arn,
             "{{REGION}}": self.deployment_region,
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,
             "{{SERVICE_ACCOUNT_ROLE_ARN}}": self.service_account_role.role_arn,
@@ -4060,6 +3966,22 @@ class GCORegionalStack(Stack):
                 ),
             )
         )
+        # Self-managed platform add-ons: the same enablement helper selects the
+        # charts, so the post-Helm Argo CD fence / root Application and the
+        # Crossplane function + RBAC apply exactly when their chart does.
+        image_replacements.update(
+            compute_argocd_replacements(
+                self._argocd_config(),
+                enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "argocd"),
+                region=self.deployment_region,
+                # The configured (literal) cluster name renders the GitOps
+                # path placeholders; a token would turn the path into a
+                # deploy-time join for no gain.
+                cluster_name=self.cluster_config.cluster_name,
+            )
+        )
+        if _helm_chart_enabled(_helm_config, _helm_overrides, "crossplane"):
+            image_replacements["{{CROSSPLANE_ENABLED}}"] = "true"
 
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
@@ -4276,24 +4198,23 @@ class GCORegionalStack(Stack):
                 self.fsx_security_group.security_group_id
             )
 
-        # Argo CD capability manifests (07-argocd-cluster-access.yaml,
-        # 08-argocd-gitops.yaml). Tokens are emitted only when the capability
-        # (and, for 08, the GitOps hand-off) is enabled for this region; a
-        # disabled feature leaves them unreplaced so the applier skips the
-        # file and prunes the registered inventory.
-        argocd_role = getattr(self, "eks_capability_roles", {}).get("argocd")
+        # kro capability tenant RBAC (07-kro-tenant-access.yaml). The token is
+        # emitted only when kro is enabled for this region; a disabled
+        # capability leaves it unreplaced so the applier skips the file and
+        # prunes the registered inventory. The capability acts as the
+        # assumed-role session <role>/KRO, which is the RBAC subject.
+        kro_role = getattr(self, "eks_capability_roles", {}).get("kro")
         image_replacements.update(
             compute_eks_capabilities_replacements(
-                getattr(self, "eks_capabilities_config", None)
-                or normalize_eks_capabilities_config(None),
-                region=self.deployment_region,
-                # The configured (literal) cluster name: it also names the
-                # GCO-managed CodeCommit repository, so a token here would turn
-                # the repository URL into a deploy-time join for no gain.
-                cluster_name=self.cluster_config.cluster_name,
-                cluster_arn=self.cluster.cluster_arn,
-                argocd_role_arn=argocd_role.role_arn if argocd_role is not None else None,
-                url_suffix=self.url_suffix,
+                kro_username=(
+                    kro_kubernetes_username(
+                        partition=self.partition,
+                        account=self.account,
+                        role_name=kro_role.role_name,
+                    )
+                    if kro_role is not None
+                    else None
+                )
             )
         )
 
@@ -4382,12 +4303,6 @@ class GCORegionalStack(Stack):
                 converge_trigger.node.add_dependency(access_entry)
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
-        # EKS Capabilities install their CRDs (Argo CD's Application and
-        # AppProject) into the cluster once ACTIVE; the base manifest pass
-        # renders objects of those kinds, so it must not start before every
-        # enabled capability has stabilized.
-        for capability in getattr(self, "eks_capabilities", {}).values():
-            converge_trigger.node.add_dependency(capability)
 
         # Deletion must run in the opposite safety order: synchronous Helm
         # teardown first (quiescing endpoint writers and removing Gateway
@@ -4779,6 +4694,10 @@ class GCORegionalStack(Stack):
           retention, the gp3 ``storageClassName``, and the GPU/Neuron/EFA
           node-exporter tolerations) over the static hardening values in
           ``charts.yaml`` when ``cluster_observability.enabled`` is true.
+        - ``argocd``: the repo-server size and optional CPU autoscaler from
+          ``helm.argocd.repo_server`` (``gco.argocd_config.argocd_chart_values``)
+          whenever the chart installs, by the cdk.json toggle or a run-scoped
+          ``helm_enabled_overrides``.
 
         The result is never empty because Gateway API requires the controller.
         """
@@ -4816,6 +4735,15 @@ class GCORegionalStack(Stack):
 
         if self._mlflow_active():
             overrides["mlflow"] = self._mlflow_chart_values()
+
+        # The same enablement helper that selects the chart, so a run-scoped
+        # helm_enabled_overrides=argocd install gets the configured sizing too.
+        helm_config = self.node.try_get_context("helm") or {}
+        enabled_overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
+        if _helm_chart_enabled(helm_config, enabled_overrides, "argocd"):
+            overrides["argocd"] = {"values": argocd_chart_values(self._argocd_config())}
 
         return overrides
 
@@ -4996,6 +4924,9 @@ class GCORegionalStack(Stack):
             ("slurm", ["slinky-slurm-operator", "slinky-slurm"]),
             ("yunikorn", ["yunikorn"]),
             ("kubeflow_trainer", ["kubeflow-trainer"]),
+            ("argocd", ["argocd"]),
+            # One toggle installs Crossplane and its Crossview dashboard.
+            ("crossplane", ["crossplane", "crossview"]),
             ("kueue", ["kueue"]),  # Must be last
         ]
 
@@ -5610,7 +5541,9 @@ class GCORegionalStack(Stack):
         )
 
         def _uninstall_task(chart_name: str) -> sfn_tasks.LambdaInvoke:
-            timeout_minutes = 5 if chart_name == lbc_chart else 4 if chart_name == "keda" else 2
+            timeout_minutes = (
+                5 if chart_name == lbc_chart else _UNINSTALL_TIMEOUT_MINUTES.get(chart_name, 2)
+            )
             task = sfn_tasks.LambdaInvoke(
                 self,
                 f"HelmUninstallChart-{chart_name}",
@@ -5755,10 +5688,14 @@ class GCORegionalStack(Stack):
             "HelmTeardownStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(start_state),
             state_machine_type=sfn.StateMachineType.STANDARD,
-            # 16m drain + 3m quiesce + max(15m endpoint cleanup, 24m ordinary
-            # chart cleanup) + 5m Gateway deletion + 5m LBC uninstall = 53m.
-            # Three minutes of workflow margin leave another three minutes for
-            # the provider's final poll inside CloudFormation's one-hour ceiling.
+            # 16m drain + 3m quiesce + max(15m endpoint cleanup, the ordinary
+            # chart chain) + 5m Gateway deletion + 5m LBC uninstall. The chain's
+            # per-chart task timeouts (2m; _UNINSTALL_TIMEOUT_MINUTES for charts
+            # whose custom resources are deleted first) are ceilings for a
+            # stalled release, not expected durations: a chart that is not
+            # installed returns in seconds, so the chain's real length is set by
+            # the installed charts. The 56m cap leaves three minutes for the
+            # provider's final poll inside CloudFormation's one-hour ceiling.
             timeout=Duration.minutes(56),
             tracing_enabled=True,
             logs=sfn.LogOptions(destination=teardown_log_group, level=sfn.LogLevel.ALL),

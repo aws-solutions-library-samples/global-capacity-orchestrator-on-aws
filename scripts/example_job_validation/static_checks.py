@@ -12,6 +12,8 @@ builds on the same parse.
 
 from __future__ import annotations
 
+import copy
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from typing import Any
 import yaml
 
 from .specs import (
+    CAPABILITY_TYPES,
     COMPANION,
     DAG_RUN,
     EXAMPLE_SPECS,
@@ -31,6 +34,26 @@ from .specs import (
 
 #: Namespaces the platform provisions for user workloads.
 _WORKLOAD_NAMESPACES = frozenset({"gco-jobs", "gco-inference"})
+
+#: This repository's clone URLs. An Argo CD example must source one of them so
+#: the offline checks (and the live waiter) can read exactly what it syncs.
+THIS_REPOSITORY_URLS = frozenset(
+    {
+        "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws",
+        "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git",
+    }
+)
+
+#: The self-managed Argo CD's namespace, fenced project and in-cluster server
+#: (gco/argocd_config.py; post-helm-argocd-access.yaml).
+_ARGOCD_NAMESPACE = "argocd"
+_ARGOCD_PROJECT = "gco-tenants"
+_IN_CLUSTER_SERVER = "https://kubernetes.default.svc"
+
+#: A whole-line Go template action (``{{ if ... }}`` / ``{{ end }}``). The
+#: static read drops these lines; inline actions sit inside quoted YAML
+#: strings, so what is left parses as the YAML the function renders.
+_TEMPLATE_ACTION_LINE = re.compile(r"^[ \t]*\{\{.*\}\}[ \t]*$", re.MULTILINE)
 
 
 @dataclass
@@ -199,14 +222,145 @@ def check_transport_acceptance(parsed: ParsedExample) -> list[StaticFinding]:
     return findings
 
 
+def _is_argocd_application(doc: dict[str, Any]) -> bool:
+    return doc.get("kind") == "Application" and str(doc.get("apiVersion", "")).startswith(
+        "argoproj.io/"
+    )
+
+
+def application_source_documents(repo_root: Path, doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """The manifests an Argo CD Application syncs from this repository, as Argo CD applies them.
+
+    Documents without a namespace get the Application's destination namespace
+    (what Argo CD does). Returns ``[]`` when the Application sources another
+    repository or a path outside this checkout: there is nothing to read.
+    """
+    spec = doc.get("spec") or {}
+    source = spec.get("source") or {}
+    if str(source.get("repoURL", "")) not in THIS_REPOSITORY_URLS:
+        return []
+    root = repo_root.resolve()
+    directory = (root / str(source.get("path", ""))).resolve()
+    if not directory.is_relative_to(root) or not directory.is_dir():
+        return []
+    destination = str((spec.get("destination") or {}).get("namespace", ""))
+    documents: list[dict[str, Any]] = []
+    for path in sorted([*directory.glob("*.yaml"), *directory.glob("*.yml")]):
+        for loaded in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not isinstance(loaded, dict):
+                continue
+            item = copy.deepcopy(loaded)
+            metadata = item.setdefault("metadata", {})
+            if not metadata.get("namespace"):
+                metadata["namespace"] = destination
+            documents.append(item)
+    return documents
+
+
+def _tenant_namespace(namespace: object) -> object:
+    """A CEL / Go-template namespace expression resolves to the instance's tenant namespace.
+
+    Instances live in gco-jobs or gco-inference; gco-jobs carries the
+    governance, so the offline checks evaluate templated namespaces there.
+    """
+    if namespace is None or (
+        isinstance(namespace, str) and ("${" in namespace or "{{" in namespace)
+    ):
+        return "gco-jobs"
+    return namespace
+
+
+def embedded_workload_documents(repo_root: Path, doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """What an Application, a kro RGD or a go-templating Composition will create.
+
+    * Argo CD Application: the manifests at its Git path in this checkout.
+    * kro ResourceGraphDefinition: each ``resources[].template``.
+    * Crossplane Composition: each document an inline ``GoTemplate`` renders
+      (the composite's own status document excluded).
+
+    Templated namespaces resolve to gco-jobs (see :func:`_tenant_namespace`).
+    """
+    kind = doc.get("kind")
+    api_version = str(doc.get("apiVersion", ""))
+    spec = doc.get("spec") or {}
+    if _is_argocd_application(doc):
+        return application_source_documents(repo_root, doc)
+    templates: list[dict[str, Any]] = []
+    if kind == "ResourceGraphDefinition" and api_version.startswith("kro.run/"):
+        templates = [
+            copy.deepcopy(resource["template"])
+            for resource in spec.get("resources") or []
+            if isinstance(resource, dict) and isinstance(resource.get("template"), dict)
+        ]
+    elif kind == "Composition" and api_version.startswith("apiextensions.crossplane.io/"):
+        composite = spec.get("compositeTypeRef") or {}
+        for step in spec.get("pipeline") or []:
+            step_input = (step or {}).get("input") or {}
+            if step_input.get("kind") != "GoTemplate" or step_input.get("source") != "Inline":
+                continue
+            text = _TEMPLATE_ACTION_LINE.sub(
+                "", str((step_input.get("inline") or {}).get("template", ""))
+            )
+            templates.extend(
+                item
+                for item in yaml.safe_load_all(text)
+                if isinstance(item, dict)
+                and (item.get("apiVersion"), item.get("kind"))
+                != (composite.get("apiVersion"), composite.get("kind"))
+            )
+    for template in templates:
+        metadata = template.setdefault("metadata", {})
+        metadata["namespace"] = _tenant_namespace(metadata.get("namespace"))
+    return templates
+
+
 def check_namespaces(parsed: ParsedExample) -> list[StaticFinding]:
-    """Namespaced example documents must target a provisioned workload namespace."""
+    """Namespaced example documents must target a provisioned workload namespace.
+
+    An Argo CD Application is the one exception: it lives in the argocd
+    namespace by design, so it must instead stay inside the fence — the
+    gco-tenants project, the in-cluster server and a tenant destination.
+    """
     findings: list[StaticFinding] = []
     for doc in parsed.documents:
         metadata = doc.get("metadata") or {}
         namespace = metadata.get("namespace")
         kind = str(doc.get("kind", ""))
         if kind in {"ResourceFlavor", "ClusterQueue"}:  # cluster-scoped
+            continue
+        if _is_argocd_application(doc):
+            spec = doc.get("spec") or {}
+            destination = spec.get("destination") or {}
+            problems = [
+                problem
+                for problem, failed in (
+                    (
+                        f"namespace {namespace!r} is not {_ARGOCD_NAMESPACE!r}",
+                        namespace != _ARGOCD_NAMESPACE,
+                    ),
+                    (
+                        f"project {spec.get('project')!r} is not {_ARGOCD_PROJECT!r}",
+                        spec.get("project") != _ARGOCD_PROJECT,
+                    ),
+                    (
+                        f"destination server {destination.get('server')!r} is not the in-cluster server",
+                        destination.get("server") != _IN_CLUSTER_SERVER,
+                    ),
+                    (
+                        f"destination namespace {destination.get('namespace')!r} is not a workload namespace",
+                        destination.get("namespace") not in _WORKLOAD_NAMESPACES,
+                    ),
+                )
+                if failed
+            ]
+            findings.append(
+                StaticFinding(
+                    example=parsed.name,
+                    check=f"Argo CD fence ({kind}/{metadata.get('name')})",
+                    passed=not problems,
+                    detail="; ".join(problems),
+                )
+            )
             continue
         if namespace is None:
             continue
@@ -222,15 +376,75 @@ def check_namespaces(parsed: ParsedExample) -> list[StaticFinding]:
 
 
 def check_spec_shape(name: str) -> StaticFinding:
-    """Spec fields must use known enumerations."""
+    """Spec fields must use known enumerations and name real companions."""
     spec = EXAMPLE_SPECS[name]
-    ok = spec.submission in SUBMISSION_PATHS
+    problems: list[str] = []
+    if spec.submission not in SUBMISSION_PATHS:
+        problems.append(f"unknown submission path {spec.submission!r}")
+    unknown_capabilities = sorted(set(spec.capability_overrides) - set(CAPABILITY_TYPES))
+    if unknown_capabilities:
+        problems.append(f"unknown EKS capability type(s) {unknown_capabilities}")
+    if spec.ack_iam_policy_arns and "ack" not in spec.capability_overrides:
+        problems.append("ack_iam_policy_arns needs capability_overrides to include 'ack'")
+    if spec.companion:
+        companion = EXAMPLE_SPECS.get(spec.companion)
+        if companion is None or companion.submission != COMPANION:
+            problems.append(f"companion {spec.companion!r} is not a companion-artifact spec")
     return StaticFinding(
         example=name,
         check="spec shape",
-        passed=ok,
-        detail="" if ok else f"unknown submission path {spec.submission!r}",
+        passed=not problems,
+        detail="; ".join(problems),
     )
+
+
+def check_embedded_workloads(repo_root: Path, parsed: ParsedExample) -> list[StaticFinding]:
+    """What an Application syncs, or an RGD / Composition composes, meets the example rules.
+
+    These workloads never cross the GCO API, so nothing else checks them
+    before they reach a cluster: they must land in a workload namespace, pull
+    from trusted image sources and fit the default gco-jobs governance. An
+    Application must also source a non-empty path of this repository.
+    """
+    from gco.services.manifest_processor import validate_image_sources
+
+    findings: list[StaticFinding] = []
+    for doc in parsed.documents:
+        embedded = embedded_workload_documents(repo_root, doc)
+        label = f"{doc.get('kind')}/{(doc.get('metadata') or {}).get('name')}"
+        if _is_argocd_application(doc):
+            findings.append(
+                StaticFinding(
+                    example=parsed.name,
+                    check=f"Git source resolves ({label})",
+                    passed=bool(embedded),
+                    detail=""
+                    if embedded
+                    else "the Application must source a non-empty directory of this repository",
+                )
+            )
+        for item in embedded:
+            item_label = f"{label} -> {item.get('kind')}/{(item.get('metadata') or {}).get('name')}"
+            namespace = (item.get("metadata") or {}).get("namespace")
+            findings.append(
+                StaticFinding(
+                    example=parsed.name,
+                    check=f"embedded workload namespace ({item_label})",
+                    passed=namespace in _WORKLOAD_NAMESPACES,
+                    detail="" if namespace in _WORKLOAD_NAMESPACES else f"namespace {namespace!r}",
+                )
+            )
+            image_ok, image_reason = validate_image_sources(item)
+            findings.append(
+                StaticFinding(
+                    example=parsed.name,
+                    check=f"trusted image sources ({item_label})",
+                    passed=image_ok,
+                    detail=image_reason or "",
+                )
+            )
+        findings.extend(_governance_findings(parsed, embedded))
+    return findings
 
 
 #: Container resource dimensions governed by the gco-jobs LimitRange, mapped
@@ -260,10 +474,17 @@ def check_resource_governance_fit(parsed: ParsedExample) -> list[StaticFinding]:
     from contradicting each other again. Only gco-jobs-namespaced pod specs
     are checked: the LimitRange and ResourceQuota bind that namespace.
     """
+    return _governance_findings(parsed, parsed.documents)
+
+
+def _governance_findings(
+    parsed: ParsedExample, documents: list[dict[str, Any]]
+) -> list[StaticFinding]:
+    """LimitRange / ResourceQuota (and front-door cap) fit for ``documents``."""
     from gco.stacks.constants import DEFAULT_RESOURCE_QUOTA, parse_k8s_quantity
 
     findings: list[StaticFinding] = []
-    for doc in parsed.documents:
+    for doc in documents:
         kind = str(doc.get("kind", ""))
         metadata = doc.get("metadata") or {}
         if metadata.get("namespace", "gco-jobs") != "gco-jobs":
@@ -409,4 +630,5 @@ def run_static_checks(repo_root: Path, names: list[str] | None = None) -> list[S
         findings.extend(check_transport_acceptance(parsed))
         findings.extend(check_namespaces(parsed))
         findings.extend(check_resource_governance_fit(parsed))
+        findings.extend(check_embedded_workloads(repo_root, parsed))
     return findings

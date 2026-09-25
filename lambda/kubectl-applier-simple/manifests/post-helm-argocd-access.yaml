@@ -1,109 +1,113 @@
-# Argo CD EKS Capability — cluster registration and Kubernetes RBAC.
+# Self-managed Argo CD — tenant RBAC and the fenced AppProject.
 #
-# Applied only when cdk.json eks_capabilities.argocd is enabled for this
-# region: the regional stack resolves {{ARGOCD_CAPABILITY_ROLE_ARN}} to the
-# capability IAM role it created, and the whole file is gated on that token.
-# When the capability is disabled the token stays unreplaced, the applier skips
-# this file and prunes exactly the objects below (see
-# _FEATURE_RESOURCE_INVENTORY in ../handler.py). The argocd Namespace is the
-# one object that is never pruned — it holds every operator-authored
-# Application and AppProject.
+# Applied in the post-Helm pass when cdk.json helm.argocd is enabled (or a
+# run-scoped helm_enabled_overrides forces it): GCORegionalStack substitutes
+# {{ARGOCD_ENABLED}} and {{ARGOCD_SOURCE_REPOS}} only then. With Argo CD
+# disabled both stay unreplaced, the applier skips this file and prunes
+# exactly the objects below (_FEATURE_RESOURCE_INVENTORY in ../handler.py).
 #
-# Why these objects exist (AWS docs, "Register target clusters"):
+# Why these objects exist: the argo-cd chart runs in namespaced mode
+# (charts.yaml createClusterRoles: false), so its controllers get no
+# ClusterRoles at all, and the chart's in-cluster cluster Secret registers
+# https://kubernetes.default.svc for exactly gco-jobs and gco-inference with
+# no cluster-scoped resources. Argo CD therefore needs, in those two tenant
+# namespaces and nowhere else:
 #
-#   * The hosted Argo CD does NOT register the cluster it is attached to as a
-#     deployment target. The local-cluster Secret does that. Its ``server``
-#     field must be the EKS cluster ARN — the managed capability identifies
-#     clusters by ARN, and kubernetes.default.svc is not supported.
-#   * EKS creates an access entry for the capability role automatically but
-#     grants it NO Kubernetes permissions. The access entry maps the role to
-#     the group ``eks-access-entry:<role ARN>``, which is what the bindings
-#     below name. Argo CD needs cluster-wide read (its cluster cache watches
-#     every resource type for discovery, drift detection and health) and
-#     write only where it deploys: the two tenant namespaces GCO ships,
-#     gco-jobs and gco-inference. The platform namespace gco-system is
-#     deliberately not writable, so a tenant repository can never touch
-#     platform resources.
-#   * The write grant is an explicit allow-list of the namespaced workload
-#     kinds a tenant repository deploys (core, apps, batch, autoscaling,
-#     policy, Ingress, Gateway API routes, and the namespaced kinds of the
-#     operators GCO installs: Kueue, Kubeflow Trainer + JobSet, KubeRay, KEDA,
-#     Volcano, Prometheus operator, cert-manager). The kinds GCO uses as
-#     guardrails inside the tenant namespaces — ResourceQuota, LimitRange,
-#     NetworkPolicy, Role, RoleBinding — are deliberately absent, and the
-#     AppProject in 08-argocd-gitops.yaml blacklists the same five kinds, so
-#     the Argo CD fence and the Kubernetes RBAC agree: nothing reconciled from
-#     Git can widen a ceiling, open the network posture, or grant itself
-#     permissions. A repository that ships a kind outside this list gets a
-#     sync-time Forbidden, never a silent grant; to admit one, bind an extra
-#     Role to the same access-entry group in the tenant namespace.
+#   * gco-argocd-read (Role): get/list/watch on every namespaced type — the
+#     application controller's cluster cache watches the namespace for
+#     drift, orphans and health, and the server reads live manifests, events
+#     and pod logs for the UI. Namespaced, so nothing outside the tenant
+#     namespaces (gco-system included) is readable through Argo CD.
+#   * gco-argocd-deploy (Role, application controller only): the apply/prune
+#     verbs on an allow-list of tenant workload kinds. ResourceQuota,
+#     LimitRange, NetworkPolicy, Role and RoleBinding are deliberately absent,
+#     and the AppProject below blacklists the same five kinds, so the Argo CD
+#     fence and the apiserver agree: nothing reconciled from Git can widen a
+#     ceiling, open the network posture or grant itself permissions. The
+#     write rules are identical to kro's (07-kro-tenant-access.yaml) and
+#     Crossplane's (post-helm-crossplane.yaml); tests pin the three lists to
+#     each other.
 #
-# The read-all ClusterRole is the documented minimum and includes Secrets: the
-# Argo CD control plane is AWS-operated, and who may see a Secret's contents
-# through the Argo CD UI/API is governed by the capability's rbac_role_mappings.
+# The server gets read only: UI-initiated resource deletes are refused; syncs
+# run through the application controller, which holds the write grant.
 
-# ─── Namespace the hosted control plane reads from ──────────────────
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: argocd
-  labels:
-    project: gco
-    app.kubernetes.io/part-of: argocd
-
-# ─── Local cluster registration ─────────────────────────────────────
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: local-cluster
-  namespace: argocd
-  labels:
-    project: gco
-    argocd.argoproj.io/secret-type: cluster
-type: Opaque
-stringData:
-  name: local-cluster
-  server: "{{EKS_CLUSTER_ARN}}"
-
-# ─── Cluster-wide read: discovery, drift detection, health ──────────
+# ─── Read: the controller's cache and the UI ────────────────────────
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: gco-argocd-read-all
+  name: gco-argocd-read
+  namespace: gco-jobs
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
   annotations:
-    checkov.io/skip1: CKV_K8S_49=Argo CD's cluster cache watches every API type; get/list/watch on all resources is the documented read-only minimum
+    checkov.io/skip1: CKV_K8S_49=Argo CD watches every namespaced type in the tenant namespace; the Role is namespaced and read-only
 rules:
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: gco-argocd-read-all
+  name: gco-argocd-read
+  namespace: gco-jobs
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
 subjects:
-  - kind: Group
-    name: "eks-access-entry:{{ARGOCD_CAPABILITY_ROLE_ARN}}"
-    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-server
+    namespace: argocd
 roleRef:
-  kind: ClusterRole
-  name: gco-argocd-read-all
+  kind: Role
+  name: gco-argocd-read
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-argocd-read
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+  annotations:
+    checkov.io/skip1: CKV_K8S_49=Argo CD watches every namespaced type in the tenant namespace; the Role is namespaced and read-only
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-argocd-read
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-server
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: gco-argocd-read
   apiGroup: rbac.authorization.k8s.io
 
-# ─── Namespace write: the tenant namespaces only ────────────────────
+# ─── Write: the tenant allow-list, application controller only ──────
 #
 # The two Roles below are identical by design (tests pin it); the RoleBindings
-# are what scope them. Verbs are the apply/prune set Argo CD uses — create for
-# new objects, get + patch/update for existing ones, delete for prune — with
-# list/watch so a namespaced list works even if the cluster-read grant above is
-# ever narrowed. Never ``*``, never ``bind``/``escalate``/``impersonate``.
+# are what scope them. Verbs are the apply/prune set Argo CD uses. Never ``*``,
+# never ``bind``/``escalate``/``impersonate``.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -112,10 +116,8 @@ metadata:
   namespace: gco-jobs
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
 rules:
-  # Core workload kinds. resourcequotas / limitranges are deliberately absent:
-  # 04-resource-quotas.yaml sets the tenant ceilings from cdk.json and nothing
-  # reconciled from Git may widen its own guardrail.
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
@@ -131,20 +133,12 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
-  # Ingress only — NetworkPolicy lives in this group too and is a guardrail
-  # (03-network-policies.yaml, 06-network-policy-controller.yaml).
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
-  # Route attachments to the shared GCO Gateway; the Gateway itself is
-  # platform-owned in gco-system.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes", "grpcroutes"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
-  # Namespaced kinds of the operators GCO installs (cdk.json helm; KEDA is
-  # mandatory). Cluster-scoped siblings (ClusterQueue, ResourceFlavor,
-  # ClusterTrainingRuntime, ClusterTriggerAuthentication, Volcano Queue) are
-  # not grantable from a Role, and the AppProject refuses them anyway.
   - apiGroups: ["kueue.x-k8s.io"]
     resources: ["localqueues"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
@@ -183,10 +177,11 @@ metadata:
   namespace: gco-jobs
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
 subjects:
-  - kind: Group
-    name: "eks-access-entry:{{ARGOCD_CAPABILITY_ROLE_ARN}}"
-    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
 roleRef:
   kind: Role
   name: gco-argocd-deploy
@@ -199,6 +194,7 @@ metadata:
   namespace: gco-inference
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
 rules:
   # Identical to the gco-jobs Role above — see its comments.
   - apiGroups: [""]
@@ -260,11 +256,56 @@ metadata:
   namespace: gco-inference
   labels:
     project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
 subjects:
-  - kind: Group
-    name: "eks-access-entry:{{ARGOCD_CAPABILITY_ROLE_ARN}}"
-    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
 roleRef:
   kind: Role
   name: gco-argocd-deploy
   apiGroup: rbac.authorization.k8s.io
+
+# ─── The fence: what any Application in gco-tenants may deploy ──────
+#
+#   * sourceRepos — cdk.json helm.argocd.source_repos, rendered as JSON (a YAML
+#     flow sequence); "*" by default. The fence is on destinations and kinds.
+#   * destinations — the two tenant namespaces on this cluster and nothing
+#     else; the chart's cluster Secret registers exactly the same pair.
+#   * clusterResourceWhitelist: [] — no cluster-scoped kind may be synced, so a
+#     tenant repository cannot create CRDs, ClusterRoles, NodePools or
+#     Namespaces.
+#   * namespaceResourceBlacklist — the guardrail kinds, refused here AND left
+#     out of gco-argocd-deploy above.
+#
+# Readiness is exact existence only: a tenant repository that fails to sync
+# must never fail a GCO deployment.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gco-tenants
+  namespace: argocd
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+spec:
+  description: GCO tenant workloads reconciled from Git; fenced to the tenant namespaces
+  sourceRepos: {{ARGOCD_SOURCE_REPOS}}
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: gco-jobs
+    - server: https://kubernetes.default.svc
+      namespace: gco-inference
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding

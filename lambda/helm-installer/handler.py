@@ -94,6 +94,20 @@ LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 # the final Helm uninstall fit inside the dedicated four-minute KEDA task.
 KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
 KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
+# Argo CD Applications carry the resources finalizer when their author asked
+# for cascading deletes; the application controller must still be running to
+# honor it (and to release AppProjects), so they go before the chart.
+ARGOCD_API_GROUPS = ("argoproj.io",)
+# Crossplane: usages first (they block deletion of what they protect), then
+# operations, then composite definitions and compositions — deleting an XRD
+# makes Crossplane delete every composite resource of that kind and its
+# composed resources — and the packages (functions, providers) last.
+CROSSPLANE_API_GROUPS = (
+    "protection.crossplane.io",
+    "ops.crossplane.io",
+    "apiextensions.crossplane.io",
+    "pkg.crossplane.io",
+)
 #: Charts whose controllers attach finalizers to their custom resources.
 #: Their instances must be deleted BEFORE ``helm uninstall`` removes the
 #: controller — uninstalling first leaves finalizer-bearing objects that
@@ -103,6 +117,8 @@ KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
 CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
     "keda": KEDA_API_GROUPS,
     "kueue": KUEUE_API_GROUPS,
+    "argocd": ARGOCD_API_GROUPS,
+    "crossplane": CROSSPLANE_API_GROUPS,
 }
 KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "45s"
 KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 55

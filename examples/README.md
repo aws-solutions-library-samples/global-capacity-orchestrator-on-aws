@@ -8,20 +8,23 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 
 - [Quick Reference](#quick-reference)
 - [Examples](#examples)
+  - [ACK SQS Queue](#ack-sqs-queue)
   - [Analytics Database Export Job](#analytics-database-export-job)
   - [Analytics S3 Upload Job](#analytics-s3-upload-job)
+  - [Argo CD GitOps Job](#argo-cd-gitops-job)
   - [Aurora pgvector Job](#aurora-pgvector-job)
   - [Cluster Shared Bucket Upload Job](#cluster-shared-bucket-upload-job)
   - [Regional Shared Bucket Upload Job](#regional-shared-bucket-upload-job)
+  - [Crossplane BatchJob](#crossplane-batchjob)
   - [DAG Pipeline](#dag-pipeline)
   - [EFA Distributed Training](#efa-distributed-training)
   - [EFS Output Job](#efs-output-job)
   - [FSx for Lustre Job](#fsx-for-lustre-job)
-  - [GitOps Tenant Smoke](#gitops-tenant-smoke)
   - [GPU Job](#gpu-job)
   - [Inference Frameworks](#inference-frameworks)
   - [Inferentia Job](#inferentia-job)
   - [KEDA Autoscaled Job](#keda-autoscaled-job)
+  - [kro BatchJob](#kro-batchjob)
   - [Kubeflow TrainJob](#kubeflow-trainjob)
   - [Kueue Job Queueing](#kueue-job-queueing)
   - [Mission Semantic-Progress Judge](#mission-semantic-progress-judge)
@@ -49,22 +52,27 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 
 | Example | File | Category | GPU | Opt-in |
 |---------|------|----------|-----|--------|
+| [ACK SQS Queue](#ack-sqs-queue) | `ack-sqs-queue.yaml` | Platform add-ons | — | [ACK EKS Capability](../docs/EKS_CAPABILITIES.md) |
 | [Analytics Database Export](#analytics-database-export-job) | `analytics-database-export-job.yaml` | Analytics | — | [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html), Analytics |
 | [Analytics S3 Upload](#analytics-s3-upload-job) | `analytics-s3-upload-job.yaml` | Analytics | — | Analytics |
+| [Argo CD GitOps](#argo-cd-gitops-job) | `argocd-gitops-job.yaml` | Platform add-ons | — | [Argo CD](../docs/GITOPS.md) |
 | [Aurora pgvector](#aurora-pgvector-job) | `aurora-pgvector-job.yaml` | Database | — | Aurora |
 | [Cluster Shared Bucket Upload](#cluster-shared-bucket-upload-job) | `cluster-shared-bucket-upload-job.yaml` | Storage | — | — |
+| [Crossplane BatchJob](#crossplane-batchjob) | `crossplane-batch-job.yaml` | Platform add-ons | — | [Crossplane](../docs/CROSSPLANE.md) |
+| [Crossplane BatchJob API](#crossplane-batchjob) | `crossplane-batch-api.yaml` | Platform add-ons | — | [Crossplane](../docs/CROSSPLANE.md) |
 | [DAG Preprocess](#dag-pipeline) | `dag-step-preprocess.yaml` | Pipeline | — | — |
 | [DAG Train](#dag-pipeline) | `dag-step-train.yaml` | Pipeline | — | — |
 | [EFA Training](#efa-distributed-training) | `efa-distributed-training.yaml` | Jobs | ✅ | — |
 | [EFS Output](#efs-output-job) | `efs-output-job.yaml` | Storage | — | — |
 | [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) |
-| [GitOps Tenant Smoke](#gitops-tenant-smoke) | `gitops/tenant-smoke/configmap.yaml` | GitOps | — | [Argo CD EKS Capability](../docs/EKS_CAPABILITIES.md) |
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
 | [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
 | [Triton](#inference-frameworks) | `inference-triton.yaml` | Inference | ✅ | — |
 | [vLLM](#inference-frameworks) | `inference-vllm.yaml` | Inference | ✅ | — |
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
+| [kro BatchJob](#kro-batchjob) | `kro-batch-job.yaml` | Platform add-ons | — | [kro EKS Capability](../docs/EKS_CAPABILITIES.md) |
+| [kro BatchJob API](#kro-batchjob) | `kro-batch-api.yaml` | Platform add-ons | — | [kro EKS Capability](../docs/EKS_CAPABILITIES.md) |
 | [Kubeflow TrainJob](#kubeflow-trainjob) | `kubeflow-trainjob.yaml` | Jobs | Optional | — |
 | [Kueue](#kueue-job-queueing) | `kueue-job.yaml` | Scheduler | Optional | — |
 | [Mission Semantic-Progress](#mission-semantic-progress-judge) | `mission-semantic-progress-criteria.json` | Mission | — | Mission, Semantic-Progress |
@@ -89,6 +97,26 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 ---
 
 ## Examples
+
+### ACK SQS Queue
+
+**File:** `ack-sqs-queue.yaml`
+
+An Amazon SQS queue declared as a Kubernetes object. The AWS-managed [ACK EKS Capability](../docs/EKS_CAPABILITIES.md) creates the queue, reports its ARN and URL in the object's status, and deletes the queue when the object is deleted.
+
+**Usage:**
+
+```bash
+kubectl apply -f examples/ack-sqs-queue.yaml
+kubectl get queue.sqs.services.k8s.aws gco-ack-example -n gco-jobs -o jsonpath='{.status.queueURL}'
+kubectl delete -f examples/ack-sqs-queue.yaml   # ACK deletes the queue
+```
+
+**Requirements:** `eks_capabilities.ack` enabled, with SQS permissions for the capability role: `iam_policy_arns: ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"]` is the simple setup; a customer managed policy scoped to your queues, or per-service `assume_role_arns`, is the production one.
+
+**When to use:** Creating the AWS resources a workload needs from the same place the workload is defined, reviewed and deleted.
+
+---
 
 ### Analytics Database Export Job
 
@@ -130,6 +158,28 @@ gco jobs submit-direct examples/analytics-s3-upload-job.yaml -r us-east-1
 ```
 
 **When to use:** Handing off cluster-side artifacts to Studio notebooks, publishing dataset snapshots for exploratory analysis, wiring up the analytics end-to-end demo.
+
+---
+
+### Argo CD GitOps Job
+
+**File:** `argocd-gitops-job.yaml` (syncs [`gitops/hello-job/`](gitops/hello-job/))
+
+An Argo CD `Application` for the self-managed [Argo CD](../docs/GITOPS.md). Argo CD pulls `examples/gitops/hello-job` from this repository and applies the Job it finds into `gco-jobs` through the fenced `gco-tenants` project, then keeps it in sync (self-heal on, prune off). Deleting the Application deletes the Job, because the Application carries Argo CD's resources finalizer.
+
+**Usage:**
+
+```bash
+kubectl apply -f examples/argocd-gitops-job.yaml
+kubectl get application gco-gitops-hello -n argocd   # SYNC STATUS Synced, HEALTH STATUS Healthy
+kubectl logs job/gco-gitops-hello -n gco-jobs
+gco gitops open                                      # the Argo CD UI; gco gitops password prints the login
+kubectl delete -f examples/argocd-gitops-job.yaml
+```
+
+**Requirements:** `helm.argocd.enabled: true` in `cdk.json` (or one deploy with `--enable argocd`). On a fork, point `repoURL` at the fork.
+
+**When to use:** Delivering tenant workloads from Git instead of submitting them, or as the template for your own Application. For one repository per cluster, set `helm.argocd.gitops` instead and GCO creates the root Application for you.
 
 ---
 
@@ -194,6 +244,30 @@ gco jobs submit-direct examples/regional-shared-bucket-upload-job.yaml -r us-eas
 ```
 
 **When to use:** Training checkpoints, model artifacts, intermediate shards — anything large, write-heavy, or latency-sensitive that does not need to be reachable from other regions.
+
+---
+
+### Crossplane BatchJob
+
+**Files:** `crossplane-batch-api.yaml` (the API), `crossplane-batch-job.yaml` (an instance)
+
+A platform API built with the self-managed [Crossplane](../docs/CROSSPLANE.md). The CompositeResourceDefinition serves a namespaced `BatchJob` kind (`examples.gco.io/v1alpha1`) and its Composition renders one Job per composite resource with the go-templating function GCO installs. The XRD limits the message to plain characters, and the Job reads it from an environment variable.
+
+**Usage:**
+
+```bash
+kubectl apply -f examples/crossplane-batch-api.yaml
+kubectl get xrd batchjobs.examples.gco.io                 # ESTABLISHED True
+kubectl apply -f examples/crossplane-batch-job.yaml
+kubectl logs job/gco-crossplane-hello -n gco-jobs
+gco crossplane open                                       # the XR and its Job in Crossview
+kubectl delete -f examples/crossplane-batch-job.yaml      # deletes the composed Job too
+kubectl delete -f examples/crossplane-batch-api.yaml
+```
+
+**Requirements:** `helm.crossplane.enabled: true` in `cdk.json` (or one deploy with `--enable crossplane`).
+
+**When to use:** Offering teams a small, validated API in place of raw manifests. The same pattern composes any kind Crossplane may write in the tenant namespaces.
 
 ---
 
@@ -292,27 +366,6 @@ gco files download fsx-lustre-example ./fsx-results -r us-east-1 -t fsx
 
 ---
 
-### GitOps Tenant Smoke
-
-**File:** `gitops/tenant-smoke/configmap.yaml` (see [`gitops/README.md`](gitops/README.md))
-
-Not a Job: a repository path the [Argo CD EKS Capability](../docs/EKS_CAPABILITIES.md)'s GitOps hand-off pulls and reconciles into `gco-jobs`. One ConfigMap with no namespace of its own, so the root `Application`'s destination supplies it and the `gco-tenants` project fence applies.
-
-**Usage:**
-
-```bash
-# cdk.json: eks_capabilities.argocd.gitops.path = "examples/gitops/tenant-smoke"
-gco stacks deploy gco-us-east-1 -y
-gco stacks capabilities status          # capability ACTIVE, hand-off configured
-gco stacks capabilities argocd open     # watch gco-gitops-root sync in the hosted UI
-```
-
-**Requirements:** `eks_capabilities.argocd` enabled with an IAM Identity Center instance and at least one RBAC mapping; `gitops.repo_url` pointing at a clone Argo CD can reach.
-
-**When to use:** proving a new deployment's GitOps hand-off end to end (the live-validation harness does exactly this), or as the template for your own tenant path.
-
----
-
 ### GPU Job
 
 **File:** `gpu-job.yaml`
@@ -405,6 +458,30 @@ kubectl apply -f examples/keda-scaled-job.yaml
 **Requirements:** KEDA (enabled by default), a disposable demo queue, and read-only KEDA metric access to that queue. See [KEDA docs](../docs/KEDA.md).
 
 **When to use:** Learning how SQS queue depth maps to KEDA Jobs. Use the built-in queue processor—or a fully implemented custom consumer—for actual message processing.
+
+---
+
+### kro BatchJob
+
+**Files:** `kro-batch-api.yaml` (the API), `kro-batch-job.yaml` (an instance)
+
+The same `BatchJob` idea with the AWS-managed [kro EKS Capability](../docs/EKS_CAPABILITIES.md). The ResourceGraphDefinition becomes a namespaced `BatchJob` kind (`kro.run/v1alpha1`); kro composes a Job with the instance's name in the instance's namespace. GCO lets the capability write the tenant workload kinds in `gco-jobs` and `gco-inference` only.
+
+**Usage:**
+
+```bash
+kubectl apply -f examples/kro-batch-api.yaml
+kubectl get resourcegraphdefinition gco-batch-job    # STATE Active
+kubectl apply -f examples/kro-batch-job.yaml
+kubectl get batchjob.kro.run gco-kro-hello -n gco-jobs
+kubectl logs job/gco-kro-hello -n gco-jobs
+kubectl delete -f examples/kro-batch-job.yaml        # kro deletes the Job
+kubectl delete -f examples/kro-batch-api.yaml
+```
+
+**Requirements:** `eks_capabilities.kro.enabled: true` in `cdk.json`.
+
+**When to use:** Defining a custom API without running a controller yourself.
 
 ---
 

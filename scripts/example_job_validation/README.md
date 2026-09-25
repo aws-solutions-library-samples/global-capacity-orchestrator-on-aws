@@ -37,9 +37,9 @@ below is what this harness adds on top.
 |---|---|
 | `__main__.py` | CLI entry (`python -m scripts.example_job_validation`): identity flags, example selection, `--static-only`, checkpoint/resume. Mirrors the sibling harness's argument surface; `gco examples validate` is the no-prompt wrapper around it. |
 | `registry.py` | The ordered action registry: five reused actions plus `static` and `examples`. Single source of truth for `--actions`, held in lockstep with the contract table in `docs/EXAMPLE_VALIDATION.md`. |
-| `models.py` | `ExampleRunSettings` — the sibling's `RunSettings` plus the selection and the parallelism cap. The helm charts and optional features the run needs are *derived* from the selection here, and the selection is part of `identity()` so a resume cannot quietly validate a different set. |
+| `models.py` | `ExampleRunSettings` — the sibling's `RunSettings` plus the selection and the parallelism cap. The helm charts, optional features and EKS Capabilities the run needs are *derived* from the selection here, and the selection is part of `identity()` so a resume cannot quietly validate a different set. |
 | `specs.py` | One `ExampleSpec` per example: how it is submitted, what infrastructure it needs, when it counts as passed, and which mutations are applied first. Declarative on purpose. |
-| `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces, resource-governance fit. No AWS, no cluster. |
+| `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces (and the Argo CD fence), resource-governance fit, and the same rules for what an Application syncs or an RGD / Composition composes. No AWS, no cluster. |
 | `actions.py` | The two new action handlers: `action_static` and `action_examples` (per-example lifecycle, capacity skips, parallelism). |
 | `drivers.py` | The per-example machinery `actions.py` orchestrates: submission through the real CLI or `kubectl`, the success-criteria waiters, setup drivers, and cleanup. Returns evidence dictionaries for the report. |
 | `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling (an isolated path when asked, so a run never rewrites `~/.kube/config`), and kubectl execution. |
@@ -65,10 +65,13 @@ part of the run identity: pacing is not what is being validated, so a
 checkpointed run may resume with a different value.
 
 The `deploy` dependency on `static` is the ordering that matters most here:
-selection decides infrastructure. `ExampleRunSettings` derives the helm charts
-and optional features the chosen examples need
-(`required_helm_overrides` / `required_feature_overrides` in `specs.py`) and
-threads them into every CDK invocation as context, so validating one KEDA
+selection decides infrastructure. `ExampleRunSettings` derives the helm charts,
+optional features and EKS Capabilities the chosen examples need
+(`required_helm_overrides` / `required_feature_overrides` /
+`required_capability_overrides` in `specs.py`; the capabilities travel as the
+sibling's `eks_capabilities_overrides` JSON, with any ACK managed policies from
+`required_capability_settings`) and threads them into every CDK invocation as
+context, so validating one KEDA
 example does not deploy the whole optional surface — and validating it *does*
 deploy KEDA. Those derived features are part of `identity()`, so a resume
 against a differently-provisioned deployment is refused rather than silently
@@ -97,8 +100,16 @@ It enforces, per example:
   LimitRange, and per-manifest caps (read from `gco.stacks.constants`, again
   the deployed values), so an example cannot be rejected at admission on a
   stock deployment.
-- **Spec shape** — every spec names a known submission path, criterion, and
-  setup driver, so a typo fails here rather than mid-run.
+- **Embedded workloads** — what an Argo CD `Application` syncs (read from its
+  path in this checkout), a kro ResourceGraphDefinition's templates and a
+  go-templating Composition's rendered documents get the namespace, image and
+  governance rules too: they never cross the GCO API, so nothing else checks
+  them before a cluster does. An `Application` itself must stay inside the
+  fence (`argocd` namespace, `gco-tenants` project, in-cluster server, tenant
+  destination).
+- **Spec shape** — every spec names a known submission path, criterion,
+  setup driver and capability type, and a `companion` names a real companion
+  spec, so a typo fails here rather than mid-run.
 
 Run it locally with `python -m scripts.example_job_validation --static-only`
 (add `--examples <stem>` to narrow it), or through pytest.
@@ -107,8 +118,10 @@ Run it locally with `python -m scripts.example_job_validation --static-only`
 
 1. Add the manifest to `examples/`.
 2. Add its `ExampleSpec` to `EXAMPLE_SPECS` in `specs.py`: submission path,
-   success criteria, any `helm_enabled_overrides` / `feature_enabled_overrides`
-   it needs, capacity requirements, and setup drivers.
+   success criteria, any `helm_overrides` / `feature_overrides` /
+   `capability_overrides` it needs, capacity requirements, setup drivers, and
+   the `companion` its setup driver applies first (an API definition an
+   instance example depends on).
 3. Add its entry to `EXAMPLE_METADATA` in `gco_mcp/resources/docs.py`, the
    catalog the MCP tools serve. `static_checks.py` reads that literal with
    `ast` rather than importing it, so the symmetry check needs no MCP runtime.
@@ -142,8 +155,11 @@ now, not in five minutes.
 
 Some examples need something to exist before they can succeed: a queue with
 messages in it for the KEDA scaler to see, a corpus to search, a trainer
-runtime or an MLflow server to be Ready. Those are setup drivers, named by
-`spec.setup_driver` and listed in `KNOWN_SETUP_DRIVERS` in `drivers.py`.
+runtime, an MLflow server or Argo CD to be Ready, a companion API definition
+applied (`CompanionApi`: a kro RGD or a Crossplane XRD + Composition), or an
+AWS-side check around an ACK resource (`AckSqsQueues`). Those are setup
+drivers, named by `spec.setup_driver` and listed in `KNOWN_SETUP_DRIVERS` in
+`drivers.py`.
 
 The registry is explicit on purpose: a spec naming a driver that does not
 exist fails the offline pin test, not a live run forty minutes in. Add the

@@ -122,22 +122,11 @@ class RunSettings:
     #: action). Part of the resume identity: a resumed run must deploy and
     #: validate the same chart set it started with.
     optional_schedulers: tuple[str, ...] = ()
-    #: Canonical JSON of the static ``eks_capabilities_overrides`` CDK context
-    #: this run deploys with (``--eks-capabilities``, the GitOps shape and any
-    #: operator-supplied Argo CD Identity Center inputs; see the
-    #: ``eks-capabilities`` action), or ``""`` for none. Part of the resume
-    #: identity like the scheduler overrides. The Identity Center inputs the
-    #: ``argocd-identity`` action provisions are run *state* (checkpoint), not
-    #: settings, and are merged in by ``checks.eks_capabilities.effective_cdk_context``.
+    #: Canonical JSON of the ``eks_capabilities_overrides`` CDK context this
+    #: run deploys with (``--eks-capabilities``; see the ``eks-capabilities``
+    #: action), or ``""`` for none. Part of the resume identity (through
+    #: ``extra_cdk_context``) like the scheduler overrides.
     eks_capabilities_overrides_json: str = ""
-    #: Region the ``argocd-identity`` action looks for (and, failing that,
-    #: creates) the Identity Center account instance in; ``""`` means the
-    #: first deployment Region.
-    argocd_idc_region: str = ""
-    #: Repository-relative directory the ``eks-capabilities`` action pushes
-    #: into the GCO-managed CodeCommit repository (``gitops.source:
-    #: codecommit``) before proving the sync.
-    argocd_gitops_fixture_path: str = "examples/gitops/tenant-smoke"
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -224,9 +213,6 @@ class RunSettings:
             "optional_schedulers": list(self.optional_schedulers),
             "extra_cdk_context": self.extra_cdk_context(),
         }
-        if self.eks_capabilities_overrides_json:
-            identity["argocd_idc_region"] = self.argocd_idc_region
-            identity["argocd_gitops_fixture_path"] = self.argocd_gitops_fixture_path
         if self.inference_enabled:
             identity["inference"] = self._inference_identity_fields()
         return identity

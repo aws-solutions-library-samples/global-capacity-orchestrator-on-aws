@@ -51,7 +51,12 @@ gco examples validate --static-only --examples gpu-job
 No AWS access. For every example: the YAML parses; documents documented to
 travel the API/SQS transports clear the exact deployed gates (kind/GVK
 allowlist, trusted image sources); namespaced documents target a
-provisioned workload namespace; every gco-jobs workload fits the deployed
+provisioned workload namespace (an Argo CD `Application` instead stays inside
+the fence: the `argocd` namespace, the `gco-tenants` project, the in-cluster
+server and a tenant destination); what an `Application` syncs from this
+repository, a kro ResourceGraphDefinition composes or a Crossplane
+Composition renders lands in a workload namespace and pulls from trusted
+image sources; every gco-jobs workload — including those — fits the deployed
 resource governance (per-container `LimitRange` ceilings, per-manifest
 caps, and the namespace `ResourceQuota`, evaluated against the same
 defaults the stack deploys — a manifest that admission would reject
@@ -79,11 +84,14 @@ and report privacy all behave exactly as documented for
 never skips teardown — `destroy` and `final-inventory` run regardless.
 
 Per-run enablement is **derived from the selection**: examples that need
-off-by-default schedulers thread `helm_enabled_overrides` (slurm,
-yunikorn) and examples that need optional infrastructure thread
-`feature_enabled_overrides` (`aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`)
-into every CDK invocation of the run — cdk.json is never rewritten, so the
-clean-worktree preflight holds.
+off-by-default charts thread `helm_enabled_overrides` (`argocd`,
+`crossplane`, `slurm`, `yunikorn`), examples that need optional
+infrastructure thread `feature_enabled_overrides` (`aurora_pgvector`,
+`valkey`, `fsx_lustre`, `vector_store`), and examples that need an
+[EKS Capability](EKS_CAPABILITIES.md) thread `eks_capabilities_overrides`
+(`kro`; `ack`, with `AmazonSQSFullAccess` on the capability role for the SQS
+example) into every CDK invocation of the run — cdk.json is never rewritten,
+so the clean-worktree preflight holds.
 
 Within the `examples` action, all selected examples run **in parallel** by
 default: each is self-contained (own workload names, own temp manifest,
@@ -108,6 +116,7 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `gco jobs submit-direct` | storage/data examples, efa training, inference pairs, vector-store-search, mlflow-tracking | Job completes / Deployment Available + Service endpoints |
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
+| `kubectl apply` (platform add-ons) | argocd-gitops-job, crossplane-batch-job, kro-batch-job (+ their companion API files), ack-sqs-queue | Application Synced + Healthy at the pinned commit with its Git Jobs complete / the composed Job completes / `ACK.ResourceSynced` and the queue resolves in SQS |
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals): the
@@ -136,6 +145,24 @@ skip):
 - **mlflow-tracking-job** — waits for the tracking server Deployment to be
   Available first, since its backend volume lands one applier pass after
   the chart on a fresh install (readiness wait; nothing to revert).
+- **argocd-gitops-job** — waits for the `gco-tenants` project, the
+  application controller and the repo server, then pins the Application's
+  `targetRevision` to the commit under validation (a disclosed mutation, so
+  the run syncs exactly the fixture it tests). Passing needs the synced
+  revision to equal that commit and every Job at the Git path to be one of
+  the resources Argo CD manages, complete. Cleanup waits for the resources
+  finalizer to delete the Job.
+- **kro-batch-job** / **crossplane-batch-job** — apply the companion API
+  first (`kro-batch-api.yaml` once the capability's CRD exists and the RGD
+  is Active; `crossplane-batch-api.yaml` once the go-templating function is
+  Healthy and the XRD Established) and wait until the new kind is served.
+  Passing needs the Job composed with the instance's name to complete;
+  cleanup waits for it to be deleted, then deletes the companion (also on
+  failure).
+- **ack-sqs-queue** — waits for the ACK capability's Queue CRD, requires
+  `ACK.ResourceSynced` (`ACK.Terminal` fails at once), resolves the queue in
+  SQS directly, and after cleanup requires SQS to stop resolving it: a queue
+  that outlives its object is a leak.
 
 Disclosed mutations: the inference example whose default model is
 HuggingFace-gated (vLLM's Llama 3.1) is validated with the ungated

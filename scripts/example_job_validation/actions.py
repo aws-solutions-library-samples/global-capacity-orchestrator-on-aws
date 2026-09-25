@@ -15,7 +15,7 @@ from scripts.live_release_validation.models import RunContext
 from . import drivers, kube
 from .drivers import ExampleRunResult, ExampleValidationError
 from .specs import COMPANION, EXAMPLE_SPECS, KUBECTL_APPLY, SCALEDJOB_SCALES
-from .static_checks import parse_example, run_static_checks
+from .static_checks import examples_dir, parse_example, run_static_checks
 
 
 def action_static(ctx: RunContext) -> dict[str, Any]:
@@ -85,6 +85,22 @@ def _prepare_keda_manifest(parsed: Any, queue_url: str, region: str, manifest_pa
     return drivers.write_temp_manifest(documents, f"-{parsed.name}.yaml")
 
 
+def _pin_argocd_revision(parsed: Any, revision: str, manifest_path: Path) -> Path:
+    """Point every Application at the commit under validation (a disclosed mutation).
+
+    The shipped example tracks ``main``; the run must sync the Git path at
+    exactly the SHA it validates, so a change to the fixture is tested before
+    it merges.
+    """
+    documents = []
+    for doc in yaml.safe_load_all(manifest_path.read_text(encoding="utf-8")):
+        if doc and doc.get("kind") == "Application":
+            doc["spec"]["source"]["targetRevision"] = revision
+        if doc:
+            documents.append(doc)
+    return drivers.write_temp_manifest(documents, f"-{parsed.name}.yaml")
+
+
 def _run_one_example(
     ctx: RunContext,
     name: str,
@@ -113,6 +129,8 @@ def _run_one_example(
     evidence: dict[str, Any] = {}
     keda_queue: drivers.KedaDemoQueue | None = None
     vector_corpus: drivers.VectorDemoCorpus | None = None
+    companion: drivers.CompanionApi | None = None
+    ack_queues: drivers.AckSqsQueues | None = None
     try:
         if spec.setup_driver and spec.setup_driver not in drivers.KNOWN_SETUP_DRIVERS:
             # Fail closed: a spec naming a driver this dispatcher does not
@@ -146,6 +164,26 @@ def _run_one_example(
             # right after a fresh install (its PVC lands one applier pass
             # after the chart). Nothing to revert.
             evidence["setup"] = drivers.wait_mlflow_ready(kubectl)
+        elif spec.setup_driver == "argocd-revision-pin":
+            # Readiness wait on deploy-time artifacts, then the disclosed
+            # revision pin; the Application itself is the example's object.
+            evidence["setup"] = drivers.wait_argocd_ready(kubectl)
+            manifest_path = _pin_argocd_revision(parsed, ctx.settings.expected_sha, manifest_path)
+            mutations["Application.spec.source.targetRevision"] = (
+                f"{ctx.settings.expected_sha} (the commit under validation)"
+            )
+        elif spec.setup_driver in {"kro-api", "crossplane-api"}:
+            # The companion API definition goes first and is deleted after the
+            # instance's cleanup (below, and in the finally on failure).
+            companion = drivers.CompanionApi(
+                flavor=spec.setup_driver.removesuffix("-api"),
+                path=examples_dir(ctx.settings.repo_root) / f"{spec.companion}.yaml",
+                kubectl=kubectl,
+            )
+            evidence["setup"] = companion.create()
+        elif spec.setup_driver == "ack-sqs":
+            ack_queues = drivers.AckSqsQueues(session=ctx.session, region=region)
+            evidence["setup"] = ack_queues.wait_ready(kubectl)
 
         evidence["submission"] = drivers.submit_example(
             parsed, manifest_path, repo_root=ctx.settings.repo_root, region=region, kubectl=kubectl
@@ -154,12 +192,18 @@ def _run_one_example(
             evidence["criteria"] = drivers.CRITERIA_WAITERS[spec.criteria](
                 parsed, kubectl, timeout=spec.timeout_seconds
             )
+        if ack_queues is not None:
+            evidence["aws"] = ack_queues.verify_created(parsed)
         if spec.criteria == SCALEDJOB_SCALES or spec.submission == KUBECTL_APPLY:
             evidence["cleanup"] = drivers.cleanup_example(parsed, manifest_path, kubectl)
         else:
             # CLI-submitted resources: delete through kubectl as well so quota
             # headroom is restored for the next example.
             evidence["cleanup"] = drivers.cleanup_example(parsed, manifest_path, kubectl)
+        if ack_queues is not None:
+            evidence["aws_cleanup"] = ack_queues.verify_deleted(parsed)
+        if companion is not None:
+            evidence["companion_cleanup"] = companion.destroy()
         return ExampleRunResult(
             name=name,
             status="passed",
@@ -185,6 +229,10 @@ def _run_one_example(
             keda_queue.destroy()
         if vector_corpus is not None:
             vector_corpus.destroy()
+        if companion is not None and companion.applied:
+            # Failure path: the instance cleanup above ran first.
+            with contextlib.suppress(ExampleValidationError):
+                companion.destroy()
 
 
 def action_examples(ctx: RunContext) -> dict[str, Any]:
