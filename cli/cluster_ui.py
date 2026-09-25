@@ -133,7 +133,7 @@ def kubectl_server_flags(server: str | None, tls_server_name: str | None) -> lis
             raise ValueError(f"Invalid --server {server!r}: must start with https://")
         flags += ["--server", server]
     if tls_server_name is not None:
-        if not re.match(r"^[a-zA-Z0-9.\-]{1,255}$", tls_server_name):
+        if not re.fullmatch(r"[a-zA-Z0-9.\-]{1,255}", tls_server_name):
             raise ValueError(f"Invalid --tls-server-name {tls_server_name!r}")
         flags += ["--tls-server-name", tls_server_name]
     return flags

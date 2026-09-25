@@ -164,9 +164,10 @@ class TestKubectlServerFlags:
         with pytest.raises(ValueError, match="must start with https://"):
             cluster_ui.kubectl_server_flags("http://127.0.0.1:8443", None)
 
-    def test_rejects_an_odd_tls_server_name(self) -> None:
+    @pytest.mark.parametrize("name", ["evil host;rm", "abc.eks.amazonaws.com\n", "", "a" * 256])
+    def test_rejects_an_odd_tls_server_name(self, name: str) -> None:
         with pytest.raises(ValueError, match="Invalid --tls-server-name"):
-            cluster_ui.kubectl_server_flags(None, "evil host;rm")
+            cluster_ui.kubectl_server_flags(None, name)
 
 
 class _Completed:
