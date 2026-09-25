@@ -36,6 +36,8 @@ from typing import NoReturn
 
 import click
 
+from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES
+
 from .._image_reference import immutable_sha256_digest
 
 _ACCOUNT_RE = re.compile(r"\d{12}")
@@ -136,6 +138,16 @@ def release() -> None:
     ),
 )
 @click.option(
+    "--eks-capabilities",
+    "eks_capabilities",
+    default=None,
+    metavar="NAME[,NAME...]",
+    help=(
+        "Enable off-by-default EKS Capabilities (ack, kro, or all) for this run's "
+        "deploy so the eks-capabilities action proves each one attaches ACTIVE."
+    ),
+)
+@click.option(
     "--profile",
     type=click.Choice(["configured", "single-region", "multi-region"]),
     default="configured",
@@ -184,6 +196,7 @@ def release_validate(
     inference_sglang_model_revision: str | None,
     inference_gpu_count: int,
     optional_schedulers: str | None,
+    eks_capabilities: str | None,
     profile: str,
     run_id: str | None,
     report_dir: Path | None,
@@ -228,6 +241,21 @@ def release_validate(
             "--resume replays an exact checkpoint identity: pass the original "
             "--run-id and --report-dir from the interrupted run."
         )
+    capability_names = {
+        name.strip() for name in (eks_capabilities or "").split(",") if name.strip()
+    }
+    if eks_capabilities is not None and not capability_names:
+        _fail("--eks-capabilities must name at least one capability")
+    unknown_capabilities = sorted(capability_names - set(EKS_CAPABILITY_TYPES) - {"all"})
+    if unknown_capabilities:
+        _fail(
+            "--eks-capabilities accepts "
+            + ", ".join((*EKS_CAPABILITY_TYPES, "all"))
+            + "; got: "
+            + ", ".join(unknown_capabilities)
+        )
+    if "all" in capability_names and len(capability_names) != 1:
+        _fail("--eks-capabilities 'all' cannot be combined with individual names")
     if inference_selected:
         required_inference = {
             "--inference-region": inference_region,
@@ -326,6 +354,8 @@ def release_validate(
         command.append("--confirm-kms-key-deletion")
     if optional_schedulers:
         command.extend(["--optional-schedulers", optional_schedulers])
+    if eks_capabilities:
+        command.extend(["--eks-capabilities", eks_capabilities])
     if resume:
         command.append("--resume")
     for name in protected_stack:
@@ -338,6 +368,8 @@ def release_validate(
     click.echo(f"actions:    {','.join(sorted(selected))}")
     if optional_schedulers:
         click.echo(f"schedulers: {optional_schedulers} (force-enabled for this run)")
+    if eks_capabilities:
+        click.echo(f"capabilities: {eks_capabilities} (enabled for this run)")
     click.echo(f"report-dir: {resolved_report_dir}")
     if emulator_endpoint:
         click.echo(f"emulator:   {emulator_endpoint} (verified by the harness before use)")

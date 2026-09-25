@@ -266,6 +266,10 @@ class TunnelSession:
     # Process handle lets readiness gates detect a tunnel that exits after its
     # local listener first appears. It is not part of session equality/repr.
     process: subprocess.Popen[bytes] | None = field(default=None, compare=False, repr=False)
+    # The SSM target the tunnel runs through (the ephemeral bastion under
+    # --via-ssm auto), so a long-lived caller can reopen a stalled tunnel on
+    # the same local port through the same instance. None without a tunnel.
+    instance_id: str | None = None
 
 
 @contextmanager
@@ -308,6 +312,7 @@ def open_api_server_tunnel(
     server: str | None = None
     tls_server_name: str | None = None
     tunnel = None
+    tunnel_target: str | None = None
     created_bastion: str | None = None
     try:
         if not plan.public:
@@ -323,6 +328,7 @@ def open_api_server_tunnel(
                     f"Opening SSM tunnel to the private API endpoint via {instance_id}..."
                 )
                 tunnel = ssm_tunnel.start_api_tunnel(instance_id, plan.endpoint, local_port, region)
+                tunnel_target = instance_id
                 server = f"https://{ssm_tunnel.LOCAL_TUNNEL_HOST}:{local_port}"
                 tls_server_name = plan.endpoint_host
             else:
@@ -334,6 +340,7 @@ def open_api_server_tunnel(
             plan=plan,
             active=tunnel is not None,
             process=tunnel,
+            instance_id=tunnel_target,
         )
     finally:
         try:

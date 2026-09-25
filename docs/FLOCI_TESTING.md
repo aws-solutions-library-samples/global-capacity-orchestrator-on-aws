@@ -154,6 +154,10 @@ discovery, a full `cdk list` (which synthesizes the entire five-stack app),
 per-region CDKToolkit health checks, refusal of pre-existing project stacks,
 protected-baseline capture, report/checkpoint writing, and PARTIAL-status
 semantics — plus the negative proof that an account mismatch fails the run.
+The run is started with `--eks-capabilities all`, so that synth also proves
+the [EKS Capabilities](EKS_CAPABILITIES.md) leg's pre-deploy shape: the
+run-scoped ACK and kro overrides ride in the CDK context of the real
+`cdk list`, and the static identity records them.
 
 The `deploy` action and everything behind it (topology, job lifecycles,
 destroy of a deployed topology) is not run against the emulator. Reasons,

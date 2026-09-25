@@ -7,6 +7,7 @@ Screenshots and visual assets for GCO (Global Capacity Orchestrator on AWS) docu
 - [Reference Architecture Diagrams](#reference-architecture-diagrams)
 - [MCP Server Screenshots](#mcp-server-screenshots)
 - [In-Cluster Monitoring Screenshots](#in-cluster-monitoring-screenshots)
+- [Platform Add-on Screenshots](#platform-add-on-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
 
 ## Reference Architecture Diagrams
@@ -56,6 +57,21 @@ OpenCost UI are captured by
 | [grafana-gpu-dcgm.png](grafana-gpu-dcgm.png) | GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, power |
 | [grafana-cost.png](grafana-cost.png) | GCO Cost dashboard — cluster and projected monthly cost, node and namespace splits |
 | [opencost-ui.png](opencost-ui.png) | Native OpenCost UI — cost allocation table with per-namespace efficiency |
+
+## Platform Add-on Screenshots
+
+The dashboards of the opt-in platform add-ons, both reached through
+`gco gitops open` and `gco crossplane open` (ClusterIP services, no public
+endpoints). The kind CI job `integration:kind:platform-addons` captures them
+with the code behind `gco gitops screenshot` and `gco crossplane screenshot`,
+once the example workloads have run, and uploads them as the
+`platform-addon-dashboards` artifact; these copies come from that artifact
+(see [`.github/CI.md`](../.github/CI.md#the-platform-add-ons-against-the-real-charts)).
+
+| Image | Description |
+|-------|-------------|
+| [argocd-ui.png](argocd-ui.png) | Argo CD Applications view — the `gco-gitops-hello` Application from [`examples/argocd-gitops-job.yaml`](../examples/argocd-gitops-job.yaml), repointed at the commit under test, Synced and Healthy in the `gco-tenants` project ([`docs/GITOPS.md`](../docs/GITOPS.md)) |
+| [crossview-dashboard.png](crossview-dashboard.png) | Crossview dashboard — the BatchJob API from [`examples/crossplane-batch-api.yaml`](../examples/crossplane-batch-api.yaml) (one XRD, one Composition, the go-templating Function) and the `gco-crossplane-hello` composite resource from [`examples/crossplane-batch-job.yaml`](../examples/crossplane-batch-job.yaml), Synced and Ready ([`docs/CROSSPLANE.md`](../docs/CROSSPLANE.md)) |
 
 ## SageMaker Studio Screenshots
 

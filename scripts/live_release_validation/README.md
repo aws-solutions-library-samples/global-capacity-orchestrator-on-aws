@@ -62,7 +62,11 @@ gated manifests, and the probes all resolve enablement identically.
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that
-distinguishes "absent" from "the read broke"). `platform-workloads`
+distinguishes "absent" from "the read broke"). That session keeps its tunnel
+carrying traffic: a watchdog reopens a stalled or exited SSM session on the
+same port through the same bastion, and a kubectl call the tunnel broke is
+repeated once it is back (see
+[Keeping the tunnel up](../example_job_validation/README.md#keeping-the-tunnel-up)). `platform-workloads`
 (`actions/platform_workloads.py`, snapshot logic in
 `checks/platform_workloads.py`) polls every Region's `gco-system` Deployments,
 PodDisruptionBudgets, HPAs, and the Auto Mode network-policy switch against the
@@ -79,11 +83,36 @@ least 45 seconds have passed) rather than dialing once: the VPC CNI attaches a
 new pod's policies in parallel with its start and admits everything until they
 are in place, so a first dial can read that window instead of the policy. The
 changes of answer are kept as `samples` evidence, with `attach_window_observed`
-set when the first answer differed from the steady state. Every Job is
+set when the first answer differed from the steady state. A disruption is
+never a verdict: probe and listener pods carry `karpenter.sh/do-not-disrupt`
+and prefer on-demand capacity, a probe whose pod an interruption evicted (its
+Job failed with no pod left, or its pod carries `DisruptionTarget` without a
+verdict exit code) is read at once and re-run once from a fresh Job, and a
+listener or inference-monitor pod that did not last the matrix fails the action
+by name, since the verdicts dialed against it are void. Every Job is
 run-labelled, deleted before the action returns, and self-expiring should the
 harness die first. Both run after the workload actions on purpose: a zero
 restart count and an intact posture mean more once the services have carried
 real traffic.
+
+`eks-capabilities` (`actions/eks_capabilities.py`, logic in
+`checks/eks_capabilities.py`) proves the opt-in AWS-managed ACK / kro
+capabilities (`docs/EKS_CAPABILITIES.md`). Because the shipped `cdk.json`
+leaves every type off and preflight requires a clean worktree, the run enables
+them the way it enables optional schedulers: `__main__.py` turns
+`--eks-capabilities` into the static `eks_capabilities_overrides` CDK context
+(`build_eks_capabilities_overrides`, part of the resume identity), and the
+action resolves the same merged block to know what to prove. For every Region
+with an enabled type the EKS API must report each capability attached to the
+Region's cluster and `ACTIVE` with no drift, judged by
+`cli.eks_capabilities.build_status` — the merge behind `gco stacks
+capabilities status` — so the harness and the CLI cannot disagree about
+drift. The action is AWS API only: what each capability does in the cluster
+(a kro `ResourceGraphDefinition` composing a Job, an ACK SQS queue) is proved
+by the [example harness](../example_job_validation/README.md)
+(`examples/kro-batch-job.yaml`, `examples/ack-sqs-queue.yaml`), as are the
+self-managed Argo CD and Crossplane add-ons. With nothing enabled the action
+passes with a note.
 
 ## How a run executes
 

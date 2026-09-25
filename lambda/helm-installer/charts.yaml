@@ -21,6 +21,9 @@
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
 #   - Kubeflow Trainer: https://github.com/kubeflow/trainer/releases
 #   - MLflow: https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/
+#   - Argo CD (argo-cd chart): https://github.com/argoproj/argo-helm/releases
+#   - Crossplane: https://github.com/crossplane/crossplane/releases
+#   - Crossview: https://github.com/crossplane-contrib/crossview/releases
 
 charts:
   # AWS Load Balancer Controller - mandatory Gateway API data plane
@@ -1051,6 +1054,212 @@ charts:
         defaultEnabled: false
         torchDistributed:
           enabled: false
+
+  # Argo CD - self-managed GitOps controller (opt-in: cdk.json helm.argocd).
+  # Release name "argocd" so every object carries the upstream names
+  # (argocd-server, argocd-initial-admin-secret, ...). Namespaced install:
+  # createClusterRoles is off, so no Argo CD component holds a ClusterRole, and
+  # the in-cluster destination below is registered for the two tenant
+  # namespaces only, with no cluster-scoped resources. GCO adds the tenant
+  # RBAC, the fenced gco-tenants AppProject and the optional root Application
+  # in the post-Helm pass (post-helm-argocd-*.yaml). The UI is reached through
+  # `gco gitops open` (a kubectl port-forward, so server.insecure serves plain
+  # HTTP inside the tunnel); `gco gitops password` reads the generated admin
+  # password. See docs/GITOPS.md.
+  # https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
+  argocd:
+    enabled: false
+    repo_name: argo
+    repo_url: https://argoproj.github.io/argo-helm
+    chart: argo-cd
+    version: "10.9.2"
+    namespace: argocd
+    create_namespace: true
+    wait: true
+    wait_timeout: "8m"
+    values:
+      createClusterRoles: false
+      crds:
+        install: true
+        # Upstream default: helm uninstall leaves the CRDs, so disabling Argo
+        # CD can never cascade-delete a CRD out from under the cluster. The
+        # installer deletes every argoproj.io object before it uninstalls.
+        keep: true
+      global:
+        # The chart's per-component NetworkPolicies admit only pod sources on
+        # the probe ports; under the VPC CNI policy agent kubelet probes arrive
+        # from the node's host network and would be dropped (the mlflow lesson,
+        # post-helm-mlflow-network.yaml). Argo CD's namespace gets no GCO
+        # policy either, like the other add-on namespaces.
+        networkPolicy:
+          create: false
+        # Prevent Karpenter / Auto Mode consolidation from evicting the
+        # controllers mid-sync.
+        podAnnotations:
+          karpenter.sh/do-not-disrupt: "true"
+      configs:
+        params:
+          # TLS terminates at the kubectl port-forward tunnel (API server
+          # TLS); the Service is ClusterIP-only with no ingress.
+          server.insecure: true
+        cm:
+          admin.enabled: true
+          exec.enabled: false
+          statusbadge.enabled: false
+          # Skip resource types the controller's namespaced RBAC does not let
+          # it list instead of failing the cluster cache.
+          resource.respectRBAC: normal
+        clusterCredentials:
+          # The in-cluster destination, fenced to the tenant namespaces: the
+          # controller watches and deploys into gco-jobs / gco-inference only
+          # (the gco-tenants AppProject names the same pair).
+          in-cluster:
+            server: https://kubernetes.default.svc
+            namespaces: gco-jobs,gco-inference
+            config:
+              tlsClientConfig:
+                insecure: false
+      dex:
+        enabled: false
+      notifications:
+        enabled: false
+      # The chart always renders the ApplicationSet controller; GCO does not
+      # use it, so it runs zero replicas.
+      applicationSet:
+        replicas: 0
+      controller:
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+      server:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      repoServer:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+      redis:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+  # Crossplane - self-managed control plane for platform APIs (opt-in:
+  # cdk.json helm.crossplane, which installs the Crossview dashboard below with
+  # it). Crossplane v2 composes any Kubernetes resource through namespaced
+  # composite resources (XRs); GCO installs the go-templating composition
+  # function, aggregates the tenant workload kinds into Crossplane's role and
+  # grants Crossview a read-only view in the post-Helm pass
+  # (post-helm-crossplane.yaml). No provider packages ship: AWS resources come
+  # from the ACK EKS Capability (docs/EKS_CAPABILITIES.md) or providers an
+  # operator adds. See docs/CROSSPLANE.md.
+  # https://github.com/crossplane/crossplane/tree/main/cluster/charts/crossplane
+  crossplane:
+    enabled: false
+    repo_name: crossplane-stable
+    repo_url: https://charts.crossplane.io/stable
+    chart: crossplane
+    version: "2.4.2"
+    namespace: crossplane-system
+    create_namespace: true
+    wait: true
+    wait_timeout: "8m"
+    values:
+      replicas: 1
+      # Rendered onto the Crossplane and RBAC manager pods.
+      customAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+      resourcesCrossplane:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1024Mi
+      resourcesRBACManager:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 100m
+          memory: 512Mi
+
+  # Crossview - the crossplane-contrib Crossplane dashboard, installed with
+  # Crossplane (helm.crossplane). Reached only through `gco crossplane open`
+  # (a kubectl port-forward to a ClusterIP Service; no ingress), so it runs
+  # with auth mode none and no PostgreSQL: whoever can port-forward into
+  # crossplane-system already holds cluster access. The chart's own
+  # ClusterRole (get/list/watch on every resource, Secrets included) is
+  # replaced by GCO's read-only binding to crossplane-view plus the tenant
+  # workload kinds (post-helm-crossplane.yaml).
+  # https://github.com/crossplane-contrib/crossview
+  crossview:
+    enabled: false
+    repo_name: crossview
+    repo_url: https://crossplane-contrib.github.io/crossview
+    chart: crossview
+    version: "4.6.0"
+    namespace: crossplane-system
+    create_namespace: false
+    wait: true
+    wait_timeout: "5m"
+    values:
+      image:
+        repository: ghcr.io/crossplane-contrib/crossview
+        tag: "v4.6.0"
+        pullPolicy: IfNotPresent
+      app:
+        replicas: 1
+        automountServiceAccountToken: true
+      global:
+        namespace: crossplane-system
+        createNamespace: false
+      database:
+        enabled: false
+      config:
+        database:
+          enabled: false
+        server:
+          auth:
+            mode: none
+          cors:
+            origin: http://localhost:3001
+      # No chart-created Secret: with auth none and no database there is
+      # nothing to hold, and the chart's defaults would store a literal
+      # admin/password pair.
+      secrets:
+        adminUsername: ""
+        adminPassword: ""
+      rbac:
+        create: false
+      serviceAccount:
+        create: true
+        name: crossview
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
 
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling

@@ -67,6 +67,22 @@
       "network_policy_enforcement": true
     },
 
+    "_comment_eks_capabilities": "Opt-in EKS Capabilities: AWS-managed AWS Controllers for Kubernetes (ACK) and kro attached to each regional cluster as AWS::EKS::Capability resources (billed for every hour a capability is active on a cluster plus hourly for specific Kubernetes resources it manages — see the Amazon EKS pricing page; every type is off by default). Each enabled type synthesizes one capability IAM role (trust capabilities.eks.amazonaws.com, sts:AssumeRole + sts:TagSession, no service permissions unless listed here) and one capability per cluster; regions [] means every regional deployment region, a non-empty list selects a subset. ack.disabled_services lists ACK controllers to leave out, enable_cross_namespace is ACK's cross-namespace flag, assume_role_arns are the per-service roles the capability role may assume (IAM Role Selectors, the least-privilege model) and iam_policy_arns are managed policies attached to the capability role itself (the simple setup); with both empty ACK can call no AWS API. kro gets write access to an allow-listed set of workload kinds in gco-jobs and gco-inference (07-kro-tenant-access.yaml) so ResourceGraphDefinitions can compose tenant workloads. Argo CD is not an EKS Capability here: GCO runs it in the cluster (helm.argocd, docs/GITOPS.md). Inspect live state with `gco stacks capabilities status -r <region>`. See docs/EKS_CAPABILITIES.md.",
+    "eks_capabilities": {
+      "ack": {
+        "enabled": false,
+        "regions": [],
+        "disabled_services": [],
+        "enable_cross_namespace": false,
+        "assume_role_arns": [],
+        "iam_policy_arns": []
+      },
+      "kro": {
+        "enabled": false,
+        "regions": []
+      }
+    },
+
     "_comment_networking": "Networking, security, and ingress",
 
     "_comment_global_accelerator": "AWS Global Accelerator front door in the commercial 'aws' partition only. Other AWS partitions omit the accelerator, listener, endpoint groups, and registration resources and use the IAM-authenticated regional APIs directly. When applicable: health_check_interval is seconds between endpoint-group probes (Global Accelerator accepts only 10 or 30); health_check_threshold is the consecutive-probe count before an endpoint flips state (1-10); health_check_path is the HTTPS path probed on each regional ALB; client_affinity is 'NONE' or 'SOURCE_IP'. traffic_dial is the optional capacity-driven traffic-dial controller (see docs/CUSTOMIZATION.md): disabled by default; in 'monitor' mode it only computes and publishes per-region dial decisions from the GCO/HealthMonitor ClusterHealthy signal, while 'enforce' mode applies them via UpdateEndpointGroup. min_dial_percentage floors how far a degraded region is dialed down; max_step_percentage caps the change per run; full_health_percentage is the healthy fraction (percent) at or above which a region returns to 100; interval_minutes and lookback_minutes are the run cadence and the health window.",
@@ -427,6 +443,29 @@
       },
       "_comment_yunikorn": "Apache YuniKorn — alternative batch scheduler with hierarchical queues. Pods opt in via schedulerName: yunikorn, so it coexists cleanly with Volcano and the default scheduler. Off by default. See docs/YUNIKORN.md.",
       "yunikorn": {
+        "enabled": false
+      },
+      "_comment_argocd": "Argo CD — self-managed GitOps controller installed from the upstream argo-cd chart in namespaced mode: no ClusterRoles, and it deploys only into gco-jobs and gco-inference through the fenced gco-tenants AppProject (quotas, limits, NetworkPolicies and RBAC are never syncable). Off by default. source_repos is the AppProject's allowed repositories (glob patterns; [\"*\"] admits any). Setting gitops.repo_url to a Git URL adds the root Application gco-gitops-root, which syncs revision/path (path may use {region} and {cluster_name} for per-cluster overlays); sync_policy manual leaves syncs to a human, automated syncs with self-heal (prune off). repo_server sizes the manifest-generation tier: replicas is the fixed count (exact integer 1-50, default 1); set repo_server.autoscaling.enabled=true to hand the count to a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 5) at cpu_target_utilization_percentage of the repo-server container's CPU request in charts.yaml (1-100, default 70). The application controller and the UI server keep one replica (one cluster is one controller shard; the UI is reached through a port-forward to one pod). Open the UI with `gco gitops open` and read the admin password with `gco gitops password`. See docs/GITOPS.md.",
+      "argocd": {
+        "enabled": false,
+        "source_repos": ["*"],
+        "gitops": {
+          "repo_url": "",
+          "revision": "HEAD",
+          "path": ".",
+          "sync_policy": "manual"
+        },
+        "repo_server": {
+          "replicas": 1,
+          "autoscaling": {
+            "enabled": false,
+            "max_replicas": 5,
+            "cpu_target_utilization_percentage": 70
+          }
+        }
+      },
+      "_comment_crossplane": "Crossplane — self-managed control plane for platform APIs (v2: namespaced composite resources compose any Kubernetes resource) plus the Crossview dashboard, both installed from their upstream charts. Off by default. GCO installs the go-templating composition function, lets Crossplane compose the tenant workload kinds and gives Crossview a read-only view; no provider packages ship (AWS resources come from the ACK EKS Capability). Open the dashboard with `gco crossplane open`. See docs/CROSSPLANE.md.",
+      "crossplane": {
         "enabled": false
       },
       "_comment_kueue": "Kueue — job-queueing layer for fair sharing across teams. Must install last because its mutating webhook intercepts every Job/Deployment. See docs/KUEUE.md.",

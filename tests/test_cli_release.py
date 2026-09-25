@@ -254,6 +254,58 @@ class TestHarnessInvocation:
         assert "--optional-schedulers" not in fake_processes.harness_calls[0]["command"]
 
 
+class TestEksCapabilitiesPassThrough:
+    """`gco release validate` is the documented one-command path for the live
+    leg, so the harness's `--eks-capabilities` surface must reach it verbatim."""
+
+    def test_eks_capabilities_are_forwarded_verbatim(self, fake_processes):
+        result = _invoke(*BASE, "--eks-capabilities", "ack,kro")
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        harness_start = command.index("scripts.live_release_validation")
+        tail = command[harness_start:]
+        assert tail[tail.index("--eks-capabilities") + 1] == "ack,kro"
+        assert not any(flag.startswith("--argocd-") for flag in tail)
+        assert "capabilities: ack,kro" in result.output, "the echo must show the enablement"
+
+    def test_all_is_forwarded(self, fake_processes):
+        result = _invoke(*BASE, "--eks-capabilities", "all")
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        assert command[command.index("--eks-capabilities") + 1] == "all"
+
+    def test_eks_capabilities_absent_by_default(self, fake_processes):
+        result = _invoke(*BASE)
+        assert result.exit_code == 0
+        command = fake_processes.harness_calls[0]["command"]
+        assert not any(flag.startswith(("--eks-capabilities", "--argocd-")) for flag in command)
+        assert "capabilities:" not in result.output
+
+    def test_the_retired_argocd_options_are_gone(self, fake_processes):
+        for extra in (
+            ("--argocd-identity", "SSO_GROUP:g-1"),
+            ("--argocd-gitops-repo-url", "https://github.com/example/gitops.git"),
+            ("--no-argocd-gitops",),
+        ):
+            result = _invoke(*BASE, "--eks-capabilities", "kro", *extra)
+            assert result.exit_code != 0, extra
+            assert "No such option" in result.output, result.output
+        assert fake_processes.harness_calls == []
+
+    def test_malformed_capability_lists_are_rejected_before_launch(self, fake_processes):
+        for value, fragment in (
+            (" , ", "at least one capability"),
+            ("kro,flux", "flux"),
+            # Argo CD is a Helm chart now (helm.argocd), not a capability.
+            ("argocd", "argocd"),
+            ("all,kro", "cannot be combined"),
+        ):
+            result = _invoke(*BASE, "--eks-capabilities", value)
+            assert result.exit_code != 0, value
+            assert fragment in result.output, result.output
+        assert fake_processes.harness_calls == []
+
+
 class TestRepoRootValidation:
     def test_refuses_a_non_gco_checkout(self, tmp_path, monkeypatch):
         bare = tmp_path / "bare"

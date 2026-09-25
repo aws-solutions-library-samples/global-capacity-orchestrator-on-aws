@@ -125,6 +125,14 @@ class MockConfigLoader:
             "network_policy_enforcement": True,
         }
 
+    def get_eks_capabilities_config(self):
+        # Every capability off, mirroring the shipped cdk.json default, so
+        # pre-existing stack-test templates stay unchanged; the EKS
+        # Capabilities tests patch this method to exercise the enabled paths.
+        from gco.eks_capabilities_config import normalize_eks_capabilities_config
+
+        return normalize_eks_capabilities_config(None)
+
     def get_vpc_endpoints_config(self):
         return {"gateway": ["s3", "dynamodb"], "interface": []}
 

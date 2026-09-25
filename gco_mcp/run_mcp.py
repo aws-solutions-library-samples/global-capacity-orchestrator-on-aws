@@ -156,10 +156,12 @@ from tools.costs import (  # noqa: E402, F401
     cost_trend,
     cost_workloads,
 )
+from tools.crossplane import crossplane_status  # noqa: E402, F401
 from tools.dag import dag_run, dag_validate  # noqa: E402, F401
 from tools.deps import deps_scan  # noqa: E402, F401
 from tools.docs import find_docs  # noqa: E402, F401
 from tools.examples import find_examples  # noqa: E402, F401
+from tools.gitops import gitops_status  # noqa: E402, F401
 from tools.images import (  # noqa: E402, F401
     images_describe,
     images_init,
@@ -238,6 +240,7 @@ from tools.stacks import (  # noqa: E402, F401
     disable_aurora,
     disable_fsx,
     disable_valkey,
+    eks_capabilities_status,
     enable_aurora,
     enable_fsx,
     enable_valkey,
@@ -658,6 +661,7 @@ _PUBLIC_EXPORTS = [
     "cost_trend",
     "cost_workloads",
     "create_reservation",
+    "crossplane_status",
     "dag_run",
     "dag_validate",
     "delete_inference",
@@ -678,6 +682,7 @@ _PUBLIC_EXPORTS = [
     "disable_fsx",
     "disable_monitoring",
     "disable_valkey",
+    "eks_capabilities_status",
     "emit_startup_log",
     "enable_analytics",
     "enable_aurora",
@@ -701,6 +706,7 @@ _PUBLIC_EXPORTS = [
     "get_model_uri",
     "get_pod_logs",
     "get_project_version",
+    "gitops_status",
     "images_build",
     "images_cleanup",
     "images_delete_repo",

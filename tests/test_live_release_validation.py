@@ -5289,6 +5289,71 @@ class TestSmokeManifestSupplyChain:
         dependency_scan = (root / ".github/scripts/dependency-scan.sh").read_text(encoding="utf-8")
         assert "scripts/live_release_validation/manifests/" in dependency_scan
 
+    def test_smoke_jobs_survive_a_node_drain_but_probes_do_not(self) -> None:
+        """A live run lost central-queue to EKS Auto Mode consolidating the node
+        its busybox pod had just been bound to: the Eviction API drain marked the
+        pod DisruptionTarget and, with backoffLimit 0, the Job failed although the
+        container had exited 0. Every smoke Job ignores exactly that condition and
+        keeps the zero backoff limit for real failures. The network-posture probe
+        and listener carry no such policy: their verdicts need one pod's
+        uninterrupted connection, so a replacement pod would hide the disruption
+        the action has to see (it re-runs a disrupted probe itself). They ask
+        Karpenter to leave their node alone and prefer on-demand capacity, where
+        no Spot reclaim interrupts them, without ever requiring it."""
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        manifest_dir = root / "scripts/live_release_validation/manifests"
+        smoke = sorted(manifest_dir.glob("*-smoke-job.yaml"))
+        probes = sorted(manifest_dir.glob("netpol-*-job.yaml"))
+        assert {path.name for path in smoke} == {
+            f"{name}-smoke-job.yaml"
+            for name in ("api", "sqs", "kueue", "yunikorn", "volcano", "slurm")
+        }
+        assert {path.name for path in probes} == {"netpol-probe-job.yaml", "netpol-target-job.yaml"}
+        assert {path.name for path in manifest_dir.glob("*.yaml")} == {
+            path.name for path in (*smoke, *probes)
+        }, "a new manifest must decide which side of this contract it is on"
+
+        for path in smoke:
+            spec = yaml.safe_load(path.read_text(encoding="utf-8"))["spec"]
+            assert spec["backoffLimit"] == 0, path.name
+            assert spec["template"]["spec"]["restartPolicy"] == "Never", path.name
+            assert spec["podFailurePolicy"] == {
+                "rules": [
+                    {
+                        "action": "Ignore",
+                        "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}],
+                    }
+                ]
+            }, path.name
+        for path in probes:
+            spec = yaml.safe_load(path.read_text(encoding="utf-8"))["spec"]
+            assert spec["backoffLimit"] == 0, path.name
+            assert "podFailurePolicy" not in spec, path.name
+            template = spec["template"]
+            assert template["metadata"]["annotations"] == {"karpenter.sh/do-not-disrupt": "true"}, (
+                path.name
+            )
+            assert template["spec"]["affinity"] == {
+                "nodeAffinity": {
+                    "preferredDuringSchedulingIgnoredDuringExecution": [
+                        {
+                            "weight": 100,
+                            "preference": {
+                                "matchExpressions": [
+                                    {
+                                        "key": "karpenter.sh/capacity-type",
+                                        "operator": "In",
+                                        "values": ["on-demand"],
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }, path.name
+
 
 class TestSchedulerValidation:
     """The schedulers action proves enabled schedulers and skips with reasons."""

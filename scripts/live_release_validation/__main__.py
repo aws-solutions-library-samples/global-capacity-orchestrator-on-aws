@@ -12,11 +12,13 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES
 from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
 
+from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides_json
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
@@ -134,6 +136,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--eks-capabilities",
+        type=_split_actions,
+        default=(),
+        metavar="NAME[,NAME...]",
+        help=(
+            "Enable off-by-default EKS Capabilities for this run's deploy so the "
+            "eks-capabilities action can prove each one attaches ACTIVE (ack, kro, or all)"
+        ),
+    )
+    parser.add_argument(
         "--inference-region",
         help="Deployed Region used by the inference action",
     )
@@ -203,6 +215,15 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         )
     if "all" in args.optional_schedulers and len(args.optional_schedulers) != 1:
         parser.error("--optional-schedulers 'all' cannot be combined with individual names")
+    unknown_capabilities = sorted(set(args.eks_capabilities) - set(EKS_CAPABILITY_TYPES) - {"all"})
+    if unknown_capabilities:
+        parser.error(
+            "--eks-capabilities accepts "
+            + ", ".join((*EKS_CAPABILITY_TYPES, "all"))
+            + f"; got: {', '.join(unknown_capabilities)}"
+        )
+    if "all" in args.eks_capabilities and len(args.eks_capabilities) != 1:
+        parser.error("--eks-capabilities 'all' cannot be combined with individual names")
     if _inference_selected(args.actions):
         required = (
             "inference_region",
@@ -244,6 +265,16 @@ def _settings_from_args(
         report_dir / "checkpoint.json",
     )
     protected = tuple(dict.fromkeys(("CDKToolkit", "GCOGitHubOIDCStack", *args.protected_stack)))
+    capability_types = (
+        EKS_CAPABILITY_TYPES
+        if "all" in args.eks_capabilities
+        else tuple(name for name in EKS_CAPABILITY_TYPES if name in args.eks_capabilities)
+    )
+    capabilities_overrides_json = ""
+    if capability_types:
+        capabilities_overrides_json = overrides_json(
+            build_eks_capabilities_overrides(types=capability_types)
+        )
     inference_enabled = _inference_selected(args.actions)
     proxy_config: dict[str, object] = {
         "tls_proxy_cpu_request_millicores": (INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT),
@@ -311,6 +342,7 @@ def _settings_from_args(
             if "all" in args.optional_schedulers
             else tuple(sorted(set(args.optional_schedulers)))
         ),
+        eks_capabilities_overrides_json=capabilities_overrides_json,
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

@@ -187,15 +187,18 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 139 read-only or low-risk
-        # tools (138 before deps_scan; 134 before fleet_status; 125 before the
-        # cost allocation/k8s/report family added 9). Optional families add 58
-        # more when every flag is enabled: capacity purchase (2), image publish
-        # (3), destructive operations (15), model upload (2), infrastructure
-        # deploy (4), infrastructure destroy (2), local metrics (1), semantic
-        # progress (1), local storage sync (1), config management (11), Mission
-        # (10), and Swarm (6). The all-flags ceiling is therefore 197.
-        base_count = 139
+        # The default registry intentionally contains 142 read-only or low-risk
+        # tools (139 before the platform add-on status trio
+        # eks_capabilities_status + gitops_status + crossplane_status; 138
+        # before deps_scan; 134 before fleet_status; 125 before the cost
+        # allocation/k8s/report family added 9). Optional families add 58
+        # more when every flag is enabled: capacity purchase (2), image
+        # publish (3), destructive operations (15), model upload (2),
+        # infrastructure deploy (4), infrastructure destroy (2), local metrics
+        # (1), semantic progress (1), local storage sync (1), config
+        # management (11), Mission (10), and Swarm (6). The all-flags ceiling
+        # is therefore 200.
+        base_count = 142
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -213,7 +216,8 @@ class TestToolRegistration:
         if "models_upload" in tool_names:
             expected += 2  # central + regional upload tools share the model-upload gate
         if "deploy_stack" in tool_names:
-            expected += 4  # deploy_stack + deploy_all + bootstrap_cdk + addons_install
+            # deploy_stack + deploy_all + bootstrap_cdk + addons_install
+            expected += 4
         if "destroy_stack" in tool_names:
             expected += 2  # destroy_stack + destroy_all
         if "metrics_from_local_file" in tool_names:
@@ -343,6 +347,11 @@ class TestToolRegistration:
             "stack_synth",
             "valkey_status",
             "aurora_status",
+            # EKS Capabilities (AWS-managed ACK / kro) and the self-managed
+            # platform add-ons (Argo CD, Crossplane)
+            "eks_capabilities_status",
+            "gitops_status",
+            "crossplane_status",
             # Stacks mutating (cdk.json toggles)
             "enable_fsx",
             "disable_fsx",
@@ -481,7 +490,14 @@ class TestToolRegistration:
         # Infrastructure-deploy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DEPLOY.
         if "deploy_stack" in names:
-            expected.update({"deploy_stack", "deploy_all", "bootstrap_cdk", "addons_install"})
+            expected.update(
+                {
+                    "deploy_stack",
+                    "deploy_all",
+                    "bootstrap_cdk",
+                    "addons_install",
+                }
+            )
         # Infrastructure-destroy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DESTROY.
         if "destroy_stack" in names:

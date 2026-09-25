@@ -1,0 +1,34 @@
+# ACK SQS Queue Example
+#
+# An Amazon SQS queue declared as a Kubernetes object. The AWS-managed ACK EKS
+# Capability (cdk.json eks_capabilities.ack) creates the queue, reports its ARN
+# and URL in the object's status, and deletes the queue when the object is
+# deleted. New SQS queues are encrypted at rest with SQS-managed keys by
+# default.
+#
+# Prerequisites:
+#   - ACK enabled with SQS permissions for the capability role, in cdk.json:
+#       "eks_capabilities": {"ack": {"enabled": true,
+#         "iam_policy_arns": ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"]}}
+#     then gco stacks deploy. For production, name a customer managed policy
+#     scoped to your queues instead, or use assume_role_arns (IAM Role
+#     Selectors); see docs/EKS_CAPABILITIES.md.
+#
+# Usage:
+#   kubectl apply -f examples/ack-sqs-queue.yaml
+#   kubectl get queue.sqs.services.k8s.aws gco-ack-example -n gco-jobs \
+#     -o jsonpath='{.status.queueURL}'
+#   kubectl delete -f examples/ack-sqs-queue.yaml   # ACK deletes the queue
+#
+# Docs: ../docs/EKS_CAPABILITIES.md
+apiVersion: sqs.services.k8s.aws/v1alpha1
+kind: Queue
+metadata:
+  name: gco-ack-example
+  namespace: gco-jobs
+spec:
+  queueName: gco-ack-example
+  # Unconsumed example messages expire after an hour.
+  messageRetentionPeriod: "3600"
+  tags:
+    project: gco

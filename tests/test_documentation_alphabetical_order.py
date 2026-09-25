@@ -175,6 +175,9 @@ class TableSpec:
 
 
 TABLE_SPECS: tuple[TableSpec, ...] = (
+    # The AWS services the guidance uses, scanned by service name (a reader
+    # asking "does this touch Amazon SQS?" should not have to read all of it).
+    TableSpec("README.md", heading="AWS Services in this Guidance"),
     # Repository automation: what lives where under .github/.
     TableSpec(".github/AUTOMATION.md", heading="Directory Map"),
     TableSpec(".github/scripts/README.md", heading="Files"),

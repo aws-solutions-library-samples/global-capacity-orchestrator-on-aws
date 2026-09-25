@@ -1503,7 +1503,7 @@ get_latest_github_release_tag() {
 # Prints the unique value(s) of a ``<VAR_NAME>: "<value>"`` env assignment
 # found across the workflow YAML under <workflows_dir> (default
 # ``.github/workflows``). Used by the CI-tooling drift check to read the
-# pinned ``HELM_VERSION`` / ``KUBECTL_VERSION`` / ``CALICO_VERSION`` the
+# pinned ``KUBECONFORM_VERSION`` / ``CALICO_VERSION`` / ``METRICS_SERVER_VERSION`` the
 # workflows install their own tooling from — pins Dependabot doesn't watch
 # (they're plain env strings, not ``uses:`` refs or Dockerfile ``FROM``
 # lines).
@@ -1520,6 +1520,25 @@ extract_workflow_env_pin() {
   grep -rhoE "^[[:space:]]*${var}:[[:space:]]*\"?[A-Za-z0-9._+-]+\"?" "$dir" 2>/dev/null \
     | sed -E "s/^[[:space:]]*${var}:[[:space:]]*//" \
     | tr -d '"' \
+    | sort -u
+}
+
+# extract_crossplane_function_pin <manifest> <function-name>
+#
+# Prints the tag of every Crossplane package reference
+# ``package: <registry>/<org>/<function-name>:<tag>`` in <manifest>, one per
+# line, de-duplicated and sorted (post-helm-crossplane.yaml pins
+# function-go-templating this way). The reference is an xpkg OCI package,
+# not a container ``image:``, so neither the manifest image sweep nor
+# Dependabot sees it. More than one line means two tags drifted apart.
+# Empty output when the manifest is absent or names no such package.
+extract_crossplane_function_pin() {
+  local manifest="$1" name="$2"
+  [ -n "$name" ] || return 0
+  [ -f "$manifest" ] || return 0
+  grep -hoE "^[[:space:]]*package:[[:space:]]*\"?[A-Za-z0-9._/-]+/${name}:[A-Za-z0-9._+-]+" \
+    "$manifest" 2>/dev/null \
+    | sed -E 's/.*:([A-Za-z0-9._+-]+)$/\1/' \
     | sort -u
 }
 

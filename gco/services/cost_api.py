@@ -38,6 +38,7 @@ from gco.services.cost_monitor import (
     OpenCostUnavailableError,
     ReportWriteError,
     create_cost_monitor_from_env,
+    preload_report_writer,
 )
 from gco.services.structured_logging import configure_structured_logging
 
@@ -94,6 +95,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global cost_monitor
 
     logger.info("Starting Cost Monitor Service")
+    # Before the server listens: the startup probe covers this window, the
+    # liveness probe does not cover the first scheduled pass.
+    preload_report_writer()
     cost_monitor = create_cost_monitor_from_env()
     configure_structured_logging(
         service_name="cost-monitor",

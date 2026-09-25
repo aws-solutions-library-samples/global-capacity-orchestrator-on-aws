@@ -1,0 +1,77 @@
+# kro BatchJob API (the companion of kro-batch-job.yaml)
+#
+# A ResourceGraphDefinition. kro turns it into a new namespaced API, BatchJob
+# (kro.run/v1alpha1), and composes one batch/v1 Job per instance, named after
+# the instance, in the instance's namespace. The AWS-managed kro EKS
+# Capability (cdk.json eks_capabilities.kro) runs it. GCO lets the capability
+# write the tenant workload kinds in gco-jobs and gco-inference only
+# (lambda/kubectl-applier-simple/manifests/07-kro-tenant-access.yaml), so a
+# BatchJob created in any other namespace cannot compose its Job.
+#
+# The message reaches the container as an environment variable and is limited
+# to plain characters, so an instance can never inject into the command.
+#
+# Prerequisites:
+#   - kro enabled: "eks_capabilities": {"kro": {"enabled": true}} in cdk.json,
+#     then gco stacks deploy
+#
+# Usage:
+#   kubectl apply -f examples/kro-batch-api.yaml
+#   kubectl get resourcegraphdefinition gco-batch-job   # STATE Active
+#   kubectl apply -f examples/kro-batch-job.yaml
+#
+# Delete the BatchJob instances before this definition.
+#
+# Docs: ../docs/EKS_CAPABILITIES.md
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: gco-batch-job
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: BatchJob
+    spec:
+      message: 'string | default="Hello from kro" maxLength=120 pattern="^[A-Za-z0-9 .!?_-]*$" description="Printed by the composed Job"'
+  resources:
+    - id: job
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+          labels:
+            project: gco
+        spec:
+          # No ttlSecondsAfterFinished: kro would re-create a Job the TTL
+          # controller removed. Deleting the instance removes the Job.
+          backoffLimit: 3
+          template:
+            spec:
+              automountServiceAccountToken: false
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+              containers:
+                - name: hello
+                  image: busybox:1.38.0
+                  command: ["sh", "-c", 'echo "$MESSAGE" && sleep 5']
+                  env:
+                    - name: MESSAGE
+                      value: ${schema.spec.message}
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                        - ALL
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "64Mi"
+                    limits:
+                      cpu: "200m"
+                      memory: "128Mi"
+              restartPolicy: Never

@@ -12,6 +12,19 @@ metadata:
     gco.aws/validation-path: yunikorn
 spec:
   backoffLimit: 0
+  # A node drain is not a workload failure. EKS Auto Mode consolidates nodes
+  # while the harness runs (the inference matrix leaves spare capacity behind
+  # it), and a pod evicted through the Eviction API carries the
+  # DisruptionTarget condition; with a zero backoff limit that eviction alone
+  # failed the Job even though the container had already exited 0. Let the
+  # Job replace a disrupted pod instead — a real non-zero exit still fails it
+  # on the spot.
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
   ttlSecondsAfterFinished: 600
   template:
     metadata:

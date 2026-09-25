@@ -13,10 +13,12 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [cluster](#cluster-commands)
   - [config-cmd](#config-cmd-commands)
   - [costs](#costs-commands)
+  - [crossplane](#crossplane-commands)
   - [dag](#dag-commands)
   - [deps](#deps-commands)
   - [examples](#examples-commands)
   - [files](#files-commands)
+  - [gitops](#gitops-commands)
   - [images](#images-commands)
   - [inference](#inference-commands)
   - [jobs](#jobs-commands)
@@ -1770,6 +1772,86 @@ gco costs dashboard --via-ssm auto -y
 
 ---
 
+### Crossplane Commands
+
+Inspect and reach the self-managed [Crossplane](CROSSPLANE.md) control plane
+(`cdk.json` `helm.crossplane`, off by default) and its
+[Crossview](https://github.com/crossplane-contrib/crossview) dashboard.
+`status` reads the checkout only. The dashboard has no public endpoint and runs
+without a login, so `gco crossplane open` port-forwards it over the PRIVATE EKS
+API endpoint (optionally through an SSM-managed instance with `--via-ssm`) and
+the port-forward is the access control.
+
+<details>
+<summary>All <code>gco crossplane</code> commands (3) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco crossplane status`](#gco-crossplane-status) | Show the configured Crossplane: toggle, chart pins and composition functions. |
+| [`gco crossplane open`](#gco-crossplane-open) | Port-forward to the Crossview dashboard over the private EKS endpoint. |
+| [`gco crossplane screenshot`](#gco-crossplane-screenshot) | Capture the Crossview dashboard as a full-page PNG. |
+
+</details>
+
+#### `gco crossplane status`
+
+Show whether `helm.crossplane.enabled` is on, the pinned `crossplane` and
+`crossview` charts from `charts.yaml`, the composition functions GCO installs
+(read from the shipped `post-helm-crossplane.yaml`) and how to reach the
+dashboard. No AWS or cluster access. The
+[`crossplane_status`](../gco_mcp/tools/README.md#crossplanepy) MCP tool returns
+the same document.
+
+```bash
+gco crossplane status [--output json]
+```
+
+#### `gco crossplane open`
+
+Port-forward `svc/crossview-service` in `crossplane-system` to
+`http://localhost:3001`. Runs in the foreground; press Ctrl-C to stop.
+
+```bash
+gco crossplane open [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
+| `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+#### `gco crossplane screenshot`
+
+Forward the dashboard in the background and capture its landing page as a
+full-page PNG with Playwright's Chromium (`pip install 'gco[diagrams]'` and
+`playwright install chromium` once). This is the code behind
+`images/crossview-dashboard.png`.
+
+```bash
+gco crossplane screenshot [OPTIONS]
+```
+
+**Options:** the tunnel options of `gco crossplane open`, plus:
+
+| Option | Description |
+|--------|-------------|
+| `--output`, `-o` | PNG to write (default `./crossview-dashboard.png`). |
+| `--local-port` | Local port to bind (default `3001`). |
+| `--headed` | Show the browser window while capturing. |
+
+**Examples:**
+
+```bash
+gco crossplane status
+gco crossplane open --via-ssm auto -y
+gco crossplane screenshot -o images/crossview-dashboard.png --via-ssm auto -y
+```
+
 ### DAG Commands
 
 Run multi-step job pipelines with dependencies. Define a DAG in YAML, and GCO runs steps in dependency order, skipping downstream steps if a dependency fails.
@@ -2084,6 +2166,103 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 ```
 
 ---
+
+### GitOps Commands
+
+Inspect and reach the self-managed [Argo CD](GITOPS.md) (`cdk.json`
+`helm.argocd`, off by default), which reconciles tenant workloads from Git into
+`gco-jobs` and `gco-inference`. `status` reads the checkout only. The UI has no
+public endpoint, so `open`, `password` and `screenshot` go through the PRIVATE
+EKS API endpoint (optionally through an SSM-managed instance with `--via-ssm`),
+like `gco monitoring open`.
+
+<details>
+<summary>All <code>gco gitops</code> commands (4) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco gitops status`](#gco-gitops-status) | Show the configured Argo CD: toggle, chart pin, fence, GitOps hand-off and repo-server scaling. |
+| [`gco gitops open`](#gco-gitops-open) | Port-forward to the Argo CD UI over the private EKS endpoint. |
+| [`gco gitops password`](#gco-gitops-password) | Print the generated `admin` password from `argocd-initial-admin-secret`. |
+| [`gco gitops screenshot`](#gco-gitops-screenshot) | Capture the Argo CD Applications view as a full-page PNG. |
+
+</details>
+
+#### `gco gitops status`
+
+Show the validated `helm.argocd` block: whether Argo CD is enabled, the pinned
+`argo-cd` chart from `charts.yaml`, the `gco-tenants` project and its
+destinations, `source_repos`, the GitOps hand-off with its `path` rendered for
+every regional deployment region (or just `--region`), the repo-server size or
+autoscaler, and how to reach the UI. No AWS or cluster access; a
+`helm_enabled_overrides` deploy is not visible here. The
+[`gitops_status`](../gco_mcp/tools/README.md#gitopspy) MCP tool returns the same
+document.
+
+```bash
+gco gitops status [--region REGION] [--output json]
+```
+
+#### `gco gitops open`
+
+Port-forward `svc/argocd-server` in `argocd` to `http://localhost:8080`. Runs in
+the foreground; press Ctrl-C to stop. Sign in as `admin` with the password from
+`gco gitops password`.
+
+```bash
+gco gitops open [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--local-port` | Local port to bind (default `8080`). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
+| `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+#### `gco gitops password`
+
+Print the `admin` password Argo CD generated on first start (the `password` key
+of `argocd/argocd-initial-admin-secret`). Once you change the password, delete
+that Secret, as Argo CD recommends; the command then says the password was
+rotated. Takes the tunnel options of `gco gitops open`.
+
+```bash
+gco gitops password [--region REGION] [--via-ssm INSTANCE_ID|auto] [-y]
+```
+
+#### `gco gitops screenshot`
+
+Forward the UI in the background, log in to the Argo CD API as `admin` and
+capture `/applications` with the session cookie as a full-page PNG — no browser
+sign-in. Needs Playwright (`pip install 'gco[diagrams]'` and
+`playwright install chromium` once). This is the code behind
+`images/argocd-ui.png`.
+
+```bash
+gco gitops screenshot [OPTIONS]
+```
+
+**Options:** the tunnel options of `gco gitops open`, plus:
+
+| Option | Description |
+|--------|-------------|
+| `--output`, `-o` | PNG to write (default `./argocd-ui.png`). |
+| `--local-port` | Local port to bind (default `8080`). |
+| `--password` | Admin password (also `$GCO_ARGOCD_ADMIN_PASSWORD`; default: read from `argocd-initial-admin-secret`). |
+| `--headed` | Show the browser window while capturing. |
+
+**Examples:**
+
+```bash
+gco gitops status -r us-west-2
+gco gitops open --via-ssm auto -y
+gco gitops password --via-ssm i-0123456789abcdef0
+gco gitops screenshot -o images/argocd-ui.png --via-ssm auto -y
+```
 
 ### Images Commands
 
@@ -4351,7 +4530,7 @@ Release validation lifecycle.
 
 #### `gco release validate`
 
-Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and SGLang images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and SGLang images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
 ```bash
 gco release validate --expected-account 123456789012 \
@@ -4380,6 +4559,7 @@ gco release validate --expected-account 123456789012 \
 | `--inference-vllm-model-revision` / `--inference-sglang-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |
 | `--optional-schedulers` | Force-enable the off-by-default schedulers (`yunikorn`, `slurm`, or `all`) for this run's deploy so the `schedulers` action proves them too. |
+| `--eks-capabilities` | Enable the off-by-default [EKS Capabilities](EKS_CAPABILITIES.md) (`ack`, `kro`, or `all`) for this run's deploy so the `eks-capabilities` action proves each one attaches `ACTIVE` with no drift. Part of the checkpoint identity. |
 | `--profile` | Topology profile to validate against cdk.json: `configured` (default), `single-region`, or `multi-region`. |
 | `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
 | `--report-dir` | Report directory (default: `~/gco-live-release-validation-reports/<run-id>`, outside the checkout so the clean-worktree preflight holds). |
@@ -4394,7 +4574,7 @@ gco release validate --expected-account 123456789012 \
 Manage CDK infrastructure stacks.
 
 <details>
-<summary>All <code>gco stacks</code> commands (18) — click to expand</summary>
+<summary>All <code>gco stacks</code> commands (19) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -4407,6 +4587,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
 | [`gco stacks eks`](#gco-stacks-eks) | Set the EKS API endpoint access mode and CIDR allowlist in cdk.json. |
+| [`gco stacks capabilities`](#gco-stacks-capabilities) | Configured vs. live [EKS Capabilities](EKS_CAPABILITIES.md) (AWS-managed ACK and kro) per region. |
 | [`gco stacks regions`](#gco-stacks-regions) | Manage deployment Regions in cdk.json (managed-config engine). |
 | [`gco stacks bedrock`](#gco-stacks-bedrock) | Manage Bedrock model and reasoning defaults in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
@@ -4680,6 +4861,45 @@ gco stacks eks endpoint set MODE [OPTIONS]
 gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr 203.0.113.7/32   # dev access from one IP
 gco stacks eks endpoint set PRIVATE -y                                 # back to production posture
 gco stacks deploy gco-us-east-1 -y                                     # apply the change
+```
+
+#### `gco stacks capabilities`
+
+The opt-in [EKS Capabilities](EKS_CAPABILITIES.md) — the AWS-managed
+[ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/)
+installations declared in `cdk.json` `eks_capabilities` (every type off by
+default) and attached to each regional cluster by `gco stacks deploy`.
+Read-only: it mutates neither AWS nor `cdk.json`. Argo CD and Crossplane are
+self-managed Helm charts rather than capabilities; see
+[`gco gitops`](#gitops-commands) and [`gco crossplane`](#crossplane-commands).
+
+```bash
+gco stacks capabilities status [OPTIONS]
+```
+
+**Subcommands:**
+
+- `status` - Configured versus live: for each capability type, whether
+  `cdk.json` enables it for the region, whether it is attached
+  (`ListCapabilities` / `DescribeCapability`), its status and version, and a
+  `drift` sentence when the two disagree (configured but not attached,
+  attached but disabled, or a status other than `ACTIVE`). Capabilities on
+  the cluster that GCO did not create are listed under `unmanaged`. Exits
+  nonzero when any inspected region drifts; with `--output json` the document
+  is one object per region (a list under `--all-regions`).
+
+**Options (`status`):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--all-regions` | `-A` | Inspect every configured deployment region |
+
+**Examples:**
+
+```bash
+gco stacks capabilities status                                      # first deployment region
+gco stacks capabilities status --all-regions --output json          # one document per region
 ```
 
 #### `gco stacks regions`

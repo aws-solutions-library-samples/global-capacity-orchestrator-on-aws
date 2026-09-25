@@ -1212,6 +1212,19 @@ def test_stacks_expected_count_swallows_loader_failure() -> None:
             {"region": "ignored", "all_regions": True},
             ("stacks", "addons", "status", "--all-regions"),
         ),
+        ("eks_capabilities_status", (), {}, ("stacks", "capabilities", "status")),
+        (
+            "eks_capabilities_status",
+            (),
+            {"region": "us-east-1"},
+            ("stacks", "capabilities", "status", "-r", "us-east-1"),
+        ),
+        (
+            "eks_capabilities_status",
+            (),
+            {"region": "ignored", "all_regions": True},
+            ("stacks", "capabilities", "status", "--all-regions"),
+        ),
     ],
 )
 def test_stacks_wrapper_option_matrix(
@@ -1222,6 +1235,36 @@ def test_stacks_wrapper_option_matrix(
 ) -> None:
     with _isolated_tool_module("stacks") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "function_name", "kwargs", "expected_argv"),
+    [
+        ("gitops", "gitops_status", {}, ("gitops", "status")),
+        (
+            "gitops",
+            "gitops_status",
+            {"region": "us-west-2"},
+            ("gitops", "status", "-r", "us-west-2"),
+        ),
+        ("crossplane", "crossplane_status", {}, ("crossplane", "status")),
+    ],
+)
+def test_platform_add_on_status_wrappers(
+    tool_name: str,
+    function_name: str,
+    kwargs: dict[str, Any],
+    expected_argv: tuple[str, ...],
+) -> None:
+    """Argo CD and Crossplane expose status only: no open/screenshot/password tool."""
+    with _isolated_tool_module(tool_name) as loaded:
+        _assert_cli_call(loaded, function_name, (), kwargs, expected_argv)
+        public = {
+            name
+            for name, value in vars(loaded.module).items()
+            if callable(value) and not name.startswith("_") and name.endswith(("_status", "_open"))
+        }
+        assert public == {function_name}
 
 
 @pytest.mark.parametrize(

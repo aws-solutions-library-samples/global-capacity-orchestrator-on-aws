@@ -71,10 +71,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Directories this script scans by default. Each entry is a directory
 # relative to the repo root; every ``*.yaml``/``*.yml`` file directly inside
-# it is a candidate (no recursion needed — neither directory nests further).
+# it is a candidate (no recursion: nested directories are listed explicitly).
 DEFAULT_TARGET_DIRS = (
     "lambda/kubectl-applier-simple/manifests",
     "examples",
+    # The Git path examples/argocd-gitops-job.yaml syncs: never submitted
+    # through GCO, so this schema check is its only pre-cluster validation.
+    "examples/gitops/hello-job",
 )
 
 # Files that are YAML but not Kubernetes manifests, so they're excluded by
@@ -110,6 +113,13 @@ SCHEMA_UNAVAILABLE_SKIPS = (
     # stronger than the catalog lookup this skip bypasses.
     "gateway.k8s.aws/v1/LoadBalancerConfiguration",
     "gateway.k8s.aws/v1/TargetGroupConfiguration",
+    # The example-defined BatchJob APIs. No catalog can carry them: their
+    # schemas are the companion examples themselves (the Crossplane XRD in
+    # crossplane-batch-api.yaml, the kro RGD in kro-batch-api.yaml), which ARE
+    # schema-validated here, and the example harness applies each instance to a
+    # real API server serving that schema.
+    "examples.gco.io/v1alpha1/BatchJob",
+    "kro.run/v1alpha1/BatchJob",
 )
 
 # kubeconform's own default schema catalog (upstream Kubernetes resources).
@@ -134,8 +144,17 @@ _PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z_]+\}\}")
 #   list entries (see regional_stack.py::_compute... / the NetworkPolicy
 #   `to:` block in 03-network-policies.yaml) — the placeholder sits at the
 #   start of a YAML sequence, so it needs a real sequence item, not a string.
+#
+#   {{ARGOCD_SOURCE_REPOS}} / {{ARGOCD_GITOPS_SYNC_POLICY}} are rendered by
+#   gco/argocd_config.py::compute_argocd_replacements as single-line JSON (a
+#   YAML flow sequence / mapping) — the AppProject ``sourceRepos`` list in
+#   post-helm-argocd-access.yaml and the root Application ``syncPolicy`` object
+#   in post-helm-argocd-gitops.yaml — so their stubs must be JSON of the same
+#   shape, not a string.
 _STRUCTURAL_STUBS: dict[str, str] = {
     "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
+    "{{ARGOCD_SOURCE_REPOS}}": '["https://github.com/example/*"]',
+    "{{ARGOCD_GITOPS_SYNC_POLICY}}": '{"automated": {"selfHeal": true, "prune": false}}',
 }
 
 # Placeholders that sit in a bare (unquoted) numeric scalar position — e.g.
@@ -600,8 +619,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"OK: {summary.get('valid', 0)} manifest(s) are schema-valid "
-        f"({summary.get('skipped', 0)} intentionally skipped: no upstream "
-        "schema yet for KubeRay/Volcano CRDs)."
+        f"({summary.get('skipped', 0)} intentionally skipped: GVKs with no catalog "
+        "schema, listed in SCHEMA_UNAVAILABLE_SKIPS)."
     )
     return 0
 

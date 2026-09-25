@@ -1,0 +1,27 @@
+# Crossplane BatchJob Example
+#
+# A composite resource (XR) of the BatchJob API that
+# examples/crossplane-batch-api.yaml defines. Crossplane composes a batch/v1
+# Job with the same name in the same namespace; the XR reports Ready once the
+# Job completes. Open the Crossview dashboard (gco crossplane open) to see the
+# XR and the Job it composed.
+#
+# Prerequisites:
+#   - Crossplane enabled: "helm": {"crossplane": {"enabled": true}} in
+#     cdk.json, then gco stacks deploy
+#   - kubectl apply -f examples/crossplane-batch-api.yaml (the API definition)
+#
+# Usage:
+#   kubectl apply -f examples/crossplane-batch-job.yaml
+#   kubectl get batchjob.examples.gco.io gco-crossplane-hello -n gco-jobs
+#   kubectl logs job/gco-crossplane-hello -n gco-jobs
+#   kubectl delete -f examples/crossplane-batch-job.yaml   # deletes the Job too
+#
+# Docs: ../docs/CROSSPLANE.md
+apiVersion: examples.gco.io/v1alpha1
+kind: BatchJob
+metadata:
+  name: gco-crossplane-hello
+  namespace: gco-jobs
+spec:
+  message: Hello from a Crossplane BatchJob

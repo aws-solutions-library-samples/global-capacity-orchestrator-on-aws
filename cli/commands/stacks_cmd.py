@@ -1097,6 +1097,104 @@ def eks_endpoint_set(config: Any, mode: str, cidrs: tuple[str, ...], yes: bool) 
 
 
 # =============================================================================
+# EKS Capabilities (AWS-managed ACK / kro) — read-only surface
+# =============================================================================
+
+
+@stacks.group("capabilities")
+@pass_config
+def capabilities_cmd(config: Any) -> None:
+    """EKS Capabilities (AWS-managed ACK and kro) attached to GCO clusters.
+
+    The capabilities themselves are declared in cdk.json (eks_capabilities,
+    all off by default) and created by 'gco stacks deploy'; 'status' reads
+    what is configured and what is live. Argo CD is not a capability here:
+    GCO runs it in the cluster ('gco gitops'). See docs/EKS_CAPABILITIES.md.
+    """
+
+
+@capabilities_cmd.command("status")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Show status across all deployment regions")
+@pass_config
+def capabilities_status(config: Any, region: Any, all_regions: bool) -> None:
+    """Show configured versus live EKS Capabilities for a regional cluster.
+
+    Reads cdk.json eks_capabilities and the EKS API (ListCapabilities /
+    DescribeCapability) and reports, per capability type, whether it is
+    configured for the region, whether it is attached, its status, and any
+    drift between the two. Exits nonzero when a region drifts (a configured
+    capability missing, an attached one disabled in cdk.json, or a status
+    other than ACTIVE).
+
+    Examples:
+        gco stacks capabilities status
+        gco stacks capabilities status -r us-west-2
+        gco stacks capabilities status --all-regions --output json
+    """
+    from ..eks_capabilities import capabilities_status as _capabilities_status
+    from ..eks_capabilities import load_eks_capabilities_config
+
+    formatter = get_output_formatter(config)
+    project = _project_name()
+    try:
+        capabilities_config = load_eks_capabilities_config()
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to read eks_capabilities from cdk.json: {exc}")
+        sys.exit(1)
+
+    failures = 0
+    documents: list[dict[str, Any]] = []
+    for target in _target_regions(config, region, all_regions):
+        try:
+            status = _capabilities_status(target, project, config=capabilities_config)
+        except Exception as exc:
+            formatter.print_error(f"[{target}] Failed to describe EKS Capabilities: {exc}")
+            failures += 1
+            continue
+        documents.append(status)
+        _print_capabilities_status(formatter, status, structured=config.output_format != "table")
+        if not status["healthy"]:
+            failures += 1
+    if documents and config.output_format != "table":
+        # One machine-readable document per invocation: a list under
+        # --all-regions, the single region's document otherwise.
+        formatter.print(documents if all_regions else documents[0])
+    if failures:
+        sys.exit(1)
+
+
+def _print_capabilities_status(
+    formatter: Any, status: Mapping[str, Any], *, structured: bool = False
+) -> None:
+    """Render one region's status: the table plus human hints (stderr) about drift.
+
+    In structured (json/yaml) mode the caller prints the documents once at the
+    end, so only the stderr hints are emitted here.
+    """
+    region = status["region"]
+    if not structured:
+        formatter.print_info(f"EKS Capabilities for {status['cluster_name']} in {region}:")
+        formatter.print(
+            status["capabilities"],
+            columns=["type", "configured", "deployed", "status", "version", "drift"],
+        )
+    if not status["cluster_found"]:
+        formatter.print_warning(
+            f"[{region}] Cluster {status['cluster_name']} is not deployed; only the "
+            "configured intent is shown."
+        )
+    for row in status["capabilities"]:
+        if row["drift"]:
+            formatter.print_warning(f"[{region}] {row['type']}: {row['drift']}")
+    for item in status["unmanaged"]:
+        formatter.print_warning(
+            f"[{region}] capability {item['capability_name']} ({item['type']}, "
+            f"{item['status']}) is attached but not managed by GCO"
+        )
+
+
+# =============================================================================
 # Deployment-region commands (managed-config engine veneers)
 # =============================================================================
 

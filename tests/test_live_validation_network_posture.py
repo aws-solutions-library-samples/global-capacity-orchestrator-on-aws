@@ -6,12 +6,15 @@ promised by which shipped policy), the Job lifecycle around every probe (a
 clean-slate foreground delete, apply from the checked-in manifest with the
 run token and PROBE_URL substituted, bounded waits for a Ready listener or a
 terminal probe, background delete of every recorded Job), verdict
-classification from phase plus exit code, the enforcement-off skip of the
-deny probes, the fail-closed handling of listener failures, missing
-inference-monitor pods, kubectl failures, deadlines, and cleanup problems, the
-checkpoint record that authorizes cleanup, and the action's per-Region tunnel
-session. Every kubectl, tunnel, and clock boundary is faked; the manifests
-are the real files.
+classification from phase plus exit code, disruptions (a probe whose pod was
+evicted is read at once and re-run once from a fresh Job, a second disruption
+is named as one, a verdict exit code stands on a pod marked for disruption,
+and a listener or inference-monitor pod that did not last the matrix voids
+its verdicts), the enforcement-off skip of the deny probes, the fail-closed
+handling of listener failures, missing inference-monitor pods, kubectl
+failures, deadlines, and cleanup problems, the checkpoint record that
+authorizes cleanup, and the action's per-Region tunnel session. Every kubectl,
+tunnel, and clock boundary is faked; the manifests are the real files.
 """
 
 from __future__ import annotations
@@ -115,6 +118,7 @@ def _pod(
     exit_code: int | None = None,
     deleting: bool = False,
     containers: bool = True,
+    conditions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {"name": name}
     if deleting:
@@ -122,6 +126,8 @@ def _pod(
     status: dict[str, Any] = {"phase": phase}
     if ip is not None:
         status["podIP"] = ip
+    if conditions is not None:
+        status["conditions"] = conditions
     if containers:
         container: dict[str, Any] = {"name": "c", "ready": ready}
         if exit_code is not None:
@@ -134,12 +140,39 @@ def _probe_name(job_name: str) -> str:
     return job_name.removeprefix("gco-live-netpol-").removesuffix(f"-{TOKEN}")
 
 
+def _evicted(reason: str = "EvictionByEvictionAPI") -> list[dict[str, Any]]:
+    """The conditions an eviction leaves on a pod: not Ready, and a DisruptionTarget."""
+    return [
+        {"type": "Ready", "status": "False"},
+        {
+            "type": "DisruptionTarget",
+            "status": "True",
+            "reason": reason,
+            "message": "Eviction API: evicting",
+        },
+    ]
+
+
+#: The Job conditions a backoffLimit-0 Job carries once its only pod is gone.
+_JOB_FAILED = [
+    {"type": "FailureTarget", "status": "True", "reason": "BackoffLimitExceeded"},
+    {
+        "type": "Failed",
+        "status": "True",
+        "reason": "BackoffLimitExceeded",
+        "message": "Job has reached the specified backoff limit",
+    },
+]
+
+
 class _FakeCluster:
     """Scripted kubectl for the probe matrix.
 
     ``apply`` materializes the Job's pod frames: listeners come up Ready with
     the namespace's target IP, probes terminate with the scripted verdict.
-    Each ``get pods`` for a Job returns the next frame until the last one.
+    Each ``get pods`` for a Job returns the next frame until the last one. A
+    probe Job applied a second time (a re-run) gets its ``rerun_frames`` and a
+    ``-rerun`` pod, and loses the ``job_conditions`` that ``get job`` answers.
     """
 
     def __init__(self, verdicts: dict[str, tuple[str, int | None]] | None = None) -> None:
@@ -150,7 +183,13 @@ class _FakeCluster:
         self.listener_frames: dict[str, list[list[dict[str, Any]]]] = {}
         self.probe_frames: dict[str, list[list[dict[str, Any]]]] = {}
         self.monitor_items: list[dict[str, Any]] = [_pod("inference-monitor-x", ip=MONITOR_IP)]
+        #: Inference-monitor reads answered in order before ``monitor_items``.
+        self.monitor_frames: list[list[dict[str, Any]]] = []
         self.logs: dict[str, tuple[str, str]] = {}
+        #: Job status conditions, per probe name, for ``get job``.
+        self.job_conditions: dict[str, list[dict[str, Any]]] = {}
+        #: Pod frames a re-created probe Job gets instead of its first ones.
+        self.rerun_frames: dict[str, list[list[dict[str, Any]]]] = {}
         self.delete_failures: set[str] = set()
         self.clear_failures: set[str] = set()
         self.apply_failures: set[str] = set()
@@ -169,11 +208,16 @@ class _FakeCluster:
         if verb == "logs":
             stdout, stderr = self.logs[args[1]]
             return 0, stdout, stderr
+        if verb == "get" and args[1] == "job":
+            assert args[-2:] == ("--output", "json")
+            conditions = self.job_conditions.get(_probe_name(args[2]), [])
+            return 0, json.dumps({"status": {"conditions": conditions}}), ""
         assert verb == "get" and args[1] == "pods" and args[-2:] == ("--output", "json")
         namespace = args[args.index("--namespace") + 1]
         selector = args[args.index("--selector") + 1]
         if selector == "app=inference-monitor":
-            return 0, json.dumps({"items": self.monitor_items}), ""
+            items = self.monitor_frames.pop(0) if self.monitor_frames else self.monitor_items
+            return 0, json.dumps({"items": items}), ""
         frames = self.frames[(namespace, selector.removeprefix("job-name="))]
         items = frames.pop(0) if len(frames) > 1 else frames[0]
         return 0, json.dumps({"items": items}), ""
@@ -203,11 +247,15 @@ class _FakeCluster:
         else:
             probe = _probe_name(name)
             phase, exit_code = self.verdicts[probe]
-            frames = self.probe_frames.get(
-                probe, [[_pod(f"{name}-pod", phase=phase, exit_code=exit_code)]]
-            )
+            rerun = (namespace, name) in self.frames
+            if rerun:
+                # A re-created Job starts clean: a pod of its own, no Failed condition.
+                self.job_conditions.pop(probe, None)
+            pod = f"{name}-rerun" if rerun else f"{name}-pod"
+            scripted = self.rerun_frames if rerun else self.probe_frames
+            frames = scripted.get(probe, [[_pod(pod, phase=phase, exit_code=exit_code)]])
             verdict = "REACHABLE" if phase == "Succeeded" else "BLOCKED"
-            self.logs.setdefault(f"{name}-pod", (f"NETPOL_{verdict}\n", ""))
+            self.logs.setdefault(pod, (f"NETPOL_{verdict}\n", ""))
         self.frames[(namespace, name)] = [list(frame) for frame in frames]
         return 0, f"job.batch/{name} created", ""
 
@@ -575,6 +623,11 @@ class TestVerdictMismatches:
         probes = ctx.checkpoint.state["network_posture"][REGION]["probes"]
         assert probes[0]["observed"] == observed
         assert probes[0]["status"] == "mismatch"
+        # No DisruptionTarget on the pod, so the probe itself broke: it is read
+        # once and never re-run.
+        assert probes[0]["disruptions"] == []
+        applied = [job["metadata"]["name"] for job in cluster.applied]
+        assert applied.count(f"gco-live-netpol-same-namespace-{TOKEN}") == 1
 
 
 class TestFailClosed:
@@ -728,6 +781,185 @@ class TestFailClosed:
             checks.NetworkPostureProbe(ctx, REGION, broken).run()
         # The listener Job that was created before the read broke is deleted.
         assert ("cleanup", "gco-system", TARGET_JOB) in cluster.deleted
+
+
+class TestDisruptions:
+    """A disruption takes a verdict away; it never becomes one.
+
+    A live run lost the HTTPS egress probe to an EKS Auto Mode interruption
+    46 seconds into its sampling: the pod was evicted and deleted, the Job
+    failed, and the harness waited out the whole pod timeout for a pod that
+    no longer existed before reporting a timeout instead of a verdict.
+    """
+
+    def test_a_probe_whose_pod_was_evicted_and_deleted_is_rerun_at_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _context()
+        cluster = _FakeCluster()
+        job = f"gco-live-netpol-https-egress-{TOKEN}"
+        cluster.probe_frames["https-egress"] = [[_pod(f"{job}-pod")], []]
+        cluster.job_conditions["https-egress"] = list(_JOB_FAILED)
+        clock = _install_clock(monkeypatch)
+
+        evidence = checks.NetworkPostureProbe(ctx, REGION, cluster).run()
+
+        https = next(item for item in evidence["probes"] if item["name"] == "https-egress")
+        assert https["status"] == "matched"
+        assert https["observed"] == "reachable"
+        assert https["pod"] == f"{job}-rerun"
+        failed = {"reason": "BackoffLimitExceeded", "message": _JOB_FAILED[1]["message"]}
+        assert https["disruptions"] == [{"attempt": 1, "pod": None, **failed}]
+        others = [item for item in evidence["probes"] if item["name"] != "https-egress"]
+        assert all(item["disruptions"] == [] for item in others)
+        record = ctx.checkpoint.state["network_posture"][REGION]
+        assert record["disruptions"] == [{"probe": "https-egress", "attempt": 1, **failed}]
+        # Read at once rather than after the pod timeout: one poll saw the pod
+        # running, the next found the Job failed with nothing left to read.
+        assert len(clock.sleeps) == 1
+        # The re-run is a fresh Job under the same record: cleared again (which
+        # waits for the old pod), applied again, and deleted once at the end.
+        assert [entry for entry in cluster.deleted if entry[2] == job] == [
+            ("clear", "gco-jobs", job),
+            ("clear", "gco-jobs", job),
+            ("cleanup", "gco-jobs", job),
+        ]
+        assert [item["metadata"]["name"] for item in cluster.applied].count(job) == 2
+        assert [entry["name"] for entry in record["jobs"]].count(job) == 1
+        assert len(record["jobs"]) == 9
+        assert all(entry["deleted"] for entry in record["jobs"])
+
+    def test_a_second_disruption_is_reported_as_one_not_as_a_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _context()
+        cluster = _FakeCluster()
+        job = f"gco-live-netpol-https-egress-{TOKEN}"
+        cluster.probe_frames["https-egress"] = [[]]
+        cluster.job_conditions["https-egress"] = list(_JOB_FAILED)
+        # The fresh Job's pod is killed mid-sampling by a drain: an exit code
+        # the script never chose, on a pod marked DisruptionTarget.
+        cluster.rerun_frames["https-egress"] = [
+            [_pod(f"{job}-rerun", phase="Failed", exit_code=137, conditions=_evicted())]
+        ]
+        cluster.logs[f"{job}-rerun"] = ("NETPOL_SAMPLE t=0s reachable\n", "")
+
+        _failure(
+            ctx,
+            cluster,
+            monkeypatch,
+            match=(
+                r"https-egress \(gco-jobs -> https://checkip\.amazonaws\.com/\) expected "
+                r"reachable, observed error \[phase=Failed exit=137\] after 2 disruption\(s\), "
+                r"last: EvictionByEvictionAPI"
+            ),
+        )
+
+        record = ctx.checkpoint.state["network_posture"][REGION]
+        https = next(item for item in record["probes"] if item["name"] == "https-egress")
+        assert https["status"] == "mismatch"
+        assert https["samples"] == ["t=0s reachable"]
+        assert [
+            (entry["attempt"], entry["pod"], entry["reason"]) for entry in https["disruptions"]
+        ] == [(1, None, "BackoffLimitExceeded"), (2, f"{job}-rerun", "EvictionByEvictionAPI")]
+        assert https["disruptions"][1]["message"] == "Eviction API: evicting"
+        assert [entry["probe"] for entry in record["disruptions"]] == ["https-egress"] * 2
+        # Two attempts, never a third.
+        assert [item["metadata"]["name"] for item in cluster.applied].count(job) == 2
+        assert all(entry["deleted"] for entry in record["jobs"])
+
+    @pytest.mark.parametrize(
+        ("probe", "phase", "exit_code"),
+        [("cross-jobs", "Failed", 42), ("same-namespace", "Succeeded", 0)],
+    )
+    def test_a_verdict_the_script_reached_stands_on_a_pod_marked_for_disruption(
+        self, monkeypatch: pytest.MonkeyPatch, probe: str, phase: str, exit_code: int
+    ) -> None:
+        """A drain that lands after the script chose its exit code takes nothing away."""
+        ctx = _context()
+        cluster = _FakeCluster()
+        job = f"gco-live-netpol-{probe}-{TOKEN}"
+        cluster.probe_frames[probe] = [
+            [_pod(f"{job}-pod", phase=phase, exit_code=exit_code, conditions=_evicted())]
+        ]
+
+        evidence = _run(ctx, cluster, monkeypatch)
+
+        result = next(item for item in evidence["probes"] if item["name"] == probe)
+        assert result["status"] == "matched"
+        assert result["disruptions"] == []
+        assert [item["metadata"]["name"] for item in cluster.applied].count(job) == 1
+        assert "disruptions" not in ctx.checkpoint.state["network_posture"][REGION]
+
+    @pytest.mark.parametrize(
+        ("namespace", "final_frame"),
+        [
+            ("gco-jobs", []),
+            ("gco-jobs", [_pod(f"{TARGET_JOB}-pod", deleting=True, ip="10.0.2.7")]),
+            ("gco-system", [_pod(f"{TARGET_JOB}-replacement", ip="10.0.1.6")]),
+            ("gco-system", [_pod(f"{TARGET_JOB}-pod", phase="Failed", ready=False)]),
+            ("gco-jobs", [_pod(f"{TARGET_JOB}-pod", ip="10.0.2.7", conditions=_evicted())]),
+        ],
+        ids=["gone", "terminating", "replaced", "failed", "marked-for-disruption"],
+    )
+    def test_a_listener_that_did_not_last_the_matrix_voids_its_verdicts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        namespace: str,
+        final_frame: list[dict[str, Any]],
+    ) -> None:
+        ctx = _context()
+        cluster = _FakeCluster()
+        cluster.listener_frames[namespace] = [
+            [_pod(f"{TARGET_JOB}-pod", ip=TARGET_IPS[namespace])],
+            final_frame,
+        ]
+
+        _failure(
+            ctx,
+            cluster,
+            monkeypatch,
+            match=(
+                rf"listener\(s\) {namespace}/{TARGET_JOB} did not last the probe matrix "
+                r"\(evicted or replaced\), so the verdicts dialed against them are void"
+            ),
+        )
+
+        record = ctx.checkpoint.state["network_posture"][REGION]
+        assert record["disrupted_listeners"] == [f"{namespace}/{TARGET_JOB}"]
+        # The verdicts are kept for the report, and everything is deleted.
+        assert {item["status"] for item in record["probes"]} == {"matched"}
+        assert all(entry["deleted"] for entry in record["jobs"])
+        assert "evidence" not in record
+
+    def test_a_replaced_inference_monitor_is_named_with_every_other_lost_listener(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _context()
+        cluster = _FakeCluster()
+        cluster.listener_frames["gco-jobs"] = [
+            [_pod(f"{TARGET_JOB}-pod", ip=TARGET_IPS["gco-jobs"])],
+            [],
+        ]
+        # The metrics probe dialed inference-monitor-x; a rollout replaced it.
+        cluster.monitor_frames = [[_pod("inference-monitor-x", ip=MONITOR_IP)]]
+        cluster.monitor_items = [_pod("inference-monitor-y", ip="10.0.3.10")]
+
+        _failure(
+            ctx,
+            cluster,
+            monkeypatch,
+            match=(
+                rf"listener\(s\) gco-jobs/{TARGET_JOB}, gco-system/inference-monitor-x "
+                "did not last the probe matrix"
+            ),
+        )
+
+        record = ctx.checkpoint.state["network_posture"][REGION]
+        assert record["disrupted_listeners"] == [
+            f"gco-jobs/{TARGET_JOB}",
+            "gco-system/inference-monitor-x",
+        ]
 
 
 class TestAction:

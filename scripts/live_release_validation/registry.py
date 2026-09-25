@@ -24,6 +24,7 @@ from .actions import (
     action_convergence,
     action_deploy,
     action_destroy,
+    action_eks_capabilities,
     action_final_inventory,
     action_inference,
     action_network_posture,
@@ -140,6 +141,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Prove the shipped NetworkPolicies decide traffic on the live cluster",
             ("topology",),
             action_network_posture,
+        ),
+        ActionDefinition(
+            "eks-capabilities",
+            "Require every configured EKS Capability (ACK, kro) attached, ACTIVE and drift-free",
+            ("topology",),
+            action_eks_capabilities,
         ),
         ActionDefinition(
             "destroy",

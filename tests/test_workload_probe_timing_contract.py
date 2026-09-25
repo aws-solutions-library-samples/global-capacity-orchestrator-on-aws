@@ -236,6 +236,23 @@ def test_exec_liveness_restarts_only_after_a_minute_of_failure(
     )
 
 
+def test_cost_monitor_liveness_outlasts_a_report_pass_on_a_saturated_node() -> None:
+    """The cost monitor's own report pass can hold its event loop for a minute.
+
+    A live release validation (2026-09-25) watched the first scheduled pass on
+    a CPU-saturated node leave the loop unanswered for about 55 s; the
+    one-minute floor then restarted a container that had just written its
+    report. The cost monitor keeps a two-minute window, and this pins it so a
+    later tidy-up to the common floor does not bring the restart back.
+    """
+    probe = next(
+        case[4]
+        for case in ALL_PROBES
+        if case[1] == "cost-monitor" and case[2] == "cost-monitor" and case[3] == "livenessProbe"
+    )
+    assert probe["periodSeconds"] * probe["failureThreshold"] >= 120
+
+
 @pytest.mark.parametrize("case", STARTUP_PROBES, ids=_probe_id)
 def test_startup_probes_budget_for_a_slow_cold_start(
     case: tuple[str, str, str, str, dict[str, Any]],

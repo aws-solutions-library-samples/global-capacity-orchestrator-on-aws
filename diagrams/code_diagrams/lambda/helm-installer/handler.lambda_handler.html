@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="23ce34337df6def0">
+        <meta name="gco-generated-at" content="2026-09-25T01:31:13Z">
+        <meta name="gco-source-commit" content="6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7">
+        <meta name="gco-flow-digest" content="64467c6011fa0357">
         <title>Helm Installer Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,15 +208,15 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op88=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
-cond91=>condition: if event.get('Action')
-sub95=>subroutine: logger.info('Task event: action=%s chart=%s cluster=%s region=%s', event.get('Action'), event.get('Chart'), event.get('ClusterName'), event.get('Region'))
-io100=>inputoutput: output: handle_task(event)
-e98=>end: end function return
-sub106=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op108=>operation: request_type = event['RequestType']
-op110=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
-op113=>operation: props = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
+cond5=>condition: if event.get('Action')
+sub9=>subroutine: logger.info('Task event: action=%s chart=%s cluster=%s region=%s', event.get('Action'), event.get('Chart'), event.get('ClusterName'), event.get('Region'))
+io14=>inputoutput: output: handle_task(event)
+e12=>end: end function return
+sub20=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op22=>operation: request_type = event['RequestType']
+op24=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
+op27=>operation: props = event['ResourceProperties']
 cluster_name = props['ClusterName']
 region = props['Region']
 default_config = load_charts_config()
@@ -306,23 +306,23 @@ if failed:
     send_response(event, context, FAILED, response_data, physical_id, f"Failed charts: {', '.join(failed)}")
 else:
     send_response(event, context, SUCCESS, response_data, physical_id)
-cond112=>condition: exception raised?
-cond115=>condition: except Exception as e
-sub119=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-sub121=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
+cond26=>condition: exception raised?
+cond29=>condition: except Exception as e
+sub33=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+sub35=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
 
-op88->cond91
-cond91(yes)->sub95
-sub95->io100
-io100->e98
-cond91(no)->sub106
-sub106->op108
-op108->op110
-op110->op113
-op113->cond112
-cond112(yes)->cond115
-cond115(yes)->sub119
-sub119->sub121
+op2->cond5
+cond5(yes)->sub9
+sub9->io14
+io14->e12
+cond5(no)->sub20
+sub20->op22
+op22->op24
+op24->op27
+op27->cond26
+cond26(yes)->cond29
+cond29(yes)->sub33
+sub33->sub35
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -332,17 +332,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-09-25T01:31:13Z -->
+        <!-- Generated from Git commit: 6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-09-25T01:31:13Z">2026-09-25T01:31:13Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>23ce34337df6def0</code>
+            Flow content SHA-256: <code>64467c6011fa0357</code>
           </p>
           <div id="canvas"></div>
         </div>

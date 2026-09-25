@@ -146,8 +146,15 @@ class TestPreflightAndBaselineAgainstTheEmulator:
         self, verified_floci_endpoint, emulated_topology, tmp_path_factory
     ):
         report_root = tmp_path_factory.mktemp("floci-e2e-reports")
+        # The EKS Capabilities leg rides along: preflight's real `cdk list`
+        # must synthesize with the run-scoped capability overrides in the
+        # CDK context, and the overrides are part of the resume identity.
         result, report_dir = _run_release_validate(
-            verified_floci_endpoint, report_root, actions="preflight,baseline"
+            verified_floci_endpoint,
+            report_root,
+            "--eks-capabilities",
+            "all",
+            actions="preflight,baseline",
         )
         assert result.returncode == 0, (
             f"harness failed\nSTDOUT:\n{result.stdout[-4000:]}\nSTDERR:\n{result.stderr[-4000:]}"
@@ -156,6 +163,10 @@ class TestPreflightAndBaselineAgainstTheEmulator:
         report_path = report_dir / "live-release-validation.json"
         assert report_path.is_file(), "every initialized run must write the JSON report"
         report = json.loads(report_path.read_text())
+        overrides = json.loads(
+            report["identity"]["extra_cdk_context"]["eks_capabilities_overrides"]
+        )
+        assert overrides == {"ack": {"enabled": True}, "kro": {"enabled": True}}
         assert report["status"] == "partial", (
             "a subset run must report PARTIAL, never PASSED — passed is reserved for "
             f"the complete action registry; got {report['status']}"

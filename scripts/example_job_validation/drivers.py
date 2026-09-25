@@ -9,6 +9,7 @@ manifest mutation (spec.mutations) is applied to a disclosed temp copy.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import threading
@@ -19,8 +20,11 @@ from typing import Any
 
 import yaml
 
-from .kube import KubectlRunner
+from .kube import KubectlRunner, through_tunnel
 from .specs import (
+    ACK_RESOURCE_SYNCED,
+    ARGOCD_APP_HEALTHY,
+    COMPOSED_JOB_COMPLETES,
     DAG_RUN,
     DEPLOYMENT_AVAILABLE,
     JOB_COMPLETES,
@@ -33,7 +37,7 @@ from .specs import (
     TRAINJOB_COMPLETES,
     VCJOB_COMPLETES,
 )
-from .static_checks import ParsedExample
+from .static_checks import ParsedExample, application_source_documents
 
 #: boto3 Session.client() is not thread-safe (client creation mutates shared
 #: loader state); every client creation against the run's shared session must
@@ -156,7 +160,22 @@ def submit_example(
         raise ExampleValidationError(f"No live submission for {spec.submission}")
 
     timeout = 1800 if spec.submission == DAG_RUN else 600
-    code, out, err = _run_cli(args, repo_root, timeout=timeout)
+
+    def submit() -> tuple[int, str, str]:
+        return _run_cli(args, repo_root, timeout=timeout)
+
+    if spec.submission == SUBMIT_DIRECT:
+        # submit-direct is the one submission that shells out to kubectl
+        # through this session's tunnel (a live run lost five examples to a
+        # stalled tunnel at exactly this step). It is repeated once the tunnel
+        # is back, but only while none of the example's Jobs exists: the CLI
+        # renames a second submission of a Job that is still running, which
+        # would start a duplicate the harness never cleans up.
+        code, out, err = through_tunnel(
+            kubectl, submit, safe_to_repeat=lambda: _no_job_landed(parsed, kubectl)
+        )
+    else:
+        code, out, err = submit()
     if code != 0:
         raise ExampleValidationError(
             f"{' '.join(args[:3])} failed (exit {code}): {(err or out).strip()[:800]}"
@@ -173,10 +192,34 @@ def _workload_documents(parsed: ParsedExample, kinds: set[str]) -> list[dict[str
     return [doc for doc in parsed.documents if doc.get("kind") in kinds]
 
 
+def _no_job_landed(parsed: ParsedExample, kubectl: KubectlRunner) -> bool:
+    """True when the API server answers NotFound for every Job the example defines."""
+    return all(
+        _job_status(
+            kubectl,
+            (doc.get("metadata") or {}).get("namespace", "gco-jobs"),
+            doc["metadata"]["name"],
+        )[0]
+        == "missing"
+        for doc in _workload_documents(parsed, {"Job"})
+    )
+
+
 def _job_status(kubectl: KubectlRunner, namespace: str, name: str) -> tuple[str, str]:
-    code, out, _ = kubectl("get", "job", name, "-n", namespace, "-o", "json")
+    """``(state, detail)``: complete, failed, running, missing, or unreachable.
+
+    ``missing`` is only ever the API server answering NotFound. Any other
+    failed read — a stalled tunnel, a timeout — is ``unreachable`` with
+    kubectl's error, so a watcher keeps polling a Job it cannot see and a
+    cleanup check never takes a read it could not make for a Job that is gone
+    (a live run's watchers reported submitted Jobs as missing for 40 minutes
+    while every read failed with ``TLS handshake timeout``).
+    """
+    code, out, err = kubectl("get", "job", name, "-n", namespace, "-o", "json")
     if code != 0:
-        return "missing", ""
+        if "(NotFound)" in err:
+            return "missing", ""
+        return "unreachable", (err or out).strip()[:300]
     payload = json.loads(out)
     for condition in payload.get("status", {}).get("conditions", []) or []:
         if condition.get("type") == "Complete" and condition.get("status") == "True":
@@ -250,7 +293,7 @@ def wait_jobs_complete(
     while time.monotonic() < deadline:
         for namespace, name in jobs:
             state, message = _job_status(kubectl, namespace, name)
-            pending[(namespace, name)] = state
+            pending[(namespace, name)] = f"{state} ({message})" if state == "unreachable" else state
             if state == "failed":
                 _, logs, _ = kubectl(
                     "logs", f"job/{name}", "-n", namespace, "--tail", "40", timeout=60
@@ -434,6 +477,248 @@ def wait_scaledjob_scales(
     )
 
 
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _conditions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    conditions = (payload.get("status") or {}).get("conditions") or []
+    return [condition for condition in conditions if isinstance(condition, dict)]
+
+
+def _condition_true(payload: dict[str, Any], condition_type: str) -> bool:
+    return any(
+        condition.get("type") == condition_type and condition.get("status") == "True"
+        for condition in _conditions(payload)
+    )
+
+
+def _condition_summary(payload: dict[str, Any]) -> str:
+    return "; ".join(
+        " ".join(
+            str(part)
+            for part in (
+                f"{condition.get('type')}={condition.get('status')}",
+                condition.get("reason", ""),
+                condition.get("message", ""),
+            )
+            if part
+        )
+        for condition in _conditions(payload)
+    )[:600]
+
+
+def _resource_ref(doc: dict[str, Any]) -> str:
+    """``kind.group`` for kubectl (``batchjob.kro.run``, ``queue.sqs.services.k8s.aws``)."""
+    group = str(doc.get("apiVersion", "")).rpartition("/")[0]
+    kind = str(doc.get("kind", "")).lower()
+    return f"{kind}.{group}" if group else kind
+
+
+def _get_json(kubectl: KubectlRunner, *args: str) -> dict[str, Any] | None:
+    code, out, _ = kubectl("get", *args, "-o", "json")
+    return json.loads(out) if code == 0 else None
+
+
+def wait_argocd_application_healthy(
+    parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
+) -> dict[str, Any]:
+    """Every Application must be Synced + Healthy, and every Job it syncs Complete.
+
+    A 40-hex ``targetRevision`` (the harness pins the commit under validation)
+    must equal the revision Argo CD reports it synced. The Jobs are read from
+    the Application's Git path in this checkout and must appear among the
+    resources Argo CD manages, so the evidence proves Argo CD applied them.
+    """
+    applications = _workload_documents(parsed, {"Application"})
+    if not applications:
+        raise ExampleValidationError(
+            "spec says argocd-app-healthy but the file defines no Application"
+        )
+    repo_root = parsed.path.parent.parent
+    deadline = time.monotonic() + timeout
+    synced: dict[str, dict[str, Any]] = {}
+    managed: set[tuple[str, str, str]] = set()
+    for doc in applications:
+        namespace = doc["metadata"].get("namespace", "argocd")
+        name = doc["metadata"]["name"]
+        last = "Application not found"
+        while True:
+            app = _get_json(kubectl, "application", name, "-n", namespace)
+            if app is not None:
+                status = app.get("status") or {}
+                sync = status.get("sync") or {}
+                health = status.get("health") or {}
+                operation = status.get("operationState") or {}
+                if operation.get("phase") in {"Failed", "Error"}:
+                    raise ExampleValidationError(
+                        f"Application {namespace}/{name} sync {operation['phase']}: "
+                        f"{str(operation.get('message', ''))[:400]}; {_condition_summary(app)}"
+                    )
+                if health.get("status") == "Degraded":
+                    raise ExampleValidationError(
+                        f"Application {namespace}/{name} is Degraded: "
+                        f"{str(health.get('message', ''))[:300]}; {_condition_summary(app)}"
+                    )
+                if sync.get("status") == "Synced" and health.get("status") == "Healthy":
+                    target = str(
+                        ((app.get("spec") or {}).get("source") or {}).get("targetRevision")
+                    )
+                    revision = str(sync.get("revision", ""))
+                    if _SHA_RE.fullmatch(target) and revision != target:
+                        raise ExampleValidationError(
+                            f"Application {namespace}/{name} synced revision {revision!r}, "
+                            f"not the pinned {target!r}"
+                        )
+                    synced[f"{namespace}/{name}"] = {"revision": revision, "resources": 0}
+                    for resource in status.get("resources") or []:
+                        managed.add(
+                            (
+                                str(resource.get("kind", "")),
+                                str(resource.get("namespace", "")),
+                                str(resource.get("name", "")),
+                            )
+                        )
+                        synced[f"{namespace}/{name}"]["resources"] += 1
+                    break
+                last = (
+                    f"sync={sync.get('status', '')} health={health.get('status', '')} "
+                    f"operation={operation.get('phase', '')}; {_condition_summary(app)}"
+                )
+            if time.monotonic() >= deadline:
+                raise ExampleValidationError(
+                    f"Application {namespace}/{name} not Synced/Healthy within {timeout}s: {last}"
+                )
+            time.sleep(_POLL_SECONDS)
+    jobs: dict[str, str] = {}
+    for doc in applications:
+        for item in application_source_documents(repo_root, doc):
+            if item.get("kind") != "Job":
+                continue
+            namespace = item["metadata"]["namespace"]
+            name = item["metadata"]["name"]
+            if ("Job", namespace, name) not in managed:
+                raise ExampleValidationError(
+                    f"Job {namespace}/{name} from the Git path is not among the resources "
+                    f"Argo CD manages for {doc['metadata']['name']}"
+                )
+            state, message = _job_status(kubectl, namespace, name)
+            if state != "complete":
+                raise ExampleValidationError(
+                    f"Application is Healthy but Job {namespace}/{name} is {state} {message}".strip()
+                )
+            jobs[f"{namespace}/{name}"] = "complete"
+    if not jobs:
+        raise ExampleValidationError("the Application syncs no Job from this repository")
+    return {"applications": synced, "jobs": jobs}
+
+
+def _instance_summary(kubectl: KubectlRunner, doc: dict[str, Any], namespace: str) -> str:
+    instance = _get_json(kubectl, _resource_ref(doc), doc["metadata"]["name"], "-n", namespace)
+    if instance is None:
+        return "instance not found"
+    state = (instance.get("status") or {}).get("state")
+    conditions = _condition_summary(instance)
+    return " ".join(part for part in (f"state={state}" if state else "", conditions) if part) or (
+        "no status yet"
+    )
+
+
+def wait_composed_jobs_complete(
+    parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
+) -> dict[str, Any]:
+    """Each instance's composed Job — named after the instance — must reach Complete.
+
+    The example file holds only the instance (a kro or Crossplane custom
+    resource), so the Job's existence already proves the composition ran; the
+    instance's own state and conditions are reported with it (and on timeout).
+    """
+    instances = [doc for doc in parsed.documents if (doc.get("metadata") or {}).get("name")]
+    if not instances:
+        raise ExampleValidationError(
+            "spec says composed-job-completes but the file defines nothing"
+        )
+    deadline = time.monotonic() + timeout
+    results: dict[str, dict[str, str]] = {}
+    for doc in instances:
+        namespace = doc["metadata"].get("namespace", "gco-jobs")
+        name = doc["metadata"]["name"]
+        while True:
+            state, message = _job_status(kubectl, namespace, name)
+            if state == "complete":
+                results[f"{namespace}/{name}"] = {
+                    "job": "complete",
+                    "instance": _instance_summary(kubectl, doc, namespace),
+                }
+                break
+            if state == "failed":
+                _, logs, _ = kubectl(
+                    "logs", f"job/{name}", "-n", namespace, "--tail", "40", timeout=60
+                )
+                raise ExampleValidationError(
+                    f"composed Job {namespace}/{name} failed: {message} :: last logs: {logs[-800:]}"
+                )
+            rejection = _job_admission_rejection(kubectl, namespace, name)
+            if rejection is not None:
+                raise ExampleValidationError(
+                    f"composed Job {namespace}/{name} pods are rejected at admission: {rejection}"
+                )
+            if time.monotonic() >= deadline:
+                raise ExampleValidationError(
+                    f"composed Job {namespace}/{name} is {state} after {timeout}s; "
+                    f"{_resource_ref(doc)}: {_instance_summary(kubectl, doc, namespace)}"
+                )
+            time.sleep(_POLL_SECONDS)
+    return {"composed_jobs": results}
+
+
+def wait_ack_resources_synced(
+    parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
+) -> dict[str, Any]:
+    """Every ACK resource must report ``ACK.ResourceSynced=True`` (``ACK.Terminal`` fails fast).
+
+    ACK sets ResourceSynced only after reading the resource back from AWS, so
+    the evidence (ARN, URL fields) is AWS's own answer. ``ACK.Recoverable``
+    (an access denial, say) keeps the wait going and is reported on timeout.
+    """
+    resources = [
+        doc for doc in parsed.documents if ".services.k8s.aws/" in str(doc.get("apiVersion", ""))
+    ]
+    if not resources:
+        raise ExampleValidationError("spec says ack-resource-synced but the file has no ACK kind")
+    deadline = time.monotonic() + timeout
+    results: dict[str, dict[str, Any]] = {}
+    for doc in resources:
+        namespace = doc["metadata"].get("namespace", "gco-jobs")
+        name = doc["metadata"]["name"]
+        ref = _resource_ref(doc)
+        last = "not found"
+        while True:
+            payload = _get_json(kubectl, ref, name, "-n", namespace)
+            if payload is not None:
+                if _condition_true(payload, "ACK.Terminal"):
+                    raise ExampleValidationError(
+                        f"{ref} {namespace}/{name} is terminal: {_condition_summary(payload)}"
+                    )
+                if _condition_true(payload, "ACK.ResourceSynced"):
+                    status = payload.get("status") or {}
+                    results[f"{namespace}/{name}"] = {
+                        "arn": str((status.get("ackResourceMetadata") or {}).get("arn", "")),
+                        **{
+                            key: value
+                            for key, value in status.items()
+                            if key.lower().endswith("url") and isinstance(value, str)
+                        },
+                    }
+                    break
+                last = _condition_summary(payload) or "no conditions yet"
+            if time.monotonic() >= deadline:
+                raise ExampleValidationError(
+                    f"{ref} {namespace}/{name} not synced within {timeout}s: {last}"
+                )
+            time.sleep(_POLL_SECONDS)
+    return {"ack_resources": results}
+
+
 CRITERIA_WAITERS = {
     JOB_COMPLETES: wait_jobs_complete,
     DEPLOYMENT_AVAILABLE: wait_deployment_available,
@@ -441,6 +726,9 @@ CRITERIA_WAITERS = {
     VCJOB_COMPLETES: wait_vcjob_completes,
     SCALEDJOB_SCALES: wait_scaledjob_scales,
     TRAINJOB_COMPLETES: wait_trainjob_completes,
+    ARGOCD_APP_HEALTHY: wait_argocd_application_healthy,
+    COMPOSED_JOB_COMPLETES: wait_composed_jobs_complete,
+    ACK_RESOURCE_SYNCED: wait_ack_resources_synced,
 }
 
 
@@ -482,7 +770,58 @@ def cleanup_example(
     )
     if code != 0:
         raise ExampleValidationError(f"cleanup failed for {parsed.name}: {err.strip()[:500]}")
-    return {"deleted": [line for line in out.strip().splitlines() if line][:20]}
+    result: dict[str, Any] = {"deleted": [line for line in out.strip().splitlines() if line][:20]}
+    derived = _derived_jobs(parsed)
+    if derived:
+        result["derived_jobs_removed"] = _wait_jobs_gone(kubectl, derived, timeout=180)
+    return result
+
+
+def _derived_jobs(parsed: ParsedExample) -> list[tuple[str, str]]:
+    """Jobs the example creates indirectly: synced by Argo CD or composed by kro/Crossplane.
+
+    Deleting the example's own objects deletes these asynchronously (the
+    Application's resources finalizer, the instance's composition), so cleanup
+    waits for them too: a lingering Job would hold namespace quota.
+    """
+    if parsed.spec.criteria == ARGOCD_APP_HEALTHY:
+        repo_root = parsed.path.parent.parent
+        return [
+            (item["metadata"]["namespace"], item["metadata"]["name"])
+            for doc in _workload_documents(parsed, {"Application"})
+            for item in application_source_documents(repo_root, doc)
+            if item.get("kind") == "Job"
+        ]
+    if parsed.spec.criteria == COMPOSED_JOB_COMPLETES:
+        return [
+            ((doc.get("metadata") or {}).get("namespace", "gco-jobs"), doc["metadata"]["name"])
+            for doc in parsed.documents
+            if (doc.get("metadata") or {}).get("name")
+        ]
+    return []
+
+
+def _wait_jobs_gone(
+    kubectl: KubectlRunner, jobs: list[tuple[str, str]], *, timeout: int
+) -> list[str]:
+    deadline = time.monotonic() + timeout
+    remaining = list(jobs)
+    while True:
+        states = {job: _job_status(kubectl, *job)[0] for job in remaining}
+        remaining = [job for job in remaining if states[job] != "missing"]
+        if not remaining:
+            return [f"{namespace}/{name}" for namespace, name in jobs]
+        if time.monotonic() >= deadline:
+            # "unreachable" is named as such: a Job the reads could not see
+            # is not proven gone, and it is not proven present either.
+            raise ExampleValidationError(
+                "derived Job(s) still present after cleanup: "
+                + ", ".join(
+                    f"{namespace}/{name} ({states[(namespace, name)]})"
+                    for namespace, name in remaining
+                )
+            )
+        time.sleep(_POLL_SECONDS)
 
 
 # --------------------------------------------------------------------------
@@ -715,6 +1054,262 @@ def wait_mlflow_ready(kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str
     )
 
 
+def _wait_until(probe: Any, *, deadline: float, what: str, hint: str = "") -> Any:
+    """Poll ``probe()`` (returns a truthy result or a falsy one plus state) until the deadline."""
+    last = ""
+    while True:
+        result, state = probe()
+        if result:
+            return result
+        last = state or last
+        if time.monotonic() >= deadline:
+            suffix = f" ({hint})" if hint else ""
+            raise ExampleValidationError(
+                f"timed out waiting for {what}. Last state: {last}{suffix}"
+            )
+        time.sleep(_POLL_SECONDS)
+
+
+def _crd_probe(kubectl: KubectlRunner, crd: str) -> Any:
+    def probe() -> tuple[bool, str]:
+        code, _, err = kubectl("get", "crd", crd)
+        return code == 0, f"CRD {crd} not present: {err.strip()[:200]}"
+
+    return probe
+
+
+def _condition_probe(kubectl: KubectlRunner, resource: str, name: str, condition: str) -> Any:
+    def probe() -> tuple[bool, str]:
+        payload = _get_json(kubectl, resource, name)
+        if payload is None:
+            return False, f"{resource}/{name} not found"
+        return _condition_true(payload, condition), _condition_summary(payload) or "no conditions"
+
+    return probe
+
+
+def _served_probe(kubectl: KubectlRunner, resource: str) -> Any:
+    def probe() -> tuple[bool, str]:
+        code, _, err = kubectl("get", resource, "-A", "-o", "name")
+        return code == 0, f"{resource} not served yet: {err.strip()[:200]}"
+
+    return probe
+
+
+def wait_argocd_ready(kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str, Any]:
+    """Wait until Argo CD can sync: the fenced project exists, controller and repo server run.
+
+    All three are deploy-time artifacts (the argo-cd chart and the post-Helm
+    ``post-helm-argocd-access.yaml``), so this is a readiness wait with
+    nothing to revert.
+    """
+    deadline = time.monotonic() + timeout
+
+    def probe() -> tuple[dict[str, Any] | None, str]:
+        if _get_json(kubectl, "appproject", "gco-tenants", "-n", "argocd") is None:
+            return None, "AppProject argocd/gco-tenants not found"
+        controller = _get_json(
+            kubectl, "statefulset", "argocd-application-controller", "-n", "argocd"
+        )
+        ready = int(((controller or {}).get("status") or {}).get("readyReplicas") or 0)
+        if ready < 1:
+            return None, "argocd-application-controller has no ready replica"
+        repo_server = _get_json(kubectl, "deployment", "argocd-repo-server", "-n", "argocd")
+        if repo_server is None or not _condition_true(repo_server, "Available"):
+            return None, "argocd-repo-server is not Available"
+        return {
+            "project": "argocd/gco-tenants",
+            "application_controller_ready": ready,
+            "repo_server": "Available",
+        }, ""
+
+    ready: dict[str, Any] = _wait_until(
+        probe, deadline=deadline, what="Argo CD", hint="is helm.argocd enabled for this deploy?"
+    )
+    return ready
+
+
+@dataclass
+class CompanionApi:
+    """A companion API definition applied before an instance example and deleted after it.
+
+    ``flavor`` ``kro`` applies a ResourceGraphDefinition (after the kro
+    capability's CRD exists) and waits for it to be Active; ``crossplane``
+    waits for every composition function the Compositions reference to be
+    Healthy, applies the XRD + Composition and waits for the XRD to be
+    Established. Either way the new API must be served before the instance
+    is applied, so ``kubectl apply`` never races discovery.
+    """
+
+    flavor: str
+    path: Path
+    kubectl: KubectlRunner
+    applied: bool = False
+
+    def _documents(self) -> list[dict[str, Any]]:
+        return [
+            doc
+            for doc in yaml.safe_load_all(self.path.read_text(encoding="utf-8"))
+            if isinstance(doc, dict)
+        ]
+
+    def create(self, *, timeout: int = 600) -> dict[str, Any]:
+        if self.flavor not in {"kro", "crossplane"}:
+            raise ExampleValidationError(f"unknown companion flavor {self.flavor!r}")
+        deadline = time.monotonic() + timeout
+        documents = self._documents()
+        prerequisites: list[str] = []
+        if self.flavor == "kro":
+            crd = "resourcegraphdefinitions.kro.run"
+            _wait_until(
+                _crd_probe(self.kubectl, crd),
+                deadline=deadline,
+                what="the kro capability",
+                hint="is eks_capabilities.kro enabled for this deploy?",
+            )
+            prerequisites.append(crd)
+        else:
+            functions = sorted(
+                {
+                    str((step.get("functionRef") or {}).get("name", ""))
+                    for doc in documents
+                    if doc.get("kind") == "Composition"
+                    for step in (doc.get("spec") or {}).get("pipeline") or []
+                }
+            )
+            for function in functions:
+                _wait_until(
+                    _condition_probe(
+                        self.kubectl, "function.pkg.crossplane.io", function, "Healthy"
+                    ),
+                    deadline=deadline,
+                    what=f"Crossplane function {function}",
+                    hint="is helm.crossplane enabled for this deploy?",
+                )
+                prerequisites.append(f"function/{function}=Healthy")
+        code, out, err = self.kubectl("apply", "-f", str(self.path))
+        if code != 0:
+            raise ExampleValidationError(
+                f"kubectl apply -f examples/{self.path.name} failed: {err.strip()[:600]}"
+            )
+        self.applied = True
+        served: list[str] = []
+        for doc in documents:
+            name = str((doc.get("metadata") or {}).get("name", ""))
+            spec = doc.get("spec") or {}
+            if self.flavor == "kro" and doc.get("kind") == "ResourceGraphDefinition":
+
+                def rgd_probe(name: str = name) -> tuple[bool, str]:
+                    payload = _get_json(self.kubectl, "resourcegraphdefinition", name)
+                    state = str(((payload or {}).get("status") or {}).get("state", ""))
+                    summary = _condition_summary(payload or {})
+                    return state == "Active", f"state={state or 'unknown'} {summary}".strip()
+
+                _wait_until(rgd_probe, deadline=deadline, what=f"ResourceGraphDefinition {name}")
+                schema = spec.get("schema") or {}
+                resource = f"{str(schema.get('kind', '')).lower()}.{schema.get('group', 'kro.run')}"
+            elif self.flavor == "crossplane" and doc.get("kind") == "CompositeResourceDefinition":
+                _wait_until(
+                    _condition_probe(
+                        self.kubectl,
+                        "compositeresourcedefinition.apiextensions.crossplane.io",
+                        name,
+                        "Established",
+                    ),
+                    deadline=deadline,
+                    what=f"CompositeResourceDefinition {name}",
+                )
+                names = spec.get("names") or {}
+                resource = f"{str(names.get('kind', '')).lower()}.{spec.get('group', '')}"
+            else:
+                continue
+            _wait_until(
+                _served_probe(self.kubectl, resource), deadline=deadline, what=f"the {resource} API"
+            )
+            served.append(resource)
+        return {
+            "prerequisites": prerequisites,
+            "applied": [line for line in out.strip().splitlines() if line][:20],
+            "served": served,
+        }
+
+    def destroy(self) -> dict[str, Any]:
+        if not self.applied:
+            return {"deleted": []}
+        code, out, err = self.kubectl(
+            "delete", "-f", str(self.path), "--ignore-not-found", "--wait=true", timeout=300
+        )
+        if code != 0:
+            raise ExampleValidationError(
+                f"deleting companion examples/{self.path.name} failed: {err.strip()[:500]}"
+            )
+        self.applied = False
+        return {"deleted": [line for line in out.strip().splitlines() if line][:20]}
+
+
+@dataclass
+class AckSqsQueues:
+    """AWS-side proof for the ACK SQS example.
+
+    ``wait_ready`` waits for the ACK capability's Queue CRD; after the
+    example syncs, ``verify_created`` resolves each queue in SQS directly;
+    after cleanup, ``verify_deleted`` requires SQS to stop resolving it — ACK
+    deletes the AWS queue when the object goes, so a surviving queue is a leak.
+    """
+
+    session: Any
+    region: str
+
+    def _sqs(self) -> Any:
+        with BOTO_CLIENT_LOCK:
+            return self.session.client("sqs", region_name=self.region)
+
+    @staticmethod
+    def queue_names(parsed: ParsedExample) -> list[str]:
+        return [
+            str((doc.get("spec") or {}).get("queueName", ""))
+            for doc in parsed.documents
+            if doc.get("kind") == "Queue"
+        ]
+
+    def wait_ready(self, kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str, Any]:
+        crd = "queues.sqs.services.k8s.aws"
+        _wait_until(
+            _crd_probe(kubectl, crd),
+            deadline=time.monotonic() + timeout,
+            what="the ACK SQS controller",
+            hint="is eks_capabilities.ack enabled for this deploy?",
+        )
+        return {"crd": crd}
+
+    def verify_created(self, parsed: ParsedExample) -> dict[str, Any]:
+        sqs = self._sqs()
+        urls: dict[str, str] = {}
+        for name in self.queue_names(parsed):
+            try:
+                urls[name] = str(sqs.get_queue_url(QueueName=name)["QueueUrl"])
+            except sqs.exceptions.QueueDoesNotExist as exc:
+                raise ExampleValidationError(
+                    f"ACK reports queue {name} synced but SQS does not resolve it"
+                ) from exc
+        return {"sqs_queue_urls": urls}
+
+    def verify_deleted(self, parsed: ParsedExample, *, timeout: int = 180) -> dict[str, Any]:
+        sqs = self._sqs()
+        deadline = time.monotonic() + timeout
+        for name in self.queue_names(parsed):
+
+            def gone(name: str = name) -> tuple[bool, str]:
+                try:
+                    sqs.get_queue_url(QueueName=name)
+                except sqs.exceptions.QueueDoesNotExist:
+                    return True, ""
+                return False, f"SQS still resolves {name}"
+
+            _wait_until(gone, deadline=deadline, what=f"deletion of SQS queue {name}")
+        return {"sqs_queues_deleted": self.queue_names(parsed)}
+
+
 #: Setup drivers _run_one_example knows how to dispatch, by spec.setup_driver
 #: name. Kept as an explicit registry so a spec naming a driver that does not
 #: exist fails the registry pin test, not a live run.
@@ -724,5 +1319,9 @@ KNOWN_SETUP_DRIVERS = frozenset(
         "vector-demo-corpus",
         "trainer-runtime-ready",
         "mlflow-ready",
+        "argocd-revision-pin",
+        "kro-api",
+        "crossplane-api",
+        "ack-sqs",
     }
 )

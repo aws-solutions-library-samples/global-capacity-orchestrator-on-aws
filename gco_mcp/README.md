@@ -71,7 +71,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 139 tools by default (up to 197 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 142 tools by default (up to 200 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -751,6 +751,9 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `valkey_status` | Show Valkey cache stack status | safe | — |
 | `aurora_status` | Show [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) database stack status | safe | — |
 | `fsx_status` | Check [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) configuration | safe | — |
+| `eks_capabilities_status` | Configured vs. live [EKS Capabilities](../docs/EKS_CAPABILITIES.md) (AWS-managed ACK and kro) per region, with drift | safe | — |
+| `gitops_status` | Show the self-managed [Argo CD](../docs/GITOPS.md) configured in `cdk.json`: chart pin, fence, GitOps hand-off, repo-server scaling | safe | — |
+| `crossplane_status` | Show the self-managed [Crossplane](../docs/CROSSPLANE.md) configured in `cdk.json`: chart pins, composition functions, dashboard access | safe | — |
 | `setup_cluster_access` | Configure kubectl access to a GCO EKS cluster | low-risk | — |
 | `enable_fsx` / `disable_fsx` | Toggle FSx Lustre in `cdk.json` (apply with `gco stacks deploy-all`) | low-risk | — |
 | `enable_valkey` / `disable_valkey` | Toggle Valkey Serverless in `cdk.json` | low-risk | — |

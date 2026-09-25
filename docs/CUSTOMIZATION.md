@@ -23,6 +23,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Job Submission with Private Endpoints](#job-submission-with-private-endpoints)
   - [Network Policy Enforcement](#network-policy-enforcement)
   - [VPC Endpoints](#vpc-endpoints)
+  - [EKS Capabilities](#eks-capabilities)
 - [Configuring GPU Nodepools](#configuring-gpu-nodepools)
   - [Which instance types can actually launch](#which-instance-types-can-actually-launch)
   - [Modify Instance Types](#modify-instance-types)
@@ -630,6 +631,35 @@ port, so job pods keep working whether S3 is reached through the gateway
 endpoint or the NAT gateways. Calls to the global region (the job tables, the
 cluster-shared bucket, the SSM registry) are cross-region and always leave
 through the NAT gateways.
+
+### EKS Capabilities
+
+The AWS-managed [ACK](https://aws-controllers-k8s.github.io/docs/) and
+[kro](https://kro.run/) installations EKS can attach to a cluster are two
+opt-in knobs under `eks_capabilities`, both off by default because each bills
+per capability-hour:
+
+```json
+"eks_capabilities": {
+  "ack": {
+    "enabled": true,
+    "iam_policy_arns": ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"]
+  },
+  "kro": {"enabled": true}
+}
+```
+
+Each enabled type synthesizes one capability IAM role and one
+`AWS::EKS::Capability` per selected regional cluster (`regions: []` means all
+of them). The ACK role holds only the managed policies in `iam_policy_arns`
+and may assume only the roles in `assume_role_arns` (ACK's IAM Role
+Selectors); with both empty ACK can call no AWS API. kro needs no AWS
+permissions; GCO grants it the RBAC to compose the tenant workload kinds in
+`gco-jobs` and `gco-inference`. `gco stacks capabilities status` reports
+configured-versus-live state. Every knob, the IAM grants and the operating
+notes are in [EKS Capabilities](EKS_CAPABILITIES.md). Argo CD and Crossplane
+are self-managed Helm charts instead; see
+[Helm Chart Configuration](#helm-chart-configuration).
 
 ## Configuring GPU Nodepools
 
@@ -1351,6 +1381,8 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
       "slurm": { "enabled": false },
       "yunikorn": { "enabled": false },
       "kubeflow_trainer": { "enabled": true },
+      "argocd": { "enabled": false },
+      "crossplane": { "enabled": false },
       "kueue": { "enabled": true }
     }
   }
@@ -1370,6 +1402,8 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [MLflow](https://mlflow.org/) | Enabled | Experiment tracking server when `cluster_observability.enabled` AND `cluster_observability.mlflow.enabled` are true — see [MONITORING.md](MONITORING.md#mlflow-experiment-tracking) |
 | Slurm/Slinky | Disabled | Slurm operator and cluster |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
+| [Argo CD](https://argo-cd.readthedocs.io/en/stable/) | Disabled | Self-managed GitOps controller in namespaced mode, fenced to `gco-jobs` and `gco-inference`, with an optional root Application per cluster and a repo-server autoscaler (`helm.argocd.gitops`, `helm.argocd.repo_server`) — see [GitOps with Argo CD](GITOPS.md) |
+| [Crossplane](https://docs.crossplane.io/) + Crossview | Disabled | Crossplane v2 and its dashboard under one toggle; composite resources compose tenant workloads in the tenant namespaces only — see [Crossplane](CROSSPLANE.md) |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
 
 Disabling `helm.kubeflow_trainer` uninstalls the trainer on the next deploy, prunes the shipped `torch-distributed` runtime, and makes `TrainJob` submissions fail with an actionable enable-the-addon message (the kind stays in the [allowed-kinds policy](#allowed-resource-kinds); the addon gate is what rejects it). Disabling `cluster_observability.mlflow` removes the tracking server and deletes its run-metadata volume; artifacts in S3 survive.
@@ -1524,7 +1558,7 @@ Names are validated before any AWS call, so a typo fails immediately rather than
 | Category | Valid names | CDK context key |
 |----------|-------------|-----------------|
 | Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store` | `feature_enabled_overrides` |
-| Helm charts | `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
+| Helm charts | `argocd`, `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `crossplane`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
 
 Two properties matter:
 

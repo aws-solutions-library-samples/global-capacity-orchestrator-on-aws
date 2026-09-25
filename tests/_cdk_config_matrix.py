@@ -716,6 +716,45 @@ CONFIGS.extend(
                 },
             },
         ),
+        # The EKS Capabilities (ACK with role selectors and a managed-policy
+        # grant, and kro) together with the self-managed platform add-ons:
+        # Argo CD with the GitOps hand-off and the repo-server autoscaler, and
+        # Crossplane with Crossview. Exercises the capability roles and their
+        # managed-policy attachment, the AWS::EKS::Capability resources, the
+        # kro tenant-RBAC token, the {{ARGOCD_*}} / {{CROSSPLANE_ENABLED}}
+        # applier tokens, the argocd chart values and the longer add-on
+        # uninstall tasks through the real loader.
+        (
+            "eks-capabilities-enabled",
+            {
+                "eks_capabilities": {
+                    "ack": {
+                        "enabled": True,
+                        "disabled_services": ["ec2"],
+                        "assume_role_arns": ["arn:aws:iam::123456789012:role/ack-s3-controller"],
+                        "iam_policy_arns": ["arn:aws:iam::aws:policy/AmazonSQSFullAccess"],
+                    },
+                    "kro": {"enabled": True},
+                },
+                "helm": {
+                    "argocd": {
+                        "enabled": True,
+                        "source_repos": ["https://github.com/example/*"],
+                        "gitops": {
+                            "repo_url": "https://github.com/example/gco-tenants.git",
+                            "revision": "main",
+                            "path": "clusters/{region}",
+                            "sync_policy": "automated",
+                        },
+                        "repo_server": {
+                            "replicas": 2,
+                            "autoscaling": {"enabled": True, "max_replicas": 6},
+                        },
+                    },
+                    "crossplane": {"enabled": True},
+                },
+            },
+        ),
     ]
 )
 
@@ -729,6 +768,13 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "release and the EKS standard-support window, both owned by the "
         "monthly dependency scan and the documented upgrade runbook — a "
         "matrix entry would hardcode a second copy of that moving target."
+    ),
+    "eks_capabilities_overrides": (
+        "Run-scoped sibling of feature_enabled_overrides for the EKS Capabilities "
+        "block (a JSON object the live-validation harness deep-merges over "
+        "eks_capabilities for one deploy). It reaches the very same loader path as "
+        "the eks_capabilities entry above, which the matrix varies; the merge "
+        "itself is pinned in tests/test_eks_capabilities.py."
     ),
 }
 
@@ -801,6 +847,10 @@ _NAG_CONFIG_NAMES = {
     # it, so its acknowledgments were only ever exercised by the live examples
     # harness — which is where the missing X-Ray acknowledgment surfaced.
     "vector-store-enabled",
+    # The EKS Capability roles are an IAM surface no other config builds: one
+    # role per capability trusted by capabilities.eks.amazonaws.com, and the
+    # ACK role's opt-in AWS managed policies with their acknowledgment.
+    "eks-capabilities-enabled",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

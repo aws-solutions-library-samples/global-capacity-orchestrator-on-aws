@@ -122,6 +122,9 @@ TAG_TTL_KEY = "gco:ttl-minutes"
 BASTION_PURPOSE = "cluster-observability"
 
 DEFAULT_TTL_MINUTES = 120
+# The self-termination backstop a caller may ask for (five minutes to one day).
+MIN_TTL_MINUTES = 5
+MAX_TTL_MINUTES = 1440
 
 # EC2 instance-profile propagation to the RunInstances API is eventually
 # consistent; retry the launch for a short window on the "not found" error.
@@ -156,8 +159,10 @@ def _validate_ttl(ttl_minutes: int) -> int:
         value = int(ttl_minutes)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid ttl-minutes {ttl_minutes!r}: must be an integer") from exc
-    if not 5 <= value <= 1440:
-        raise ValueError(f"Invalid ttl-minutes {value}: must be between 5 and 1440")
+    if not MIN_TTL_MINUTES <= value <= MAX_TTL_MINUTES:
+        raise ValueError(
+            f"Invalid ttl-minutes {value}: must be between {MIN_TTL_MINUTES} and {MAX_TTL_MINUTES}"
+        )
     return value
 
 

@@ -200,6 +200,28 @@ async def aurora_status() -> str:
     return await asyncio.to_thread(cli_runner._run_cli, "stacks", "aurora", "status")
 
 
+@mcp.tool(tags={"safe", "stacks"})
+@audit_logged
+async def eks_capabilities_status(region: str | None = None, all_regions: bool = False) -> str:
+    """`gco stacks capabilities status` — configured vs. live EKS Capabilities.
+
+    Reports, per AWS-managed capability type (ACK, kro), whether cdk.json
+    ``eks_capabilities`` enables it for the region, whether it is attached to
+    the cluster, its status/version, and any drift between configuration and
+    the cluster.
+
+    Args:
+        region: Region to inspect. Omit for the first deployment region.
+        all_regions: Inspect every configured deployment region.
+    """
+    args = ["stacks", "capabilities", "status"]
+    if all_regions:
+        args.append("--all-regions")
+    elif region:
+        args += ["-r", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
 # =============================================================================
 # Mutating cdk.json toggles (low-risk)
 # =============================================================================

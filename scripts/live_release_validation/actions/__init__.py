@@ -24,6 +24,7 @@ from .central_queue import action_central_queue_lifecycle
 from .convergence import action_convergence
 from .deploy import action_deploy
 from .destroy import action_destroy, destroy_deployment
+from .eks_capabilities import action_eks_capabilities
 from .final_inventory import action_final_inventory
 from .inference import action_inference
 from .jobs import action_api_lifecycle, action_sqs_lifecycle
@@ -42,6 +43,7 @@ __all__ = [
     "action_convergence",
     "action_deploy",
     "action_destroy",
+    "action_eks_capabilities",
     "action_final_inventory",
     "action_inference",
     "action_network_posture",

@@ -114,7 +114,19 @@ from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
+from gco.argocd_config import (
+    argocd_chart_values,
+    compute_argocd_replacements,
+    validate_argocd_config,
+)
 from gco.config.config_loader import ConfigLoader
+from gco.eks_capabilities_config import (
+    CAPABILITY_TYPE_API_NAMES,
+    compute_eks_capabilities_replacements,
+    enabled_capability_types,
+    kro_kubernetes_username,
+    normalize_eks_capabilities_config,
+)
 from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
@@ -144,8 +156,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-25T01:09:59Z
+# Generated from Git commit: f750e73905a75793aac5d3ddb625b378064ba18a
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -378,6 +390,8 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
         "slurm",
         "yunikorn",
         "kubeflow_trainer",
+        "argocd",
+        "crossplane",
         "kueue",
     }
 )
@@ -385,6 +399,18 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
 #: Charts that are mandatory platform components; the cdk.json toggle is
 #: ignored for these (see _get_enabled_charts for the rationale).
 _MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
+
+#: Opt-in platform add-ons: an absent cdk.json block (or one without
+#: ``enabled``) means OFF, unlike the historical charts whose missing key
+#: defaults to on. A fork or an older cdk.json that predates the add-on must
+#: never start installing Argo CD or Crossplane on its next deploy.
+_OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
+
+#: Stack-delete Helm uninstall task budgets (minutes) for charts whose
+#: installer first deletes their custom resources (every discovered type,
+#: namespaced then cluster-scoped, with a finalizer-strip retry) before the
+#: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
+_UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {"keda": 4, "argocd": 4, "crossplane": 6}
 
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant
@@ -549,12 +575,15 @@ def _helm_chart_enabled(
     kubectl-applier gate replacements so the installed chart set and the
     gated manifests can never disagree: mandatory charts are always on, a
     context override forces on, and otherwise the cdk.json toggle decides
-    (missing key defaults to enabled, matching the historical behavior).
+    (missing key defaults to enabled, matching the historical behavior —
+    except the opt-in add-ons in ``_OFF_BY_DEFAULT_CHART_KEYS``, which
+    default to disabled).
     """
     if config_key in _MANDATORY_CHART_KEYS or config_key in overrides:
         return True
+    default = config_key not in _OFF_BY_DEFAULT_CHART_KEYS
     chart_config = helm_config.get(config_key, {})
-    return bool(chart_config.get("enabled", True)) if isinstance(chart_config, dict) else True
+    return bool(chart_config.get("enabled", default)) if isinstance(chart_config, dict) else default
 
 
 def _compute_kubectl_scheduler_replacements(
@@ -1624,6 +1653,11 @@ class GCORegionalStack(Stack):
         # exactly today's entries.
         self._create_developer_access_entries(eks_config)
 
+        # EKS Capabilities (eks_capabilities): AWS-managed ACK and kro attached
+        # as AWS::EKS::Capability resources. Every type is off by default; the
+        # shipped cdk.json synthesizes exactly today's template.
+        self._create_eks_capabilities()
+
         # Create IRSA role for service account to access secrets
         self._create_service_account_role()
 
@@ -1688,6 +1722,213 @@ class GCORegionalStack(Stack):
                 principal=principal_arn,
                 access_policies=[access_policy],
             )
+
+    # ── EKS Capabilities (AWS-managed ACK / kro) ─────────────────────────
+    #: cdk.json type name -> construct-id / CfnOutput suffix.
+    _EKS_CAPABILITY_CONSTRUCT_SUFFIXES: ClassVar[dict[str, str]] = {
+        "ack": "Ack",
+        "kro": "Kro",
+    }
+
+    def _eks_capabilities_config(self) -> dict[str, Any]:
+        """The normalized ``eks_capabilities`` block, or the all-off defaults.
+
+        Many stack tests build the regional stack with hand-rolled config
+        doubles that predate this knob (or with ``MagicMock``), so the accessor
+        is optional: a missing method or a non-dict result reads as "every
+        capability off", which is also the shipped cdk.json default.
+        """
+        getter = getattr(self.config, "get_eks_capabilities_config", None)
+        raw = getter() if callable(getter) else None
+        if not isinstance(raw, dict):
+            return normalize_eks_capabilities_config(None)
+        return raw
+
+    def _argocd_config(self) -> dict[str, Any]:
+        """The validated ``helm.argocd`` block, or the all-default block.
+
+        Same optional-accessor posture as :meth:`_eks_capabilities_config`:
+        config doubles without ``get_argocd_config`` (or a ``MagicMock``
+        returning a non-dict) read as the shipped default (Argo CD off, no
+        GitOps hand-off).
+        """
+        getter = getattr(self.config, "get_argocd_config", None)
+        raw = getter() if callable(getter) else None
+        if not isinstance(raw, dict):
+            return validate_argocd_config(None)
+        return raw
+
+    def _create_eks_capabilities(self) -> None:
+        """Attach the enabled EKS Capabilities to this region's cluster.
+
+        For every type enabled for this region (``eks_capabilities.<type>``
+        with ``enabled: true`` and either an empty ``regions`` list or one
+        naming this region) synthesize:
+
+        * one capability IAM role trusted by ``capabilities.eks.amazonaws.com``
+          (``sts:AssumeRole`` + ``sts:TagSession``, the documented trust
+          policy). The role carries only what the operator configured: ACK
+          may assume exactly the ``assume_role_arns`` (ACK IAM Role Selectors)
+          and holds exactly the ``iam_policy_arns`` managed policies; kro gets
+          no AWS permissions at all (it only needs Kubernetes RBAC, which
+          ``07-kro-tenant-access.yaml`` grants in the tenant namespaces);
+        * one ``AWS::EKS::Capability`` named ``<project>-<type>`` (a
+          deterministic name the CLI and the live checks describe directly),
+          with ``RETAIN`` delete propagation (the only supported value) so
+          workloads the tools created survive a capability removal;
+        * ``CfnOutput``s for the capability and role ARNs.
+        """
+        self.eks_capabilities: dict[str, eks_l1.CfnCapability] = {}
+        self.eks_capability_roles: dict[str, iam.Role] = {}
+        self.eks_capabilities_config = self._eks_capabilities_config()
+        enabled_types = enabled_capability_types(
+            self.eks_capabilities_config, self.deployment_region
+        )
+        if not enabled_types:
+            return
+
+        project_name = self.config.get_project_name()
+        for type_name in enabled_types:
+            block = self.eks_capabilities_config[type_name]
+            suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
+            role = self._create_eks_capability_role(type_name, block)
+            capability = eks_l1.CfnCapability(
+                self,
+                f"EksCapability{suffix}",
+                capability_name=f"{project_name}-{type_name}",
+                cluster_name=self.cluster.cluster_name,
+                type=CAPABILITY_TYPE_API_NAMES[type_name],
+                role_arn=role.role_arn,
+                # RETAIN is the only value the API accepts today; spelled out so
+                # a future PURGE option is an explicit decision, not a default.
+                delete_propagation_policy="RETAIN",
+                configuration=self._eks_capability_configuration(type_name, block),
+            )
+            # The cluster_name token already orders creation after the cluster;
+            # the explicit edge keeps deletion ordered too (capability before
+            # cluster) when CloudFormation reverses the graph.
+            capability.node.add_dependency(self.cluster)
+            capability.node.add_dependency(role)
+            self.eks_capabilities[type_name] = capability
+            self.eks_capability_roles[type_name] = role
+
+            CfnOutput(
+                self,
+                f"EksCapability{suffix}Arn",
+                value=capability.attr_arn,
+                description=f"ARN of the AWS-managed {type_name} EKS Capability",
+            )
+            CfnOutput(
+                self,
+                f"EksCapability{suffix}RoleArn",
+                value=role.role_arn,
+                description=f"IAM role the {type_name} EKS Capability runs as",
+            )
+
+    def _create_eks_capability_role(self, type_name: str, block: Mapping[str, Any]) -> iam.Role:
+        """The IAM role one capability assumes, carrying only configured grants."""
+        suffix = self._EKS_CAPABILITY_CONSTRUCT_SUFFIXES[type_name]
+        statements: list[iam.PolicyStatement] = []
+        wildcard_arns: list[str] = []
+        managed_policies: list[iam.IManagedPolicy] = []
+        aws_managed_policy_names: list[str] = []
+        if type_name == "ack":
+            target_role_arns = [str(arn) for arn in block.get("assume_role_arns") or []]
+            if target_role_arns:
+                statements.append(
+                    iam.PolicyStatement(
+                        sid="AssumeAckControllerRoles",
+                        effect=iam.Effect.ALLOW,
+                        actions=["sts:AssumeRole"],
+                        resources=target_role_arns,
+                    )
+                )
+                wildcard_arns.extend(arn for arn in target_role_arns if "*" in arn)
+            # The documented "simple permission setup": service permissions on
+            # the capability role itself. Only the managed policies the
+            # operator names are attached. AWS managed policies are rebuilt
+            # from their name so the ARN follows this stack's partition.
+            for index, raw_arn in enumerate(block.get("iam_policy_arns") or []):
+                arn = str(raw_arn)
+                if ":iam::aws:policy/" in arn:
+                    name = arn.split(":policy/", 1)[1]
+                    aws_managed_policy_names.append(name)
+                    managed_policies.append(iam.ManagedPolicy.from_aws_managed_policy_name(name))
+                else:
+                    managed_policies.append(
+                        iam.ManagedPolicy.from_managed_policy_arn(
+                            self, f"EksCapability{suffix}Policy{index}", arn
+                        )
+                    )
+
+        # role_name intentionally omitted - let CDK generate a unique name.
+        # inline_policies keeps the grants inside the AWS::IAM::Role resource
+        # itself, so the capability never observes a role whose policy has
+        # not been attached yet; managed_policies attach the same way.
+        role = iam.Role(
+            self,
+            f"EksCapability{suffix}Role",
+            assumed_by=iam.ServicePrincipal("capabilities.eks.amazonaws.com").with_session_tags(),
+            description=f"Capability role for the AWS-managed {type_name} EKS Capability",
+            inline_policies=(
+                {f"EksCapability{suffix}Grants": iam.PolicyDocument(statements=statements)}
+                if statements
+                else None
+            ),
+            managed_policies=managed_policies or None,
+        )
+        if wildcard_arns:
+            # An operator may deliberately configure an ARN pattern (one role
+            # per account under a naming scheme). Acknowledge exactly those
+            # patterns so cdk-nag still flags any other wildcard on this role.
+            from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+            acknowledge_nag_findings(
+                role,
+                [
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            f"eks_capabilities.{type_name} names these resource ARN "
+                            "patterns explicitly in cdk.json; the capability role is "
+                            "granted nothing else."
+                        ),
+                        "appliesTo": [f"Resource::{arn}" for arn in sorted(set(wildcard_arns))],
+                    }
+                ],
+            )
+        if aws_managed_policy_names:
+            from gco.stacks.nag_suppressions import suppress_managed_policy_opt_in
+
+            for name in sorted(set(aws_managed_policy_names)):
+                # ACK manages AWS resources on the operator's behalf; which AWS
+                # managed policies it holds is the operator's explicit choice,
+                # acknowledged policy by policy so any other managed policy on
+                # this role still surfaces.
+                suppress_managed_policy_opt_in(
+                    role,
+                    managed_policy_name=name,
+                    reason=(
+                        f"eks_capabilities.{type_name}.iam_policy_arns names this AWS managed "
+                        "policy explicitly in cdk.json (off by default: the capability role "
+                        "holds no service permissions unless the operator lists them)."
+                    ),
+                )
+        return role
+
+    def _eks_capability_configuration(
+        self, type_name: str, block: Mapping[str, Any]
+    ) -> eks_l1.CfnCapability.CapabilityConfigurationProperty | None:
+        """Type-specific ``Configuration``; kro takes none."""
+        if type_name == "ack":
+            disabled_services = [str(service) for service in block.get("disabled_services") or []]
+            return eks_l1.CfnCapability.CapabilityConfigurationProperty(
+                ack=eks_l1.CfnCapability.AckProperty(
+                    disabled_services=disabled_services or None,
+                    enable_cross_namespace=bool(block.get("enable_cross_namespace", False)),
+                )
+            )
+        return None
 
     # ── Shared toleration config for EKS add-ons ──────────────────────────
     # All GCO nodepools apply taints (nvidia.com/gpu, aws.amazon.com/neuron,
@@ -3725,6 +3966,22 @@ class GCORegionalStack(Stack):
                 ),
             )
         )
+        # Self-managed platform add-ons: the same enablement helper selects the
+        # charts, so the post-Helm Argo CD fence / root Application and the
+        # Crossplane function + RBAC apply exactly when their chart does.
+        image_replacements.update(
+            compute_argocd_replacements(
+                self._argocd_config(),
+                enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "argocd"),
+                region=self.deployment_region,
+                # The configured (literal) cluster name renders the GitOps
+                # path placeholders; a token would turn the path into a
+                # deploy-time join for no gain.
+                cluster_name=self.cluster_config.cluster_name,
+            )
+        )
+        if _helm_chart_enabled(_helm_config, _helm_overrides, "crossplane"):
+            image_replacements["{{CROSSPLANE_ENABLED}}"] = "true"
 
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
@@ -3940,6 +4197,26 @@ class GCORegionalStack(Stack):
             image_replacements["{{FSX_SECURITY_GROUP_ID}}"] = (
                 self.fsx_security_group.security_group_id
             )
+
+        # kro capability tenant RBAC (07-kro-tenant-access.yaml). The token is
+        # emitted only when kro is enabled for this region; a disabled
+        # capability leaves it unreplaced so the applier skips the file and
+        # prunes the registered inventory. The capability acts as the
+        # assumed-role session <role>/KRO, which is the RBAC subject.
+        kro_role = getattr(self, "eks_capability_roles", {}).get("kro")
+        image_replacements.update(
+            compute_eks_capabilities_replacements(
+                kro_username=(
+                    kro_kubernetes_username(
+                        partition=self.partition,
+                        account=self.account,
+                        role_name=kro_role.role_name,
+                    )
+                    if kro_role is not None
+                    else None
+                )
+            )
+        )
 
         # ── Trigger the convergence pipeline (fire-and-forget) ───────────────
         # A single custom resource starts the HelmInstallStateMachine, which now
@@ -4417,6 +4694,10 @@ class GCORegionalStack(Stack):
           retention, the gp3 ``storageClassName``, and the GPU/Neuron/EFA
           node-exporter tolerations) over the static hardening values in
           ``charts.yaml`` when ``cluster_observability.enabled`` is true.
+        - ``argocd``: the repo-server size and optional CPU autoscaler from
+          ``helm.argocd.repo_server`` (``gco.argocd_config.argocd_chart_values``)
+          whenever the chart installs, by the cdk.json toggle or a run-scoped
+          ``helm_enabled_overrides``.
 
         The result is never empty because Gateway API requires the controller.
         """
@@ -4454,6 +4735,15 @@ class GCORegionalStack(Stack):
 
         if self._mlflow_active():
             overrides["mlflow"] = self._mlflow_chart_values()
+
+        # The same enablement helper that selects the chart, so a run-scoped
+        # helm_enabled_overrides=argocd install gets the configured sizing too.
+        helm_config = self.node.try_get_context("helm") or {}
+        enabled_overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
+        if _helm_chart_enabled(helm_config, enabled_overrides, "argocd"):
+            overrides["argocd"] = {"values": argocd_chart_values(self._argocd_config())}
 
         return overrides
 
@@ -4634,6 +4924,9 @@ class GCORegionalStack(Stack):
             ("slurm", ["slinky-slurm-operator", "slinky-slurm"]),
             ("yunikorn", ["yunikorn"]),
             ("kubeflow_trainer", ["kubeflow-trainer"]),
+            ("argocd", ["argocd"]),
+            # One toggle installs Crossplane and its Crossview dashboard.
+            ("crossplane", ["crossplane", "crossview"]),
             ("kueue", ["kueue"]),  # Must be last
         ]
 
@@ -5248,7 +5541,9 @@ class GCORegionalStack(Stack):
         )
 
         def _uninstall_task(chart_name: str) -> sfn_tasks.LambdaInvoke:
-            timeout_minutes = 5 if chart_name == lbc_chart else 4 if chart_name == "keda" else 2
+            timeout_minutes = (
+                5 if chart_name == lbc_chart else _UNINSTALL_TIMEOUT_MINUTES.get(chart_name, 2)
+            )
             task = sfn_tasks.LambdaInvoke(
                 self,
                 f"HelmUninstallChart-{chart_name}",
@@ -5393,10 +5688,14 @@ class GCORegionalStack(Stack):
             "HelmTeardownStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(start_state),
             state_machine_type=sfn.StateMachineType.STANDARD,
-            # 16m drain + 3m quiesce + max(15m endpoint cleanup, 24m ordinary
-            # chart cleanup) + 5m Gateway deletion + 5m LBC uninstall = 53m.
-            # Three minutes of workflow margin leave another three minutes for
-            # the provider's final poll inside CloudFormation's one-hour ceiling.
+            # 16m drain + 3m quiesce + max(15m endpoint cleanup, the ordinary
+            # chart chain) + 5m Gateway deletion + 5m LBC uninstall. The chain's
+            # per-chart task timeouts (2m; _UNINSTALL_TIMEOUT_MINUTES for charts
+            # whose custom resources are deleted first) are ceilings for a
+            # stalled release, not expected durations: a chart that is not
+            # installed returns in seconds, so the chain's real length is set by
+            # the installed charts. The 56m cap leaves three minutes for the
+            # provider's final poll inside CloudFormation's one-hour ceiling.
             timeout=Duration.minutes(56),
             tracing_enabled=True,
             logs=sfn.LogOptions(destination=teardown_log_group, level=sfn.LogLevel.ALL),

@@ -1,0 +1,45 @@
+# Argo CD GitOps Job Example
+#
+# An Argo CD Application that syncs a Job from Git into gco-jobs. The
+# self-managed Argo CD (cdk.json helm.argocd) pulls examples/gitops/hello-job
+# from this repository and applies it through the fenced gco-tenants project:
+# tenant namespaces only, no cluster-scoped kinds, and never a ResourceQuota,
+# LimitRange, NetworkPolicy, Role or RoleBinding.
+#
+# Prerequisites:
+#   - Argo CD enabled: "helm": {"argocd": {"enabled": true}} in cdk.json, then
+#     gco stacks deploy (or deploy once with --enable argocd)
+#   - On a fork, point repoURL at the fork (and add it to
+#     helm.argocd.source_repos if you narrowed that list)
+#
+# Usage:
+#   kubectl apply -f examples/argocd-gitops-job.yaml
+#   kubectl get application gco-gitops-hello -n argocd   # Synced / Healthy
+#   kubectl logs job/gco-gitops-hello -n gco-jobs
+#   gco gitops open                                      # the Argo CD UI
+#   kubectl delete -f examples/argocd-gitops-job.yaml    # also deletes the Job
+#
+# The resources finalizer makes deleting the Application delete what it
+# synced. Automated sync self-heals: a Job deleted by hand comes back.
+#
+# Docs: ../docs/GITOPS.md
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gco-gitops-hello
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: gco-tenants
+  source:
+    repoURL: https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git
+    targetRevision: main
+    path: examples/gitops/hello-job
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gco-jobs
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false

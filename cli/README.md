@@ -36,6 +36,10 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `vector_store.py` | Operator client for the vector store (`gco vector`) |
 | `cluster_tunnel.py` | Shared helpers for reaching a possibly-private EKS API endpoint (`gco cluster tunnel`) |
 | `cluster_doctor.py` | Diagnosis of the three layers of cluster access: reachability, authentication, authorization (`gco cluster doctor`) |
+| `eks_capabilities.py` | Configured-vs-live view of the [EKS Capabilities](../docs/EKS_CAPABILITIES.md) (AWS-managed ACK and kro) on a regional cluster: cdk.json intent merged with `ListCapabilities`/`DescribeCapability`, drift sentences, unmanaged capabilities (`gco stacks capabilities status`) |
+| `gitops.py` | The self-managed [Argo CD](../docs/GITOPS.md) behind `gco gitops`: the status document (validated `helm.argocd`, chart pin, fence, per-Region GitOps paths, repo-server scaling), the generated admin password, and the API login + session-cookie screenshot of the Applications view |
+| `crossplane.py` | The self-managed [Crossplane](../docs/CROSSPLANE.md) behind `gco crossplane`: the status document (toggle, chart pins, shipped composition functions) and the Crossview dashboard screenshot |
+| `cluster_ui.py` | Shared plumbing for the in-cluster web UIs reached through kubectl: cdk.json and charts.yaml reads, Secret-key reads, background port-forwards, headless Playwright captures, the shared tunnel options |
 | `ssm_tunnel.py` | SSM Session Manager tunnel helpers for private EKS endpoints |
 | `ephemeral_bastion.py` | Ephemeral SSM bastion lifecycle (`--via-ssm auto`) |
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |
@@ -57,10 +61,12 @@ Click command definitions that wire CLI flags to the business logic above.
 | `cluster_cmd.py` | `gco cluster ...` |
 | `config_cmd.py` | `gco config-cmd init`, `show`, `get` |
 | `costs_cmd.py` | `gco costs ...` |
+| `crossplane_cmd.py` | `gco crossplane status`, `open`, `screenshot` |
 | `dag_cmd.py` | `gco dag ...` |
 | `deps_cmd.py` | `gco deps scan` |
 | `examples_cmd.py` | `gco examples ...` |
 | `files_cmd.py` | `gco files ...` |
+| `gitops_cmd.py` | `gco gitops status`, `open`, `password`, `screenshot` |
 | `images_cmd.py` | `gco images ...` |
 | `inference_cmd.py` | `gco inference ...` |
 | `jobs_cmd.py` | `gco jobs ...` |

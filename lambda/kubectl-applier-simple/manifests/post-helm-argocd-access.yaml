@@ -1,0 +1,311 @@
+# Self-managed Argo CD — tenant RBAC and the fenced AppProject.
+#
+# Applied in the post-Helm pass when cdk.json helm.argocd is enabled (or a
+# run-scoped helm_enabled_overrides forces it): GCORegionalStack substitutes
+# {{ARGOCD_ENABLED}} and {{ARGOCD_SOURCE_REPOS}} only then. With Argo CD
+# disabled both stay unreplaced, the applier skips this file and prunes
+# exactly the objects below (_FEATURE_RESOURCE_INVENTORY in ../handler.py).
+#
+# Why these objects exist: the argo-cd chart runs in namespaced mode
+# (charts.yaml createClusterRoles: false), so its controllers get no
+# ClusterRoles at all, and the chart's in-cluster cluster Secret registers
+# https://kubernetes.default.svc for exactly gco-jobs and gco-inference with
+# no cluster-scoped resources. Argo CD therefore needs, in those two tenant
+# namespaces and nowhere else:
+#
+#   * gco-argocd-read (Role): get/list/watch on every namespaced type — the
+#     application controller's cluster cache watches the namespace for
+#     drift, orphans and health, and the server reads live manifests, events
+#     and pod logs for the UI. Namespaced, so nothing outside the tenant
+#     namespaces (gco-system included) is readable through Argo CD.
+#   * gco-argocd-deploy (Role, application controller only): the apply/prune
+#     verbs on an allow-list of tenant workload kinds. ResourceQuota,
+#     LimitRange, NetworkPolicy, Role and RoleBinding are deliberately absent,
+#     and the AppProject below blacklists the same five kinds, so the Argo CD
+#     fence and the apiserver agree: nothing reconciled from Git can widen a
+#     ceiling, open the network posture or grant itself permissions. The
+#     write rules are identical to kro's (07-kro-tenant-access.yaml) and
+#     Crossplane's (post-helm-crossplane.yaml); tests pin the three lists to
+#     each other.
+#
+# The server gets read only: UI-initiated resource deletes are refused; syncs
+# run through the application controller, which holds the write grant.
+
+# ─── Read: the controller's cache and the UI ────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-argocd-read
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+  annotations:
+    checkov.io/skip1: CKV_K8S_49=Argo CD watches every namespaced type in the tenant namespace; the Role is namespaced and read-only
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-argocd-read
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-server
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: gco-argocd-read
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-argocd-read
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+  annotations:
+    checkov.io/skip1: CKV_K8S_49=Argo CD watches every namespaced type in the tenant namespace; the Role is namespaced and read-only
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-argocd-read
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-server
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: gco-argocd-read
+  apiGroup: rbac.authorization.k8s.io
+
+# ─── Write: the tenant allow-list, application controller only ──────
+#
+# The two Roles below are identical by design (tests pin it); the RoleBindings
+# are what scope them. Verbs are the apply/prune set Argo CD uses. Never ``*``,
+# never ``bind``/``escalate``/``impersonate``.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-argocd-deploy
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-argocd-deploy
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: gco-argocd-deploy
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-argocd-deploy
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+rules:
+  # Identical to the gco-jobs Role above — see its comments.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-argocd-deploy
+  namespace: gco-inference
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: gco-argocd-deploy
+  apiGroup: rbac.authorization.k8s.io
+
+# ─── The fence: what any Application in gco-tenants may deploy ──────
+#
+#   * sourceRepos — cdk.json helm.argocd.source_repos, rendered as JSON (a YAML
+#     flow sequence); "*" by default. The fence is on destinations and kinds.
+#   * destinations — the two tenant namespaces on this cluster and nothing
+#     else; the chart's cluster Secret registers exactly the same pair.
+#   * clusterResourceWhitelist: [] — no cluster-scoped kind may be synced, so a
+#     tenant repository cannot create CRDs, ClusterRoles, NodePools or
+#     Namespaces.
+#   * namespaceResourceBlacklist — the guardrail kinds, refused here AND left
+#     out of gco-argocd-deploy above.
+#
+# Readiness is exact existence only: a tenant repository that fails to sync
+# must never fail a GCO deployment.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gco-tenants
+  namespace: argocd
+  labels:
+    project: gco
+    gco.io/argocd-enabled: "{{ARGOCD_ENABLED}}"
+spec:
+  description: GCO tenant workloads reconciled from Git; fenced to the tenant namespaces
+  sourceRepos: {{ARGOCD_SOURCE_REPOS}}
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: gco-jobs
+    - server: https://kubernetes.default.svc
+      namespace: gco-inference
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding

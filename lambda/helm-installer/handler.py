@@ -42,8 +42,8 @@ import urllib3
 import yaml
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-25T01:31:13Z
+# Generated from Git commit: 6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png``)
@@ -94,6 +94,20 @@ LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 # the final Helm uninstall fit inside the dedicated four-minute KEDA task.
 KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
 KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
+# Argo CD Applications carry the resources finalizer when their author asked
+# for cascading deletes; the application controller must still be running to
+# honor it (and to release AppProjects), so they go before the chart.
+ARGOCD_API_GROUPS = ("argoproj.io",)
+# Crossplane: usages first (they block deletion of what they protect), then
+# operations, then composite definitions and compositions — deleting an XRD
+# makes Crossplane delete every composite resource of that kind and its
+# composed resources — and the packages (functions, providers) last.
+CROSSPLANE_API_GROUPS = (
+    "protection.crossplane.io",
+    "ops.crossplane.io",
+    "apiextensions.crossplane.io",
+    "pkg.crossplane.io",
+)
 #: Charts whose controllers attach finalizers to their custom resources.
 #: Their instances must be deleted BEFORE ``helm uninstall`` removes the
 #: controller — uninstalling first leaves finalizer-bearing objects that
@@ -103,6 +117,23 @@ KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
 CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
     "keda": KEDA_API_GROUPS,
     "kueue": KUEUE_API_GROUPS,
+    "argocd": ARGOCD_API_GROUPS,
+    "crossplane": CROSSPLANE_API_GROUPS,
+}
+#: Resource types (``plural.group``) or whole API groups that a chart's
+#: cleanup deletes in a pass of their own, once every other type of the same
+#: scope is gone: one ``kubectl delete`` issues its deletes in order but
+#: waits for all of them together, so order alone is not enough. Argo CD's
+#: application controller looks an Application's AppProject up before it
+#: processes the resources finalizer and gives up while the project is
+#: missing; deleting the projects in the same call as the Applications stalls
+#: the cascade until the wait times out and the finalizers are stripped,
+#: which can leave the synced workloads behind (caught by
+#: integration:kind:platform-addons). Crossplane's packages (the functions
+#: and providers) go once the definitions and Compositions are gone.
+CHART_CUSTOM_RESOURCES_DELETED_LAST: dict[str, frozenset[str]] = {
+    "argocd": frozenset({"appprojects.argoproj.io"}),
+    "crossplane": frozenset({"pkg.crossplane.io"}),
 }
 KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "45s"
 KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 55
@@ -724,13 +755,12 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
     Applies to every chart in ``CHART_CUSTOM_RESOURCE_API_GROUPS``. Resource
     discovery keeps this compatible with the exact chart version in use
     instead of maintaining a second CRD list here. Namespaced resources are
-    deleted first across every namespace, then cluster-scoped ones.
-    ``kubectl delete --wait`` does not return until controller-owned
-    finalizers are gone, so Helm can safely remove the controller and CRDs
-    afterwards. If the wait stalls — the controller may already be gone on a
-    teardown retry — finalizers are stripped from the survivors and the
-    delete retried once, so teardown self-heals instead of wedging CRDs in
-    Terminating.
+    deleted first across every namespace, then cluster-scoped ones; within a
+    scope, the chart's ``CHART_CUSTOM_RESOURCES_DELETED_LAST`` types get a
+    pass of their own after the rest. ``kubectl delete --wait`` does not
+    return until controller-owned finalizers are gone, so Helm can safely
+    remove the controller and CRDs afterwards (see
+    ``_delete_custom_resource_pass`` for the stalled-wait recovery).
     """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
@@ -765,75 +795,100 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
                 return False, f"Failed to discover {api_group} custom resources: {error}"
             resources_by_scope[namespaced].extend(discovery.stdout.split())
 
+    deleted_last = CHART_CUSTOM_RESOURCES_DELETED_LAST.get(chart_name, frozenset())
     deleted_types = 0
     for namespaced in (True, False):
         resources = list(dict.fromkeys(resources_by_scope[namespaced]))
-        if not resources:
-            continue
-
-        command = [
-            *common,
-            "delete",
-            ",".join(resources),
-            "--all",
-            "--ignore-not-found=true",
-            "--wait=true",
-            f"--timeout={KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT}",
+        last = [
+            name
+            for name in resources
+            if name in deleted_last or name.partition(".")[2] in deleted_last
         ]
-        if namespaced:
-            command.append("--all-namespaces")
-
-        scope = "namespaced" if namespaced else "cluster-scoped"
-        failure: str | None = None
-        try:
-            deletion = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
-                command,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
-                check=False,
-            )
-            if deletion.returncode != 0:
-                failure = (deletion.stderr or deletion.stdout).strip()
-        except subprocess.TimeoutExpired:
-            failure = "delete --wait timed out"
-        if failure is not None:
-            # The finalizer-clearing controller may already be gone (teardown
-            # retry after a partial uninstall). Strip finalizers from the
-            # survivors and retry the delete once before failing teardown.
-            logger.warning(
-                f"{scope} {chart_name} custom-resource delete stalled ({failure}); "
-                "stripping finalizers and retrying once"
-            )
-            strip_error = _strip_custom_resource_finalizers(kubeconfig, resources, namespaced)
-            if strip_error is not None:
-                return False, (
-                    f"Failed to delete {scope} {chart_name} custom resources "
-                    f"({failure}); finalizer removal also failed: {strip_error}"
-                )
-            try:
-                retry = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
-                    command,
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                return False, (
-                    f"Timed out deleting {scope} {chart_name} custom resources "
-                    "even after finalizer removal"
-                )
-            if retry.returncode != 0:
-                error = (retry.stderr or retry.stdout).strip()
-                return False, (
-                    f"Failed to delete {scope} {chart_name} custom resources "
-                    f"even after finalizer removal: {error}"
-                )
-        deleted_types += len(resources)
+        passes = ([name for name in resources if name not in last], last)
+        for batch in passes:
+            if not batch:
+                continue
+            pass_error = _delete_custom_resource_pass(chart_name, kubeconfig, batch, namespaced)
+            if pass_error is not None:
+                return False, pass_error
+            deleted_types += len(batch)
     return True, f"Deleted and waited for {deleted_types} {chart_name} custom resource type(s)"
+
+
+def _delete_custom_resource_pass(
+    chart_name: str, kubeconfig: str, resources: list[str], namespaced: bool
+) -> str | None:
+    """Delete every instance of ``resources`` and wait until they are gone.
+
+    If the wait stalls — the finalizer-clearing controller may already be
+    gone on a teardown retry — finalizers are stripped from the survivors and
+    the delete retried once, so teardown self-heals instead of wedging CRDs
+    in Terminating. Returns an error string, or ``None`` on success.
+    """
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    command = [
+        "kubectl",
+        "--kubeconfig",
+        kubeconfig,
+        "--request-timeout=30s",
+        "delete",
+        ",".join(resources),
+        "--all",
+        "--ignore-not-found=true",
+        "--wait=true",
+        f"--timeout={KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT}",
+    ]
+    if namespaced:
+        command.append("--all-namespaces")
+
+    scope = "namespaced" if namespaced else "cluster-scoped"
+    failure: str | None = None
+    try:
+        deletion = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if deletion.returncode != 0:
+            failure = (deletion.stderr or deletion.stdout).strip()
+    except subprocess.TimeoutExpired:
+        failure = "delete --wait timed out"
+    if failure is None:
+        return None
+    logger.warning(
+        f"{scope} {chart_name} custom-resource delete stalled ({failure}); "
+        "stripping finalizers and retrying once"
+    )
+    strip_error = _strip_custom_resource_finalizers(kubeconfig, resources, namespaced)
+    if strip_error is not None:
+        return (
+            f"Failed to delete {scope} {chart_name} custom resources "
+            f"({failure}); finalizer removal also failed: {strip_error}"
+        )
+    try:
+        retry = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered resource names, no shell=True
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            f"Timed out deleting {scope} {chart_name} custom resources even after finalizer removal"
+        )
+    if retry.returncode != 0:
+        error = (retry.stderr or retry.stdout).strip()
+        return (
+            f"Failed to delete {scope} {chart_name} custom resources "
+            f"even after finalizer removal: {error}"
+        )
+    return None
 
 
 def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[bool, str]:

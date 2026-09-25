@@ -1,0 +1,265 @@
+# kro EKS Capability — tenant RBAC for the workloads ResourceGraphDefinitions compose.
+#
+# Applied only when cdk.json eks_capabilities.kro is enabled for this region:
+# the regional stack resolves {{KRO_CAPABILITY_USERNAME}} to the Kubernetes
+# user the capability acts as (arn:<partition>:sts::<account>:assumed-role/
+# <kro capability role>/KRO) and the whole file is gated on that token. When
+# kro is disabled the token stays unreplaced, the applier skips this file and
+# prunes exactly the objects below (_FEATURE_RESOURCE_INVENTORY in
+# ../handler.py).
+#
+# Why these objects exist (AWS docs, "Configure kro permissions"): EKS gives
+# the capability the AmazonEKSKROPolicy access policy — ResourceGraphDefinitions
+# and their instances — but no permission to create the resources an RGD
+# composes. GCO grants the tenant allow-list instead of cluster-admin:
+#
+#   * gco-kro-read (ClusterRole): get/list/watch on the allow-listed kinds
+#     cluster-wide, so kro can watch the resources it owns. Secrets are
+#     deliberately not readable cluster-wide; the namespaced Roles below cover
+#     Secrets an RGD composes in a tenant namespace.
+#   * gco-kro-compose (Role in gco-jobs and gco-inference): the apply/prune
+#     verbs on the same kinds, only in the two tenant namespaces. The platform
+#     namespace gco-system is never writable.
+#
+# ResourceQuota, LimitRange, NetworkPolicy, Role and RoleBinding are absent on
+# purpose — the same guardrail kinds the Argo CD fence refuses — so an RGD
+# instance can never widen its own ceiling, open the network posture or grant
+# itself permissions. The write rules are identical to Argo CD's
+# (post-helm-argocd-access.yaml) and to Crossplane's aggregated role
+# (post-helm-crossplane.yaml); tests pin the three lists to each other. To
+# compose another kind (an ACK resource, for instance), bind an extra Role to
+# the same user in the tenant namespace.
+
+# ─── Cluster-wide read: kro watches what it composes ────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gco-kro-read
+  labels:
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gco-kro-read
+  labels:
+    project: gco
+subjects:
+  - kind: User
+    name: "{{KRO_CAPABILITY_USERNAME}}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: gco-kro-read
+  apiGroup: rbac.authorization.k8s.io
+
+# ─── Namespace write: the tenant namespaces only ────────────────────
+#
+# The two Roles below are identical by design (tests pin it); the RoleBindings
+# are what scope them. Never ``*``, never ``bind``/``escalate``/``impersonate``.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-kro-compose
+  namespace: gco-jobs
+  labels:
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-kro-compose
+  namespace: gco-jobs
+  labels:
+    project: gco
+subjects:
+  - kind: User
+    name: "{{KRO_CAPABILITY_USERNAME}}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: gco-kro-compose
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-kro-compose
+  namespace: gco-inference
+  labels:
+    project: gco
+rules:
+  # Identical to the gco-jobs Role above — see its comments.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainingruntimes"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["flow.volcano.sh"]
+    resources: ["jobflows", "jobtemplates"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "prometheusrules"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-kro-compose
+  namespace: gco-inference
+  labels:
+    project: gco
+subjects:
+  - kind: User
+    name: "{{KRO_CAPABILITY_USERNAME}}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: gco-kro-compose
+  apiGroup: rbac.authorization.k8s.io

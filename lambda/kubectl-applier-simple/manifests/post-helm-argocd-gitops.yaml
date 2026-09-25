@@ -1,0 +1,42 @@
+# Self-managed Argo CD — the GitOps hand-off: one root Application.
+#
+# Applied in the post-Helm pass when Argo CD is enabled AND cdk.json
+# helm.argocd.gitops.repo_url is set; the whole file is gated on
+# {{ARGOCD_GITOPS_REPO_URL}}. With the hand-off off (or Argo CD disabled) the
+# token stays unreplaced, the applier skips the file and prunes the
+# Application (see _FEATURE_RESOURCE_INVENTORY in ../handler.py). The
+# Application carries no resources-finalizer on purpose: removing it detaches
+# the tenant workloads from Git, it does not delete them.
+#
+# The hand-off points Argo CD at an operator-owned repository path for THIS
+# cluster (``path`` may carry {region} / {cluster_name} so one repository holds
+# a per-cluster overlay). Everything under that path is reconciled into the
+# tenant namespaces and nowhere else — the gco-tenants AppProject in
+# post-helm-argocd-access.yaml is the fence. Manifests without a namespace land
+# in gco-jobs.
+#
+#   * syncPolicy — rendered as JSON from gitops.sync_policy: {} for manual
+#     (sync from the Argo CD UI) or automated with selfHeal on and prune off,
+#     so a bad commit can drift-correct but never delete workloads.
+#
+# Readiness is exact existence only: a tenant repository that fails to sync
+# must never fail a GCO deployment. Sync and health status are surfaced by the
+# Argo CD UI (``gco gitops open``).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gco-gitops-root
+  namespace: argocd
+  labels:
+    project: gco
+spec:
+  project: gco-tenants
+  source:
+    repoURL: "{{ARGOCD_GITOPS_REPO_URL}}"
+    targetRevision: "{{ARGOCD_GITOPS_REVISION}}"
+    path: "{{ARGOCD_GITOPS_PATH}}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gco-jobs
+  syncPolicy: {{ARGOCD_GITOPS_SYNC_POLICY}}

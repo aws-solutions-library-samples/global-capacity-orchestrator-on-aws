@@ -1,0 +1,40 @@
+# The Job the argocd-gitops-job example syncs from Git (../../argocd-gitops-job.yaml).
+#
+# No namespace on purpose: the Application's destination (gco-jobs) supplies
+# it, which also keeps the Job inside the gco-tenants fence. No
+# ttlSecondsAfterFinished either: automated sync with self-heal would re-create
+# a Job the TTL controller removed. Deleting the Application removes the Job
+# (its resources finalizer).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-gitops-hello
+  labels:
+    project: gco
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: hello
+          image: busybox:1.38.0
+          command: ["sh", "-c", "echo 'Hello from Git, delivered by Argo CD' && sleep 5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      restartPolicy: Never

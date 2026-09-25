@@ -1,0 +1,121 @@
+# Crossplane BatchJob API (the companion of crossplane-batch-job.yaml)
+#
+# A CompositeResourceDefinition (XRD) and the Composition behind it. Crossplane
+# serves a new namespaced API, BatchJob (examples.gco.io/v1alpha1), and composes
+# one batch/v1 Job per composite resource (XR), named after the XR, in the XR's
+# namespace. The Composition renders the Job with the go-templating function
+# GCO installs with Crossplane (post-helm-crossplane.yaml). GCO lets Crossplane
+# write the tenant workload kinds in gco-jobs and gco-inference only, so a
+# BatchJob created in any other namespace cannot compose its Job.
+#
+# The message reaches the container as an environment variable and the XRD
+# limits it to plain characters, so an XR can never inject into the rendered
+# YAML or the command.
+#
+# Prerequisites:
+#   - Crossplane enabled: "helm": {"crossplane": {"enabled": true}} in
+#     cdk.json, then gco stacks deploy (or deploy once with --enable crossplane)
+#
+# Usage:
+#   kubectl apply -f examples/crossplane-batch-api.yaml
+#   kubectl get xrd batchjobs.examples.gco.io   # ESTABLISHED True
+#   kubectl apply -f examples/crossplane-batch-job.yaml
+#
+# Delete the BatchJob XRs before this definition.
+#
+# Docs: ../docs/CROSSPLANE.md
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: batchjobs.examples.gco.io
+spec:
+  scope: Namespaced
+  group: examples.gco.io
+  names:
+    kind: BatchJob
+    plural: batchjobs
+  defaultCompositionRef:
+    name: batchjobs-go-templating
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                message:
+                  description: Printed by the composed Job.
+                  type: string
+                  default: Hello from Crossplane
+                  maxLength: 120
+                  pattern: "^[A-Za-z0-9 .!?_-]*$"
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: batchjobs-go-templating
+spec:
+  compositeTypeRef:
+    apiVersion: examples.gco.io/v1alpha1
+    kind: BatchJob
+  mode: Pipeline
+  pipeline:
+    - step: render-job
+      functionRef:
+        name: crossplane-contrib-function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          # Inline template actions sit inside quoted YAML strings and the
+          # conditional readiness annotation uses whole-line actions, so the
+          # template reads as the Job it renders (the example checks parse it).
+          # No ttlSecondsAfterFinished: Crossplane would re-create a Job the
+          # TTL controller removed. Deleting the XR removes the Job.
+          template: |
+            apiVersion: batch/v1
+            kind: Job
+            metadata:
+              name: "{{ .observed.composite.resource.metadata.name }}"
+              labels:
+                project: gco
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: job
+                {{ if eq (.observed.resources.job | getResourceCondition "Complete").Status "True" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{ end }}
+            spec:
+              backoffLimit: 3
+              template:
+                spec:
+                  automountServiceAccountToken: false
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                  containers:
+                    - name: hello
+                      image: busybox:1.38.0
+                      command: ["sh", "-c", 'echo "$MESSAGE" && sleep 5']
+                      env:
+                        - name: MESSAGE
+                          value: "{{ .observed.composite.resource.spec.message }}"
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        readOnlyRootFilesystem: true
+                        capabilities:
+                          drop:
+                            - ALL
+                      resources:
+                        requests:
+                          cpu: "100m"
+                          memory: "64Mi"
+                        limits:
+                          cpu: "200m"
+                          memory: "128Mi"
+                  restartPolicy: Never

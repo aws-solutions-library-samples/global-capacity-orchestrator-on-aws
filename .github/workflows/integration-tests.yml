@@ -33,6 +33,7 @@
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
+#   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
@@ -2755,6 +2756,108 @@ jobs:
             exit 1
           fi
           echo "queue drained: the consumer acknowledged the message it applied"
+      - name: Apply the kro capability tenant RBAC and prove its fence
+        # 07-kro-tenant-access.yaml is the one base-pass file the kro EKS
+        # Capability switches on (cdk.json eks_capabilities.kro;
+        # docs/EKS_CAPABILITIES.md). The capability is AWS-managed and has no
+        # kind equivalent, but its RBAC is plain Kubernetes: render it with the
+        # same helpers the regional stack uses for the session user the
+        # capability acts as, apply it, and let the apiserver prove the fence
+        # under impersonation — read the allow-listed kinds cluster-wide (never
+        # Secrets), write them in the two tenant namespaces only, and never a
+        # guardrail kind. The applier's disable-path inventory then removes
+        # exactly what the file applied.
+        env:
+          CI_KRO_ROLE_NAME: gco-ci-EksCapabilityKroRole
+        run: |
+          set -euo pipefail
+          user="$(python3 -c '
+          import os
+
+          from gco.eks_capabilities_config import kro_kubernetes_username
+
+          print(
+              kro_kubernetes_username(
+                  partition="aws", account="123456789012", role_name=os.environ["CI_KRO_ROLE_NAME"]
+              )
+          )
+          ')"
+          export CI_KRO_USER="${user}"
+          python3 - <<'PY' > "${RUNNER_TEMP}/kro-tenant-access.yaml"
+          import os
+          import re
+          from pathlib import Path
+
+          from gco.eks_capabilities_config import compute_eks_capabilities_replacements
+
+          text = Path("lambda/kubectl-applier-simple/manifests/07-kro-tenant-access.yaml").read_text(
+              encoding="utf-8"
+          )
+          for token, value in compute_eks_capabilities_replacements(
+              kro_username=os.environ["CI_KRO_USER"]
+          ).items():
+              text = text.replace(token, value)
+          if re.search(r"\{\{[A-Z0-9_]+\}\}", text):
+              raise SystemExit("07-kro-tenant-access.yaml: unsubstituted token(s) remain")
+          print(text)
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/kro-tenant-access.yaml"
+
+          expect() {
+            local want="$1"
+            shift
+            local got
+            got="$(kubectl auth can-i "$@" --as="${CI_KRO_USER}" 2>/dev/null || true)"
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::kro capability: can-i $* answered '${got}', expected '${want}'"
+              exit 1
+            fi
+            echo "ok (${want}): $*"
+          }
+          expect yes list jobs --all-namespaces
+          expect yes watch deployments --all-namespaces
+          expect no list secrets --all-namespaces
+          for ns in gco-jobs gco-inference; do
+            expect yes create jobs -n "${ns}"
+            expect yes delete deployments -n "${ns}"
+            expect yes create secrets -n "${ns}"
+            expect no create networkpolicies -n "${ns}"
+            expect no update resourcequotas -n "${ns}"
+            expect no delete limitranges -n "${ns}"
+            expect no create roles -n "${ns}"
+            expect no create rolebindings -n "${ns}"
+          done
+          expect no create jobs -n gco-system
+          expect no create configmaps -n kube-system
+          expect no create namespaces
+          expect no create clusterroles
+
+          python3 - <<'PY'
+          import sys
+
+          from kubernetes import config as kube_config
+
+          kube_config.load_kube_config()
+          sys.path.insert(0, "lambda/kubectl-applier-simple")
+          import handler
+
+          inventory = handler._FEATURE_RESOURCE_INVENTORY[("{{KRO_CAPABILITY_USERNAME}}", False)]
+          result = handler._delete_exact_resources(inventory, "ci-disable")
+          if result["failed"] or len(result["pruned"]) != len(inventory):
+              raise SystemExit(f"kro RBAC prune: {result}")
+          print(f"pruned {len(result['pruned'])} kro RBAC objects")
+          PY
+          if kubectl get clusterrole gco-kro-read >/dev/null 2>&1; then
+            echo "::error::gco-kro-read survived the disable-path prune"
+            exit 1
+          fi
+          for ns in gco-jobs gco-inference; do
+            if kubectl -n "${ns}" get rolebinding gco-kro-compose >/dev/null 2>&1; then
+              echo "::error::${ns}/gco-kro-compose survived the disable-path prune"
+              exit 1
+            fi
+          done
+          echo "kro tenant RBAC applied, fenced, and pruned"
       - name: Verify all namespaces exist
         run: |
           set -euo pipefail
@@ -4355,6 +4458,807 @@ jobs:
           kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
 
   # --------------------------------------------------------------------------
+  # The self-managed platform add-ons against a real API server: Argo CD
+  # (cdk.json helm.argocd) and Crossplane with its Crossview dashboard
+  # (helm.crossplane). The pinned argo-cd, crossplane and crossview charts
+  # install with the shipped values (charts.yaml through
+  # validate_helm_charts.py --emit-*) in the installer Lambda's order; the
+  # stack-derived chart values and the post-Helm manifests are rendered by the
+  # helpers the regional stack calls.
+  #
+  #   * Argo CD: the repo server runs under the chart's HPA (the
+  #     helm.argocd.repo_server autoscaler) and the HPA owns its replica
+  #     count; the root Application syncs examples/gitops/hello-job from this
+  #     pull request's own commit (the head repository, so forks work) and the
+  #     Job completes; the gco-tenants project refuses a platform destination;
+  #     the RBAC fence holds under impersonation (the application controller
+  #     writes the tenant allow-list in gco-jobs / gco-inference and nothing
+  #     else; the server only reads); deleting the root Application detaches
+  #     the Job instead of deleting it; the shipped example Application syncs
+  #     and its resources finalizer cascades when the helm installer's
+  #     pre-uninstall cleanup deletes every argoproj.io object; the applier's
+  #     disable-path inventories remove the rest.
+  #   * Crossplane: the go-templating function turns Healthy, the example XRD
+  #     and Composition serve BatchJob, an XR in gco-jobs composes a Job that
+  #     completes and marks the XR Ready, an XR in gco-system cannot compose
+  #     (the write grant is namespaced), the crossplane and crossview fences
+  #     hold, Crossview answers /api/health, and teardown runs the installer
+  #     cleanup and the applier prune.
+  #   * Both dashboards are captured with the code `gco gitops screenshot` and
+  #     `gco crossplane screenshot` run once their tunnel is up (port-forward,
+  #     API login for Argo CD, headless Chromium) and uploaded as the
+  #     platform-addon-dashboards artifact; images/argocd-ui.png and
+  #     images/crossview-dashboard.png come from it.
+  #
+  # kro and ACK are AWS-managed EKS Capabilities with no kind equivalent: the
+  # example harness covers them live (examples/kro-batch-job.yaml,
+  # examples/ack-sqs-queue.yaml) and cluster-e2e proves the kro tenant RBAC.
+  # --------------------------------------------------------------------------
+  integration-kind-platform-addons:
+    name: "integration:kind:platform-addons"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # The commit Argo CD syncs from GitHub: the pull request head in its own
+      # repository (forks included) or, on push and dispatch, the tested commit.
+      GITOPS_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}
+      GITOPS_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Pre-pull Kind node image with retry
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: ${{ env.KIND_NODE_IMAGE }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project (renderers, Lambda helpers and the capture code)
+        # -e . provides PyYAML, boto3, requests and the kubernetes client and
+        # makes gco.argocd_config and the cli package importable: the chart
+        # values and post-Helm manifests are rendered by the regional stack's
+        # own helpers, the teardown runs the Lambda handlers' own functions and
+        # the dashboards are captured by the CLI's screenshot code. The
+        # diagrams extra is the pinned Playwright those commands need.
+        run: pip install -e ".[diagrams]"
+      - name: Install the headless Chromium the captures drive (with retry)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout 300s python -m playwright install --with-deps --only-shell chromium; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              delay=$((attempt * 15))
+              echo "::warning::playwright install failed (attempt ${attempt}/3); retrying in ${delay}s."
+              sleep "${delay}"
+            fi
+          done
+          echo "::error::Failed to install the Playwright Chromium headless shell after 3 attempts."
+          exit 1
+      - name: Derive the Helm pin from the production installer Dockerfile
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
+          helm version --short
+      - name: Prefetch the pinned platform add-on charts with retry
+        # Read-only pulls retry; each install below consumes its archive once,
+        # so a Kubernetes or chart failure stays fail-fast.
+        run: |
+          set -euo pipefail
+          pull_chart() {
+            local chart_name env_name ref version _namespace repo_url pull_dir
+            local attempt delay archive success
+            local -a pull_args archives
+            chart_name="$1"
+            env_name="$2"
+            read -r ref version _namespace repo_url < <(
+              python3 .github/scripts/validate_helm_charts.py --emit-ref "${chart_name}"
+            )
+            pull_dir="${RUNNER_TEMP}/kind-charts/${chart_name}"
+            mkdir -p "${pull_dir}"
+            if [[ "${ref}" == oci://* ]]; then
+              pull_args=("${ref}")
+            else
+              pull_args=("${ref#*/}" --repo "${repo_url}")
+            fi
+
+            success=0
+            for attempt in 1 2 3 4; do
+              rm -f "${pull_dir}"/*.tgz
+              echo "::group::helm pull ${chart_name} (attempt ${attempt}/4)"
+              if timeout 60s helm pull "${pull_args[@]}" --version "${version}" \
+                  --destination "${pull_dir}"; then
+                success=1
+                echo "::endgroup::"
+                break
+              fi
+              echo "::endgroup::"
+              if [ "${attempt}" -lt 4 ]; then
+                delay=$((2 ** attempt))
+                echo "::warning::Chart pull failed; retrying in ${delay}s."
+                sleep "${delay}"
+              fi
+            done
+            if [ "${success}" -ne 1 ]; then
+              echo "::error::Failed to pull ${chart_name} ${version} after 4 attempts."
+              return 1
+            fi
+
+            shopt -s nullglob
+            archives=("${pull_dir}"/*.tgz)
+            shopt -u nullglob
+            if [ "${#archives[@]}" -ne 1 ]; then
+              echo "::error::Expected one ${chart_name} archive, found ${#archives[@]}."
+              return 1
+            fi
+            archive="${archives[0]}"
+            echo "${env_name}=${archive}" >> "${GITHUB_ENV}"
+            echo "Pinned ${chart_name} archive: ${archive}"
+          }
+
+          pull_chart argocd ARGOCD_CHART_ARCHIVE
+          pull_chart crossplane CROSSPLANE_CHART_ARCHIVE
+          pull_chart crossview CROSSVIEW_CHART_ARCHIVE
+      - name: Create kind cluster
+        # kind's default CNI is enough here: nothing in this job depends on
+        # NetworkPolicy enforcement (the add-on namespaces carry no policies
+        # and the argo-cd chart's are switched off).
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        with:
+          version: "${{ env.KIND_VERSION }}"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
+          cluster_name: "gco-platform-addons"
+      - name: Apply the platform namespaces
+        run: kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
+      - name: Render the Argo CD chart values and post-Helm manifests like the stack
+        # One helm.argocd block, validated by gco.argocd_config (the config
+        # loader's rules) and rendered by the two helpers the regional stack
+        # calls: argocd_chart_values (the Charts override the helm installer
+        # deep-merges over charts.yaml; here a repo-server autoscaler with a
+        # floor of two) and compute_argocd_replacements (the post-Helm fence
+        # and the root Application, pointed at this commit).
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          from gco.argocd_config import (
+              argocd_chart_values,
+              compute_argocd_replacements,
+              validate_argocd_config,
+          )
+
+          config = validate_argocd_config(
+              {
+                  "enabled": True,
+                  "gitops": {
+                      "repo_url": os.environ["GITOPS_REPO_URL"],
+                      "revision": os.environ["GITOPS_REVISION"],
+                      "path": "examples/gitops/hello-job",
+                      "sync_policy": "automated",
+                  },
+                  "repo_server": {
+                      "replicas": 2,
+                      "autoscaling": {"enabled": True, "max_replicas": 3},
+                  },
+              }
+          )
+          out = Path(os.environ["RUNNER_TEMP"])
+          (out / "argocd-gco-values.json").write_text(
+              json.dumps(argocd_chart_values(config), indent=2), encoding="utf-8"
+          )
+          values = compute_argocd_replacements(
+              config, enabled=True, region="us-east-1", cluster_name="gco-ci"
+          )
+          manifests = Path("lambda/kubectl-applier-simple/manifests")
+          rendered = []
+          for name in ("post-helm-argocd-access.yaml", "post-helm-argocd-gitops.yaml"):
+              text = (manifests / name).read_text(encoding="utf-8")
+              for token, value in values.items():
+                  text = text.replace(token, value)
+              if re.search(r"\{\{[A-Z0-9_]+\}\}", text):
+                  raise SystemExit(f"{name}: unsubstituted token(s) remain")
+              rendered.append(text)
+          (out / "argocd-post-helm.yaml").write_text("\n---\n".join(rendered), encoding="utf-8")
+          PY
+          cat "${RUNNER_TEMP}/argocd-gco-values.json"
+      - name: Install the pinned argo-cd chart with the shipped values
+        # What the installer Lambda does for this entry: release "argocd", the
+        # chart's namespace, the charts.yaml values with the stack's override
+        # merged over them (a later --values file wins key by key, like the
+        # installer's deep_merge) and the blocking wait.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref argocd
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values argocd \
+            > "${RUNNER_TEMP}/argocd-values.yaml"
+          helm install argocd "${ARGOCD_CHART_ARCHIVE}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/argocd-values.yaml" \
+            --values "${RUNNER_TEMP}/argocd-gco-values.json" \
+            --wait --timeout 8m
+          # Namespaced mode: the chart creates no cluster-scoped RBAC at all.
+          if kubectl get clusterroles,clusterrolebindings -o name | grep -i argocd; then
+            echo "::error::the argo-cd chart created cluster-scoped RBAC"
+            exit 1
+          fi
+      - name: Prove the repo-server autoscaler owns the replica count
+        # helm.argocd.repo_server.autoscaling: the chart renders its own HPA
+        # (the repo-server container's CPU, the damped behavior) and leaves
+        # spec.replicas out of the Deployment, so the HPA lifts it to the floor
+        # of two. kind runs no metrics-server, and the floor still holds: the
+        # HPA clamps to minReplicas before it reads any metric, which is the
+        # ownership this step checks.
+        run: |
+          set -euo pipefail
+          hpa() { kubectl -n argocd get hpa argocd-repo-server -o "jsonpath=$1"; }
+          test "$(hpa '{.spec.scaleTargetRef.kind}/{.spec.scaleTargetRef.name}')" = \
+            "Deployment/argocd-repo-server"
+          test "$(hpa '{.spec.minReplicas}/{.spec.maxReplicas}')" = "2/3"
+          metric='{.spec.metrics[0].type}/{.spec.metrics[0].containerResource.container}'
+          metric="${metric}/{.spec.metrics[0].containerResource.target.averageUtilization}"
+          test "$(hpa "${metric}")" = "ContainerResource/repo-server/70"
+          test "$(hpa '{.spec.behavior.scaleUp.stabilizationWindowSeconds}/{.spec.behavior.scaleDown.stabilizationWindowSeconds}')" = \
+            "60/300"
+          helm get manifest argocd --namespace argocd > "${RUNNER_TEMP}/argocd-manifest.yaml"
+          python3 - <<'PY'
+          import os
+
+          import yaml
+
+          path = os.path.join(os.environ["RUNNER_TEMP"], "argocd-manifest.yaml")
+          with open(path, encoding="utf-8") as handle:
+              documents = [doc for doc in yaml.safe_load_all(handle) if doc]
+          (deployment,) = [
+              doc
+              for doc in documents
+              if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "argocd-repo-server"
+          ]
+          if "replicas" in deployment["spec"]:
+              raise SystemExit("the chart pinned argocd-repo-server replicas under an HPA")
+          print("the rendered Deployment leaves replicas to the HPA")
+          PY
+          deadline=$((SECONDS + 300))
+          until [ "$(kubectl -n argocd get deployment argocd-repo-server -o jsonpath='{.status.readyReplicas}')" = "2" ]; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the HPA never lifted argocd-repo-server to its floor of two"
+              kubectl -n argocd describe hpa argocd-repo-server || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "the HPA owns argocd-repo-server: two ready replicas at its floor"
+      - name: Apply the Argo CD post-Helm manifests
+        # post-helm-argocd-access.yaml (tenant RBAC + the gco-tenants fence) and
+        # post-helm-argocd-gitops.yaml (the root Application), as rendered above.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "${RUNNER_TEMP}/argocd-post-helm.yaml"
+          project() { kubectl -n argocd get appproject gco-tenants -o "jsonpath=$1"; }
+          test "$(project '{.spec.destinations[*].namespace}')" = "gco-jobs gco-inference"
+          test "$(project '{.spec.namespaceResourceBlacklist[*].kind}')" = \
+            "ResourceQuota LimitRange NetworkPolicy Role RoleBinding"
+          test -z "$(project '{.spec.clusterResourceWhitelist[*].kind}')"
+      - name: Prove the Argo CD RBAC fence under impersonation
+        run: |
+          set -euo pipefail
+          expect() {
+            local want="$1" who="$2"
+            shift 2
+            local got
+            got="$(kubectl auth can-i "$@" --as="system:serviceaccount:argocd:${who}" 2>/dev/null || true)"
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::${who}: can-i $* answered '${got}', expected '${want}'"
+              exit 1
+            fi
+            echo "ok (${want}) ${who}: $*"
+          }
+          for ns in gco-jobs gco-inference; do
+            expect yes argocd-application-controller create jobs -n "${ns}"
+            expect yes argocd-application-controller delete deployments -n "${ns}"
+            expect yes argocd-application-controller list pods -n "${ns}"
+            expect no argocd-application-controller create networkpolicies -n "${ns}"
+            expect no argocd-application-controller update resourcequotas -n "${ns}"
+            expect no argocd-application-controller delete limitranges -n "${ns}"
+            expect no argocd-application-controller create roles -n "${ns}"
+            expect no argocd-application-controller create rolebindings -n "${ns}"
+            expect yes argocd-server get pods -n "${ns}"
+            expect no argocd-server create jobs -n "${ns}"
+            expect no argocd-server delete deployments -n "${ns}"
+          done
+          expect no argocd-application-controller create jobs -n gco-system
+          expect no argocd-application-controller list secrets -n kube-system
+          expect no argocd-application-controller list pods --all-namespaces
+          expect no argocd-application-controller create namespaces
+          expect no argocd-application-controller create clusterroles
+          expect no argocd-server list secrets -n gco-system
+      - name: Sync the GitOps fixture from this commit
+        # The root Application reads examples/gitops/hello-job at the pull
+        # request's own commit, so a change to the fixture is tested here
+        # before it merges; two repo servers share the rendering.
+        run: |
+          set -euo pipefail
+          app() { kubectl -n argocd get application gco-gitops-root -o "jsonpath=$1" 2>/dev/null || true; }
+          deadline=$((SECONDS + 600))
+          until [ "$(app '{.status.sync.status}:{.status.health.status}')" = "Synced:Healthy" ]; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::gco-gitops-root never reached Synced/Healthy"
+              kubectl -n argocd get application gco-gitops-root -o yaml || true
+              exit 1
+            fi
+            sleep 10
+          done
+          test "$(app '{.status.sync.revision}')" = "${GITOPS_REVISION}"
+          app '{.status.resources[*].name}' | grep -qw gco-gitops-hello
+          kubectl -n gco-jobs wait --for=condition=complete job/gco-gitops-hello --timeout=300s
+          kubectl -n gco-jobs logs job/gco-gitops-hello | grep -q "delivered by Argo CD"
+          echo "Argo CD synced ${GITOPS_REVISION} and the Job completed"
+      - name: Prove the project fence refuses a platform destination
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: gco-ci-fence-probe
+            namespace: argocd
+          spec:
+            project: gco-tenants
+            source:
+              repoURL: "${GITOPS_REPO_URL}"
+              targetRevision: "${GITOPS_REVISION}"
+              path: examples/gitops/hello-job
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: gco-system
+          EOF
+          deadline=$((SECONDS + 180))
+          until kubectl -n argocd get application gco-ci-fence-probe \
+              -o jsonpath='{.status.conditions[*].type}' | grep -q InvalidSpecError; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the gco-tenants project admitted a gco-system destination"
+              kubectl -n argocd get application gco-ci-fence-probe -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl -n argocd get application gco-ci-fence-probe \
+            -o jsonpath='{.status.conditions[?(@.type=="InvalidSpecError")].message}'
+          echo
+          if kubectl -n gco-system get job gco-gitops-hello >/dev/null 2>&1; then
+            echo "::error::a Job landed in gco-system"
+            exit 1
+          fi
+          kubectl -n argocd delete application gco-ci-fence-probe --wait=true
+      - name: Detach from the root Application and re-sync with the shipped example
+        # Deleting the root Application (no resources finalizer) must leave
+        # the Job running. The shipped example Application (the same path, at
+        # this commit) then adopts it.
+        run: |
+          set -euo pipefail
+          kubectl -n argocd delete application gco-gitops-root --wait=true
+          kubectl -n gco-jobs get job gco-gitops-hello
+          python3 - <<'PY' > "${RUNNER_TEMP}/argocd-example.yaml"
+          import os
+
+          import yaml
+
+          with open("examples/argocd-gitops-job.yaml", encoding="utf-8") as handle:
+              application = yaml.safe_load(handle)
+          application["spec"]["source"]["repoURL"] = os.environ["GITOPS_REPO_URL"]
+          application["spec"]["source"]["targetRevision"] = os.environ["GITOPS_REVISION"]
+          print(yaml.safe_dump(application))
+          PY
+          kubectl apply -f "${RUNNER_TEMP}/argocd-example.yaml"
+          app() { kubectl -n argocd get application gco-gitops-hello -o "jsonpath=$1" 2>/dev/null || true; }
+          deadline=$((SECONDS + 300))
+          until [ "$(app '{.status.sync.status}:{.status.health.status}')" = "Synced:Healthy" ]; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the example Application never reached Synced/Healthy"
+              kubectl -n argocd get application gco-gitops-hello -o yaml || true
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "the example Application adopted gco-gitops-hello"
+      - name: Capture the Argo CD UI with the gco gitops screenshot code
+        # What `gco gitops screenshot` runs once its tunnel is up: read the
+        # generated admin password, port-forward argocd-server, log in to the
+        # API and screenshot /applications with the session cookie.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          from cli import cluster_ui, gitops
+          from cli.kubectl_helpers import build_port_forward_command
+
+          namespace, target, remote_port = gitops.PORT_FORWARD_TARGET
+          port = gitops.DEFAULT_LOCAL_PORT
+          base_url = f"http://localhost:{port}"
+          output = Path(os.environ["RUNNER_TEMP"]) / "dashboards" / gitops.DEFAULT_SCREENSHOT_FILENAME
+          password = gitops.read_admin_password()
+          command = build_port_forward_command(namespace, target, port, remote_port)
+          with cluster_ui.background_port_forward(command, port):
+              token = gitops.create_session_token(base_url, password)
+              written = gitops.capture_argocd_screenshot(base_url, output, token=token)
+          size = written.stat().st_size
+          if size < 10_000:
+              raise SystemExit(f"{written} is only {size} bytes: the UI did not render")
+          print(f"captured {written} ({size} bytes)")
+          PY
+      - name: Cascade the example Application through the installer cleanup
+        # The example Application DOES carry the resources finalizer: when the
+        # helm installer's pre-uninstall cleanup deletes every argoproj.io
+        # object (what a disabled chart or a stack delete runs), Argo CD
+        # deletes the Job before the Application goes. The projects get a
+        # later pass (the controller finalizes nothing whose project is
+        # gone), so the cascade must finish inside the wait: needing the
+        # finalizer-strip fallback fails the step.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import logging
+          import os
+          import sys
+
+          sys.path.insert(0, "lambda/helm-installer")
+          import handler
+
+
+          class StallRecorder(logging.Handler):
+              def __init__(self):
+                  super().__init__(logging.WARNING)
+                  self.stalls = []
+
+              def emit(self, record):
+                  if "stalled" in record.getMessage():
+                      self.stalls.append(record.getMessage())
+
+
+          recorder = StallRecorder()
+          handler.logger.addHandler(recorder)
+          ok, message = handler._delete_chart_custom_resources(
+              "argocd", os.path.expanduser("~/.kube/config")
+          )
+          print(message)
+          if not ok:
+              raise SystemExit(message)
+          if recorder.stalls:
+              raise SystemExit(f"the cascade fell back to stripping finalizers: {recorder.stalls}")
+          PY
+          if kubectl get applications.argoproj.io,appprojects.argoproj.io -A -o name | grep -q .; then
+            echo "::error::argoproj.io objects survived the installer cleanup"
+            exit 1
+          fi
+          if kubectl -n gco-jobs get job gco-gitops-hello >/dev/null 2>&1; then
+            echo "::error::the resources finalizer did not delete the synced Job"
+            exit 1
+          fi
+          echo "the example Application's finalizer deleted the Job during the installer cleanup"
+      - name: Prune the Argo CD post-Helm objects and uninstall the chart
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+
+          from kubernetes import config as kube_config
+
+          kube_config.load_kube_config()
+          sys.path.insert(0, "lambda/kubectl-applier-simple")
+          import handler
+
+          for gate in ("{{ARGOCD_GITOPS_REPO_URL}}", "{{ARGOCD_ENABLED}}"):
+              result = handler._delete_exact_resources(
+                  handler._FEATURE_RESOURCE_INVENTORY[(gate, True)], "ci-disable"
+              )
+              if result["failed"]:
+                  raise SystemExit(f"{gate}: prune failures {result['failed']}")
+              print(f"{gate}: pruned {result['pruned']}")
+          PY
+          for ns in gco-jobs gco-inference; do
+            for object in role/gco-argocd-read rolebinding/gco-argocd-read \
+                role/gco-argocd-deploy rolebinding/gco-argocd-deploy; do
+              if kubectl -n "${ns}" get "${object}" >/dev/null 2>&1; then
+                echo "::error::${ns}/${object} survived the disable-path prune"
+                exit 1
+              fi
+            done
+          done
+          helm uninstall argocd --namespace argocd --wait --timeout 5m
+          if kubectl -n argocd get hpa argocd-repo-server >/dev/null 2>&1; then
+            echo "::error::the repo-server HPA outlived the chart"
+            exit 1
+          fi
+          # crds.keep: uninstalling never cascades a CRD delete.
+          kubectl get crd applications.argoproj.io appprojects.argoproj.io
+      - name: Install the pinned crossplane and crossview charts with the shipped values
+        # One cdk.json toggle, two releases, Crossplane first: Crossview goes
+        # into the namespace the crossplane release creates.
+        run: |
+          set -euo pipefail
+          for chart in crossplane crossview; do
+            read -r _ref _version namespace _repo_url < <(
+              python3 .github/scripts/validate_helm_charts.py --emit-ref "${chart}"
+            )
+            python3 .github/scripts/validate_helm_charts.py --emit-values "${chart}" \
+              > "${RUNNER_TEMP}/${chart}-values.yaml"
+            archive_var="${chart^^}_CHART_ARCHIVE"
+            create_namespace=()
+            if [ "${chart}" = "crossplane" ]; then
+              create_namespace=(--create-namespace)
+            fi
+            helm install "${chart}" "${!archive_var}" \
+              --namespace "${namespace}" "${create_namespace[@]}" \
+              --values "${RUNNER_TEMP}/${chart}-values.yaml" \
+              --wait --timeout 8m
+          done
+      - name: Apply the Crossplane post-Helm manifest and wait for the function
+        run: |
+          set -euo pipefail
+          sed 's/{{CROSSPLANE_ENABLED}}/true/g' \
+            lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml \
+            > "${RUNNER_TEMP}/crossplane-post-helm.yaml"
+          if grep -Eq '\{\{[A-Z0-9_]+\}\}' "${RUNNER_TEMP}/crossplane-post-helm.yaml"; then
+            echo "::error::post-helm-crossplane.yaml: unsubstituted token(s) remain"
+            exit 1
+          fi
+          kubectl apply -f "${RUNNER_TEMP}/crossplane-post-helm.yaml"
+          kubectl wait --for=condition=Healthy --timeout=5m \
+            function.pkg.crossplane.io/crossplane-contrib-function-go-templating
+      - name: Prove the Crossplane and Crossview fences under impersonation
+        run: |
+          set -euo pipefail
+          expect() {
+            local want="$1" who="$2"
+            shift 2
+            local got
+            got="$(kubectl auth can-i "$@" --as="system:serviceaccount:crossplane-system:${who}" 2>/dev/null || true)"
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::${who}: can-i $* answered '${got}', expected '${want}'"
+              exit 1
+            fi
+            echo "ok (${want}) ${who}: $*"
+          }
+          expect yes crossplane list jobs --all-namespaces
+          for ns in gco-jobs gco-inference; do
+            expect yes crossplane create jobs -n "${ns}"
+            expect no crossplane create networkpolicies -n "${ns}"
+            expect no crossplane update resourcequotas -n "${ns}"
+            expect no crossplane create rolebindings -n "${ns}"
+          done
+          expect no crossplane create jobs -n gco-system
+          expect yes crossview list pods --all-namespaces
+          expect yes crossview list compositeresourcedefinitions.apiextensions.crossplane.io
+          expect no crossview get secrets -n kube-system
+          expect no crossview create jobs -n gco-jobs
+          expect no crossview delete functions.pkg.crossplane.io
+      - name: Compose the example BatchJob
+        # The two example files, applied as users would: the API first, then
+        # an XR in gco-jobs. A second XR in gco-system proves the namespaced
+        # write grant: Crossplane cannot compose into a platform namespace.
+        run: |
+          set -euo pipefail
+          kubectl apply -f examples/crossplane-batch-api.yaml
+          kubectl wait --for=condition=Established --timeout=3m \
+            compositeresourcedefinition.apiextensions.crossplane.io/batchjobs.examples.gco.io
+          deadline=$((SECONDS + 120))
+          until kubectl get batchjobs.examples.gco.io -A >/dev/null 2>&1; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the BatchJob API was never served"
+              exit 1
+            fi
+            sleep 3
+          done
+          kubectl apply -f examples/crossplane-batch-job.yaml
+          deadline=$((SECONDS + 300))
+          until kubectl -n gco-jobs get job gco-crossplane-hello >/dev/null 2>&1; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::Crossplane never composed the Job"
+              kubectl -n gco-jobs get batchjob.examples.gco.io gco-crossplane-hello -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl -n gco-jobs wait --for=condition=complete job/gco-crossplane-hello --timeout=300s
+          kubectl -n gco-jobs logs job/gco-crossplane-hello | grep -q "Hello from a Crossplane BatchJob"
+          kubectl -n gco-jobs wait --for=condition=Ready --timeout=180s \
+            batchjob.examples.gco.io/gco-crossplane-hello
+
+          kubectl apply -f - <<'EOF'
+          apiVersion: examples.gco.io/v1alpha1
+          kind: BatchJob
+          metadata:
+            name: gco-ci-denied
+            namespace: gco-system
+          spec:
+            message: Refused in gco-system
+          EOF
+          deadline=$((SECONDS + 180))
+          until kubectl -n gco-system get batchjob.examples.gco.io gco-ci-denied \
+              -o jsonpath='{.status.conditions[*].message}' | grep -qi forbidden; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::an XR in gco-system was never refused"
+              kubectl -n gco-system get batchjob.examples.gco.io gco-ci-denied -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+          if kubectl -n gco-system get job gco-ci-denied >/dev/null 2>&1; then
+            echo "::error::Crossplane composed a Job into gco-system"
+            exit 1
+          fi
+          kubectl -n gco-system delete batchjob.examples.gco.io gco-ci-denied --wait=true
+      - name: Check and capture the Crossview dashboard with the gco crossplane code
+        # The port-forward `gco crossplane open` runs: /api/health answers, and
+        # the landing page (the composed BatchJob still in place) is captured
+        # the way `gco crossplane screenshot` does.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import time
+          from pathlib import Path
+
+          import requests
+
+          from cli import cluster_ui, crossplane
+          from cli.kubectl_helpers import build_port_forward_command
+
+          namespace, target, remote_port = crossplane.PORT_FORWARD_TARGET
+          port = crossplane.DEFAULT_LOCAL_PORT
+          base_url = f"http://localhost:{port}"
+          output = (
+              Path(os.environ["RUNNER_TEMP"]) / "dashboards" / crossplane.DEFAULT_SCREENSHOT_FILENAME
+          )
+          command = build_port_forward_command(namespace, target, port, remote_port)
+          with cluster_ui.background_port_forward(command, port):
+              deadline = time.monotonic() + 60
+              while True:
+                  try:
+                      response = requests.get(f"{base_url}/api/health", timeout=5)
+                  except requests.RequestException as exc:
+                      detail = str(exc)
+                  else:
+                      if response.ok:
+                          print(f"Crossview /api/health: {response.text.strip()}")
+                          break
+                      detail = f"HTTP {response.status_code}"
+                  if time.monotonic() >= deadline:
+                      raise SystemExit(f"Crossview never answered /api/health ({detail})")
+                  time.sleep(2)
+              written = crossplane.capture_dashboard_screenshot(base_url, output)
+          size = written.stat().st_size
+          if size < 10_000:
+              raise SystemExit(f"{written} is only {size} bytes: the dashboard did not render")
+          print(f"captured {written} ({size} bytes)")
+          PY
+      - name: Tear Crossplane down the way the stack does
+        run: |
+          set -euo pipefail
+          kubectl delete -f examples/crossplane-batch-job.yaml --wait=true
+          deadline=$((SECONDS + 180))
+          while kubectl -n gco-jobs get job gco-crossplane-hello >/dev/null 2>&1; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the composed Job outlived its XR"
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl delete -f examples/crossplane-batch-api.yaml --wait=true
+          python3 - <<'PY'
+          import logging
+          import os
+          import sys
+
+          sys.path.insert(0, "lambda/helm-installer")
+          import handler
+
+
+          class StallRecorder(logging.Handler):
+              def __init__(self):
+                  super().__init__(logging.WARNING)
+                  self.stalls = []
+
+              def emit(self, record):
+                  if "stalled" in record.getMessage():
+                      self.stalls.append(record.getMessage())
+
+
+          recorder = StallRecorder()
+          handler.logger.addHandler(recorder)
+          ok, message = handler._delete_chart_custom_resources(
+              "crossplane", os.path.expanduser("~/.kube/config")
+          )
+          print(message)
+          if not ok:
+              raise SystemExit(message)
+          if recorder.stalls:
+              raise SystemExit(f"the cleanup fell back to stripping finalizers: {recorder.stalls}")
+          PY
+          python3 - <<'PY'
+          import sys
+
+          from kubernetes import config as kube_config
+
+          kube_config.load_kube_config()
+          sys.path.insert(0, "lambda/kubectl-applier-simple")
+          import handler
+
+          result = handler._delete_exact_resources(
+              handler._FEATURE_RESOURCE_INVENTORY[("{{CROSSPLANE_ENABLED}}", True)], "ci-disable"
+          )
+          if result["failed"]:
+              raise SystemExit(f"prune failures {result['failed']}")
+          print(f"pruned {result['pruned']}")
+          PY
+          if kubectl get functions.pkg.crossplane.io -o name | grep -q .; then
+            echo "::error::a composition function survived the installer cleanup"
+            exit 1
+          fi
+          for object in clusterrole/gco-crossplane-read clusterrole/gco-crossview-read \
+              clusterrolebinding/gco-crossview-read clusterrolebinding/gco-crossview-crossplane-view; do
+            if kubectl get "${object}" >/dev/null 2>&1; then
+              echo "::error::${object} survived the disable-path prune"
+              exit 1
+            fi
+          done
+          helm uninstall crossview --namespace crossplane-system --wait --timeout 5m
+          helm uninstall crossplane --namespace crossplane-system --wait --timeout 5m
+      - name: Upload the dashboard captures
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: platform-addon-dashboards
+          path: ${{ runner.temp }}/dashboards/
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n argocd get applications,appprojects,hpa -o yaml || true
+          kubectl -n argocd logs statefulset/argocd-application-controller --tail=200 || true
+          kubectl -n argocd logs deployment/argocd-repo-server --tail=200 || true
+          kubectl -n argocd logs deployment/argocd-server --tail=100 || true
+          kubectl get functions.pkg.crossplane.io -o yaml || true
+          kubectl get compositeresourcedefinitions.apiextensions.crossplane.io -o yaml || true
+          kubectl get batchjobs.examples.gco.io -A -o yaml || true
+          kubectl -n crossplane-system logs deployment/crossplane --tail=200 || true
+          kubectl -n crossplane-system logs deployment/crossview --tail=100 || true
+          kubectl -n gco-jobs get jobs,pods -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
+
+  # --------------------------------------------------------------------------
   # Dev-onboarding alias live proofs. Each job installs the latest version of a
   # container runtime, then runs scripts/setup-dev-alias.sh end to end — proving
   # it builds the gco-dev image AND that the `gco` shell function it emits
@@ -4577,6 +5481,7 @@ jobs:
       - integration-kind-cluster-e2e
       - integration-kind-cost-pipeline
       - integration-kind-examples-smoke
+      - integration-kind-platform-addons
       - integration-lambda-imports
       - integration-mcp-server
       - integration-pytest-cross-module

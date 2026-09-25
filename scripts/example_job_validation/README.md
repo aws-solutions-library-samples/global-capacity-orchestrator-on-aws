@@ -28,6 +28,7 @@ below is what this harness adds on top.
 - [Adding a success criterion](#adding-a-success-criterion)
 - [Adding a setup driver](#adding-a-setup-driver)
 - [Mutations are disclosed, never silent](#mutations-are-disclosed-never-silent)
+- [Keeping the tunnel up](#keeping-the-tunnel-up)
 - [Layering rules](#layering-rules)
 - [Testing your change](#testing-your-change)
 
@@ -37,12 +38,12 @@ below is what this harness adds on top.
 |---|---|
 | `__main__.py` | CLI entry (`python -m scripts.example_job_validation`): identity flags, example selection, `--static-only`, checkpoint/resume. Mirrors the sibling harness's argument surface; `gco examples validate` is the no-prompt wrapper around it. |
 | `registry.py` | The ordered action registry: five reused actions plus `static` and `examples`. Single source of truth for `--actions`, held in lockstep with the contract table in `docs/EXAMPLE_VALIDATION.md`. |
-| `models.py` | `ExampleRunSettings` — the sibling's `RunSettings` plus the selection and the parallelism cap. The helm charts and optional features the run needs are *derived* from the selection here, and the selection is part of `identity()` so a resume cannot quietly validate a different set. |
+| `models.py` | `ExampleRunSettings` — the sibling's `RunSettings` plus the selection and the parallelism cap. The helm charts, optional features and EKS Capabilities the run needs are *derived* from the selection here, and the selection is part of `identity()` so a resume cannot quietly validate a different set. |
 | `specs.py` | One `ExampleSpec` per example: how it is submitted, what infrastructure it needs, when it counts as passed, and which mutations are applied first. Declarative on purpose. |
-| `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces, resource-governance fit. No AWS, no cluster. |
+| `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces (and the Argo CD fence), resource-governance fit, and the same rules for what an Application syncs or an RGD / Composition composes. No AWS, no cluster. |
 | `actions.py` | The two new action handlers: `action_static` and `action_examples` (per-example lifecycle, capacity skips, parallelism). |
 | `drivers.py` | The per-example machinery `actions.py` orchestrates: submission through the real CLI or `kubectl`, the success-criteria waiters, setup drivers, and cleanup. Returns evidence dictionaries for the report. |
-| `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling (an isolated path when asked, so a run never rewrites `~/.kube/config`), and kubectl execution. |
+| `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling (an isolated path when asked, so a run never rewrites `~/.kube/config`), and kubectl execution. A tunnelled session keeps its tunnel carrying traffic: a TLS-handshake watchdog reopens a stalled or exited SSM session on the same port through the same bastion, and `SessionKubectl.through_tunnel` repeats a call the tunnel broke once it is back (see [Keeping the tunnel up](#keeping-the-tunnel-up)). |
 
 ## How a run executes
 
@@ -65,10 +66,13 @@ part of the run identity: pacing is not what is being validated, so a
 checkpointed run may resume with a different value.
 
 The `deploy` dependency on `static` is the ordering that matters most here:
-selection decides infrastructure. `ExampleRunSettings` derives the helm charts
-and optional features the chosen examples need
-(`required_helm_overrides` / `required_feature_overrides` in `specs.py`) and
-threads them into every CDK invocation as context, so validating one KEDA
+selection decides infrastructure. `ExampleRunSettings` derives the helm charts,
+optional features and EKS Capabilities the chosen examples need
+(`required_helm_overrides` / `required_feature_overrides` /
+`required_capability_overrides` in `specs.py`; the capabilities travel as the
+sibling's `eks_capabilities_overrides` JSON, with any ACK managed policies from
+`required_capability_settings`) and threads them into every CDK invocation as
+context, so validating one KEDA
 example does not deploy the whole optional surface — and validating it *does*
 deploy KEDA. Those derived features are part of `identity()`, so a resume
 against a differently-provisioned deployment is refused rather than silently
@@ -97,8 +101,16 @@ It enforces, per example:
   LimitRange, and per-manifest caps (read from `gco.stacks.constants`, again
   the deployed values), so an example cannot be rejected at admission on a
   stock deployment.
-- **Spec shape** — every spec names a known submission path, criterion, and
-  setup driver, so a typo fails here rather than mid-run.
+- **Embedded workloads** — what an Argo CD `Application` syncs (read from its
+  path in this checkout), a kro ResourceGraphDefinition's templates and a
+  go-templating Composition's rendered documents get the namespace, image and
+  governance rules too: they never cross the GCO API, so nothing else checks
+  them before a cluster does. An `Application` itself must stay inside the
+  fence (`argocd` namespace, `gco-tenants` project, in-cluster server, tenant
+  destination).
+- **Spec shape** — every spec names a known submission path, criterion,
+  setup driver and capability type, and a `companion` names a real companion
+  spec, so a typo fails here rather than mid-run.
 
 Run it locally with `python -m scripts.example_job_validation --static-only`
 (add `--examples <stem>` to narrow it), or through pytest.
@@ -107,8 +119,10 @@ Run it locally with `python -m scripts.example_job_validation --static-only`
 
 1. Add the manifest to `examples/`.
 2. Add its `ExampleSpec` to `EXAMPLE_SPECS` in `specs.py`: submission path,
-   success criteria, any `helm_enabled_overrides` / `feature_enabled_overrides`
-   it needs, capacity requirements, and setup drivers.
+   success criteria, any `helm_overrides` / `feature_overrides` /
+   `capability_overrides` it needs, capacity requirements, setup drivers, and
+   the `companion` its setup driver applies first (an API definition an
+   instance example depends on).
 3. Add its entry to `EXAMPLE_METADATA` in `gco_mcp/resources/docs.py`, the
    catalog the MCP tools serve. `static_checks.py` reads that literal with
    `ast` rather than importing it, so the symmetry check needs no MCP runtime.
@@ -142,8 +156,11 @@ now, not in five minutes.
 
 Some examples need something to exist before they can succeed: a queue with
 messages in it for the KEDA scaler to see, a corpus to search, a trainer
-runtime or an MLflow server to be Ready. Those are setup drivers, named by
-`spec.setup_driver` and listed in `KNOWN_SETUP_DRIVERS` in `drivers.py`.
+runtime, an MLflow server or Argo CD to be Ready, a companion API definition
+applied (`CompanionApi`: a kro RGD or a Crossplane XRD + Composition), or an
+AWS-side check around an ACK resource (`AckSqsQueues`). Those are setup
+drivers, named by `spec.setup_driver` and listed in `KNOWN_SETUP_DRIVERS` in
+`drivers.py`.
 
 The registry is explicit on purpose: a spec naming a driver that does not
 exist fails the offline pin test, not a live run forty minutes in. Add the
@@ -160,6 +177,37 @@ declared as `mutations` on the spec, applied by `apply_mutations` to a
 disclosed temp copy (`write_temp_manifest`), and reported. The shipped example
 is never edited, and the report always states what ran instead of what ships.
 `REMOVE_VALUE` deletes a key rather than replacing it.
+
+## Keeping the tunnel up
+
+Every live example reaches the private API through one SSM port-forward, and
+a Session Manager session can stall with its local listener still accepting
+connections: a run lost seven examples to one that completed no TLS handshake
+for over an hour. `kube.cluster_session` therefore yields a `SessionKubectl`
+backed by a tunnel keeper whenever the session has a tunnel (the release
+harness's cluster-facing actions share it):
+
+- the keeper's watchdog completes a TLS handshake through the tunnel every 30
+  seconds and, after two failures in a row (or at once when the session
+  process exits), reopens the session on the same local port through the
+  same bastion, so the kubeconfig and every `gco` process reading it keep
+  working;
+- `SessionKubectl.through_tunnel(call, safe_to_repeat=...)` runs anything that
+  crosses the tunnel and repeats it once when it failed on the transport and
+  the keeper found the tunnel broken (and reopened it) or already replaced. A
+  healthy tunnel is never reopened for a failed call, so a failure that was
+  not the tunnel's is reported as it happened. `kube.through_tunnel` and
+  `kube.ensure_tunnel` accept any runner, so drivers and tests can pass a
+  plain function;
+- drivers treat an unreadable object as unreadable: `_job_status` returns
+  `missing` only for the API server's NotFound, and `unreachable` with the
+  error otherwise;
+- a driver whose repetition could duplicate work passes `safe_to_repeat`
+  (`submit-direct` repeats only while none of the example's Jobs exists).
+
+`action_examples` sizes the bastion's self-termination backstop with
+`_bastion_ttl_minutes` and reports it, with every reopen the keeper attempted,
+in the summary's `tunnel` block.
 
 ## Layering rules
 
@@ -187,17 +235,20 @@ __main__.py → registry.py → actions.py → drivers.py → kube.py
 
 ## Testing your change
 
-`tests/test_example_job_validation.py` is the whole offline suite: the static
+`tests/test_example_job_validation.py` is the core offline suite: the static
 checks as a CI gate, plus the harness plumbing (spec enumeration, derived
 overrides, action registry order and dependencies, argument surface, mutation
 application, waiters and cleanup against a scripted kubectl, parallelism).
-Every AWS, Kubernetes, and subprocess boundary is stubbed, so the suite is
-hermetic.
+`tests/test_example_job_validation_platform_addons.py` covers the platform
+add-on and EKS Capability examples, and
+`tests/test_example_job_validation_tunnel.py` the tunnel keeper and the
+drivers that lean on it. Every AWS, Kubernetes, and subprocess boundary is
+stubbed, so the suites are hermetic.
 
 Add coverage next to the layer you touched, then:
 
 ```bash
-pytest tests/test_example_job_validation.py -q
+pytest tests/test_example_job_validation*.py -q
 python -m scripts.example_job_validation --static-only
 ```
 
