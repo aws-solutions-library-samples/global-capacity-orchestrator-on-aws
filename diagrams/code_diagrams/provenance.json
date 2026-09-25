@@ -222,9 +222,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "lambda/helm-installer/handler.py": {
-      "digest": "79a5911f7fe63d58fdc9d452eed0c13822be5f94f5fe4a063d1bf2203c5a02b8",
-      "generated_at": "2026-09-25T01:09:59Z",
-      "source_commit": "f750e73905a75793aac5d3ddb625b378064ba18a"
+      "digest": "f0ff66e35907629c1663a02d2c9fa351f19fcab88a7912b3cce985060e9f0362",
+      "generated_at": "2026-09-25T01:31:13Z",
+      "source_commit": "6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7"
     },
     "lambda/helm-installer/teardown_provider.py": {
       "digest": "96ca3c2a35518ee498355f88ecdc077618275c5829b937bb4b3b5e8261b3ceec",
