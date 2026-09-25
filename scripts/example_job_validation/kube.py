@@ -300,6 +300,7 @@ def _tunnel_handshake_error(port: int, server_name: str, timeout: float) -> str 
     has, by then, come back through the tunnel.
     """
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         with (
             socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection,

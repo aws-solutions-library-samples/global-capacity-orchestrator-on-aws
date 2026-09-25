@@ -245,8 +245,10 @@ class TestHandshakeProbe:
         connection = _Managed()
 
         class _Context:
+            minimum_version: Any = None
+
             def wrap_socket(self, raw: Any, *, server_hostname: str) -> _Managed:
-                seen["wrapped"] = (raw, server_hostname)
+                seen["wrapped"] = (raw, server_hostname, self.minimum_version)
                 return _Managed()
 
         def create_connection(address: tuple[str, int], timeout: float) -> _Managed:
@@ -258,7 +260,8 @@ class TestHandshakeProbe:
 
         assert kube._tunnel_handshake_error(8443, HOST, 10.0) is None
         assert seen["address"] == (("127.0.0.1", 8443), 10.0)
-        assert seen["wrapped"] == (connection, HOST)
+        # Nothing older than TLS 1.2 is ever offered, even for a probe.
+        assert seen["wrapped"] == (connection, HOST, ssl.TLSVersion.TLSv1_2)
         assert len(seen["closed"]) == 2
 
     def test_a_real_server_whose_certificate_cannot_be_verified_still_answered(
