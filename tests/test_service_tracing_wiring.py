@@ -53,6 +53,8 @@ def test_service_configures_tracing_then_instruments_its_app(
     module_name: str, service_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Imported before the recorders go in, so only the copy's calls are seen.
+    # The names come from this module's own _TRACED_SERVICES constant.
+    # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
     source = importlib.import_module(module_name)
     calls: list[tuple[str, Any]] = []
 

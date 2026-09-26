@@ -73,6 +73,8 @@ def test_loopback_listener_serves_the_collector(monkeypatch: pytest.MonkeyPatch)
     ((server, thread),) = started
     try:
         assert server.server_address[0] == "127.0.0.1"
+        # The URL is this test's own loopback listener on a port it picked.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
             body = response.read().decode("utf-8")
         assert 'gco_inference_monitor_metric{name="reconcile_count"} 3.0' in body
