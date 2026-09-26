@@ -12,9 +12,9 @@ and the one real subprocess (the stdlib import probe) only imports stdlib
 modules by name in an isolated interpreter. No Docker, no network, no root.
 
 The drift guards at the end tie each Dockerfile's smoke ``RUN`` to its
-``CMD``, and the smoke's ``--tracing`` module list, the Dockerfiles that pass
-the flag and the ``image-*`` dependency groups to what
-``gco/services/tracing.py`` actually imports.
+``CMD``, and the Dockerfiles that pass the smoke's ``--tracing`` flag and the
+``image-*`` dependency groups to what ``gco/services/tracing.py`` actually
+imports. The smoke itself derives that import list from the module's source.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import textwrap
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -320,6 +321,91 @@ def _stub_default_trust(monkeypatch: pytest.MonkeyPatch, anchors: int) -> list[d
     return calls
 
 
+def _write_importable(root: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
+    """Write ``files`` under ``root/importable`` and put that directory on ``sys.path``."""
+    base = root / "importable"
+    base.mkdir(exist_ok=True)
+    for relative, content in files.items():
+        path = base / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(base))
+
+
+def _fake_tracing_module(
+    root: Path, monkeypatch: pytest.MonkeyPatch, smoke: ModuleType, source: str
+) -> None:
+    """Point the smoke's derivation at a stand-in tracing module holding ``source``.
+
+    The stand-in is only ever parsed, never imported, exactly like the real one.
+    """
+    _write_importable(root, monkeypatch, {"_gco_smoke_fake_tracing.py": textwrap.dedent(source)})
+    monkeypatch.setattr(smoke, "TRACING_MODULE", "_gco_smoke_fake_tracing")
+
+
+class TestTracingImportDerivation:
+    def test_every_statement_shape_inside_a_function_is_found(self, smoke_mod: ModuleType) -> None:
+        source = textwrap.dedent(
+            """
+            import os
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                import httpx2
+
+            class Exporter:
+                import json
+
+                def export(self):
+                    import botocore.auth as auth
+                    from opentelemetry.sdk.trace import TracerProvider, sampling
+
+            async def handler():
+                from . import sibling
+                from ..config import loader
+                from .helpers import build
+
+                def nested():
+                    import zlib
+                    from . import sibling
+            """
+        )
+        # Module-level imports (the TYPE_CHECKING block and class body
+        # included) already ran when the module was imported; only the
+        # deferred ones are found, relative ones against the package, once.
+        assert smoke_mod.function_scope_imports(source, "gco.services") == [
+            ("botocore.auth", None),
+            ("gco.config", "loader"),
+            ("gco.services", "sibling"),
+            ("gco.services.helpers", "build"),
+            ("opentelemetry.sdk.trace", "TracerProvider"),
+            ("opentelemetry.sdk.trace", "sampling"),
+            ("zlib", None),
+        ]
+
+    def test_a_module_without_functions_defers_nothing(self, smoke_mod: ModuleType) -> None:
+        assert smoke_mod.function_scope_imports("import json\nVALUE = 1\n", None) == []
+
+    def test_the_real_tracing_module_is_found_from_its_installed_source(
+        self, smoke_mod: ModuleType
+    ) -> None:
+        failures: list[str] = []
+        found = smoke_mod.tracing_imports(failures)
+        assert failures == []
+        assert found == smoke_mod.function_scope_imports(
+            _TRACING_SOURCE.read_text(encoding="utf-8"), "gco.services"
+        )
+        # Spot checks that the derivation reaches the exporter, the SDK and
+        # both instrumentations the traced services depend on.
+        assert {
+            ("botocore.auth", "SigV4Auth"),
+            ("opentelemetry.sdk.trace", "TracerProvider"),
+            ("opentelemetry.instrumentation.fastapi", "FastAPIInstrumentor"),
+            ("opentelemetry.instrumentation.httpx", "AsyncOpenTelemetryTransportHttpx2"),
+            ("httpx2", None),
+        } <= set(found)
+
+
 class TestRuntimeSmokeTracing:
     def test_tracing_flag_imports_the_stack_and_counts_trust_anchors(
         self,
@@ -328,12 +414,17 @@ class TestRuntimeSmokeTracing:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture,
     ) -> None:
+        # No stubbed module list: this runs every deferred import of the real
+        # gco/services/tracing.py, derived from its source, in the locked
+        # environment the images install.
         _write_manifest(tmp_path)
         calls = _stub_default_trust(monkeypatch, anchors=150)
+        derived = len(smoke_at.tracing_imports([]))
+        assert derived > 0
         assert _run_smoke(smoke_at, monkeypatch, "json", "--tracing") == 0
         out = capsys.readouterr().out
         assert "distroless runtime smoke OK" in out
-        assert f"tracing stack imports ({len(smoke_at.TRACING_MODULES)} modules)" in out
+        assert f"{derived} deferred imports of gco.services.tracing present" in out
         assert "httpx2 default trust loads 150 CA certificates" in out
         # The exporter's own client ignores the environment; so does the check.
         assert calls == [{"trust_env": False}, {"server_hostname": "localhost"}]
@@ -347,12 +438,12 @@ class TestRuntimeSmokeTracing:
     ) -> None:
         _write_manifest(tmp_path)
         calls = _stub_default_trust(monkeypatch, anchors=0)
-        monkeypatch.setattr(smoke_at, "TRACING_MODULES", ("_no_such_tracing_module",))
+        monkeypatch.setattr(smoke_at, "TRACING_MODULE", "_no_such_tracing_module")
         assert _run_smoke(smoke_at, monkeypatch, "json") == 0
         assert "tracing" not in capsys.readouterr().out
         assert calls == []
 
-    def test_missing_tracing_module_fails_and_names_it(
+    def test_missing_deferred_imports_fail_and_name_their_statement(
         self,
         smoke_at: ModuleType,
         tmp_path: Path,
@@ -361,13 +452,95 @@ class TestRuntimeSmokeTracing:
     ) -> None:
         _write_manifest(tmp_path)
         _stub_default_trust(monkeypatch, anchors=150)
-        monkeypatch.setattr(
-            smoke_at, "TRACING_MODULES", ("json", "_no_such_tracing_module", "zlib")
+        _fake_tracing_module(
+            tmp_path,
+            monkeypatch,
+            smoke_at,
+            """
+            import _no_such_module_level_import_is_never_rechecked  # noqa
+
+            def setup():
+                import json
+                import _no_such_tracing_module
+                from zlib import crc32
+                from json import no_such_name
+                from email import mime  # a submodule, found the way the statement finds it
+            """,
         )
+        # The module-level import above would fail too; only importing the
+        # module runs it, which the entry-module check already covers.
+        assert _run_smoke(smoke_at, monkeypatch, "json", "--tracing") == 1
+        err = capsys.readouterr().err
+        assert "2 problem(s)" in err
+        assert "tracing import (import _no_such_tracing_module): ModuleNotFoundError" in err
+        assert "tracing import (from json import no_such_name): ModuleNotFoundError" in err
+        assert "_no_such_module_level_import" not in err
+
+    @pytest.mark.parametrize(
+        ("module", "files", "expected"),
+        [
+            pytest.param("_no_such_tracing_module", {}, "ModuleNotFoundError", id="no-such-module"),
+            pytest.param("no_such_parent.tracing", {}, "ModuleNotFoundError", id="no-such-parent"),
+            # A namespace package has no source file to read.
+            pytest.param(
+                "_gco_smoke_namespace",
+                {"_gco_smoke_namespace/placeholder.txt": ""},
+                "no source file for _gco_smoke_namespace",
+                id="no-source-file",
+            ),
+            pytest.param(
+                "_gco_smoke_broken",
+                {"_gco_smoke_broken.py": "def setup(:\n"},
+                "SyntaxError",
+                id="unparseable",
+            ),
+            # A function-scope relative import needs the module's package.
+            pytest.param(
+                "_gco_smoke_toplevel",
+                {"_gco_smoke_toplevel.py": "def setup():\n    from . import sibling\n"},
+                "ImportError",
+                id="relative-import-without-package",
+            ),
+        ],
+    )
+    def test_underivable_tracing_imports_fail_the_build(
+        self,
+        smoke_at: ModuleType,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        module: str,
+        files: dict[str, str],
+        expected: str,
+    ) -> None:
+        _write_manifest(tmp_path)
+        _stub_default_trust(monkeypatch, anchors=150)
+        _write_importable(tmp_path, monkeypatch, files)
+        monkeypatch.setattr(smoke_at, "TRACING_MODULE", module)
         assert _run_smoke(smoke_at, monkeypatch, "json", "--tracing") == 1
         err = capsys.readouterr().err
         assert "1 problem(s)" in err
-        assert "tracing module _no_such_tracing_module: ModuleNotFoundError" in err
+        assert f"tracing imports of {module}: " in err
+        assert expected in err
+
+    def test_a_tracing_module_without_deferred_imports_is_a_hard_failure(
+        self,
+        smoke_at: ModuleType,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        # A derivation that finds nothing must never produce a vacuously
+        # green smoke (the stdlib-extension manifest has the same rule).
+        _write_manifest(tmp_path)
+        _stub_default_trust(monkeypatch, anchors=150)
+        _fake_tracing_module(
+            tmp_path, monkeypatch, smoke_at, "import json\n\ndef setup():\n    return json\n"
+        )
+        assert _run_smoke(smoke_at, monkeypatch, "json", "--tracing") == 1
+        assert "has no function-scope imports; the tracing derivation broke" in (
+            capsys.readouterr().err
+        )
 
     def test_zero_trust_anchors_fail_the_build(
         self,
@@ -417,8 +590,9 @@ class TestRuntimeSmokeTracing:
 
         monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
         failures: list[str] = []
-        anchors = smoke_mod.check_tracing_stack(failures)
+        imported, anchors = smoke_mod.check_tracing_stack(failures)
         assert failures == []
+        assert imported > 0
         assert anchors > 0
 
 
@@ -1363,8 +1537,9 @@ class TestDockerfileSmokeWiring:
 
 
 # ---------------------------------------------------------------------------
-# Tracing drift guards: the smoke's --tracing list, the Dockerfiles that pass
-# it, and the image-* groups must all follow gco/services/tracing.py
+# Tracing drift guards: the Dockerfiles that pass --tracing and the image-*
+# groups must follow gco/services/tracing.py (whose deferred imports the
+# smoke derives from its source)
 # ---------------------------------------------------------------------------
 
 _TRACING_SOURCE = REPO_ROOT / "gco" / "services" / "tracing.py"
@@ -1378,24 +1553,20 @@ def _is_submodule(name: str) -> bool:
         return False
 
 
-def _lazy_third_party_imports(path: Path) -> set[str]:
-    """Third-party modules ``path`` imports inside functions, as they load.
+def _lazy_third_party_imports(smoke: ModuleType) -> set[str]:
+    """Third-party modules tracing.py imports inside functions, as they load.
 
-    ``from package import name`` counts as ``package.name`` when that is a
-    submodule and as ``package`` otherwise. Standard-library and first-party
-    (``gco``) modules are left out: the image always has them.
+    The smoke's own derivation, so this guard and the image build agree on
+    what the tracing stack is. ``from package import name`` counts as
+    ``package.name`` when that is a submodule and as ``package`` otherwise.
+    Standard-library and first-party (``gco``) modules are left out: the
+    image always has them.
     """
     modules: set[str] = set()
-    for function in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        for node in ast.walk(function):
-            if isinstance(node, ast.Import):
-                modules.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                for alias in node.names:
-                    submodule = f"{node.module}.{alias.name}"
-                    modules.add(submodule if _is_submodule(submodule) else node.module)
+    source = _TRACING_SOURCE.read_text(encoding="utf-8")
+    for module, name in smoke.function_scope_imports(source, "gco.services"):
+        submodule = f"{module}.{name}"
+        modules.add(submodule if name and _is_submodule(submodule) else module)
     return {
         name for name in modules if name.partition(".")[0] not in sys.stdlib_module_names | {"gco"}
     }
@@ -1439,29 +1610,6 @@ def _smoke_runs() -> dict[str, re.Match[str]]:
 
 
 class TestTracingSmokeContract:
-    def test_tracing_modules_are_what_the_tracing_module_imports_lazily(
-        self, smoke_mod: ModuleType
-    ) -> None:
-        # Plus truststore: httpx2 builds its default context from it, and the
-        # trust check depends on it, but tracing.py never imports it by name.
-        expected = _lazy_third_party_imports(_TRACING_SOURCE) | {"truststore"}
-        listed = smoke_mod.TRACING_MODULES
-        assert len(set(listed)) == len(listed), "duplicate TRACING_MODULES entries"
-        assert set(listed) == expected, (
-            "dockerfiles/runtime_smoke.py TRACING_MODULES drifted from the function-scope "
-            f"imports of gco/services/tracing.py: missing={sorted(expected - set(listed))}, "
-            f"stale={sorted(set(listed) - expected)}"
-        )
-
-    def test_every_tracing_module_imports_in_the_locked_environment(
-        self, smoke_mod: ModuleType
-    ) -> None:
-        # The same pins the images install; a typo in the list fails here
-        # instead of in every traced image build.
-        for name in smoke_mod.TRACING_MODULES:
-            # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
-            importlib.import_module(name)
-
     def test_smoke_traces_exactly_the_services_that_configure_tracing(self) -> None:
         runs = _smoke_runs()
         traced = {service for service, smoke in runs.items() if smoke.group(2)}
@@ -1477,11 +1625,13 @@ class TestTracingSmokeContract:
         assert traced
         assert traced != set(runs)
 
-    def test_traced_image_groups_declare_every_distribution_tracing_imports(self) -> None:
+    def test_traced_image_groups_declare_every_distribution_tracing_imports(
+        self, smoke_mod: ModuleType
+    ) -> None:
         groups = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
             "project"
         ]["optional-dependencies"]
-        required = {_distribution_of(name) for name in _lazy_third_party_imports(_TRACING_SOURCE)}
+        required = {_distribution_of(name) for name in _lazy_third_party_imports(smoke_mod)}
         assert {"httpx2", "opentelemetry-sdk", "protobuf"} <= required, required
         for service, smoke in _smoke_runs().items():
             declared = {
