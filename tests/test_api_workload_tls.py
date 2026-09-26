@@ -35,6 +35,8 @@ _API_WORKLOADS = {
     "31-manifest-processor.yaml": ("manifest-processor", "manifest-processor-tls"),
     "33-inference-proxy.yaml": ("inference-proxy", "inference-proxy-tls"),
 }
+#: API applications that are themselves clients of an internal HTTPS hop.
+_INTERNAL_HTTPS_CLIENTS = {"manifest-processor", "inference-proxy"}
 
 
 def _documents(filename: str) -> list[dict]:
@@ -403,6 +405,28 @@ def test_api_workload_uses_tls_only_sidecar_probe_and_service(
     tls_volume = next(item for item in pod_spec["volumes"] if item["name"] == "api-tls")
     assert tls_volume["secret"] == {"secretName": secret_name, "defaultMode": 0o440}
 
+    # The applications that dial another in-cluster HTTPS hop (manifest
+    # processor -> cost monitor, inference proxy -> model endpoints) trust the
+    # internal CA from their own leaf Secret: a separate volume projecting
+    # only ca.crt, so the application container never sees tls.key.
+    volumes = {item["name"]: item for item in pod_spec["volumes"]}
+    if app in _INTERNAL_HTTPS_CLIENTS:
+        assert volumes["internal-ca"]["secret"] == {
+            "secretName": secret_name,
+            "items": [{"key": "ca.crt", "path": "ca.crt"}],
+            "defaultMode": 0o440,
+        }
+        assert {
+            "name": "internal-ca",
+            "mountPath": "/var/run/gco/ca",
+            "readOnly": True,
+        } in application["volumeMounts"]
+        assert app_environment["GCO_INTERNAL_CA_FILE"] == "/var/run/gco/ca/ca.crt"
+        assert "internal-ca" not in proxy_mount_names
+    else:
+        assert "internal-ca" not in volumes
+        assert "GCO_INTERNAL_CA_FILE" not in app_environment
+
     assert service["metadata"]["name"] == app
     # Keep the named targetPort: the AWS controller may represent it with a
     # target-group-wide port-1 sentinel while registering every pod on 8443.
@@ -413,23 +437,23 @@ def test_api_workload_uses_tls_only_sidecar_probe_and_service(
 
 
 def test_cert_manager_issues_one_rotating_ecdsa_leaf_per_api_workload() -> None:
+    """Each ALB-facing API leaf is signed by the internal CA, not by itself.
+
+    The full chain (bootstrap issuer, CA, every other leaf) is pinned in
+    tests/test_internal_tls_manifests.py.
+    """
     documents = _documents("post-helm-api-workload-certificates.yaml")
-    issuer = next(document for document in documents if document["kind"] == "Issuer")
+    assert not [document for document in documents if document["kind"] == "Issuer"]
     certificates = {
         document["metadata"]["name"]: document
         for document in documents
         if document["kind"] == "Certificate"
     }
 
-    assert issuer["metadata"]["name"] == "gco-api-selfsigned"
-    assert issuer["spec"] == {"selfSigned": {}}
-    assert set(certificates) == {
-        "health-monitor-tls",
-        "manifest-processor-tls",
-        "inference-proxy-tls",
-    }
-    for name, certificate in certificates.items():
-        spec = certificate["spec"]
+    assert {secret_name for _app, secret_name in _API_WORKLOADS.values()} <= set(certificates)
+    for app, name in _API_WORKLOADS.values():
+        spec = certificates[name]["spec"]
+        assert certificates[name]["metadata"]["namespace"] == "gco-system"
         assert spec["secretName"] == name
         assert spec["privateKey"] == {
             "algorithm": "ECDSA",
@@ -438,10 +462,16 @@ def test_cert_manager_issues_one_rotating_ecdsa_leaf_per_api_workload() -> None:
             "rotationPolicy": "Always",
         }
         assert spec["issuerRef"] == {
-            "name": "gco-api-selfsigned",
-            "kind": "Issuer",
+            "name": "gco-internal-ca",
+            "kind": "ClusterIssuer",
             "group": "cert-manager.io",
         }
+        assert spec["dnsNames"] == [
+            app,
+            f"{app}.gco-system",
+            f"{app}.gco-system.svc",
+            f"{app}.gco-system.svc.cluster.local",
+        ]
 
 
 def test_gateway_reencrypts_to_https_service_ports() -> None:
@@ -490,7 +520,13 @@ def test_api_podmonitors_scrape_over_encrypted_transport() -> None:
         endpoint = monitors[app]["spec"]["podMetricsEndpoints"][0]
         assert endpoint["port"] == "https"
         assert endpoint["scheme"] == "https"
-        assert endpoint["tlsConfig"] == {"insecureSkipVerify": True}
+        # Verified, not merely encrypted: the internal CA from the monitoring
+        # namespace's trust leaf, and the Service name the pod's leaf carries
+        # (Prometheus dials pod IPs, so the name has to be supplied).
+        assert endpoint["tlsConfig"] == {
+            "ca": {"secret": {"name": "gco-monitoring-trust", "key": "ca.crt"}},
+            "serverName": f"{app}.gco-system.svc",
+        }
 
 
 def test_alb_network_policies_expose_only_the_tls_proxy_port() -> None:

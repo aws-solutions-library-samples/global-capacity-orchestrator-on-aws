@@ -3189,7 +3189,7 @@
   ],
   "x-gco-downstream": {
     "inference-proxy": {
-      "description": "Resolves `/inference/<endpoint>/...` by endpoint name from the inference endpoint store, requires the endpoint to be running in this region, allows only its serving and health paths, and streams `http://<service>.gco-inference.svc.cluster.local/<path>` back.",
+      "description": "Resolves `/inference/<endpoint>/...` by endpoint name from the inference endpoint store, requires the endpoint to be running in this region, allows only its serving and health paths, and streams `https://<service>.gco-inference.svc.cluster.local:8443/<path>` back, verifying the model pod's TLS sidecar against the cluster's internal CA.",
       "hop": "inference-endpoint",
       "target": "gco-inference/<endpoint>, <endpoint>-canary or <endpoint>-proxy Services"
     }
@@ -3250,7 +3250,7 @@
   },
   "x-gco-not-exposed": {
     "cost-monitor": {
-      "description": "Confined to manifest-processor traffic by a NetworkPolicy and runs no authentication middleware of its own; the manifest processor's `/api/v1/cost/*` routes are its authenticated front.",
+      "description": "Confined to manifest-processor traffic by a NetworkPolicy and runs no authentication middleware of its own; the manifest processor's `/api/v1/cost/*` routes are its authenticated front, reaching it at `https://cost-monitor.gco-system.svc.cluster.local:8443` and verifying its certificate against the cluster's internal CA.",
       "pathPrefix": "/api/v1/cost",
       "via": "manifest-processor"
     }

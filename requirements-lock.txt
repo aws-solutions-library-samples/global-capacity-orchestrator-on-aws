@@ -29,6 +29,8 @@ anyio==4.14.2
     #   sse-starlette
     #   starlette
     #   watchfiles
+asgiref==3.12.1
+    # via opentelemetry-instrumentation-asgi
 ast-serialize==0.6.0
     # via mypy
 attrs==25.4.0
@@ -181,7 +183,7 @@ h11==0.16.0
     #   uvicorn
 httpcore==1.0.9
     # via httpx
-httpcore2==2.12.0
+httpcore2==2.13.1
     # via httpx2
 httptools==0.8.0
     # via gco-cli (pyproject.toml)
@@ -189,9 +191,11 @@ httpx==0.28.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-httpx2==2.12.0
+httpx2==2.13.1
     # via
     #   fastmcp-slim
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
     #   mcp
 hypothesis==6.168.0
     # via
@@ -207,8 +211,6 @@ idna==3.19
     #   httpx2
     #   requests
     #   yarl
-importlib-metadata==8.7.1
-    # via opentelemetry-api
 iniconfig==2.3.0
     # via pytest
 jaraco-classes==3.4.0
@@ -318,15 +320,64 @@ openapi-spec-validator==0.9.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-opentelemetry-api==1.41.1
+opentelemetry-api==1.45.0
     # via
     #   fastmcp-slim
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
     #   mcp
+    #   opentelemetry-instrumentation
+    #   opentelemetry-instrumentation-asgi
+    #   opentelemetry-instrumentation-fastapi
+    #   opentelemetry-instrumentation-httpx
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
     #   pydocket
+opentelemetry-exporter-otlp-proto-common==1.45.0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+opentelemetry-instrumentation==0.66b0
+    # via
+    #   opentelemetry-instrumentation-asgi
+    #   opentelemetry-instrumentation-fastapi
+    #   opentelemetry-instrumentation-httpx
+opentelemetry-instrumentation-asgi==0.66b0
+    # via opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-fastapi==0.66b0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+opentelemetry-instrumentation-httpx==0.66b0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+opentelemetry-proto==1.45.0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+    #   opentelemetry-exporter-otlp-proto-common
+opentelemetry-sdk==1.45.0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+opentelemetry-semantic-conventions==0.66b0
+    # via
+    #   opentelemetry-instrumentation
+    #   opentelemetry-instrumentation-asgi
+    #   opentelemetry-instrumentation-fastapi
+    #   opentelemetry-instrumentation-httpx
+    #   opentelemetry-sdk
+opentelemetry-util-http==0.66b0
+    # via
+    #   opentelemetry-instrumentation-asgi
+    #   opentelemetry-instrumentation-fastapi
+    #   opentelemetry-instrumentation-httpx
 packaging==26.2
     # via
     #   build
     #   fastmcp-slim
+    #   opentelemetry-instrumentation
     #   pytest
     #   tensorboard
     #   wheel
@@ -375,7 +426,11 @@ propcache==0.5.2
     #   aiohttp
     #   yarl
 protobuf==7.35.1
-    # via tensorboard
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+    #   opentelemetry-proto
+    #   tensorboard
 psutil==7.2.2
     # via pytest-xdist
 publication==0.0.3
@@ -605,6 +660,8 @@ typing-extensions==4.15.0
     #   mcp-types
     #   mypy
     #   opentelemetry-api
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
     #   py-key-value-aio
     #   pydantic
     #   pydantic-core
@@ -655,6 +712,10 @@ werkzeug==3.1.8
     #   tensorboard
 wheel==0.47.0
     # via pip-tools
+wrapt==2.4.1
+    # via
+    #   opentelemetry-instrumentation
+    #   opentelemetry-instrumentation-httpx
 xmltodict==1.0.4
     # via moto
 yamllint==1.38.0
@@ -667,8 +728,6 @@ zensical==0.0.63
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-zipp==3.23.1
-    # via importlib-metadata
 
 # The following packages are considered to be unsafe in a requirements file:
 # pip

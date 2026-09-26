@@ -368,7 +368,9 @@ def _rendered_probes(framework: str) -> list[tuple[str, Any]]:
         spec=INFERENCE_FRAMEWORK_SPECS[framework],
         replicas=1,
     )
-    (container,) = deployment.spec.template.spec.containers
+    # The model server is the first container; the endpoint TLS sidecar after
+    # it only runs socket probes against its own listener.
+    container, _tls_sidecar = deployment.spec.template.spec.containers
     probes = [
         ("startupProbe", container.startup_probe),
         ("livenessProbe", container.liveness_probe),

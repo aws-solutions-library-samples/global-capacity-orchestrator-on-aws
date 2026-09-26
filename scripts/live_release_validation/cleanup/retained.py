@@ -12,6 +12,10 @@ from ..cleanup.ecr import _cleanup_new_ecr_images, _cleanup_new_ecr_repositories
 from ..cleanup.log_groups import (
     _cleanup_owned_log_groups,
 )
+from ..cleanup.transaction_search import (
+    TransactionSearchRestoreError,
+    _restore_transaction_search,
+)
 from ..constants import (
     _KMS_PENDING_WINDOW_DAYS,
     _RUN_STACK_TAG,
@@ -121,6 +125,16 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
         result["kms"] = _schedule_retained_kms_keys(ctx)
     except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "kms", "error": f"{type(exc).__name__}: {exc}"})
+    # Account-level state the stacks' deletion never reverts: the enabler's
+    # Delete is a no-op, so the run puts Transaction Search back itself.
+    try:
+        result["transaction_search"] = _restore_transaction_search(ctx)
+    except Exception as exc:  # preserve partial evidence
+        if isinstance(exc, TransactionSearchRestoreError):
+            result["transaction_search"] = copy.deepcopy(exc.details)
+        result["errors"].append(
+            {"phase": "transaction-search", "error": f"{type(exc).__name__}: {exc}"}
+        )
     result["ended_at"] = utc_now()
     ctx.checkpoint.state.setdefault("retained_cleanup_attempts", []).append(result)
     ctx.persist()

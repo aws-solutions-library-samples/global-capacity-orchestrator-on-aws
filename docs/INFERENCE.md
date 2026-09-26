@@ -59,12 +59,12 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
                                                 │
                                                 ▼
                                   internal regional ALB (private-root TLS)
-                                                │ HTTP after termination
+                                                │ re-encrypted HTTPS to the proxy's TLS sidecar
                                                 ▼
                                       authenticated inference proxy
-                                                │ streamed response
+                                                │ HTTPS :8443, verified against the internal CA
                                                 ▼
-                               endpoint ClusterIP Service → pod
+                  endpoint ClusterIP Service → model pod TLS sidecar → model server
 ```
 
 ### How It Works
@@ -75,7 +75,9 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
    seconds and reconciles the local workload.
 3. For a plain endpoint, the monitor creates or updates a Deployment and
    ClusterIP Service, plus an HPA or [KEDA](https://keda.sh/) ScaledObject when requested. Mooncake
-   endpoints add role workloads, internal Services, and a PD proxy.
+   endpoints add role workloads, internal Services, and a PD proxy. Every
+   model pod carries a TLS sidecar, and every model Service publishes only its
+   port 8443 (see [Model Endpoint TLS](#model-endpoint-tls)).
 4. The shared `/inference` rule on the `gco-system/gco-routes` HTTPRoute
    (attached to the `gco-gateway` Gateway) is the only ALB route for inference
    traffic; the monitor never creates endpoint-specific routes.
@@ -89,8 +91,9 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
    hot-reloads its projected leaf and forwards the stream over pod loopback.
 6. The inference proxy validates that envelope, checks endpoint state and an
    allowlist of serving paths, then streams the response from a strictly derived
-   in-cluster Service name. Mooncake admin, metrics, debug, and documentation
-   paths are never forwarded.
+   in-cluster Service name over HTTPS on port 8443, verifying the endpoint's
+   certificate against the GCO internal CA. Mooncake admin, metrics, debug, and
+   documentation paths are never forwarded.
 
 ### Shared Internal ALB
 
@@ -103,10 +106,76 @@ the public boundary narrow:
 
 - The ALB exposes the shared platform Gateway, not one route per model.
 - `/inference/*` first reaches the dedicated authenticated inference proxy.
-- Plain endpoints resolve to `<name>.gco-inference.svc.cluster.local`; split
-  Mooncake endpoints resolve to `<name>-proxy` in the same namespace.
+- Plain endpoints resolve to `https://<name>.gco-inference.svc.cluster.local:8443`;
+  split Mooncake endpoints resolve to `<name>-proxy` in the same namespace, on
+  the same port.
 - No ExternalName bridge, endpoint-specific target group, direct Global
   Accelerator URL, or public model Service is required.
+
+### Model Endpoint TLS
+
+The hop from the inference proxy to a model is HTTPS, verified against the GCO
+internal CA (the chain is described in
+[ARCHITECTURE.md → In-cluster TLS](ARCHITECTURE.md#in-cluster-tls)):
+
+- **A TLS sidecar in every managed model pod.** The inference monitor adds an
+  `endpoint-tls-proxy` container to every pod it renders (plain, canary,
+  prefill, decode, store, and the Mooncake PD proxy). It serves the
+  `gco-inference-tls` wildcard certificate (`*.gco-inference.svc`,
+  `*.gco-inference.svc.cluster.local`) on port 8443 and relays the decrypted
+  bytes to the model server on `127.0.0.1:<port>`. The model server keeps its
+  own bind address, port, and probes, which the kubelet and the Mooncake side
+  channels use.
+- **A multi-arch image.** GCO's service images are built for linux/amd64 only,
+  but model pods also land on arm64 (Graviton GPU) nodes, so the sidecar does
+  not reuse a service image. It runs the stdlib-only `gco/services/tls_proxy.py`
+  source, which the monitor publishes in a per-endpoint `<name>-tls-proxy`
+  ConfigMap, on the official `public.ecr.aws/docker/library/python:3.14.7-slim`
+  image pinned by tag and OCI index digest (override with
+  `ENDPOINT_TLS_PROXY_IMAGE` on the inference monitor). It runs as UID 65532
+  with a read-only root filesystem, no capabilities, no AWS credentials, and
+  socket probes against its own listener only, so a slow model never restarts
+  the sidecar. It requests 50m CPU and 64Mi of memory, is memory-limited but not
+  CPU-limited (throttling never delays streamed tokens), and drains accepted
+  streams for 25 seconds of the pod's 30-second termination grace.
+- **Services publish 8443 only.** Every model Service (`<name>`,
+  `<name>-canary`, `<name>-proxy`, `<name>-prefill`, `<name>-decode`) exposes a
+  single port, 8443 (`https`, target port `https`), and the `gco-inference`
+  NetworkPolicies admit the inference proxy on that port only. Because the
+  sidecar owns 8443 in the pod, an endpoint whose `port` is 8443 is refused at
+  reconcile; its region status reports the error.
+- **The inference proxy** opens a new HTTPS client for every request, trusting
+  only the internal CA and checking that the certificate names the Service it
+  dialled. Keep-alive is off on purpose, so kube-proxy balances each request
+  across the Ready replicas, and only an `Accept-Encoding` the caller sent
+  reaches the model. Because the trust is looked up per request, a rotated CA
+  bundle takes effect on the next request without restarting the proxy.
+- **The Mooncake PD proxy** binds `127.0.0.1:8000` behind its pod's sidecar and
+  dials `https://<name>-prefill.gco-inference.svc.cluster.local:8443` and
+  `https://<name>-decode.gco-inference.svc.cluster.local:8443`, trusting only
+  the internal CA (`PD_PROXY_CA_FILE=/var/run/gco/ca/ca.crt`, the `ca.crt` key
+  of `gco-inference-tls` projected on its own). Its probes are exec checks
+  against its loopback `/healthz`.
+
+**Calling a model from inside the cluster.** Model Services no longer answer
+plain HTTP. A workload of your own that calls one directly must use
+`https://<service>.gco-inference.svc.cluster.local:8443`, trust the internal CA
+(the `ca.crt` key of any GCO certificate Secret, for example
+`gco-inference-tls`), and be admitted by a NetworkPolicy: the shipped
+`gco-inference` policies admit only the inference proxy from outside the
+namespace. The authenticated `/inference/<name>/...` path through the API is the
+supported way in.
+
+**Upgrading existing endpoints.** On an in-place redeploy, the monitor adds the
+sidecar to each existing endpoint Deployment (a digest annotation,
+`gco.io/endpoint-tls-proxy-digest`, detects a missing or outdated sidecar) and
+moves each existing Service to 8443 in place, keeping its ClusterIP and DNS
+name. Every endpoint re-rolls once, and is unavailable through the inference
+proxy from the moment the upgraded proxy dials 8443 until the endpoint's first
+TLS-capable pod is Ready; the new pod needs a free GPU and a model load, so
+plan the upgrade like an image update. A later change to the sidecar program
+alone reaches running sidecars at their next restart and does not roll GPU
+pods. See [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
 
 ### Self-Healing
 
@@ -218,7 +287,7 @@ gco inference deploy ENDPOINT_NAME \
   --replicas N                     # Replicas per region (default: 1)
   --gpu-count N                    # GPUs per replica (default: 1)
   --gpu-type TYPE                  # GPU instance type hint (e.g. g5.xlarge)
-  --port PORT                      # Container port (default: 8000)
+  --port PORT                      # Container port (default: 8000; not 8443, the TLS sidecar's)
   --model-path PATH                # EFS path for model weights
   --model-source S3_URI            # S3 URI for auto-sync via init container
   --health-path PATH               # Health check endpoint (default: /health)
@@ -234,7 +303,10 @@ For each target region, the inference monitor creates:
 - **Deployment** — Runs the inference container with GPU resources and an
   optional init container for S3 model sync.
 - **ClusterIP Service** — Gives the authenticated platform proxy a stable,
-  in-cluster destination.
+  in-cluster destination on port 8443 only.
+- **TLS sidecar and its ConfigMap** — The `endpoint-tls-proxy` container in
+  every pod and the `<name>-tls-proxy` ConfigMap it runs from (see
+  [Model Endpoint TLS](#model-endpoint-tls)).
 - **Optional autoscaler** — A native HPA for CPU/memory metrics or KEDA
   ScaledObject when GPU metrics are requested.
 
@@ -489,11 +561,12 @@ The `store` and `both` modes enable the shared KV-cache store automatically — 
 API Gateway (AWS TLS + SigV4) → streaming HMAC proxy → Global Accelerator (TCP/443)
   → internal ALB (private-root TLS) → pod TLS proxy (re-encrypted HTTPS)
   → authenticated inference proxy (pod-loopback HTTP)
-                                                          │
+                                                          │ HTTPS :8443 (internal CA)
                                                           ▼
                                                 {name}-proxy Service
                                                           │
-                                                PD proxy Deployment
+                                   PD proxy Deployment (TLS sidecar → router on 127.0.0.1:8000)
+                                                          │ HTTPS :8443 (internal CA)
                                              ┌────────────┴────────────┐
                                              ▼                         ▼
                                  {name}-prefill Service     {name}-decode Service
@@ -980,8 +1053,11 @@ kubectl get pods -n gco-inference --context arn:aws:eks:us-east-1:ACCOUNT:cluste
 # Check deployment rollout
 kubectl rollout status deployment/my-llm -n gco-inference
 
-# View logs
-kubectl logs -n gco-inference deployment/my-llm
+# View logs (the model server container is named inference)
+kubectl logs -n gco-inference deployment/my-llm -c inference
+
+# TLS sidecar logs (certificate loading and rotation)
+kubectl logs -n gco-inference deployment/my-llm -c endpoint-tls-proxy
 ```
 
 ### Endpoint States

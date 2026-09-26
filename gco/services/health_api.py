@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from gco.models import HealthStatus
+from gco.services import tracing
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.health_monitor import HealthMonitor, create_health_monitor_from_env
 from gco.services.metrics_publisher import HealthMonitorMetrics
@@ -119,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await webhook_dispatcher.stop()
             logger.info("Webhook dispatcher stopped")
         logger.info("Health monitoring stopped")
+        tracing.shutdown_tracing()
 
 
 # Create FastAPI app with lifespan management
@@ -128,6 +130,12 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Server spans for every route except the probe and scrape paths; inert unless
+# GCO_TRACING_ENABLED=true. The webhook dispatcher in this process is never
+# traced (its URLs carry credentials).
+tracing.configure_tracing("health-monitor")
+tracing.instrument_fastapi_app(app)
 
 # Add authentication middleware
 app.add_middleware(AuthenticationMiddleware)

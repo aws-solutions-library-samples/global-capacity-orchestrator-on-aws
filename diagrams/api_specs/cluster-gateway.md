@@ -104,11 +104,11 @@ A prefix cannot be split between Services, so these implementations are reachabl
 
 ### Services not on the ALB
 
-- [`cost-monitor`](cost-monitor.md) — reached through [`manifest-processor`](manifest-processor.md) (`/api/v1/cost*`). Confined to manifest-processor traffic by a NetworkPolicy and runs no authentication middleware of its own; the manifest processor's `/api/v1/cost/*` routes are its authenticated front.
+- [`cost-monitor`](cost-monitor.md) — reached through [`manifest-processor`](manifest-processor.md) (`/api/v1/cost*`). Confined to manifest-processor traffic by a NetworkPolicy and runs no authentication middleware of its own; the manifest processor's `/api/v1/cost/*` routes are its authenticated front, reaching it at `https://cost-monitor.gco-system.svc.cluster.local:8443` and verifying its certificate against the cluster's internal CA.
 
 ### Downstream of the backends
 
-- [`inference-proxy`](inference-proxy.md) → gco-inference/<endpoint>, <endpoint>-canary or <endpoint>-proxy Services. Resolves `/inference/<endpoint>/...` by endpoint name from the inference endpoint store, requires the endpoint to be running in this region, allows only its serving and health paths, and streams `http://<service>.gco-inference.svc.cluster.local/<path>` back.
+- [`inference-proxy`](inference-proxy.md) → gco-inference/<endpoint>, <endpoint>-canary or <endpoint>-proxy Services. Resolves `/inference/<endpoint>/...` by endpoint name from the inference endpoint store, requires the endpoint to be running in this region, allows only its serving and health paths, and streams `https://<service>.gco-inference.svc.cluster.local:8443/<path>` back, verifying the model pod's TLS sidecar against the cluster's internal CA.
 
 ## Security schemes
 

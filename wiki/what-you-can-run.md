@@ -90,6 +90,10 @@ and cross-region Athena analytics:
 *The cost dashboard: cluster and projected monthly cost with node and
 namespace splits.*
 
+The four API services also export OpenTelemetry traces to AWS X-Ray, sampled
+at 5% by default and searchable in CloudWatch Transaction Search, with the trace
+id repeated on every service log line.
+
 MLflow experiment tracking is on by default with observability:
 
 ![MLflow tracking server run view with metric, parameters, and Finished status](assets/images/mlflow-ui.png)

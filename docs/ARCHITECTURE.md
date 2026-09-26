@@ -15,6 +15,7 @@
   - [Node Provisioning](#node-provisioning-eks-auto-mode)
 - [Security Architecture](#security-architecture)
   - [Network Security](#network-security)
+  - [In-cluster TLS](#in-cluster-tls)
   - [IAM Security](#iam-security)
   - [Data Security](#data-security)
 - [Scalability](#scalability)
@@ -90,7 +91,7 @@ Each region contains:
 - Registered with Global Accelerator when the deployment partition is `aws`, and recorded in the global-region SSM registry in every partition
 - Routes `/api/v1/*` and `/inference/*` through authenticated platform services via the shared `HTTPRoute`
 - Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and the exact `gco.aws/gateway` ownership tag before a regional proxy forwards traffic
-- Terminates private-root TLS, then re-encrypts target traffic to TLS-only proxy sidecars on pod port 8443 with HTTPS `/healthz` target-group checks. Each sidecar (`gco.services.tls_proxy`, the same image as its application, running on uvloop) hot-reloads its projected leaf in place — the listener is bound once and every handshake is routed to the currently active keypair, so rotation never refuses a connection or drops a stream — and forwards only over pod loopback; ALB does not validate the self-signed workload leaves. HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
+- Terminates private-root TLS, then re-encrypts target traffic to TLS-only proxy sidecars on pod port 8443 with HTTPS `/healthz` target-group checks. Each sidecar (`gco.services.tls_proxy`, the same image as its application, running on uvloop) hot-reloads its projected leaf in place — the listener is bound once and every handshake is routed to the currently active keypair, so rotation never refuses a connection or drops a stream — and forwards only over pod loopback. The leaves come from the cluster's [internal CA](#in-cluster-tls), but ALB does not validate target certificates. HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
 
 **Regional API Gateway Bridge** (separate stack)
 
@@ -187,7 +188,7 @@ rendered as spec sheets and as the interaction diagram in
 - 3 replicas and a PodDisruptionBudget with at least 2 available
 - Own image, ServiceAccount, IAM role, NetworkPolicies, and ClusterIP Service
 - Validates the HMAC envelope and serving-path allowlist
-- Reads only the exact endpoint record from DynamoDB and streams model responses
+- Reads only the exact endpoint record from DynamoDB and streams model responses from the endpoint's Service over HTTPS on 8443, verified against the internal CA
 - Has no Kubernetes RoleBinding and shares no worker lifecycle with the manifest processor
 
 **Cost Monitor Service** (when cost monitoring is enabled — the default)
@@ -195,8 +196,9 @@ rendered as spec sheets and as the interaction diagram in
 - Single-replica `Recreate` Deployment: the scheduled reporter is a singleton writer with deterministic per-window report keys, so restarts and rollouts converge instead of double-counting
 - Queries the in-cluster [OpenCost](https://opencost.io/) allocation API and writes interval-aligned [Parquet](https://parquet.apache.org/docs/) reports to the central cost report bucket in the monitoring region
 - Serves report listing and ad-hoc generation through the manifest API's authenticated `/api/v1/cost/*` proxy
+- Binds pod loopback behind an `api-tls-proxy` sidecar on 8443 and reaches OpenCost through the `opencost-tls` Service on 9443, both hops verified against the internal CA
 - IRSA role scoped to the deterministic cost report bucket ARN plus `kms:ViaService`-conditioned key use; no Kubernetes RBAC binding
-- Default-deny ingress with an explicit allow from the manifest processor only
+- Default-deny ingress with an explicit allow from the manifest processor only, on 8443
 
 **Service Accounts & RBAC**
 
@@ -262,7 +264,7 @@ rendered as spec sheets and as the interaction diagram in
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
   → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
-  → Gateway API HTTPRoute → Manifest Processor Pod (HTTP target group)
+  → Gateway API HTTPRoute → Manifest Processor pod (HTTPS target group, TLS sidecar on 8443)
   → Kubernetes API → Workload Scheduled → Node Provisioned
 ```
 
@@ -271,8 +273,9 @@ User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Streaming Inference Lambda
   → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
-  → Gateway API HTTPRoute → Dedicated Inference Proxy Pod (HTTP target group)
-  → Endpoint ClusterIP Service → Model Pod → streamed response
+  → Gateway API HTTPRoute → Dedicated Inference Proxy pod (HTTPS target group, TLS sidecar on 8443)
+  → Endpoint ClusterIP Service on 8443 (HTTPS, internal CA) → model pod TLS sidecar
+  → model server (pod loopback) → streamed response
 ```
 
 Outside the commercial `aws` partition, control-plane and inference requests use
@@ -339,9 +342,9 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 | Namespace | Ingress | Egress |
 |-----------|---------|--------|
-| `gco-system` | Default deny. Each platform Deployment is admitted on exactly the port it serves: 8443 (TLS proxy sidecars, targeted by the ALB) for health-monitor, manifest-processor, inference-proxy; 9090 (Prometheus metrics) for inference-monitor; 8080 from the manifest processor only for cost-monitor | DNS, HTTPS (AWS APIs, Kubernetes API), the node's EKS Pod Identity Agent, the inference proxy's path to `gco-inference` model pods, the cost monitor's path to OpenCost |
+| `gco-system` | Default deny. Each platform Deployment is admitted on exactly the TLS port its sidecar serves, while every plaintext application listener binds pod loopback: 8443 (TLS proxy sidecars, targeted by the ALB) for health-monitor, manifest-processor, inference-proxy; 9443 (the metrics TLS sidecar) for inference-monitor; 8443 from the manifest processor only for cost-monitor | DNS, HTTPS (AWS APIs, Kubernetes API), the node's EKS Pod Identity Agent, the inference proxy's path to `gco-inference` model pods (8443), the cost monitor's path to OpenCost's TLS front door (9443) |
 | `gco-jobs` | Default deny from other namespaces; every pod in the namespace may reach every other pod on any port (distributed training, Ray, Volcano, Slurm, Kubeflow choose their own ports). Two operators are admitted from their own namespaces on one port each, because they drive their workloads through an in-pod API rather than the Kubernetes API: KubeRay to Ray head pods on the dashboard port (8265, RayJob status and RayService health) and, with Slurm enabled, Slinky to slurmrestd (6820, NodeSet reconciliation) | DNS, HTTPS to any destination (S3, DynamoDB, ECR, CloudWatch, Bedrock, model hubs, package indexes — GCO's own tables and shared bucket live in the global region, so a VPC-only rule could never carry the platform's traffic), the node's EKS Pod Identity Agent (`169.254.170.23:80`, where a `gco-service-account` pod obtains its AWS credentials), the in-VPC ranges from `vpc_endpoint_cidrs` on any port (Valkey, Aurora, EFS/FSx, VPC endpoints), plus the opt-in MLflow and Slurm client rules |
-| `gco-inference` | Model pods accept traffic only from the authenticated inference proxy and from each other (Mooncake KV-transfer, PD proxy) | DNS, HTTPS (model pulls, AWS APIs), the node's EKS Pod Identity Agent, the Mooncake master ports |
+| `gco-inference` | Model pods accept traffic only from the authenticated inference proxy, on their TLS sidecar's 8443, and from each other (Mooncake KV-transfer, PD proxy) | DNS, HTTPS (model pulls, AWS APIs), the node's EKS Pod Identity Agent, the Mooncake master ports |
 
 Rules on probed ports name the port but no source: the ALB is not a pod and the kubelet probes from the node's host network, which no selector can express. DNS rules likewise allow port 53 to any destination because Auto Mode answers cluster DNS from a per-node service rather than CoreDNS pods. NetworkPolicies are additive, so an operator who needs a path GCO does not ship adds a policy rather than switching enforcement off.
 
@@ -349,7 +352,181 @@ One VPC CNI property shapes how egress rules and Services are written. The agent
 
 A second property concerns timing. The VPC CNI attaches a new pod's policies in parallel with the pod's start and admits all of its traffic until they are in place (the agent's standard mode), so a pod's very first connections can go through paths its policies deny a moment later; the window is normally a few seconds. Auto Mode's NodeClass `networkPolicy: DefaultDeny` is the strict alternative, in which a new pod is denied everything until its policies attach, and it requires a policy for every pod the node runs — GCO does not set it. The live release validation's `network-posture` probes read their verdicts from the steady state rather than the first dial for this reason, and record the window when they see it.
 
-**VPC endpoints** (`cdk.json` `vpc_endpoints`): each regional VPC gets free S3 and DynamoDB gateway endpoints by default, so the platform's largest data path (models, datasets, checkpoints, MLflow artifacts, cost reports) stays inside the VPC and off the NAT gateways' per-GB metering. Interface (PrivateLink) endpoints for STS, ECR, CloudWatch, SQS, SSM, Secrets Manager, KMS, EKS, EFS, and Bedrock are opt-in because they bill per AZ-hour. Cross-region calls to the global region's tables, buckets, and parameters still leave through the NAT gateways.
+**VPC endpoints** (`cdk.json` `vpc_endpoints`): each regional VPC gets free S3 and DynamoDB gateway endpoints by default, so the platform's largest data path (models, datasets, checkpoints, MLflow artifacts, cost reports) stays inside the VPC and off the NAT gateways' per-GB metering. Interface (PrivateLink) endpoints for STS, ECR, CloudWatch, SQS, SSM, Secrets Manager, KMS, EKS, EFS, Bedrock, and X-Ray (span export) are opt-in because they bill per AZ-hour. Cross-region calls to the global region's tables, buckets, and parameters still leave through the NAT gateways.
+
+### In-cluster TLS
+
+Every in-cluster hop GCO owns is HTTPS, and every client of one of those hops
+verifies the server's certificate against one private CA, the GCO internal CA,
+that cert-manager runs inside each regional cluster. The manifests are
+`post-helm-api-workload-certificates.yaml` (the chain and the always-on
+leaves), `post-helm-cost-monitoring-tls.yaml`, and `post-helm-monitoring-tls.yaml`
+(leaves gated like the features they serve).
+
+**The CA chain.** A selfSigned ClusterIssuer, `gco-internal-ca-bootstrap`,
+signs exactly one certificate: the `gco-internal-ca` CA (ECDSA P-256, 10 years,
+renewed one year before expiry). Its Secret lives in the `cert-manager`
+namespace, cert-manager's cluster resource namespace and the only place a
+ClusterIssuer reads a CA Secret from. The CA keeps its private key across
+renewals (`rotationPolicy: Never`), so a renewed CA certificate still verifies
+every leaf the previous one signed, and every 90-day leaf is re-issued inside
+the one-year overlap. The ClusterIssuer `gco-internal-ca` then signs every leaf.
+
+**Leaves.** Each is ECDSA P-256 with a fresh key per issuance, valid 90 days and
+renewed 30 days before expiry, for server authentication only, and names the
+four DNS forms of its Service (`name`, `name.ns`, `name.ns.svc`,
+`name.ns.svc.cluster.local`):
+
+| Leaf Secret | Namespace | Served by | Its `ca.crt` is read by |
+|-------------|-----------|-----------|--------------------------|
+| `health-monitor-tls` | `gco-system` | health-monitor `api-tls-proxy` (8443) | — |
+| `manifest-processor-tls` | `gco-system` | manifest-processor `api-tls-proxy` (8443) | the manifest processor (cost-monitor client) |
+| `inference-proxy-tls` | `gco-system` | inference-proxy `api-tls-proxy` (8443) | the inference proxy (model-endpoint client) |
+| `inference-monitor-tls` | `gco-system` | inference-monitor `metrics-tls-proxy` (9443) | — |
+| `cost-monitor-tls` (cost monitoring) | `gco-system` | cost-monitor `api-tls-proxy` (8443) | the cost monitor (OpenCost client) |
+| `gco-inference-tls` (wildcard `*.gco-inference.svc`, `*.gco-inference.svc.cluster.local`) | `gco-inference` | every managed model pod's `endpoint-tls-proxy` (8443) | the Mooncake PD proxy (prefill/decode client) |
+| `opencost-tls` (cost monitoring) | `monitoring` | the OpenCost pod's `opencost-tls-proxy` (9443) | — |
+| `grafana-tls` (cluster observability) | `monitoring` | the Grafana pod's `grafana-tls-proxy` (3443) | — |
+| `gco-monitoring-trust` (cluster observability) | `monitoring` | nothing | Prometheus (GCO PodMonitors) and the Grafana credential rotator |
+
+**Clients trust only the internal CA.** cert-manager writes the issuing CA's
+certificate into every leaf Secret as `ca.crt`, so a client projects just that
+key, from a Secret in its own namespace, as a separate read-only volume at
+`/var/run/gco/ca/ca.crt` (`GCO_INTERNAL_CA_FILE`); a client container never
+mounts a private key, and `gco-monitoring-trust` exists only to deliver the CA
+into the `monitoring` namespace. `gco/services/internal_tls.py` builds a context
+that trusts that file and nothing else (no public anchors), requires TLS 1.2 or
+later, and verifies that the certificate names the exact Service host dialled.
+A missing or unusable bundle fails the call closed (503 on the cost routes, 502
+on inference) instead of falling back to another trust store. Contexts are cached
+per file identity, so a rotated `ca.crt` is picked up by the next new context.
+The PD proxy trusts `PD_PROXY_CA_FILE` the same way, the Grafana rotator hands
+the bundle path to `requests`, and Prometheus uses each PodMonitor's
+`tlsConfig.ca` with a `serverName`, because it dials pod IPs.
+
+**Servers terminate TLS in a sidecar.** `gco/services/tls_proxy.py` mounts its
+leaf at `/var/run/gco/tls`, binds its listener once, activates a rotated keypair
+in place for new handshakes, and forwards the decrypted bytes to the
+application on pod loopback; the application itself binds `127.0.0.1`, so the
+only listener on the pod network is TLS. The sidecar never holds AWS
+credentials: pods with an AWS identity exclude it from credential injection
+(`eks.amazonaws.com/skip-containers`), and the chart pods have none. It runs in
+three shapes:
+
+- **`gco-system` pods** run it from their own service image, with the Secret at
+  mode 0440 and the pod's fsGroup.
+- **The OpenCost and Grafana chart pods** get it through Helm values the regional
+  stack builds, running from the cost-monitor and manifest-processor images
+  respectively. Those images are amd64-only, so both pods carry an amd64 node
+  selector. The chart pods start before the post-Helm Certificates exist, so the
+  Secret volume is `optional` (mode 0444, because GCO does not own the chart
+  pods' users), the sidecar waits up to 30 minutes for the keypair
+  (`TLS_PROXY_KEYPAIR_WAIT_SECONDS=1800`), and it has no readiness probe, so the
+  chart pod turns Ready on its own container.
+- **Managed model pods** get an `endpoint-tls-proxy` from the inference monitor
+  (see [INFERENCE.md](INFERENCE.md#model-endpoint-tls)). It runs the same stdlib-only
+  `tls_proxy.py`, shipped in a ConfigMap, on a pinned multi-arch official Python
+  image, because model pods also land on arm64 (Graviton GPU) nodes.
+
+**Verified hops.** The ALB → API pod hop is encrypted as well, but the ALB does
+not validate target certificates; HMAC authenticates the proxy on that hop. The
+hops below verify the server's certificate:
+
+| Client → server | Address the client dials | Server TLS | Client's CA source |
+|-----------------|--------------------------|------------|--------------------|
+| manifest-processor → cost-monitor (`/api/v1/cost/*`) | `https://cost-monitor.gco-system.svc.cluster.local:8443` | `api-tls-proxy`, `cost-monitor-tls` | `manifest-processor-tls` |
+| cost-monitor → OpenCost | `https://opencost-tls.monitoring.svc.cluster.local:9443` | `opencost-tls-proxy`, `opencost-tls` | `cost-monitor-tls` |
+| Prometheus → health-monitor, manifest-processor, inference-proxy `/metrics` | pod IP, port `https` (8443), `serverName: <app>.gco-system.svc` | `api-tls-proxy`, the app's leaf | `gco-monitoring-trust` |
+| Prometheus → inference-monitor `/metrics` | pod IP, port `https-metrics` (9443), `serverName: inference-monitor.gco-system.svc` | `metrics-tls-proxy`, `inference-monitor-tls` | `gco-monitoring-trust` |
+| Grafana credential rotator → Grafana admin API | `https://grafana-tls.monitoring.svc.cluster.local:3443` | `grafana-tls-proxy`, `grafana-tls` | `gco-monitoring-trust` |
+| inference-proxy → model endpoints (`<endpoint>`, `<endpoint>-canary`, `<endpoint>-proxy`) | `https://<service>.gco-inference.svc.cluster.local:8443/<path>` | `endpoint-tls-proxy`, `gco-inference-tls` | `inference-proxy-tls` |
+| Mooncake PD proxy → prefill and decode | `https://<endpoint>-prefill.gco-inference.svc.cluster.local:8443`, `https://<endpoint>-decode.gco-inference.svc.cluster.local:8443` | `endpoint-tls-proxy`, `gco-inference-tls` | `gco-inference-tls` (`PD_PROXY_CA_FILE`) |
+
+The NetworkPolicies on these paths name only the TLS ports. The plaintext
+ports behind them are either bound to pod loopback (inference-monitor 9090,
+cost-monitor 8080, the PD proxy's 8000) or not admitted from these clients
+(OpenCost's 9003 for the cost monitor, the model servers' own ports for the
+inference proxy).
+
+**What stays plaintext, and why:**
+
+- **Sidecar → application**, over pod loopback inside the pod's network
+  namespace.
+- **Prometheus scrapes of third-party components**: KEDA, Volcano, KubeRay,
+  YuniKorn, and the DCGM exporter on their plain HTTP metrics ports, OpenCost's
+  metrics through its chart Service, and kube-prometheus-stack's own targets
+  with the chart's settings. Kueue is scraped over HTTPS with its own
+  certificate, unverified. These are upstream components serving their own
+  listeners; metrics carry no credentials.
+- **OpenCost → Prometheus** queries inside the `monitoring` namespace.
+- **UIs reached through `kubectl port-forward`**: Grafana (3000), Prometheus,
+  Alertmanager, the OpenCost UI and API, and the Argo CD UI (`server.insecure`).
+  The forward rides the authenticated TLS connection to the private EKS API
+  server, and the node opens the last connection inside the pod, so the
+  plaintext never crosses the pod network.
+- **MLflow** (5000), which job pods labelled `gco.io/mlflow-client` reach over
+  plain HTTP, fenced by NetworkPolicy.
+- **Slurm REST** (slurmrestd, 6820) and the **Ray dashboard** (8265), which
+  their upstream operators and clients drive over plain HTTP inside
+  `gco-jobs`, fenced by NetworkPolicy.
+- **Mooncake** inside `gco-inference`: the master's metadata server (8080) and
+  RPC port, the KV-cache transfer between role pods, and the model servers' own
+  ports that those side channels and the kubelet's probes use.
+- **The node-local EKS Pod Identity Agent** (`http://169.254.170.23`), which AWS
+  serves over link-local HTTP on each node.
+
+**Who can obtain a trusted certificate.** cert-manager approves and signs any
+`Certificate` or `CertificateRequest` that references a ClusterIssuer, from any
+namespace, and GCO's clients trust whatever the internal CA signs. Job
+submissions cannot create either kind (the submission kind allowlist has no
+cert-manager kinds), and no GCO service account can. But the tenant roles of
+the optional Argo CD, Crossplane, and kro integrations can create and patch
+`Certificate` objects in `gco-jobs` and `gco-inference`, and cert-manager's
+ingress-shim creates one for any Ingress annotated with a cluster issuer. The
+ValidatingAdmissionPolicy `gco-internal-ca-issuance`
+(`07-internal-ca-issuance.yaml`) therefore fences the two GCO ClusterIssuers.
+It fences only those: a tenant's own `Issuer` is untouched.
+
+- `gco-internal-ca` signs only the leaves in the table above, matched by
+  namespace and name, each with exactly its own DNS names: no other name, no
+  `commonName`, subject, IP, URI, email or other name, and never a CA. The names
+  are pinned because `gco-inference-tls` lives in a namespace tenants can write.
+- `gco-internal-ca-bootstrap` signs only the CA, `cert-manager/gco-internal-ca`.
+- A `CertificateRequest` for either can be created, or completed through its
+  status (where cert-manager writes the signed certificate), only by
+  cert-manager's controller (`system:serviceaccount:cert-manager:cert-manager`),
+  and only for one of those Certificates. The Certificate rules exempt no
+  requester, which is what fences the ingress-shim.
+
+The base pass applies the policy before Helm installs cert-manager. That order
+matters: a new policy is enforced a moment after it is stored, and cert-manager
+can turn the CA Ready faster than that. Applying the two together would let a
+request filed earlier be signed in the gap. The policy needs Kubernetes 1.30 or
+later; `cdk.json` `kubernetes_version` defaults to 1.36.
+
+What the fence does not cover:
+
+- A pod created in `gco-inference` can mount the `gco-inference-tls` Secret, as
+  any pod can mount a Secret in its own namespace, and so present the wildcard
+  for any model Service name. A tenant who can create such pods can already
+  join a model Service through its labels.
+- Admission cannot revoke a certificate the CA has already signed. The fence
+  re-checks an object that predates it only when the object changes. Its
+  request rule still stops the CA from completing an older request for any
+  Certificate off the allowlist.
+- cert-manager can also sign Kubernetes `CertificateSigningRequest` objects,
+  but only through an experimental controller that GCO does not enable.
+
+**Lifecycle.** Certificates are post-Helm objects, because cert-manager's CRDs
+come from its chart. On a fresh cluster, `gco-system` pods that mount a leaf wait
+in `ContainerCreating` until cert-manager issues it; model pods wait the same way
+for `gco-inference-tls`. The applier's legacy sweep deletes the
+`gco-api-selfsigned` Issuer that used to sign the three API leaves as their own
+roots. [Live release validation](LIVE_RELEASE_VALIDATION.md) requires the
+ClusterIssuer and every leaf the configuration deploys to be `Ready` and issued
+by `gco-internal-ca`, and probes that only the TLS ports answer; the kind CI jobs
+exercise the chain and the verified hops as well
+([CI.md](../.github/CI.md#in-cluster-tls-in-the-kind-jobs)).
 
 ### IAM Security
 
@@ -372,7 +549,8 @@ A second property concerns timing. The VPC CNI attaches a new pod's policies in 
 - **At Rest**: EBS volumes and EFS encrypted with AWS KMS
 - **Client and AWS API Transit**: AWS-managed TLS protects API Gateway and AWS service API connections; aggregator-to-regional-API calls also require SigV4
 - **Private Backend Transit**: In `aws`, global proxy → Global Accelerator → ALB uses deployment-local private-root TLS; in every partition, regional VPC proxy → ALB uses the same trust and explicit `backend.<project>.gco.internal` SNI/hostname verification. Global Accelerator is Layer 4 and does not terminate TLS.
-- **Workload Target Transit**: The ALB terminates its private-root client connection and re-encrypts every target hop to cert-manager-backed HTTPS listeners on health-monitor, manifest-processor, and inference-proxy. ALB target TLS encrypts traffic but does not validate the deployment-local self-signed workload certificates and is not mTLS.
+- **Workload Target Transit**: The ALB terminates its private-root client connection and re-encrypts every target hop to cert-manager-backed HTTPS listeners on health-monitor, manifest-processor, and inference-proxy. ALB target TLS encrypts traffic but does not validate target certificates and is not mTLS.
+- **In-cluster Transit**: Every in-cluster hop GCO owns (to the cost monitor, OpenCost, model endpoints, prefill/decode, Grafana's admin API, and the GCO metrics scrapes) is HTTPS verified against the cluster's internal CA; see [In-cluster TLS](#in-cluster-tls) for the hops and for what stays plaintext.
 - **Private-Key Boundary**: Only the certificate-manager role can read the customer-managed-KMS-encrypted root secret; backend clients read public SSM trust only
 - **Request Authentication**: HMAC adds integrity, freshness, and replay defense, not encryption
 - **EFS Transit**: TLS-enabled mounts
@@ -480,6 +658,11 @@ A second property concerns timing. The VPC CNI attaches a new pod's policies in 
   load-balancer hours — access is via `gco monitoring open` port-forward.
 - **Opt out** with `gco monitoring disable` to remove the stack and its volumes.
   See [`docs/MONITORING.md`](MONITORING.md#cost) for the full breakdown.
+- **Tracing is on by default** at a 5% sample: span ingestion into the
+  `aws/spans` log group is billed at CloudWatch Logs pricing and scales with
+  request volume times `tracing.sample_ratio`. Enabling Transaction Search
+  moves every X-Ray trace in the account and Region to that pricing. See
+  [`docs/MONITORING.md`](MONITORING.md#tracing-cost) for the details.
 
 ### Cost Monitoring & Cost-Aware Scheduling
 

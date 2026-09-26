@@ -107,6 +107,29 @@ spec:
               value: "9000"
             - name: REGION
               value: "{{REGION}}"
+            # OpenTelemetry -> X-Ray (gco/services/tracing.py), switched and
+            # sampled from cdk.json tracing; the cluster and pod identity
+            # label the spans, as on the other traced services.
+            - name: CLUSTER_NAME
+              value: "{{CLUSTER_NAME}}"
+            - name: GCO_TRACING_ENABLED
+              value: "{{TRACING_ENABLED}}"
+            - name: GCO_TRACING_SAMPLE_RATIO
+              value: "{{TRACING_SAMPLE_RATIO}}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Model endpoints are dialled over verified HTTPS
+            # (https://<service>.gco-inference.svc.cluster.local:8443) and
+            # must present the gco-inference-tls leaf; the only trust anchor
+            # is the GCO internal CA mounted here from this pod's own Secret.
+            - name: GCO_INTERNAL_CA_FILE
+              value: "/var/run/gco/ca/ca.crt"
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: AWS_ROLE_ARN
@@ -196,6 +219,9 @@ spec:
             - name: aws-iam-token
               mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
               readOnly: true
+            - name: internal-ca
+              mountPath: /var/run/gco/ca
+              readOnly: true
         - name: api-tls-proxy
           image: {{INFERENCE_PROXY_IMAGE}}
           imagePullPolicy: IfNotPresent
@@ -265,6 +291,15 @@ spec:
         - name: api-tls
           secret:
             secretName: inference-proxy-tls
+            defaultMode: 288
+        # Only the CA certificate from the same Secret, for the model-endpoint
+        # client: the application never sees a private key.
+        - name: internal-ca
+          secret:
+            secretName: inference-proxy-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
             defaultMode: 288
         - name: aws-iam-token
           projected:

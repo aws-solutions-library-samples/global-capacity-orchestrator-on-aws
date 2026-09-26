@@ -555,8 +555,11 @@ charts:
   # Bundles Prometheus, Alertmanager, Grafana, kube-state-metrics, node-exporter,
   # and the Prometheus Operator. Installed on every regional cluster when
   # cdk.json cluster_observability.enabled = true (the default). Inclusion and
-  # the dynamic values (persistence sizes, retention, gp3 storageClassName, and
-  # GPU/Neuron node-exporter tolerations) are driven by GCORegionalStack, not by
+  # the dynamic values (persistence sizes, retention, gp3 storageClassName,
+  # GPU/Neuron node-exporter tolerations, and Grafana's grafana-tls-proxy
+  # sidecar — verified TLS on 3443 for the admin-password rotator, run from
+  # the manifest-processor image, with its optional grafana-tls Secret volume
+  # and an amd64 nodeSelector) are driven by GCORegionalStack, not by
   # the helm block above, so the default here is enabled: false. Grafana uses
   # native auth (no self sign-up, no anonymous) and a ClusterIP service; access
   # is via `gco monitoring open` (kubectl port-forward). The admin password is
@@ -602,6 +605,15 @@ charts:
           type: pvc
           accessModes:
             - ReadWriteOnce
+        # Recreate, not the subchart's RollingUpdate: the single replica owns a
+        # ReadWriteOnce EBS volume, so a surge pod scheduled onto another node
+        # can never attach it while the old pod still holds it, and the rollout
+        # would wait on a Multi-Attach error forever. The amd64 nodeSelector
+        # GCORegionalStack adds for the grafana-tls-proxy sidecar makes that
+        # the common case for a pod that ran on a Graviton node. A rollout
+        # therefore costs a brief Grafana restart instead of a stall.
+        deploymentStrategy:
+          type: Recreate
         # First-boot tolerance: Grafana runs its full database migration set
         # (plus the unified-storage search index build) against the fresh PVC
         # before it listens on 3000. A live deployment measured 7+ minutes,
@@ -698,7 +710,10 @@ charts:
   # Grafana cost dashboard renders. Installed on every regional cluster when
   # cdk.json cost_monitoring.enabled = true (the default) AND
   # cluster_observability.enabled = true. Inclusion and the dynamic values
-  # (cluster id, Prometheus service wiring) are driven by GCORegionalStack,
+  # (cluster id, Prometheus service wiring, and the opencost-tls-proxy
+  # sidecar — verified TLS on 9443 for the cost-monitor, run from the
+  # cost-monitor image, with its optional opencost-tls Secret volume and an
+  # amd64 nodeSelector) are driven by GCORegionalStack,
   # so the default here is enabled: false — mirroring kube-prometheus-stack.
   # Must install AFTER kube-prometheus-stack: the ServiceMonitor below needs
   # the Prometheus Operator CRDs that chart applies.

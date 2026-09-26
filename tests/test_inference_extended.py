@@ -859,8 +859,9 @@ class TestDeleteResourcesExtended:
         assert "delete service ep-proxy failed (status 500)" in result.errors
         assert all("server detail" not in error for error in result.errors)
         # Failure of one kind never short-circuits inventory of later kinds;
-        # already-absent ConfigMaps are read once and never deleted blindly.
-        assert monitor.core_v1.read_namespaced_config_map.call_count == 2
+        # already-absent ConfigMaps (mooncake, PD proxy, TLS sidecar program)
+        # are read once and never deleted blindly.
+        assert monitor.core_v1.read_namespaced_config_map.call_count == 3
         assert monitor.core_v1.delete_namespaced_config_map.call_count == 0
 
 

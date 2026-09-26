@@ -143,7 +143,7 @@
     "vpc_endpoint_cidrs": [
       "10.0.0.0/16"
     ],
-    "_comment_vpc_endpoints": "VPC endpoints created in each regional VPC. gateway (free, route-table based): s3 and dynamodb by default — the S3 endpoint takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC. interface (PrivateLink, billed per AZ-hour plus per GB, so opt-in) keeps the remaining AWS API calls private; supported names: sts, ecr.api, ecr.dkr, logs, monitoring, sqs, ssm, secretsmanager, kms, eks, elasticfilesystem, bedrock-runtime. Cross-region calls to the global region's tables, buckets and parameters still leave through the NAT gateways. See docs/CUSTOMIZATION.md (VPC Endpoints).",
+    "_comment_vpc_endpoints": "VPC endpoints created in each regional VPC. gateway (free, route-table based): s3 and dynamodb by default — the S3 endpoint takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC. interface (PrivateLink, billed per AZ-hour plus per GB, so opt-in) keeps the remaining AWS API calls private; supported names: sts, ecr.api, ecr.dkr, logs, monitoring, sqs, ssm, secretsmanager, kms, eks, elasticfilesystem, bedrock-runtime, xray (span export when tracing is enabled). Cross-region calls to the global region's tables, buckets and parameters still leave through the NAT gateways. See docs/CUSTOMIZATION.md (VPC Endpoints).",
     "vpc_endpoints": {
       "gateway": [
         "s3",
@@ -408,6 +408,13 @@
       "athena": {
         "query_results_retention_days": 30
       }
+    },
+
+    "_comment_tracing": "Distributed tracing for the four GCO API services (health-monitor, manifest-processor, inference-proxy, cost-monitor). Each service runs the OpenTelemetry SDK and exports spans straight to the AWS X-Ray OTLP endpoint (https://xray.<region>.amazonaws.com/v1/traces) as gzip-compressed protobuf, signed with SigV4 by the service's own IAM role, which is granted xray:PutTraceSegments and xray:PutSpans; no collector or agent runs. enabled (default true) renders GCO_TRACING_ENABLED into those Deployments; false leaves the SDK inert and drops the X-Ray grants and the Transaction Search resource. sample_ratio (a number from 0 to 1, default 0.05) is head sampling: a new trace is recorded with that probability, every GCO hop makes the same decision from the propagated W3C traceparent trace ID, an upstream caller's sampled flag is ignored, and health, readiness and metrics endpoints are never traced. enable_transaction_search (default true, used only while enabled) makes each regional stack switch on CloudWatch Transaction Search in its Region, which the X-Ray OTLP endpoint requires: it writes the gco-transaction-search-xray-access CloudWatch Logs resource policy and sets the X-Ray trace segment destination to CloudWatch Logs, so spans land in the aws/spans log group. Transaction Search is an account-level setting, configured per Region and shared with every other traced workload in the account, so a Region where it is already on is left untouched and GCO never turns it off or removes the policy when a stack is destroyed (turn it off in the CloudWatch console once nothing uses it); set false when your organization manages it. Cost: span ingestion into aws/spans is billed at CloudWatch pricing (1% of spans are also indexed as trace summaries at no charge), so spend scales with request volume times sample_ratio. The run-scoped tracing_overrides CDK context (a JSON object deep-merged over this block) changes it for one deploy; release validation uses it to raise sample_ratio to 1.0. Add xray to vpc_endpoints.interface to keep span export on PrivateLink. See docs/MONITORING.md.",
+    "tracing": {
+      "enabled": true,
+      "sample_ratio": 0.05,
+      "enable_transaction_search": true
     },
 
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",

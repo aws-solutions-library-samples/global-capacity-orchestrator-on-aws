@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from gco.services import tracing
 from gco.services.cost_monitor import (
     CostMonitor,
     CostReportBucketUnavailableError,
@@ -98,15 +99,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Before the server listens: the startup probe covers this window, the
     # liveness probe does not cover the first scheduled pass.
     preload_report_writer()
-    cost_monitor = create_cost_monitor_from_env()
+    # Shutdown releases the instance this lifespan built, whatever the module
+    # global holds by then.
+    monitor = create_cost_monitor_from_env()
+    cost_monitor = monitor
     configure_structured_logging(
         service_name="cost-monitor",
-        cluster_id=cost_monitor.cluster,
-        region=cost_monitor.region,
+        cluster_id=monitor.cluster,
+        region=monitor.region,
     )
     stop = asyncio.Event()
     loop_task = asyncio.create_task(
-        _scheduled_report_loop(cost_monitor, stop),
+        _scheduled_report_loop(monitor, stop),
         name="cost-monitor-scheduled-reports",
     )
     app.state.scheduled_report_task = loop_task
@@ -118,6 +122,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.wait_for(loop_task, timeout=30)
         except TimeoutError:
             loop_task.cancel()
+        monitor.opencost.close()
+        # Last, so spans from the final scheduled pass are exported too.
+        tracing.shutdown_tracing()
         logger.info("Shutting down Cost Monitor Service")
 
 
@@ -127,6 +134,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Server spans for every route except the probe and scrape paths, plus the
+# OpenCost client spans under them; inert unless GCO_TRACING_ENABLED=true.
+tracing.configure_tracing("cost-monitor")
+tracing.instrument_fastapi_app(app)
 
 from gco.services.service_metrics import mount_metrics  # noqa: E402
 

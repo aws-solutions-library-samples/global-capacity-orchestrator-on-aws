@@ -1470,6 +1470,10 @@ async def test_manifest_api_enabled_worker_lifecycle_times_out_and_cancels(
     worker.run = MagicMock(side_effect=never)
     real_create_task = asyncio.create_task
     monkeypatch.setenv("CENTRAL_QUEUE_WORKER_ENABLED", "true")
+    # The lifespan leaves its (cancelled) worker task on the shared app; put
+    # back whatever was there so later readiness checks are unaffected.
+    for name in ("central_queue_worker", "central_queue_worker_task"):
+        monkeypatch.setattr(api.app.state, name, getattr(api.app.state, name, None), raising=False)
     with (
         patch.object(api, "create_manifest_processor_from_env", return_value=processor),
         patch.object(api, "configure_structured_logging"),
@@ -1493,11 +1497,19 @@ async def test_manifest_api_enabled_worker_lifecycle_times_out_and_cancels(
 
 
 @pytest.mark.asyncio
-async def test_manifest_api_readiness_health_status_and_policy_edges() -> None:
+async def test_manifest_api_readiness_health_status_and_policy_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import gco.services.manifest_api as api
 
+    # Restored afterwards: a dead worker task left on the shared app would fail
+    # every later readiness check in the same worker process.
+    for name in ("manifest_processor", "template_store", "webhook_store"):
+        monkeypatch.setattr(api, name, getattr(api, name))
+    monkeypatch.setattr(
+        api.app.state, "central_queue_worker_task", MagicMock(done=lambda: True), raising=False
+    )
     api.manifest_processor = _api_processor()
-    api.app.state.central_queue_worker_task = MagicMock(done=lambda: True)
     with pytest.raises(HTTPException) as error:
         await api.kubernetes_readiness_check()
     assert error.value.status_code == 503
@@ -1961,7 +1973,7 @@ async def test_webhook_nonstring_url_cancel_and_dispatch_cancellation() -> None:
     context.__aexit__ = AsyncMock(return_value=False)
     with (
         patch.object(webhooks, "_resolve_webhook_target", return_value=(target, None)),
-        patch.object(webhooks.httpx, "AsyncClient", return_value=context),
+        patch.object(webhooks.httpx2, "AsyncClient", return_value=context),
         pytest.raises(asyncio.CancelledError),
     ):
         await dispatcher._deliver_webhook(
@@ -2264,7 +2276,9 @@ def test_opencost_client_skips_nonmapping_allocation_sets() -> None:
 
     response = MagicMock(status_code=200)
     response.json.return_value = {"data": ["bad", {"ml": {"cpuCost": 1}, "also-bad": []}]}
-    with patch.object(costs.httpx, "get", return_value=response):
+    http = MagicMock()
+    http.get.return_value = response
+    with patch.object(costs.OpenCostClient, "_http", return_value=http):
         allocations = costs.OpenCostClient("http://opencost").get_allocation(
             datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 2, tzinfo=UTC)
         )

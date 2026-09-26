@@ -89,6 +89,13 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
             region="us-east-2",
         ),
         mlflow_role=SimpleNamespace(role_arn="arn:aws:iam::123456789012:role/test-mlflow"),
+        # The Grafana and OpenCost TLS sidecars run from these service images.
+        manifest_processor_image=SimpleNamespace(
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/test:manifest-processor"
+        ),
+        cost_monitor_image=SimpleNamespace(
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/test:cost-monitor"
+        ),
     )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
     # Cost monitoring and MLflow helpers ride the same stub: the override
@@ -198,6 +205,79 @@ def test_node_exporter_tolerates_accelerator_taints(valid_cdk_context) -> None:
     keys = {t.get("key") for t in tolerations}
     assert "nvidia.com/gpu" in keys
     assert "aws.amazon.com/neuron" in keys
+
+
+# --- Grafana TLS sidecar (the admin-password rotator's front door) -----------
+#
+# Value keys are those of the Grafana subchart (13.2.4) pinned by
+# kube-prometheus-stack 91.0.0: ``extraContainers`` is a STRING rendered with
+# ``tpl . $ | nindent 2`` into the pod's containers list, ``extraContainerVolumes``
+# a list rendered with ``tpl (toYaml .)``, and ``nodeSelector`` a map.
+
+
+def _grafana_values(valid_cdk_context) -> dict[str, Any]:
+    return RS._observability_chart_values(_stub(valid_cdk_context, enabled=True))["values"][
+        "grafana"
+    ]
+
+
+def test_grafana_sidecar_is_a_templated_container_string(valid_cdk_context) -> None:
+    rendered = _grafana_values(valid_cdk_context)["extraContainers"]
+
+    assert isinstance(rendered, str)
+    (sidecar,) = yaml.safe_load(rendered)
+    assert sidecar["name"] == "grafana-tls-proxy"
+    assert (
+        sidecar["image"] == "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:manifest-processor"
+    )
+    assert sidecar["command"] == ["python", "-m", "gco.services.tls_proxy"]
+    assert sidecar["ports"] == [{"name": "https", "containerPort": 3443}]
+    env = {item["name"]: item["value"] for item in sidecar["env"]}
+    assert env["TLS_PROXY_PORT"] == "3443"
+    assert env["TLS_PROXY_UPSTREAM_HOST"] == "127.0.0.1"
+    assert env["TLS_PROXY_UPSTREAM_PORT"] == "3000"
+    assert env["TLS_PROXY_KEYPAIR_WAIT_SECONDS"] == "1800"
+    # Grafana must go Ready on its own container while the sidecar waits for
+    # the post-Helm grafana-tls Certificate.
+    assert "readinessProbe" not in sidecar
+    assert "startupProbe" not in sidecar
+
+
+def test_grafana_sidecar_string_renders_inside_the_chart_containers_list(
+    valid_cdk_context,
+) -> None:
+    rendered = _grafana_values(valid_cdk_context)["extraContainers"]
+    # _pod.tpl: ``containers:`` then the grafana container, then
+    # ``{{- tpl . $ | nindent 2 }}`` for extraContainers.
+    pod = "containers:\n  - name: grafana\n    image: grafana\n" + "".join(
+        f"  {line}\n" for line in rendered.splitlines()
+    )
+    assert "{{" not in rendered
+    assert [item["name"] for item in yaml.safe_load(pod)["containers"]] == [
+        "grafana",
+        "grafana-tls-proxy",
+    ]
+
+
+def test_grafana_leaf_secret_volume_is_optional_and_mounted_read_only(valid_cdk_context) -> None:
+    grafana = _grafana_values(valid_cdk_context)
+    (sidecar,) = yaml.safe_load(grafana["extraContainers"])
+    (volume,) = grafana["extraContainerVolumes"]
+    assert volume["secret"] == {"secretName": "grafana-tls", "optional": True, "defaultMode": 0o444}
+    assert sidecar["volumeMounts"] == [
+        {"name": volume["name"], "mountPath": "/var/run/gco/tls", "readOnly": True}
+    ]
+
+
+def test_grafana_pod_is_pinned_to_the_sidecar_image_architecture(valid_cdk_context) -> None:
+    assert _grafana_values(valid_cdk_context)["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+
+
+def test_static_grafana_values_leave_the_injected_keys_to_the_stack() -> None:
+    """The installer replaces non-mapping values on merge; charts.yaml must not own them."""
+    with open(_CHARTS_YAML, encoding="utf-8") as handle:
+        grafana = yaml.safe_load(handle)["charts"]["kube-prometheus-stack"]["values"]["grafana"]
+    assert not {"extraContainers", "extraContainerVolumes", "nodeSelector"} & set(grafana)
 
 
 # --- property: chart + gp3 StorageClass invariant (CP-2) ---------------------
@@ -412,6 +492,17 @@ def test_grafana_liveness_tolerates_first_boot_migrations(kps_entry) -> None:
 
 def test_grafana_persistence_enabled(kps_entry) -> None:
     assert kps_entry["values"]["grafana"]["persistence"]["enabled"] is True
+
+
+def test_grafana_rolls_out_by_recreate_because_its_volume_is_read_write_once(kps_entry) -> None:
+    """A surge pod on another node could never attach the single RWO volume.
+
+    The amd64 nodeSelector added for the TLS sidecar moves a pod that ran on
+    a Graviton node, so RollingUpdate would stall on a Multi-Attach error.
+    """
+    grafana = kps_entry["values"]["grafana"]
+    assert grafana["persistence"]["accessModes"] == ["ReadWriteOnce"]
+    assert grafana["deploymentStrategy"] == {"type": "Recreate"}
 
 
 # --- ServiceMonitors for scheduler/operator components -----------------------

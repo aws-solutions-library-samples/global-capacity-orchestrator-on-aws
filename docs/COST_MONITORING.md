@@ -57,9 +57,10 @@ so disabling observability switches the whole cost pipeline off with it.
 │    Grafana ── "GCO Cost (OpenCost)" dashboard   │   │   adhoc/region=…/date=…/*.pq    │
 │                        ▲                        │   │   athena-results/               │
 │                        │ /allocation/compute    │   │            ▲                    │
+│                        │ HTTPS :9443            │   │            │                    │
 │  cost-monitor (gco-system ns)  ─────────────────┼───┼── Parquet ─┘                    │
 │    scheduled interval reports + ad-hoc API      │   │                                 │
-│                        ▲                        │   │  Glue database + table          │
+│                        ▲ HTTPS :8443            │   │  Glue database + table          │
 │  manifest API /api/v1/cost/* (proxy)            │   │   (partition projection)        │
 └─────────────────────────────────────────────────┘   │  Athena workgroup <project>-cost│
                          ▲                            └─────────────────────────────────┘
@@ -73,6 +74,18 @@ to the central bucket, and Athena reads the bucket across all regions. The
 Grafana dashboard is served entirely from in-cluster Prometheus metrics and
 works even if the S3 pipeline is down.
 
+Both in-cluster hops are verified HTTPS. The manifest processor calls the
+cost-monitor at `https://cost-monitor.gco-system.svc.cluster.local:8443`, its
+`api-tls-proxy` sidecar with the `cost-monitor-tls` certificate, while the
+application itself binds pod loopback (8080). The cost-monitor calls OpenCost
+at `https://opencost-tls.monitoring.svc.cluster.local:9443`, the
+`opencost-tls` Service in front of an `opencost-tls-proxy` sidecar in the
+OpenCost pod, which forwards to the exporter API on the pod's loopback 9003.
+Each client trusts only the cluster's internal CA; the chain and the other
+hops are in [ARCHITECTURE.md → In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
+The chart's own plaintext `opencost` Service stays in place for Prometheus and
+for `gco monitoring open --service opencost-api`.
+
 Scheduled report object keys are **deterministic per window** (aligned to the
 report interval), so a worker restart, rollout overlap, or retry converges on
 the same object instead of double-counting a window in Athena.
@@ -82,9 +95,10 @@ the same object instead of double-counting a window in Athena.
 The feature is deliberately lightweight:
 
 - **OpenCost** — one pod per region (cost model + UI containers, requests of
-  tens of millicores / ~110 Mi). It queries the Prometheus you already run
-  with cluster observability.
-- **cost-monitor** — one small pod per region.
+  tens of millicores / ~110 Mi, plus a 10m / 32 Mi TLS sidecar). It queries
+  the Prometheus you already run with cluster observability.
+- **cost-monitor** — one small pod per region (the service and its TLS
+  sidecar).
 - **S3** — Parquet allocation reports are a few KiB per interval per region.
   Lifecycle rules transition reports to STANDARD_IA (default 90 days) and
   expire them (default 365 days); Athena query results expire after 30 days.
@@ -138,8 +152,12 @@ The `cost_monitoring` block in `cdk.json`:
 OpenCost itself needs no credentials or per-account configuration: it prices
 nodes and volumes from the public AWS list-price API and reads usage from the
 in-cluster Prometheus. The chart pin and hardening values live in
-`lambda/helm-installer/charts.yaml` (`opencost`); the cluster identity is
-injected per region by the regional stack.
+`lambda/helm-installer/charts.yaml` (`opencost`); the cluster identity and the
+`opencost-tls-proxy` sidecar are injected per region by the regional stack.
+The sidecar runs from the cost-monitor image, which is built for amd64 only, so
+the OpenCost pod carries an amd64 node selector. The pod starts before its
+`opencost-tls` certificate exists, so the sidecar waits up to 30 minutes for
+the keypair without holding the pod back from Ready.
 
 ## Accessing the cost dashboards
 
@@ -443,10 +461,23 @@ The monitoring stack owns them (`gco stacks deploy <project>-monitoring`).
 The CLI derives their names from `project_name`, so a non-default project
 name needs its matching deployment.
 
-**Ad-hoc generation returns 503.**
+**Ad-hoc generation (or any cost route) returns 503.**
 The manifest API cannot reach the cost-monitor service — cost monitoring is
 disabled in that region, or the `cost-monitor` Deployment in `gco-system` is
-unhealthy (`kubectl -n gco-system get pods -l app=cost-monitor`).
+unhealthy (`kubectl -n gco-system get pods -l app=cost-monitor`). A pod in
+`ContainerCreating` is waiting for its `cost-monitor-tls` Secret, which
+cert-manager issues in the post-Helm pass
+(`kubectl -n gco-system get certificate cost-monitor-tls`). A manifest-processor
+log line `Cost monitor TLS trust is unavailable` means its projected CA bundle
+is missing or unreadable.
+
+**`opencost_healthy: false` while the OpenCost pod is Ready.**
+The cost monitor reaches OpenCost only through the `opencost-tls-proxy`
+sidecar, which waits for the `opencost-tls` Secret before it listens
+(`kubectl -n monitoring get certificate opencost-tls`,
+`kubectl -n monitoring logs deploy/opencost -c opencost-tls-proxy`). A
+cost-monitor log line `OpenCost TLS trust is unavailable` points at its CA
+bundle instead.
 
 **A gated job never dispatches.**
 `gco queue get <id>` shows the cap and the last observed price. If the

@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from gco.services import tracing
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.central_queue_worker import CentralQueueWorker
 from gco.services.manifest_processor import (
@@ -170,6 +171,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 with suppress(asyncio.CancelledError):
                     await queue_worker_task
         logger.info("Shutting down Manifest API Service")
+        tracing.shutdown_tracing()
 
 
 # =============================================================================
@@ -182,6 +184,12 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+# Server spans for every route except the probe and scrape paths, with the
+# cost-monitor proxy's client spans beneath them; inert unless
+# GCO_TRACING_ENABLED=true.
+tracing.configure_tracing("manifest-processor")
+tracing.instrument_fastapi_app(app)
 
 app.add_middleware(AuthenticationMiddleware)
 

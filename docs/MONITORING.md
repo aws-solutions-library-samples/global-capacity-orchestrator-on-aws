@@ -28,10 +28,11 @@ stock deployment installs it in each region; operators opt out with
 - [MLflow experiment tracking](#mlflow-experiment-tracking)
 - [Curated dashboards](#curated-dashboards)
 - [Dashboard screenshots](#dashboard-screenshots)
+- [Distributed tracing](#distributed-tracing)
 
 ## Relationship to the CloudWatch monitoring stack
 
-GCO ships **two** complementary observability surfaces:
+GCO ships **three** complementary observability surfaces:
 
 - **`gco-monitoring` (CloudWatch)** — a cross-region CloudWatch dashboard, alarm,
   and SNS surface. It answers "is the platform up, are alarms firing, what does
@@ -41,9 +42,14 @@ GCO ships **two** complementary observability surfaces:
 - **Cluster observability (this feature)** — per-cluster Prometheus/Grafana at a
   cardinality CloudWatch does not surface: per-GPU DCGM series, scheduler queue
   depth, KEDA scaler lag, per-pod GCO service RED metrics.
+- **[Distributed tracing](#distributed-tracing)** — OpenTelemetry spans from the
+  four API services in AWS X-Ray and CloudWatch Transaction Search, with the
+  trace ids repeated on every service log line. It follows `cdk.json`
+  `tracing`, not the `cluster_observability` toggle.
 
 Reach for CloudWatch for cross-region platform health; reach for cluster
-observability to debug what one cluster is doing in detail.
+observability to debug what one cluster is doing in detail, and for traces to
+follow one request across the services.
 
 ## Cost
 
@@ -77,8 +83,25 @@ Per regional cluster, when enabled:
 - A gated `gco-observability-gp3` StorageClass backing the persistent volumes.
 - `ServiceMonitor`s for the schedulers/operators (KEDA, [Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html),
   [YuniKorn](https://yunikorn.apache.org/)) and the DCGM GPU exporter, plus `PodMonitor`s for the GCO services
-  (health-monitor, manifest-processor, inference-monitor), which expose
-  Prometheus `/metrics`.
+  (health-monitor, manifest-processor, inference-proxy, inference-monitor),
+  which expose Prometheus `/metrics`. The GCO scrapes are HTTPS verified
+  against the GCO internal CA: Prometheus reads the CA from the `ca.crt` key of
+  the `gco-monitoring-trust` Secret and checks each pod's certificate against
+  its Service name (`serverName: <service>.gco-system.svc`). The API services
+  serve `/metrics` on their TLS sidecar (`https`, 8443); the inference monitor
+  binds its plaintext endpoint to pod loopback (`127.0.0.1:9090`) and serves
+  it through a `metrics-tls-proxy` sidecar on 9443 (`https-metrics`). See
+  [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
+- TLS sidecars in two chart pods, for GCO's in-cluster clients: Grafana's
+  `grafana-tls-proxy` (3443, the `grafana-tls` Service the credential rotator
+  calls) and OpenCost's `opencost-tls-proxy` (9443, the `opencost-tls` Service
+  the cost monitor calls). Both run from a GCO service image, which is built
+  for amd64 only, so those two pods carry a `kubernetes.io/arch: amd64`
+  node selector. `gco monitoring open` still port-forwards to the charts' own
+  Services. Grafana's Deployment uses the `Recreate` strategy: its single
+  replica owns a ReadWriteOnce volume, so a rolling update could never attach
+  the volume to a surge pod on another node, and a rollout is a brief restart
+  instead.
 - A standalone DCGM exporter DaemonSet on GPU nodes for per-GPU metrics.
 - Curated Grafana dashboards (see [below](#curated-dashboards)).
 - A credential-rotation CronJob (see
@@ -190,7 +213,12 @@ The CronJob resets the live password through Grafana's admin API and updates the
 Secret that `gco monitoring users` reads (a restart cannot rotate it — Grafana
 persists the password in its own database and only seeds it from the environment
 on first start). Its ServiceAccount is least-privilege: `get`/`patch` on that one
-Secret, no `pods/exec`, no AWS permissions.
+Secret, no `pods/exec`, no AWS permissions. The admin API calls carry the admin
+credential, so they go over verified HTTPS to the `grafana-tls` Service
+(`https://grafana-tls.monitoring.svc.cluster.local:3443`, the Grafana pod's TLS
+sidecar); the rotator trusts only the GCO internal CA, projected from the
+`gco-monitoring-trust` Secret, and fails before reading any credential when
+that CA is missing.
 
 The cadence is configurable and defaults to monthly:
 
@@ -343,3 +371,224 @@ repo's [`images/`](../images/) directory; pass
 `--opencost-url http://localhost:9091` (with an
 `gco monitoring open --service opencost` tunnel up) to also capture the native
 OpenCost UI as `opencost-ui.png`.
+
+## Distributed tracing
+
+The four GCO API services — `health-monitor`, `manifest-processor`,
+`inference-proxy`, and `cost-monitor` — record [OpenTelemetry](https://opentelemetry.io/docs/)
+traces and export them to [AWS X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html),
+which stores them through [CloudWatch Transaction Search](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search.html)
+as span events in the `aws/spans` log group of each regional Region. Tracing is
+**on by default** with a 5% sample and is configured by the `tracing` block in
+`cdk.json` ([CUSTOMIZATION.md](CUSTOMIZATION.md#distributed-tracing)). The
+implementation is `gco/services/tracing.py`.
+
+### What is traced
+
+- **Server spans** for the requests each service handles, named by method and
+  route (for example `GET /api/v1/jobs`). The probe and scrape paths
+  `/healthz`, `/readyz`, `/metrics`, and `/api/v1/health` are excluded;
+  `/api/v1/metrics` is an API route and is traced.
+- **Client spans** for the in-cluster hops the services make, nested under the
+  server span that caused them: manifest-processor → cost-monitor
+  (`/api/v1/cost/*`), cost-monitor → OpenCost, and inference-proxy → model
+  endpoints. Each client request carries a W3C `traceparent` header, so the
+  cost monitor's server span joins the manifest processor's trace. Model
+  servers receive the header as well; GCO configures no tracing inside model
+  pods. The OpenCost calls of the cost monitor's scheduled reports happen
+  outside any request, so their client spans start traces of their own.
+- Spans carry the standard HTTP attributes (method, route, URL path and query,
+  status code, user agent) and the resource attributes `service.name`,
+  `service.namespace` (`gco`), `service.version`, `cloud.region`,
+  `k8s.cluster.name`, `k8s.namespace.name`, and `k8s.pod.name`. No other
+  request or response headers are captured, and no bodies.
+- **Not traced:** the health monitor's webhook deliveries (webhook URLs often
+  carry credentials in their path or query, and a client span records the full
+  URL), AWS SDK and Kubernetes API calls, the inference monitor, the queue
+  processor, the Mooncake PD proxy, and the TLS sidecars.
+
+### How spans reach X-Ray
+
+Each service exports its own spans directly to the
+[X-Ray OTLP endpoint](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-OTLPEndpoint.html),
+`https://xray.<region>.amazonaws.com/v1/traces`: OTLP/HTTP protobuf batches,
+gzip-compressed and signed with SigV4 by the service's own IAM role, with the
+credentials resolved again for every attempt so rotated keys are picked up. The
+SDK's batch processor sends from a background thread. A throttled request, a
+server error, or a transport error is retried with a short exponential backoff
+inside a 10-second budget; a batch that still fails is dropped, and the warning
+is logged at most once a minute with a count of the repeats it stands for.
+Export never raises into request handling, the exporter's own HTTP client is
+never traced, and each service flushes its queued spans when it shuts down. A
+service that cannot trace (no Region, no credentials, a package missing from
+its image) logs one warning at startup and serves untraced. Spans usually
+appear in `aws/spans` within a few minutes.
+
+There is deliberately no collector. The services already have what direct
+export needs: HTTPS egress to AWS APIs, which the `gco-system` NetworkPolicies
+allow, and one IAM role each. Relaying through the CloudWatch agent that the
+CloudWatch Observability add-on runs would add a plaintext OTLP hop out of
+`gco-system`, a NetworkPolicy path for it, and one shared agent identity in
+place of the per-service roles. A third-party tracing service would send span
+data, URL paths and queries included, outside AWS and need an API key stored in
+the cluster; with X-Ray the spans stay in the account's CloudWatch Logs, under
+its IAM policies and retention settings.
+
+The endpoint host is the `amazonaws.com` form, and the manifests do not set the
+`GCO_TRACING_ENDPOINT` override. In a partition whose endpoints use another
+domain, or where Transaction Search is not available, set `tracing.enabled` to
+`false`.
+
+### Sampling
+
+Sampling is decided at the head of a trace from its trace ID, with probability
+`tracing.sample_ratio` (default `0.05`). The same trace-ID-ratio sampler applies
+to requests that start a trace and to requests that arrive with a parent from
+another GCO service, and every hop reaches the same decision from the same trace
+ID, so a trace is kept or dropped whole: a sampled manifest-processor span
+always has its cost-monitor child. A `traceparent` sampled flag from a caller can
+neither force nor suppress recording.
+
+External callers cannot inject trace context in the first place. The API Gateway
+Lambda proxies forward an allowlist of request headers that does not include
+`traceparent`, and the services read only W3C trace context (not the
+`X-Amzn-Trace-Id` header the ALB adds), so every trace starts at the first GCO
+service a request reaches and is not joined to the Lambda functions' own X-Ray
+traces. [Release validation](LIVE_RELEASE_VALIDATION.md#tracing-and-transaction-search)
+raises the ratio to `1.0` for its run through the `tracing_overrides` context.
+
+### Correlating logs with traces
+
+While tracing is active, every JSON log line a service writes inside a request
+carries `trace_id` (32 hex digits), `span_id` (16 hex digits), and
+`trace_sampled`. Unsampled requests keep their ids (`trace_sampled: false`), and
+the trace id is the same in every service a request crosses, so log lines
+correlate across services even when no span was exported. Container logs reach
+CloudWatch Logs through the CloudWatch Observability add-on; in CloudWatch Logs
+Insights, on the cluster's `/aws/containerinsights/<cluster>/application` log
+group, one request's lines across all services are:
+
+```text
+fields @timestamp, @logStream, @message
+| filter @message like "4bf92f3577b34da6a3ce929d0e0e4736"
+| sort @timestamp asc
+```
+
+When `trace_sampled` is true, the same id finds the request's spans in
+`aws/spans`.
+
+### Transaction Search
+
+The X-Ray OTLP endpoint accepts spans only once CloudWatch Transaction Search is
+on. Each regional stack therefore carries a custom resource
+([`lambda/transaction-search`](../lambda/transaction-search/README.md)) that
+switches it on in its Region while `tracing.enabled` and
+`tracing.enable_transaction_search` are both true (the default):
+
+- When the X-Ray trace segment destination is already `CloudWatchLogs` (active,
+  or pending a switch someone else started), nothing changes.
+- Otherwise it writes the CloudWatch Logs resource policy
+  `gco-transaction-search-xray-access` (principal `xray.amazonaws.com`,
+  `logs:PutLogEvents` on the `aws/spans` and `/aws/application-signals/data`
+  log groups of that Region, conditioned on this account's X-Ray through
+  `aws:SourceArn` and `aws:SourceAccount`), then sets the destination to
+  `CloudWatchLogs`. X-Ray can take about 10 minutes to report the destination
+  `ACTIVE` and make spans searchable.
+- It never changes the span indexing rule, so the account keeps AWS's default
+  of 1% of spans indexed as trace summaries, or whatever you set.
+- Delete is a no-op: destroying a stack never turns Transaction Search off and
+  never removes the policy. The resource runs again only when its properties
+  change, so re-enable Transaction Search in the console if it is switched off
+  out of band.
+
+Transaction Search is an account-level setting configured per Region and shared
+with every other workload that sends traces to X-Ray there. Turning it on moves
+all X-Ray span ingestion in that account and Region to CloudWatch Logs pricing,
+including the traces of GCO's own Lambda functions (they run with X-Ray active
+tracing) and of any other application. Set `tracing.enable_transaction_search`
+to `false` when your organization manages the setting, or in a partition where
+it is unavailable; the services then export successfully only once someone
+else has enabled it. A failed enablement fails the stack operation with an
+error that names this opt-out.
+
+### Querying spans
+
+In the CloudWatch console, **Application Signals → Transaction Search**
+searches and groups spans by any attribute; filter on `service.name` for one
+GCO service. The spans are also log events in `aws/spans`, so CloudWatch Logs
+Insights queries them directly. The slowest GCO spans in the selected window
+(`durationNano` is in nanoseconds):
+
+```text
+fields @timestamp, `resource.attributes.service.name` as service, name, durationNano, traceId
+| filter `resource.attributes.service.namespace` = "gco"
+| sort durationNano desc
+| limit 20
+```
+
+Every span of one trace, for example the `trace_id` from a log line:
+
+```text
+fields @timestamp, `resource.attributes.service.name` as service, name, durationNano
+| filter traceId = "4bf92f3577b34da6a3ce929d0e0e4736"
+| sort @timestamp asc
+```
+
+### Permissions
+
+- The health-monitor, manifest-processor, inference-proxy, and (with cost
+  monitoring) cost-monitor roles each get one write-only statement:
+  `xray:PutTraceSegments` and `xray:PutSpans` on `Resource: *`, because X-Ray
+  supports no resource-level scoping for them (acknowledged in cdk-nag with that
+  reason). Nothing is granted while `tracing.enabled` is false, and the TLS
+  sidecars hold no AWS credentials at all.
+- The Transaction Search Lambda's role carries the permissions AWS lists for
+  enabling Transaction Search, minus the indexing-rule APIs GCO never calls;
+  the list is in its [README](../lambda/transaction-search/README.md#iam-permissions).
+
+### Tracing cost
+
+Spans are billed as CloudWatch Logs ingestion and storage in `aws/spans` (see
+[CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/)); indexing 1%
+of them as trace summaries is free. Spend scales with request volume times
+`sample_ratio`: a sampled request produces one server span, plus a client span
+for each in-cluster hop it makes and the spans of the service it reaches (a cost
+route adds the cost monitor's server span and its OpenCost client spans). GCO
+does not create, configure, or delete the `aws/spans` log group and sets no
+retention on it; it is shared by every span producer in the Region, so choose
+its retention with that in mind. Without an `xray` VPC endpoint, export
+traffic also passes the NAT gateways.
+
+### Turning tracing off
+
+Set `tracing.enabled` to `false` in `cdk.json` and redeploy the regional stacks.
+The four Deployments then render `GCO_TRACING_ENABLED: "false"` (the SDK stays
+inert and exports nothing), the X-Ray grants are removed, and the Transaction
+Search resource is dropped, which leaves Transaction Search itself on. To turn
+Transaction Search off once nothing else in the account and Region depends on
+it, use the CloudWatch console (**Application Signals → Transaction Search**)
+or `aws xray update-trace-segment-destination --destination XRay`, then remove
+the policy with
+`aws logs delete-resource-policy --policy-name gco-transaction-search-xray-access`.
+
+`sample_ratio: 0` is the lighter alternative: nothing is exported, while log
+lines keep their request-scoped trace ids.
+
+### Application Signals auto-instrumentation
+
+The regional stack configures the CloudWatch Observability add-on to exclude
+`gco-system` and `gco-inference` from Application Signals auto-monitoring for
+every language it instruments (Java, Python, .NET, Node.js), whatever the
+`tracing` setting. Auto-monitoring injects ADOT auto-instrumentation into
+matching workloads: in `gco-system` it would instrument the API services a
+second time, and in `gco-inference` it would change model pods that must run
+exactly as the inference monitor renders them. Other namespaces keep the
+add-on's behavior.
+
+### Keeping span export private
+
+Add `xray` to `vpc_endpoints.interface` in `cdk.json` to create a PrivateLink
+interface endpoint (`com.amazonaws.<region>.xray`) whose private DNS answers
+for the host the services export to, so span export stays inside the VPC
+instead of passing the NAT gateways. Interface endpoints bill per AZ-hour; see
+[VPC Endpoints](CUSTOMIZATION.md#vpc-endpoints).

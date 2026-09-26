@@ -1,8 +1,10 @@
-"""Hot-reloading TLS termination proxy for ALB-facing GCO API pods.
+"""Hot-reloading TLS termination proxy for GCO pods.
 
 The application container listens on pod-loopback HTTP. A second container
 using this module exposes only HTTPS to the pod network and forwards decrypted
-bytes over loopback. Certificate files are treated as a pluggable projection:
+bytes over loopback. It fronts the ALB-facing API pods, the cost monitor, the
+inference monitor's metrics endpoint, the OpenCost and Grafana chart pods, and
+managed model pods. Certificate files are treated as a pluggable projection:
 today cert-manager supplies a Secret volume; a future Kubernetes PodCertificate
 volume can replace it without changing the proxy or Service topology.
 
@@ -17,6 +19,19 @@ streams keep the session they already negotiated.
 
 The process runs on uvloop when it is importable (the service images ship it
 for uvicorn) and on the stdlib selector loop otherwise.
+
+Startup fails closed by default: a keypair that is missing or invalid when the
+process starts is an error, because a GCO pod mounts its Secret non-optionally
+and the kubelet does not start the container until the Secret exists. Pods GCO
+does not build (the OpenCost and Grafana chart pods) can start before the
+post-Helm Certificates have produced their Secrets, so those sidecars mount the
+Secret ``optional`` and set ``TLS_PROXY_KEYPAIR_WAIT_SECONDS``: the proxy then
+polls for the keypair for that long before binding, and only raises the load
+error once the budget is spent.
+
+The module is deliberately stdlib-only (uvloop is optional) and imports nothing
+from ``gco``: the inference monitor ships this file's source to managed model
+pods, where it runs as a plain script on a stock Python image.
 """
 
 from __future__ import annotations
@@ -39,9 +54,16 @@ logger = logging.getLogger(__name__)
 
 TLS_CERT_FILE_ENV = "GCO_TLS_CERT_FILE"
 TLS_KEY_FILE_ENV = "GCO_TLS_KEY_FILE"
+KEYPAIR_WAIT_SECONDS_ENV = "TLS_PROXY_KEYPAIR_WAIT_SECONDS"
 DEFAULT_CERT_FILE = "/var/run/gco/tls/tls.crt"
 DEFAULT_KEY_FILE = "/var/run/gco/tls/tls.key"
 _BUFFER_BYTES = 64 * 1024
+# While waiting for a keypair, say so at most this often: the wait can last
+# half an hour on a fresh cluster and one line per poll would bury the log.
+_KEYPAIR_WAIT_LOG_INTERVAL_SECONDS = 60.0
+# Floor for the keypair wait's poll interval, so TLS_PROXY_POLL_SECONDS=0 (a
+# valid rotation setting) cannot turn the wait into a busy loop.
+_MIN_KEYPAIR_WAIT_POLL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -56,6 +78,8 @@ class ProxyConfig:
     key_file: Path
     poll_seconds: float
     graceful_shutdown_seconds: float
+    # 0 keeps startup fail-closed: an absent or invalid keypair is an error.
+    keypair_wait_seconds: float = 0.0
 
 
 def _positive_port(name: str, default: int) -> int:
@@ -89,6 +113,7 @@ def load_proxy_config() -> ProxyConfig:
         key_file=key_file,
         poll_seconds=_non_negative_number("TLS_PROXY_POLL_SECONDS", 5.0),
         graceful_shutdown_seconds=_non_negative_number("GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", 30.0),
+        keypair_wait_seconds=_non_negative_number(KEYPAIR_WAIT_SECONDS_ENV, 0.0),
     )
 
 
@@ -193,9 +218,69 @@ class TlsProxy:
             if task is not None:
                 self._connections.discard(task)
 
+    async def _wait_for_stop(self, timeout: float) -> bool:
+        """Return True when shutdown is requested within ``timeout`` seconds."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+
+    async def _load_initial_keypair(self) -> tuple[ssl.SSLContext, str] | None:
+        """Load the keypair the listener starts with, waiting for it when configured.
+
+        With no wait budget this is the fail-closed load: any error propagates.
+        With a budget the load is retried every poll interval until it
+        succeeds; once the budget is spent the last load error is raised, so
+        a Secret that never appears still fails the container visibly. Returns
+        None when shutdown is requested during the wait (nothing was bound, so
+        there is nothing to drain).
+        """
+        budget = self.config.keypair_wait_seconds
+        if budget <= 0:
+            return _ssl_context(self.config)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + budget
+        poll = max(self.config.poll_seconds, _MIN_KEYPAIR_WAIT_POLL_SECONDS)
+        next_log = started
+        remaining = budget
+        waited = False
+        while True:
+            try:
+                keypair = _ssl_context(self.config)
+            except (OSError, RuntimeError, ssl.SSLError) as exc:
+                now = loop.time()
+                remaining = deadline - now
+                if remaining <= 0:
+                    logger.error("No usable TLS keypair after waiting %.0fs", budget)
+                    raise
+                if now >= next_log:
+                    logger.warning(
+                        "TLS keypair not loadable yet; retrying for up to %.0fs: %s",
+                        remaining,
+                        exc,
+                    )
+                    next_log = now + _KEYPAIR_WAIT_LOG_INTERVAL_SECONDS
+                waited = True
+            else:
+                if waited:
+                    logger.info("TLS keypair loaded after %.1fs", loop.time() - started)
+                return keypair
+            if await self._wait_for_stop(min(poll, remaining)):
+                logger.info("Shutdown requested while waiting for the TLS keypair")
+                return None
+
     async def start(self) -> None:
-        """Bind the ALB listener once; every handshake is routed to the active keypair."""
-        self._active_context, self._keypair_digest = _ssl_context(self.config)
+        """Bind the listener once; every handshake is routed to the active keypair.
+
+        When a keypair wait is configured and shutdown arrives before the
+        keypair does, this returns without binding.
+        """
+        keypair = await self._load_initial_keypair()
+        if keypair is None:
+            return
+        self._active_context, self._keypair_digest = keypair
         dispatcher = _server_context()
         dispatcher.sni_callback = self._select_context
         self._server = await asyncio.start_server(

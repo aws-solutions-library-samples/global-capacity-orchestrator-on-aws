@@ -1418,7 +1418,11 @@ class TestRegionalStackSynthesis:
             )
 
     def test_inference_proxy_role_and_manifest_replacements_are_exact(self):
-        """The inference data plane gets only secret and endpoint point-read access."""
+        """The inference data plane gets only secret and endpoint point-read access.
+
+        Tracing is on by default, so the role also carries the write-only
+        X-Ray span-export statement — and nothing else.
+        """
         from gco.stacks.regional_stack import GCORegionalStack
 
         app = cdk.App()
@@ -1469,7 +1473,9 @@ class TestRegionalStackSynthesis:
         assert set(by_actions) == {
             frozenset({"secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"}),
             frozenset({"dynamodb:GetItem"}),
+            frozenset({"xray:PutTraceSegments", "xray:PutSpans"}),
         }
+        assert by_actions[frozenset({"xray:PutTraceSegments", "xray:PutSpans"})] == "*"
         assert by_actions[frozenset({"dynamodb:GetItem"})] == {
             "Fn::Join": [
                 "",

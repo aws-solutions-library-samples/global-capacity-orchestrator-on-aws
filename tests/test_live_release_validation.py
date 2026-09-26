@@ -4520,6 +4520,10 @@ class TestFinalInventoryReconciliation:
         with (
             patch_live_validation_helper("_verify_target_stack_absence", return_value=residual),
             patch_live_validation_helper(
+                "_verify_transaction_search_restored",
+                return_value={"regions": {}, "differences": []},
+            ),
+            patch_live_validation_helper(
                 "capture_baseline",
                 return_value=ctx.checkpoint.baseline,
             ),
@@ -5097,8 +5101,11 @@ class TestLocalOnlyRuntime:
         assert isinstance(settings, RunSettings)
         assert settings.inference_enabled is True
         full_identity = settings.identity()
+        # The release entry point always samples every request, so the
+        # tracing override rides every CDK invocation and the resume identity.
         assert full_identity["extra_cdk_context"] == {
-            "gco_live_validation_disable_efs_automatic_backups": "true"
+            "gco_live_validation_disable_efs_automatic_backups": "true",
+            "tracing_overrides": '{"sample_ratio":1.0}',
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
@@ -5310,7 +5317,11 @@ class TestSmokeManifestSupplyChain:
             f"{name}-smoke-job.yaml"
             for name in ("api", "sqs", "kueue", "yunikorn", "volcano", "slurm")
         }
-        assert {path.name for path in probes} == {"netpol-probe-job.yaml", "netpol-target-job.yaml"}
+        assert {path.name for path in probes} == {
+            "netpol-probe-job.yaml",
+            "netpol-target-job.yaml",
+            "netpol-model-target-job.yaml",
+        }
         assert {path.name for path in manifest_dir.glob("*.yaml")} == {
             path.name for path in (*smoke, *probes)
         }, "a new manifest must decide which side of this contract it is on"
@@ -6556,6 +6567,29 @@ class TestActionBaselineCheckpointPurity:
         "ecr_repositories": {"us-east-1": []},
     }
 
+    #: A shape-valid Transaction Search capture for the one deployed Region.
+    _TRANSACTION_SEARCH = {
+        "schema_version": 1,
+        "policy_name": "gco-transaction-search-xray-access",
+        "regions": {
+            "us-east-1": {
+                "observed_at": "2026-01-01T00:00:00+00:00",
+                "destination": "XRay",
+                "status": "ACTIVE",
+                "resource_policy": {
+                    "present": False,
+                    "document_sha256": None,
+                    "last_updated_time": None,
+                    "grants_xray_span_delivery": False,
+                },
+                "log_groups": {
+                    "aws/spans": {"present": False, "creation_time": None},
+                    "/aws/application-signals/data": {"present": False, "creation_time": None},
+                },
+            }
+        },
+    }
+
     @staticmethod
     def _inventory(*tagged: dict[str, object]) -> dict[str, object]:
         """A shape-valid inventory: the absence gate is fail-closed on
@@ -6591,6 +6625,11 @@ class TestActionBaselineCheckpointPurity:
                 "_strip_accepted_efs_automatic_backup_recovery_points",
                 side_effect=lambda _ctx, candidate: (candidate, list(accepted_efs or [])),
             ),
+            patch.object(
+                actions_baseline,
+                "_capture_transaction_search_baseline",
+                return_value=json.loads(json.dumps(self._TRANSACTION_SEARCH)),
+            ),
         ):
             return actions_baseline.action_baseline(ctx)
 
@@ -6625,6 +6664,30 @@ class TestActionBaselineCheckpointPurity:
         assert "accepted_expired_dynamodb_streams" not in ctx.checkpoint.baseline
         ctx.persist.assert_called()
 
+    def test_transaction_search_rides_checkpoint_state_not_the_baseline(self):
+        """Teardown restores exactly what the baseline recorded, so the record
+        is persisted in the same checkpoint write, outside the pure capture."""
+        ctx = self._ctx()
+
+        result = self._run(ctx, self._inventory())
+
+        assert result["transaction_search"] == self._TRANSACTION_SEARCH
+        assert ctx.checkpoint.baseline == self._BASELINE
+        assert "transaction_search" not in ctx.checkpoint.baseline
+        assert ctx.checkpoint.state["transaction_search_baseline"] == self._TRANSACTION_SEARCH
+        assert (
+            ctx.checkpoint.state["transaction_search_baseline"] is not result["transaction_search"]
+        )
+        ctx.persist.assert_called_once_with()
+
+    def test_a_reused_baseline_without_its_transaction_search_record_fails_closed(self):
+        ctx = self._ctx()
+        ctx.checkpoint.baseline = dict(self._BASELINE)
+        from scripts.live_release_validation.actions import baseline as actions_baseline
+
+        with pytest.raises(RuntimeError, match="Checkpoint has no Transaction Search baseline"):
+            actions_baseline.action_baseline(ctx)
+
     def test_accepted_efs_backup_rides_result_not_checkpoint(self):
         ctx = self._ctx()
         evidence = {"recovery_point_arn": "arn:aws:backup:us-east-1:123:recovery-point:x"}
@@ -6643,6 +6706,8 @@ class TestActionBaselineCheckpointPurity:
         resumed = actions_baseline.action_baseline(ctx)
         assert resumed["reused_checkpoint_baseline"] is True
         assert resumed["accepted_efs_automatic_backup_recovery_points"] == [evidence]
+        # A resume reports the checkpointed record; it never re-captures it.
+        assert resumed["transaction_search"] == self._TRANSACTION_SEARCH
 
     def test_live_table_stream_still_fails_the_gate(self):
         """A stream whose parent table exists is genuine residue: hard fail."""
@@ -6676,12 +6741,20 @@ class TestActionBaselineCheckpointPurity:
     def test_reused_checkpoint_short_circuits(self):
         ctx = self._ctx()
         ctx.checkpoint.baseline = dict(self._BASELINE)
+        ctx.checkpoint.state["transaction_search_baseline"] = json.loads(
+            json.dumps(self._TRANSACTION_SEARCH)
+        )
         from scripts.live_release_validation.actions import baseline as actions_baseline
 
-        with patch.object(actions_baseline, "capture_baseline") as capture:
+        with (
+            patch.object(actions_baseline, "capture_baseline") as capture,
+            patch.object(actions_baseline, "_capture_transaction_search_baseline") as ts_capture,
+        ):
             result = actions_baseline.action_baseline(ctx)
         capture.assert_not_called()
+        ts_capture.assert_not_called()
         assert result["reused_checkpoint_baseline"] is True
+        assert result["transaction_search"] == self._TRANSACTION_SEARCH
 
 
 class TestOpenCostLiveValidationRetry:

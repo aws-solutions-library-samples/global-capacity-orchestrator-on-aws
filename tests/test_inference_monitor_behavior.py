@@ -12,7 +12,10 @@ from kubernetes.client.rest import ApiException
 from gco.models.inference_models import INFERENCE_PROBE_TIMEOUT_SECONDS
 from gco.services.inference_monitor import (
     AWS_CLI_IMAGE,
+    ENDPOINT_TLS_PROXY_CONTAINER,
+    ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION,
     MOONCAKE_BOOTSTRAP_BASE_PORT,
+    SKIP_CONTAINERS_ANNOTATION,
     VLLM_MOONCAKE_BOOTSTRAP_PORT_ENV,
     AdminApiKeySecretError,
     InferenceMonitor,
@@ -22,6 +25,7 @@ from gco.services.inference_monitor import (
     RegionalScopeResolution,
     RegionServicesResolution,
     ResourceCleanupResult,
+    build_endpoint_tls_proxy,
 )
 
 NAMESPACE = "gco-inference"
@@ -638,8 +642,10 @@ async def test_reconcile_mooncake_orders_roles_autoscalers_and_front_end() -> No
     monitor._verify_hpa_owner = MagicMock(  # type: ignore[method-assign]
         return_value=ResourceCleanupResult(resources_found=True)
     )
+    # Role Services no longer take the model port: they publish only the pods'
+    # TLS sidecar port.
     monitor._create_role_service = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda _name, _ns, role, _port: events.append(f"service:{role}")
+        side_effect=lambda _name, _ns, role: events.append(f"service:{role}")
     )
     monitor._create_pd_proxy = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda *_args: events.append("proxy")
@@ -1328,11 +1334,12 @@ def test_active_cleanup_request_budget_is_explicit_and_bounded() -> None:
             custom,
         )
     )
-    # Read-before-delete avoids 27 unnecessary delete calls on an already
-    # absent pass. The fixed 32 requests still cover every parent, generated
-    # child, and legacy route exactly once; future expansion must update this
-    # reviewed bound rather than introducing an unbounded hot loop.
-    assert request_count == 32
+    # Read-before-delete avoids 28 unnecessary delete calls on an already
+    # absent pass. The fixed 33 requests still cover every parent (including
+    # the TLS sidecar program ConfigMap), generated child, and legacy route
+    # exactly once; future expansion must update this reviewed bound rather
+    # than introducing an unbounded hot loop.
+    assert request_count == 33
 
 
 class TestKubernetesLifecycleFencing:
@@ -1626,7 +1633,14 @@ def test_sglang_renderer_supplies_launcher_listener_and_model_from_env() -> None
         "gco.io/leader-epoch": "epoch-1",
     }
     assert deployment.metadata.annotations == expected
-    assert deployment.spec.template.metadata.annotations == expected
+    # The pod template adds only the TLS sidecar's credential skip and digest.
+    assert deployment.spec.template.metadata.annotations == {
+        **expected,
+        SKIP_CONTAINERS_ANNOTATION: ENDPOINT_TLS_PROXY_CONTAINER,
+        ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: build_endpoint_tls_proxy(
+            30000, "chat-tls-proxy"
+        ).digest,
+    }
 
 
 def test_sglang_renderer_never_duplicates_operator_supplied_launcher_flags() -> None:
@@ -1822,7 +1836,9 @@ def test_sglang_probes_outlast_the_health_endpoints_one_second_generation_floor(
             "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
         },
     )
-    (container,) = deployment.spec.template.spec.containers
+    # The model container comes first; the TLS sidecar keeps its own probes.
+    container, sidecar = deployment.spec.template.spec.containers
+    assert sidecar.name == ENDPOINT_TLS_PROXY_CONTAINER
     for probe in (container.startup_probe, container.liveness_probe, container.readiness_probe):
         assert probe is not None
         assert probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
@@ -1849,7 +1865,8 @@ def test_vllm_probes_state_the_same_timeout_instead_of_the_kubelet_default() -> 
             "env": {"MODEL": "facebook/opt-125m"},
         },
     )
-    (container,) = deployment.spec.template.spec.containers
+    container, sidecar = deployment.spec.template.spec.containers
+    assert sidecar.name == ENDPOINT_TLS_PROXY_CONTAINER
     assert container.startup_probe is None
     assert container.liveness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
     assert container.readiness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS

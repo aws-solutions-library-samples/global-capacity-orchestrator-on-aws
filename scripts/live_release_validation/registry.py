@@ -35,6 +35,7 @@ from .actions import (
     action_schedulers,
     action_sqs_lifecycle,
     action_topology,
+    action_tracing,
 )
 from .models import RunContext
 
@@ -62,7 +63,7 @@ def build_action_registry() -> dict[str, ActionDefinition]:
         ),
         ActionDefinition(
             "baseline",
-            "Capture protected CloudFormation and ECR baselines",
+            "Capture protected CloudFormation, ECR, and Transaction Search baselines",
             ("preflight",),
             action_baseline,
         ),
@@ -125,6 +126,13 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Require stable SQS/DLQ and DynamoDB convergence",
             ("topology",),
             action_convergence,
+        ),
+        ActionDefinition(
+            "tracing",
+            "Require every traced service's spans in Transaction Search, with a joined "
+            "cost-monitor span",
+            ("topology",),
+            action_tracing,
         ),
         # The two cluster-facing checks run after every workload action on
         # purpose: a zero restart count and an intact policy posture mean more

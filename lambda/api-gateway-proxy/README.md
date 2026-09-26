@@ -27,7 +27,7 @@ API Gateway (proxy integration) — all routes are forwarded through this Lambda
    `backend.<project>.gco.internal` through explicit SNI/hostname assertion
 5. It forwards the signed request over HTTPS/443 through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html);
    the accelerator is Layer 4 and does not terminate TLS
-6. The regional [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) terminates the private-root client connection and re-encrypts the target hop to a TLS-only proxy sidecar on the selected Kubernetes pod. The sidecar hot-reloads its cert-manager-projected leaf and forwards only over pod loopback. ALB target TLS provides confidentiality but does not validate the self-signed workload leaf; HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
+6. The regional [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) terminates the private-root client connection and re-encrypts the target hop to a TLS-only proxy sidecar on the selected Kubernetes pod. The sidecar hot-reloads its cert-manager-projected leaf and forwards only over pod loopback. ALB target TLS provides confidentiality but does not validate the workload leaf (issued by the cluster's internal CA); HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
 7. Backend middleware validates freshness, integrity, and process-local nonce
    replay before serving the request
 8. The Lambda returns the buffered upstream response to the caller

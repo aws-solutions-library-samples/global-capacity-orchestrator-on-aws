@@ -127,6 +127,11 @@ class RunSettings:
     #: action), or ``""`` for none. Part of the resume identity (through
     #: ``extra_cdk_context``) like the scheduler overrides.
     eks_capabilities_overrides_json: str = ""
+    #: Canonical JSON of the ``tracing_overrides`` CDK context (deep-merged
+    #: over cdk.json ``tracing``), or ``""`` for none. The release entry point
+    #: always sets ``{"sample_ratio":1.0}`` so the ``tracing`` action finds a
+    #: span for every request it drives; part of the resume identity.
+    tracing_overrides_json: str = ""
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -196,6 +201,8 @@ class RunSettings:
             context["helm_enabled_overrides"] = ",".join(self.optional_schedulers)
         if self.eks_capabilities_overrides_json:
             context["eks_capabilities_overrides"] = self.eks_capabilities_overrides_json
+        if self.tracing_overrides_json:
+            context["tracing_overrides"] = self.tracing_overrides_json
         return context
 
     def identity(self) -> dict[str, Any]:

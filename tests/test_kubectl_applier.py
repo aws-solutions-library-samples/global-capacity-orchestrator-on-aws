@@ -513,6 +513,42 @@ class TestLegacyRemovedResources:
                 name,
             ) in handler_module._LEGACY_REMOVED_RESOURCES
 
+    def test_inventory_targets_the_retired_self_signed_api_issuer(self, handler_module):
+        # The API leaves moved to the gco-internal-ca ClusterIssuer; the
+        # namespaced selfSigned Issuer they used to name is swept exactly.
+        assert (
+            "cert-manager.io/v1",
+            "Issuer",
+            "gco-system",
+            "gco-api-selfsigned",
+        ) in handler_module._LEGACY_REMOVED_RESOURCES
+
+    def test_issuer_sweep_before_cert_manager_exists_is_a_noop(self, handler_module):
+        """Base pass on a fresh cluster: the cert-manager CRDs do not exist yet."""
+        mock_dynamic = MagicMock()
+
+        from kubernetes.client.rest import ApiException
+
+        def resources_get(*, api_version: str, kind: str) -> MagicMock:
+            if api_version == "cert-manager.io/v1":
+                raise handler_module.ResourceNotFoundError(f"no {kind} API")
+            resource = MagicMock()
+            resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+            return resource
+
+        mock_dynamic.resources.get.side_effect = resources_get
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert result == {"pruned": [], "failed": []}
+        assert call(api_version="cert-manager.io/v1", kind="Issuer") in (
+            mock_dynamic.resources.get.call_args_list
+        )
+
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -2727,6 +2763,45 @@ class TestManifestReadinessValidation:
         }
         assert result["ExpectedResources"] == result["ValidatedResources"]
 
+    def test_the_issuance_fence_is_validated_by_exact_cluster_scoped_existence(
+        self, handler_module, tmp_path
+    ):
+        """07-internal-ca-issuance.yaml's policy and binding have no rollout contract.
+
+        The API server compiles a policy's CEL when it stores it and enforces it
+        from then on, so the two exact cluster-scoped objects existing is the
+        evidence; a status the type-checking controller has not written yet
+        must not fail convergence.
+        """
+        api_version = "admissionregistration.k8s.io/v1"
+        kinds = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
+        (tmp_path / "07-fence.yaml").write_text(
+            yaml.safe_dump_all(
+                [
+                    {"apiVersion": api_version, "kind": kind, "metadata": {"name": "fence"}}
+                    for kind in kinds
+                ]
+            )
+        )
+        cluster = handler_module._CLUSTER_SCOPE
+        live_objects = {
+            (api_version, kind, cluster, "fence"): {"metadata": {"generation": 1}} for kind in kinds
+        }
+
+        result, dynamic_client = _validate_with_fake_dynamic(handler_module, tmp_path, live_objects)
+
+        assert result["BaseExpectedCount"] == result["BaseValidatedCount"] == 2
+        assert [(item["kind"], item["namespace"]) for item in result["ValidatedResources"]] == [
+            (kind, cluster) for kind in kinds
+        ]
+        for kind in kinds:
+            resource = dynamic_client.resources.get(api_version=api_version, kind=kind)
+            assert resource.get.call_args_list == [call(name="fence")]
+
+        del live_objects[(api_version, kinds[1], cluster, "fence")]
+        with pytest.raises(RuntimeError, match=r"ValidatingAdmissionPolicyBinding/<cluster>/fence"):
+            _validate_with_fake_dynamic(handler_module, tmp_path, live_objects)
+
     def test_missing_exact_object_fails_with_identity(self, handler_module, tmp_path):
         (tmp_path / "10-required.yaml").write_text(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: absent\n  namespace: demo\n"
@@ -2842,7 +2917,7 @@ class TestManifestReadinessValidation:
         }
         assert "Deployment" not in discovered_kinds
 
-    @pytest.mark.parametrize("kind", ["Issuer", "Certificate"])
+    @pytest.mark.parametrize("kind", ["ClusterIssuer", "Issuer", "Certificate"])
     def test_cert_manager_resource_requires_current_ready_condition(self, handler_module, kind):
         pending = {"metadata": {"generation": 2}, "status": {"conditions": []}}
         stale = {
@@ -4711,6 +4786,7 @@ _APPLY_DISPATCH = [
     _cluster_custom("ResourceFlavor", "kueue.x-k8s.io/v1beta1", "resourceflavors"),
     _cluster_custom("ClusterQueue", "kueue.x-k8s.io/v1beta1", "clusterqueues"),
     _namespaced_custom("LocalQueue", "kueue.x-k8s.io/v1beta1", "localqueues"),
+    _cluster_custom("ClusterIssuer", "cert-manager.io/v1", "clusterissuers"),
     _namespaced_custom("Issuer", "cert-manager.io/v1", "issuers"),
     _namespaced_custom("Certificate", "cert-manager.io/v1", "certificates"),
     _namespaced_custom("AppProject", "argoproj.io/v1alpha1", "appprojects"),
@@ -4724,6 +4800,22 @@ _APPLY_DISPATCH = [
         "ApiregistrationV1Api",
         "create_api_service",
         "patch_api_service",
+        cluster_scoped=True,
+    ),
+    _typed(
+        "ValidatingAdmissionPolicy",
+        "admissionregistration.k8s.io/v1",
+        "AdmissionregistrationV1Api",
+        "create_validating_admission_policy",
+        "patch_validating_admission_policy",
+        cluster_scoped=True,
+    ),
+    _typed(
+        "ValidatingAdmissionPolicyBinding",
+        "admissionregistration.k8s.io/v1",
+        "AdmissionregistrationV1Api",
+        "create_validating_admission_policy_binding",
+        "patch_validating_admission_policy_binding",
         cluster_scoped=True,
     ),
     _typed(

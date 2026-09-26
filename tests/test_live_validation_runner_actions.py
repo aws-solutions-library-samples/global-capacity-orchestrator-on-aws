@@ -3289,6 +3289,8 @@ class TestActionFinalInventory:
         ctx.settings.protected_stack_names = ("CDKToolkit",)
         return ctx
 
+    _TRANSACTION_SEARCH = {"regions": {"us-east-1": {"differences": []}}, "differences": []}
+
     @contextlib.contextmanager
     def _inventory(
         self,
@@ -3296,11 +3298,16 @@ class TestActionFinalInventory:
         stack_absence: dict[str, Any],
         differences: list[Any],
         absent: bool,
+        transaction_search: dict[str, Any] | None = None,
     ) -> Iterator[None]:
         inventory = dict(self._PROJECT_INVENTORY)
         with (
             patch_live_validation_helper(
                 "_verify_target_stack_absence", return_value=stack_absence
+            ),
+            patch_live_validation_helper(
+                "_verify_transaction_search_restored",
+                return_value=transaction_search or dict(self._TRANSACTION_SEARCH),
             ),
             patch_live_validation_helper("capture_baseline", return_value=dict(_BASELINE)),
             patch_live_validation_helper(
@@ -3356,6 +3363,7 @@ class TestActionFinalInventory:
         assert result["accepted_expired_dynamodb_streams"] == [{"arn": "stream"}]
         assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
+        assert result["transaction_search"] == self._TRANSACTION_SEARCH
         assert ctx.report.final_inventory is result
         assert ctx.checkpoint.state["final_inventory"] == result
         assert ctx.checkpoint.destroyed is True
@@ -3384,6 +3392,37 @@ class TestActionFinalInventory:
             pytest.raises(RuntimeError, match="Project resources remain after teardown"),
         ):
             actions_final_inventory.action_final_inventory(ctx)
+
+    def test_transaction_search_differences_fail_after_persisting_evidence(self) -> None:
+        ctx = self._ctx()
+        absent = {"all_absent": True, "absent": [], "residual": []}
+        unrestored = {
+            "regions": {"us-east-1": {"differences": ["trace segment destination is ..."]}},
+            "differences": [
+                "us-east-1: trace segment destination is CloudWatchLogs, baseline XRay",
+                "us-east-1: log group aws/spans did not exist at baseline and remains",
+            ],
+        }
+
+        with (
+            self._inventory(
+                stack_absence=absent,
+                differences=[],
+                absent=True,
+                transaction_search=unrestored,
+            ),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"Transaction Search state differs from the baseline: us-east-1: trace "
+                    r"segment destination is CloudWatchLogs, baseline XRay; us-east-1: log group "
+                    r"aws/spans did not exist at baseline and remains"
+                ),
+            ),
+        ):
+            actions_final_inventory.action_final_inventory(ctx)
+
+        assert ctx.checkpoint.state["final_inventory"]["transaction_search"] == unrestored
 
     def test_residual_stack_reopens_partially_recorded_teardown(self) -> None:
         ctx = self._ctx()

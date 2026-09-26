@@ -31,6 +31,7 @@ _CHARTS_YAML = _REPO_ROOT / "lambda" / "helm-installer" / "charts.yaml"
 _MANIFESTS = _REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
 _COST_MONITOR_MANIFEST = _MANIFESTS / "34-cost-monitor.yaml"
 _COST_DASHBOARD_MANIFEST = _MANIFESTS / "post-helm-grafana-cost-dashboard.yaml"
+_COST_MONITOR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:cost-monitor"
 
 
 class _MockNode:
@@ -126,6 +127,11 @@ def _stub(
             region="us-east-2",
         ),
         mlflow_role=SimpleNamespace(role_arn="arn:aws:iam::123456789012:role/test-mlflow"),
+        # The OpenCost and Grafana TLS sidecars run from these service images.
+        cost_monitor_image=SimpleNamespace(image_uri=_COST_MONITOR_IMAGE),
+        manifest_processor_image=SimpleNamespace(
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/test:manifest-processor"
+        ),
     )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
@@ -221,6 +227,58 @@ class TestRegionalChartWiring:
     def test_overrides_exclude_opencost_when_disabled(self, valid_cdk_context):
         overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context, cost_enabled=False))
         assert "opencost" not in overrides
+
+
+class TestOpencostTlsSidecar:
+    """The verified-TLS front door the cost-monitor reaches OpenCost through.
+
+    Value keys are those of the pinned OpenCost chart 2.5.31:
+    ``opencost.extraContainers`` (a list rendered with ``toYaml``), the
+    root-level ``extraVolumes`` and ``opencost.nodeSelector``.
+    """
+
+    @pytest.fixture
+    @staticmethod
+    def values(valid_cdk_context) -> dict[str, Any]:
+        return RS._helm_chart_value_overrides(_stub(valid_cdk_context))["opencost"]["values"]
+
+    def test_sidecar_terminates_tls_in_front_of_the_exporter_api(self, values):
+        (sidecar,) = values["opencost"]["extraContainers"]
+        assert sidecar["name"] == "opencost-tls-proxy"
+        assert sidecar["image"] == _COST_MONITOR_IMAGE
+        assert sidecar["command"] == ["python", "-m", "gco.services.tls_proxy"]
+        assert sidecar["ports"] == [{"name": "https", "containerPort": 9443}]
+        env = {item["name"]: item["value"] for item in sidecar["env"]}
+        assert env["TLS_PROXY_PORT"] == "9443"
+        assert env["TLS_PROXY_UPSTREAM_HOST"] == "127.0.0.1"
+        assert env["TLS_PROXY_UPSTREAM_PORT"] == "9003"
+        assert env["TLS_PROXY_KEYPAIR_WAIT_SECONDS"] == "1800"
+        assert "readinessProbe" not in sidecar
+
+    def test_leaf_secret_is_an_optional_world_readable_volume(self, values):
+        (sidecar,) = values["opencost"]["extraContainers"]
+        (volume,) = values["extraVolumes"]
+        assert volume["secret"] == {
+            "secretName": "opencost-tls",
+            "optional": True,
+            "defaultMode": 0o444,
+        }
+        assert sidecar["volumeMounts"] == [
+            {"name": volume["name"], "mountPath": "/var/run/gco/tls", "readOnly": True}
+        ]
+
+    def test_pod_is_pinned_to_the_sidecar_image_architecture(self, values):
+        assert values["opencost"]["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+
+    def test_cluster_identity_is_still_injected(self, values):
+        assert values["opencost"]["exporter"] == {"defaultClusterId": "gco-us-east-1"}
+
+    def test_static_chart_values_leave_the_injected_keys_to_the_stack(self, charts):
+        """The installer replaces lists on merge, so charts.yaml must not own them."""
+        static = charts["opencost"]["values"]
+        assert "extraVolumes" not in static
+        assert "extraContainers" not in static["opencost"]
+        assert "nodeSelector" not in static["opencost"]
 
 
 class TestCostMonitorManifest:

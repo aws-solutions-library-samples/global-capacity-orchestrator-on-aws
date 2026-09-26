@@ -36,6 +36,8 @@ Resources Created:
         - kubectl-applier: applies K8s manifests during deployment
         - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, etc.)
         - ga-registration: registers the ALB with Global Accelerator in ``aws``
+        - transaction-search: switches on CloudWatch Transaction Search for the
+          traced API services' X-Ray span export (never switches it off)
         - regional-api-proxy: separate-stack VPC proxy used by the always-on
           aggregation bridge and by optional direct callers in ``aws`` or the
           required regional workload ingress in other partitions
@@ -75,6 +77,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -119,7 +122,12 @@ from gco.argocd_config import (
     compute_argocd_replacements,
     validate_argocd_config,
 )
-from gco.config.config_loader import ConfigLoader
+from gco.config.config_loader import (
+    TRACING_CONTEXT_KEY,
+    TRACING_OVERRIDES_CONTEXT_KEY,
+    ConfigLoader,
+    resolve_tracing_config,
+)
 from gco.eks_capabilities_config import (
     CAPABILITY_TYPE_API_NAMES,
     compute_eks_capabilities_replacements,
@@ -342,6 +350,8 @@ _INTERFACE_ENDPOINT_SERVICES: dict[str, ec2.InterfaceVpcEndpointAwsService] = {
     "eks": ec2.InterfaceVpcEndpointAwsService.EKS,
     "elasticfilesystem": ec2.InterfaceVpcEndpointAwsService.ELASTIC_FILESYSTEM,
     "bedrock-runtime": ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+    # com.amazonaws.<region>.xray: the traced API services' OTLP span export.
+    "xray": ec2.InterfaceVpcEndpointAwsService.XRAY,
 }
 
 
@@ -632,6 +642,165 @@ def _compute_kubectl_observability_replacements(
         "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true",
         "{{GRAFANA_ADMIN_PASSWORD_ROTATION_SCHEDULE}}": grafana_admin_password_rotation_schedule,
     }
+
+
+def _decimal_string(value: float) -> str:
+    """Render a float as a plain decimal (``1e-05`` -> ``"0.00001"``).
+
+    ``repr`` is the shortest string that round-trips the float, and
+    formatting its ``Decimal`` with ``"f"`` removes any exponent, so the
+    services' ``float()`` parse sees exactly the configured value.
+    """
+    return format(Decimal(repr(float(value))), "f")
+
+
+def _compute_kubectl_tracing_replacements(tracing: Mapping[str, Any]) -> dict[str, str]:
+    """Build the ``{{TRACING_*}}`` kubectl-applier replacements.
+
+    Unlike the feature gates above, both keys are ALWAYS emitted: they sit
+    in the four core API Deployments (health-monitor, manifest-processor,
+    inference-proxy, cost-monitor), and a placeholder left unreplaced makes
+    the applier skip the whole file. Tracing off therefore renders
+    ``GCO_TRACING_ENABLED: "false"`` rather than withholding the key.
+    """
+    return {
+        "{{TRACING_ENABLED}}": "true" if tracing["enabled"] else "false",
+        "{{TRACING_SAMPLE_RATIO}}": _decimal_string(tracing["sample_ratio"]),
+    }
+
+
+#: IAM actions the traced API services use to export spans. The X-Ray OTLP
+#: endpoint authorizes ``xray:PutSpans``; ``xray:PutTraceSegments`` covers the
+#: segment API. X-Ray supports no resource-level scoping for either, so the
+#: grant is ``Resource: *`` and write-only.
+_TRACING_EXPORT_ACTIONS = ("xray:PutTraceSegments", "xray:PutSpans")
+
+#: Part of the AwsSolutions-IAM5 ``Resource::*`` reason of every traced
+#: service role while tracing is enabled. cdk-nag records one reason per
+#: finding id and construct (the first acknowledgment wins), so a role that
+#: already acknowledges ``Resource::*`` gets this appended to that reason
+#: instead of a second acknowledgment the report would never show.
+_TRACING_EXPORT_NAG_REASON = (
+    "Tracing span export uses xray:PutTraceSegments and xray:PutSpans, which "
+    "X-Ray grants only on Resource:* (no resource-level permissions); that "
+    "statement is write-only and carries no other action."
+)
+
+#: Namespaces whose pods GCO instruments itself (the traced API services in
+#: gco-system) or must never mutate (model pods in gco-inference).
+#: Application Signals auto-monitor in the CloudWatch Observability add-on
+#: injects ADOT auto-instrumentation into matching workloads by default; it
+#: would double-instrument the services and rewrite model pods.
+_APPLICATION_SIGNALS_EXCLUDED_NAMESPACES = ("gco-system", "gco-inference")
+
+#: Every language the add-on's auto-monitor can instrument (its
+#: ``manager.applicationSignals.autoMonitor.exclude`` keys).
+_APPLICATION_SIGNALS_LANGUAGES = ("java", "python", "dotnet", "nodejs")
+
+#: Where every GCO TLS sidecar reads its cert-manager leaf; these are also the
+#: ``gco.services.tls_proxy`` defaults.
+_TLS_PROXY_KEYPAIR_DIR = "/var/run/gco/tls"
+
+#: How long a chart-pod TLS sidecar waits for its leaf Secret. The Helm charts
+#: start OpenCost and Grafana before the post-Helm manifests create their
+#: Certificates, so the Secret volume is optional and the sidecar polls for
+#: the keypair instead of failing closed immediately.
+_CHART_TLS_PROXY_KEYPAIR_WAIT_SECONDS = 1800
+
+#: The service images run as this uid/gid (the synthesized ``gco`` user).
+#: Chart pods run their own containers as other uids, so the sidecar sets it
+#: explicitly; ``runAsNonRoot`` needs a numeric uid to verify a named user.
+_SERVICE_IMAGE_UID = 1000
+
+
+def _chart_tls_proxy_sidecar(
+    *,
+    name: str,
+    image: str,
+    port: int,
+    upstream_port: int,
+    secret_name: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the ``(container, volume)`` of a TLS sidecar for a Helm chart pod.
+
+    OpenCost and Grafana serve plain HTTP on pod loopback; the sidecar runs
+    ``gco.services.tls_proxy`` from a GCO service image, terminates TLS on
+    ``port`` (container port ``https``, which the post-Helm ``*-tls``
+    Services target) with the cert-manager leaf in ``secret_name``, and
+    forwards to ``127.0.0.1:upstream_port``.
+
+    The Secret volume is ``optional`` and world-readable (``0444``): the
+    chart pod starts before its Certificate exists, and GCO does not own the
+    chart pod's uid/fsGroup. There is deliberately no readiness or startup
+    probe, so the chart pod becomes Ready on its own container while the
+    sidecar waits for the keypair (``TLS_PROXY_KEYPAIR_WAIT_SECONDS``); the
+    tcpSocket liveness probe only starts after that wait budget.
+    """
+    # Leaves out what Kubernetes and tls_proxy already default to (the port
+    # protocol, the keypair file paths under /var/run/gco/tls): these specs
+    # ride in the convergence replay input, which SSM caps at 8 KiB encoded.
+    volume_name = "gco-tls"
+    container: dict[str, Any] = {
+        "name": name,
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python", "-m", "gco.services.tls_proxy"],
+        "ports": [{"name": "https", "containerPort": port}],
+        "env": [
+            {"name": "TLS_PROXY_PORT", "value": str(port)},
+            {"name": "TLS_PROXY_UPSTREAM_HOST", "value": "127.0.0.1"},
+            {"name": "TLS_PROXY_UPSTREAM_PORT", "value": str(upstream_port)},
+            {
+                "name": "TLS_PROXY_KEYPAIR_WAIT_SECONDS",
+                "value": str(_CHART_TLS_PROXY_KEYPAIR_WAIT_SECONDS),
+            },
+        ],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "runAsUser": _SERVICE_IMAGE_UID,
+            "runAsGroup": _SERVICE_IMAGE_UID,
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "resources": {
+            "requests": {"cpu": "10m", "memory": "32Mi"},
+            "limits": {"cpu": "100m", "memory": "128Mi"},
+        },
+        "livenessProbe": {
+            "tcpSocket": {"port": "https"},
+            "initialDelaySeconds": _CHART_TLS_PROXY_KEYPAIR_WAIT_SECONDS + 60,
+            "periodSeconds": 20,
+            "timeoutSeconds": 5,
+            "failureThreshold": 3,
+        },
+        "volumeMounts": [
+            {"name": volume_name, "mountPath": _TLS_PROXY_KEYPAIR_DIR, "readOnly": True}
+        ],
+    }
+    volume: dict[str, Any] = {
+        "name": volume_name,
+        "secret": {"secretName": secret_name, "optional": True, "defaultMode": 0o444},
+    }
+    return container, volume
+
+
+def _helm_container_list_string(containers: list[dict[str, Any]]) -> str:
+    """Render containers as the YAML block list a Grafana ``extraContainers`` needs.
+
+    The Grafana subchart renders ``extraContainers`` with ``tpl`` into the
+    pod's ``containers:`` sequence, so the value must be a *string* of block
+    list items, not a list. The width is unbounded so no scalar is ever
+    folded, which keeps CDK token markers inside the image URI intact until
+    CloudFormation resolves them.
+    """
+    return yaml.safe_dump(
+        containers,
+        default_flow_style=False,
+        sort_keys=False,
+        width=2**31 - 1,
+    )
 
 
 def _augment_trusted_registries_with_project_ecr(
@@ -951,6 +1120,11 @@ class GCORegionalStack(Stack):
 
         # Apply Kubernetes manifests (after EFS so IDs are available)
         self._apply_kubernetes_manifests()
+
+        # Switch on CloudWatch Transaction Search in this Region: the X-Ray
+        # OTLP endpoint the traced API services export to requires it
+        # (tracing.enabled + tracing.enable_transaction_search).
+        self._create_transaction_search_resource()
 
         # Create CloudFormation drift detection (daily schedule + SNS alerts)
         self._create_drift_detection()
@@ -1758,6 +1932,30 @@ class GCORegionalStack(Stack):
             return validate_argocd_config(None)
         return raw
 
+    def _tracing_config(self) -> dict[str, Any]:
+        """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
+
+        Same optional-accessor posture as :meth:`_eks_capabilities_config`,
+        except that a config double without ``get_tracing_config`` (or a
+        ``MagicMock``) resolves this stack's own ``tracing`` /
+        ``tracing_overrides`` context through the loader's resolver. An
+        absent block yields the shipped defaults (tracing on), so stack tests
+        exercise the default deployment's resources.
+        """
+        getter = getattr(self.config, "get_tracing_config", None)
+        raw = getter() if callable(getter) else None
+        if isinstance(raw, dict):
+            return raw
+        return resolve_tracing_config(
+            self.node.try_get_context(TRACING_CONTEXT_KEY),
+            self.node.try_get_context(TRACING_OVERRIDES_CONTEXT_KEY),
+        )
+
+    def _transaction_search_active(self) -> bool:
+        """Whether this region's stack manages CloudWatch Transaction Search."""
+        tracing = self._tracing_config()
+        return bool(tracing["enabled"]) and bool(tracing["enable_transaction_search"])
+
     def _create_eks_capabilities(self) -> None:
         """Attach the enabled EKS Capabilities to this region's cluster.
 
@@ -2143,6 +2341,24 @@ class GCORegionalStack(Stack):
                 "containerLogs": {
                     "enabled": True,
                 },
+                # Application Signals auto-monitor injects ADOT
+                # auto-instrumentation into matching workloads. The GCO API
+                # services already export their own OpenTelemetry spans and
+                # model pods must run exactly as rendered, so both GCO
+                # namespaces are excluded for every supported language
+                # (schema path verified against this add-on version).
+                "manager": {
+                    "applicationSignals": {
+                        "autoMonitor": {
+                            "exclude": {
+                                language: {
+                                    "namespaces": list(_APPLICATION_SIGNALS_EXCLUDED_NAMESPACES)
+                                }
+                                for language in _APPLICATION_SIGNALS_LANGUAGES
+                            },
+                        },
+                    },
+                },
             },
         )
 
@@ -2263,6 +2479,11 @@ class GCORegionalStack(Stack):
             self._grant_cost_report_bucket_discovery_to_cost_monitor()
 
         self._create_aws_load_balancer_controller_role()
+
+        # OpenTelemetry span export (cdk.json ``tracing``): each traced API
+        # service signs its own OTLP requests with its own role. The returned
+        # note extends each role's existing IAM5 reason below.
+        tracing_nag_note = self._grant_tracing_export_to_service_roles()
 
         # Grant permission to read the auth secret.
         #
@@ -2410,6 +2631,7 @@ class GCORegionalStack(Stack):
                         "Secrets Manager random ARN suffix and cloudwatch:PutMetricData's "
                         "required Resource:*. PutMetricData is constrained to the exact "
                         "GCO/HealthMonitor namespace; all SSM and DynamoDB resources are exact."
+                        + tracing_nag_note
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -2476,6 +2698,7 @@ class GCORegionalStack(Stack):
                         "InferenceProxyRole uses one wildcard only for the random "
                         "Secrets Manager ARN suffix. DynamoDB access is an exact-table "
                         "GetItem grant, and the role has no Kubernetes, queue, or write access."
+                        + tracing_nag_note
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -2513,7 +2736,7 @@ class GCORegionalStack(Stack):
                         "ec2:DescribeSpotPriceHistory Resource:* (Describe* actions do "
                         "not support resource-level scoping; the central queue worker's "
                         "spot price gate needs current pricing). DynamoDB table names "
-                        "and the CloudWatch namespace are otherwise exact."
+                        "and the CloudWatch namespace are otherwise exact." + tracing_nag_note
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -2633,6 +2856,53 @@ class GCORegionalStack(Stack):
 
         # Create Pod Identity Associations for all service accounts
         self._create_pod_identity_associations()
+
+    def _grant_tracing_export_to_service_roles(self) -> str:
+        """Let the four traced API services export spans to X-Ray.
+
+        Adds one write-only ``xray:PutTraceSegments`` / ``xray:PutSpans``
+        statement to the health-monitor, manifest-processor, inference-proxy
+        and (when cost monitoring deploys) cost-monitor roles — the roles
+        their Deployments assume through the ``*_ROLE_ARN`` placeholders.
+        Nothing is granted while ``tracing.enabled`` is false.
+
+        Returns the sentence the callers append to the roles' existing
+        AwsSolutions-IAM5 ``Resource::*`` reasons (empty when tracing is
+        off). The cost-monitor role has no other wildcard, so it gets its own
+        acknowledgment here.
+        """
+        if not self._tracing_config()["enabled"]:
+            return ""
+
+        roles = [self.health_monitor_role, self.manifest_processor_role, self.inference_proxy_role]
+        if self._cost_monitoring_active():
+            roles.append(self.cost_monitor_role)
+        for role in roles:
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=list(_TRACING_EXPORT_ACTIONS),
+                    resources=["*"],
+                )
+            )
+
+        if self._cost_monitoring_active():
+            from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+            acknowledge_nag_findings(
+                self.cost_monitor_role,
+                [
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            "CostMonitorRole's only wildcard is tracing. "
+                            + _TRACING_EXPORT_NAG_REASON
+                        ),
+                        "appliesTo": ["Resource::*"],
+                    }
+                ],
+            )
+        return " " + _TRACING_EXPORT_NAG_REASON
 
     def _create_aws_load_balancer_controller_role(self) -> None:
         """Create the controller's exact OIDC-only IRSA role and v3.4.2 policy."""
@@ -3936,6 +4206,12 @@ class GCORegionalStack(Stack):
             )
         )
 
+        # OpenTelemetry tracing of the API services (on by default). Both
+        # placeholders are always substituted — "false" when tracing is off —
+        # because they sit in the core service Deployments, and a leftover
+        # placeholder would make the applier skip the whole file.
+        image_replacements.update(_compute_kubectl_tracing_replacements(self._tracing_config()))
+
         # Cluster observability (on by default): gate the gp3 StorageClass and
         # the ServiceMonitors/dashboards on the toggle. When enabled the gating
         # placeholders resolve so those manifests apply; when disabled the keys
@@ -4588,6 +4864,192 @@ class GCORegionalStack(Stack):
             ],
         )
 
+    def _create_transaction_search_resource(self) -> None:
+        """Enable CloudWatch Transaction Search in this Region, never disable it.
+
+        The traced API services export OpenTelemetry spans to the X-Ray OTLP
+        endpoint, which accepts spans only once Transaction Search is on. The
+        setting is account-level (configured per Region) and shared with any
+        other traced workload, so the custom resource
+        (``lambda/transaction-search``) is one-directional: Create/Update
+        switch the trace segment destination to CloudWatch Logs only when it
+        is not already there, and Delete is a no-op that leaves the setting
+        and its resource policy in place. Skipped unless both
+        ``tracing.enabled`` and ``tracing.enable_transaction_search`` hold.
+
+        Mirrors the GA deregistration provider: a plain zip Lambda outside
+        the VPC (it only calls public AWS APIs and must not create ENIs), a
+        ``cr.Provider`` whose explicit log group honours the live-validation
+        retention context, and scoped cdk-nag acknowledgments. The role
+        carries the AWS-documented Transaction Search prerequisites minus the
+        indexing-rule APIs GCO never calls.
+        """
+        if not self._transaction_search_active():
+            return
+
+        region = self.deployment_region
+        partition = self.partition
+        account = self.account
+        span_log_group_arns = [
+            f"arn:{partition}:logs:{region}:{account}:log-group:aws/spans:*",
+            f"arn:{partition}:logs:{region}:{account}:log-group:/aws/application-signals/data:*",
+        ]
+        application_signals_role_arn = (
+            f"arn:{partition}:iam::{account}:role/aws-service-role/"
+            "application-signals.cloudwatch.amazonaws.com/"
+            "AWSServiceRoleForCloudWatchApplicationSignals"
+        )
+        application_signals_channel_arn = (
+            f"arn:{partition}:cloudtrail:{region}:{account}:"
+            "channel/aws-service-channel/application-signals/*"
+        )
+
+        transaction_search_lambda = lambda_.Function(
+            self,
+            "TransactionSearchFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("lambda/transaction-search"),
+            timeout=Duration.minutes(5),  # three API calls plus throttling retries
+            memory_size=256,
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+        # Read and switch the trace segment destination, and write the
+        # X-Ray -> CloudWatch Logs resource policy. None of these APIs (nor
+        # Application Signals discovery) support resource-level scoping.
+        transaction_search_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "xray:GetTraceSegmentDestination",
+                    "xray:UpdateTraceSegmentDestination",
+                    "logs:PutResourcePolicy",
+                    "logs:DescribeResourcePolicies",
+                    "application-signals:StartDiscovery",
+                ],
+                resources=["*"],
+            )
+        )
+        # The two Transaction Search log groups in this Region only.
+        transaction_search_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutRetentionPolicy",
+                ],
+                resources=span_log_group_arns,
+            )
+        )
+        # Application Signals' service-linked role and CloudTrail channel.
+        transaction_search_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=[application_signals_role_arn],
+                conditions={
+                    "StringEquals": {
+                        "iam:AWSServiceName": "application-signals.cloudwatch.amazonaws.com"
+                    }
+                },
+            )
+        )
+        transaction_search_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["iam:GetRole"],
+                resources=[application_signals_role_arn],
+            )
+        )
+        transaction_search_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["cloudtrail:CreateServiceLinkedChannel"],
+                resources=[application_signals_channel_arn],
+            )
+        )
+
+        # Strict live validation retains the provider's log group through its
+        # final delete invocation, exactly like the GA deregistration guard.
+        transaction_search_log_group = logs.LogGroup(
+            self,
+            "TransactionSearchProviderLogGroup",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=self.provider_log_group_removal_policy,
+        )
+        transaction_search_provider = cr.Provider(
+            self,
+            "TransactionSearchProvider",
+            on_event_handler=transaction_search_lambda,
+            log_group=transaction_search_log_group,
+        )
+        # Properties change only with the deployment identity, so the
+        # resource re-runs only when that changes: a failing Update during an
+        # unrelated deploy could otherwise wedge the stack's rollback.
+        transaction_search = CustomResource(
+            self,
+            "TransactionSearch",
+            service_token=transaction_search_provider.service_token,
+            properties={
+                "Region": region,
+                "AccountId": account,
+                "Partition": partition,
+                "ProjectName": self.config.get_project_name(),
+            },
+        )
+        transaction_search.node.add_dependency(transaction_search_log_group)
+        self.transaction_search_resource = transaction_search
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            transaction_search_lambda,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The Transaction Search handler reads and switches the X-Ray "
+                        "trace segment destination, writes the X-Ray -> CloudWatch Logs "
+                        "resource policy and starts Application Signals discovery; none "
+                        "of these APIs, nor the X-Ray writes of Lambda active tracing, "
+                        "support resource-level permissions."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Log-group creation and retention are scoped to the two "
+                        "Transaction Search log groups of this Region; the ':*' suffix "
+                        "covers their log streams, and the CloudTrail grant is scoped to "
+                        "Application Signals' service-linked channels in this Region."
+                    ),
+                    "appliesTo": [
+                        *(f"Resource::{arn}" for arn in span_log_group_arns),
+                        f"Resource::{application_signals_channel_arn}",
+                    ],
+                },
+            ],
+        )
+        function_logical_id = self.get_logical_id(
+            cast(lambda_.CfnFunction, transaction_search_lambda.node.default_child)
+        )
+        acknowledge_nag_findings(
+            transaction_search_provider,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The cr.Provider framework role invokes the Transaction Search "
+                        "handler through the standard '<lambda-arn>:*' version "
+                        "qualifier, which cannot be narrowed at synth time."
+                    ),
+                    "appliesTo": [f"Resource::<{function_logical_id}.Arn>:*"],
+                },
+            ],
+        )
+
     def _get_volcano_image_mirror_config(self) -> dict[str, Any]:
         """Parse the ``volcano_image_mirror`` block from cdk.json.
 
@@ -4691,9 +5153,12 @@ class GCORegionalStack(Stack):
           ``<mirror_registry>/volcanosh/vc-*``.
         - ``kube-prometheus-stack``: inject the ``cdk.json``-derived dynamic
           values (Grafana/Prometheus/Alertmanager persistence sizes, Prometheus
-          retention, the gp3 ``storageClassName``, and the GPU/Neuron/EFA
-          node-exporter tolerations) over the static hardening values in
+          retention, the gp3 ``storageClassName``, the GPU/Neuron/EFA
+          node-exporter tolerations, and Grafana's TLS sidecar built from the
+          manifest-processor image) over the static hardening values in
           ``charts.yaml`` when ``cluster_observability.enabled`` is true.
+        - ``opencost``: the cluster identity and the OpenCost TLS sidecar
+          built from the cost-monitor image, while cost monitoring deploys.
         - ``argocd``: the repo-server size and optional CPU autoscaler from
           ``helm.argocd.repo_server`` (``gco.argocd_config.argocd_chart_values``)
           whenever the chart installs, by the cdk.json toggle or a run-scoped
@@ -4831,14 +5296,32 @@ class GCORegionalStack(Stack):
         set here: that value is the Kubernetes DNS zone (``cluster.local``)
         used to build the Prometheus URL, and overriding it with the EKS
         cluster name breaks in-cluster DNS resolution.
+
+        The ``opencost-tls-proxy`` sidecar is dynamic too, because it runs
+        from the cost-monitor image: it terminates verified TLS on 9443 (the
+        ``opencost-tls`` Service the cost-monitor calls) and forwards to the
+        exporter API on loopback 9003, with the ``opencost-tls`` leaf mounted
+        from an optional Secret volume (chart key ``extraVolumes``). The
+        service images are built for amd64 only, so the pod is pinned to
+        amd64 nodes (``opencost.nodeSelector``).
         """
+        sidecar, volume = _chart_tls_proxy_sidecar(
+            name="opencost-tls-proxy",
+            image=self.cost_monitor_image.image_uri,
+            port=9443,
+            upstream_port=9003,
+            secret_name="opencost-tls",  # nosec B106  # Kubernetes Secret name, not a credential
+        )
         return {
             "values": {
                 "opencost": {
                     "exporter": {
                         "defaultClusterId": self.cluster.cluster_name,
                     },
+                    "extraContainers": [sidecar],
+                    "nodeSelector": {"kubernetes.io/arch": "amd64"},
                 },
+                "extraVolumes": [volume],
             }
         }
 
@@ -4851,9 +5334,25 @@ class GCORegionalStack(Stack):
         node-exporter tolerations reuse the shared accelerator-node tolerations
         so the DaemonSet schedules on tainted GPU/Neuron/EFA nodes. Deep-merged
         by the installer over the static hardening values in ``charts.yaml``.
+
+        Grafana also gets the ``grafana-tls-proxy`` sidecar, which runs from
+        the manifest-processor image: verified TLS on 3443 (the
+        ``grafana-tls`` Service the admin-password rotator calls) forwarded
+        to Grafana on loopback 3000, with the ``grafana-tls`` leaf mounted
+        from an optional Secret volume. The Grafana subchart renders
+        ``extraContainers`` through ``tpl`` as a YAML string, while
+        ``extraContainerVolumes`` is a list. The service images are amd64
+        only, so the Grafana pod is pinned to amd64 nodes.
         """
         obs = self.config.get_cluster_observability_config()
         storage_class = _OBSERVABILITY_STORAGE_CLASS
+        grafana_sidecar, grafana_tls_volume = _chart_tls_proxy_sidecar(
+            name="grafana-tls-proxy",
+            image=self.manifest_processor_image.image_uri,
+            port=3443,
+            upstream_port=3000,
+            secret_name="grafana-tls",  # nosec B106  # Kubernetes Secret name, not a credential
+        )
         return {
             "values": {
                 "grafana": {
@@ -4861,6 +5360,9 @@ class GCORegionalStack(Stack):
                         "storageClassName": storage_class,
                         "size": obs["grafana"]["persistence_size"],
                     },
+                    "extraContainers": _helm_container_list_string([grafana_sidecar]),
+                    "extraContainerVolumes": [grafana_tls_volume],
+                    "nodeSelector": {"kubernetes.io/arch": "amd64"},
                 },
                 "prometheus": {
                     "prometheusSpec": {

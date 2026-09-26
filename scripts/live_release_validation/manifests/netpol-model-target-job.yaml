@@ -1,0 +1,99 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # The network-posture action's stand-in for a managed model pod: a listener
+  # in gco-inference on the model pods' only Service port, 8443, carrying the
+  # label the model ingress policies select. The file fixes the pod shape.
+  name: gco-live-netpol-model-__RUN_TOKEN__
+  namespace: gco-inference
+  annotations:
+    # The listener exists to be selected by the cluster-managed model ingress
+    # policies; whether they admit or refuse a client is the verdict under test.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-inference ingress NetworkPolicies
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: network-posture
+spec:
+  backoffLimit: 0
+  # Safety nets for a harness that dies mid-run: the listener is killed after
+  # 30 minutes and the Job is garbage-collected 10 minutes later.
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      annotations:
+        # Karpenter (EKS Auto Mode) must not consolidate or drift the node
+        # away mid-verdict: the answer is one pod's uninterrupted connection.
+        karpenter.sh/do-not-disrupt: "true"
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: network-posture
+        # Selected by allow-inference-proxy-ingress, allow-inference-internal
+        # and allow-rdma-bootstrap exactly like a model pod. Deliberately no
+        # ``project: gco`` or ``app`` label: the inference monitor adopts only
+        # pods carrying both, so it never treats this listener as its own.
+        gco.io/type: inference
+    spec:
+      restartPolicy: Never
+      # Prefer on-demand capacity, where no Spot reclaim can interrupt the
+      # verdict; any node still works, so scheduling never waits on it.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: karpenter.sh/capacity-type
+                    operator: In
+                    values: ["on-demand"]
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: listener
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+          imagePullPolicy: IfNotPresent
+          # Plain HTTP on the model port: the probes decide reachability at
+          # the network layer, and any HTTP answer is a connection admitted.
+          command:
+            - sh
+            - -c
+            - printf 'netpol-model-ready\n' > /www/index.html && exec httpd -f -p 8443 -h /www
+          ports:
+            - name: model
+              containerPort: 8443
+              protocol: TCP
+          # Loopback, not an httpGet from the kubelet: a node-originated probe
+          # would itself be subject to the policy under test.
+          readinessProbe:
+            exec:
+              command: ["wget", "-qO-", "-T", "2", "http://127.0.0.1:8443/"]
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: www
+              mountPath: /www
+      volumes:
+        - name: www
+          emptyDir:
+            sizeLimit: 1Mi

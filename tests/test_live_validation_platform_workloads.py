@@ -703,8 +703,14 @@ class TestAction:
             verified.append((region, kubectl))
             return {"converged": region}
 
+        def verify_pki(context: Any, region: str, kubectl: Any) -> dict[str, Any]:
+            # The PKI read rides the same tunnelled session, after the workloads.
+            assert verified[-1] == (region, kubectl)
+            return {"issued": region}
+
         monkeypatch.setattr(action_module, "cluster_kubectl", cluster_kubectl)
         monkeypatch.setattr(action_module, "verify_platform_workloads", verify)
+        monkeypatch.setattr(action_module, "verify_internal_pki", verify_pki)
 
         evidence = action_module.action_platform_workloads(ctx)
 
@@ -717,6 +723,10 @@ class TestAction:
             "regions": {
                 "us-east-1": {"converged": "us-east-1"},
                 "eu-west-1": {"converged": "eu-west-1"},
+            },
+            "internal_tls": {
+                "us-east-1": {"issued": "us-east-1"},
+                "eu-west-1": {"issued": "eu-west-1"},
             },
         }
 

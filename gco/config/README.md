@@ -14,7 +14,7 @@ GCO's [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stacks.
 
 `ConfigLoader` reads `cdk.json` context, merges documented defaults, validates
 cross-field constraints, and returns typed configuration for regions, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html),
-[API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html), private backend TLS, storage, analytics, observability, and
+[API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html), private backend TLS, storage, analytics, observability, tracing, and
 capacity history.
 
 ## Usage
@@ -41,4 +41,4 @@ CDK context.
 |------|-------------|
 | `__init__.py` | Exports the package's public configuration API. |
 | `accelerator_catalog.json` | Reviewed NVIDIA GPU and AWS Neuron instance catalog consumed by configuration and capacity validation. |
-| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed ACK and kro) is validated through the CDK-free `gco/eks_capabilities_config.py`, and the self-managed Argo CD block (`helm.argocd`) through `gco/argocd_config.py`; the CLI and live validation share both. |
+| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed ACK and kro) is validated through the CDK-free `gco/eks_capabilities_config.py`, and the self-managed Argo CD block (`helm.argocd`) through `gco/argocd_config.py`; the CLI and live validation share both. The `tracing` block and its run-scoped `tracing_overrides` context resolve through `resolve_tracing_config`, which the regional stack also calls. |

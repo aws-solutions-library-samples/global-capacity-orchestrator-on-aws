@@ -31,6 +31,7 @@
 | `tls-certificate-manager/` | Bootstraps the encrypted private root, rotates regional ACM leaves, publishes trust, and manages staged root rollover. |
 | `tls-shared/` | Canonical strict private-root TLS and SNI client shared by backend proxy packages. |
 | `traffic-dial-controller/` | Scheduled, health-driven Global Accelerator traffic-dial convergence with manual overrides and last-healthy-region protection. |
+| `transaction-search/` | Regional-stack custom resource that switches on [CloudWatch Transaction Search](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search.html) for the API services' X-Ray span export when it is not already on; Delete is a no-op because the setting is account-level and shared. |
 | `vector-ingest/` | S3-triggered chunking and Bedrock embedding pipeline for the optional DynamoDB global vector store. |
 
 ## Build
@@ -69,7 +70,8 @@ API Gateway → api-gateway-proxy (HMAC) → Global Accelerator (TCP/443 pass-th
 
 API Gateway → inference-streaming-proxy (HMAC, Node.js 24 response stream)
   → Global Accelerator or regional ALB (private-root TLS)
-  → inference-proxy Service → model endpoint Service → streamed response
+  → inference-proxy Service → model endpoint Service (HTTPS 8443, internal CA)
+  → streamed response
 
 Global API → cross-region-aggregator → regional API (AWS TLS + SigV4)
   → regional-api-proxy (HMAC) → regional ALB (private-root TLS) → EKS pod
@@ -77,6 +79,7 @@ Global API → cross-region-aggregator → regional API (AWS TLS + SigV4)
 CDK Deploy → kubectl-applier-simple → EKS (applies manifests)
            → helm-orchestrator → Step Functions → helm-installer → EKS (installs Helm charts)
            → ga-registration → Global Accelerator (registers endpoints)
+           → transaction-search → X-Ray trace segment destination (CloudWatch Logs)
 
 Scheduled → secret-rotation → HMAC secret
           → tls-certificate-manager → stable regional ACM certificate ARNs

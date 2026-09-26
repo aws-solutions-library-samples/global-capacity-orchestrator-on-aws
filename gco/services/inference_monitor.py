@@ -9,6 +9,8 @@ Kubernetes resources. Follows a GitOps-style reconciliation pattern:
 
 The monitor:
 - Creates and reconciles Deployments, ClusterIP Services, and optional autoscalers
+- Terminates in-cluster TLS in an ``endpoint-tls-proxy`` sidecar in every model
+  pod; model Services publish only that sidecar's port 8443
 - Leaves public routing on the shared ``gco-system/gco-gateway`` HTTPRoute:
   ``/inference`` -> ``gco-system/inference-proxy``
 - Removes legacy endpoint-specific Ingresses so upgrades cannot retain a bypass
@@ -23,11 +25,15 @@ Environment Variables:
     INFERENCE_ENDPOINTS_TABLE_NAME: DynamoDB table name
     RECONCILE_INTERVAL_SECONDS: Seconds between reconciliation loops (default: 15)
     INFERENCE_NAMESPACE: Namespace for inference workloads (default: gco-inference)
+    ENDPOINT_TLS_PROXY_IMAGE: Image for the model pods' TLS sidecar (default: the
+        pinned multi-arch ``ENDPOINT_TLS_PROXY_IMAGE`` constant)
+    METRICS_HOST / METRICS_PORT: Prometheus listener (default: 0.0.0.0:9090)
 """
 
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +42,7 @@ import secrets
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -363,6 +369,89 @@ PD_PROXY_SCRIPT_PATH = f"{PD_PROXY_CONFIG_MOUNT_DIR}/{PD_PROXY_SCRIPT_FILENAME}"
 PD_PROXY_PORT_ENV = "PD_PROXY_PORT"
 PD_PROXY_PREFILL_URL_ENV = "PD_PROXY_PREFILL_URL"
 PD_PROXY_DECODE_URL_ENV = "PD_PROXY_DECODE_URL"
+
+# The router binds pod loopback, so the only way into it from the pod network
+# is the pod's own TLS sidecar: nothing else in the namespace can reach it in
+# plaintext, and it needs no NetworkPolicy of its own to stay that way.
+PD_PROXY_HOST_ENV = "PD_PROXY_HOST"
+PD_PROXY_BIND_HOST = "127.0.0.1"
+
+# The router verifies the prefill and decode Services against the GCO internal
+# CA alone. cert-manager writes the issuing CA into every leaf Secret it signs,
+# so the CA certificate is projected, on its own, from the endpoint wildcard
+# Secret into a separate read-only volume: the router container never mounts a
+# private key. The path matches ``internal_tls.DEFAULT_INTERNAL_CA_FILE``, the
+# convention every GCO in-cluster client follows.
+PD_PROXY_CA_FILE_ENV = "PD_PROXY_CA_FILE"
+INTERNAL_CA_VOLUME = "internal-ca"
+INTERNAL_CA_KEY = "ca.crt"
+INTERNAL_CA_MOUNT_DIR = "/var/run/gco/ca"
+PD_PROXY_CA_FILE = f"{INTERNAL_CA_MOUNT_DIR}/{INTERNAL_CA_KEY}"
+
+# --- Endpoint TLS sidecar ----------------------------------------------------
+#
+# Every managed model pod (classic, canary, prefill, decode, store, and the PD
+# proxy) carries an ``endpoint-tls-proxy`` sidecar that serves the
+# ``gco-inference`` wildcard certificate on ENDPOINT_TLS_PORT and forwards the
+# decrypted bytes to the pod's own server over loopback. Model Services publish
+# only that port, so the inference proxy and the PD proxy reach a model solely
+# over verified HTTPS, while the model server keeps its bind address, port, and
+# probes: KV-transfer side channels and the kubelet still depend on them.
+ENDPOINT_TLS_PROXY_CONTAINER = "endpoint-tls-proxy"
+ENDPOINT_TLS_PORT = 8443
+ENDPOINT_TLS_PORT_NAME = "https"
+ENDPOINT_TLS_SECRET = "gco-inference-tls"  # nosec B105  # Kubernetes Secret name, not a credential
+ENDPOINT_TLS_VOLUME = "endpoint-tls"
+ENDPOINT_TLS_MOUNT_DIR = "/var/run/gco/tls"
+
+# The sidecar runs the stdlib-only gco/services/tls_proxy.py source, shipped to
+# the pod in a per-endpoint ``{name}-tls-proxy`` ConfigMap exactly like the PD
+# proxy program. GCO's service images are linux/amd64 only, while managed model
+# pods also land on arm64 (Graviton GPU) nodes, so the sidecar cannot reuse a
+# service image; a plain multi-arch interpreter image plus the shipped source
+# runs identically on both.
+ENDPOINT_TLS_PROXY_SCRIPT_FILENAME = "tls_proxy.py"
+ENDPOINT_TLS_PROXY_SCRIPT_VOLUME = "endpoint-tls-proxy-script"
+ENDPOINT_TLS_PROXY_CONFIG_MOUNT_DIR = "/etc/gco-tls-proxy"
+ENDPOINT_TLS_PROXY_SCRIPT_PATH = (
+    f"{ENDPOINT_TLS_PROXY_CONFIG_MOUNT_DIR}/{ENDPOINT_TLS_PROXY_SCRIPT_FILENAME}"
+)
+
+# Official Docker Library Python image (ECR Public mirror) for that sidecar.
+# Keep the readable release tag and immutable OCI image-index digest together:
+# both amd64 and arm64 model nodes resolve through this single verified index.
+# The minor version must satisfy tls_proxy.py (it uses Python 3.14 syntax).
+ENDPOINT_TLS_PROXY_IMAGE = (
+    "public.ecr.aws/docker/library/python:3.14.7-slim@"
+    "sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d"
+)
+ENDPOINT_TLS_PROXY_IMAGE_ENV = "ENDPOINT_TLS_PROXY_IMAGE"
+
+# The image defaults to root and the sidecar needs no identity or writable
+# path, so it runs as a fixed unprivileged UID. The Secret and ConfigMap
+# volumes are world-readable (0444) because model pods carry no fsGroup: GCO
+# does not own the model image's users.
+ENDPOINT_TLS_PROXY_UID = 65532
+
+# Model pods stop within the Kubernetes default grace period, stated explicitly
+# so the sidecar's drain budget is derived from it: the sidecar and the model
+# server receive SIGTERM together, and the sidecar keeps relaying accepted
+# streams for ENDPOINT_TLS_PROXY_DRAIN_SECONDS, then exits before the kubelet's
+# SIGKILL. No preStop sleep: the model server stops accepting at SIGTERM too, so
+# holding the TLS listener open longer would only accept doomed connections.
+MODEL_POD_TERMINATION_GRACE_SECONDS = 30
+ENDPOINT_TLS_PROXY_DRAIN_SECONDS = MODEL_POD_TERMINATION_GRACE_SECONDS - 5
+
+# The pods' service account carries IRSA / Pod Identity credentials; the
+# sidecar needs none, so the credential webhook is told to skip it.
+SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
+
+# Digest of the rendered sidecar and its volumes, stamped on the pod template.
+# Reconcile patches a Deployment in place only when the digest differs, which
+# is how endpoints created before the sidecar existed pick it up, and how an
+# image override or model-port change reaches running pods without rewriting
+# unchanged templates on every pass.
+ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
 
 @dataclass
@@ -734,8 +823,8 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
     - add an ``efa=true`` node selector plus a ``mooncake-efa=true`` node
       selector (merged with any existing selectors), and
     - request at least one ``vpc.amazonaws.com/efa`` device on the pod's
-      containers, leaving every existing resource request and limit — including
-      GPU asks — untouched.
+      workload containers (never the TLS sidecar), leaving every existing
+      resource request and limit — including GPU asks — untouched.
 
     The ``mooncake-efa=true`` selector pins the pod to the dedicated
     ``mooncake-efa-pool`` NodePool, which only offers instance families with
@@ -787,9 +876,14 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
 
     # Request at least one EFA device, preserving existing requests and limits
     # (notably the GPU asks). Apply to containers that already request an
-    # accelerator; if none do, apply to every container so the pod still asks
-    # for the fabric it needs.
-    containers = pod_spec.containers or []
+    # accelerator; if none do, apply to every workload container so the pod
+    # still asks for the fabric it needs. The TLS sidecar only relays HTTPS over
+    # loopback and never takes a device.
+    containers = [
+        container
+        for container in pod_spec.containers or []
+        if getattr(container, "name", None) != ENDPOINT_TLS_PROXY_CONTAINER
+    ]
     accelerator_keys = ("nvidia.com/gpu", "aws.amazon.com/neuron")
 
     def _requests_accelerator(container: client.V1Container) -> bool:
@@ -859,6 +953,290 @@ def build_pd_proxy_config(mooncake: dict[str, Any]) -> dict[str, str]:
         PD_PROXY_SCHEDULING_ENV: scheduling,
         PD_PROXY_STORE_ADDRESS_ENV: store_address,
     }
+
+
+def _role_service_url(name: str, ns: str, role: str) -> str:
+    """Return the verified-HTTPS URL the PD proxy uses for one role Service.
+
+    The fully qualified Service name is what the ``gco-inference`` wildcard
+    certificate covers, so hostname verification in the router succeeds
+    against exactly the name it dials.
+    """
+    return f"https://{name}-{role}.{ns}.svc.cluster.local:{ENDPOINT_TLS_PORT}"
+
+
+def _tls_proxy_config_map_name(name: str) -> str:
+    """Name of the per-endpoint ConfigMap carrying the TLS sidecar program."""
+    return f"{name}-tls-proxy"
+
+
+def _endpoint_tls_proxy_image() -> str:
+    """Return the TLS sidecar image: the env override or the pinned default."""
+    override = os.environ.get(ENDPOINT_TLS_PROXY_IMAGE_ENV, "").strip()
+    return override or ENDPOINT_TLS_PROXY_IMAGE
+
+
+def _merge_skip_containers(existing: object) -> str:
+    """Add the TLS sidecar to an ``eks.amazonaws.com/skip-containers`` value.
+
+    The annotation is a comma-separated container list; entries already present
+    (including the sidecar itself) are kept in order so the merge is idempotent.
+    """
+    names = [part.strip() for part in existing.split(",")] if isinstance(existing, str) else []
+    merged = [part for part in names if part]
+    if ENDPOINT_TLS_PROXY_CONTAINER not in merged:
+        merged.append(ENDPOINT_TLS_PROXY_CONTAINER)
+    return ",".join(merged)
+
+
+def _reject_tls_port_collision(port: object) -> None:
+    """Refuse a model port that would collide with the TLS sidecar listener.
+
+    The sidecar and the model server share the pod's network namespace, so a
+    model server on ENDPOINT_TLS_PORT could never start alongside it. Failing
+    the render names the conflict instead of leaving a crash-looping pod.
+    """
+    if port == ENDPOINT_TLS_PORT:
+        raise ValueError(
+            f"endpoint port {ENDPOINT_TLS_PORT} is reserved for the model pod's TLS sidecar; "
+            "serve the model on a different spec.port"
+        )
+
+
+def _reject_bootstrap_window_collision(base_port: int) -> None:
+    """Refuse a KV-transfer bootstrap window that contains the TLS sidecar port.
+
+    Mooncake workers bind ``base_port + dp_rank * tp_size + tp_rank``, anywhere
+    in the inclusive window the ``allow-rdma-bootstrap`` rule opens
+    (``base_port`` through ``base_port + MOONCAKE_BOOTSTRAP_PORT_SPAN``). A
+    worker landing on ENDPOINT_TLS_PORT would collide with the sidecar in the
+    shared pod network namespace, so the render names the conflict instead.
+    """
+    if base_port <= ENDPOINT_TLS_PORT <= base_port + MOONCAKE_BOOTSTRAP_PORT_SPAN:
+        lowest_clash = ENDPOINT_TLS_PORT - MOONCAKE_BOOTSTRAP_PORT_SPAN
+        raise ValueError(
+            f"mooncake.transfer.bootstrap_base_port {base_port} opens the KV-transfer "
+            f"bootstrap window {base_port}-{base_port + MOONCAKE_BOOTSTRAP_PORT_SPAN}, which "
+            f"contains port {ENDPOINT_TLS_PORT}, reserved for the model pod's TLS sidecar; "
+            f"choose a base port outside {lowest_clash}-{ENDPOINT_TLS_PORT}"
+        )
+
+
+@dataclass(frozen=True)
+class EndpointTLSProxy:
+    """The TLS sidecar a managed model pod carries, with its volumes and digest."""
+
+    container: client.V1Container
+    volumes: tuple[client.V1Volume, ...]
+    digest: str
+
+
+def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> EndpointTLSProxy:
+    """Render the ``endpoint-tls-proxy`` sidecar for one model pod.
+
+    The sidecar serves the ``gco-inference-tls`` wildcard keypair on
+    ENDPOINT_TLS_PORT and relays to ``127.0.0.1:upstream_port`` (the model
+    server, or the PD router). It runs ``tls_proxy.py`` from the endpoint's
+    ConfigMap on the pinned multi-arch Python image as a fixed unprivileged
+    UID with a read-only root filesystem and no capabilities. Its probes are
+    socket checks against its own listener only, so a slow model never restarts
+    the sidecar and a sidecar fault never restarts the model. It requests a
+    little CPU and memory (autoscaler Resource metrics need a request on every
+    container) and is memory-limited but not CPU-limited, so CFS throttling
+    never adds latency to streamed tokens.
+
+    The digest covers everything rendered here plus the pod grace period, so a
+    changed image, upstream port, or sidecar shape is detected on existing
+    Deployments; the program's source is deliberately excluded (see
+    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`).
+    """
+    container = client.V1Container(
+        name=ENDPOINT_TLS_PROXY_CONTAINER,
+        image=_endpoint_tls_proxy_image(),
+        image_pull_policy="IfNotPresent",
+        command=["python3", ENDPOINT_TLS_PROXY_SCRIPT_PATH],
+        env=[
+            # The root filesystem is read-only; never try to write bytecode.
+            client.V1EnvVar(name="PYTHONDONTWRITEBYTECODE", value="1"),
+            client.V1EnvVar(name="TLS_PROXY_PORT", value=str(ENDPOINT_TLS_PORT)),
+            client.V1EnvVar(name="TLS_PROXY_UPSTREAM_HOST", value="127.0.0.1"),
+            client.V1EnvVar(name="TLS_PROXY_UPSTREAM_PORT", value=str(upstream_port)),
+            client.V1EnvVar(name="GCO_TLS_CERT_FILE", value=f"{ENDPOINT_TLS_MOUNT_DIR}/tls.crt"),
+            client.V1EnvVar(name="GCO_TLS_KEY_FILE", value=f"{ENDPOINT_TLS_MOUNT_DIR}/tls.key"),
+            client.V1EnvVar(
+                name="GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+                value=str(ENDPOINT_TLS_PROXY_DRAIN_SECONDS),
+            ),
+        ],
+        ports=[
+            client.V1ContainerPort(
+                name=ENDPOINT_TLS_PORT_NAME,
+                container_port=ENDPOINT_TLS_PORT,
+                protocol="TCP",
+            )
+        ],
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": "50m", "memory": "64Mi"},
+            limits={"memory": "256Mi"},
+        ),
+        security_context=client.V1SecurityContext(
+            allow_privilege_escalation=False,
+            capabilities=client.V1Capabilities(drop=["ALL"]),
+            privileged=False,
+            read_only_root_filesystem=True,
+            run_as_non_root=True,
+            run_as_user=ENDPOINT_TLS_PROXY_UID,
+            run_as_group=ENDPOINT_TLS_PROXY_UID,
+            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
+        ),
+        readiness_probe=client.V1Probe(
+            tcp_socket=client.V1TCPSocketAction(port=ENDPOINT_TLS_PORT_NAME),
+            period_seconds=5,
+            timeout_seconds=3,
+            failure_threshold=3,
+        ),
+        liveness_probe=client.V1Probe(
+            tcp_socket=client.V1TCPSocketAction(port=ENDPOINT_TLS_PORT_NAME),
+            initial_delay_seconds=10,
+            period_seconds=15,
+            timeout_seconds=5,
+            failure_threshold=4,
+        ),
+        volume_mounts=[
+            client.V1VolumeMount(
+                name=ENDPOINT_TLS_VOLUME,
+                mount_path=ENDPOINT_TLS_MOUNT_DIR,
+                read_only=True,
+            ),
+            client.V1VolumeMount(
+                name=ENDPOINT_TLS_PROXY_SCRIPT_VOLUME,
+                mount_path=ENDPOINT_TLS_PROXY_CONFIG_MOUNT_DIR,
+                read_only=True,
+            ),
+        ],
+    )
+    volumes = (
+        client.V1Volume(
+            name=ENDPOINT_TLS_VOLUME,
+            secret=client.V1SecretVolumeSource(
+                secret_name=ENDPOINT_TLS_SECRET,
+                default_mode=0o444,
+            ),
+        ),
+        client.V1Volume(
+            name=ENDPOINT_TLS_PROXY_SCRIPT_VOLUME,
+            config_map=client.V1ConfigMapVolumeSource(
+                name=config_map_name,
+                default_mode=0o444,
+            ),
+        ),
+    )
+    rendered = {
+        "container": container.to_dict(),
+        "volumes": [volume.to_dict() for volume in volumes],
+        "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+    }
+    digest = hashlib.sha256(
+        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return EndpointTLSProxy(container=container, volumes=volumes, digest=digest)
+
+
+def _endpoint_tls_pod_annotations(
+    existing: Mapping[str, str] | None, sidecar: EndpointTLSProxy
+) -> dict[str, str]:
+    """Pod-template annotations for a model pod carrying the TLS sidecar."""
+    annotations = dict(existing or {})
+    annotations[SKIP_CONTAINERS_ANNOTATION] = _merge_skip_containers(
+        annotations.get(SKIP_CONTAINERS_ANNOTATION)
+    )
+    annotations[ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] = sidecar.digest
+    return annotations
+
+
+def _endpoint_service_ports() -> list[client.V1ServicePort]:
+    """The only port a model Service publishes: the pods' TLS sidecar."""
+    return [
+        client.V1ServicePort(
+            name=ENDPOINT_TLS_PORT_NAME,
+            port=ENDPOINT_TLS_PORT,
+            target_port=ENDPOINT_TLS_PORT_NAME,
+            protocol="TCP",
+        )
+    ]
+
+
+def _service_publishes_only_tls(service: Any) -> bool:
+    """Whether a live Service already exposes exactly the TLS sidecar port."""
+    ports = getattr(getattr(service, "spec", None), "ports", None)
+    if not isinstance(ports, list) or len(ports) != 1:
+        return False
+    [port] = ports
+    return (
+        getattr(port, "port", None) == ENDPOINT_TLS_PORT
+        and getattr(port, "name", None) == ENDPOINT_TLS_PORT_NAME
+        and getattr(port, "target_port", None) == ENDPOINT_TLS_PORT_NAME
+        and (getattr(port, "protocol", None) or "TCP") == "TCP"
+    )
+
+
+def _model_server_port(containers: list[Any], fallback: int) -> int:
+    """Return the port the live model container serves on, else ``fallback``.
+
+    In-place reconciliation reads the port from the running template rather
+    than the spec: only the image and replica count of an existing Deployment
+    are reconciled, so the model keeps listening where it was created, and the
+    sidecar must forward there.
+    """
+    for container in containers:
+        if getattr(container, "name", None) != "inference":
+            continue
+        ports = getattr(container, "ports", None)
+        for port in ports if isinstance(ports, list) else []:
+            value = getattr(port, "container_port", None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return fallback
+
+
+def _pd_proxy_health_probe(*, liveness: bool) -> client.V1Probe:
+    """Exec probe for the PD router, which listens on pod loopback only.
+
+    The kubelet dials probes at the pod IP, so neither an httpGet nor a
+    tcpSocket check can reach a loopback listener. An exec probe checks the
+    router process itself; probing through the TLS sidecar instead would let
+    a sidecar fault restart a healthy router (the sidecar has its own probes).
+    It follows the repo's lean exec-probe shape: an isolated interpreter
+    without ``site`` and a bare-socket request instead of ``urllib``, with
+    every socket wait bounded below the probe timeout. The router image ships
+    ``python3`` (not ``python``), the same interpreter the pod already runs.
+    """
+    command = [
+        "python3",
+        "-I",
+        "-S",
+        "-c",
+        "import socket,sys;"
+        f"s=socket.create_connection(('127.0.0.1',{PD_PROXY_PORT}),3);"
+        "s.settimeout(3);"
+        "s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n');"
+        "sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)",
+    ]
+    if liveness:
+        return client.V1Probe(
+            _exec=client.V1ExecAction(command=command),
+            initial_delay_seconds=30,
+            period_seconds=15,
+            timeout_seconds=10,
+            failure_threshold=5,
+        )
+    return client.V1Probe(
+        _exec=client.V1ExecAction(command=command),
+        initial_delay_seconds=10,
+        period_seconds=10,
+        timeout_seconds=5,
+        failure_threshold=3,
+    )
 
 
 class InferenceMonitor:
@@ -1848,6 +2226,7 @@ class InferenceMonitor:
                 }
 
             logger.info("Creating endpoint %s in %s", name, self.region)
+            self._ensure_tls_proxy_configmap(name, namespace)
             self._create_deployment(name, namespace, spec)
             self._create_service(name, namespace, spec)
             if autoscaling_enabled:
@@ -1868,8 +2247,20 @@ class InferenceMonitor:
         # Deployment exists — ensure its Service exists. Public traffic follows
         # ``gco-system/gco-gateway``'s shared ``/inference`` HTTPRoute to
         # ``gco-system/inference-proxy``, which then reaches this endpoint's
-        # ClusterIP Service.
+        # ClusterIP Service on its TLS sidecar port.
         self._ensure_service(name, namespace, spec)
+
+        # Endpoints created before the TLS sidecar existed gain it here, in
+        # place; the resulting rollout is observed through ready replicas like
+        # any other template change, so the pass carries on.
+        self._ensure_tls_proxy_configmap(name, namespace)
+        self._converge_endpoint_tls_proxy(
+            name,
+            namespace,
+            deployment,
+            config_map_name=_tls_proxy_config_map_name(name),
+            fallback_port=spec.get("port", 8000),
+        )
 
         # Once enabled, HPA/KEDA is the sole owner of Deployment
         # ``spec.replicas``; the static endpoint count must never fight it.
@@ -2148,6 +2539,16 @@ class InferenceMonitor:
             self._create_role_deployment(name, ns, spec, role)
             return 0, desired, False
 
+        # Role Deployments created before the TLS sidecar existed gain it in
+        # place (the PD proxy and kube-proxy only reach the role through it).
+        self._converge_endpoint_tls_proxy(
+            deploy_name,
+            ns,
+            deployment,
+            config_map_name=_tls_proxy_config_map_name(name),
+            fallback_port=spec.get("port", 8000),
+        )
+
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)
         autoscaled = (
@@ -2364,9 +2765,11 @@ class InferenceMonitor:
                     "deferred": "master_not_ready",
                 }
 
-        # Step 4: shared transport ConfigMap, applied once before role pods.
+        # Step 4: shared transport ConfigMap, applied once before role pods,
+        # together with the TLS sidecar program every role and proxy pod runs.
         cfg = render_mooncake_config(mooncake, region_services)
         self._ensure_mooncake_configmap(name, ns, cfg)
+        self._ensure_tls_proxy_configmap(name, ns)
 
         # Steps 5-6: converge ownership before creating/scaling any role
         # Deployment. This is the same recreate/handoff barrier used by classic
@@ -2475,10 +2878,10 @@ class InferenceMonitor:
             # Per-role Services so the proxy can address prefill and decode by
             # stable in-cluster DNS. Routing through a Service means kube-proxy
             # load-balances across only the Ready pods of each role, which is
-            # what gives the proxy ready-only decode routing for free.
-            role_port = spec.get("port", 8000)
+            # what gives the proxy ready-only decode routing for free. Each
+            # Service publishes only its pods' TLS sidecar port.
             for role in desired_roles:
-                self._create_role_service(name, ns, role, role_port)
+                self._create_role_service(name, ns, role)
             try:
                 self._create_pd_proxy(name, ns, spec, endpoint)
             except AdminApiKeySecretError as e:
@@ -3427,8 +3830,20 @@ class InferenceMonitor:
                 )
                 raise NetworkPolicyApplyError(rule_name, e.reason or str(e)) from e
 
-    def _create_deployment(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
-        """Create a Kubernetes Deployment for an inference endpoint."""
+    def _create_deployment(
+        self,
+        name: str,
+        namespace: str,
+        spec: dict[str, Any],
+        *,
+        tls_proxy_config_map: str | None = None,
+    ) -> None:
+        """Create a Kubernetes Deployment for an inference endpoint.
+
+        ``tls_proxy_config_map`` names the ConfigMap carrying the TLS sidecar
+        program when it is not ``name``'s own: a canary Deployment shares its
+        endpoint's ConfigMap.
+        """
         replicas = spec.get("replicas", 1)
         deployment = self._build_inference_deployment_object(
             name=name,
@@ -3437,6 +3852,7 @@ class InferenceMonitor:
             namespace=namespace,
             spec=spec,
             replicas=replicas,
+            tls_proxy_config_map=tls_proxy_config_map,
         )
         self._assert_mutation_authority()
         self.apps_v1.create_namespaced_deployment(
@@ -3470,6 +3886,8 @@ class InferenceMonitor:
         replicas: int,
         extra_args: list[str] | None = None,
         extra_labels: dict[str, str] | None = None,
+        *,
+        tls_proxy_config_map: str | None = None,
     ) -> client.V1Deployment:
         """Build the ``V1Deployment`` object for an inference workload.
 
@@ -3481,9 +3899,14 @@ class InferenceMonitor:
         container args (for example the rendered ``--kv-transfer-config``), and
         ``extra_labels`` are merged into both the Deployment and pod-template
         labels so role pods carry a stable role marker.
+
+        The pod always carries the ``endpoint-tls-proxy`` sidecar after the
+        model container, fronting the model's own port; its program comes from
+        ``tls_proxy_config_map`` (default: ``name``'s ``{name}-tls-proxy``).
         """
         image = self._resolve_image_for_region(spec)
         port = spec.get("port", 8000)
+        _reject_tls_port_collision(port)
         gpu_count = spec.get("gpu_count", 1)
         health_path = spec.get("health_check_path", "/health")
         env_vars = spec.get("env", {})
@@ -3618,6 +4041,7 @@ class InferenceMonitor:
                 base_port = int(base_port)
             except TypeError, ValueError:
                 base_port = MOONCAKE_BOOTSTRAP_BASE_PORT
+            _reject_bootstrap_window_collision(base_port)
             container_env.append(
                 client.V1EnvVar(name=MOONCAKE_CONFIG_PATH_ENV, value=MOONCAKE_CONFIG_FILE_PATH)
             )
@@ -3765,6 +4189,12 @@ class InferenceMonitor:
         if extra_labels:
             labels.update(extra_labels)
 
+        # The model container stays first: image reconciliation and every
+        # consumer that reads ``containers[0]`` address the model server.
+        sidecar = build_endpoint_tls_proxy(
+            port, tls_proxy_config_map or _tls_proxy_config_map_name(name)
+        )
+
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
@@ -3780,17 +4210,20 @@ class InferenceMonitor:
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
                         labels=dict(labels),
-                        annotations=self._provenance_annotations(),
+                        annotations=_endpoint_tls_pod_annotations(
+                            self._provenance_annotations(), sidecar
+                        ),
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
                         automount_service_account_token=False,
-                        containers=[container],
+                        termination_grace_period_seconds=MODEL_POD_TERMINATION_GRACE_SECONDS,
+                        containers=[container, sidecar.container],
                         init_containers=init_containers if init_containers else None,
                         tolerations=tolerations,
                         node_selector=node_selector if node_selector else None,
                         affinity=affinity,
-                        volumes=volumes if volumes else None,
+                        volumes=[*volumes, *sidecar.volumes],
                     ),
                 ),
             ),
@@ -4144,6 +4577,12 @@ class InferenceMonitor:
         platform proxy then reaches this internal ClusterIP Service.
         Endpoint-specific Ingresses are removed as an unsafe legacy path.
 
+        Every hop is verified HTTPS: the router binds pod loopback behind the
+        pod's ``endpoint-tls-proxy`` sidecar (the Service publishes only that
+        sidecar's port), and dials the role Services' sidecars by their fully
+        qualified names, trusting only the GCO internal CA projected from the
+        endpoint wildcard Secret.
+
         Before those resources are created, a user-named
         ``mooncake.proxy.admin_api_key_secret`` is verified to contain a usable
         ``ADMIN_API_KEY``. When no Secret is named, the monitor auto-provisions
@@ -4152,9 +4591,11 @@ class InferenceMonitor:
         a Secret reference at pod start and is never written to the spec or a
         command argument.
 
-        Creation is idempotent at the API boundary: an already-present Deployment
-        or ClusterIP Service is left in place, and historical direct Ingresses are
-        deleted if present. No endpoint Gateway or HTTPRoute is created.
+        Creation is idempotent at the API boundary: an already-present
+        Deployment is merge-patched to the desired shape and an already-present
+        ClusterIP Service is moved to the TLS port if it predates it, while
+        historical direct Ingresses are deleted if present. No endpoint Gateway
+        or HTTPRoute is created.
 
         Args:
             name: The endpoint name.
@@ -4221,16 +4662,21 @@ class InferenceMonitor:
         }
 
         # The proxy reaches prefill and decode through their per-role Services
-        # and listens on PD_PROXY_PORT for requests from the authenticated API
-        # proxy. Routing via Services means only Ready role pods receive traffic.
-        port = spec.get("port", 8000)
+        # over verified HTTPS (their TLS sidecars, trusting only the GCO
+        # internal CA) and listens on loopback PD_PROXY_PORT behind its own
+        # sidecar for requests from the authenticated API proxy. Routing via
+        # Services means only Ready role pods receive traffic.
         container_env.extend(
             [
+                client.V1EnvVar(name=PD_PROXY_HOST_ENV, value=PD_PROXY_BIND_HOST),
                 client.V1EnvVar(name=PD_PROXY_PORT_ENV, value=str(PD_PROXY_PORT)),
                 client.V1EnvVar(
-                    name=PD_PROXY_PREFILL_URL_ENV, value=f"http://{name}-prefill:{port}"
+                    name=PD_PROXY_PREFILL_URL_ENV, value=_role_service_url(name, ns, "prefill")
                 ),
-                client.V1EnvVar(name=PD_PROXY_DECODE_URL_ENV, value=f"http://{name}-decode:{port}"),
+                client.V1EnvVar(
+                    name=PD_PROXY_DECODE_URL_ENV, value=_role_service_url(name, ns, "decode")
+                ),
+                client.V1EnvVar(name=PD_PROXY_CA_FILE_ENV, value=PD_PROXY_CA_FILE),
             ]
         )
 
@@ -4253,20 +4699,17 @@ class InferenceMonitor:
                     name=proxy_volume_name,
                     mount_path=PD_PROXY_CONFIG_MOUNT_DIR,
                     read_only=True,
-                )
+                ),
+                client.V1VolumeMount(
+                    name=INTERNAL_CA_VOLUME,
+                    mount_path=INTERNAL_CA_MOUNT_DIR,
+                    read_only=True,
+                ),
             ],
-            readiness_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=PD_PROXY_PORT),
-                initial_delay_seconds=10,
-                period_seconds=10,
-            ),
-            liveness_probe=client.V1Probe(
-                tcp_socket=client.V1TCPSocketAction(port=PD_PROXY_PORT),
-                initial_delay_seconds=30,
-                period_seconds=15,
-                failure_threshold=5,
-            ),
+            readiness_probe=_pd_proxy_health_probe(liveness=False),
+            liveness_probe=_pd_proxy_health_probe(liveness=True),
         )
+        sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, _tls_proxy_config_map_name(name))
 
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
@@ -4281,12 +4724,15 @@ class InferenceMonitor:
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
                         labels=dict(labels),
-                        annotations=self._provenance_annotations(),
+                        annotations=_endpoint_tls_pod_annotations(
+                            self._provenance_annotations(), sidecar
+                        ),
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
                         automount_service_account_token=False,
-                        containers=[container],
+                        termination_grace_period_seconds=MODEL_POD_TERMINATION_GRACE_SECONDS,
+                        containers=[container, sidecar.container],
                         volumes=[
                             client.V1Volume(
                                 name=proxy_volume_name,
@@ -4294,7 +4740,23 @@ class InferenceMonitor:
                                     name=f"{name}-pd-proxy",
                                     default_mode=0o555,
                                 ),
-                            )
+                            ),
+                            # A separate projection of only the CA certificate
+                            # from the wildcard Secret the sidecar mounts whole.
+                            client.V1Volume(
+                                name=INTERNAL_CA_VOLUME,
+                                secret=client.V1SecretVolumeSource(
+                                    secret_name=ENDPOINT_TLS_SECRET,
+                                    items=[
+                                        client.V1KeyToPath(
+                                            key=INTERNAL_CA_KEY,
+                                            path=INTERNAL_CA_KEY,
+                                        )
+                                    ],
+                                    default_mode=0o444,
+                                ),
+                            ),
+                            *sidecar.volumes,
                         ],
                     ),
                 ),
@@ -4334,10 +4796,16 @@ class InferenceMonitor:
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
             deployment.metadata.resource_version = resource_version
             self._assert_mutation_authority()
+            # A JSON merge patch replaces the containers and volumes lists
+            # wholesale (a strategic merge would key them by name and merge each
+            # entry, keeping a stale tcpSocket beside the new exec handler,
+            # which the API rejects). Maps still merge, so annotations such as
+            # a rollout-restart stamp survive.
             self.apps_v1.patch_namespaced_deployment(
                 proxy_name,
                 ns,
                 body=deployment,
+                _content_type="application/merge-patch+json",
                 _request_timeout=self._k8s_timeout,
             )
             logger.info("Reconciled proxy deployment %s/%s", ns, proxy_name)
@@ -4369,6 +4837,39 @@ class InferenceMonitor:
             ),
         )
 
+    def _converge_service_ports(self, name: str, namespace: str, service: Any) -> bool:
+        """Move an authorized Service that predates the TLS sidecar onto it.
+
+        A Service created before the sidecar existed publishes plain HTTP (port
+        80 or 8000 straight to the model). It is patched in place, so its
+        ClusterIP and DNS name never change, to publish only the sidecar port.
+        A JSON merge patch replaces the whole ``ports`` list: a strategic merge
+        keys ports by number and would keep the old unnamed port beside the new
+        one, which the API rejects (a multi-port Service must name every port).
+        The observed resourceVersion makes the patch a compare-and-swap.
+
+        Returns:
+            ``True`` when the Service was patched.
+        """
+        if _service_publishes_only_tls(service):
+            return False
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(service)
+        body: dict[str, Any] = {"spec": {"ports": _endpoint_service_ports()}}
+        if resource_version:
+            body["metadata"] = {"resourceVersion": resource_version}
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_service(
+            name,
+            namespace,
+            body=body,
+            _content_type="application/merge-patch+json",
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info(
+            "Moved service %s/%s to the TLS sidecar port %d", namespace, name, ENDPOINT_TLS_PORT
+        )
+        return True
+
     def _create_role_service(self, name: str, ns: str, role: str, port: int = 8000) -> None:
         """Create the ClusterIP Service that fronts one role's pods.
 
@@ -4377,8 +4878,15 @@ class InferenceMonitor:
         Routing through a Service means kube-proxy load-balances across only the
         role's Ready pods, which is what gives the proxy ready-only decode
         routing without watching the Kubernetes API. Idempotent at the API
-        boundary: an already-present Service is left in place.
+        boundary: an already-present Service is kept and moved onto the TLS
+        port if it predates it.
+
+        The Service publishes only the role pods' TLS sidecar port. ``port`` is
+        the role pods' model-server port, which the Service deliberately no
+        longer exposes (the sidecar forwards to it over pod loopback); it is
+        accepted and ignored so existing callers keep their signature.
         """
+        del port
         deploy_name = f"{name}-{role}"
         service = client.V1Service(
             metadata=client.V1ObjectMeta(
@@ -4394,7 +4902,7 @@ class InferenceMonitor:
             ),
             spec=client.V1ServiceSpec(
                 selector=_inference_service_selector(deploy_name),
-                ports=[client.V1ServicePort(port=port, target_port=port, protocol="TCP")],
+                ports=_endpoint_service_ports(),
                 type="ClusterIP",
             ),
         )
@@ -4421,7 +4929,8 @@ class InferenceMonitor:
         except ApiException as error:
             if error.status != 409:
                 raise
-            self._authorize_existing_service(deploy_name, ns)
+            existing = self._authorize_existing_service(deploy_name, ns)
+            self._converge_service_ports(deploy_name, ns, existing)
             logger.info("Role service %s/%s already exists", ns, deploy_name)
 
     def _ensure_pd_proxy_configmap(self, name: str, ns: str) -> None:
@@ -4505,12 +5014,185 @@ class InferenceMonitor:
             )
             logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
 
+    def _ensure_tls_proxy_configmap(self, name: str, ns: str) -> None:
+        """Publish the TLS sidecar program for every pod of one endpoint.
+
+        ``gco/services/tls_proxy.py`` ships in this image; its source is read
+        here on every call (never copied) and published as the endpoint's
+        ``{name}-tls-proxy`` ConfigMap, which each of the endpoint's model pods
+        mounts at ``ENDPOINT_TLS_PROXY_CONFIG_MOUNT_DIR`` and runs with
+        ``python3``. The ConfigMap is read first and written only when absent or
+        stale, so the steady state costs one read per pass.
+
+        A changed program reaches running sidecars on their next start: the
+        source is deliberately not part of the pod-template digest, because a
+        monitor upgrade must not roll every GPU model pod (each needs spare GPU
+        capacity to surge and minutes to reload its model) for a sidecar change.
+        """
+        script = (Path(__file__).resolve().parent / ENDPOINT_TLS_PROXY_SCRIPT_FILENAME).read_text(
+            encoding="utf-8"
+        )
+        cm_name = _tls_proxy_config_map_name(name)
+        body = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(
+                name=cm_name,
+                namespace=ns,
+                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                annotations=self._provenance_annotations(),
+            ),
+            data={ENDPOINT_TLS_PROXY_SCRIPT_FILENAME: script},
+        )
+        read_config_map = partial(
+            self.core_v1.read_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_config_map = partial(
+            self.core_v1.delete_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        try:
+            existing = read_config_map()
+        except ApiException as error:
+            if error.status != 404:
+                raise
+            self._assert_mutation_authority()
+            try:
+                self.core_v1.create_namespaced_config_map(
+                    ns, body, _request_timeout=self._k8s_timeout
+                )
+            except ApiException as create_error:
+                if create_error.status != 409:
+                    raise
+                # A concurrent writer created it between the read and the
+                # create; converge on whatever it wrote below.
+                existing = read_config_map()
+            else:
+                self._confirm_created_resource(
+                    kind="configmap",
+                    resource_name=cm_name,
+                    read_resource=read_config_map,
+                    delete_resource=delete_config_map,
+                )
+                logger.info("Created TLS proxy ConfigMap %s/%s", ns, cm_name)
+                return
+
+        existing = self._authorize_resource(
+            existing,
+            kind="configmap",
+            resource_name=cm_name,
+            patch_metadata=partial(
+                self.core_v1.patch_namespaced_config_map,
+                cm_name,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            read_resource=read_config_map,
+            delete_resource=delete_config_map,
+        )
+        if getattr(existing, "data", None) == body.data:
+            return
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        body.metadata.resource_version = resource_version
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_config_map(
+            cm_name, ns, body, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated TLS proxy ConfigMap %s/%s", ns, cm_name)
+
+    def _converge_endpoint_tls_proxy(
+        self,
+        deploy_name: str,
+        namespace: str,
+        deployment: Any,
+        *,
+        config_map_name: str,
+        fallback_port: int,
+    ) -> bool:
+        """Give an existing model Deployment the current TLS sidecar, in place.
+
+        Deployments created before the sidecar existed (or rendered with a
+        different sidecar image or upstream port) are patched when the live pod
+        template lacks the sidecar or carries a different
+        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION``. A strategic merge adds the
+        sidecar container and its volumes by name, merges the annotations, and
+        leaves the model container untouched: its image, port, and probes stay
+        exactly as reconciled. The observed resourceVersion makes the patch a
+        compare-and-swap; the resulting rollout replaces pods like any other
+        template change.
+
+        Args:
+            deploy_name: The Deployment to converge.
+            namespace: Its namespace.
+            deployment: The authorized live Deployment.
+            config_map_name: The endpoint's TLS program ConfigMap.
+            fallback_port: The spec port, used when the live template does not
+                show the model container's port.
+
+        Returns:
+            ``True`` when the Deployment was patched.
+
+        Raises:
+            ValueError: If the model serves on the sidecar's own port.
+        """
+        template = getattr(getattr(deployment, "spec", None), "template", None)
+        raw_annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+        annotations = dict(raw_annotations) if isinstance(raw_annotations, dict) else {}
+        raw_containers = getattr(getattr(template, "spec", None), "containers", None)
+        containers = list(raw_containers) if isinstance(raw_containers, list) else []
+
+        upstream_port = _model_server_port(containers, fallback_port)
+        _reject_tls_port_collision(upstream_port)
+        sidecar = build_endpoint_tls_proxy(upstream_port, config_map_name)
+        has_sidecar = any(
+            getattr(container, "name", None) == ENDPOINT_TLS_PROXY_CONTAINER
+            for container in containers
+        )
+        if has_sidecar and annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION) == sidecar.digest:
+            return False
+
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            SKIP_CONTAINERS_ANNOTATION: _merge_skip_containers(
+                                annotations.get(SKIP_CONTAINERS_ANNOTATION)
+                            ),
+                            ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: sidecar.digest,
+                        }
+                    },
+                    "spec": {
+                        "terminationGracePeriodSeconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+                        "containers": [sidecar.container],
+                        "volumes": list(sidecar.volumes),
+                    },
+                }
+            }
+        }
+        if resource_version:
+            body["metadata"] = {"resourceVersion": resource_version}
+        self._assert_mutation_authority()
+        self.apps_v1.patch_namespaced_deployment(
+            deploy_name,
+            namespace,
+            body=body,
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info("Rolled the TLS sidecar into deployment %s/%s", namespace, deploy_name)
+        return True
+
     def _create_proxy_service(self, proxy_name: str, namespace: str) -> None:
         """Create the Service that fronts only the proxy pods.
 
         The selector is the ``{name}-proxy`` app label together with the proxy
         role marker, so the Service resolves exclusively to proxy pods and never
-        to the prefill or decode role pods that share the namespace.
+        to the prefill or decode role pods that share the namespace. It
+        publishes only the proxy pods' TLS sidecar port.
         """
         service = client.V1Service(
             metadata=client.V1ObjectMeta(
@@ -4528,13 +5210,7 @@ class InferenceMonitor:
                 selector=_inference_service_selector(
                     proxy_name, **{"gco.io/role": PD_PROXY_ROLE_LABEL}
                 ),
-                ports=[
-                    client.V1ServicePort(
-                        port=80,
-                        target_port=PD_PROXY_PORT,
-                        protocol="TCP",
-                    )
-                ],
+                ports=_endpoint_service_ports(),
                 type="ClusterIP",
             ),
         )
@@ -4564,12 +5240,18 @@ class InferenceMonitor:
         except ApiException as error:
             if error.status != 409:
                 raise
-            self._authorize_existing_service(proxy_name, namespace)
+            existing = self._authorize_existing_service(proxy_name, namespace)
+            self._converge_service_ports(proxy_name, namespace, existing)
             logger.info("Proxy service %s/%s already exists", namespace, proxy_name)
 
     def _create_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
-        """Create the internal ClusterIP Service for an inference endpoint."""
-        port = spec.get("port", 8000)
+        """Create the internal ClusterIP Service for an inference endpoint.
+
+        The Service publishes only the pods' TLS sidecar port, whatever port
+        the model serves on, so ``spec`` no longer shapes it; the parameter is
+        kept so every caller shares one signature with :meth:`_ensure_service`.
+        """
+        del spec
 
         service = client.V1Service(
             metadata=client.V1ObjectMeta(
@@ -4584,13 +5266,7 @@ class InferenceMonitor:
             ),
             spec=client.V1ServiceSpec(
                 selector=_inference_service_selector(name),
-                ports=[
-                    client.V1ServicePort(
-                        port=80,
-                        target_port=port,
-                        protocol="TCP",
-                    )
-                ],
+                ports=_endpoint_service_ports(),
                 type="ClusterIP",
             ),
         )
@@ -4620,19 +5296,25 @@ class InferenceMonitor:
         except ApiException as error:
             if error.status != 409:
                 raise
-            self._authorize_existing_service(name, namespace)
+            existing = self._authorize_existing_service(name, namespace)
+            self._converge_service_ports(name, namespace, existing)
             logger.info("Service %s/%s already exists", namespace, name)
 
     def _ensure_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
-        """Ensure an owned endpoint Service exists, recreating it if absent."""
+        """Ensure an owned endpoint Service exists on the TLS port.
+
+        An absent Service is recreated; one that predates the TLS sidecar is
+        moved onto it in place.
+        """
         try:
-            self._authorize_existing_service(name, namespace)
+            existing = self._authorize_existing_service(name, namespace)
         except ApiException as error:
             if error.status == 404:
                 logger.warning("Service %s/%s missing, recreating", namespace, name)
                 self._create_service(name, namespace, spec)
-            else:
-                raise
+                return
+            raise
+        self._converge_service_ports(name, namespace, existing)
 
     def _check_health_watchdog(
         self,
@@ -4759,12 +5441,27 @@ class InferenceMonitor:
         deployment = self._get_deployment(canary_name, namespace)
         state = "creating"
         ready_replicas = 0
+        # The canary runs its endpoint's TLS sidecar program; it has no
+        # ConfigMap of its own to create or clean up.
+        tls_proxy_config_map = _tls_proxy_config_map_name(name)
         if deployment is None:
             logger.info("Creating canary deployment %s with image %s", canary_name, canary_image)
-            self._create_deployment(canary_name, namespace, canary_spec)
+            self._create_deployment(
+                canary_name,
+                namespace,
+                canary_spec,
+                tls_proxy_config_map=tls_proxy_config_map,
+            )
             self._create_service(canary_name, namespace, canary_spec)
         else:
             self._ensure_service(canary_name, namespace, canary_spec)
+            self._converge_endpoint_tls_proxy(
+                canary_name,
+                namespace,
+                deployment,
+                config_map_name=tls_proxy_config_map,
+                fallback_port=canary_spec.get("port", 8000),
+            )
             current_image = self._get_deployment_image(deployment)
             current_replicas = deployment.spec.replicas or 1
             ready_replicas = deployment.status.ready_replicas or 0
@@ -4866,7 +5563,11 @@ class InferenceMonitor:
                 f"{name}-prefill",
                 f"{name}-decode",
             ),
-            config_maps=(f"{name}-mooncake", f"{name}-pd-proxy"),
+            config_maps=(
+                f"{name}-mooncake",
+                f"{name}-pd-proxy",
+                _tls_proxy_config_map_name(name),
+            ),
             legacy_ingresses=(name, f"{name}-canary", f"{name}-proxy"),
             legacy_http_routes=(name, f"{name}-canary", f"{name}-proxy"),
             generated_admin_secret=f"{name}-admin",
@@ -6175,11 +6876,13 @@ async def main() -> None:
     # Expose Prometheus metrics on a dedicated port for the in-cluster
     # observability scrape. A scrape-time collector reflects the monitor's live
     # counters (reconcile_count, errors_count, running), so no push from the
-    # reconcile loop is needed.
+    # reconcile loop is needed. The deployment binds it to pod loopback
+    # (METRICS_HOST=127.0.0.1) behind a TLS sidecar that Prometheus scrapes.
     from gco.services.service_metrics import start_metrics_server
 
     metrics_port = int(os.getenv("METRICS_PORT", "9090"))
-    start_metrics_server(metrics_port, "inference-monitor", monitor.get_metrics)
+    metrics_host = os.getenv("METRICS_HOST", "0.0.0.0")  # container listener
+    start_metrics_server(metrics_port, "inference-monitor", monitor.get_metrics, host=metrics_host)
 
     # Kubernetes stops pods with SIGTERM. This process is PID 1 in its
     # container, and PID 1 receives no kernel-default signal handling — so

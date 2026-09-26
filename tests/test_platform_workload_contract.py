@@ -40,6 +40,11 @@ DEPLOYMENT_FILES = (
 )
 SCALED_JOB_FILE = "post-helm-sqs-consumer.yaml"
 TLS_SIDECAR = "api-tls-proxy"
+#: Every TLS-terminating sidecar beside a platform application: the API
+#: sidecar (health, manifest, inference proxy, cost monitor) and the inference
+#: monitor's metrics sidecar. They only terminate TLS, so none holds AWS
+#: credentials and each is excluded from EKS credential injection.
+TLS_SIDECARS = frozenset({TLS_SIDECAR, "metrics-tls-proxy"})
 IRSA_TOKEN_PATH = (
     "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"  # a mount path, not a secret
 )
@@ -312,13 +317,21 @@ class TestIdentity:
         (token_source,) = volumes["aws-iam-token"]["projected"]["sources"]
         assert token_source["serviceAccountToken"]["audience"] == "sts.amazonaws.com"
 
+        sidecars = {container["name"] for container in pod_spec["containers"]} & TLS_SIDECARS
+        if sidecars:
+            # The Pod Identity webhook skips exactly the pod's TLS sidecars.
+            skipped = {
+                name.strip()
+                for name in annotations["eks.amazonaws.com/skip-containers"].split(",")
+                if name.strip()
+            }
+            assert skipped == sidecars, filename
         for container in pod_spec["containers"]:
             env = {item["name"]: item.get("value") for item in container.get("env", [])}
             mounts = {mount["name"]: mount for mount in container.get("volumeMounts", [])}
-            if container["name"] == TLS_SIDECAR:
+            if container["name"] in TLS_SIDECARS:
                 assert "AWS_ROLE_ARN" not in env, filename
                 assert "aws-iam-token" not in mounts, filename
-                assert annotations["eks.amazonaws.com/skip-containers"] == TLS_SIDECAR, filename
             else:
                 assert "AWS_ROLE_ARN" in env, f"{filename}/{container['name']}"
                 assert env["AWS_WEB_IDENTITY_TOKEN_FILE"] == IRSA_TOKEN_PATH

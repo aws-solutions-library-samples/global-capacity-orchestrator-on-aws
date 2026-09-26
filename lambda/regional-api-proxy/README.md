@@ -25,7 +25,7 @@ Regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developergu
 5. It reads the public root bundle, sends/asserts
    `backend.<project>.gco.internal`, and forwards to the internal ALB over
    private-root HTTPS/443.
-6. The ALB terminates the private-root client connection and re-encrypts the target hop to a TLS-only proxy sidecar on the selected Kubernetes pod. The sidecar hot-reloads its cert-manager-projected leaf and forwards only over pod loopback. ALB target TLS provides confidentiality but does not validate the self-signed workload leaf; HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
+6. The ALB terminates the private-root client connection and re-encrypts the target hop to a TLS-only proxy sidecar on the selected Kubernetes pod. The sidecar hot-reloads its cert-manager-projected leaf and forwards only over pod loopback. ALB target TLS provides confidentiality but does not validate the workload leaf (issued by the cluster's internal CA); HMAC proves trusted-proxy key possession and request integrity on protected paths, while API Gateway IAM authenticates the original caller.
 7. Backend middleware validates freshness, integrity, and process-local nonce replay before serving the request.
 8. The Lambda returns the buffered upstream response to the caller.
 

@@ -1,9 +1,9 @@
 """Runtime smoke for the distroless service images.
 
 Runs as the final Dockerfile stage's only RUN — exec form, as the runtime
-user — with one argument: the service entry module. It proves builder-to-
-scratch parity programmatically instead of via a hand-maintained module
-list:
+user — with the service entry module as its argument, plus ``--tracing`` in
+the four traced API images. It proves builder-to-scratch parity
+programmatically instead of via a hand-maintained module list:
 
 - every stdlib C extension that was importable in the builder stage must
   import here too. ``build_scratch_rootfs.py`` records that set in
@@ -17,6 +17,17 @@ list:
 - OpenSSL's default trust store must load CA certificates (TLS to AWS);
 - ``zoneinfo`` must resolve from the staged tzdata.
 
+``--tracing`` adds the tracing stack. ``gco.services.tracing`` imports
+OpenTelemetry, botocore's SigV4 signer and httpx2 only once tracing is
+enabled, so importing the entry module never loads them: a package missing
+from a traced image would surface only at runtime, as one warning and a
+service that exports nothing. With the flag, every module in
+``TRACING_MODULES`` must import, and httpx2's default TLS context (the public
+trust the X-Ray exporter uses, backed by truststore) must load the image's CA
+anchors. Neither check opens a connection. ``TRACING_MODULES`` is the one list
+kept by hand here; ``tests/test_distroless_build_scripts.py`` derives the lazy
+imports from the tracing module's source and fails when the two drift.
+
 Every failure is collected and reported, then the process exits non-zero so
 the image build — including CDK deploys — fails instead of the pod. The
 script and its manifest live in the builder stage's ``/opt/build`` and reach
@@ -28,8 +39,8 @@ pair works from any mount target.
 
 Only ``json``, ``sys``, ``importlib``, and ``pathlib`` are imported at module
 scope; everything under test (``ssl``, ``getpass``, ``zoneinfo``, the stdlib
-extensions, the entry module) is imported inside guarded sections so a single
-breakage cannot mask the rest of the report.
+extensions, the entry module, the tracing stack) is imported inside guarded
+sections so a single breakage cannot mask the rest of the report.
 """
 
 from __future__ import annotations
@@ -39,12 +50,84 @@ import json
 import sys
 from pathlib import Path
 
+TRACING_FLAG = "--tracing"
+
+#: Every module ``gco.services.tracing`` imports inside its functions (none of
+#: them load until ``GCO_TRACING_ENABLED=true``), plus ``truststore``, which
+#: provides httpx2's default trust store.
+TRACING_MODULES = (
+    "botocore.auth",
+    "botocore.awsrequest",
+    "botocore.session",
+    "google.protobuf.message",
+    "httpx2",
+    "opentelemetry.exporter.otlp.proto.common.trace_encoder",
+    "opentelemetry.instrumentation.fastapi",
+    "opentelemetry.instrumentation.httpx",
+    "opentelemetry.metrics",
+    "opentelemetry.propagate",
+    "opentelemetry.proto.collector.trace.v1.trace_service_pb2",
+    "opentelemetry.sdk.resources",
+    "opentelemetry.sdk.trace",
+    "opentelemetry.sdk.trace.export",
+    "opentelemetry.sdk.trace.sampling",
+    "opentelemetry.trace",
+    "opentelemetry.trace.propagation.tracecontext",
+    "truststore",
+)
+
+# ``wrap_bio`` needs a server name to satisfy check_hostname. No handshake
+# runs, so the name is never resolved or contacted.
+_TRUST_PROBE_HOSTNAME = "localhost"
+
+
+def check_tracing_stack(failures: list[str]) -> int:
+    """Import the lazily loaded tracing stack and check httpx2's default trust.
+
+    Appends every problem to ``failures`` and returns the number of CA
+    certificates httpx2's default context loaded (0 when that check failed).
+    """
+    for name in TRACING_MODULES:
+        try:
+            # The names are this script's own constant, never input.
+            # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
+            importlib.import_module(name)
+        except BaseException as exc:  # aggregate every breakage
+            failures.append(f"tracing module {name}: {type(exc).__name__}: {exc}")
+
+    try:
+        import ssl
+
+        import httpx2
+
+        # The context the X-Ray exporter's client builds (trust_env=False) is
+        # a truststore one, which loads the system trust store when a
+        # connection is wrapped rather than when it is built. Wrapping two
+        # in-memory BIOs does that without a socket or a handshake; the SSL
+        # object's context is the OpenSSL one truststore configured.
+        context = httpx2.create_ssl_context(trust_env=False)
+        tls = context.wrap_bio(
+            ssl.MemoryBIO(), ssl.MemoryBIO(), server_hostname=_TRUST_PROBE_HOSTNAME
+        )
+        anchors = tls.context.cert_store_stats()["x509_ca"]
+    except BaseException as exc:
+        failures.append(f"httpx2 default trust: {type(exc).__name__}: {exc}")
+        return 0
+    if anchors <= 0:
+        failures.append("httpx2 default trust store (truststore) loaded zero CA certificates")
+    return anchors
+
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: runtime_smoke.py <service-entry-module>", file=sys.stderr)
+    arguments = sys.argv[1:]
+    tracing = arguments[1:] == [TRACING_FLAG]
+    if len(arguments) != 1 and not tracing:
+        print(
+            f"usage: runtime_smoke.py <service-entry-module> [{TRACING_FLAG}]",
+            file=sys.stderr,
+        )
         return 2
-    entry_module = sys.argv[1]
+    entry_module = arguments[0]
 
     manifest_path = Path(__file__).with_name("runtime_smoke_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -99,16 +182,24 @@ def main() -> int:
     except BaseException as exc:
         failures.append(f"zoneinfo/tzdata: {type(exc).__name__}: {exc}")
 
+    trust_anchors = check_tracing_stack(failures) if tracing else 0
+
     if failures:
         print(f"distroless runtime smoke FAILED ({len(failures)} problem(s)):", file=sys.stderr)
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
-    print(
+    summary = (
         f"distroless runtime smoke OK: {len(extensions)} stdlib extensions, "
         f"entry module {entry_module}, user {actual_user}, CA trust and tzdata present"
     )
+    if tracing:
+        summary += (
+            f"; tracing stack imports ({len(TRACING_MODULES)} modules), "
+            f"httpx2 default trust loads {trust_anchors} CA certificates"
+        )
+    print(summary)
     return 0
 
 

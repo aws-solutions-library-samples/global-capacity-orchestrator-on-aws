@@ -24,6 +24,12 @@ and that stack deploys after the regional stack this service runs in. Until the
 parameter exists the scheduled pass skips and the API answers 503; nothing here
 ever reconstructs a bucket name. ``COST_REPORT_BUCKET`` remains an explicit
 override for kind/CI.
+
+OpenCost is reached over verified HTTPS through the ``opencost-tls`` Service,
+a TLS sidecar in the OpenCost pod that serves a certificate issued by the GCO
+internal CA; the client trusts that CA alone (see
+:mod:`gco.services.internal_tls`). An ``http://`` ``OPENCOST_BASE_URL``
+override (kind/CI) opens no TLS session and needs no CA bundle.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ import io
 import logging
 import math
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -41,10 +48,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
-import httpx
+import httpx2
 from botocore.config import Config
 
+from gco.services import internal_tls, tracing
+
 logger = logging.getLogger(__name__)
+
+#: In-cluster OpenCost API behind the OpenCost pod's TLS sidecar.
+DEFAULT_OPENCOST_BASE_URL = "https://opencost-tls.monitoring.svc.cluster.local:9443"
 
 #: Normalized report row fields, in Parquet column order. This is the
 #: write-side contract of the monitoring stack's Glue table
@@ -237,20 +249,57 @@ class ReportResult:
 
 
 class OpenCostClient:
-    """Minimal HTTP client for the in-cluster OpenCost allocation API."""
+    """Minimal HTTP client for the in-cluster OpenCost allocation API.
+
+    Every call goes through one ``httpx2.Client``, built on first use rather
+    than at construction so that building the service never touches the CA
+    bundle: a bundle that is not mounted yet surfaces as "OpenCost unhealthy"
+    (and a failed allocation query) on each call until it appears, instead of
+    a crash at startup. The scheduled reporter and the API handlers call in
+    from worker threads, so first use is serialized by a lock.
+    """
 
     def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self._client: httpx2.Client | None = None
+        self._client_lock = threading.Lock()
+
+    def _http(self) -> httpx2.Client:
+        """Return the shared client, building it (and its TLS trust) on first use.
+
+        Raises :class:`~gco.services.internal_tls.InternalTLSError` while an
+        ``https`` base URL has no usable internal CA bundle. The transport, not
+        the client, carries ``verify`` because a client given ``transport=``
+        ignores its own TLS settings.
+        """
+        with self._client_lock:
+            if self._client is None:
+                transport = httpx2.HTTPTransport(
+                    verify=internal_tls.verify_for_url(self.base_url), trust_env=False
+                )
+                self._client = httpx2.Client(
+                    transport=tracing.wrap_sync_transport(transport),
+                    timeout=self.timeout_seconds,
+                    trust_env=False,
+                )
+            return self._client
+
+    def close(self) -> None:
+        """Release the connection pool (service shutdown); a later call rebuilds it."""
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     def is_healthy(self) -> bool:
         """Return whether OpenCost answers its /healthz probe."""
         try:
-            response = httpx.get(
-                f"{self.base_url}/healthz",
-                timeout=self.timeout_seconds,
-            )
-        except httpx.HTTPError:
+            response = self._http().get(f"{self.base_url}/healthz")
+        except internal_tls.InternalTLSError as exc:
+            logger.warning("OpenCost TLS trust is unavailable: %s", exc)
+            return False
+        except httpx2.HTTPError:
             return False
         return response.status_code == 200
 
@@ -274,16 +323,17 @@ class OpenCostClient:
             f"{window_end.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}"
         )
         try:
-            response = httpx.get(
+            response = self._http().get(
                 f"{self.base_url}/allocation/compute",
                 params={
                     "window": window,
                     "aggregate": aggregate,
                     "accumulate": "true",
                 },
-                timeout=self.timeout_seconds,
             )
-        except httpx.HTTPError as exc:
+        except internal_tls.InternalTLSError as exc:
+            raise OpenCostUnavailableError(f"OpenCost TLS trust is unavailable: {exc}") from exc
+        except httpx2.HTTPError as exc:
             raise OpenCostUnavailableError(f"OpenCost request failed: {exc}") from exc
         if response.status_code != 200:
             raise OpenCostUnavailableError(
@@ -712,10 +762,7 @@ def create_cost_monitor_from_env() -> CostMonitor:
         parameter_region = os.getenv("COST_REPORT_BUCKET_PARAMETER_REGION", "").strip() or region
         bucket_locator = CostReportBucketLocator(parameter_name, parameter_region)
     cluster = os.getenv("CLUSTER_NAME", f"gco-{region}")
-    base_url = os.getenv(
-        "OPENCOST_BASE_URL",
-        "http://opencost.monitoring.svc.cluster.local:9003",
-    )
+    base_url = os.getenv("OPENCOST_BASE_URL", DEFAULT_OPENCOST_BASE_URL)
     try:
         interval = int(os.getenv("COST_REPORT_INTERVAL_MINUTES", "60"))
     except ValueError:

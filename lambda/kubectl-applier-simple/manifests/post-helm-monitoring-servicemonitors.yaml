@@ -17,8 +17,9 @@
 #
 # GCO's own services (health-monitor, manifest-processor, inference-proxy, and
 # inference-monitor) expose Prometheus-format application metrics. The
-# PodMonitors at the end of this file scrape each replica directly; chart-level
-# kube-state-metrics and cAdvisor additionally cover pod/container resources.
+# PodMonitors after the ServiceMonitors scrape each replica directly over
+# verified HTTPS; chart-level kube-state-metrics and cAdvisor additionally
+# cover pod/container resources.
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -168,11 +169,16 @@ spec:
 ---
 # GCO's own services expose Prometheus /metrics (see gco/services/service_metrics
 # .py). They run with multiple replicas, so PodMonitors scrape each pod directly
-# rather than round-robining one pod through a Service. The ALB-facing APIs
-# expose /metrics on the same cert-manager-backed HTTPS listener used for
-# application traffic; Prometheus encrypts the scrape while skipping leaf
-# verification because these deployment-local leaves are self-signed. The
-# inference monitor continues to serve metrics on its dedicated HTTP port.
+# rather than round-robining one pod through a Service. Every scrape is
+# verified HTTPS: the ALB-facing APIs serve /metrics on the same TLS sidecar
+# (port "https", 8443) that carries application traffic, and the inference
+# monitor serves it through its metrics-tls-proxy sidecar (port
+# "https-metrics", 9443) while the plaintext listener stays on the pod's
+# loopback. Prometheus trusts only the GCO internal CA, read from the ca.crt
+# key of gco-monitoring-trust (a leaf in this namespace, declared in
+# post-helm-monitoring-tls.yaml under the same gate), and checks each pod's
+# leaf against the Service DNS name it was issued for; it dials pod IPs, so
+# serverName supplies that name.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -194,7 +200,11 @@ spec:
     - port: https
       scheme: https
       tlsConfig:
-        insecureSkipVerify: true
+        ca:
+          secret:
+            name: gco-monitoring-trust
+            key: ca.crt
+        serverName: health-monitor.gco-system.svc
       interval: 30s
       path: /metrics
 ---
@@ -219,7 +229,11 @@ spec:
     - port: https
       scheme: https
       tlsConfig:
-        insecureSkipVerify: true
+        ca:
+          secret:
+            name: gco-monitoring-trust
+            key: ca.crt
+        serverName: manifest-processor.gco-system.svc
       interval: 30s
       path: /metrics
 ---
@@ -244,7 +258,11 @@ spec:
     - port: https
       scheme: https
       tlsConfig:
-        insecureSkipVerify: true
+        ca:
+          secret:
+            name: gco-monitoring-trust
+            key: ca.crt
+        serverName: inference-proxy.gco-system.svc
       interval: 30s
       path: /metrics
 ---
@@ -266,6 +284,13 @@ spec:
     matchLabels:
       app: inference-monitor
   podMetricsEndpoints:
-    - port: metrics
+    - port: https-metrics
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: gco-monitoring-trust
+            key: ca.crt
+        serverName: inference-monitor.gco-system.svc
       interval: 30s
       path: /metrics

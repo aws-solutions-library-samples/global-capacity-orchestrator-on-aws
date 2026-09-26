@@ -96,7 +96,7 @@ committed tests, not inferred from Floci's docs):
 | Step Functions | `helm-orchestrator` provider (start/adopt/fence), `helm-installer` teardown provider (ordered delete, drain, `is_complete`) | Meaningful behavior: named executions, `ExecutionAlreadyExists` adoption, stop confirmation, Fail-state error/cause |
 | ELBv2 | `regional-api-proxy` ownership validation; `ga-registration` tag/hostname ALB discovery | Meaningful behavior: real internal ALBs, tags, fail-closed rejections |
 | ECR | `image-lookup` adopt-or-create custom resource | Meaningful behavior in CI (create/adopt/delete); local Finch hosts skip (gap 4) |
-| EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners | Control-plane list/describe only |
+| EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners; the baseline's Transaction Search record (Logs resource policies and the span log groups; its X-Ray read is shimmed, gap 2) | Control-plane list/describe only |
 | CloudWatch | `metrics_publisher`; `traffic-dial-controller` decision metrics and its no-datapoints `GetMetricData` hold | Accepts writes (no query assertions); an empty query answer drives the controller's fail-safe hold for real |
 
 Still mocked (unit layer only): Kubernetes API interactions (kind E2E owns
@@ -121,10 +121,19 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
 1. **CloudFormation `GetStackPolicy`** responses omit the result wrapper and
    are unparseable by botocore. The shim answers with real AWS's no-policy
    shape — which is what every GCO stack has.
-2. **Global Accelerator** is absent from Floci's catalog, while the
-   harness's fail-closed inventory requires its scanner to complete. The
-   shim answers `ListAccelerators` with the truthful empty list; GA scanner
-   logic keeps its coverage in patched-client unit tests.
+2. **Global Accelerator and X-Ray** are absent from Floci's catalog (X-Ray
+   probed against Floci 2.0.1: every operation tried, reads and writes,
+   answers `UnknownOperationException`). The harness's fail-closed
+   inventory requires its Global Accelerator scanner to complete, and its
+   baseline records each Region's X-Ray trace segment destination before
+   anything deploys, so the Transaction Search state a run changes can be
+   restored. The shims answer `ListAccelerators` with the truthful empty
+   list and `GetTraceSegmentDestination` with what a fresh account returns
+   (`XRay`, `ACTIVE`: Transaction Search never enabled, which a fabricated
+   emulator account cannot have done). The GA scanner and the Transaction
+   Search restore logic keep their coverage in patched-client unit tests.
+   CloudWatch Logs `DescribeResourcePolicies`, the baseline's other
+   Transaction Search read, is modeled by Floci and needs no shim.
 3. **Availability Zone ids** are not modeled by Floci's EC2. A credentialed
    synth runs the regional stack's fail-closed EKS-unsupported-AZ
    resolution (`DescribeAvailabilityZones` filtered by `zone-id`); the shim
@@ -152,8 +161,9 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
 the real harness: git identity pinning, STS account verification, region
 discovery, a full `cdk list` (which synthesizes the entire five-stack app),
 per-region CDKToolkit health checks, refusal of pre-existing project stacks,
-protected-baseline capture, report/checkpoint writing, and PARTIAL-status
-semantics — plus the negative proof that an account mismatch fails the run.
+protected-baseline and Transaction Search baseline capture, report/checkpoint
+writing, and PARTIAL-status semantics — plus the negative proof that an
+account mismatch fails the run.
 The run is started with `--eks-capabilities all`, so that synth also proves
 the [EKS Capabilities](EKS_CAPABILITIES.md) leg's pre-deploy shape: the
 run-scoped ACK and kro overrides ride in the CDK context of the real

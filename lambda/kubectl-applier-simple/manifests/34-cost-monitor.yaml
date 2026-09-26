@@ -9,6 +9,16 @@
 # Deliberately a single replica: the scheduled reporter is a singleton writer.
 # Report object keys are deterministic per window, so even a rollout overlap
 # cannot double-count in Athena — concurrent writers converge on the same key.
+#
+# Both of the monitor's hops are verified HTTPS. The application listens on
+# pod loopback only; the api-tls-proxy sidecar serves it on 8443 with the
+# cost-monitor-tls leaf, which is the only port the manifest processor (its
+# one client) may reach. Outbound, the monitor calls OpenCost through the
+# opencost-tls Service (the TLS sidecar in the OpenCost pod) and trusts only
+# the GCO internal CA, projected from its own leaf Secret's ca.crt. Both TLS
+# objects are post-Helm (post-helm-cost-monitoring-tls.yaml): on a fresh
+# cluster this pod waits in ContainerCreating until cert-manager has issued
+# them, exactly like the API workloads wait for their leaves.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -53,6 +63,7 @@ spec:
       annotations:
         gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
         karpenter.sh/do-not-disrupt: "true"
+        eks.amazonaws.com/skip-containers: "api-tls-proxy"
     spec:
       serviceAccountName: gco-cost-monitor-sa
       priorityClassName: gco-platform-critical
@@ -80,10 +91,15 @@ spec:
               drop:
                 - ALL
           ports:
-            - name: http
+            - name: app-http
               containerPort: 8080
               protocol: TCP
           env:
+            # Loopback only: the api-tls-proxy sidecar is the pod's listener.
+            - name: HOST
+              value: "127.0.0.1"
+            - name: PORT
+              value: "8080"
             - name: CLUSTER_NAME
               value: "{{CLUSTER_NAME}}"
             - name: REGION
@@ -102,11 +118,30 @@ spec:
             - name: COST_REPORT_INTERVAL_MINUTES
               value: "{{COST_REPORT_INTERVAL_MINUTES}}"
             # Uvicorn drains in-flight report requests for this long after
-            # SIGTERM; the pod grace period covers preStop + this value.
+            # SIGTERM; the sidecar uses the same budget and the pod grace
+            # period covers preStop + this value.
             - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
               value: "20"
+            # OpenCost's TLS front door (post-helm-cost-monitoring-tls.yaml),
+            # verified against the internal CA mounted below.
             - name: OPENCOST_BASE_URL
-              value: "http://opencost.monitoring.svc.cluster.local:9003"
+              value: "https://opencost-tls.monitoring.svc.cluster.local:9443"
+            - name: GCO_INTERNAL_CA_FILE
+              value: "/var/run/gco/ca/ca.crt"
+            # OpenTelemetry -> X-Ray (gco/services/tracing.py), switched and
+            # sampled from cdk.json tracing; the pod identity labels spans.
+            - name: GCO_TRACING_ENABLED
+              value: "{{TRACING_ENABLED}}"
+            - name: GCO_TRACING_SAMPLE_RATIO
+              value: "{{TRACING_SAMPLE_RATIO}}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: AWS_ROLE_ARN
               value: "{{COST_MONITOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
@@ -193,8 +228,106 @@ spec:
             - name: aws-iam-token
               mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
               readOnly: true
+            - name: internal-ca
+              mountPath: /var/run/gco/ca
+              readOnly: true
             - name: tmp
               mountPath: /tmp
+        - name: api-tls-proxy
+          image: {{COST_MONITOR_IMAGE}}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "gco.services.tls_proxy"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: GCO_TLS_CERT_FILE
+              value: /var/run/gco/tls/tls.crt
+            - name: GCO_TLS_KEY_FILE
+              value: /var/run/gco/tls/tls.key
+            - name: TLS_PROXY_UPSTREAM_PORT
+              value: "8080"
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "20"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          # Exec probes over loopback for the same reason as the application's:
+          # 8443 admits only the manifest processor, so the kubelet's own
+          # tcpSocket/httpGet checks would depend on the CNI exempting the
+          # node. Liveness is a bare connect to the TLS listener (bound only
+          # once a keypair has loaded); readiness completes a TLS handshake and
+          # reads /readyz through the proxy, like the kubelet's HTTPS probe on
+          # the other API sidecars (no verification: the chain is the client's
+          # to verify, and the application reports its own health).
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket;
+                  socket.create_connection(('127.0.0.1',8443),3).close()
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 24
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket;
+                  socket.create_connection(('127.0.0.1',8443),3).close()
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 4
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,ssl,sys;
+                  c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);
+                  c.check_hostname=False;
+                  c.verify_mode=ssl.CERT_NONE;
+                  s=c.wrap_socket(socket.create_connection(('127.0.0.1',8443),3));
+                  s.settimeout(3);
+                  s.sendall(b'GET /readyz HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # Keep the TLS acceptor open while the endpoint is removed.
+                command: ["python", "-c", "import time; time.sleep(5)"]
+          volumeMounts:
+            - name: api-tls
+              mountPath: /var/run/gco/tls
+              readOnly: true
       volumes:
         - name: aws-iam-token
           projected:
@@ -204,6 +337,20 @@ spec:
                   audience: sts.amazonaws.com
                   expirationSeconds: 86400
                   path: token
+        # The serving keypair, for the sidecar only.
+        - name: api-tls
+          secret:
+            secretName: cost-monitor-tls
+            defaultMode: 288
+        # Only the CA certificate from the same Secret, for the application's
+        # OpenCost client: the application container never sees a private key.
+        - name: internal-ca
+          secret:
+            secretName: cost-monitor-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 288
         - name: tmp
           emptyDir:
             sizeLimit: 512Mi
@@ -223,16 +370,18 @@ spec:
     # policy enforcement admits Service traffic reliably only when the
     # Service port equals the container port (EKS network policy
     # considerations), and the manifest processor reaches this Service
-    # through an egress rule that names port 8080.
-    - port: 8080
-      targetPort: http
+    # through an egress rule that names port 8443.
+    - port: 8443
+      targetPort: https
       protocol: TCP
-      name: http
+      name: https
   selector:
     app: cost-monitor
 ---
 # gco-system runs default-deny ingress: admit only the manifest processor
-# (the authenticated /api/v1/cost/* proxy) into the cost monitor.
+# (the authenticated /api/v1/cost/* proxy) into the cost monitor, and only on
+# the TLS sidecar's port. The application's 8080 is loopback-bound and not
+# admitted either way.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -255,10 +404,16 @@ spec:
               app: manifest-processor
       ports:
         - protocol: TCP
-          port: 8080
+          port: 8443
 ---
 # The project=gco egress policy limits gco-system platform pods to 443 + DNS.
-# The cost monitor additionally needs the OpenCost API (monitoring ns, 9003).
+# The cost monitor additionally needs the OpenCost API through its TLS front
+# door: the opencost-tls-proxy sidecar in the OpenCost pod, on 9443. The peer
+# selects the chart pod's own labels, which are also the opencost-tls
+# Service's selector, so the VPC CNI (egress evaluated before kube-proxy's
+# DNAT) admits the Service's ClusterIP as well as the pod; Service port and
+# container port are both 9443 for the same reason. OpenCost's plaintext 9003
+# is not admitted.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -279,11 +434,15 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opencost
+              app.kubernetes.io/instance: opencost
       ports:
         - protocol: TCP
-          port: 9003
+          port: 9443
 ---
-# ...and the manifest processor needs egress to the cost monitor pod port to
+# ...and the manifest processor needs egress to the cost monitor's TLS port to
 # serve the /api/v1/cost/* proxy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -307,4 +466,4 @@ spec:
               app: cost-monitor
       ports:
         - protocol: TCP
-          port: 8080
+          port: 8443

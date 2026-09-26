@@ -2675,7 +2675,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |
 | `--gpu-type` | | GPU instance type hint (e.g. g5.xlarge) |
-| `--port` | | Container port (default: 8000; SGLang's documented default is 30000) |
+| `--port` | | Container port (default: 8000; SGLang's documented default is 30000). 8443 is reserved for the pod's TLS sidecar, which is the only port the endpoint's Service publishes ([Model Endpoint TLS](INFERENCE.md#model-endpoint-tls)) |
 | `--model-path` | | EFS path for model weights |
 | `--model-source` | | S3 URI for model weights (auto-synced via init container) |
 | `--health-path` | | Health check endpoint path (default: /health) |

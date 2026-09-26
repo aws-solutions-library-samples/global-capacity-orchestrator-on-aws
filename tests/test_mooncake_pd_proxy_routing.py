@@ -165,7 +165,8 @@ def test_role_service_resolves_only_that_role(monitor):
     The proxy addresses prefill and decode through these Services, so each must
     select exactly its own role's app label (plus the ``gco.io/type: inference``
     marker every inference pod carries, which the NetworkPolicy peers select
-    on) and expose the serving port.
+    on) and expose only the role pods' TLS sidecar port: the model server
+    behind it is never addressed directly.
     """
     monitor._create_role_service("ep", "gco-inference", "prefill", 8000)
 
@@ -174,8 +175,10 @@ def test_role_service_resolves_only_that_role(monitor):
     assert svc.metadata.name == "ep-prefill"
     assert svc.spec.type == "ClusterIP"
     assert svc.spec.selector == {"app": "ep-prefill", "gco.io/type": "inference"}
-    assert svc.spec.ports[0].port == 8000
-    assert svc.spec.ports[0].target_port == 8000
+    [port] = svc.spec.ports
+    assert port.port == 8443
+    assert port.name == "https"
+    assert port.target_port == "https"
 
 
 def test_proxy_runs_the_router_script_against_role_services(monitor):
@@ -184,7 +187,7 @@ def test_proxy_runs_the_router_script_against_role_services(monitor):
     The proxy container is launched with ``python <script>`` (not the vLLM image
     default entrypoint), the router program is shipped as a ConfigMap mounted
     into the pod, and the prefill/decode backend URLs point at the per-role
-    Services.
+    Services over verified HTTPS, with only the CA certificate mounted.
     """
     from gco.services.inference_monitor import (
         PD_PROXY_SCRIPT_FILENAME,
@@ -216,12 +219,22 @@ def test_proxy_runs_the_router_script_against_role_services(monitor):
     # The proxy container runs that script, not the image's default server.
     dep_args, _ = monitor.apps_v1.create_namespaced_deployment.call_args
     pod_spec = dep_args[1].spec.template.spec
-    container = pod_spec.containers[0]
-    assert container.command == ["python3", PD_PROXY_SCRIPT_PATH]
+    [container] = [
+        candidate
+        for candidate in pod_spec.containers
+        if candidate.command == ["python3", PD_PROXY_SCRIPT_PATH]
+    ]
 
     env = {e.name: e.value for e in (container.env or []) if e.value is not None}
-    assert env["PD_PROXY_PREFILL_URL"] == "http://ep-prefill:8000"
-    assert env["PD_PROXY_DECODE_URL"] == "http://ep-decode:8000"
+    # Verified HTTPS to the role Services' TLS sidecars, trusting only the GCO
+    # internal CA; the router itself listens on loopback behind its own sidecar.
+    assert env["PD_PROXY_PREFILL_URL"] == "https://ep-prefill.gco-inference.svc.cluster.local:8443"
+    assert env["PD_PROXY_DECODE_URL"] == "https://ep-decode.gco-inference.svc.cluster.local:8443"
+    assert env["PD_PROXY_CA_FILE"] == "/var/run/gco/ca/ca.crt"
+    assert env["PD_PROXY_HOST"] == "127.0.0.1"
+    assert any(
+        m.mount_path == "/var/run/gco/ca" and m.read_only for m in (container.volume_mounts or [])
+    )
 
     # The ConfigMap is mounted so the script is present at the run path.
     assert any(m.mount_path == "/etc/pd-proxy" for m in (container.volume_mounts or []))

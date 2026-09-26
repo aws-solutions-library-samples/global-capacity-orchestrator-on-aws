@@ -11,7 +11,9 @@
 #
 #   1. The prefill-decode proxy starts under the image's python3 and serves
 #      /healthz (the image ships python3 but no `python`; the bundled router
-#      must launch with python3, and fastapi/uvicorn/httpx must be present).
+#      must launch with python3, fastapi/uvicorn must be present, and so must
+#      an HTTP client: the proxy prefers httpx2 and falls back to the httpx
+#      the image ships).
 #   2. The store config GCO renders is accepted by the image's
 #      MooncakeStoreConfig loader (embedded mode rejects global_segment_size=0).
 #   3. The connector names GCO emits (MooncakeConnector / MooncakeStoreConnector

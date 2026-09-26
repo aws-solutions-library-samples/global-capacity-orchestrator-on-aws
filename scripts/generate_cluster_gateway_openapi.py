@@ -70,7 +70,9 @@ INTERNAL_CONSUMERS: dict[str, dict[str, str]] = {
         "description": (
             "Confined to manifest-processor traffic by a NetworkPolicy and runs no "
             "authentication middleware of its own; the manifest processor's "
-            "`/api/v1/cost/*` routes are its authenticated front."
+            "`/api/v1/cost/*` routes are its authenticated front, reaching it at "
+            "`https://cost-monitor.gco-system.svc.cluster.local:8443` and verifying "
+            "its certificate against the cluster's internal CA."
         ),
     },
 }
@@ -86,7 +88,8 @@ DOWNSTREAM: dict[str, dict[str, str]] = {
             "Resolves `/inference/<endpoint>/...` by endpoint name from the inference "
             "endpoint store, requires the endpoint to be running in this region, allows "
             "only its serving and health paths, and streams "
-            "`http://<service>.gco-inference.svc.cluster.local/<path>` back."
+            "`https://<service>.gco-inference.svc.cluster.local:8443/<path>` back, "
+            "verifying the model pod's TLS sidecar against the cluster's internal CA."
         ),
     },
 }

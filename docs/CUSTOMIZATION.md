@@ -61,6 +61,8 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Load Balancer Configuration](#load-balancer-configuration)
   - [Add Prometheus Monitoring](#add-prometheus-monitoring)
 - [Cost Tracking Setup](#cost-tracking-setup)
+- [Distributed Tracing](#distributed-tracing)
+  - [Run-scoped tracing overrides](#run-scoped-tracing-overrides)
 - [Run-scoped Enablement Overrides](#run-scoped-enablement-overrides)
 - [FSx for Lustre Configuration](#fsx-for-lustre-configuration)
   - [Lustre Version Compatibility](#lustre-version-compatibility)
@@ -624,7 +626,7 @@ interface endpoints are opt-in because they bill per AZ-hour:
 | Setting | Default | Description |
 |---|---|---|
 | `gateway` | `["s3", "dynamodb"]` | Route-table endpoints attached to every subnet. S3 takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC; DynamoDB helps single-region topologies. Free |
-| `interface` | `[]` | PrivateLink endpoints, one ENI per AZ each, with private DNS and a security group admitting HTTPS from the VPC. Supported: `sts`, `ecr.api`, `ecr.dkr`, `logs`, `monitoring`, `sqs`, `ssm`, `secretsmanager`, `kms`, `eks`, `elasticfilesystem`, `bedrock-runtime`. Unknown or duplicate names fail synthesis |
+| `interface` | `[]` | PrivateLink endpoints, one ENI per AZ each, with private DNS and a security group admitting HTTPS from the VPC. Supported: `sts`, `ecr.api`, `ecr.dkr`, `logs`, `monitoring`, `sqs`, `ssm`, `secretsmanager`, `kms`, `eks`, `elasticfilesystem`, `bedrock-runtime`, `xray` (the API services' span export, see [Distributed Tracing](#distributed-tracing)). Unknown or duplicate names fail synthesis |
 
 Endpoints change routing, not policy: NetworkPolicy egress rules allow HTTPS by
 port, so job pods keep working whether S3 is reached through the gateway
@@ -1541,6 +1543,58 @@ Two cost surfaces ship with GCO and are configured in two places:
 
 Redeploy after changing the block (`gco stacks deploy-all`). Every command is
 listed in the [CLI Reference](CLI.md#costs-commands).
+
+## Distributed Tracing
+
+The health-monitor, manifest-processor, inference-proxy, and cost-monitor
+services export OpenTelemetry spans to AWS X-Ray, sampled at 5% by default.
+The `tracing` block in `cdk.json` controls it:
+
+```json
+"tracing": {
+  "enabled": true,
+  "sample_ratio": 0.05,
+  "enable_transaction_search": true
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Renders `GCO_TRACING_ENABLED: "true"` into the four traced Deployments and grants their roles `xray:PutTraceSegments` and `xray:PutSpans`. `false` renders `"false"` (the SDK stays inert and exports nothing), removes the grants, and drops the Transaction Search resource |
+| `sample_ratio` | number from 0 to 1 | `0.05` | Head-sampling probability of a new trace, rendered as `GCO_TRACING_SAMPLE_RATIO`. Every GCO hop makes the same decision from the trace ID, and a caller's sampled flag is ignored. `0` exports nothing but keeps trace ids on log lines |
+| `enable_transaction_search` | boolean | `true` | Used only while `enabled` is true: each regional stack switches CloudWatch Transaction Search on in its Region (the X-Ray OTLP endpoint requires it) and never switches it off. Set `false` when your organization manages Transaction Search itself or it is unavailable in the partition |
+
+The block is optional; an absent block, or absent keys, mean the defaults above.
+It is validated at synthesis (`ConfigValidationError`): unknown keys are
+rejected with the list of allowed ones, the two flags must be JSON booleans (a
+quoted `"false"` is an error, not "off"), and `sample_ratio` must be a finite
+number from 0 to 1 inclusive (booleans are rejected). Redeploy the regional
+stacks after a change.
+
+Transaction Search is an account-level setting, configured per Region and
+shared with every other workload that sends traces to X-Ray there; turning it on
+moves all X-Ray span ingestion in that Region to CloudWatch Logs pricing. What
+the services trace, how spans are exported, the IAM grants, cost, querying, and
+turning Transaction Search back off are in
+[MONITORING.md → Distributed tracing](MONITORING.md#distributed-tracing). Span
+export uses the public X-Ray endpoint through the NAT gateways unless you add
+`xray` to [`vpc_endpoints.interface`](#vpc-endpoints).
+
+### Run-scoped tracing overrides
+
+For one deploy without editing `cdk.json`, pass a JSON object as the
+`tracing_overrides` CDK context. It is deep-merged over the `tracing` block and
+the merged result is validated exactly like the file, so partial objects work
+and malformed JSON fails synthesis:
+
+```bash
+cdk deploy gco-us-east-1 --context 'tracing_overrides={"sample_ratio": 1.0}'
+```
+
+The [live release validation](LIVE_RELEASE_VALIDATION.md#tracing-and-transaction-search)
+passes `{"sample_ratio":1.0}` on every CDK invocation of a run so each request it
+drives is sampled. As with the other run-scoped overrides, the next deploy
+without the context returns to the `cdk.json` values.
 
 ## Run-scoped Enablement Overrides
 

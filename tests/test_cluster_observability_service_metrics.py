@@ -82,18 +82,21 @@ def test_start_metrics_server_serves_collector_on_dedicated_registry(monkeypatch
 
     import gco.services.service_metrics as sm
 
-    served: list[tuple[int, object]] = []
+    served: list[tuple[int, str, object]] = []
     monkeypatch.setattr(
         prometheus_client,
         "start_http_server",
-        lambda port, registry=None: served.append((port, registry)),
+        lambda port, addr="0.0.0.0", registry=None: served.append((port, addr, registry)),
     )
 
     sm.start_metrics_server(9099, "inference-monitor", lambda: {"reconcile_count": 1})
 
     assert len(served) == 1
-    port, registry = served[0]
+    port, addr, registry = served[0]
     assert port == 9099
+    # Every interface unless the caller narrows it (the deployed monitor binds
+    # loopback; see tests/test_service_metrics_host.py).
+    assert addr == "0.0.0.0"
     # A dedicated registry (not the default one) so the collector's own
     # gco_service_info liveness series cannot collide with the module-level
     # _INFO gauge that mount_metrics registers in the default registry.

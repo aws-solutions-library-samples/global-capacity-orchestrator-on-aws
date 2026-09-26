@@ -161,8 +161,9 @@ All three ALB-facing Services expose only port 443 and route to a TLS proxy
 sidecar on pod port 8443. The sidecar hot-reloads its cert-manager-projected
 leaf and forwards decrypted traffic only to the application process over pod
 loopback. The ALB re-encrypts each target connection and uses HTTPS
-`/healthz` checks. ALB does not validate the deployment-local self-signed
-workload leaves, so this hop provides confidentiality rather than mTLS.
+`/healthz` checks. The leaves are issued by the cluster's internal CA, but ALB
+does not validate target certificates, so this hop provides confidentiality
+rather than mTLS.
 Request-bound HMAC proves trusted-proxy key possession and request integrity on
 protected paths; API Gateway IAM remains responsible for original caller
 identity. The exact HMAC exemptions are `/healthz`, `/readyz`, `/metrics`,
@@ -232,7 +233,7 @@ key at all.
 
 ## Transport Security
 
-GCO has two explicit TLS trust domains:
+GCO has three explicit TLS trust domains:
 
 1. Clients and the centralized aggregator use AWS-managed TLS to API Gateway.
    Aggregator fan-out additionally uses SigV4 with its execution-role
@@ -243,6 +244,12 @@ GCO has two explicit TLS trust domains:
    Accelerator forwards TCP/443 at Layer 4 and does not terminate TLS. Outside
    `aws`, accelerator-backed workload routes are omitted and callers use the
    regional bridge path directly.
+3. Inside each cluster, the hops GCO owns behind the ALB (manifest processor →
+   cost monitor, cost monitor → OpenCost, inference proxy → model endpoints,
+   PD proxy → prefill/decode, and the GCO metrics scrapes) use certificates
+   from a cluster-local cert-manager CA, and every client verifies them against
+   that CA alone. See
+   [ARCHITECTURE.md → In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
 
 Every regional ACM leaf represents `backend.<project>.gco.internal`. Backend
 clients connect to dynamic accelerator or ALB DNS names but explicitly send
@@ -251,7 +258,7 @@ terminate that connection and open a new HTTPS connection to a TLS-only proxy
 sidecar on each selected pod. The sidecar hot-reloads its projected workload
 certificate and forwards decrypted traffic only to the application listener on
 pod loopback. ALB target TLS provides confidentiality but does not validate the
-self-signed workload leaf and is not mTLS.
+workload certificate and is not mTLS.
 
 The root private key exists only in a customer-managed-KMS-encrypted Secrets
 Manager secret readable by the certificate-manager role. Proxy roles read only
@@ -1832,7 +1839,16 @@ Only `Accept`, `Accept-Encoding`, `Cache-Control`, `Content-Encoding`,
 `Content-Type`, `Idempotency-Key`, `If-Match`, `If-None-Match`, `Prefer`,
 `Range`, `User-Agent`, and `X-Request-Id` are forwarded upstream. Hop-by-hop
 headers and anything else a caller sends are dropped, so a model server never
-sees caller-supplied auth or routing headers.
+sees caller-supplied auth or routing headers. The proxy adds no
+`Accept-Encoding` of its own: it relays the model's bytes unchanged, so only an
+encoding the caller asked for can shape the response. While
+[tracing](MONITORING.md#distributed-tracing) is enabled it adds one header, its
+own W3C `traceparent`.
+
+The proxy reaches the endpoint's Service at
+`https://<service>.gco-inference.svc.cluster.local:8443`, the model pod's TLS
+sidecar, and verifies its certificate against the cluster's internal CA; see
+[Model Endpoint TLS](INFERENCE.md#model-endpoint-tls).
 
 ### Allowed Upstream Paths
 
@@ -1875,7 +1891,7 @@ the inference-proxy deployment:
 |--------|---------|
 | `404` | Unknown endpoint name, invalid DNS label, or a path outside the allowlist |
 | `400` | Path contained `.` or `..` segments |
-| `502` | The upstream endpoint could not be reached |
+| `502` | The upstream endpoint could not be reached, its certificate did not verify against the internal CA, or the proxy's CA bundle is missing |
 | `503` | The endpoint record exists but its spec is unusable |
 | `504` | The upstream endpoint exceeded the read timeout |
 
@@ -1987,6 +2003,10 @@ port-forward sessions.
 
 The cost-monitor service is reachable only from the manifest processor, enforced
 by a Kubernetes NetworkPolicy, and runs no authentication middleware of its own.
+It listens at `https://cost-monitor.gco-system.svc.cluster.local:8443`, a TLS
+sidecar in front of the application (which binds pod loopback), and the manifest
+processor verifies its certificate against the cluster's internal CA; an
+unreachable service or a missing CA bundle turns the cost routes into `503`.
 The manifest processor's `/api/v1/cost/*` routes are the authenticated front for
 these:
 
@@ -1999,7 +2019,9 @@ these:
 ### Mooncake Prefill/Decode Proxy
 
 Deployed only for endpoints using Mooncake disaggregation, as the
-`{endpoint_name}-proxy` Service:
+`{endpoint_name}-proxy` Service on port 8443: the pod's TLS sidecar in front of
+the proxy, which binds `127.0.0.1:8000`. The proxy itself calls the prefill and
+decode Services over HTTPS on 8443, trusting only the internal CA:
 
 | Endpoint | Description |
 |----------|-------------|

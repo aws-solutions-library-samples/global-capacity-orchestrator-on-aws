@@ -1,0 +1,113 @@
+# TLS for the cost pipeline's two in-cluster hops (post-Helm pass).
+#
+#   manifest processor -> cost monitor   https://cost-monitor.gco-system.svc.cluster.local:8443
+#   cost monitor       -> OpenCost       https://opencost-tls.monitoring.svc.cluster.local:9443
+#
+# Both leaves come from the gco-internal-ca ClusterIssuer
+# (post-helm-api-workload-certificates.yaml). cost-monitor-tls serves the cost
+# monitor's api-tls-proxy sidecar (34-cost-monitor.yaml), and its ca.crt is
+# also the cost monitor's own trust anchor for OpenCost. opencost-tls serves
+# the opencost-tls-proxy sidecar that GCORegionalStack injects into the
+# OpenCost chart pod; the opencost-tls Service below is that sidecar's front
+# door, next to the chart's own plaintext Service (Prometheus keeps scraping
+# OpenCost's metrics there).
+#
+# Certificates are post-Helm objects (cert-manager's CRDs come from its chart),
+# so these cannot live in 34-cost-monitor.yaml, which the base pass applies
+# before Helm. Gated on {{COST_MONITORING_ENABLED}} exactly like 34 and the
+# OpenCost chart itself: when cost monitoring or observability is off the
+# placeholder stays unreplaced, the applier skips this file, and
+# _FEATURE_RESOURCE_INVENTORY prunes what an earlier deploy created.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cost-monitor-tls
+  namespace: gco-system
+  labels:
+    app: cost-monitor
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  secretName: cost-monitor-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - cost-monitor
+    - cost-monitor.gco-system
+    - cost-monitor.gco-system.svc
+    - cost-monitor.gco-system.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: opencost-tls
+  namespace: monitoring
+  labels:
+    app: opencost
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  secretName: opencost-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - opencost-tls
+    - opencost-tls.monitoring
+    - opencost-tls.monitoring.svc
+    - opencost-tls.monitoring.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# The OpenCost API over TLS. Selects the chart's pod by the chart's own
+# selector labels (release "opencost") and targets the sidecar's named port.
+# Service port 9443 equals the container port on purpose: the VPC CNI
+# evaluates egress before kube-proxy's DNAT, so allow-cost-monitor-to-opencost
+# (34-cost-monitor.yaml) names 9443 and selects these same labels, which is
+# what lets the network policy controller admit this Service's ClusterIP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencost-tls
+  namespace: monitoring
+  labels:
+    app: opencost
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: opencost
+    app.kubernetes.io/instance: opencost

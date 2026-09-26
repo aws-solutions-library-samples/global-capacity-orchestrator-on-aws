@@ -209,6 +209,9 @@ class TestActionRegistry:
                 # Reads the EKS Capabilities attached to the deployed
                 # cluster; nothing to describe once it is torn down.
                 "eks-capabilities",
+                # Drives API traffic through the deployed services and reads
+                # their spans back from Transaction Search (topology first).
+                "tracing",
             }
         )
 

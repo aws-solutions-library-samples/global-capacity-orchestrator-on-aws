@@ -20,6 +20,7 @@ from gco.inference_proxy_config import (
 
 from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides_json
 from .checks.schedulers import OPTIONAL_SCHEDULERS
+from .checks.tracing import tracing_overrides_json
 from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
     InferenceRuntimeSpec,
@@ -343,6 +344,9 @@ def _settings_from_args(
             else tuple(sorted(set(args.optional_schedulers)))
         ),
         eks_capabilities_overrides_json=capabilities_overrides_json,
+        # Every CDK invocation of a release run samples every request, so the
+        # tracing action finds a span for each call it drives.
+        tracing_overrides_json=tracing_overrides_json(),
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

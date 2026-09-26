@@ -50,7 +50,12 @@ values; the `enabled` key in it is only a default. Operators toggle charts under
 `helm.<key>.enabled` in `cdk.json` (EFA and Neuron device plugins, Volcano,
 KubeRay, Kubeflow Trainer, cert-manager, Slurm, YuniKorn, Kueue), while
 kube-prometheus-stack, OpenCost and MLflow follow `cluster_observability` and
-`cost_monitoring`. In install order:
+`cost_monitoring`. The regional stack also injects a TLS sidecar into two chart
+pods through their values: `grafana-tls-proxy` in kube-prometheus-stack's
+Grafana (run from the manifest-processor image) and `opencost-tls-proxy` in
+OpenCost (run from the cost-monitor image), each with an amd64 node selector
+because those images are amd64-only; Grafana rolls out with the `Recreate`
+strategy because its one replica owns a ReadWriteOnce volume. In install order:
 
 | Chart | Namespace | Shipped default |
 |-------|-----------|-----------------|
