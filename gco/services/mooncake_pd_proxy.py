@@ -61,19 +61,20 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-try:
-    import httpx2 as httpx  # type: ignore[import-not-found,unused-ignore]
-except ImportError:
-    import httpx  # type: ignore[no-redef,unused-ignore]
-
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-26T23:26:19Z
+# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
 # Flowchart(s) generated from this file:
 #   * ``_dispatch`` -> ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
+
+
+try:
+    import httpx2 as httpx  # type: ignore[import-not-found,unused-ignore]
+except ImportError:
+    import httpx  # type: ignore[no-redef,unused-ignore]
 
 
 logging.basicConfig(

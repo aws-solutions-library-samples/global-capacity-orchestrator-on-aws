@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-20T18:35:17Z">
-        <meta name="gco-source-commit" content="b5e38fd2b8d538270e52d393d97979d9ca78e914">
-        <meta name="gco-flow-digest" content="0cf547a6875483ec">
+        <meta name="gco-generated-at" content="2026-09-26T23:26:19Z">
+        <meta name="gco-source-commit" content="f3be7366f66f942f857b581eaf47f75a14c29d81">
+        <meta name="gco-flow-digest" content="aa5976fbbfd2b4fb">
         <title>Manifest API lifecycle (stores + optional central queue worker)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,12 +208,12 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Initialize API dependencies and the optional regional queue worker.'
-op4=>operation: global manifest_processor, manifest_metrics, template_store, webhook_store, job_store
-op6=>operation: queue_worker: CentralQueueWorker | None = None
-op8=>operation: queue_worker_task: asyncio.Task[None] | None = None
-sub10=>subroutine: logger.info('Starting Manifest API Service')
-op13=>operation: manifest_processor = create_manifest_processor_from_env()
+        <div><textarea id="code" style="width: 100%;" rows="11">op141=>operation: 'Initialize API dependencies and the optional regional queue worker.'
+op143=>operation: global manifest_processor, manifest_metrics, template_store, webhook_store, job_store
+op145=>operation: queue_worker: CentralQueueWorker | None = None
+op147=>operation: queue_worker_task: asyncio.Task[None] | None = None
+sub149=>subroutine: logger.info('Starting Manifest API Service')
+op152=>operation: manifest_processor = create_manifest_processor_from_env()
 configure_structured_logging(service_name='manifest-api', cluster_id=manifest_processor.cluster_id, region=manifest_processor.region)
 manifest_metrics = ManifestProcessorMetrics(cluster_name=manifest_processor.cluster_id, region=manifest_processor.region)
 logger.info('Manifest processor initialized')
@@ -229,46 +229,48 @@ if _env_bool('CENTRAL_QUEUE_WORKER_ENABLED'):
 else:
     app.state.central_queue_worker = None
     app.state.central_queue_worker_task = None
-cond12=>condition: exception raised?
-cond15=>condition: except Exception as e
-sub19=>subroutine: logger.error(f'Failed to initialize manifest processor: {e}')
-sub21=>subroutine: raise
-io29=>inputoutput: output: yield
-cond26=>condition: exception raised?
-cond36=>condition: if queue_worker is not None and queue_worker_task is not None
-sub40=>subroutine: queue_worker.stop()
-op45=>operation: await asyncio.wait_for(queue_worker_task, timeout=30)
-cond42=>condition: exception raised?
-cond47=>condition: except TimeoutError
-sub51=>subroutine: queue_worker_task.cancel()
-op53=>operation: with suppress(asyncio.CancelledError):
+cond151=>condition: exception raised?
+cond154=>condition: except Exception as e
+sub158=>subroutine: logger.error(f'Failed to initialize manifest processor: {e}')
+sub160=>subroutine: raise
+io168=>inputoutput: output: yield
+cond165=>condition: exception raised?
+cond175=>condition: if queue_worker is not None and queue_worker_task is not None
+sub179=>subroutine: queue_worker.stop()
+op184=>operation: await asyncio.wait_for(queue_worker_task, timeout=30)
+cond181=>condition: exception raised?
+cond186=>condition: except TimeoutError
+sub190=>subroutine: queue_worker_task.cancel()
+op192=>operation: with suppress(asyncio.CancelledError):
     await queue_worker_task
-sub61=>subroutine: logger.info('Shutting down Manifest API Service')
+sub200=>subroutine: logger.info('Shutting down Manifest API Service')
+sub202=>subroutine: tracing.shutdown_tracing()
 
-op2->op4
-op4->op6
-op6->op8
-op8->sub10
-sub10->op13
-op13->cond12
-cond12(yes)->cond15
-cond15(yes)->sub19
-sub19->sub21
-cond15(no)->io29
-io29->cond26
-cond26(yes)->cond36
-cond36(yes)->sub40
-sub40->op45
-op45->cond42
-cond42(yes)->cond47
-cond47(yes)->sub51
-sub51->op53
-op53->sub61
-cond47(no)->sub61
-cond42(no)->sub61
-cond36(no)->sub61
-cond26(no)->cond36
-cond12(no)->io29
+op141->op143
+op143->op145
+op145->op147
+op147->sub149
+sub149->op152
+op152->cond151
+cond151(yes)->cond154
+cond154(yes)->sub158
+sub158->sub160
+cond154(no)->io168
+io168->cond165
+cond165(yes)->cond175
+cond175(yes)->sub179
+sub179->op184
+op184->cond181
+cond181(yes)->cond186
+cond186(yes)->sub190
+sub190->op192
+op192->sub200
+sub200->sub202
+cond186(no)->sub200
+cond181(no)->sub200
+cond175(no)->sub200
+cond165(no)->cond175
+cond151(no)->io168
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -278,17 +280,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-20T18:35:17Z -->
-        <!-- Generated from Git commit: b5e38fd2b8d538270e52d393d97979d9ca78e914 -->
+        <!-- Generated at (UTC): 2026-09-26T23:26:19Z -->
+        <!-- Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-20T18:35:17Z">2026-09-20T18:35:17Z</time>
+            Generated at (UTC): <time datetime="2026-09-26T23:26:19Z">2026-09-26T23:26:19Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b5e38fd2b8d538270e52d393d97979d9ca78e914</code>
+            Source commit: <code>f3be7366f66f942f857b581eaf47f75a14c29d81</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>0cf547a6875483ec</code>
+            Flow content SHA-256: <code>aa5976fbbfd2b4fb</code>
           </p>
           <div id="canvas"></div>
         </div>
