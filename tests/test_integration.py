@@ -279,7 +279,7 @@ class TestKubernetesManifests:
             # (post-helm-api-workload-certificates.yaml and the gated post-helm
             # TLS files).
             "cert-manager.io/v1",
-            # The issuance fence on that CA (07-internal-ca-issuance.yaml).
+            # The issuance fence on that CA (08-internal-ca-issuance.yaml).
             "admissionregistration.k8s.io/v1",
             # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
             # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.

@@ -484,7 +484,7 @@ the optional Argo CD, Crossplane, and kro integrations can create and patch
 `Certificate` objects in `gco-jobs` and `gco-inference`, and cert-manager's
 ingress-shim creates one for any Ingress annotated with a cluster issuer. The
 ValidatingAdmissionPolicy `gco-internal-ca-issuance`
-(`07-internal-ca-issuance.yaml`) therefore fences the two GCO ClusterIssuers.
+(`08-internal-ca-issuance.yaml`) therefore fences the two GCO ClusterIssuers.
 It fences only those: a tenant's own `Issuer` is untouched.
 
 - `gco-internal-ca` signs only the leaves in the table above, matched by

@@ -1776,7 +1776,7 @@ def apply_manifests(
                     elif kind == "ValidatingAdmissionPolicy":
                         # Built-in and cluster-scoped: the fence on who may
                         # obtain a certificate from GCO's internal CA
-                        # (07-internal-ca-issuance.yaml). It is a base-pass
+                        # (08-internal-ca-issuance.yaml). It is a base-pass
                         # object even though it matches cert-manager types, so
                         # it is enforced before the post-Helm pass creates the CA.
                         admission_v1 = client.AdmissionregistrationV1Api()

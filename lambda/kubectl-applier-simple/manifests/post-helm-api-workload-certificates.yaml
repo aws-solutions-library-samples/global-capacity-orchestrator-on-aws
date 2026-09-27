@@ -18,7 +18,7 @@
 # at /var/run/gco/tls and hot-reloads each rotation.
 #
 # Issuance fence. Trusting the CA means trusting whoever can get it to sign.
-# 07-internal-ca-issuance.yaml, an admission policy the base pass applies
+# 08-internal-ca-issuance.yaml, an admission policy the base pass applies
 # before cert-manager is installed, lets these ClusterIssuers sign only the
 # listed GCO leaves, each with exactly its own names, and the CA. A new leaf
 # needs an entry there too.

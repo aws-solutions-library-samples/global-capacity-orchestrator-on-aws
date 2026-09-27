@@ -4757,7 +4757,7 @@ jobs:
         # rules Python 3.13+ applies by default, so a chain that only passes a
         # lenient check would still fail every in-cluster HTTPS call.
         #
-        # The issuance fence (07-internal-ca-issuance.yaml, which the base
+        # The issuance fence (08-internal-ca-issuance.yaml, which the base
         # pass applies before cert-manager exists) goes in first and is then
         # proven in this real API server: a tenant Certificate from
         # gco-internal-ca is refused, a listed leaf in a tenant namespace
@@ -4768,7 +4768,7 @@ jobs:
         # kind node image is newer.
         run: |
           set -euo pipefail
-          fence_manifest=lambda/kubectl-applier-simple/manifests/07-internal-ca-issuance.yaml
+          fence_manifest=lambda/kubectl-applier-simple/manifests/08-internal-ca-issuance.yaml
           manifest=lambda/kubectl-applier-simple/manifests/post-helm-api-workload-certificates.yaml
           for file in "${fence_manifest}" "${manifest}"; do
             if grep -Eq '\{\{[A-Z0-9_]+\}\}' "${file}"; then

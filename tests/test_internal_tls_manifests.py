@@ -13,7 +13,7 @@ Every in-cluster hop GCO owns is HTTPS verified against one private CA:
 * Prometheus, the cost monitor, the manifest processor, the inference proxy
   and the Grafana rotator all name the Service host their peer's leaf carries.
 
-* ``07-internal-ca-issuance.yaml`` fences who may get the CA to sign: its
+* ``08-internal-ca-issuance.yaml`` fences who may get the CA to sign: its
   ValidatingAdmissionPolicy's own CEL runs through a small interpreter here, over
   every shipped Certificate and over the tenant objects it must refuse.
 
@@ -41,7 +41,7 @@ CHARTS_FILE = REPO_ROOT / "lambda" / "helm-installer" / "charts.yaml"
 INTEGRATION_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "integration-tests.yml"
 
 CORE_PKI = "post-helm-api-workload-certificates.yaml"
-FENCE = "07-internal-ca-issuance.yaml"
+FENCE = "08-internal-ca-issuance.yaml"
 COST_TLS = "post-helm-cost-monitoring-tls.yaml"
 MONITORING = "post-helm-monitoring-servicemonitors.yaml"
 MONITORING_TLS = "post-helm-monitoring-tls.yaml"
@@ -1232,9 +1232,15 @@ class TestIssuanceFencePolicy:
         assert not re.search(r"\{\{[A-Za-z0-9_]+\}\}", _raw(FENCE))
         # The base pass runs before Helm installs cert-manager, so the fence is
         # enforced before any Certificate can exist and minutes before the
-        # post-Helm pass creates the CA; it also sorts before the kro grant.
+        # post-Helm pass creates the CA. No base-pass file carries a
+        # cert-manager object, so where the fence sorts within that pass is free.
         assert not FENCE.startswith("post-helm-") and CORE_PKI.startswith("post-helm-")
-        assert FENCE < "07-kro-tenant-access.yaml"
+        assert not [
+            name
+            for name, doc in _all_documents()
+            if not name.startswith("post-helm-")
+            and str(doc.get("apiVersion", "")).startswith("cert-manager.io/")
+        ]
 
     def test_the_policy_fails_closed_and_its_binding_denies_everywhere(self) -> None:
         spec = _fence_policy()["spec"]

@@ -2766,7 +2766,7 @@ class TestManifestReadinessValidation:
     def test_the_issuance_fence_is_validated_by_exact_cluster_scoped_existence(
         self, handler_module, tmp_path
     ):
-        """07-internal-ca-issuance.yaml's policy and binding have no rollout contract.
+        """08-internal-ca-issuance.yaml's policy and binding have no rollout contract.
 
         The API server compiles a policy's CEL when it stores it and enforces it
         from then on, so the two exact cluster-scoped objects existing is the

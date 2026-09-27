@@ -43,7 +43,7 @@ The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
 - **Gateway API and AWS Load Balancer Controller:** GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration
 - **Karpenter / EKS Auto Mode:** NodePool, EC2NodeClass
 - **cert-manager:** ClusterIssuer (cluster-scoped), Issuer, Certificate — GCO's internal CA chain and its TLS leaves
-- **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the issuance fence on the internal CA (`07-internal-ca-issuance.yaml`)
+- **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the issuance fence on the internal CA (`08-internal-ca-issuance.yaml`)
 - **Prometheus Operator:** ServiceMonitor, PodMonitor
 - **KEDA:** ScaledJob, ScaledObject
 - **Kueue:** ClusterQueue, LocalQueue, ResourceFlavor

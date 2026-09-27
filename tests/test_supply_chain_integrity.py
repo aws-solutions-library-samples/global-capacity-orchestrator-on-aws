@@ -974,7 +974,7 @@ def test_kind_examples_smoke_issues_the_shipped_internal_pki() -> None:
     name = "Issue the shipped internal PKI with the pinned cert-manager"
     run = next(step["run"] for step in steps if step.get("name") == name)
 
-    assert "manifests/07-internal-ca-issuance.yaml" in run
+    assert "manifests/08-internal-ca-issuance.yaml" in run
     assert "manifests/post-helm-api-workload-certificates.yaml" in run
     assert (
         run.index('kubectl apply -f "${fence_manifest}"')
