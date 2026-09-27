@@ -83,6 +83,25 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _chart_overrides(props: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``Charts`` overrides with the JSON types the stack gave them.
+
+    CloudFormation delivers custom-resource properties with every number and
+    boolean as a string, so the regional stack sends ``Charts`` as one JSON
+    string and it is decoded here. An object (a stack synthesized before
+    that change) is taken as it is.
+    """
+    charts = props.get("Charts", {})
+    if isinstance(charts, str):
+        try:
+            charts = json.loads(charts)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Charts is not valid JSON: {exc}") from exc
+    if not isinstance(charts, dict):
+        raise ValueError("Charts must be a JSON object of per-chart overrides")
+    return charts
+
+
 def _encode_replay_input(execution_input_json: str) -> str:
     """Encode the replay input as zlib+base64 for SSM Parameter Store.
 
@@ -245,7 +264,7 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         "RegistryRegion": props["RegistryRegion"],
         "ProjectName": props["ProjectName"],
         "EnabledCharts": props.get("EnabledCharts", []),
-        "Charts": props.get("Charts", {}),
+        "Charts": _chart_overrides(props),
         "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
         "ImageReplacements": props.get("ImageReplacements", {}),
         "DeploymentToken": deployment_token,

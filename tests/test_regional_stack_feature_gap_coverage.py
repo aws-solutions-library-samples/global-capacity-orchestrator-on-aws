@@ -19,6 +19,7 @@ from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_lambda as lambda_
 
 from gco.stacks import regional_stack as rs
+from tests._cfn_json import decode_cfn_json
 from tests.test_regional_stack import MockConfigLoader
 
 _ACCOUNT = "123456789012"
@@ -548,7 +549,7 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     assert "yunikorn" in enabled
     assert "kube-prometheus-stack" in enabled
 
-    chart_overrides = properties["Charts"]
+    chart_overrides = decode_cfn_json(properties["Charts"])
     lbc_values = chart_overrides["aws-load-balancer-controller"]["values"]
     assert lbc_values["region"] == _REGION
     assert "GCOEksCluster" in json.dumps(lbc_values["clusterName"])
@@ -667,6 +668,54 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
         "2026-01-02T03:04:05Z"
     )
     assert "EndpointGroupArn" in properties
+
+
+def test_chart_overrides_keep_their_json_types_through_cloudformation(feature_stack):
+    """Both Helm custom resources carry Charts as one JSON string, never an object.
+
+    CloudFormation hands an object property to the provider with every number
+    and boolean as a string. That is how the TLS sidecars' Secret volume
+    (``optional``, ``defaultMode``) and OpenCost's sidecar container (ports,
+    probes, security context) reached Helm as strings on a live cluster and
+    failed server-side apply on the Grafana and OpenCost Deployments. The JSON
+    string decodes to exactly the overrides the stack built, types included.
+    """
+    stack, template = feature_stack
+    expected = stack.resolve(stack._helm_chart_value_overrides())
+    decoded = {}
+    for logical_id in ("HelmInstallCharts", "HelmTeardown"):
+        _, resource = _single_resource(
+            template,
+            "AWS::CloudFormation::CustomResource",
+            logical_id,
+        )
+        encoded = resource["Properties"]["Charts"]
+        assert isinstance(encoded, str) or set(encoded) == {"Fn::Join"}
+        decoded[logical_id] = decode_cfn_json(encoded)
+        assert decoded[logical_id] == expected
+
+    charts = decoded["HelmInstallCharts"]
+    observability = charts["kube-prometheus-stack"]["values"]
+    assert observability["alertmanager"]["enabled"] is True
+    assert observability["grafana"]["extraContainerVolumes"] == [
+        {
+            "name": "gco-tls",
+            "secret": {"secretName": "grafana-tls", "optional": True, "defaultMode": 0o444},
+        }
+    ]
+    opencost = charts["opencost"]["values"]
+    assert opencost["extraVolumes"] == [
+        {
+            "name": "gco-tls",
+            "secret": {"secretName": "opencost-tls", "optional": True, "defaultMode": 0o444},
+        }
+    ]
+    (sidecar,) = opencost["opencost"]["extraContainers"]
+    assert sidecar["ports"] == [{"name": "https", "containerPort": 9443}]
+    assert sidecar["securityContext"]["runAsNonRoot"] is True
+    assert sidecar["securityContext"]["runAsUser"] == rs._SERVICE_IMAGE_UID
+    assert sidecar["livenessProbe"]["periodSeconds"] == 20
+    assert sidecar["volumeMounts"][0]["readOnly"] is True
 
 
 def test_install_state_machine_retries_and_continues_per_chart(feature_stack):

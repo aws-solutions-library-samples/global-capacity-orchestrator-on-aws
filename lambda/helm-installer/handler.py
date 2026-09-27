@@ -1015,6 +1015,26 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
     return True, "Health monitor quiesced"
 
 
+def _cfn_chart_overrides(props: dict[str, Any]) -> dict[str, Any]:
+    """Return a custom resource's ``Charts`` overrides with their JSON types.
+
+    CloudFormation delivers custom-resource properties with every number and
+    boolean as a string, so the regional stack sends ``Charts`` as one JSON
+    string (decoded here); an object is taken as it is. Step Functions task
+    events carry the orchestrator's already-decoded object and never pass
+    through this.
+    """
+    charts = props.get("Charts", {})
+    if isinstance(charts, str):
+        try:
+            charts = json.loads(charts)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Charts is not valid JSON: {exc}") from exc
+    if not isinstance(charts, dict):
+        raise ValueError("Charts must be a JSON object of per-chart overrides")
+    return charts
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep merge two dictionaries."""
     result = base.copy()
@@ -2196,8 +2216,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
         default_config = load_charts_config()
         charts_config = default_config.get("charts", {})
 
-        # Apply chart overrides from CloudFormation
-        chart_overrides = props.get("Charts", {})
+        # Apply chart overrides from CloudFormation, which the regional stack
+        # sends as one JSON string so their types survive (see
+        # _cfn_chart_overrides).
+        chart_overrides = _cfn_chart_overrides(props)
         for chart_name, overrides in chart_overrides.items():
             if chart_name in charts_config:
                 charts_config[chart_name] = deep_merge(charts_config[chart_name], overrides)

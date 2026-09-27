@@ -22,6 +22,7 @@ import yaml
 from aws_cdk import assertions
 
 from gco.config.config_loader import ConfigLoader
+from tests._cfn_json import decode_cfn_json
 
 
 class MockConfigLoader:
@@ -3456,23 +3457,15 @@ class TestRegionalStackVolcanoImageMirror:
     def test_enabled_redirects_volcano_image_registry(self):
         """The HelmInstallCharts custom resource carries the Volcano override."""
         stack = self._build(self._enabled_app())
-        template = assertions.Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::CloudFormation::CustomResource",
-            {
-                "Charts": {
-                    "volcano": {
-                        "values": {
-                            "basic": {
-                                "image_registry": self._expected_mirror_registry(
-                                    stack, "gco-test/dockerhub"
-                                )
-                            }
-                        }
-                    }
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        charts = decode_cfn_json(resources["HelmInstallCharts"]["Properties"]["Charts"])
+        assert charts["volcano"] == {
+            "values": {
+                "basic": {
+                    "image_registry": self._expected_mirror_registry(stack, "gco-test/dockerhub")
                 }
-            },
-        )
+            }
+        }
 
     def test_custom_namespace_is_honored(self):
         stack = self._build(self._enabled_app(ecr_namespace="gco-test/mirror"))

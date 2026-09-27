@@ -80,7 +80,7 @@ strategy because its one replica owns a ReadWriteOnce volume. In install order:
 |----------|----------|-------------|
 | `ClusterName` | Yes | EKS cluster name |
 | `Region` | Yes | AWS region |
-| `Charts` | No | Dict of chart config overrides |
+| `Charts` | No | Per-chart config overrides as one JSON string (an object is accepted too). CloudFormation turns every number and boolean in an object property into a string, so the regional stack JSON-encodes the overrides and this path, the orchestrator and the teardown provider decode them |
 | `EnabledCharts` | No | List of chart names to enable |
 | `KedaOperatorRoleArn` | No | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) role ARN for KEDA [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) |
 

@@ -4515,9 +4515,10 @@ class GCORegionalStack(Stack):
             "ClusterName": self.cluster.cluster_name,
             "Region": self.deployment_region,
             # Helm chart selection + per-chart value overrides (e.g. Volcano
-            # image_registry redirected to the ECR mirror when enabled).
+            # image_registry redirected to the ECR mirror when enabled), the
+            # overrides as one JSON string so their types survive CloudFormation.
             "EnabledCharts": self._get_enabled_helm_charts(),
-            "Charts": self._helm_chart_value_overrides(),
+            "Charts": self._helm_chart_value_overrides_json(),
             "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
             # Template substitutions for the base + post-Helm kubectl passes.
             "ImageReplacements": image_replacements,
@@ -5136,11 +5137,28 @@ class GCORegionalStack(Stack):
             f"{self.account}.dkr.ecr.{self.deployment_region}.{self.url_suffix}/{ecr_namespace}"
         )
 
+    def _helm_chart_value_overrides_json(self) -> str:
+        """The chart value overrides as the JSON string both Helm custom resources carry.
+
+        CloudFormation hands a custom resource's properties to its provider
+        with every number and boolean turned into a string. Values a chart
+        renders with ``toYaml`` then reach the API server with the wrong type:
+        the TLS sidecars' Secret volume (``optional: "true"``,
+        ``defaultMode: "292"``) and OpenCost's sidecar container (ports,
+        probes, ``runAsNonRoot``) fail server-side apply, and a ``false``
+        toggle becomes the truthy string ``"false"``. One JSON string keeps
+        every override's type; CloudFormation still resolves the tokens inside
+        it, and the Helm orchestrator and teardown provider decode it before
+        building their execution input.
+        """
+        return self.to_json_string(self._helm_chart_value_overrides())
+
     def _helm_chart_value_overrides(self) -> dict[str, Any]:
         """Per-chart helm value overrides injected into the install payload.
 
-        Returned dict is forwarded verbatim as the ``Charts`` property of the
-        ``HelmInstallCharts`` custom resource; the installer deep-merges each
+        Returned dict is JSON-encoded (``_helm_chart_value_overrides_json``)
+        into the ``Charts`` property of the ``HelmInstallCharts`` and
+        ``HelmTeardown`` custom resources; the installer deep-merges each
         chart's ``values`` over ``charts.yaml``. The mandatory
         ``aws-load-balancer-controller`` chart always receives the cluster,
         region, VPC, and dedicated IRSA role values. Optional overrides are:
@@ -6287,7 +6305,7 @@ class GCORegionalStack(Stack):
             "RegistryRegion": self.config.get_global_region(),
             "ProjectName": self.config.get_project_name(),
             "EnabledCharts": self._get_enabled_helm_charts(),
-            "Charts": self._helm_chart_value_overrides(),
+            "Charts": self._helm_chart_value_overrides_json(),
             "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
         }
         if self.endpoint_group_arn is not None:
