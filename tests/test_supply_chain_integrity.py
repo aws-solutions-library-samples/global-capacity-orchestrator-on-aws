@@ -637,12 +637,103 @@ def test_kind_cluster_e2e_dry_runs_the_inference_deployments_the_monitor_renders
     assert '"--attention-backend", "triton", "--disable-cuda-graph"' in run
     assert '"node_selector": {' in run
     assert 'assert container["command"] == ["python3", "-m", "sglang.launch_server"]' in run
+    # Every model pod carries the endpoint-tls-proxy sidecar: containers are
+    # picked by name (never by position), and each render must front the
+    # model's own port on 8443 with the gco-inference wildcard leaf.
+    assert '(sidecar,) = [c for c in pod["containers"] if c["name"] == "endpoint-tls-proxy"]' in run
+    assert (
+        '(container,) = [c for c in pod["containers"] if c["name"] != "endpoint-tls-proxy"]' in run
+    )
+    assert '["containers"][0]' not in run
+    assert '{"containerPort": 8443, "name": "https", "protocol": "TCP"}' in run
+    assert 'sidecar_env["TLS_PROXY_UPSTREAM_PORT"] == str(spec["port"])' in run
+    assert '"gco-inference-tls" in {' in run
     assert "kubectl apply --dry-run=server -f" in run
     assert "kubectl -n gco-inference get serviceaccount gco-service-account" in run
     assert """test "$(grep -c 'created (server dry run)' """ in run
     assert '= "3"' in run
     assert order.index("Apply namespaces + RBAC") < order.index(name)
     assert order.index(name) < order.index("Apply ResourceQuotas and LimitRanges")
+
+
+def test_kind_cluster_e2e_runs_the_platform_on_internal_ca_tls() -> None:
+    """cluster-e2e issues every platform leaf from one CA and proves the TLS-only posture.
+
+    Each Secret the platform pods mount gets a leaf carrying the dnsNames of
+    the shipped Certificate of the same name plus the ``ca.crt`` key the pods
+    project as their clients' only trust anchor (without it they never leave
+    ContainerCreating). The render gives tracing an explicit value and lets
+    only listed opaque tokens fall back to a stub; the inference proxy then
+    verifies its own sidecar through ``gco.services.internal_tls``; and the
+    NetworkPolicy probes cover the TLS-only ports (inference-monitor metrics
+    on 9443 not 9090; model pods on 8443 from the proxy only).
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-cluster-e2e"]["steps"]
+    order = [step.get("name") or step.get("uses") for step in steps]
+    by_name = {step.get("name"): step for step in steps if isinstance(step, dict)}
+
+    seed_name = "Seed the platform TLS Secrets from a CI internal CA"
+    seed = by_name[seed_name]["run"]
+    for secret in (
+        "health-monitor-tls",
+        "manifest-processor-tls",
+        "inference-proxy-tls",
+        "inference-monitor-tls",
+        "cost-monitor-tls",
+    ):
+        assert secret in seed, secret
+    for fragment in (
+        '"post-helm-api-workload-certificates.yaml"',
+        '"post-helm-cost-monitoring-tls.yaml"',
+        '("ClusterIssuer", "gco-internal-ca")',
+        '",".join(certificate["spec"]["dnsNames"])',
+        "basicConstraints = critical, CA:TRUE",
+        "subjectKeyIdentifier = hash",
+        "authorityKeyIdentifier = keyid",
+        "openssl verify -x509_strict -purpose sslserver",
+        "--type=kubernetes.io/tls",
+        '--from-file=ca.crt="${ca_dir}/ca.crt"',
+    ):
+        assert fragment in seed, fragment
+    # `kubectl create secret tls` has no ca.crt; the self-signed leaf is gone.
+    assert "create secret tls" not in seed
+    assert order.index("Apply namespaces + RBAC") < order.index(seed_name)
+    assert order.index(seed_name) < order.index("Render and apply deployments")
+
+    render = by_name["Render and apply deployments"]["run"]
+    assert '"{{TRACING_ENABLED}}": "false"' in render
+    assert '"{{TRACING_SAMPLE_RATIO}}": "0.05"' in render
+    assert "opaque = {" in render
+    assert 'raise SystemExit(f"{name}: no CI value for {sorted(leftover)}")' in render
+
+    verify_name = "Verify the internal CA chain through the services' own trust code"
+    verify = by_name[verify_name]["run"]
+    assert "kubectl -n gco-system exec deploy/inference-proxy -c inference-proxy --" in verify
+    assert "from gco.services.internal_tls import" in verify
+    assert 'get_healthz("inference-proxy.gco-system.svc.cluster.local")' in verify
+    assert "except ssl.SSLCertVerificationError" in verify
+    assert (
+        order.index("Wait for inference proxy TLS rollout")
+        < order.index(verify_name)
+        < order.index("Verify inference proxy HPA is actively computing replicas")
+    )
+
+    netpol = by_name["Verify NetworkPolicy enforcement (allowed and denied paths)"]["run"]
+    assert (
+        "start_target gco-system netpol-target-metrics app=inference-monitor,project=gco 9443 9090"
+        in netpol
+    )
+    assert 'app=netpol-probe-client "$metrics_ip" 9443 reachable' in netpol
+    assert 'app=netpol-probe-client "$metrics_ip" 9090 blocked' in netpol
+    assert (
+        "start_target gco-inference netpol-target-model app=netpol-model,gco.io/type=inference "
+        "8443 8000" in netpol
+    )
+    assert 'app=inference-proxy,gco.aws/ci-only=true "$model_ip" 8443 reachable' in netpol
+    assert 'app=inference-proxy,gco.aws/ci-only=true "$model_ip" 8000 blocked' in netpol
+    foreign = 'netpol-test-model-foreign app=netpol-probe-client "$model_ip" 8443 blocked'
+    assert f"probe default {foreign}" in netpol
 
 
 def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() -> None:
@@ -705,17 +796,56 @@ def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() ->
     assert 'storage_class = "gco-observability-gp3"' in kps
     assert "rollout status statefulset/prometheus-kube-prometheus-stack-prometheus" in kps
     opencost = by_name["Install pinned OpenCost with shipped values"]["run"]
-    assert 'defaultClusterId: "${CI_CLUSTER_ID}"' in opencost
-    # The Service/port the monitor's OPENCOST_BASE_URL names and the shipped
-    # egress rule admits, plus the ServiceMonitor the shipped values enable.
+    # The deploy-time values are the stack's own output, not a copy: the two
+    # functions are executed from the stack source with the loaded image.
+    assert 'source = Path("gco/stacks/regional_stack.py")' in opencost
+    assert 'node.name == "_chart_tls_proxy_sidecar"' in opencost
+    assert 'node.name == "_opencost_chart_values"' in opencost
+    assert 'cost_monitor_image=SimpleNamespace(image_uri="cost-monitor:ci")' in opencost
+    assert 'cluster=SimpleNamespace(cluster_name=os.environ["CI_CLUSTER_ID"])' in opencost
+    assert 'sidecar["name"] == "opencost-tls-proxy"' in opencost
+    assert "python3 - <<'PY' > \"${RUNNER_TEMP}/opencost-ci-overlay.yaml\"" in opencost
+    # ...and no hand-written overlay beside it.
+    assert 'defaultClusterId: "${CI_CLUSTER_ID}"' not in opencost
+    # The sidecar made it into the chart pod on the Service's named port,
+    # from an optional Secret volume that must not exist yet (the keypair
+    # wait is exercised), and the pod wears the selector labels the
+    # opencost-tls Service and allow-cost-monitor-to-opencost select.
+    assert 'containers[?(@.name=="opencost-tls-proxy")].ports[?(@.name=="https")]' in opencost
+    assert 'volumes[?(@.name=="gco-tls")].secret.optional}\')" = "true"' in opencost
+    assert "get secret opencost-tls" in opencost
+    assert "-l app.kubernetes.io/name=opencost,app.kubernetes.io/instance=opencost" in opencost
+    # The chart's plaintext Service stays for the ServiceMonitor the shipped
+    # values enable (Prometheus scrapes 9003 in-namespace; nothing else may).
     assert '= "9003"' in opencost
     assert "get servicemonitor opencost" in opencost
     # kind has no cloud provider: the fallback price sheet needs a writable
     # /var/configs, supplied as a scratch volume INTO the shipped read-only
-    # root — which the step must prove survived the overlay.
-    assert "mountPath: /var/configs" in opencost
-    assert "emptyDir: {}" in opencost
+    # root — which the step must prove survived the overlay. Helm replaces
+    # lists, so it joins the stack's extraVolumes instead of replacing them.
+    assert '{"name": "pricing-configs", "mountPath": "/var/configs"}' in opencost
+    assert 'values["extraVolumes"].append({"name": "pricing-configs", "emptyDir": {}})' in opencost
     assert 'securityContext.readOnlyRootFilesystem}\')" = "true"' in opencost
+
+    # No cert-manager here: the post-Helm cost TLS file is rendered like the
+    # applier renders it, its Service applied as shipped, and its two
+    # Certificates issued by a CI CA with their own names — both Secrets
+    # carrying ca.crt from the one CA — before the monitor rolls out.
+    tls = by_name["Apply the post-Helm cost TLS objects with a CI internal CA"]["run"]
+    assert "post-helm-cost-monitoring-tls.yaml" in tls
+    assert 'text.replace("{{COST_MONITORING_ENABLED}}", "true")' in tls
+    assert "unsubstituted token(s) remain" in tls
+    assert '[("gco-system", "cost-monitor-tls"), ("monitoring", "opencost-tls")]' in tls
+    assert '("Service", "opencost-tls")' in tls
+    assert '("ClusterIssuer", "gco-internal-ca")' in tls
+    assert "openssl verify -x509_strict -purpose sslserver" in tls
+    assert "--type=kubernetes.io/tls" in tls
+    assert '--from-file=ca.crt="${ca_dir}/ca.crt"' in tls
+    assert 'echo "COST_PIPELINE_CA_FILE=${ca_dir}/ca.crt" >> "${GITHUB_ENV}"' in tls
+    assert "kubernetes.io/service-name=opencost-tls" in tls
+    assert 'internal_ssl_context("/var/run/gco/tls/ca.crt")' in tls
+    assert "exec deploy/opencost -c opencost-tls-proxy" in tls
+    assert "helm " not in tls
 
     build = by_name["Build cost-monitor image"]
     assert build["with"]["file"] == "dockerfiles/Dockerfile.cost-monitor"
@@ -732,23 +862,62 @@ def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() ->
     assert '>= {"OPENCOST_BASE_URL"' in render
     assert "networkpolicy allow-cost-monitor-to-opencost" in render
     assert "ci-allow-s3-emulator-egress" in render
+    # Two containers now: picked by name, both on the loaded image, tracing
+    # given its CI value, and only the listed opaque tokens stubbed.
+    assert '(container,) = [c for c in containers if c["name"] == "cost-monitor"]' in render
+    assert '(container,) = deployment["spec"]["template"]["spec"]["containers"]' not in render
+    assert 'pod_container["imagePullPolicy"] = "Never"' in render
+    assert '"{{TRACING_ENABLED}}": "false"' in render
+    assert '"{{TRACING_SAMPLE_RATIO}}": "0.05"' in render
+    assert "34-cost-monitor.yaml: no CI value for" in render
+    assert 'get service cost-monitor -o jsonpath=\'{.spec.ports[*].port}\')" = "8443"' in render
 
+    # The monitor's API is read over verified HTTPS through its TLS sidecar
+    # (the manifest processor's hop), never its loopback-bound plaintext port.
     status = by_name["Wait for the cost monitor to see OpenCost returning data"]["run"]
     assert "/internal/status" in status
     assert 'status["opencost_returning_data"]' in status
     assert 'status["opencost_healthy"]' in status
     report = by_name["Generate an ad-hoc report and verify the Parquet object end to end"]["run"]
+    for run in (status, report):
+        assert "port-forward svc/cost-monitor 18443:8443" in run
+        assert '--cacert "${COST_PIPELINE_CA_FILE}" --resolve "${api}:127.0.0.1"' in run
+        assert 'api="cost-monitor.gco-system.svc.cluster.local:18443"' in run
+        assert '"https://${api}/internal/' in run
+        assert "18080" not in run
     assert "/internal/reports" in report
     assert "from gco.services.cost_monitor import ALLOCATION_REPORT_FIELDS" in report
     assert "table.column_names == list(ALLOCATION_REPORT_FIELDS)" in report
-    assert "kubectl -n gco-system exec deploy/cost-monitor" in report
+    assert "kubectl -n gco-system exec deploy/cost-monitor -c cost-monitor --" in report
     assert "aws s3api head-object" in report
+    summary = by_name["Summary"]["run"]
+    assert "exec deploy/cost-monitor -c cost-monitor --" in summary
     prometheus = by_name["Verify Prometheus scrapes the pinned OpenCost"]["run"]
     assert "node_total_hourly_cost" in prometheus
-    netpol = by_name["Verify only the cost monitor may reach OpenCost"]["run"]
-    assert netpol.count("--image=busybox:1.38.0") == 1
-    assert "probe netpol-probe-unlabelled app=netpol-probe blocked" in netpol
-    assert "probe netpol-probe-cost-monitor app=cost-monitor,project=gco reachable" in netpol
+    # One probe command (a TLS client, so the loaded cost-monitor image), five
+    # verdicts: the monitor reaches only OpenCost's TLS front door, only the
+    # manifest processor reaches the monitor, and neither plaintext port nor
+    # an unlisted peer gets through.
+    netpol_name = "Verify the cost pipeline's NetworkPolicies admit only its TLS hops"
+    netpol = by_name[netpol_name]["run"]
+    assert netpol.count("--image=cost-monitor:ci") == 1
+    assert "--image-pull-policy=Never" in netpol
+    assert len(re.findall(r"kubectl (?:-n \S+ )?run ", netpol)) == 1
+    assert "busybox" not in netpol
+    assert "ssl.create_default_context(cadata=" in netpol
+    assert "except TimeoutError:" in netpol
+    for probe in (
+        'probe gco-system netpol-probe-cost-monitor app=cost-monitor,project=gco "${opencost_tls}" 9443 reachable',
+        "probe gco-system netpol-probe-plaintext app=cost-monitor,project=gco \\\n"
+        "  opencost.monitoring.svc.cluster.local 9003 blocked",
+        'probe gco-system netpol-probe-unlabelled app=netpol-probe "${opencost_tls}" 9443 blocked',
+        "probe gco-system netpol-probe-manifest-processor app=manifest-processor,gco.aws/ci-only=true \\\n"
+        '  "${cost_monitor}" 8443 reachable',
+        'probe default netpol-probe-foreign app=netpol-probe "${cost_monitor}" 8443 blocked',
+    ):
+        assert probe in netpol, probe
+    # busybox is no longer part of this job, so it is neither pulled nor loaded.
+    assert "busybox" not in yaml.safe_dump(job)
 
     order = [step.get("name") or step.get("uses") for step in steps]
     kind_index = next(
@@ -765,11 +934,89 @@ def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() ->
         order.index("Apply the shipped NetworkPolicies (Calico-enforced)")
         < order.index("Install pinned kube-prometheus-stack with shipped values")
         < order.index("Install pinned OpenCost with shipped values")
+        < order.index("Apply the post-Helm cost TLS objects with a CI internal CA")
         < order.index("Render and apply the cost monitor")
         < order.index("Verify Prometheus scrapes the pinned OpenCost")
         < order.index("Wait for the cost monitor to see OpenCost returning data")
         < order.index("Generate an ad-hoc report and verify the Parquet object end to end")
-        < order.index("Verify only the cost monitor may reach OpenCost")
+        < order.index(netpol_name)
+    )
+    # cost-monitor:ci is on the node before anything runs it: the OpenCost
+    # pod's TLS sidecar, the monitor itself, and the NetworkPolicy probes.
+    assert order.index("Load the cost-monitor image into kind") < order.index(
+        "Install pinned OpenCost with shipped values"
+    )
+
+
+def test_kind_examples_smoke_issues_the_shipped_internal_pki() -> None:
+    """The shipped gco-internal-ca chain meets the pinned cert-manager in examples-smoke.
+
+    It is the one kind job that already installs cert-manager, and the trainer
+    install before the step proves the webhook answers. The step applies the
+    issuance fence and then the PKI manifest, both unrendered (neither carries
+    a placeholder), waits for both ClusterIssuers and the CA Certificate, and
+    for every leaf requires Ready, ``ca.crt`` equal to the CA's certificate,
+    and a strict X.509 verification for the name clients dial.
+
+    Then, once a dry run shows the fence enforced, it proves the fence in the
+    real API server: a tenant Certificate from gco-internal-ca is refused with
+    the policy's message, widening gco-inference-tls is refused, a
+    CertificateRequest from a non-cert-manager user in system:masters is
+    refused, a tenant's own Issuer still issues, and cert-manager still
+    re-issues a listed leaf that verifies against the CA. Every refusal fails
+    the step if the API server admits it instead.
+    tests/test_internal_tls_manifests.py evaluates the same probes against the
+    policy's CEL. ValidatingAdmissionPolicy v1 needs Kubernetes 1.30 or later.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-examples-smoke"]["steps"]
+    order = [step.get("name") for step in steps]
+    name = "Issue the shipped internal PKI with the pinned cert-manager"
+    run = next(step["run"] for step in steps if step.get("name") == name)
+
+    assert "manifests/08-internal-ca-issuance.yaml" in run
+    assert "manifests/post-helm-api-workload-certificates.yaml" in run
+    assert (
+        run.index('kubectl apply -f "${fence_manifest}"')
+        < run.index('kubectl apply -f "${manifest}"')
+        < run.index('done 3< "${pki}/leaves.txt"')
+    )
+    fence_checks = [
+        'kubectl apply --dry-run=server -f "${fence}/tenant-leaf.yaml"',
+        'if kubectl apply -f "${fence}/tenant-leaf.yaml"',
+        "grep -qF \"ValidatingAdmissionPolicy 'gco-internal-ca-issuance'\"",
+        'grep -qF "${denied}" "${fence}/tenant-leaf.err"',
+        "patch certificate gco-inference-tls --dry-run=server",
+        'grep -qF "may carry only its own DNS names"',
+        "if kubectl create --as=gco-ci-tenant --as-group=system:masters",
+        'grep -qF "accepts requests only from cert-manager"',
+        'kubectl apply -f "${fence}/tenant-own-issuer.yaml"',
+        "wait --for=condition=Ready certificate/gco-ci-tenant-own-issuer",
+        "kubectl -n gco-system delete secret health-monitor-tls",
+        "-verify_hostname health-monitor.gco-system.svc.cluster.local",
+        "kubectl -n gco-jobs delete certificate gco-ci-tenant-own-issuer",
+        "kubectl -n gco-jobs delete issuer gco-internal-ca",
+    ]
+    positions = [run.index(fragment) for fragment in fence_checks]
+    assert positions == sorted(positions)
+    assert run.index('done 3< "${pki}/leaves.txt"') < positions[0]
+    assert 'denied="the ClusterIssuer gco-internal-ca signs only the GCO platform leaves"' in run
+    node_image = re.fullmatch(r"kindest/node:v1\.(\d+)\.\d+", workflow["env"]["KIND_NODE_IMAGE"])
+    assert node_image is not None and int(node_image.group(1)) >= 30
+    for wait in (
+        "kubectl wait --for=condition=Ready clusterissuer/gco-internal-ca-bootstrap",
+        "kubectl -n cert-manager wait --for=condition=Ready certificate/gco-internal-ca",
+        "kubectl wait --for=condition=Ready clusterissuer/gco-internal-ca --timeout",
+        'wait --for=condition=Ready "certificate/${certificate}"',
+    ):
+        assert wait in run, wait
+    assert "-fingerprint -sha256" in run
+    assert "openssl verify -x509_strict -purpose sslserver" in run
+    assert 'doc["spec"].get("isCA")' in run
+    assert (
+        order.index("Install pinned cert-manager (the trainer chart's cert dependency)")
+        < order.index("Re-run the trainer install as an upgrade (idempotency contract)")
+        < order.index(name)
     )
 
 

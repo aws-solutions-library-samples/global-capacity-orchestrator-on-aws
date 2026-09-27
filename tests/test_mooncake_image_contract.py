@@ -14,7 +14,9 @@ than discovered in production:
    test runs the router exactly as the pod does — ``python3
    /etc/pd-proxy/mooncake_pd_proxy.py`` against a read-only mount of the
    shipped script — and asserts it serves ``/healthz``. It also implicitly
-   verifies the image still bundles ``fastapi``/``uvicorn``/``httpx``.
+   verifies the image still bundles ``fastapi``/``uvicorn``/``httpx`` (the
+   image has no ``httpx2``, so this is the program's ``httpx`` fallback path)
+   and that the script still parses and runs on the image's Python.
 
 2. **The rendered store config is accepted by the image's loader.** The
    shared KV-cache store runs embedded in each vLLM pod, and embedded mode
@@ -170,8 +172,9 @@ def test_proxy_starts_and_serves_health(image: str) -> None:
 
     Reproduces the production launch (``python3 /etc/pd-proxy/<script>`` over a
     read-only mount of the shipped script) so a missing ``python3``, a dropped
-    ``fastapi``/``uvicorn``/``httpx`` dependency, or a script/app-construction
-    break fails here instead of crash-looping the proxy pod.
+    ``fastapi``/``uvicorn``/``httpx`` dependency, syntax the image's Python
+    cannot parse, or a script/app-construction break fails here instead of
+    crash-looping the proxy pod.
     """
     assert _PROXY_SCRIPT.is_file(), f"proxy script not found at {_PROXY_SCRIPT}"
 
@@ -193,6 +196,10 @@ def test_proxy_starts_and_serves_health(image: str) -> None:
             f"{_PROXY_SCRIPT.parent}:{_PROXY_MOUNT_DIR}:ro",
             "-e",
             f"PD_PROXY_PORT={_PROXY_CONTAINER_PORT}",
+            # The pod binds loopback behind its TLS sidecar; a published
+            # container port needs the all-interfaces listener instead.
+            "-e",
+            "PD_PROXY_HOST=0.0.0.0",
             "-e",
             "PD_PROXY_PREFILL_URL=http://prefill.invalid:8000",
             "-e",

@@ -15,6 +15,7 @@ Configuration Sections:
 - inference_proxy: Shared inference TLS proxy CPU request and HPA target
 - manifest_processor: Manifest validation and resource limits
 - api_gateway: Throttling and logging configuration
+- tracing: OpenTelemetry -> AWS X-Ray tracing for the API services
 - tags: Common tags applied to all resources
 
 Usage:
@@ -25,8 +26,12 @@ Usage:
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
+import math
 import re
+from collections.abc import Mapping
 from typing import Any, cast
 
 import boto3
@@ -104,6 +109,8 @@ VPC_INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
     "eks",
     "elasticfilesystem",
     "bedrock-runtime",
+    # OTLP span export from the traced API services (``tracing`` block).
+    "xray",
 )
 
 _VPC_ENDPOINTS_DEFAULTS: dict[str, list[str]] = {
@@ -149,6 +156,128 @@ def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
             f"Unknown {FEATURE_OVERRIDE_CONTEXT_KEY} name(s): {', '.join(unknown)}. Valid: {valid}"
         )
     return frozenset(names)
+
+
+#: cdk.json context key for the OpenTelemetry -> AWS X-Ray tracing block.
+TRACING_CONTEXT_KEY = "tracing"
+
+#: Run-scoped CDK context key carrying a JSON object deep-merged over the
+#: ``tracing`` block for one deploy (``cdk deploy --context
+#: tracing_overrides='{"sample_ratio": 1.0}'``) — the tracing sibling of
+#: ``eks_capabilities_overrides``. The live release harness, whose preflight
+#: requires a clean worktree, records every trace of its run this way.
+TRACING_OVERRIDES_CONTEXT_KEY = "tracing_overrides"
+
+#: The ``tracing`` block with every knob at its default. Tracing is ON by
+#: default, like cluster observability: an absent block means the shipped
+#: posture, not "off". ``sample_ratio`` is the head-sampling probability of a
+#: new trace; ``enable_transaction_search`` lets each regional stack switch on
+#: CloudWatch Transaction Search, which the X-Ray OTLP endpoint requires, and
+#: only matters while ``enabled`` is true.
+TRACING_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "sample_ratio": 0.05,
+    "enable_transaction_search": True,
+}
+
+
+def _deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``overlay`` recursively merged over a copy of ``base``."""
+    merged: dict[str, Any] = copy.deepcopy(dict(base))
+    for key, value in overlay.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def parse_tracing_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``tracing_overrides`` context value into a mapping.
+
+    Accepts a JSON object string (the only shape ``cdk --context`` can carry)
+    or a mapping (cdk.json-style); ``None`` and blank strings mean no
+    overrides. Only the shape is checked here: the merged block is validated
+    as a whole, so an override that produces an invalid block fails exactly
+    like an invalid cdk.json does.
+    """
+    if raw is None:
+        return {}
+    if isinstance(raw, Mapping):
+        return copy.deepcopy(dict(raw))
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ConfigValidationError(
+                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ConfigValidationError(
+                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object, got {type(parsed).__name__}"
+            )
+        return parsed
+    raise ConfigValidationError(
+        f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object string or an object, "
+        f"got {type(raw).__name__}"
+    )
+
+
+def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, Any]:
+    """Return the validated ``tracing`` block with overrides and defaults applied.
+
+    Single source of truth shared by :meth:`ConfigLoader.get_tracing_config`
+    and the regional stack, which falls back to it for config doubles that
+    predate the knob. ``overrides`` is the raw ``tracing_overrides`` context
+    value. Types are checked exactly: the flags are rendered verbatim into
+    the ``GCO_TRACING_ENABLED`` env var and a quoted ``"false"`` in cdk.json
+    must not read as enabled, and ``sample_ratio`` must be a real number in
+    ``[0, 1]`` because the services treat it as a probability.
+
+    Raises:
+        ConfigValidationError: If the block or the overrides are malformed.
+    """
+    if raw is None:
+        block: Mapping[str, Any] = {}
+    elif isinstance(raw, Mapping):
+        block = raw
+    else:
+        raise ConfigValidationError(
+            f"{TRACING_CONTEXT_KEY} must be an object, got {type(raw).__name__}"
+        )
+    parsed_overrides = parse_tracing_overrides(overrides)
+    merged = _deep_merge(_deep_merge(TRACING_DEFAULTS, block), parsed_overrides)
+
+    unknown = sorted(str(key) for key in merged if key not in TRACING_DEFAULTS)
+    if unknown:
+        source = f" (after {TRACING_OVERRIDES_CONTEXT_KEY})" if parsed_overrides else ""
+        raise ConfigValidationError(
+            f"{TRACING_CONTEXT_KEY}{source} contains unknown key(s): {', '.join(unknown)}; "
+            f"allowed keys: {', '.join(sorted(TRACING_DEFAULTS))}"
+        )
+    for flag in ("enabled", "enable_transaction_search"):
+        if type(merged[flag]) is not bool:
+            raise ConfigValidationError(
+                f"{TRACING_CONTEXT_KEY}.{flag} must be a boolean, got {merged[flag]!r}"
+            )
+    ratio = merged["sample_ratio"]
+    if (
+        isinstance(ratio, bool)
+        or not isinstance(ratio, int | float)
+        or not math.isfinite(ratio)
+        or not 0 <= ratio <= 1
+    ):
+        raise ConfigValidationError(
+            f"{TRACING_CONTEXT_KEY}.sample_ratio must be a number from 0 to 1 (inclusive), "
+            f"got {ratio!r}"
+        )
+    return {
+        "enabled": merged["enabled"],
+        "sample_ratio": float(ratio),
+        "enable_transaction_search": merged["enable_transaction_search"],
+    }
 
 
 class ConfigValidationError(Exception):
@@ -237,6 +366,10 @@ class ConfigLoader:
 
         # Validate cost monitoring config (optional block)
         self._validate_cost_monitoring_config()
+
+        # Validate the OpenTelemetry -> X-Ray tracing block and its run-scoped
+        # overrides (optional; on by default)
+        self._validate_tracing_config()
 
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
@@ -2156,6 +2289,55 @@ class ConfigLoader:
         return bool(self.get_cost_monitoring_config()["enabled"]) and bool(
             self.get_cluster_observability_config()["enabled"]
         )
+
+    def _validate_tracing_config(self) -> None:
+        """Validate the optional ``tracing`` block and ``tracing_overrides``.
+
+        Resolving the block is the validation: unknown keys, non-boolean
+        flags, a ``sample_ratio`` outside ``[0, 1]`` and malformed overrides
+        all raise :class:`ConfigValidationError` at synth instead of shipping
+        a value the services would silently replace with their defaults.
+        """
+        self.get_tracing_config()
+
+    def get_tracing_config(self) -> dict[str, Any]:
+        """Return the validated ``tracing`` block with defaults merged in.
+
+        Keys (see :data:`TRACING_DEFAULTS`):
+            - enabled: render ``GCO_TRACING_ENABLED=true`` into the
+              health-monitor, manifest-processor, inference-proxy and
+              cost-monitor Deployments and grant their roles the X-Ray span
+              export actions (default True)
+            - sample_ratio: head-sampling probability of a new trace, a float
+              in ``[0, 1]`` (default 0.05)
+            - enable_transaction_search: let each regional stack switch on
+              CloudWatch Transaction Search in its Region (default True;
+              effective only while ``enabled`` — see
+              :meth:`get_transaction_search_enabled`)
+
+        Honors the run-scoped ``tracing_overrides`` context (a JSON object
+        deep-merged over the block), which the live release harness uses to
+        sample every trace of its run.
+        """
+        return resolve_tracing_config(
+            self.app.node.try_get_context(TRACING_CONTEXT_KEY),
+            self.app.node.try_get_context(TRACING_OVERRIDES_CONTEXT_KEY),
+        )
+
+    def get_tracing_enabled(self) -> bool:
+        """Return whether the API services export traces (default True)."""
+        return bool(self.get_tracing_config()["enabled"])
+
+    def get_transaction_search_enabled(self) -> bool:
+        """Return whether the regional stacks enable CloudWatch Transaction Search.
+
+        The conjunction of ``tracing.enabled`` and
+        ``tracing.enable_transaction_search``: Transaction Search only exists
+        to receive GCO's spans, so a deployment with tracing off never touches
+        the account-level setting.
+        """
+        config = self.get_tracing_config()
+        return bool(config["enabled"]) and bool(config["enable_transaction_search"])
 
     def get_capacity_history_config(self) -> dict[str, Any]:
         """Get the optional historical capacity surface configuration.

@@ -90,6 +90,56 @@ def test_delete_starts_retry_stable_ordered_execution():
     )
 
 
+def test_delete_decodes_json_encoded_charts_with_their_types():
+    """The stack sends Charts as one JSON string (CloudFormation stringifies
+    every number and boolean in an object property); the teardown input gets
+    the decoded overrides, while the object form still passes straight through."""
+    charts = {"opencost": {"values": {"extraVolumes": [{"secret": {"optional": True}}]}}}
+    event = _event("Delete")
+    event["ResourceProperties"]["Charts"] = json.dumps(charts)
+    sfn = MagicMock()
+    sfn.list_executions.return_value = {"executions": []}
+    with (
+        patch.dict(os.environ, _provider_env()),
+        patch.object(teardown_provider, "_sfn", return_value=sfn),
+        patch.object(teardown_provider, "_ssm", return_value=MagicMock()),
+    ):
+        teardown_provider.on_event(event)
+        teardown_provider.on_event(_event("Delete"))
+
+    first, second = (
+        json.loads(call.kwargs["input"]) for call in sfn.start_execution.call_args_list
+    )
+    assert first["Charts"] == charts
+    assert first["Charts"]["opencost"]["values"]["extraVolumes"][0]["secret"]["optional"] is True
+    assert second["Charts"] == {"keda": {"values": {"watchNamespace": "gco-jobs"}}}
+
+
+@pytest.mark.parametrize(
+    ("charts", "message"),
+    [
+        ("{not json", "Charts is not valid JSON"),
+        ('["keda"]', "Charts must be a JSON object"),
+    ],
+)
+def test_malformed_charts_fail_the_delete_before_anything_is_written(charts, message):
+    event = _event("Delete")
+    event["ResourceProperties"]["Charts"] = charts
+    sfn = MagicMock()
+    ssm = MagicMock()
+    with (
+        patch.dict(os.environ, _provider_env()),
+        patch.object(teardown_provider, "_sfn", return_value=sfn),
+        patch.object(teardown_provider, "_ssm", return_value=ssm),
+        pytest.raises(ValueError, match=message),
+    ):
+        teardown_provider.on_event(event)
+
+    ssm.put_parameter.assert_not_called()
+    sfn.list_executions.assert_not_called()
+    sfn.start_execution.assert_not_called()
+
+
 def test_delete_stops_and_drains_running_install_execution():
     running_arn = "arn:aws:states:us-east-1:123456789012:execution:gco-helm-install:running-1"
     sfn = MagicMock()

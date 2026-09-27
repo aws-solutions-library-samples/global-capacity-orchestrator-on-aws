@@ -1,7 +1,7 @@
 """Documented Floci-gap shims, importable without pytest.
 
-Two Floci 1.6.0 gaps affect GCO's AWS surface (both probed empirically;
-see docs/FLOCI_TESTING.md):
+Four emulator gaps affect GCO's AWS surface (each probed empirically; see
+docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
   ``GetStackPolicyResult`` wrapper element, so botocore's parser raises
@@ -11,15 +11,22 @@ see docs/FLOCI_TESTING.md):
 * Global Accelerator is absent from the emulator's service catalog
   (``UnknownOperationException``), while the harness's fail-closed
   inventory requires its scanner to complete.
+* EC2 does not model Availability Zone IDs (see
+  :func:`shim_floci_zone_id_lookup`).
+* X-Ray is absent from the catalog as well (``UnknownOperationException``
+  on every operation tried against Floci 2.0.1), while the harness's
+  baseline records each Region's trace segment destination before anything
+  deploys, so the Transaction Search state the run changes can be restored.
 
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
 resources GCO actually creates (no stack policy; no accelerators an
-emulator could host). They live strictly in the test layer: in-process
-Floci tests apply them to their sessions, and the E2E injects them into
-harness subprocesses through ``tests/_floci_sitecustomize/``. Production
-code never imports this module. Delete it when a Floci release closes both
-gaps.
+emulator could host; the X-Ray destination of an account that never turned
+Transaction Search on, which a fabricated emulator account cannot have done).
+They live strictly in the test layer: in-process Floci tests apply them to
+their sessions, and the E2E injects them into harness subprocesses through
+``tests/_floci_sitecustomize/``. Production code never imports this module.
+Delete each shim when a Floci release closes its gap.
 
 Kept free of pytest imports on purpose so harness subprocesses can load it
 through sitecustomize without dragging the test framework along.
@@ -41,6 +48,12 @@ _EMPTY_STACK_POLICY_XML = (
 )
 
 _EMPTY_ACCELERATORS_JSON = json.dumps({"Accelerators": []}).encode()
+
+# What GetTraceSegmentDestination returns for an account that has never
+# enabled CloudWatch Transaction Search: segments still go to X-Ray.
+_DEFAULT_TRACE_SEGMENT_DESTINATION_JSON = json.dumps(
+    {"Destination": "XRay", "Status": "ACTIVE"}
+).encode()
 
 
 def _local_response(request, body: bytes, content_type: str) -> AWSResponse:
@@ -133,8 +146,27 @@ def shim_floci_zone_id_lookup(events) -> None:
     events.register("before-send.ec2.DescribeAvailabilityZones", _synthesize)
 
 
+def shim_floci_missing_xray(events) -> None:
+    """Answer X-Ray ``GetTraceSegmentDestination`` with the account default.
+
+    The only X-Ray call the Floci E2E reaches is the harness baseline's
+    read-only record of each Region's destination
+    (``scripts/live_release_validation/ownership/transaction_search.py``).
+    CloudWatch Logs ``DescribeResourcePolicies``, the other half of that
+    record, is modeled by the emulator and needs no shim. The mutating
+    ``UpdateTraceSegmentDestination`` stays unshimmed on purpose: only a
+    deployed topology's cleanup calls it, and the E2E never deploys.
+    """
+
+    def _synthesize(request, **_kwargs):
+        return _local_response(request, _DEFAULT_TRACE_SEGMENT_DESTINATION_JSON, "application/json")
+
+    events.register("before-send.xray.GetTraceSegmentDestination", _synthesize)
+
+
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
     shim_floci_missing_global_accelerator(events)
     shim_floci_zone_id_lookup(events)
+    shim_floci_missing_xray(events)

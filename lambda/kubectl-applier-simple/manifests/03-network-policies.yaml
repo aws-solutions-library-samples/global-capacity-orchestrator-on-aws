@@ -3,12 +3,14 @@
 # One file, three namespaces, one model:
 #
 #   gco-system    default-deny ingress; each platform workload is admitted on
-#                 exactly the port it serves (the TLS proxy sidecars on 8443
-#                 for the ALB, the inference monitor's :9090 metrics endpoint);
-#                 egress is DNS + HTTPS (AWS APIs, the Kubernetes API), the
-#                 node's EKS Pod Identity Agent, plus the proxy's path into
-#                 gco-inference and the cost monitor's path to OpenCost
-#                 (34-cost-monitor.yaml).
+#                 exactly the TLS port its sidecar serves (8443 for the ALB
+#                 API pods, 9443 for the inference monitor's metrics, 8443
+#                 from the manifest processor only for the cost monitor in
+#                 34-cost-monitor.yaml) while every plaintext listener stays
+#                 on pod loopback; egress is DNS + HTTPS (AWS APIs, the
+#                 Kubernetes API), the node's EKS Pod Identity Agent, plus the
+#                 proxy's TLS path into gco-inference and the cost monitor's
+#                 TLS path to OpenCost (34-cost-monitor.yaml).
 #   gco-jobs      default-deny ingress from outside the namespace, everything
 #                 allowed between job pods (distributed training, Ray, Volcano,
 #                 Slurm and Kubeflow talk pod-to-pod on framework-chosen
@@ -23,9 +25,10 @@
 #                 Slurm REST clients, the Slinky operator); the KubeRay
 #                 operator's namespace is admitted to Ray head pods on the
 #                 dashboard port.
-#   gco-inference model pods are isolated to the authenticated proxy and to
-#                 each other; egress is DNS + HTTPS (model pulls, AWS APIs)
-#                 and the node's EKS Pod Identity Agent.
+#   gco-inference model pods are isolated to each other and to the
+#                 authenticated proxy, which reaches them only on their TLS
+#                 sidecar's 8443; egress is DNS + HTTPS (model pulls, AWS
+#                 APIs) and the node's EKS Pod Identity Agent.
 #
 # EKS Pod Identity serves credentials from the node itself: the cluster
 # injects AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.23/v1/credentials
@@ -165,11 +168,14 @@ spec:
         - protocol: TCP
           port: 8443
 ---
-# The inference monitor has no request path; its one listener is the :9090
-# Prometheus endpoint that the gco-inference-monitor PodMonitor scrapes and
-# that its own startup/liveness/readiness probes hit. Without this rule the
-# default-deny above drops both — the scrape silently (an absent target) and
-# the probes fatally. Same shape as the 8443 rules: port only, any source.
+# The inference monitor has no request path; its one pod-network listener is
+# the metrics-tls-proxy sidecar on 9443, which the gco-inference-monitor
+# PodMonitor scrapes over verified HTTPS and the kubelet probes directly. The
+# plaintext Prometheus endpoint (9090) is bound to pod loopback and probed
+# from inside the container, so it is not admitted. Without this rule the
+# default-deny above drops both the scrape (silently: an absent target) and
+# the sidecar's probes (fatally). Same shape as the 8443 rules: port only,
+# any source.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -186,7 +192,7 @@ spec:
   ingress:
     - ports:
         - protocol: TCP
-          port: 9090
+          port: 9443
 ---
 # Allow DNS egress in gco-system (any resolver: Auto Mode node-local CoreDNS
 # is not a pod, see the header)
@@ -432,14 +438,18 @@ spec:
         - protocol: TCP
           port: 80
 ---
-# Allow the authenticated inference proxy to reach internal model Services.
-# No other gco-system pod is selected, and model endpoints are never exposed
-# directly through the ALB.
+# Allow the authenticated inference proxy to reach internal model Services,
+# on their TLS port only. No other gco-system pod is selected, and model
+# endpoints are never exposed directly through the ALB.
 #
-# The proxy dials the endpoint's ClusterIP Service, and the VPC CNI evaluates
-# egress before kube-proxy's DNAT: the peer podSelector below admits the model
-# pods' addresses, while the Service's ClusterIP is admitted only because the
-# inference monitor puts the same ``gco.io/type: inference`` label in every
+# The proxy dials https://<service>.gco-inference.svc.cluster.local:8443, and
+# every managed model pod serves that port from its endpoint-tls-proxy sidecar
+# (the inference monitor renders both; each Service maps 8443 to the sidecar's
+# named 8443 port). The VPC CNI evaluates egress before kube-proxy's DNAT, so
+# the Service port has to equal the container port for one rule to hold on
+# both sides of the translation, and the peer podSelector below admits the
+# model pods' addresses while the Service's ClusterIP is admitted only because
+# the inference monitor puts the same ``gco.io/type: inference`` label in every
 # inference Service's spec.selector (the network policy controller adds a
 # ClusterIP only when the Service selector matches the peer podSelector).
 # Keep the two in step: a Service selected by ``app`` alone is unreachable
@@ -467,8 +477,11 @@ spec:
               gco.io/type: inference
       ports:
         - protocol: TCP
+          port: 8443
 ---
-# Allow only the authenticated inference proxy into inference pods.
+# Allow only the authenticated inference proxy into inference pods, and only
+# on the TLS sidecar's 8443: the model servers' own plaintext ports are never
+# reachable from outside the namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -492,6 +505,7 @@ spec:
               app: inference-proxy
       ports:
         - protocol: TCP
+          port: 8443
 ---
 # Permit TCP only among managed inference workloads. This covers the PD proxy,
 # prefill/decode serving ports, canary backends, and KV-transfer bootstrap ports.

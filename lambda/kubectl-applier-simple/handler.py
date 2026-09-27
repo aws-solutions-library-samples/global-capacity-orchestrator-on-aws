@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-25T01:09:59Z
-# Generated from Git commit: f750e73905a75793aac5d3ddb625b378064ba18a
+# Generated at (UTC): 2026-09-27T00:57:37Z
+# Generated from Git commit: ddc2bce8e97f32a5019e6446f145741da36a2a04
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -121,10 +121,14 @@ _QUEUEING_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "LocalQueue": ("kueue.x-k8s.io", "v1beta1", "localqueues", False),
 }
 
-# cert-manager resources that issue the TLS leaves mounted by ALB-facing API
-# workloads. They are ordinary namespaced CRs and are applied before the
-# Gateway resources in the post-Helm phase.
+# cert-manager resources behind GCO's internal PKI
+# (post-helm-api-workload-certificates.yaml): the cluster-scoped bootstrap and
+# CA ClusterIssuers, and the namespaced Certificates they sign (the CA itself
+# and every in-cluster TLS leaf). cert-manager's chart installs the CRDs, so
+# these are POST-HELM kinds; the file sorts before the Gateway resources.
+# Issuer stays supported for namespaced issuers even though GCO ships none.
 _CERT_MANAGER_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "ClusterIssuer": ("cert-manager.io", "v1", "clusterissuers", True),
     "Issuer": ("cert-manager.io", "v1", "issuers", False),
     "Certificate": ("cert-manager.io", "v1", "certificates", False),
 }
@@ -163,6 +167,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "AppProject",
         "Application",
         "Certificate",
+        "ClusterIssuer",
         "ClusterRole",
         "ClusterRoleBinding",
         "ClusterTrainingRuntime",
@@ -207,11 +212,14 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "StatefulSet",
         "StorageClass",
         "TargetGroupConfiguration",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
     }
 )
 _CLUSTER_SCOPED_KINDS = frozenset(
     {
         "APIService",
+        "ClusterIssuer",
         "ClusterQueue",
         "ClusterRole",
         "ClusterRoleBinding",
@@ -227,6 +235,8 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "PriorityClass",
         "ResourceFlavor",
         "StorageClass",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
     }
 )
 _IDENTITY_FIELDS = ("apiVersion", "kind", "namespace", "name", "sourceFile", "phase")
@@ -709,6 +719,16 @@ _FEATURE_RESOURCE_INVENTORY: dict[
                 "gco-inference-monitor",
             )
         ),
+        # The monitoring half of the internal PKI
+        # (post-helm-monitoring-tls.yaml). Each Certificate goes before its
+        # Secret: cert-manager does not delete a Secret with its Certificate,
+        # and a disabled feature must not leave key material behind; deleted
+        # in this order, nothing re-issues it.
+        ("v1", "Service", "monitoring", "grafana-tls"),
+        ("cert-manager.io/v1", "Certificate", "monitoring", "grafana-tls"),
+        ("v1", "Secret", "monitoring", "grafana-tls"),
+        ("cert-manager.io/v1", "Certificate", "monitoring", "gco-monitoring-trust"),
+        ("v1", "Secret", "monitoring", "gco-monitoring-trust"),
         ("rbac.authorization.k8s.io/v1", "RoleBinding", "monitoring", "gco-grafana-rotator"),
         ("rbac.authorization.k8s.io/v1", "Role", "monitoring", "gco-grafana-rotator"),
         ("v1", "ServiceAccount", "monitoring", "gco-grafana-rotator"),
@@ -777,6 +797,13 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ),
     ("{{COST_MONITORING_ENABLED}}", True): (
         ("v1", "ConfigMap", "monitoring", "gco-dashboard-cost"),
+        # post-helm-cost-monitoring-tls.yaml; each Certificate before its
+        # Secret, as for the observability leaves above.
+        ("v1", "Service", "monitoring", "opencost-tls"),
+        ("cert-manager.io/v1", "Certificate", "monitoring", "opencost-tls"),
+        ("v1", "Secret", "monitoring", "opencost-tls"),
+        ("cert-manager.io/v1", "Certificate", "gco-system", "cost-monitor-tls"),
+        ("v1", "Secret", "gco-system", "cost-monitor-tls"),
     ),
     # Self-managed Argo CD (cdk.json helm.argocd; post-helm-argocd-access.yaml).
     # Bindings before the roles they reference. The AppProject is normally
@@ -854,10 +881,21 @@ _FEATURE_RESOURCE_INVENTORY: dict[
 # strictly contain both. NetworkPolicies union, so the leftovers would allow
 # nothing new — they are swept so the live policy set stays exactly the
 # shipped, documented one.
+#
+# gco-api-selfsigned (gco-system): the namespaced selfSigned Issuer that signed
+# each API workload leaf as its own root before the internal CA existed. The
+# leaves now name the gco-internal-ca ClusterIssuer
+# (post-helm-api-workload-certificates.yaml). Deleting the Issuer in the base
+# pass, before the post-Helm pass re-points them, is safe: a Certificate whose
+# issuer is briefly missing keeps its Secret, stays Ready while that Secret is
+# valid, and is re-issued by the new issuer as soon as its issuerRef changes.
+# On a fresh cluster the cert-manager CRDs do not exist yet in the base pass,
+# which the sweep treats as already absent.
 _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("apps/v1", "DaemonSet", "kube-system", "nvidia-device-plugin-daemonset"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
+    ("cert-manager.io/v1", "Issuer", "gco-system", "gco-api-selfsigned"),
 )
 
 
@@ -1735,6 +1773,33 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "ValidatingAdmissionPolicy":
+                        # Built-in and cluster-scoped: the fence on who may
+                        # obtain a certificate from GCO's internal CA
+                        # (08-internal-ca-issuance.yaml). It is a base-pass
+                        # object even though it matches cert-manager types, so
+                        # it is enforced before the post-Helm pass creates the CA.
+                        admission_v1 = client.AdmissionregistrationV1Api()
+                        try:
+                            admission_v1.create_validating_admission_policy(body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                admission_v1.patch_validating_admission_policy(name, body=doc)
+                            else:
+                                raise
+
+                    elif kind == "ValidatingAdmissionPolicyBinding":
+                        admission_v1 = client.AdmissionregistrationV1Api()
+                        try:
+                            admission_v1.create_validating_admission_policy_binding(body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                admission_v1.patch_validating_admission_policy_binding(
+                                    name, body=doc
+                                )
+                            else:
+                                raise
+
                     elif kind == "CustomResourceDefinition":
                         api_extensions_v1 = client.ApiextensionsV1Api()
                         try:
@@ -2382,7 +2447,10 @@ def _resource_readiness_failure(kind: str, resource: dict[str, Any]) -> str | No
             )
         return None
 
-    if kind in {"Certificate", "Issuer"}:
+    if kind in {"Certificate", "ClusterIssuer", "Issuer"}:
+        # cert-manager stamps observedGeneration on these Ready conditions, so
+        # a condition left over from a previous spec (a re-pointed issuerRef,
+        # a new dnsName) is stale rather than ready.
         generation = metadata.get("generation")
         if not isinstance(generation, int) or isinstance(generation, bool):
             return f"invalid metadata.generation ({generation})"
@@ -2398,7 +2466,10 @@ def _resource_readiness_failure(kind: str, resource: dict[str, Any]) -> str | No
 
     # Static configuration and RBAC resources have no rollout contract. Their
     # exact-object existence is sufficient unless a generic Ready/Available
-    # condition explicitly reported False above.
+    # condition explicitly reported False above. That includes the
+    # ValidatingAdmissionPolicy and its binding: the API server rejects a
+    # policy whose CEL does not compile, and enforces a stored one without
+    # waiting for the status controller (whose type check is advisory).
     return None
 
 

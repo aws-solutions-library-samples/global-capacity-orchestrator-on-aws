@@ -13,6 +13,12 @@ API host for every control-plane call:
 
 When cost monitoring is disabled the cost-monitor Deployment does not exist,
 so the proxy maps connection failures to a clear 503.
+
+The hop is verified HTTPS: the cost-monitor's TLS sidecar serves a leaf
+certificate issued by the GCO internal CA, and this client trusts that CA
+alone (see :mod:`gco.services.internal_tls`). A missing or unusable CA bundle
+fails closed through the same 503, never by falling back to plaintext or to
+the public trust store.
 """
 
 from __future__ import annotations
@@ -22,18 +28,21 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from gco.services import internal_tls, tracing
+
 router = APIRouter(prefix="/api/v1/cost", tags=["Cost"])
 logger = logging.getLogger(__name__)
 
-# The Service listens on the container port (8080) rather than 80: the VPC
-# CNI's network policy enforcement wants Service port == container port, and
-# the manifest processor's egress rule names 8080.
-_DEFAULT_COST_MONITOR_URL = "http://cost-monitor.gco-system.svc.cluster.local:8080"
+# The cost-monitor Service publishes only its TLS sidecar port (8443); the
+# application itself binds loopback. The VPC CNI's network policy enforcement
+# wants Service port == container port, and the manifest processor's egress
+# rule names 8443.
+_DEFAULT_COST_MONITOR_URL = "https://cost-monitor.gco-system.svc.cluster.local:8443"
 _PROXY_TIMEOUT_SECONDS = 30.0
 _REPORT_TIMEOUT_SECONDS = 120.0
 
@@ -63,18 +72,45 @@ def _cost_monitor_base_url() -> str:
     return os.getenv("COST_MONITOR_URL", _DEFAULT_COST_MONITOR_URL).rstrip("/")
 
 
-async def _proxy_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+async def _cost_monitor_request(
+    method: str, path: str, *, timeout: float, **kwargs: Any
+) -> httpx2.Response:
+    """Send one request to the cost monitor; unreachable or untrusted maps to 503.
+
+    Each call builds its own short-lived client: this is a low-traffic
+    operator surface, so a per-call TLS handshake is cheaper than owning a
+    long-lived pool's lifecycle, and the verifying SSL context itself is cached
+    by :mod:`gco.services.internal_tls` (no CA parse per call). The transport,
+    not the client, carries ``verify`` because a client given ``transport=``
+    ignores its own TLS settings.
+    """
     url = f"{_cost_monitor_base_url()}{path}"
     try:
-        async with httpx.AsyncClient(timeout=_PROXY_TIMEOUT_SECONDS) as client:
-            response = await client.get(url, params=params)
-    except httpx.HTTPError as exc:
+        transport = httpx2.AsyncHTTPTransport(
+            verify=internal_tls.verify_for_url(url), trust_env=False
+        )
+        async with httpx2.AsyncClient(
+            transport=tracing.wrap_async_transport(transport),
+            timeout=timeout,
+            trust_env=False,
+        ) as client:
+            return await client.request(method, url, **kwargs)
+    except internal_tls.InternalTLSError as exc:
+        logger.error("Cost monitor TLS trust is unavailable for %s: %s", url, exc)
+        raise HTTPException(status_code=503, detail=_DISABLED_DETAIL) from exc
+    except httpx2.HTTPError as exc:
         logger.warning("Cost monitor unreachable at %s: %s", url, exc)
         raise HTTPException(status_code=503, detail=_DISABLED_DETAIL) from exc
+
+
+async def _proxy_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await _cost_monitor_request(
+        "GET", path, timeout=_PROXY_TIMEOUT_SECONDS, params=params
+    )
     return _relay_json(response)
 
 
-def _relay_json(response: httpx.Response) -> dict[str, Any]:
+def _relay_json(response: httpx2.Response) -> dict[str, Any]:
     """Return the cost-monitor JSON body, propagating its error statuses."""
     try:
         payload = response.json()
@@ -113,19 +149,15 @@ async def list_cost_reports(
 @router.post("/reports")
 async def generate_cost_report(request: CostReportRequest) -> Response:
     """Generate an ad-hoc cost report for the trailing window."""
-    url = f"{_cost_monitor_base_url()}/internal/reports"
-    try:
-        async with httpx.AsyncClient(timeout=_REPORT_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                url,
-                json={
-                    "window_hours": request.window_hours,
-                    "include_rows": request.include_rows,
-                },
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("Cost monitor unreachable at %s: %s", url, exc)
-        raise HTTPException(status_code=503, detail=_DISABLED_DETAIL) from exc
+    response = await _cost_monitor_request(
+        "POST",
+        "/internal/reports",
+        timeout=_REPORT_TIMEOUT_SECONDS,
+        json={
+            "window_hours": request.window_hours,
+            "include_rows": request.include_rows,
+        },
+    )
     payload = _relay_json(response)
     payload.setdefault("timestamp", datetime.now(UTC).isoformat())
     return JSONResponse(status_code=201, content=payload)

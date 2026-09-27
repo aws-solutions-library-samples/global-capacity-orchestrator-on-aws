@@ -18,17 +18,22 @@ These checks generate a wide spread of plain specs — varied images, replica
 counts, ports, and accelerators — and confirm that for every one of them the
 distributed branch declines and the single-instance reconcile materialises
 precisely one Deployment and one Service, with no direct Ingress or distributed
-extras.
+extras. Every such pod is fronted by the ``endpoint-tls-proxy`` sidecar and its
+Service publishes only the sidecar's port, whatever port the model serves on
+(any port but the sidecar's own 8443, which the monitor refuses).
 """
 
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from kubernetes.client.rest import ApiException
+
+from gco.services.inference_monitor import ENDPOINT_TLS_PORT, ENDPOINT_TLS_PROXY_CONTAINER
 
 OWN_REGION = "us-east-1"
 NAMESPACE = "gco-inference"
@@ -94,7 +99,14 @@ def _plain_endpoints(draw):
         "gpu_count": draw(st.integers(min_value=0, max_value=4)),
     }
     if draw(st.booleans()):
-        spec["port"] = draw(st.integers(min_value=8000, max_value=9000))
+        # The pod's TLS sidecar owns 8443 in the shared network namespace, so
+        # the monitor refuses a model on it (covered in
+        # test_inference_endpoint_tls.py); a plain endpoint uses any other port.
+        spec["port"] = draw(
+            st.integers(min_value=8000, max_value=9000).filter(
+                lambda port: port != ENDPOINT_TLS_PORT
+            )
+        )
     if draw(st.booleans()):
         spec["health_check_path"] = draw(st.sampled_from(["/health", "/healthz", "/ping"]))
 
@@ -110,7 +122,7 @@ def _plain_endpoints(draw):
 
 @settings(max_examples=150, deadline=None)
 @given(bundle=_plain_endpoints())
-def test_plain_spec_declines_the_distributed_branch(bundle: dict) -> None:
+def test_plain_spec_declines_the_distributed_branch(bundle: dict[str, Any]) -> None:
     """The distributed branch hands a plain spec back to the single-instance path.
 
     With no ``mooncake`` block the branch returns ``None``, which is the signal
@@ -133,7 +145,7 @@ def test_plain_spec_declines_the_distributed_branch(bundle: dict) -> None:
 
 @settings(max_examples=150, deadline=None)
 @given(bundle=_plain_endpoints())
-def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict) -> None:
+def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict[str, Any]) -> None:
     """A plain endpoint creates one Deployment and one internal Service.
 
     On a first reconcile the single-instance path creates exactly those two
@@ -175,6 +187,17 @@ def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict) -> No
     _, created = monitor.apps_v1.create_namespaced_deployment.call_args[0][:2]
     assert created.spec.replicas == bundle["spec"]["replicas"]
     assert created.metadata.name == bundle["name"]
+
+    # The model container comes first and the TLS sidecar fronts its port; the
+    # Service publishes only the sidecar's port.
+    model, sidecar = created.spec.template.spec.containers
+    assert (model.name, sidecar.name) == ("inference", ENDPOINT_TLS_PROXY_CONTAINER)
+    sidecar_env = {item.name: item.value for item in sidecar.env}
+    assert sidecar_env["TLS_PROXY_UPSTREAM_PORT"] == str(bundle["spec"].get("port", 8000))
+    _, service = monitor.core_v1.create_namespaced_service.call_args[0][:2]
+    assert [(port.name, port.port, port.target_port) for port in service.spec.ports] == [
+        ("https", ENDPOINT_TLS_PORT, "https")
+    ]
 
     # None of the distributed extras are materialised.
     monitor.apps_v1.create_namespaced_stateful_set.assert_not_called()

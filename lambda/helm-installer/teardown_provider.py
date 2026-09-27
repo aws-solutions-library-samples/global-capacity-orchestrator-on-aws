@@ -24,8 +24,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-27T04:10:54Z
+# Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46
 # Flowchart(s) generated from this file:
 #   * ``on_event`` -> ``diagrams/code_diagrams/lambda/helm-installer/teardown_provider.on_event.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/teardown_provider.on_event.png``)
@@ -47,6 +47,25 @@ def _sfn() -> Any:
 
 def _ssm(region: str) -> Any:
     return boto3.client("ssm", region_name=region)
+
+
+def _chart_overrides(props: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``Charts`` overrides with the JSON types the stack gave them.
+
+    CloudFormation delivers custom-resource properties with every number and
+    boolean as a string, so the regional stack sends ``Charts`` as one JSON
+    string and it is decoded here, the same way the Helm orchestrator decodes
+    it. An object (a stack synthesized before that change) is taken as it is.
+    """
+    charts = props.get("Charts", {})
+    if isinstance(charts, str):
+        try:
+            charts = json.loads(charts)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Charts is not valid JSON: {exc}") from exc
+    if not isinstance(charts, dict):
+        raise ValueError("Charts must be a JSON object of per-chart overrides")
+    return charts
 
 
 def _execution_name(event: dict[str, Any]) -> str:
@@ -137,6 +156,9 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         return {"PhysicalResourceId": physical_id}
 
     props = event["ResourceProperties"]
+    # Decoded before anything is written, so a malformed payload fails the
+    # Delete without leaving a fence or stopped executions behind.
+    chart_overrides = _chart_overrides(props)
     state_machine_arn = os.environ["TEARDOWN_STATE_MACHINE_ARN"]
     install_state_machine_arn = os.environ["INSTALL_STATE_MACHINE_ARN"]
     execution_name = _execution_name(event)
@@ -155,7 +177,7 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         "RegistryRegion": props["RegistryRegion"],
         "ProjectName": props["ProjectName"],
         "EnabledCharts": props.get("EnabledCharts", []),
-        "Charts": props.get("Charts", {}),
+        "Charts": chart_overrides,
         "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
         # ListExecutions is eventually consistent and StopExecution cannot
         # cancel an in-flight Lambda. Always drain the full invocation bound;

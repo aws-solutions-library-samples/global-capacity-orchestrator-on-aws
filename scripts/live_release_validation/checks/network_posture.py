@@ -11,9 +11,18 @@ pods and reading the verdict from each probe's exit code:
 * ``default`` -> ``gco-jobs``: **blocked** (``default-deny-ingress``);
 * ``gco-jobs`` -> ``gco-system``: **blocked** (``default-deny-ingress`` — the
   job namespace cannot reach the control plane's services);
-* ``default`` -> the live inference-monitor's ``:9090/metrics``: **reachable**
-  (``allow-metrics-to-inference-monitor`` admits exactly the metrics port,
-  which is what lets Prometheus scrape it);
+* ``default`` -> the live inference-monitor's ``https://…:9443/metrics``:
+  **reachable** (``allow-metrics-to-inference-monitor`` admits exactly the
+  metrics TLS sidecar's port, which is what lets Prometheus scrape it);
+* ``default`` -> the same pod's plaintext ``:9090``: **blocked** (the monitor
+  binds it to loopback, so only its TLS sidecar can reach it);
+* ``default`` -> the live cost-monitor's ``https://…:8443``: **blocked**
+  (``allow-manifest-processor-to-cost-monitor-ingress`` admits only the
+  manifest processor), and its plaintext ``:8080``: **blocked** (loopback);
+* ``default`` and ``gco-jobs`` -> a stand-in model pod in ``gco-inference`` on
+  ``:8443``: **blocked** (``allow-inference-proxy-ingress`` admits only the
+  inference proxy; the stand-in carries the ``gco.io/type: inference`` label
+  those policies select);
 * ``gco-jobs`` -> ``https://checkip.amazonaws.com/``: **reachable**
   (``allow-dns`` plus ``allow-https-egress``);
 * ``gco-jobs`` -> ``http://checkip.amazonaws.com/`` on port 80: **blocked**
@@ -26,11 +35,21 @@ pods and reading the verdict from each probe's exit code:
   Port 80 to the internet is blocked by the previous probe, so this one shows
   the rule admitting exactly the link-local endpoint.
 
+The one allowed caller of the cost monitor cannot be impersonated by a probe
+pod without joining its Service, so that leg rides the service path instead:
+``GET /api/v1/cost/status`` through the Region's API must answer 200, which
+the manifest processor only does after reaching the cost monitor on 8443 over
+verified TLS. The model pods' one allowed caller, the inference proxy, is
+proved the same way by the ``inference`` action's served requests (their
+Services expose only 8443).
+
 Every probe is a digest-pinned BusyBox Job labelled with this run's token
-(``manifests/netpol-probe-job.yaml``); the two listeners are the same image
-behind ``httpd`` (``manifests/netpol-target-job.yaml``). All of them are
-deleted before the action returns, and each carries ``activeDeadlineSeconds``
-plus a TTL so a harness that dies mid-probe still leaves nothing behind.
+(``manifests/netpol-probe-job.yaml``); the listeners are the same image
+behind ``httpd`` (``manifests/netpol-target-job.yaml`` in ``gco-system`` and
+``gco-jobs``, ``manifests/netpol-model-target-job.yaml`` in ``gco-inference``).
+All of them are deleted before the action returns, and each carries
+``activeDeadlineSeconds`` plus a TTL so a harness that dies mid-probe still
+leaves nothing behind.
 
 A probe's verdict is its steady state, not its first dial. The VPC CNI
 attaches a new pod's policies in parallel with the pod's start and admits
@@ -53,13 +72,15 @@ sampling and then waited out the whole pod timeout on a pod that no longer
 existed. A probe whose Job failed with no terminated pod left, or whose pod
 carries ``DisruptionTarget`` without a verdict exit code, is read at once and
 re-run once from a fresh Job; a second disruption is reported as one. A
-listener pod that did not last the matrix (either ``httpd`` target, or the
-inference-monitor pod the metrics probe dialed) voids every verdict dialed
-against it, so the action names it instead of reporting mismatches.
+listener pod that did not last the matrix (any ``httpd`` target, or the
+inference-monitor or cost-monitor pod a probe dialed) voids every verdict
+dialed against it, so the action names it instead of reporting mismatches.
 
 When cdk.json turns the controller off (``eks_cluster.network_policy_enforcement:
 false``) the deny verdicts are not promised and those probes are recorded as
-skipped; the reachability probes still have to pass.
+skipped; the reachability probes and the two loopback probes (a bind address,
+not a policy) still have to pass. With cost monitoring off there is no cost
+monitor to dial and its probes are skipped with that reason.
 """
 
 from __future__ import annotations
@@ -70,15 +91,27 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from ..context import _job_transport_region
 from ..models import RunContext
 from .cluster import KubectlRunner, kubectl_json
 from .jobs import _load_manifest, _run_token
+from .opencost import _cost_monitoring_configured
 from .platform_workloads import network_policy_enforcement_enabled
 
 _TARGET_MANIFEST = "netpol-target-job.yaml"
+_MODEL_TARGET_MANIFEST = "netpol-model-target-job.yaml"
 _PROBE_MANIFEST = "netpol-probe-job.yaml"
 _TARGET_PORT = 8080
-_INFERENCE_MONITOR_METRICS_PORT = 9090
+#: The inference-monitor's metrics TLS sidecar; its app binds 9090 to loopback.
+_INFERENCE_MONITOR_METRICS_PORT = 9443
+_INFERENCE_MONITOR_LOOPBACK_PORT = 9090
+#: The cost-monitor's TLS sidecar; its app binds 8080 to loopback.
+_COST_MONITOR_PORT = 8443
+_COST_MONITOR_LOOPBACK_PORT = 8080
+#: The model pods' only Service port (their TLS sidecar).
+_MODEL_PORT = 8443
+_MODEL_NAMESPACE = "gco-inference"
+_COST_STATUS_PATH = "/api/v1/cost/status"
 _EGRESS_HOST = "checkip.amazonaws.com"
 #: The EKS Pod Identity Agent's link-local address on every node; the
 #: cluster points AWS_CONTAINER_CREDENTIALS_FULL_URI at this path.
@@ -104,6 +137,7 @@ _LOG_TAIL_LINES = 40
 _LOG_LIMIT = 4_000
 _SAMPLE_PREFIX = "NETPOL_SAMPLE "
 _SETTLED_PREFIXES = ("NETPOL_SETTLED ", "NETPOL_UNSETTLED ")
+_COST_MONITORING_DISABLED = "cost monitoring is disabled in cdk.json; there is no cost monitor"
 
 
 class NetworkPostureValidationError(RuntimeError):
@@ -121,13 +155,19 @@ class ProbeSpec:
     rule: str
     #: A deny verdict exists only while the policy controller is on.
     enforcement_only: bool
+    #: Dials the cost monitor, which exists only with cost monitoring on.
+    requires_cost_monitor: bool = False
 
 
 def _probe_specs(
     system_target_ip: str,
     jobs_target_ip: str,
     inference_monitor_ip: str,
+    *,
+    model_target_ip: str,
+    cost_monitor_ip: str | None,
 ) -> tuple[ProbeSpec, ...]:
+    cost_host = cost_monitor_ip or "cost-monitor-not-deployed"
     return (
         ProbeSpec(
             "same-namespace",
@@ -156,10 +196,53 @@ def _probe_specs(
         ProbeSpec(
             "metrics-open",
             _UNPOLICED_NAMESPACE,
-            f"http://{inference_monitor_ip}:{_INFERENCE_MONITOR_METRICS_PORT}/metrics",
+            f"https://{inference_monitor_ip}:{_INFERENCE_MONITOR_METRICS_PORT}/metrics",
             "reachable",
-            "gco-system/allow-metrics-to-inference-monitor",
+            "gco-system/allow-metrics-to-inference-monitor (metrics-tls-proxy, TCP 9443)",
             enforcement_only=False,
+        ),
+        ProbeSpec(
+            "metrics-plaintext",
+            _UNPOLICED_NAMESPACE,
+            f"http://{inference_monitor_ip}:{_INFERENCE_MONITOR_LOOPBACK_PORT}/metrics",
+            "blocked",
+            "inference-monitor binds :9090 to 127.0.0.1 (METRICS_HOST)",
+            enforcement_only=False,
+        ),
+        ProbeSpec(
+            "cost-from-default",
+            _UNPOLICED_NAMESPACE,
+            f"https://{cost_host}:{_COST_MONITOR_PORT}/",
+            "blocked",
+            "gco-system/allow-manifest-processor-to-cost-monitor-ingress "
+            "(manifest-processor only, TCP 8443)",
+            enforcement_only=True,
+            requires_cost_monitor=True,
+        ),
+        ProbeSpec(
+            "cost-plaintext",
+            _UNPOLICED_NAMESPACE,
+            f"http://{cost_host}:{_COST_MONITOR_LOOPBACK_PORT}/",
+            "blocked",
+            "cost-monitor binds :8080 to 127.0.0.1 (HOST)",
+            enforcement_only=False,
+            requires_cost_monitor=True,
+        ),
+        ProbeSpec(
+            "model-from-default",
+            _UNPOLICED_NAMESPACE,
+            f"http://{model_target_ip}:{_MODEL_PORT}/",
+            "blocked",
+            "gco-inference/allow-inference-proxy-ingress (inference-proxy only, TCP 8443)",
+            enforcement_only=True,
+        ),
+        ProbeSpec(
+            "model-from-jobs",
+            "gco-jobs",
+            f"http://{model_target_ip}:{_MODEL_PORT}/",
+            "blocked",
+            "gco-inference/allow-inference-proxy-ingress (inference-proxy only, TCP 8443)",
+            enforcement_only=True,
         ),
         ProbeSpec(
             "https-egress",
@@ -188,6 +271,19 @@ def _probe_specs(
     )
 
 
+#: The manifest processor's leg to the cost monitor, over the service path.
+_COST_VIA_MANIFEST_PROCESSOR = ProbeSpec(
+    "cost-via-manifest-processor",
+    "gco-system",
+    f"GET {_COST_STATUS_PATH} -> https://cost-monitor.gco-system.svc.cluster.local:8443",
+    "reachable",
+    "gco-system/allow-manifest-processor-to-cost-monitor-egress + -ingress (TCP 8443, "
+    "verified TLS)",
+    enforcement_only=False,
+    requires_cost_monitor=True,
+)
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -207,6 +303,22 @@ def _substitute(value: Any, replacements: dict[str, str]) -> Any:
     if isinstance(value, dict):
         return {key: _substitute(item, replacements) for key, item in value.items()}
     return value
+
+
+def _mismatch(item: dict[str, Any]) -> str:
+    """One report line for a probe whose observed answer broke its promise."""
+    if item.get("via") == "api":
+        detail = f"[HTTP {item['status_code']}]"
+    else:
+        detail = f"[phase={item['phase']} exit={item['exit_code']}]"
+    line = (
+        f"{item['name']} ({item['client_namespace']} -> {item['url']}) expected "
+        f"{item['expected']}, observed {item['observed']} {detail}"
+    )
+    disruptions = item.get("disruptions") or []
+    if disruptions:
+        line += f" after {len(disruptions)} disruption(s), last: {disruptions[-1]['reason']}"
+    return line
 
 
 class NetworkPostureProbe:
@@ -448,20 +560,23 @@ class NetworkPostureProbe:
         return verdict, disruptions
 
     def _disrupted_listeners(
-        self, targets: dict[str, dict[str, str]], monitor_pod: str
+        self,
+        targets: dict[str, dict[str, str]],
+        platform_pods: list[tuple[str, str]],
     ) -> list[str]:
         """Listeners whose pod did not last the matrix; verdicts dialed at them are void.
 
-        The inference-monitor pod the metrics probe dialed is one of them: a
-        replaced pod answers on a different IP, so the probe that dialed the
-        old one would read ``blocked`` for a reason no policy chose.
+        The inference-monitor and cost-monitor pods the probes dialed are among
+        them: a replaced pod answers on a different IP, so a probe that dialed
+        the old one would read ``blocked`` for a reason no policy chose.
         """
         dialed = [
             (namespace, f"job-name={target['job']}", target["pod"], f"{namespace}/{target['job']}")
             for namespace, target in targets.items()
         ]
-        dialed.append(
-            ("gco-system", "app=inference-monitor", monitor_pod, f"gco-system/{monitor_pod}")
+        dialed.extend(
+            ("gco-system", f"app={app}", pod_name, f"gco-system/{pod_name}")
+            for app, pod_name in platform_pods
         )
         broken: list[str] = []
         for namespace, selector, pod_name, label in dialed:
@@ -504,8 +619,9 @@ class NetworkPostureProbe:
 
     # -- the matrix ---------------------------------------------------------
 
-    def _inference_monitor_ip(self) -> tuple[str, str]:
-        for item in self._live_pods("gco-system", "app=inference-monitor"):
+    def _ready_platform_pod(self, app: str) -> tuple[str, str]:
+        """Return ``(pod name, pod IP)`` of one Running, Ready ``gco-system`` pod of ``app``."""
+        for item in self._live_pods("gco-system", f"app={app}"):
             metadata = _dict(item.get("metadata"))
             status = _dict(item.get("status"))
             containers = [_dict(entry) for entry in _list(status.get("containerStatuses"))]
@@ -516,7 +632,28 @@ class NetworkPostureProbe:
                 and status.get("podIP")
             ):
                 return str(metadata.get("name")), str(status["podIP"])
-        raise self._fail("no ready inference-monitor pod to probe")
+        raise self._fail(f"no ready {app} pod to probe")
+
+    def _cost_via_manifest_processor(self) -> dict[str, Any]:
+        """Prove the manifest processor reaches the cost monitor through the API."""
+        spec = asdict(_COST_VIA_MANIFEST_PROCESSOR)
+        try:
+            transport = _job_transport_region(self.ctx, self.region)
+        except RuntimeError as exc:
+            return {**spec, "status": "skipped", "reason": str(exc)}
+        response = self.ctx.aws_client.make_authenticated_request(
+            method="GET",
+            path=_COST_STATUS_PATH,
+            target_region=transport,
+        )
+        observed = "reachable" if response.status_code == 200 else "error"
+        return {
+            **spec,
+            "via": "api",
+            "status_code": response.status_code,
+            "observed": observed,
+            "status": "matched" if observed == spec["expected"] else "mismatch",
+        }
 
     @staticmethod
     def _observed(verdict: dict[str, Any]) -> str:
@@ -551,30 +688,59 @@ class NetworkPostureProbe:
             "attach_window_observed": len(samples) > 1,
         }
 
+    def _start_listeners(self) -> dict[str, dict[str, str]]:
+        """Start every ``httpd`` target and return ``{namespace: {job, pod, ip}}``."""
+        listeners = (
+            ("gco-system", _TARGET_MANIFEST, f"gco-live-netpol-target-{self.token}"),
+            ("gco-jobs", _TARGET_MANIFEST, f"gco-live-netpol-target-{self.token}"),
+            (_MODEL_NAMESPACE, _MODEL_TARGET_MANIFEST, f"gco-live-netpol-model-{self.token}"),
+        )
+        targets: dict[str, dict[str, str]] = {}
+        for namespace, manifest, name in listeners:
+            self._create_job(self._job_manifest(manifest, name=name, namespace=namespace))
+            pod_name, pod_ip = self._wait_for_listener(namespace, name)
+            targets[namespace] = {"job": name, "pod": pod_name, "ip": pod_ip}
+        return targets
+
     def run(self) -> dict[str, Any]:
         """Start the listeners, run every probe, delete everything, judge the matrix."""
         enforcement = network_policy_enforcement_enabled(self.ctx)
+        cost_monitoring = _cost_monitoring_configured(self.ctx)
         self.record["enforcement_configured"] = enforcement
         results: list[dict[str, Any]] = []
-        evidence: dict[str, Any] = {"enforcement_configured": enforcement, "probes": results}
+        evidence: dict[str, Any] = {
+            "enforcement_configured": enforcement,
+            "cost_monitoring_configured": cost_monitoring,
+            "probes": results,
+        }
         try:
-            targets: dict[str, dict[str, str]] = {}
-            for namespace in ("gco-system", "gco-jobs"):
-                name = f"gco-live-netpol-target-{self.token}"
-                self._create_job(
-                    self._job_manifest(_TARGET_MANIFEST, name=name, namespace=namespace)
-                )
-                pod_name, pod_ip = self._wait_for_listener(namespace, name)
-                targets[namespace] = {"job": name, "pod": pod_name, "ip": pod_ip}
+            targets = self._start_listeners()
             evidence["targets"] = targets
-            monitor_pod, monitor_ip = self._inference_monitor_ip()
-            evidence["inference_monitor"] = {"pod": monitor_pod, "ip": monitor_ip}
             self.record["targets"] = targets
+            monitor_pod, monitor_ip = self._ready_platform_pod("inference-monitor")
+            evidence["inference_monitor"] = {"pod": monitor_pod, "ip": monitor_ip}
+            platform_pods = [("inference-monitor", monitor_pod)]
+            cost_monitor_ip: str | None = None
+            if cost_monitoring:
+                cost_pod, cost_monitor_ip = self._ready_platform_pod("cost-monitor")
+                evidence["cost_monitor"] = {"pod": cost_pod, "ip": cost_monitor_ip}
+                platform_pods.append(("cost-monitor", cost_pod))
             self._persist()
 
-            specs = _probe_specs(targets["gco-system"]["ip"], targets["gco-jobs"]["ip"], monitor_ip)
+            specs = _probe_specs(
+                targets["gco-system"]["ip"],
+                targets["gco-jobs"]["ip"],
+                monitor_ip,
+                model_target_ip=targets[_MODEL_NAMESPACE]["ip"],
+                cost_monitor_ip=cost_monitor_ip,
+            )
             launched: list[tuple[ProbeSpec, dict[str, Any]]] = []
             for spec in specs:
+                if spec.requires_cost_monitor and not cost_monitoring:
+                    results.append(
+                        {**asdict(spec), "status": "skipped", "reason": _COST_MONITORING_DISABLED}
+                    )
+                    continue
                 if spec.enforcement_only and not enforcement:
                     results.append(
                         {
@@ -611,7 +777,19 @@ class NetworkPostureProbe:
                 )
                 self.record["probes"] = results
                 self._persist()
-            if disrupted := self._disrupted_listeners(targets, monitor_pod):
+            if cost_monitoring:
+                results.append(self._cost_via_manifest_processor())
+            else:
+                results.append(
+                    {
+                        **asdict(_COST_VIA_MANIFEST_PROCESSOR),
+                        "status": "skipped",
+                        "reason": _COST_MONITORING_DISABLED,
+                    }
+                )
+            self.record["probes"] = results
+            self._persist()
+            if disrupted := self._disrupted_listeners(targets, platform_pods):
                 self.record["disrupted_listeners"] = disrupted
                 raise self._fail(
                     f"listener(s) {', '.join(disrupted)} did not last the probe matrix "
@@ -623,19 +801,7 @@ class NetworkPostureProbe:
             except Exception as exc:  # a cleanup error must never mask the verdict
                 evidence["cleanup_problems"] = [{"error": f"{type(exc).__name__}: {exc}"}]
 
-        mismatches = [
-            f"{item['name']} ({item['client_namespace']} -> {item['url']}) expected "
-            f"{item['expected']}, observed {item['observed']} "
-            f"[phase={item['phase']} exit={item['exit_code']}]"
-            + (
-                f" after {len(item['disruptions'])} disruption(s), last: "
-                f"{item['disruptions'][-1]['reason']}"
-                if item["disruptions"]
-                else ""
-            )
-            for item in results
-            if item["status"] == "mismatch"
-        ]
+        mismatches = [_mismatch(item) for item in results if item["status"] == "mismatch"]
         if mismatches:
             raise self._fail("; ".join(mismatches))
         if evidence["cleanup_problems"]:

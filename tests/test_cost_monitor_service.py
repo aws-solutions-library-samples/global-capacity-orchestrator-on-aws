@@ -1,27 +1,37 @@
 """
 Tests for gco/services/cost_monitor.py — the cost-monitor service core.
 
-Covers the OpenCost allocation client (transport failures, non-200s,
+Covers the OpenCost allocation client (one lazily built verifying client,
+fail-closed while the internal CA is missing, transport failures, non-200s,
 malformed bodies), allocation-row normalization, real Parquet
 serialization via pyarrow, deterministic scheduled report keys, aligned
 window math, the CostMonitor orchestrator (generate/skip/list/status), the
 SSM-backed bucket locator (lazy resolution, TTL refresh, stale-cache
-fallback, not-yet-published handling), and the environment factory. S3, SSM
-and httpx are mocked; pyarrow runs for real so the Parquet contract with the
-Glue table is exercised, not simulated.
+fallback, not-yet-published handling), and the environment factory. S3 and
+SSM are mocked; OpenCost is answered by an in-memory ``httpx2.MockTransport``
+behind the client's real verifying transport; pyarrow runs for real so the
+Parquet contract with the Glue table is exercised, not simulated.
 """
 
 from __future__ import annotations
 
+import logging
+import ssl
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
+import gco.services.cost_monitor as cost_monitor_module
+from gco.services import internal_tls, tracing
 from gco.services.cost_monitor import (
     ADHOC_PREFIX,
     ALLOCATION_REPORT_FIELDS,
+    DEFAULT_OPENCOST_BASE_URL,
     SCHEDULED_PREFIX,
     CostMonitor,
     CostReportBucketLocator,
@@ -37,9 +47,66 @@ from gco.services.cost_monitor import (
     rows_to_parquet_bytes,
     scheduled_report_key,
 )
+from gco.services.internal_tls import InternalTLSError
 
 WINDOW_START = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
 WINDOW_END = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
+
+# Captured before any test swaps the constructor for a spy.
+_REAL_SYNC_TRANSPORT = httpx2.HTTPTransport
+
+
+class _OpenCostWire:
+    """OpenCost behind the client's real ``httpx2.Client``, answered in memory.
+
+    The internal-CA lookup returns a stand-in context (recording each URL it
+    was asked about), the transport constructor is spied, and the tracing seam
+    the client passes its transport through swaps in an ``httpx2.MockTransport``.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.context = ssl.create_default_context()
+        self.verified_urls: list[str] = []
+        self.transport_kwargs: list[dict[str, Any]] = []
+        self.wrapped: list[httpx2.BaseTransport] = []
+        self.requests: list[httpx2.Request] = []
+        self.handler: Callable[[httpx2.Request], httpx2.Response] = lambda _request: (
+            httpx2.Response(200, json={})
+        )
+        monkeypatch.setattr(internal_tls, "verify_for_url", self.verify)
+        monkeypatch.setattr(httpx2, "HTTPTransport", self._transport)
+        monkeypatch.setattr(tracing, "wrap_sync_transport", self._wrap)
+
+    def verify(self, url: str, ca_file: object = None) -> ssl.SSLContext:
+        self.verified_urls.append(url)
+        return self.context
+
+    def _transport(self, **kwargs: Any) -> httpx2.HTTPTransport:
+        self.transport_kwargs.append(kwargs)
+        return _REAL_SYNC_TRANSPORT(**kwargs)
+
+    def _wrap(self, transport: httpx2.BaseTransport) -> httpx2.BaseTransport:
+        self.wrapped.append(transport)
+
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(request)
+            return self.handler(request)
+
+        return httpx2.MockTransport(handle)
+
+    def respond(self, status_code: int = 200, **kwargs: Any) -> None:
+        self.handler = lambda _request: httpx2.Response(status_code, **kwargs)
+
+    def fail(self, error_type: type[httpx2.TransportError], message: str) -> None:
+        def raise_error(request: httpx2.Request) -> httpx2.Response:
+            raise error_type(message, request=request)
+
+        self.handler = raise_error
+
+
+@pytest.fixture
+def opencost_wire(monkeypatch: pytest.MonkeyPatch) -> _OpenCostWire:
+    return _OpenCostWire(monkeypatch)
 
 
 def _allocation(total: float = 1.5, **overrides) -> dict:
@@ -75,26 +142,112 @@ def _monitor(**kwargs) -> CostMonitor:
 
 
 class TestOpenCostClient:
-    def test_healthz_true_on_200(self):
+    def test_healthz_true_on_200(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        with patch("gco.services.cost_monitor.httpx.get") as mock_get:
-            mock_get.return_value = MagicMock(status_code=200)
-            assert client.is_healthy() is True
-        mock_get.assert_called_once()
-        assert mock_get.call_args.args[0] == "http://opencost:9003/healthz"
+        opencost_wire.respond(200)
+        assert client.is_healthy() is True
+        [request] = opencost_wire.requests
+        assert request.method == "GET"
+        assert str(request.url) == "http://opencost:9003/healthz"
 
-    def test_healthz_false_on_non_200(self):
+    def test_healthz_false_on_non_200(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        with patch("gco.services.cost_monitor.httpx.get") as mock_get:
-            mock_get.return_value = MagicMock(status_code=503)
+        opencost_wire.respond(503)
+        assert client.is_healthy() is False
+
+    def test_healthz_false_on_transport_error(self, opencost_wire):
+        client = OpenCostClient("http://opencost:9003")
+        opencost_wire.fail(httpx2.ConnectError, "no")
+        assert client.is_healthy() is False
+
+    def test_healthz_false_and_logged_while_the_internal_ca_is_missing(
+        self, opencost_wire, monkeypatch, caplog
+    ):
+        client = OpenCostClient(DEFAULT_OPENCOST_BASE_URL)
+        missing = MagicMock(side_effect=InternalTLSError("GCO internal CA bundle is not readable"))
+        monkeypatch.setattr(internal_tls, "verify_for_url", missing)
+
+        with caplog.at_level(logging.WARNING, logger=cost_monitor_module.__name__):
             assert client.is_healthy() is False
 
-    def test_healthz_false_on_transport_error(self):
-        client = OpenCostClient("http://opencost:9003")
-        with patch("gco.services.cost_monitor.httpx.get", side_effect=httpx.ConnectError("no")):
-            assert client.is_healthy() is False
+        assert "OpenCost TLS trust is unavailable" in caplog.text
+        assert opencost_wire.requests == []
+        # Nothing was cached: once the bundle is mounted the next call builds
+        # the client and reaches OpenCost.
+        monkeypatch.setattr(internal_tls, "verify_for_url", opencost_wire.verify)
+        opencost_wire.respond(200)
+        assert client.is_healthy() is True
+        assert opencost_wire.verified_urls == [DEFAULT_OPENCOST_BASE_URL]
 
-    def test_get_allocation_merges_allocation_sets(self):
+    def test_https_default_fails_closed_without_a_ca_bundle(self, monkeypatch, tmp_path):
+        """The real trust lookup: no projected CA means no request, not plaintext."""
+        monkeypatch.setenv("GCO_INTERNAL_CA_FILE", str(tmp_path / "absent-ca.crt"))
+        client = OpenCostClient(DEFAULT_OPENCOST_BASE_URL)
+        assert client.is_healthy() is False
+        with pytest.raises(OpenCostUnavailableError, match="TLS trust is unavailable"):
+            client.get_allocation(WINDOW_START, WINDOW_END)
+
+    def test_one_verified_client_serves_every_call(self, opencost_wire):
+        client = OpenCostClient("https://opencost-tls.monitoring.svc.cluster.local:9443/", 12.5)
+        opencost_wire.respond(200, json={"data": []})
+
+        assert client.is_healthy() is True
+        assert client.get_allocation(WINDOW_START, WINDOW_END) == {}
+
+        # Built once, with trust on the transport (a client given transport=
+        # ignores its own verify) and no environment influence.
+        assert opencost_wire.verified_urls == [DEFAULT_OPENCOST_BASE_URL]
+        [transport_kwargs] = opencost_wire.transport_kwargs
+        assert transport_kwargs == {"verify": opencost_wire.context, "trust_env": False}
+        [wrapped] = opencost_wire.wrapped
+        assert isinstance(wrapped, _REAL_SYNC_TRANSPORT)
+        assert client._client is not None
+        assert client._client.trust_env is False
+        for request in opencost_wire.requests:
+            assert request.extensions["timeout"] == {
+                "connect": 12.5,
+                "read": 12.5,
+                "write": 12.5,
+                "pool": 12.5,
+            }
+
+    def test_first_use_from_many_threads_builds_one_client(self, opencost_wire):
+        client = OpenCostClient("http://opencost:9003")
+        opencost_wire.respond(200)
+        start = threading.Barrier(8)
+        results: list[bool] = []
+
+        def probe() -> None:
+            start.wait()
+            results.append(client.is_healthy())
+
+        threads = [threading.Thread(target=probe) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert results == [True] * 8
+        assert len(opencost_wire.transport_kwargs) == 1
+
+    def test_close_releases_the_client_and_a_later_call_rebuilds_it(self, opencost_wire):
+        client = OpenCostClient("http://opencost:9003")
+        client.close()  # never used: nothing to release
+        opencost_wire.respond(200)
+        assert client.is_healthy() is True
+        first = client._client
+        assert first is not None
+
+        client.close()
+
+        assert first.is_closed is True
+        assert client._client is None
+        assert client.is_healthy() is True
+        assert client._client is not first
+        assert len(opencost_wire.transport_kwargs) == 2
+        client.close()
+
+    def test_get_allocation_merges_allocation_sets(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003/")
         payload = {
             "code": 200,
@@ -104,52 +257,49 @@ class TestOpenCostClient:
                 "not-a-dict",
             ],
         }
-        response = MagicMock(status_code=200)
-        response.json.return_value = payload
-        with patch("gco.services.cost_monitor.httpx.get", return_value=response) as mock_get:
-            merged = client.get_allocation(WINDOW_START, WINDOW_END)
+        opencost_wire.respond(200, json=payload)
+        merged = client.get_allocation(WINDOW_START, WINDOW_END)
         assert set(merged) == {"gco-jobs", "monitoring", "__idle__"}
-        params = mock_get.call_args.kwargs["params"]
+        [request] = opencost_wire.requests
+        assert request.url.path == "/allocation/compute"
+        params = request.url.params
         assert params["window"] == "2026-07-26T09:00:00Z,2026-07-26T10:00:00Z"
         assert params["aggregate"] == "namespace"
         assert params["accumulate"] == "true"
 
-    def test_get_allocation_raises_on_transport_error(self):
+    def test_get_allocation_raises_on_transport_error(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        with (
-            patch("gco.services.cost_monitor.httpx.get", side_effect=httpx.ReadTimeout("slow")),
-            pytest.raises(OpenCostUnavailableError, match="request failed"),
-        ):
+        opencost_wire.fail(httpx2.ReadTimeout, "slow")
+        with pytest.raises(OpenCostUnavailableError, match="request failed"):
             client.get_allocation(WINDOW_START, WINDOW_END)
 
-    def test_get_allocation_raises_on_http_error(self):
+    def test_get_allocation_raises_on_http_error(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        response = MagicMock(status_code=500)
-        with (
-            patch("gco.services.cost_monitor.httpx.get", return_value=response),
-            pytest.raises(OpenCostUnavailableError, match="HTTP 500"),
-        ):
+        opencost_wire.respond(500)
+        with pytest.raises(OpenCostUnavailableError, match="HTTP 500"):
             client.get_allocation(WINDOW_START, WINDOW_END)
 
-    def test_get_allocation_raises_on_non_json(self):
+    def test_get_allocation_raises_on_non_json(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        response = MagicMock(status_code=200)
-        response.json.side_effect = ValueError("not json")
-        with (
-            patch("gco.services.cost_monitor.httpx.get", return_value=response),
-            pytest.raises(OpenCostUnavailableError, match="non-JSON"),
-        ):
+        opencost_wire.respond(200, content=b"not json")
+        with pytest.raises(OpenCostUnavailableError, match="non-JSON"):
             client.get_allocation(WINDOW_START, WINDOW_END)
 
-    def test_get_allocation_raises_on_missing_data(self):
+    def test_get_allocation_raises_on_missing_data(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003")
-        response = MagicMock(status_code=200)
-        response.json.return_value = {"code": 200}
-        with (
-            patch("gco.services.cost_monitor.httpx.get", return_value=response),
-            pytest.raises(OpenCostUnavailableError, match="omitted data"),
-        ):
+        opencost_wire.respond(200, json={"code": 200})
+        with pytest.raises(OpenCostUnavailableError, match="omitted data"):
             client.get_allocation(WINDOW_START, WINDOW_END)
+
+    def test_get_allocation_raises_while_the_internal_ca_is_missing(
+        self, opencost_wire, monkeypatch
+    ):
+        client = OpenCostClient(DEFAULT_OPENCOST_BASE_URL)
+        missing = MagicMock(side_effect=InternalTLSError("GCO internal CA bundle is not readable"))
+        monkeypatch.setattr(internal_tls, "verify_for_url", missing)
+        with pytest.raises(OpenCostUnavailableError, match="TLS trust is unavailable"):
+            client.get_allocation(WINDOW_START, WINDOW_END)
+        assert opencost_wire.requests == []
 
 
 class TestAllocationsToRows:
@@ -651,6 +801,20 @@ class TestCreateFromEnv:
         assert monitor.cluster == "gco-us-west-2"
         assert monitor.report_interval_minutes == 30
         assert monitor.opencost.base_url == "http://opencost.monitoring.svc:9003"
+
+    def test_opencost_defaults_to_the_verified_tls_service(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("COST_REPORT_BUCKET", "bucket-x")
+        monkeypatch.setenv("REGION", "us-west-2")
+        monkeypatch.delenv("OPENCOST_BASE_URL", raising=False)
+        monkeypatch.setenv("GCO_INTERNAL_CA_FILE", str(tmp_path / "absent-ca.crt"))
+        with patch("gco.services.cost_monitor.boto3.client"):
+            monitor = create_cost_monitor_from_env()
+        assert monitor.opencost.base_url == (
+            "https://opencost-tls.monitoring.svc.cluster.local:9443"
+        )
+        # Construction reads no CA bundle (none exists here): trust is
+        # resolved on the first OpenCost call.
+        assert monitor.opencost._client is None
 
     def test_discovers_the_bucket_from_the_published_parameter(self, monkeypatch):
         monkeypatch.delenv("COST_REPORT_BUCKET", raising=False)

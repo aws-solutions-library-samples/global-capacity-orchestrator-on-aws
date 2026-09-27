@@ -171,7 +171,10 @@ kinds of the operators GCO installs (Kueue `LocalQueue`s, Kubeflow Trainer
 monitors and rules, cert-manager). A kind outside the list fails the sync with
 a `Forbidden`; to admit one, bind an extra `Role` naming it to the
 `argocd-application-controller` ServiceAccount of the `argocd` namespace in
-the tenant namespace.
+the tenant namespace. A tenant `Certificate` must reference an `Issuer` in its
+own namespace: the admission policy `gco-internal-ca-issuance` refuses any
+Certificate that names GCO's internal CA ClusterIssuers
+([ARCHITECTURE.md → Who can obtain a trusted certificate](ARCHITECTURE.md#in-cluster-tls)).
 
 The [job admission policy](CUSTOMIZATION.md#security-policy-configuration)
 enforced by GCO's manifest API does **not** apply to objects Argo CD writes

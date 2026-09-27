@@ -887,17 +887,28 @@ Shape is guarded by `tests/test_monitoring_stack.py` and
   `/metrics` ([Prometheus](https://prometheus.io/docs/introduction/overview/)). These four are the only paths the auth middleware
   leaves unauthenticated (`gco/services/auth_middleware.py`), so ALB and Global
   Accelerator health checks reach them without a token.
+- **Traces:** `gco/services/tracing.py` exports OpenTelemetry spans from the
+  four API services straight to the X-Ray OTLP endpoint (on by default, 5%
+  sampled, `cdk.json` `tracing`); spans land in each regional Region's
+  `aws/spans` log group through CloudWatch Transaction Search, and JSON log lines
+  carry the matching `trace_id`. See
+  [MONITORING.md → Distributed tracing](MONITORING.md#distributed-tracing).
 
 ### Logs and rotation
 
 Services emit structured JSON (`gco/services/structured_logging.py`, tunable via
-`LOG_FORMAT` / `LOG_LEVEL`) for CloudWatch Logs Insights. Retention is bounded,
-not open-ended:
+`LOG_FORMAT` / `LOG_LEVEL`) for CloudWatch Logs Insights; inside a traced
+request each line also carries `trace_id`, `span_id`, and `trace_sampled`.
+Retention is bounded, not open-ended:
 
 - Monitoring log groups use `RetentionDays.ONE_MONTH` (`monitoring_stack.py`).
 - S3 access logs expire per `s3_access_logs.retention_days` in `cdk.json`
   (default 90 days).
 - Capacity-history rows carry a DynamoDB TTL (default 90 days).
+- The exception is the `aws/spans` log group that holds trace spans: it belongs
+  to CloudWatch Transaction Search, is shared with every other X-Ray producer in
+  the Region, and GCO sets no retention on it, so set one that suits the
+  account.
 
 ### On-call
 

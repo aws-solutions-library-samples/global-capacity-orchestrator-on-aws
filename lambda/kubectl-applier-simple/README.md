@@ -36,7 +36,19 @@ Always returns SUCCESS to prevent stuck stacks. Optionally skips resource deleti
 
 ## Supported Resource Kinds
 
-Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, Deployment, DaemonSet, HorizontalPodAutoscaler (`autoscaling/v2`), Service, ConfigMap, Secret, GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration, StorageClass, PersistentVolume, PersistentVolumeClaim, PodDisruptionBudget, NetworkPolicy, NodePool, EC2NodeClass, APIService, DeviceClass, ScaledJob, ScaledObject, ClusterTrainingRuntime.
+The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
+
+- **Core and apps:** Namespace, ServiceAccount, ConfigMap, Secret, Service, Pod, Deployment, StatefulSet, DaemonSet, Job, CronJob, HorizontalPodAutoscaler (`autoscaling/v2`), PodDisruptionBudget, PriorityClass, ResourceQuota, LimitRange, Lease, StorageClass, PersistentVolume, PersistentVolumeClaim, NetworkPolicy, APIService, CustomResourceDefinition, DeviceClass
+- **RBAC:** ClusterRole, ClusterRoleBinding, Role, RoleBinding
+- **Gateway API and AWS Load Balancer Controller:** GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration
+- **Karpenter / EKS Auto Mode:** NodePool, EC2NodeClass
+- **cert-manager:** ClusterIssuer (cluster-scoped), Issuer, Certificate — GCO's internal CA chain and its TLS leaves
+- **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the issuance fence on the internal CA (`08-internal-ca-issuance.yaml`)
+- **Prometheus Operator:** ServiceMonitor, PodMonitor
+- **KEDA:** ScaledJob, ScaledObject
+- **Kueue:** ClusterQueue, LocalQueue, ResourceFlavor
+- **Kubeflow Trainer:** ClusterTrainingRuntime
+- **Argo CD and Crossplane:** AppProject, Application, Function
 
 ## CloudFormation Properties
 

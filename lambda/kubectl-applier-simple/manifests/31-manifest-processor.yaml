@@ -120,6 +120,26 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            # OpenTelemetry -> X-Ray (gco/services/tracing.py), switched and
+            # sampled from cdk.json tracing; the pod identity labels spans.
+            - name: GCO_TRACING_ENABLED
+              value: "{{TRACING_ENABLED}}"
+            - name: GCO_TRACING_SAMPLE_RATIO
+              value: "{{TRACING_SAMPLE_RATIO}}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # The /api/v1/cost/* proxy calls the cost monitor over verified
+            # HTTPS (https://cost-monitor.gco-system.svc.cluster.local:8443,
+            # the code default) and trusts only the GCO internal CA mounted
+            # here from this pod's own leaf Secret.
+            - name: GCO_INTERNAL_CA_FILE
+              value: "/var/run/gco/ca/ca.crt"
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: AWS_ROLE_ARN
@@ -277,6 +297,9 @@ spec:
             - name: kubernetes-api-token
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
+            - name: internal-ca
+              mountPath: /var/run/gco/ca
+              readOnly: true
         - name: api-tls-proxy
           image: {{MANIFEST_PROCESSOR_IMAGE}}
           imagePullPolicy: IfNotPresent
@@ -344,6 +367,15 @@ spec:
         - name: api-tls
           secret:
             secretName: manifest-processor-tls
+            defaultMode: 288
+        # Only the CA certificate from the same Secret, for the application's
+        # in-cluster HTTPS clients: the application never sees a private key.
+        - name: internal-ca
+          secret:
+            secretName: manifest-processor-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
             defaultMode: 288
         - name: aws-iam-token
           projected:

@@ -22,6 +22,8 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [Variations](#variations)
 - [Rolling back](#rolling-back)
 - [What the command does not do](#what-the-command-does-not-do)
+- [Release notes for running deployments](#release-notes-for-running-deployments)
+  - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
 
 ## How an upgrade works
 
@@ -219,3 +221,52 @@ schemas in a way that makes going back unsafe.
 - It does not back up or restore data. Steps 2 and 4 are yours.
 - It is not exposed as an MCP tool: it replaces the checkout the MCP server
   itself runs from.
+
+## Release notes for running deployments
+
+`gco upgrade` rebuilds the regional stacks, so a cluster it creates starts in
+the new release's state. The notes below describe what an operator sees when a
+running deployment is instead updated in place with `gco stacks deploy-all` on
+a newer checkout, plus any account-level effect that applies either way.
+
+### In-cluster TLS and tracing
+
+The release that moves every in-cluster hop to verified HTTPS
+([ARCHITECTURE.md → In-cluster TLS](ARCHITECTURE.md#in-cluster-tls)) and adds
+OpenTelemetry tracing ([MONITORING.md → Distributed tracing](MONITORING.md#distributed-tracing))
+changes running clusters in these ways during an in-place redeploy:
+
+- **The cost API is unavailable until its certificate exists.** The single
+  cost-monitor pod (`Recreate`) now mounts the `cost-monitor-tls` Secret, which
+  cert-manager issues in the post-Helm pass, and the updated manifest processor
+  dials the cost monitor on 8443. Until the new pod is running, the
+  `/api/v1/cost/*` routes answer 503.
+- **Model endpoints re-roll once.** The inference monitor adds the
+  `endpoint-tls-proxy` sidecar to every existing endpoint and moves its Service
+  to port 8443 in place. The updated monitor itself starts only once the
+  post-Helm pass has issued its `inference-monitor-tls` certificate, while the
+  updated inference proxy dials 8443 from the base pass on, so each endpoint is
+  unavailable through the inference proxy until its first TLS-capable pod is
+  Ready, which also needs a free GPU and a model load; see
+  [INFERENCE.md → Model Endpoint TLS](INFERENCE.md#model-endpoint-tls).
+  Workloads of your own that call model Services directly must switch to
+  `https://<service>.gco-inference.svc.cluster.local:8443` and trust the
+  internal CA.
+- **Grafana restarts once.** Its Deployment switches to the `Recreate` strategy
+  and its pod gains the `grafana-tls-proxy` sidecar and an amd64 node selector.
+  The OpenCost pod rolls once for the same sidecar and node selector.
+- **The API certificates move to the internal CA.** The base pass deletes the
+  old `gco-api-selfsigned` Issuer; the post-Helm pass re-points the
+  health-monitor, manifest-processor, and inference-proxy Certificates at the
+  `gco-internal-ca` ClusterIssuer, and their sidecars load the re-issued leaves
+  in place. Prometheus's verified scrapes of those pods fail until then. The
+  inference proxy builds its model-endpoint client per request from the CA
+  bundle on disk, so once the kubelet has refreshed its re-issued `ca.crt` it
+  trusts the internal CA from the next request on, without a restart.
+- **CloudWatch Transaction Search is switched on and left on.** Each regional
+  stack turns Transaction Search on in its Region unless it already is. The
+  setting is account-wide in that Region, moves every X-Ray trace there to
+  CloudWatch Logs pricing, and is not turned off by any later destroy or
+  upgrade. Set `tracing.enable_transaction_search` to `false` before deploying
+  if your organization manages it, or `tracing.enabled` to `false` for no
+  tracing at all.

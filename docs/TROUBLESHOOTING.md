@@ -29,6 +29,7 @@ Common issues and their solutions.
 - [Networking Issues](#networking-issues)
   - [Pods Can't Reach Internet](#pods-cant-reach-internet)
   - [Can't Access Services](#cant-access-services)
+  - [In-cluster TLS Errors](#in-cluster-tls-errors)
   - [API Gateway Timeout After Deployment](#api-gateway-timeout-after-deployment)
   - [ALB Not Routing Traffic](#alb-not-routing-traffic)
 - [Performance Issues](#performance-issues)
@@ -429,7 +430,18 @@ kubectl get pvc -n NAMESPACE
 # 3. "CNI plugin not ready"
 # Solution: Check VPC CNI pods
 kubectl get pods -n kube-system -l k8s-app=aws-node
+
+# 4. FailedMount: secret "<name>-tls" (or "gco-inference-tls") not found
+# Solution: the certificate is issued in the post-Helm pass; check the CA and leaves
+kubectl get clusterissuer gco-internal-ca
+kubectl get certificate -A
+gco stacks addons status -r REGION
 ```
+
+GCO pods that terminate TLS mount their cert-manager Secret non-optionally, so
+on a fresh cluster (or right after an upgrade that adds a certificate) they
+wait in `ContainerCreating` until cert-manager has issued it. See
+[In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
 
 ### Pods CrashLoopBackOff
 
@@ -602,6 +614,46 @@ kubectl run test-pod --image=busybox --rm -it -- wget -O- http://SERVICE-NAME.NA
 # 4. Check network policies
 kubectl get networkpolicies -n NAMESPACE
 ```
+
+GCO's own Services speak only HTTPS: the API services and the cost monitor on
+8443, model endpoints on 8443 (`https://<service>.gco-inference.svc.cluster.local:8443`),
+and their NetworkPolicies admit only their known clients, so a plain-HTTP
+`wget` from a test pod is expected to fail. See
+[In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
+
+### In-cluster TLS Errors
+
+**Symptom**: `/inference/*` returns 502 or the `/api/v1/cost/*` routes return
+503 while the pods behind them are Ready.
+
+**Cause**: the client could not verify the server against the GCO internal CA,
+or its CA bundle (`/var/run/gco/ca/ca.crt`) is missing. The client logs say
+which: `Inference upstream TLS trust is unavailable` or a certificate
+verification error in an `Inference upstream request failed` line
+(inference-proxy), `Cost monitor TLS trust is unavailable` (manifest-processor),
+`OpenCost TLS trust is unavailable` (cost-monitor).
+
+**Solution**:
+
+```bash
+# 1. The CA and every leaf must be Ready and issued by gco-internal-ca
+kubectl get clusterissuer gco-internal-ca
+kubectl get certificate -A
+
+# 2. Read the client's log line
+kubectl logs -n gco-system deployment/inference-proxy -c inference-proxy | grep -i tls
+kubectl logs -n gco-system deployment/manifest-processor -c manifest-processor | grep -i tls
+
+# 3. Check the server's TLS sidecar (for a model endpoint)
+kubectl logs -n gco-inference deployment/ENDPOINT -c endpoint-tls-proxy
+```
+
+A certificate issued by another CA, or one that does not name the Service the
+client dialled, is refused by design. During an in-place upgrade the inference
+proxy answers 502 until the post-Helm pass has re-issued `inference-proxy-tls`
+and the kubelet has refreshed the proxy's mounted `ca.crt`; its next request
+then trusts the new CA, with no restart. See
+[UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
 
 ### API Gateway Timeout After Deployment
 

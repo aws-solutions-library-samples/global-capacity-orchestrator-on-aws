@@ -1845,3 +1845,195 @@ class TestAnalyticsConstants:
             "cluster_shared_ssm_parameter_prefix must be an absolute SSM path "
             "(starts with '/') so it composes into valid parameter ARNs"
         )
+
+
+class TestTracingConfig:
+    """The ``tracing`` block and its run-scoped ``tracing_overrides`` context.
+
+    Tracing is on by default; the flags render verbatim into the services'
+    ``GCO_TRACING_ENABLED`` env var and ``sample_ratio`` is a head-sampling
+    probability, so every value is type-checked exactly at synth.
+    """
+
+    def test_absent_block_means_the_shipped_defaults(self, valid_context):
+        loader = ConfigLoader(MockApp(valid_context))
+
+        assert loader.get_tracing_config() == {
+            "enabled": True,
+            "sample_ratio": 0.05,
+            "enable_transaction_search": True,
+        }
+        assert loader.get_tracing_enabled() is True
+        assert loader.get_transaction_search_enabled() is True
+
+    def test_shipped_cdk_json_block_matches_the_defaults(self, valid_context):
+        import json
+
+        from gco.config.config_loader import TRACING_DEFAULTS
+
+        shipped = json.loads((Path(__file__).resolve().parents[1] / "cdk.json").read_text())
+        valid_context["tracing"] = shipped["context"]["tracing"]
+
+        assert ConfigLoader(MockApp(valid_context)).get_tracing_config() == TRACING_DEFAULTS
+
+    def test_partial_block_keeps_the_other_defaults(self, valid_context):
+        valid_context["tracing"] = {"sample_ratio": 0.2}
+
+        assert ConfigLoader(MockApp(valid_context)).get_tracing_config() == {
+            "enabled": True,
+            "sample_ratio": 0.2,
+            "enable_transaction_search": True,
+        }
+
+    @pytest.mark.parametrize(("value", "expected"), [(0, 0.0), (1, 1.0), (0.5, 0.5)])
+    def test_sample_ratio_boundaries_are_inclusive_and_normalized_to_float(
+        self, valid_context, value, expected
+    ):
+        valid_context["tracing"] = {"sample_ratio": value}
+
+        ratio = ConfigLoader(MockApp(valid_context)).get_tracing_config()["sample_ratio"]
+
+        assert ratio == expected
+        assert type(ratio) is float
+
+    @pytest.mark.parametrize(
+        "value", [True, False, "0.1", None, -0.01, 1.01, float("nan"), float("inf"), [0.1]]
+    )
+    def test_sample_ratio_must_be_a_probability(self, valid_context, value):
+        valid_context["tracing"] = {"sample_ratio": value}
+
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"tracing\.sample_ratio must be a number from 0 to 1 \(inclusive\)",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("flag", ["enabled", "enable_transaction_search"])
+    @pytest.mark.parametrize("value", ["true", "false", 1, 0, None])
+    def test_flags_must_be_literal_booleans(self, valid_context, flag, value):
+        valid_context["tracing"] = {flag: value}
+
+        with pytest.raises(ConfigValidationError, match=rf"tracing\.{flag} must be a boolean"):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", [[], "enabled", True, 5])
+    def test_block_must_be_an_object(self, valid_context, value):
+        valid_context["tracing"] = value
+
+        with pytest.raises(ConfigValidationError, match="tracing must be an object"):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_unknown_key_lists_the_allowed_ones(self, valid_context):
+        valid_context["tracing"] = {"sampling_ratio": 0.1}
+
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+
+        message = str(exc_info.value)
+        assert "tracing contains unknown key(s): sampling_ratio" in message
+        assert "allowed keys: enable_transaction_search, enabled, sample_ratio" in message
+
+    @pytest.mark.parametrize(
+        ("enabled", "transaction_search", "expected"),
+        [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+    )
+    def test_transaction_search_needs_tracing(
+        self, valid_context, enabled, transaction_search, expected
+    ):
+        valid_context["tracing"] = {
+            "enabled": enabled,
+            "enable_transaction_search": transaction_search,
+        }
+        loader = ConfigLoader(MockApp(valid_context))
+
+        assert loader.get_tracing_enabled() is enabled
+        assert loader.get_transaction_search_enabled() is expected
+
+    @pytest.mark.parametrize(
+        "overrides",
+        ['{"sample_ratio": 1.0}', {"sample_ratio": 1.0}, ' {"sample_ratio": 1} '],
+    )
+    def test_overrides_deep_merge_over_the_block(self, valid_context, overrides):
+        valid_context["tracing"] = {"sample_ratio": 0.05, "enable_transaction_search": False}
+        valid_context["tracing_overrides"] = overrides
+
+        assert ConfigLoader(MockApp(valid_context)).get_tracing_config() == {
+            "enabled": True,
+            "sample_ratio": 1.0,
+            "enable_transaction_search": False,
+        }
+
+    @pytest.mark.parametrize("overrides", [None, "", "   ", {}])
+    def test_empty_overrides_change_nothing(self, valid_context, overrides):
+        valid_context["tracing_overrides"] = overrides
+
+        assert ConfigLoader(MockApp(valid_context)).get_tracing_config()["sample_ratio"] == 0.05
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ("{sample_ratio: 1}", "tracing_overrides must be a JSON object: "),
+            ("[1]", "tracing_overrides must be a JSON object, got list"),
+            ('"on"', "tracing_overrides must be a JSON object, got str"),
+            (7, "tracing_overrides must be a JSON object string or an object, got int"),
+            (["sample_ratio"], "tracing_overrides must be a JSON object string or an object"),
+        ],
+    )
+    def test_malformed_overrides_fail_at_synth(self, valid_context, overrides, message):
+        valid_context["tracing_overrides"] = overrides
+
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+
+        assert message in str(exc_info.value)
+
+    def test_overrides_are_validated_as_part_of_the_merged_block(self, valid_context):
+        valid_context["tracing_overrides"] = '{"sample_ratio": 2}'
+        with pytest.raises(ConfigValidationError, match=r"tracing\.sample_ratio"):
+            ConfigLoader(MockApp(valid_context))
+
+        valid_context["tracing_overrides"] = '{"sampling": 1}'
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        assert "tracing (after tracing_overrides) contains unknown key(s): sampling" in str(
+            exc_info.value
+        )
+
+    def test_resolver_never_mutates_its_inputs(self):
+        from gco.config.config_loader import TRACING_DEFAULTS, resolve_tracing_config
+
+        block = {"enabled": False}
+        overrides = {"sample_ratio": 0.5}
+
+        resolved = resolve_tracing_config(block, overrides)
+        resolved["enabled"] = True
+
+        assert block == {"enabled": False}
+        assert overrides == {"sample_ratio": 0.5}
+        assert TRACING_DEFAULTS["enabled"] is True
+        assert resolve_tracing_config(None) == TRACING_DEFAULTS
+
+    def test_deep_merge_recurses_into_nested_mappings(self):
+        from gco.config.config_loader import _deep_merge
+
+        base = {"outer": {"kept": 1, "replaced": 2}, "flat": 1}
+        merged = _deep_merge(base, {"outer": {"replaced": 3}, "flat": {"now": "a map"}})
+
+        assert merged == {"outer": {"kept": 1, "replaced": 3}, "flat": {"now": "a map"}}
+        assert base == {"outer": {"kept": 1, "replaced": 2}, "flat": 1}
+
+    def test_parse_overrides_copies_mapping_input(self):
+        from gco.config.config_loader import parse_tracing_overrides
+
+        raw = {"sample_ratio": 1.0}
+        parsed = parse_tracing_overrides(raw)
+        parsed["sample_ratio"] = 0.0
+
+        assert raw == {"sample_ratio": 1.0}
+
+    def test_xray_is_a_supported_interface_endpoint(self, valid_context):
+        valid_context["vpc_endpoints"] = {"interface": ["xray"]}
+
+        assert ConfigLoader(MockApp(valid_context)).get_vpc_endpoints_config()["interface"] == [
+            "xray"
+        ]

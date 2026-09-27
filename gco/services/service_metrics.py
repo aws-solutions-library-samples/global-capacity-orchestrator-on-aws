@@ -8,10 +8,11 @@ the self-hosted cluster Prometheus can scrape them:
   health-monitor, manifest-processor, and inference-proxy API services. Their auth
   middleware already treats ``/metrics`` as unauthenticated, so the in-cluster
   Prometheus scrapes it over the existing service port without credentials.
-- ``start_metrics_server(port, name, metrics_fn)`` starts a standalone metrics
-  HTTP server for the loop-based inference monitor (which has no HTTP server of
-  its own) and registers a collector that reflects the monitor's live counters
-  at scrape time.
+- ``start_metrics_server(port, name, metrics_fn, *, host)`` starts a standalone
+  metrics HTTP server for the loop-based inference monitor (which has no HTTP
+  server of its own) and registers a collector that reflects the monitor's live
+  counters at scrape time. The deployed monitor binds it to loopback and a TLS
+  sidecar serves it to Prometheus over verified HTTPS.
 
 ``prometheus-client`` is already a project dependency, so instrumenting these
 services pulls no new package into their container images. All series carry a
@@ -139,11 +140,19 @@ def start_metrics_server(
     port: int,
     service_name: str,
     metrics_fn: Callable[[], Mapping[str, Any]],
+    *,
+    host: str = "0.0.0.0",  # every interface unless the caller narrows it
 ) -> None:
     """Start a standalone Prometheus metrics HTTP server for a loop-based service.
 
     Serves a scrape-time collector backed by ``metrics_fn`` (e.g. the inference
-    monitor's ``get_metrics``) on ``port``.
+    monitor's ``get_metrics``) on ``host:port``.
+
+    ``host`` defaults to every interface so a bare ``python -m`` run (local
+    development, the functional container test) is reachable. The deployed
+    inference monitor passes ``127.0.0.1``: its plaintext listener is then
+    reachable only inside the pod, and Prometheus scrapes it through the TLS
+    sidecar that terminates HTTPS on the pod network.
 
     The collector is registered on its own ``CollectorRegistry`` rather than the
     default one. The collector emits its own ``gco_service_info`` liveness series
@@ -158,4 +167,4 @@ def start_metrics_server(
 
     registry = CollectorRegistry()
     registry.register(_CallableCollector(service_name, metrics_fn))
-    start_http_server(port, registry=registry)
+    start_http_server(port, addr=host, registry=registry)

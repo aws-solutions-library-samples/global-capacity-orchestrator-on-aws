@@ -116,6 +116,63 @@ class TestOnEvent:
 
         assert result["PhysicalResourceId"] == "existing-id"
 
+    def test_json_encoded_charts_reach_the_execution_with_their_types(self, orchestrator):
+        """The stack sends Charts as one JSON string because CloudFormation turns
+        every number and boolean in an object property into a string; decoded
+        here, a Secret volume's ``optional`` and ``defaultMode`` stay typed."""
+        handler, sfn = orchestrator
+        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        charts = {
+            "opencost": {
+                "values": {
+                    "extraVolumes": [
+                        {
+                            "name": "gco-tls",
+                            "secret": {
+                                "secretName": "opencost-tls",
+                                "optional": True,
+                                "defaultMode": 292,
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+
+        handler.on_event(
+            {"RequestType": "Create", "ResourceProperties": self._props(Charts=json.dumps(charts))}
+        )
+
+        sent = json.loads(sfn.start_execution.call_args.kwargs["input"])
+        assert sent["Charts"] == charts
+        secret = sent["Charts"]["opencost"]["values"]["extraVolumes"][0]["secret"]
+        assert secret["optional"] is True
+        assert secret["defaultMode"] == 292
+
+    @pytest.mark.parametrize(
+        ("charts", "message"),
+        [
+            ("{not json", "Charts is not valid JSON"),
+            ('["keda"]', "Charts must be a JSON object"),
+            (["keda"], "Charts must be a JSON object"),
+        ],
+    )
+    def test_malformed_charts_fail_before_anything_is_written(self, orchestrator, charts, message):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(ValueError, match=message),
+        ):
+            handler.on_event(
+                {"RequestType": "Create", "ResourceProperties": self._props(Charts=charts)}
+            )
+
+        handler._prepare_teardown_fence.assert_not_called()
+        ssm.put_parameter.assert_not_called()
+        sfn.start_execution.assert_not_called()
+
     def test_optional_props_default_when_omitted(self, orchestrator):
         handler, sfn = orchestrator
         sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}

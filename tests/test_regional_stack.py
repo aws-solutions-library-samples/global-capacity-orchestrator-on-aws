@@ -22,6 +22,7 @@ import yaml
 from aws_cdk import assertions
 
 from gco.config.config_loader import ConfigLoader
+from tests._cfn_json import decode_cfn_json
 
 
 class MockConfigLoader:
@@ -1418,7 +1419,11 @@ class TestRegionalStackSynthesis:
             )
 
     def test_inference_proxy_role_and_manifest_replacements_are_exact(self):
-        """The inference data plane gets only secret and endpoint point-read access."""
+        """The inference data plane gets only secret and endpoint point-read access.
+
+        Tracing is on by default, so the role also carries the write-only
+        X-Ray span-export statement — and nothing else.
+        """
         from gco.stacks.regional_stack import GCORegionalStack
 
         app = cdk.App()
@@ -1469,7 +1474,9 @@ class TestRegionalStackSynthesis:
         assert set(by_actions) == {
             frozenset({"secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"}),
             frozenset({"dynamodb:GetItem"}),
+            frozenset({"xray:PutTraceSegments", "xray:PutSpans"}),
         }
+        assert by_actions[frozenset({"xray:PutTraceSegments", "xray:PutSpans"})] == "*"
         assert by_actions[frozenset({"dynamodb:GetItem"})] == {
             "Fn::Join": [
                 "",
@@ -3450,23 +3457,15 @@ class TestRegionalStackVolcanoImageMirror:
     def test_enabled_redirects_volcano_image_registry(self):
         """The HelmInstallCharts custom resource carries the Volcano override."""
         stack = self._build(self._enabled_app())
-        template = assertions.Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::CloudFormation::CustomResource",
-            {
-                "Charts": {
-                    "volcano": {
-                        "values": {
-                            "basic": {
-                                "image_registry": self._expected_mirror_registry(
-                                    stack, "gco-test/dockerhub"
-                                )
-                            }
-                        }
-                    }
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        charts = decode_cfn_json(resources["HelmInstallCharts"]["Properties"]["Charts"])
+        assert charts["volcano"] == {
+            "values": {
+                "basic": {
+                    "image_registry": self._expected_mirror_registry(stack, "gco-test/dockerhub")
                 }
-            },
-        )
+            }
+        }
 
     def test_custom_namespace_is_honored(self):
         stack = self._build(self._enabled_app(ecr_namespace="gco-test/mirror"))

@@ -1,0 +1,200 @@
+# The issuance fence on GCO's internal CA: who may obtain a certificate GCO's
+# in-cluster clients trust. Base pass, never gated.
+#
+# Threat. Every GCO client trusts whatever gco-internal-ca signs
+# (post-helm-api-workload-certificates.yaml), and cert-manager approves and
+# signs any Certificate or CertificateRequest that names a ClusterIssuer, from
+# any namespace. So whoever may create or patch a Certificate can obtain a leaf
+# GCO trusts, for any name (a cost-monitor.gco-system.svc.cluster.local of
+# their own), or a CA. The optional Argo CD, Crossplane and kro tenant roles
+# may do exactly that in gco-jobs and gco-inference
+# (post-helm-argocd-access.yaml, post-helm-crossplane.yaml,
+# 07-kro-tenant-access.yaml), and cert-manager's ingress-shim turns any
+# Ingress annotated with a cluster-issuer into a Certificate, created as
+# cert-manager itself.
+#
+# Rules. Only objects that name one of the two GCO ClusterIssuers are checked;
+# a tenant's own Issuer is untouched. issuerRef resolves the way cert-manager
+# resolves it: an absent or empty kind is a namespaced Issuer, an absent or
+# empty group is cert-manager.io.
+#   * gco-internal-ca signs only the leaves listed in internalLeaves, by
+#     namespace/name, each with only the DNS names listed for it and no other
+#     subject or SAN field. The names are pinned, not just the object, because
+#     gco-inference-tls lives in a namespace tenants may write.
+#   * gco-internal-ca-bootstrap signs only the CA, cert-manager/gco-internal-ca.
+#   * gco-internal-ca never signs a CA.
+#   * A CertificateRequest naming either may be created, or completed through
+#     its status subresource (where cert-manager writes the signed
+#     certificate), only by cert-manager's controller,
+#     system:serviceaccount:cert-manager:cert-manager (the cert-manager release
+#     in charts.yaml runs as the chart's default ServiceAccount), and only for
+#     a Certificate that issuer signs, by the cert-manager.io/certificate-name
+#     annotation cert-manager sets on every request. The status rule is what
+#     stops the CA from completing a request filed before the fence existed.
+# No requester is exempt from the Certificate rules, cert-manager included,
+# which is what fences the ingress-shim.
+#
+# Why the base pass. A new policy is enforced only once every API server has
+# picked up its binding (about half a second on an idle kind control plane),
+# and cert-manager turns the CA ClusterIssuer Ready faster than that when both
+# arrive in one apply, so a request filed before the fence would be signed in
+# the gap. Applied here, before Helm installs cert-manager, the fence is in
+# force before a Certificate can exist on a new cluster and minutes before the
+# post-Helm pass creates the CA on an upgraded one. A policy may name
+# resources whose CRD is not installed yet: it applies to them as soon as they
+# are served. A new leaf needs an internalLeaves entry with exactly its
+# dnsNames; tests/test_internal_tls_manifests.py fails until both agree.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gco-internal-ca-issuance
+  labels:
+    app: gco
+    project: gco
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificates"]
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["certificaterequests"]
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["certificaterequests/status"]
+  variables:
+    - name: isCertificate
+      expression: "request.resource.resource == 'certificates'"
+    - name: objectName
+      expression: "has(object.metadata.name) ? object.metadata.name : ''"
+    - name: issuerName
+      expression: >-
+        has(object.spec) && has(object.spec.issuerRef) && has(object.spec.issuerRef.name)
+        ? object.spec.issuerRef.name : ''
+    - name: issuerKind
+      expression: >-
+        has(object.spec) && has(object.spec.issuerRef) && has(object.spec.issuerRef.kind)
+        && object.spec.issuerRef.kind != '' ? object.spec.issuerRef.kind : 'Issuer'
+    - name: issuerGroup
+      expression: >-
+        has(object.spec) && has(object.spec.issuerRef) && has(object.spec.issuerRef.group)
+        && object.spec.issuerRef.group != '' ? object.spec.issuerRef.group : 'cert-manager.io'
+    # The GCO ClusterIssuer the object names, or '' for any other issuer.
+    - name: gcoIssuer
+      expression: >-
+        variables.issuerGroup == 'cert-manager.io' && variables.issuerKind == 'ClusterIssuer'
+        && variables.issuerName in ['gco-internal-ca', 'gco-internal-ca-bootstrap']
+        ? variables.issuerName : ''
+    # namespace/name of the Certificate: the object itself, or the one
+    # cert-manager filed this CertificateRequest for.
+    - name: certificate
+      expression: >-
+        request.namespace + '/' + (variables.isCertificate ? variables.objectName
+        : (has(object.metadata.annotations) && 'cert-manager.io/certificate-name' in object.metadata.annotations
+        ? object.metadata.annotations['cert-manager.io/certificate-name'] : ''))
+    - name: objectRef
+      expression: >-
+        variables.isCertificate ? 'Certificate ' + variables.certificate
+        : 'CertificateRequest ' + request.namespace + '/' + variables.objectName
+    # Every Certificate gco-internal-ca signs, with the only DNS names it may carry.
+    - name: internalLeaves
+      expression: |-
+        {
+          'gco-system/health-monitor-tls': [
+            'health-monitor', 'health-monitor.gco-system',
+            'health-monitor.gco-system.svc', 'health-monitor.gco-system.svc.cluster.local'],
+          'gco-system/manifest-processor-tls': [
+            'manifest-processor', 'manifest-processor.gco-system',
+            'manifest-processor.gco-system.svc', 'manifest-processor.gco-system.svc.cluster.local'],
+          'gco-system/inference-proxy-tls': [
+            'inference-proxy', 'inference-proxy.gco-system',
+            'inference-proxy.gco-system.svc', 'inference-proxy.gco-system.svc.cluster.local'],
+          'gco-system/inference-monitor-tls': [
+            'inference-monitor', 'inference-monitor.gco-system',
+            'inference-monitor.gco-system.svc', 'inference-monitor.gco-system.svc.cluster.local'],
+          'gco-system/cost-monitor-tls': [
+            'cost-monitor', 'cost-monitor.gco-system',
+            'cost-monitor.gco-system.svc', 'cost-monitor.gco-system.svc.cluster.local'],
+          'gco-inference/gco-inference-tls': [
+            '*.gco-inference.svc', '*.gco-inference.svc.cluster.local'],
+          'monitoring/opencost-tls': [
+            'opencost-tls', 'opencost-tls.monitoring',
+            'opencost-tls.monitoring.svc', 'opencost-tls.monitoring.svc.cluster.local'],
+          'monitoring/grafana-tls': [
+            'grafana-tls', 'grafana-tls.monitoring',
+            'grafana-tls.monitoring.svc', 'grafana-tls.monitoring.svc.cluster.local'],
+          'monitoring/gco-monitoring-trust': [
+            'gco-monitoring-trust', 'gco-monitoring-trust.monitoring',
+            'gco-monitoring-trust.monitoring.svc', 'gco-monitoring-trust.monitoring.svc.cluster.local']
+        }
+    # Whether the named GCO ClusterIssuer signs for this Certificate.
+    - name: signable
+      expression: >-
+        variables.gcoIssuer == 'gco-internal-ca' ? variables.certificate in variables.internalLeaves
+        : variables.certificate == 'cert-manager/gco-internal-ca'
+    - name: dnsNames
+      expression: "has(object.spec) && has(object.spec.dnsNames) ? object.spec.dnsNames : []"
+    - name: otherIdentity
+      expression: >-
+        has(object.spec) && (has(object.spec.commonName) || has(object.spec.literalSubject)
+        || has(object.spec.subject) || has(object.spec.ipAddresses) || has(object.spec.uris)
+        || has(object.spec.emailAddresses) || has(object.spec.otherNames))
+    - name: isCA
+      expression: "has(object.spec) && has(object.spec.isCA) && object.spec.isCA"
+    - name: fromCertManager
+      expression: "request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
+  validations:
+    # Requests to a GCO ClusterIssuer come from cert-manager, never from a client.
+    - expression: "variables.isCertificate || variables.gcoIssuer == '' || variables.fromCertManager"
+      message: >-
+        only cert-manager's controller may request certificates from the GCO ClusterIssuers;
+        create a Certificate instead
+      messageExpression: >-
+        variables.objectRef + ': the ClusterIssuer ' + variables.gcoIssuer + ' accepts requests only from
+        cert-manager (system:serviceaccount:cert-manager:cert-manager), not ' + request.userInfo.username
+        + '; create a Certificate instead'
+      reason: Forbidden
+    # A GCO ClusterIssuer signs only its own Certificates.
+    - expression: "variables.gcoIssuer == '' || variables.signable"
+      message: >-
+        gco-internal-ca signs only the GCO platform leaves and gco-internal-ca-bootstrap only
+        cert-manager/gco-internal-ca; use an Issuer in your own namespace
+      messageExpression: >-
+        variables.objectRef + (variables.isCertificate ? '' : ' (for Certificate ' + variables.certificate + ')')
+        + ': the ClusterIssuer ' + variables.gcoIssuer + ' signs only '
+        + (variables.gcoIssuer == 'gco-internal-ca' ? 'the GCO platform leaves' : 'cert-manager/gco-internal-ca')
+        + '; use an Issuer in your own namespace'
+      reason: Forbidden
+    # A GCO leaf carries exactly the names GCO ships for it.
+    - expression: >-
+        !variables.isCertificate || variables.gcoIssuer != 'gco-internal-ca' || !variables.signable
+        || (variables.dnsNames.all(name, name in variables.internalLeaves[variables.certificate])
+        && !variables.otherIdentity)
+      message: >-
+        a GCO platform leaf may carry only its own DNS names: no commonName, subject, IP address,
+        URI, email address or other name
+      messageExpression: >-
+        variables.objectRef + ' may carry only its own DNS names to use the ClusterIssuer
+        gco-internal-ca: no other DNS name, commonName, subject, IP address, URI, email address or other name'
+      reason: Forbidden
+    - expression: "variables.gcoIssuer != 'gco-internal-ca' || !variables.isCA"
+      message: the ClusterIssuer gco-internal-ca never signs a CA
+      messageExpression: "variables.objectRef + ': the ClusterIssuer gco-internal-ca never signs a CA'"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gco-internal-ca-issuance
+  labels:
+    app: gco
+    project: gco
+spec:
+  policyName: gco-internal-ca-issuance
+  validationActions: [Deny]

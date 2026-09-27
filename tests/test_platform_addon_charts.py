@@ -40,6 +40,7 @@ from gco.config.config_loader import ConfigLoader
 from gco.enablement_overrides import HELM_CHART_CONFIG_KEYS
 from gco.stacks import regional_stack as rs
 from gco.stacks.regional_stack import GCORegionalStack as RS
+from tests._cfn_json import decode_cfn_json
 from tests._lambda_imports import load_lambda_module
 from tests.test_regional_stack import MockConfigLoader
 from tests.test_regional_stack import TestRegionalStackSynthesis as _SynthFixtures
@@ -429,7 +430,7 @@ class TestSynthesizedReplacements:
         replacements = properties["ImageReplacements"]
         assert not [key for key in replacements if key.startswith(("{{ARGOCD_", "{{CROSSPLANE_"))]
         assert not {"argocd", "crossplane", "crossview"} & set(properties["EnabledCharts"])
-        assert "argocd" not in properties["Charts"]
+        assert "argocd" not in decode_cfn_json(properties["Charts"])
         assert stack._argocd_config() == ac.ARGOCD_DEFAULTS
 
     def test_everything_on_emits_every_token(self, everything_on) -> None:
@@ -447,14 +448,15 @@ class TestSynthesizedReplacements:
         }
         assert replacements["{{CROSSPLANE_ENABLED}}"] == "true"
         assert {"argocd", "crossplane", "crossview"} <= set(properties["EnabledCharts"])
-        # The repo-server autoscaler reaches the installer as chart values.
-        assert properties["Charts"]["argocd"] == {
+        # The repo-server autoscaler reaches the installer as chart values,
+        # with the integer and boolean types the chart's toYaml needs.
+        charts = decode_cfn_json(properties["Charts"])
+        assert charts["argocd"] == {
             "values": ac.argocd_chart_values(ac.validate_argocd_config(_ARGOCD_ON))
         }
-        assert (
-            properties["Charts"]["argocd"]["values"]["repoServer"]["autoscaling"]["maxReplicas"]
-            == 4
-        )
+        autoscaling = charts["argocd"]["values"]["repoServer"]["autoscaling"]
+        assert autoscaling["enabled"] is True
+        assert autoscaling["maxReplicas"] == 4
 
     def test_config_doubles_without_the_getter_read_as_off(self) -> None:
         stack = RS.__new__(RS)

@@ -580,7 +580,10 @@ PROXY_LOG_GROUP=$(aws lambda get-function-configuration \
 aws logs tail "$PROXY_LOG_GROUP" \
   --since 1h --filter-pattern INIT_START --region "$API_REGION"
 
-# 3. Use the X-Ray console or service map when tracing is enabled
+# 3. Find the slow requests' spans inside the regional services (tracing is on
+#    by default): CloudWatch → Application Signals → Transaction Search, or
+#    Logs Insights on the Region's aws/spans log group (docs/MONITORING.md,
+#    "Distributed tracing"). The proxy Lambdas' own X-Ray traces are separate.
 ```
 
 **Resolution:**

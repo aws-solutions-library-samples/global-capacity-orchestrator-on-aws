@@ -73,7 +73,7 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import ParseResult, urlparse
 
-import httpx
+import httpx2
 from kubernetes import client, config
 from kubernetes.client.models import V1Job
 from kubernetes.client.rest import ApiException
@@ -87,8 +87,8 @@ from gco.services.leader_lease import (
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-26T23:26:19Z
+# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
 # Flowchart(s) generated from this file:
 #   * ``WebhookDispatcher._deliver_webhook`` -> ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.png``)
@@ -484,7 +484,10 @@ class WebhookDispatcher:
                 if secret:
                     headers["X-GCO-Signature"] = self._sign_payload(payload_json, secret)
 
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                # Public trust (the system store) and never a tracing transport:
+                # webhook URL paths and queries routinely carry credentials,
+                # and a client span would record the full URL.
+                async with httpx2.AsyncClient(timeout=self.timeout) as client:
                     while attempts < self.max_retries:
                         attempts += 1
                         try:
@@ -513,7 +516,7 @@ class WebhookDispatcher:
                                 continue
                             break  # Caller errors are terminal and must not be replayed.
 
-                        except httpx.TimeoutException:
+                        except httpx2.TimeoutException:
                             last_error = "Request timed out"
                             logger.warning(
                                 "Webhook attempt timed out: webhook_id=%s %s attempt=%s",
@@ -523,7 +526,7 @@ class WebhookDispatcher:
                             )
                             if attempts < self.max_retries:
                                 await asyncio.sleep(self.retry_delay * (2 ** (attempts - 1)))
-                        except httpx.RequestError as exc:
+                        except httpx2.RequestError as exc:
                             last_error = type(exc).__name__
                             logger.warning(
                                 "Webhook transport failed: webhook_id=%s %s "

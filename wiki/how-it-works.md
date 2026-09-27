@@ -68,7 +68,8 @@ transparent; placement is deliberate.
 
 Six complementary controls protect every backend request: IAM authentication
 at API Gateway, TLS trust separation (AWS-managed TLS at the edge, a
-deployment-local private root behind it), a request-bound rotating HMAC,
+deployment-local private root behind it, and a cluster-local CA that every
+in-cluster client verifies), a request-bound rotating HMAC,
 private backend exposure (internal ALBs, private EKS endpoints),
 freshness/integrity validation in backend middleware, and IRSA / EKS Pod
 Identity for pod-level AWS access without static credentials. The README's

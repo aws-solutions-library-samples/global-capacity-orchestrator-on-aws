@@ -340,7 +340,7 @@ Below is the reference architecture for the security controls and the authentica
 Six complementary controls protect backend requests:
 
 1. **IAM authentication** — API Gateway validates AWS credentials with SigV4.
-2. **TLS trust separation** — API Gateway uses AWS-managed TLS; proxy-to-ALB traffic uses a deployment-local private root and explicit `backend.<project>.gco.internal` SNI/hostname verification.
+2. **TLS trust separation** — API Gateway uses AWS-managed TLS; proxy-to-ALB traffic uses a deployment-local private root and explicit `backend.<project>.gco.internal` SNI/hostname verification; the in-cluster hops behind the ALB (cost monitor, OpenCost, model endpoints, metrics scrapes) use a cluster-local cert-manager CA that every client verifies against ([In-cluster TLS](docs/ARCHITECTURE.md#in-cluster-tls)).
 3. **Request-bound HMAC** — a trusted Lambda signs the version, timestamp, nonce, method, exact target, and body digest with a rotating key that is never transmitted. HMAC provides integrity/freshness/replay defense, not encryption.
 4. **Private backend exposure** — regional ALBs are internal and the EKS API endpoint is private by default.
 5. **Freshness and integrity validation** — backend [middleware](./gco/services/auth_middleware.py) rejects stale, altered, or replayed envelopes.
@@ -386,7 +386,7 @@ The HTTP API surface has its own catalogue: [`diagrams/api_specs/`](diagrams/api
 | [Amazon Athena](https://aws.amazon.com/athena/) | Cross-region cost analytics — a KMS-enforced workgroup queried by `gco costs k8s` |
 | [Amazon Aurora](https://aws.amazon.com/rds/aurora/) | Optional Serverless v2 PostgreSQL with pgvector for RAG and semantic search |
 | [Amazon Bedrock](https://aws.amazon.com/bedrock/) | Multi-engine Autopilot (`gco autopilot` for Claude Code, `--engine codex` for OpenAI Codex, or `--engine opencode` for OpenCode), the optional AI capacity advisor (`gco capacity ai-recommend` / `predict`), and Mission strategy sampling |
-| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
+| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, Container Insights for GPU utilization, and Transaction Search for the API services' trace spans |
 | [Amazon Cognito](https://aws.amazon.com/cognito/) | Optional user pool authenticating analytics users to presigned Studio sessions |
 | [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
 | [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
@@ -411,6 +411,7 @@ The HTTP API surface has its own catalogue: [`diagrams/api_specs/`](diagrams/api
 | [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
 | [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
 | [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
+| [AWS X-Ray](https://aws.amazon.com/xray/) | OpenTelemetry traces of the four API services (OTLP endpoint, stored through CloudWatch Transaction Search) and active tracing for the Lambda functions |
 | [Elastic Load Balancing](https://aws.amazon.com/elasticloadbalancing/) | Internal Application Load Balancers provisioned from the shared Gateway API resources; terminate deployment-local private-root TLS |
 
 ## Sample Cost Table
@@ -490,6 +491,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **IAM authentication**: SigV4 at the API Gateway — no kubeconfig distribution
 - **Infrastructure policy validation**: [cdk-nag](https://github.com/cdklabs/cdk-nag) v3 rule packs for AWS Solutions, HIPAA, NIST 800-53, PCI DSS, and Serverless findings (these checks are not certifications)
 - **Network policies**: Default-deny with explicit allow rules for all service communication
+- **Verified in-cluster HTTPS**: every hop GCO owns inside a cluster (cost monitor, OpenCost, model endpoints, prefill/decode, Grafana's admin API, metrics scrapes) is TLS from a sidecar with a cert-manager leaf, verified by the client against one cluster-local CA — see [In-cluster TLS](docs/ARCHITECTURE.md#in-cluster-tls)
 - **EFA support**: Optional Elastic Fabric Adapter for high-bandwidth distributed training and [NIXL](https://github.com/ai-dynamo/nixl)-based inference (toggle on/off)
 
 ### Storage & Data
@@ -509,6 +511,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **MLflow experiment tracking** (on by default with observability): an in-cluster [MLflow](https://mlflow.org/) tracking server per region — run artifacts to S3 via a prefix-scoped IAM role, metadata on EBS, reached with `gco monitoring open --service mlflow` — see [MONITORING.md](docs/MONITORING.md#mlflow-experiment-tracking)
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region monitoring**: the `gco-monitoring` stack's cross-region CloudWatch dashboards, alarms, and SNS alerts, complemented by per-cluster Prometheus/Grafana [cluster observability](./docs/MONITORING.md)
+- **Distributed tracing** (on by default, 5% sampled): the four API services export OpenTelemetry spans straight to [AWS X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) with no collector, searchable in CloudWatch Transaction Search, and every service log line carries the matching trace id — see [Distributed tracing](docs/MONITORING.md#distributed-tracing)
 - **GitOps with Argo CD** (off by default): a self-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/) per regional cluster, installed from the upstream chart in namespaced mode and fenced to the job namespaces by a `gco-tenants` `AppProject` and matching RBAC; point it at a repository path per cluster from `cdk.json`, let the repo server autoscale, and open the UI over the private endpoint with `gco gitops open` — see [GitOps with Argo CD](docs/GITOPS.md)
 - **Crossplane** (off by default): a self-managed [Crossplane](https://docs.crossplane.io/) v2 and the Crossview dashboard, whose namespaced composite resources compose tenant workloads in the job namespaces only (`gco crossplane open`) — see [Crossplane](docs/CROSSPLANE.md)
 - **EKS Capabilities** (off by default): attach the AWS-managed [ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/) capabilities per regional cluster from `cdk.json`, with IAM roles that carry only the permissions you configure and the tenant RBAC kro composes with; `gco stacks capabilities status` reports drift — see [EKS Capabilities](docs/EKS_CAPABILITIES.md)

@@ -122,9 +122,12 @@ USER gco
 # the pod. The bind mount exists only for this RUN (BuildKit — the default
 # in Docker 23+, buildx, and finch), so the deployed image ships no build
 # tooling; a delete in a later layer would merely hide it, layers being
-# additive.
+# additive. --tracing also imports the tracing stack this service loads only
+# once GCO_TRACING_ENABLED=true (OpenTelemetry, botocore's SigV4 signer,
+# httpx2) and checks that httpx2's default trust store loads the image's CA
+# anchors, so a tracing package missing from the image fails the build too.
 RUN --mount=type=bind,from=builder,source=/opt/build,target=/opt/build \
-    ["python", "/opt/build/runtime_smoke.py", "gco.services.inference_api"]
+    ["python", "/opt/build/runtime_smoke.py", "gco.services.inference_api", "--tracing"]
 
 # Expose port
 EXPOSE 8080

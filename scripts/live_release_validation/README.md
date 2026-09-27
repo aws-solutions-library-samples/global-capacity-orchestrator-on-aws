@@ -114,6 +114,28 @@ by the [example harness](../example_job_validation/README.md)
 self-managed Argo CD and Crossplane add-ons. With nothing enabled the action
 passes with a note.
 
+`tracing` (`actions/tracing.py`, logic in `checks/tracing.py`) proves the API
+services' OpenTelemetry spans reach CloudWatch Transaction Search: per Region
+it requires the X-Ray trace segment destination `CloudWatchLogs`/`ACTIVE`,
+drives authenticated traffic at health-monitor, manifest-processor, and
+`/api/v1/cost/status`, then polls Logs Insights on `aws/spans` for every
+expected `service.name` and for one trace joining a cost-monitor span to the
+manifest-processor trace that called it (counts only). `__main__.py` sets the
+run-scoped `tracing_overrides` context `{"sample_ratio":1.0}` on every run
+(`RunSettings.tracing_overrides_json`, part of the resume identity) so each
+request is sampled. Transaction Search itself is account-level state no stack
+owns, so it follows the owned-resource pattern without a creation tag:
+`ownership/transaction_search.py` records each regional Region's destination,
+GCO resource policy, and span log groups at `baseline` (in checkpoint state,
+beside the pure protected baseline), `cleanup/transaction_search.py` restores
+exactly what the run changed as a retained-resource phase once every target
+stack is absent, and `final-inventory` compares the account with the record
+again. `platform-workloads` also reads the internal PKI in the same session
+(`checks/internal_pki.py`: the `gco-internal-ca` ClusterIssuer, its CA
+Certificate, and every GCO leaf), and `network-posture` dials the TLS-sidecar
+ports, the loopback-bound plaintext ports, and a stand-in model pod
+(`manifests/netpol-model-target-job.yaml`).
+
 ## How a run executes
 
 `runner.py` resolves the requested actions (expanding dependencies), then for

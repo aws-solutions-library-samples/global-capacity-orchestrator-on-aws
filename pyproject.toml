@@ -54,7 +54,23 @@ dependencies = [
     "uvicorn==0.52.4",
     "pydantic==2.13.5",
     "prometheus-client==0.26.0",
-    "httpx==0.28.1",
+    # httpx2 is Pydantic's maintained continuation of httpx (same API). Its
+    # default TLS trust is the OS store, through truststore.
+    "httpx2==2.13.1",
+    # OpenTelemetry for the X-Ray tracing of the four FastAPI services
+    # (gco/services/tracing.py imports it lazily, only when
+    # GCO_TRACING_ENABLED=true); their image-* groups carry the same roots.
+    # The X-Ray exporter signs each request with SigV4 itself, so it needs
+    # only the OTLP protobuf encoder, not the stock OTLP/HTTP exporter (which
+    # cannot sign). protobuf is a root because tracing.py imports
+    # google.protobuf directly to decode X-Ray's partial-success responses.
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-sdk==1.45.0",
+    "opentelemetry-exporter-otlp-proto-common==1.45.0",
+    "opentelemetry-proto==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+    "protobuf==7.35.1",
     "urllib3==2.7.0",
     # FastMCP powers the in-tree MCP server (gco_mcp/run_mcp.py). The ``tasks``
     # extra pulls in ``fastmcp-tasks``, the io.modelcontextprotocol/tasks
@@ -101,14 +117,27 @@ diagrams = [
 # they are importable, and the TLS sidecar (gco.services.tls_proxy, same
 # image) runs on the same uvloop wheel. integration:docker:* asserts both
 # are importable and selected inside every built image.
+# The same four images are the traced ones, so they also carry the
+# OpenTelemetry roots gco/services/tracing.py imports (protobuf included; see
+# the base dependencies). Tracing imports them only when it is enabled, so
+# the image smoke runs with --tracing to import them at build time
+# (dockerfiles/runtime_smoke.py). The inference-monitor and queue-processor
+# images do not trace and ship none of it.
 image-health-monitor = [
     "boto3==1.43.93",
     "botocore==1.43.93",
     "fastapi==0.141.1",
     "httptools==0.8.0",
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
     "kubernetes==36.0.3",
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-exporter-otlp-proto-common==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+    "opentelemetry-proto==1.45.0",
+    "opentelemetry-sdk==1.45.0",
     "prometheus-client==0.26.0",
+    "protobuf==7.35.1",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
     "uvloop==0.22.1",
@@ -118,9 +147,16 @@ image-manifest-processor = [
     "botocore==1.43.93",
     "fastapi==0.141.1",
     "httptools==0.8.0",
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
     "kubernetes==36.0.3",
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-exporter-otlp-proto-common==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+    "opentelemetry-proto==1.45.0",
+    "opentelemetry-sdk==1.45.0",
     "prometheus-client==0.26.0",
+    "protobuf==7.35.1",
     "pydantic==2.13.5",
     "pyyaml==6.0.3",
     "requests==2.34.2",
@@ -133,8 +169,15 @@ image-inference-proxy = [
     "botocore==1.43.93",
     "fastapi==0.141.1",
     "httptools==0.8.0",
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-exporter-otlp-proto-common==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+    "opentelemetry-proto==1.45.0",
+    "opentelemetry-sdk==1.45.0",
     "prometheus-client==0.26.0",
+    "protobuf==7.35.1",
     "starlette==1.6.0",
     "uvicorn==0.52.4",
     "uvloop==0.22.1",
@@ -156,8 +199,15 @@ image-cost-monitor = [
     "botocore==1.43.93",
     "fastapi==0.141.1",
     "httptools==0.8.0",
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-exporter-otlp-proto-common==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+    "opentelemetry-proto==1.45.0",
+    "opentelemetry-sdk==1.45.0",
     "prometheus-client==0.26.0",
+    "protobuf==7.35.1",
     "pyarrow==25.0.1",
     "pydantic==2.13.5",
     "starlette==1.6.0",
@@ -228,6 +278,11 @@ test = [
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.
     "pyarrow==25.0.1",
+    # Test-only since the move to httpx2: the Mooncake PD proxy runs on the
+    # upstream vLLM image, which ships httpx rather than httpx2, and
+    # gco/services/mooncake_pd_proxy.py falls back to it. The transport tests
+    # run that fallback against the real library. Nothing GCO ships imports it.
+    "httpx==0.28.1",
     # Structural diagram tests verify every committed PNG can be parsed in a
     # targeted ``.[test]`` environment; keep this aligned with ``security``.
     "pillow==12.3.0",

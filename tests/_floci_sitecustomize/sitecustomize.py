@@ -3,23 +3,24 @@
 The Floci E2E (tests/test_floci_live_validation_e2e.py) runs the real live
 validation harness as a subprocess via ``gco release validate``. That child
 interpreter builds its own boto3 sessions, out of reach of in-process test
-fixtures — so the two documented Floci 1.6.0 gap shims from tests/_floci.py
-(unparseable CloudFormation ``GetStackPolicy`` responses; Global Accelerator
-absent) are injected here instead: the E2E prepends this directory to
+fixtures — so the documented Floci gap shims from tests/_floci_gap_shims.py
+(its docstring lists each gap: unparseable CloudFormation ``GetStackPolicy``
+responses, Global Accelerator and X-Ray absent, EC2 without Availability Zone
+IDs) are injected here instead: the E2E prepends this directory to
 ``PYTHONPATH``, Python imports ``sitecustomize`` at startup, and every
-botocore session created in the child auto-registers the same two
-``before-send`` answers.
+botocore session created in the child auto-registers the same ``before-send``
+answers.
 
 Triple-gated so it can never leak beyond the emulator E2E:
 
 1. the module only ships inside ``tests/`` and only enters ``PYTHONPATH``
    when the E2E test composes the subprocess environment;
 2. it hard-noops unless ``GCO_LIVE_VALIDATION_EMULATOR`` is set; and
-3. the shims answer exactly two read-only operations with fixed local
-   responses — they cannot mutate anything.
+3. the shims answer only read-only operations with fixed local responses —
+   they cannot mutate anything.
 
-Delete this file (and the shims in tests/_floci.py) once a Floci release
-parses GetStackPolicy and catalogs Global Accelerator.
+Delete this file (and the shims in tests/_floci_gap_shims.py) once Floci
+releases close every documented gap.
 """
 
 from __future__ import annotations

@@ -1,22 +1,97 @@
-# TLS identities for the three ALB-facing GCO API workloads.
+# GCO's internal PKI: one private CA and the TLS identities it issues for the
+# in-cluster HTTPS hops GCO owns.
 #
-# These certificates encrypt the ALB target hop. Application Load Balancers do
-# not validate target certificates or present a client certificate, so the
+# Chain. The selfSigned ClusterIssuer gco-internal-ca-bootstrap signs exactly
+# one certificate: the gco-internal-ca CA, whose Secret lives in the
+# cert-manager namespace because that is cert-manager's cluster resource
+# namespace (charts.yaml installs the chart there), the only place a
+# ClusterIssuer reads a CA Secret from. The ClusterIssuer gco-internal-ca then
+# signs every leaf. The CA keeps its private key across renewals
+# (rotationPolicy: Never), so a renewed CA certificate still verifies every
+# leaf the previous one signed; leaves keep rotating their own keys.
+#
+# Trust distribution. cert-manager writes the issuing CA certificate into every
+# leaf Secret as ca.crt. A client container projects only that key, from a
+# Secret in its own namespace, at /var/run/gco/ca/ca.crt and trusts nothing
+# else (gco/services/internal_tls.py); it never mounts a private key. Servers
+# terminate TLS in a sidecar (gco/services/tls_proxy.py) that mounts the leaf
+# at /var/run/gco/tls and hot-reloads each rotation.
+#
+# Issuance fence. Trusting the CA means trusting whoever can get it to sign.
+# 08-internal-ca-issuance.yaml, an admission policy the base pass applies
+# before cert-manager is installed, lets these ClusterIssuers sign only the
+# listed GCO leaves, each with exactly its own names, and the CA. A new leaf
+# needs an entry there too.
+#
+# The ALB-facing API leaves (health-monitor, manifest-processor,
+# inference-proxy) also encrypt the ALB target hop. Application Load Balancers
+# do not validate target certificates or present a client certificate, so the
 # request-bound HMAC envelope proves trusted-proxy key possession and request
 # integrity on protected paths. Original caller identity remains API Gateway
 # IAM's responsibility. Only /healthz, /readyz, /metrics, and /api/v1/health
 # bypass HMAC; /api/v1/metrics remains protected.
+#
+# Leaves that belong to optional features live in files gated like the
+# feature: cost-monitor-tls and opencost-tls in
+# post-helm-cost-monitoring-tls.yaml, grafana-tls and gco-monitoring-trust in
+# post-helm-monitoring-tls.yaml.
+#
+# Every leaf: ECDSA P-256 (PKCS#8) with a fresh key per issuance, 90 days,
+# renewed 30 days before expiry, server auth only, and the four Service DNS
+# forms (short, .ns, .ns.svc, .ns.svc.cluster.local).
 ---
 apiVersion: cert-manager.io/v1
-kind: Issuer
+kind: ClusterIssuer
 metadata:
-  name: gco-api-selfsigned
-  namespace: gco-system
+  name: gco-internal-ca-bootstrap
   labels:
     app: gco
     project: gco
 spec:
   selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gco-internal-ca
+  namespace: cert-manager
+  labels:
+    app: gco
+    project: gco
+spec:
+  isCA: true
+  commonName: GCO internal CA
+  secretName: gco-internal-ca
+  # Ten years, renewed one year early: every 90-day leaf is re-issued at least
+  # once inside that overlap and so carries the renewed CA certificate as its
+  # ca.crt long before the old one expires.
+  duration: 87600h
+  renewBefore: 8760h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Never
+  usages:
+    - cert sign
+    - crl sign
+    - digital signature
+  issuerRef:
+    name: gco-internal-ca-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: gco-internal-ca
+  labels:
+    app: gco
+    project: gco
+spec:
+  ca:
+    secretName: gco-internal-ca
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -45,10 +120,12 @@ spec:
     - health-monitor.gco-system.svc
     - health-monitor.gco-system.svc.cluster.local
   issuerRef:
-    name: gco-api-selfsigned
-    kind: Issuer
+    name: gco-internal-ca
+    kind: ClusterIssuer
     group: cert-manager.io
 ---
+# Also the manifest processor's trust anchor: its container projects this
+# Secret's ca.crt to verify the cost monitor.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -76,10 +153,12 @@ spec:
     - manifest-processor.gco-system.svc
     - manifest-processor.gco-system.svc.cluster.local
   issuerRef:
-    name: gco-api-selfsigned
-    kind: Issuer
+    name: gco-internal-ca
+    kind: ClusterIssuer
     group: cert-manager.io
 ---
+# Also the inference proxy's trust anchor: its container projects this
+# Secret's ca.crt to verify the model endpoints' gco-inference-tls leaf.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -107,6 +186,75 @@ spec:
     - inference-proxy.gco-system.svc
     - inference-proxy.gco-system.svc.cluster.local
   issuerRef:
-    name: gco-api-selfsigned
-    kind: Issuer
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# The inference monitor's metrics endpoint, served by its metrics-tls-proxy
+# sidecar on 9443. There is no inference-monitor Service: Prometheus scrapes
+# each pod and verifies this leaf with serverName
+# inference-monitor.gco-system.svc.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: inference-monitor-tls
+  namespace: gco-system
+  labels:
+    app: inference-monitor
+    project: gco
+spec:
+  secretName: inference-monitor-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - inference-monitor
+    - inference-monitor.gco-system
+    - inference-monitor.gco-system.svc
+    - inference-monitor.gco-system.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# One wildcard leaf for every managed model Service in gco-inference. The
+# inference monitor mounts it in each model pod's endpoint-tls-proxy sidecar,
+# and the Mooncake PD proxy trusts its ca.crt when it dials the prefill and
+# decode Services. A wildcard matches exactly one label, which is how the
+# endpoints are addressed: https://<service>.gco-inference.svc.cluster.local.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gco-inference-tls
+  namespace: gco-inference
+  labels:
+    app: gco-inference
+    project: gco
+spec:
+  secretName: gco-inference-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - "*.gco-inference.svc"
+    - "*.gco-inference.svc.cluster.local"
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
     group: cert-manager.io

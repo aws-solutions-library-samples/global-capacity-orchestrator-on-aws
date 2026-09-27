@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="f5b1f1688047468f">
+        <meta name="gco-generated-at" content="2026-09-27T04:10:54Z">
+        <meta name="gco-source-commit" content="590c275a9cd8dc0e0ba9f8ea74acefb63754df46">
+        <meta name="gco-flow-digest" content="e6734bf831c6a0b0">
         <title>Helm teardown provider event path (install drain + idempotent execution start)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,56 +208,58 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4671=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
-op4673=>operation: request_type = event['RequestType']
-op4675=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
-cond4678=>condition: if request_type != 'Delete'
-io4685=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e4683=>end: end function return
-op4691=>operation: props = event['ResourceProperties']
-op4693=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
-op4695=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
-op4697=>operation: execution_name = _execution_name(event)
-op4699=>operation: sfn_client = _sfn()
-op4701=>operation: fence_name = f"/{props['ProjectName']}/addons/{props['Region']}/_teardown"
-sub4703=>subroutine: _ssm(str(props['Region'])).put_parameter(Name=fence_name, Value=execution_name, Type='String', Overwrite=True)
-sub4705=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
-op4707=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'RegistryRegion': props['RegistryRegion'], 'ProjectName': props['ProjectName'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
-op4709=>operation: endpoint_group_arn = props.get('EndpointGroupArn')
-cond4712=>operation: execution_input['EndpointGroupArn'] = endpoint_group_arn if  endpoint_group_arn
-sub4725=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
-cond4722=>condition: exception raised?
-cond4727=>condition: except ClientError as exc
-cond4732=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
-sub4745=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
-io4750=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e4748=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op129=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
+op131=>operation: request_type = event['RequestType']
+op133=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
+cond136=>condition: if request_type != 'Delete'
+io143=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e141=>end: end function return
+op149=>operation: props = event['ResourceProperties']
+op151=>operation: chart_overrides = _chart_overrides(props)
+op153=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
+op155=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
+op157=>operation: execution_name = _execution_name(event)
+op159=>operation: sfn_client = _sfn()
+op161=>operation: fence_name = f"/{props['ProjectName']}/addons/{props['Region']}/_teardown"
+sub163=>subroutine: _ssm(str(props['Region'])).put_parameter(Name=fence_name, Value=execution_name, Type='String', Overwrite=True)
+sub165=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
+op167=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'RegistryRegion': props['RegistryRegion'], 'ProjectName': props['ProjectName'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': chart_overrides, 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
+op169=>operation: endpoint_group_arn = props.get('EndpointGroupArn')
+cond172=>operation: execution_input['EndpointGroupArn'] = endpoint_group_arn if  endpoint_group_arn
+sub185=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
+cond182=>condition: exception raised?
+cond187=>condition: except ClientError as exc
+cond192=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
+sub205=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
+io210=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e208=>end: end function return
 
-op4671->op4673
-op4673->op4675
-op4675->cond4678
-cond4678(yes)->io4685
-io4685->e4683
-cond4678(no)->op4691
-op4691->op4693
-op4693->op4695
-op4695->op4697
-op4697->op4699
-op4699->op4701
-op4701->sub4703
-sub4703->sub4705
-sub4705->op4707
-op4707->op4709
-op4709->cond4712
-cond4712->sub4725
-sub4725->cond4722
-cond4722(yes)->cond4727
-cond4727(yes)->cond4732
-cond4732->sub4745
-sub4745->io4750
-io4750->e4748
-cond4727(no)->sub4745
-cond4722(no)->sub4745
+op129->op131
+op131->op133
+op133->cond136
+cond136(yes)->io143
+io143->e141
+cond136(no)->op149
+op149->op151
+op151->op153
+op153->op155
+op155->op157
+op157->op159
+op159->op161
+op161->sub163
+sub163->sub165
+sub165->op167
+op167->op169
+op169->cond172
+cond172->sub185
+sub185->cond182
+cond182(yes)->cond187
+cond187(yes)->cond192
+cond192->sub205
+sub205->io210
+io210->e208
+cond187(no)->sub205
+cond182(no)->sub205
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -267,17 +269,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-27T04:10:54Z -->
+        <!-- Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-27T04:10:54Z">2026-09-27T04:10:54Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>590c275a9cd8dc0e0ba9f8ea74acefb63754df46</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>f5b1f1688047468f</code>
+            Flow content SHA-256: <code>e6734bf831c6a0b0</code>
           </p>
           <div id="canvas"></div>
         </div>

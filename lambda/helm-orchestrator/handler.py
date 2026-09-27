@@ -51,8 +51,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-27T04:10:54Z
+# Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46
 # Flowchart(s) generated from this file:
 #   * ``on_event`` -> ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.png``)
@@ -81,6 +81,25 @@ def _ssm() -> Any:
 def _canonical_json(value: Any) -> str:
     """Serialize *value* deterministically for execution and persistence."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _chart_overrides(props: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``Charts`` overrides with the JSON types the stack gave them.
+
+    CloudFormation delivers custom-resource properties with every number and
+    boolean as a string, so the regional stack sends ``Charts`` as one JSON
+    string and it is decoded here. An object (a stack synthesized before
+    that change) is taken as it is.
+    """
+    charts = props.get("Charts", {})
+    if isinstance(charts, str):
+        try:
+            charts = json.loads(charts)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Charts is not valid JSON: {exc}") from exc
+    if not isinstance(charts, dict):
+        raise ValueError("Charts must be a JSON object of per-chart overrides")
+    return charts
 
 
 def _encode_replay_input(execution_input_json: str) -> str:
@@ -245,7 +264,7 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         "RegistryRegion": props["RegistryRegion"],
         "ProjectName": props["ProjectName"],
         "EnabledCharts": props.get("EnabledCharts", []),
-        "Charts": props.get("Charts", {}),
+        "Charts": _chart_overrides(props),
         "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
         "ImageReplacements": props.get("ImageReplacements", {}),
         "DeploymentToken": deployment_token,

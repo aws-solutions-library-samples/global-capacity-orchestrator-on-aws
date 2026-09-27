@@ -275,8 +275,12 @@ class TestKubernetesManifests:
             "apiregistration.k8s.io/v1",
             "keda.sh/v1alpha1",
             "monitoring.coreos.com/v1",
-            # API workload TLS identities (post-helm-api-workload-certificates.yaml).
+            # GCO's internal CA chain and its TLS leaves
+            # (post-helm-api-workload-certificates.yaml and the gated post-helm
+            # TLS files).
             "cert-manager.io/v1",
+            # The issuance fence on that CA (08-internal-ca-issuance.yaml).
+            "admissionregistration.k8s.io/v1",
             # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
             # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.
             "kueue.x-k8s.io/v1beta1",

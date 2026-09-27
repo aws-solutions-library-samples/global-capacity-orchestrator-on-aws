@@ -33,6 +33,7 @@ from scripts.live_release_validation import constants, protected
 from scripts.live_release_validation.cleanup import ecr as cleanup_ecr
 from scripts.live_release_validation.cleanup import log_groups as cleanup_log_groups
 from scripts.live_release_validation.cleanup import retained as cleanup_retained
+from scripts.live_release_validation.cleanup import transaction_search as cleanup_transaction_search
 from scripts.live_release_validation.cleanup import workloads as cleanup_workloads
 from scripts.live_release_validation.inventory import _shared as inventory_shared
 from scripts.live_release_validation.inventory import ecr as inventory_ecr
@@ -2826,6 +2827,7 @@ class TestRetainedResourceCleanup:
             "_cleanup_new_ecr_images": MagicMock(return_value={"images": []}),
             "_cleanup_new_ecr_repositories": MagicMock(return_value={"repositories": []}),
             "_schedule_retained_kms_keys": MagicMock(return_value={"keys": []}),
+            "_restore_transaction_search": MagicMock(return_value={"regions": {}, "errors": []}),
         }
         fakes.update(overrides)
         return fakes
@@ -2842,6 +2844,7 @@ class TestRetainedResourceCleanup:
         assert result["ecr_images"] == {"images": []}
         assert result["ecr_repositories"] == {"repositories": []}
         assert result["kms"] == {"keys": []}
+        assert result["transaction_search"] == {"regions": {}, "errors": []}
         assert result["started_at"] <= result["ended_at"]
         assert ctx.checkpoint.state["retained_cleanup_attempts"] == [result]
         ctx.persist.assert_called_once()
@@ -2851,12 +2854,18 @@ class TestRetainedResourceCleanup:
     def test_every_phase_runs_and_failures_are_aggregated_with_partial_evidence(self) -> None:
         ctx = _context()
         log_details = {"log_groups": [{"name": "blocked"}], "errors": [{"phase": "log-groups"}]}
+        restore_details = {"regions": {"us-east-1": {"error": "denied"}}, "errors": ["denied"]}
         fakes = self._fakes(
             _cleanup_owned_log_groups=MagicMock(
                 side_effect=constants._LogGroupCleanupError("logs failed", log_details)
             ),
             _cleanup_new_ecr_images=MagicMock(side_effect=RuntimeError("image drift")),
             _schedule_retained_kms_keys=MagicMock(side_effect=ValueError("kms drift")),
+            _restore_transaction_search=MagicMock(
+                side_effect=cleanup_transaction_search.TransactionSearchRestoreError(
+                    "restore failed", restore_details
+                )
+            ),
         )
 
         with _patched_helpers(fakes), pytest.raises(RuntimeError) as raised:
@@ -2867,10 +2876,17 @@ class TestRetainedResourceCleanup:
         assert attempt["cloudwatch_logs"] is not log_details
         assert "ecr_images" not in attempt
         assert attempt["ecr_repositories"] == {"repositories": []}
+        # The Transaction Search phase still runs last and keeps its partial evidence.
+        assert attempt["transaction_search"] == restore_details
+        assert attempt["transaction_search"] is not restore_details
         assert attempt["errors"] == [
             {"phase": "cloudwatch-logs", "error": "_LogGroupCleanupError: logs failed"},
             {"phase": "ecr-images", "error": "RuntimeError: image drift"},
             {"phase": "kms", "error": "ValueError: kms drift"},
+            {
+                "phase": "transaction-search",
+                "error": "TransactionSearchRestoreError: restore failed",
+            },
         ]
         assert str(raised.value) == "Retained resource cleanup failed: " + json.dumps(
             attempt["errors"], sort_keys=True
@@ -2883,6 +2899,7 @@ class TestRetainedResourceCleanup:
         fakes = self._fakes(
             _cleanup_owned_log_groups=MagicMock(side_effect=RuntimeError("helper stack missing")),
             _cleanup_new_ecr_repositories=MagicMock(side_effect=RuntimeError("repo drift")),
+            _restore_transaction_search=MagicMock(side_effect=RuntimeError("no baseline")),
         )
 
         with (
@@ -2893,9 +2910,11 @@ class TestRetainedResourceCleanup:
 
         attempt = ctx.checkpoint.state["retained_cleanup_attempts"][0]
         assert "cloudwatch_logs" not in attempt
+        assert "transaction_search" not in attempt
         assert [error["phase"] for error in attempt["errors"]] == [
             "cloudwatch-logs",
             "ecr-repositories",
+            "transaction-search",
         ]
         assert attempt["kms"] == {"keys": []}
 

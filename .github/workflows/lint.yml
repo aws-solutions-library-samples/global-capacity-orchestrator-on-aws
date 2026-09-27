@@ -387,7 +387,8 @@ jobs:
                    lambda/kubectl-applier-simple lambda/proxy-shared \
                    lambda/regional-api-proxy lambda/secret-rotation \
                    lambda/tls-certificate-manager lambda/tls-shared \
-                   lambda/traffic-dial-controller lambda/vector-ingest; do
+                   lambda/traffic-dial-controller lambda/transaction-search \
+                   lambda/vector-ingest; do
             echo "=== typecheck: $d ==="
             if ! mypy "$d"; then
               FAILED=1

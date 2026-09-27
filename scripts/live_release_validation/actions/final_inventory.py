@@ -34,13 +34,23 @@ from ..ownership.kms import (
 from ..ownership.stacks import (
     _verify_target_stack_absence,
 )
+from ..ownership.transaction_search import (
+    _verify_transaction_search_restored,
+)
 from ..ownership.vpc_endpoints import (
     _strip_deleted_vpc_endpoints,
 )
 
 
 def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
-    """Prove cleanup and exact protected-stack/ECR baseline preservation."""
+    """Prove cleanup and exact protected-stack/ECR and Transaction Search baseline preservation.
+
+    Transaction Search is account-level state no stack owns, so it gets its
+    own comparison: every regional Region's X-Ray destination, GCO resource
+    policy, and span log groups must match the baseline again, except a span
+    log group that appeared while Transaction Search was already enabled at
+    baseline, which is reported as accepted.
+    """
     if ctx.checkpoint.baseline is None:
         raise RuntimeError("Final inventory cannot compare without a baseline")
     enabled_regions = ctx.checkpoint.state.get("enabled_regions")
@@ -90,6 +100,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         ctx,
         residual_inventory,
     )
+    transaction_search = _verify_transaction_search_restored(ctx)
     summary = summarize_project_resources(residual_inventory)
     result = {
         "summary": summary,
@@ -104,6 +115,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "residual_project_resources": residual_inventory,
+        "transaction_search": transaction_search,
     }
     ctx.report.final_inventory = result
     ctx.checkpoint.state["final_inventory"] = copy.deepcopy(result)
@@ -124,6 +136,11 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
     if differences:
         raise RuntimeError(
             "Protected stack/ECR baseline changed: " + json.dumps(differences, sort_keys=True)
+        )
+    if transaction_search["differences"]:
+        raise RuntimeError(
+            "Transaction Search state differs from the baseline: "
+            + "; ".join(transaction_search["differences"])
         )
     if not project_resources_are_absent(residual_inventory):
         raise RuntimeError(

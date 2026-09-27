@@ -321,10 +321,17 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
     tunnel: dict[str, Any] | None = None
     if pending:
         tunnel = {"bastion_ttl_minutes": _bastion_ttl_minutes(pending, workers), "reopens": []}
+        # The run's own kubeconfig in its private report dir, as in the release
+        # harness. On the default kubeconfig a KUBECONFIG exported by the
+        # operator's shell split the two: `aws eks update-kubeconfig` and
+        # kubectl used that file while the tunnel was pinned in
+        # ~/.kube/config, and two live runs timed out on the private endpoint
+        # before their first example. It also leaves ~/.kube/config alone.
         with kube.cluster_session(
             ctx.settings.repo_root,
             cluster_name,
             region,
+            kubeconfig_path=ctx.settings.kubeconfig_path,
             bastion_ttl_minutes=tunnel["bastion_ttl_minutes"],
             tunnel_events=tunnel["reopens"],
         ) as kubectl:

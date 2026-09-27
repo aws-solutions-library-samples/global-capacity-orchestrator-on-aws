@@ -1,9 +1,11 @@
 """Cluster access for live harnesses: SSM tunnel plus kubectl execution.
 
-The historical example harness keeps its default behavior when no explicit
-kubeconfig is supplied. Sibling harnesses can instead pass an isolated path;
-AWS CLI and kubectl receive ``--kubeconfig`` and every nested ``gco`` process
-receives ``KUBECONFIG``, so those runs never rewrite ``~/.kube/config``.
+Both live harnesses pass an isolated kubeconfig in their private report
+directory. AWS CLI and kubectl receive ``--kubeconfig``, and every nested
+``gco`` process receives ``KUBECONFIG`` (:func:`session_environment` hands
+drivers the same environment), so a run never reads or rewrites
+``~/.kube/config`` or a ``KUBECONFIG`` the operator's shell exports. Without
+an explicit path the default kubeconfig is used.
 
 A session that reaches the API through an SSM tunnel also keeps the tunnel
 carrying traffic. A live run lost seven examples to a Session Manager session
@@ -538,6 +540,10 @@ class SessionKubectl:
     def __call__(self, *args: str, timeout: float = 120, **kwargs: Any) -> tuple[int, str, str]:
         return self.through_tunnel(lambda: self.run_once(*args, timeout=timeout, **kwargs))
 
+    def environment(self) -> dict[str, str] | None:
+        """``os.environ`` with ``KUBECONFIG`` set to this session's kubeconfig, or ``None``."""
+        return _environment_with_kubeconfig(self._kubeconfig_path)
+
     def through_tunnel(
         self,
         call: Callable[[], tuple[int, str, str]],
@@ -587,6 +593,20 @@ def ensure_tunnel(kubectl: KubectlRunner) -> None:
     """:meth:`SessionKubectl.ensure_tunnel` for a session runner; a no-op for any other."""
     if isinstance(kubectl, SessionKubectl):
         kubectl.ensure_tunnel()
+
+
+def session_environment(kubectl: KubectlRunner) -> dict[str, str] | None:
+    """The environment for a ``gco`` process that must reach the cluster the way kubectl does.
+
+    A session runner with its own kubeconfig hands it on through
+    ``KUBECONFIG``, over whatever the caller's environment exports, so a
+    ``gco`` command that shells out to kubectl (``gco jobs submit-direct``)
+    uses the file the tunnel is pinned in. ``None`` (inherit) for a session on
+    the default kubeconfig and for any other runner.
+    """
+    if isinstance(kubectl, SessionKubectl):
+        return kubectl.environment()
+    return None
 
 
 @contextmanager

@@ -1117,10 +1117,24 @@ class TestInferenceMonitor:
 
     @pytest.mark.asyncio
     async def test_reconcile_scales_when_replicas_differ(self, monitor, mock_store):
+        from gco.services.inference_monitor import (
+            ENDPOINT_TLS_PROXY_CONTAINER,
+            ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION,
+            build_endpoint_tls_proxy,
+        )
+
         deployment = MagicMock()
         deployment.spec.replicas = 1
         deployment.status.ready_replicas = 1
-        deployment.spec.template.spec.containers = [MagicMock(image="img:v1")]
+        # Already carries the current TLS sidecar, so scaling is the only patch.
+        sidecar = MagicMock()
+        sidecar.name = ENDPOINT_TLS_PROXY_CONTAINER
+        deployment.spec.template.spec.containers = [MagicMock(image="img:v1"), sidecar]
+        deployment.spec.template.metadata.annotations = {
+            ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: build_endpoint_tls_proxy(
+                8000, "scale-ep-tls-proxy"
+            ).digest
+        }
         monitor.apps_v1.read_namespaced_deployment.return_value = deployment
 
         endpoint = {

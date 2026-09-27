@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..checks.cluster import cluster_kubectl
+from ..checks.internal_pki import verify_internal_pki
 from ..checks.platform_workloads import (
     expected_deployments,
     manifest_processor_autoscaling_enabled,
@@ -15,7 +16,7 @@ from ..models import RunContext
 
 
 def action_platform_workloads(ctx: RunContext) -> dict[str, Any]:
-    """Require every Region's platform services to be converged, restart-free, drain-safe, and autoscaled as configured.
+    """Require every Region's platform services to be converged, restart-free, drain-safe, autoscaled as configured, and served under the internal CA.
 
     For every deployed Region, open the tunnelled kubectl session and poll a
     bounded snapshot of the ``gco-system`` Deployments (health-monitor,
@@ -29,18 +30,26 @@ def action_platform_workloads(ctx: RunContext) -> dict[str, Any]:
     ``kube-system/amazon-vpc-cni`` switch must carry the value rendered from
     ``eks_cluster.network_policy_enforcement``.
 
+    In the same session the internal PKI must be sound: the ``gco-internal-ca``
+    ClusterIssuer and its CA Certificate ``Ready``, every GCO leaf Certificate
+    the configuration deploys ``Ready`` and issued by that ClusterIssuer, and
+    the retired ``gco-api-selfsigned`` Issuer gone.
+
     Running late in the registry is deliberate: by then the Job, queue,
     scheduler, inference, and cost actions have exercised every service, so a
     zero restart count is evidence the services held up under real traffic,
     not just that they started.
     """
     regions: dict[str, Any] = {}
+    internal_tls: dict[str, Any] = {}
     for region in ctx.deployment_regions:
         with cluster_kubectl(ctx, region) as kubectl:
             regions[region] = verify_platform_workloads(ctx, region, kubectl)
+            internal_tls[region] = verify_internal_pki(ctx, region, kubectl)
     return {
         "deployments": list(expected_deployments(ctx)),
         "manifest_processor_autoscaling": manifest_processor_autoscaling_enabled(ctx),
         "network_policy_enforcement": network_policy_enforcement_enabled(ctx),
         "regions": regions,
+        "internal_tls": internal_tls,
     }

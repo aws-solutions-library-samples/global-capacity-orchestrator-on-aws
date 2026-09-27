@@ -1,0 +1,115 @@
+# The monitoring namespace's half of GCO's internal PKI (post-Helm pass).
+#
+#   gco-monitoring-trust   the CA bundle Prometheus trusts for the GCO
+#                          PodMonitors (post-helm-monitoring-servicemonitors.yaml)
+#                          and the Grafana credential rotator projects
+#                          (post-helm-grafana-credential-rotation.yaml)
+#   grafana-tls            Grafana's TLS front door for the rotator: the leaf and
+#                          the Service in front of the Grafana pod's TLS sidecar
+#
+# Both leaves come from the gco-internal-ca ClusterIssuer
+# (post-helm-api-workload-certificates.yaml). Only applied when cdk.json
+# cluster_observability.enabled = true, like the monitors and the rotator:
+# otherwise {{CLUSTER_OBSERVABILITY_ENABLED}} stays unreplaced, the applier
+# skips this file, and _FEATURE_RESOURCE_INVENTORY prunes what an earlier
+# deploy created (Secrets included: cert-manager leaves them behind).
+---
+# The monitoring namespace's copy of the GCO internal CA. Nothing serves this
+# leaf: it exists because cert-manager writes the issuing CA into every leaf
+# Secret as ca.crt, which makes it the way to deliver the CA certificate (and
+# every later renewal of it) into this namespace. Readers take only ca.crt.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gco-monitoring-trust
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  secretName: gco-monitoring-trust
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - gco-monitoring-trust
+    - gco-monitoring-trust.monitoring
+    - gco-monitoring-trust.monitoring.svc
+    - gco-monitoring-trust.monitoring.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Grafana's admin API over TLS for the credential rotator. The leaf is served
+# by the grafana-tls-proxy sidecar that GCORegionalStack injects into the
+# kube-prometheus-stack Grafana pod (3443 -> Grafana on 127.0.0.1:3000); the
+# chart's own plaintext Service stays for `gco monitoring open`, which
+# port-forwards to it over the private EKS endpoint.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  secretName: grafana-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - grafana-tls
+    - grafana-tls.monitoring
+    - grafana-tls.monitoring.svc
+    - grafana-tls.monitoring.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Selects the Grafana subchart's pod by its selector labels (release
+# "kube-prometheus-stack") and targets the sidecar's named port. The
+# monitoring namespace carries no default-deny policy (only MLflow's own
+# server policy), so the rotator reaches 3443 without an extra rule.
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-tls
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: kube-prometheus-stack

@@ -6,6 +6,13 @@
 # inference-monitor-leader Lease in gco-inference (see inference_monitor.py),
 # so the second replica is a hot standby that takes over within one lease
 # duration. Adding replicas adds no throughput; two are for availability.
+#
+# Metrics: the Prometheus endpoint binds pod loopback (127.0.0.1:9090) and the
+# metrics-tls-proxy sidecar serves it on 9443 with the inference-monitor-tls
+# leaf (post-helm-api-workload-certificates.yaml), which Prometheus verifies
+# against the GCO internal CA. The leaf is a post-Helm object, so on a fresh
+# cluster these pods wait in ContainerCreating until cert-manager issues it,
+# as the API workloads wait for theirs.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,6 +46,7 @@ spec:
         project: gco
       annotations:
         gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
+        eks.amazonaws.com/skip-containers: "metrics-tls-proxy"
     spec:
       serviceAccountName: gco-inference-monitor-sa
       priorityClassName: gco-platform-critical
@@ -113,9 +121,13 @@ spec:
               value: "gco-inference"
             - name: RECONCILE_INTERVAL_SECONDS
               value: "15"
-            # Prometheus metrics port scraped by the cluster-observability
-            # PodMonitor (gco-inference-monitor). Matches METRICS_PORT read by
-            # gco/services/service_metrics.start_metrics_server.
+            # The plaintext Prometheus listener
+            # (gco/services/service_metrics.start_metrics_server) binds pod
+            # loopback only; the metrics-tls-proxy sidecar below serves it on
+            # 9443 over TLS, which is what the gco-inference-monitor PodMonitor
+            # scrapes and the only port the pod admits.
+            - name: METRICS_HOST
+              value: "127.0.0.1"
             - name: METRICS_PORT
               value: "9090"
             # Default image for the shared per-region Mooncake master
@@ -138,30 +150,60 @@ spec:
               cpu: 500m
               memory: 512Mi
           # The controller has no request path; the Prometheus endpoint that
-          # start_metrics_server binds on :9090 is the process's one network
-          # surface, so it is the honest liveness signal. A stuck reconcile
-          # loop is visible in the exported seconds_since_last_pass gauge.
+          # start_metrics_server serves on 127.0.0.1:9090 is the process's one
+          # listener, so it is the honest liveness signal. A stuck reconcile
+          # loop is visible in the exported seconds_since_last_pass gauge. The
+          # kubelet cannot reach pod loopback, so these are exec probes built
+          # like 30-health-monitor.yaml's: a lean interpreter and a bare-socket
+          # request, with the same timeouts and the one-minute liveness window.
           startupProbe:
-            httpGet:
-              path: /metrics
-              port: metrics
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9090),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /metrics HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 24
           livenessProbe:
-            httpGet:
-              path: /metrics
-              port: metrics
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9090),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /metrics HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 4
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -I
+                - -S
+                - -c
+                - >-
+                  import socket,sys;
+                  s=socket.create_connection(('127.0.0.1',9090),3);
+                  s.settimeout(3);
+                  s.sendall(b'GET /metrics HTTP/1.0\r\n\r\n');
+                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
             periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /metrics
-              port: metrics
-            periodSeconds: 15
-            timeoutSeconds: 3
             failureThreshold: 3
           volumeMounts:
             - name: aws-iam-token
@@ -170,7 +212,77 @@ spec:
             - name: kubernetes-api-token
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
+        # TLS front for the metrics endpoint, the same hot-reloading proxy the
+        # API pods run (gco/services/tls_proxy.py) from this pod's own image.
+        # It holds no AWS credentials (skip-containers above) and mounts the
+        # inference-monitor-tls leaf, which only it can read. The kubelet
+        # probes it directly: 9443 admits any source
+        # (allow-metrics-to-inference-monitor). No preStop: nothing routes
+        # traffic here through an endpoint list that must drain first.
+        - name: metrics-tls-proxy
+          image: {{INFERENCE_MONITOR_IMAGE}}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "gco.services.tls_proxy"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: https-metrics
+              containerPort: 9443
+              protocol: TCP
+          env:
+            - name: GCO_TLS_CERT_FILE
+              value: /var/run/gco/tls/tls.crt
+            - name: GCO_TLS_KEY_FILE
+              value: /var/run/gco/tls/tls.key
+            - name: TLS_PROXY_PORT
+              value: "9443"
+            - name: TLS_PROXY_UPSTREAM_PORT
+              value: "9090"
+            # A scrape lasts milliseconds; drain briefly and let the pod's
+            # grace period belong to the reconcile pass.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "10"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          startupProbe:
+            tcpSocket:
+              port: https-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            tcpSocket:
+              port: https-metrics
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: https-metrics
+              scheme: HTTPS
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: metrics-tls
+              mountPath: /var/run/gco/tls
+              readOnly: true
       volumes:
+        - name: metrics-tls
+          secret:
+            secretName: inference-monitor-tls
+            defaultMode: 288
         - name: aws-iam-token
           projected:
             defaultMode: 420

@@ -7,7 +7,7 @@ from V1Job.status (running / succeeded / failed transitions), that the
 dispatcher emits exactly one event per transition (no duplicates from
 the state cache), that payloads are signed with the per-webhook HMAC
 secret and the signature header matches the bytes that go on the wire,
-and that httpx failures are retried with backoff before the delivery
+and that httpx2 failures are retried with backoff before the delivery
 is marked failed. Also covers the SSRF guard on outbound URLs (private
 RFC 1918 addresses rejected, public hostnames accepted) and the
 lightweight WebhookStore cache used to keep DynamoDB reads off the
@@ -26,7 +26,7 @@ import textwrap
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -239,7 +239,7 @@ class TestWebhookDispatcher:
         }
         payload = {"event": "job.completed", "job": {"name": "test"}}
 
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("httpx2.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -263,7 +263,7 @@ class TestWebhookDispatcher:
         }
         payload = {"event": "job.completed"}
 
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("httpx2.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -315,7 +315,7 @@ class TestWebhookDispatcher:
                 "gco.services.webhook_dispatcher.socket.getaddrinfo",
                 return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.20", 443))],
             ),
-            patch("httpx.AsyncClient") as mock_client_class,
+            patch("httpx2.AsyncClient") as mock_client_class,
         ):
             mock_client = AsyncMock()
             mock_response = MagicMock(status_code=200)
@@ -342,7 +342,7 @@ class TestWebhookDispatcher:
         }
         payload = {"event": "job.completed"}
 
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("httpx2.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             # First call fails with 500, second succeeds
             mock_response_500 = MagicMock()
@@ -368,7 +368,7 @@ class TestWebhookDispatcher:
         }
         payload = {"event": "job.completed"}
 
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("httpx2.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 400
@@ -392,9 +392,9 @@ class TestWebhookDispatcher:
         }
         payload = {"event": "job.completed"}
 
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("httpx2.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.post.side_effect = httpx.TimeoutException("Timeout")
+            mock_client.post.side_effect = httpx2.TimeoutException("Timeout")
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             result = await dispatcher._deliver_webhook(webhook, payload)
@@ -448,14 +448,14 @@ class TestWebhookDispatcher:
         # ``example1.com``/``example2.com`` resolving on the CI runner. The
         # dispatcher calls ``validate_webhook_url`` before any HTTP request,
         # and on hosted runners those bogus domains return ``gaierror``,
-        # which marks the delivery as a validation failure before httpx is
+        # which marks the delivery as a validation failure before httpx2 is
         # ever touched.
         with (
             patch(
                 "gco.services.webhook_dispatcher.socket.getaddrinfo",
                 return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.20", 443))],
             ),
-            patch("httpx.AsyncClient") as mock_client_class,
+            patch("httpx2.AsyncClient") as mock_client_class,
         ):
             mock_client = AsyncMock()
             mock_response = MagicMock()
@@ -761,10 +761,10 @@ class TestDeliverWebhookEdgeCases:
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.1", 443))]
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=fake_addrinfo),
-            patch("httpx.AsyncClient") as mock_cls,
+            patch("httpx2.AsyncClient") as mock_cls,
         ):
             mock_client = AsyncMock()
-            mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+            mock_client.post.side_effect = httpx2.ConnectError("Connection refused")
             mock_cls.return_value.__aenter__.return_value = mock_client
 
             result = await dispatcher._deliver_webhook(webhook, payload)
@@ -781,7 +781,7 @@ class TestDeliverWebhookEdgeCases:
         webhook = {"id": "wh-1", "url": "https://example.com/hook", "secret": None}
         payload = {"event": "job.failed"}
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             resp = MagicMock()
             resp.status_code = 503
@@ -802,12 +802,12 @@ class TestDeliverWebhookEdgeCases:
         webhook = {"id": "wh-1", "url": "https://example.com/hook", "secret": None}
         payload = {"event": "job.completed"}
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             ok_resp = MagicMock()
             ok_resp.status_code = 200
             mock_client.post.side_effect = [
-                httpx.TimeoutException("timed out"),
+                httpx2.TimeoutException("timed out"),
                 ok_resp,
             ]
             mock_cls.return_value.__aenter__.return_value = mock_client
@@ -832,7 +832,7 @@ class TestDeliverWebhookEdgeCases:
         )
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", resolver),
-            patch("httpx.AsyncClient") as mock_cls,
+            patch("httpx2.AsyncClient") as mock_cls,
         ):
             client = AsyncMock()
             client.post.return_value = MagicMock(status_code=204)
@@ -858,12 +858,12 @@ class TestDeliverWebhookEdgeCases:
         address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
-            patch("httpx.AsyncClient") as mock_cls,
+            patch("httpx2.AsyncClient") as mock_cls,
         ):
             client = AsyncMock()
             client.post.side_effect = [
                 MagicMock(status_code=503, text=f"remote {secret}"),
-                httpx.ConnectError(f"transport {secret}"),
+                httpx2.ConnectError(f"transport {secret}"),
             ]
             mock_cls.return_value.__aenter__.return_value = client
             result = await dispatcher._deliver_webhook(webhook, {"event": "job.failed"})
@@ -915,7 +915,7 @@ class TestDeliverWebhookEdgeCases:
 
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=public),
-            patch("httpx.AsyncClient") as mock_cls,
+            patch("httpx2.AsyncClient") as mock_cls,
         ):
             mock_cls.return_value.__aenter__.side_effect = RuntimeError("setup-secret")
             result = await dispatcher._deliver_webhook(
@@ -943,7 +943,7 @@ class TestDeliverWebhookEdgeCases:
         public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.12", 443))]
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=public),
-            patch("httpx.AsyncClient") as mock_cls,
+            patch("httpx2.AsyncClient") as mock_cls,
         ):
             client = AsyncMock()
             client.post.side_effect = blocked_post
@@ -983,7 +983,7 @@ class TestDeliverWebhookEdgeCases:
         with (
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=public),
             patch(
-                "gco.services.webhook_dispatcher.httpx.AsyncClient",
+                "gco.services.webhook_dispatcher.httpx2.AsyncClient",
                 return_value=BlockingExitClient(),
             ),
         ):
@@ -1089,7 +1089,7 @@ class TestDeliverWebhookEdgeCases:
         port = first.sockets[0].getsockname()[1]
         second = await asyncio.start_server(handler(200), "::1", port, ssl=server_context)
         client_context = ssl.create_default_context(cafile=str(cert_path))
-        real_async_client = httpx.AsyncClient
+        real_async_client = httpx2.AsyncClient
 
         def client_factory(**kwargs):
             return real_async_client(
@@ -1113,7 +1113,7 @@ class TestDeliverWebhookEdgeCases:
                     side_effect=ipaddress.ip_address,
                 ),
                 patch(
-                    "gco.services.webhook_dispatcher.httpx.AsyncClient",
+                    "gco.services.webhook_dispatcher.httpx2.AsyncClient",
                     side_effect=client_factory,
                 ),
             ):
@@ -1214,7 +1214,7 @@ class TestDispatchEventEdgeCases:
         mock_webhook_store.get_webhooks_for_event.return_value = [wh]
         job = self._make_job()
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             resp = MagicMock()
             resp.status_code = 200

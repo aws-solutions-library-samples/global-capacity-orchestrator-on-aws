@@ -142,6 +142,10 @@ def _stub(
             region="us-east-2",
         ),
         mlflow_role=SimpleNamespace(role_arn="arn:aws:iam::123456789012:role/test-mlflow"),
+        # Grafana's TLS sidecar runs from the manifest-processor image.
+        manifest_processor_image=SimpleNamespace(
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/test:manifest-processor"
+        ),
     )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)

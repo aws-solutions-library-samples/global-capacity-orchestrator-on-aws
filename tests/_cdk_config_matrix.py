@@ -755,6 +755,23 @@ CONFIGS.extend(
                 },
             },
         ),
+        # OpenTelemetry -> X-Ray tracing ships ON, so the untraced shape only
+        # synthesizes here: no xray:PutTraceSegments / xray:PutSpans grant on
+        # the four traced service roles, no Transaction Search custom
+        # resource, and {{TRACING_ENABLED}} rendered "false".
+        ("tracing-disabled", {"tracing": {"enabled": False}}),
+        # Tracing kept on without the Transaction Search custom resource (an
+        # account whose X-Ray destination is already CloudWatch Logs), at a
+        # non-default sample ratio, with the X-Ray interface endpoint the span
+        # exporter reaches from private subnets — the one interface endpoint
+        # that exists for tracing. The gateway list stays at its default.
+        (
+            "tracing-without-transaction-search",
+            {
+                "tracing": {"sample_ratio": 0.25, "enable_transaction_search": False},
+                "vpc_endpoints": {"gateway": ["s3", "dynamodb"], "interface": ["xray"]},
+            },
+        ),
     ]
 )
 
@@ -775,6 +792,13 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "eks_capabilities for one deploy). It reaches the very same loader path as "
         "the eks_capabilities entry above, which the matrix varies; the merge "
         "itself is pinned in tests/test_eks_capabilities.py."
+    ),
+    "tracing_overrides": (
+        "Run-scoped sibling of the tracing block, like eks_capabilities_overrides: "
+        "a JSON object the live-validation harness deep-merges over tracing for "
+        "one deploy (sample_ratio 1.0). resolve_tracing_config merges it before "
+        "validating, so it reaches the same loader path the tracing-* entries "
+        "above vary; the parse and merge are pinned in tests/test_config_loader.py."
     ),
 }
 

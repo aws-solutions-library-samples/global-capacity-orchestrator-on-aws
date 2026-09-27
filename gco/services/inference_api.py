@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from gco.services import tracing
+from gco.services.api_routes.inference_proxy import router as inference_proxy_router
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.request_size_middleware import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -24,11 +28,35 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 900
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Flush queued spans at shutdown; startup has nothing to prepare.
+
+    The proxy keeps no process-wide upstream state: every request builds its
+    model-endpoint client and releases it when its stream ends, so shutdown
+    has no client to close. Uvicorn runs this shutdown only after it has
+    drained (or, past the graceful budget, cancelled) the in-flight streams,
+    so the spans of the last requests are already queued when the provider
+    flushes.
+    """
+    try:
+        yield
+    finally:
+        tracing.shutdown_tracing()
+
+
 app = FastAPI(
     title="GCO Inference Proxy API",
     description="Authenticated streaming reverse proxy for managed GCO inference endpoints",
     version="1.0.0",
+    lifespan=lifespan,
 )
+
+# Server spans for every route except the probe and scrape paths, with the
+# model-endpoint client spans beneath them; inert unless GCO_TRACING_ENABLED=true.
+tracing.configure_tracing("inference-proxy")
+tracing.instrument_fastapi_app(app)
 
 # Starlette executes middleware in reverse registration order. The size limit
 # runs first so an oversized request is rejected before secret retrieval or
@@ -38,8 +66,6 @@ _max_body_bytes = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(DEFAULT_MAX_REQUES
 app.add_middleware(RequestSizeLimitMiddleware, max_body_bytes=_max_body_bytes)
 
 mount_metrics(app, "inference-proxy")
-
-from gco.services.api_routes.inference_proxy import router as inference_proxy_router  # noqa: E402
 
 app.include_router(inference_proxy_router)
 

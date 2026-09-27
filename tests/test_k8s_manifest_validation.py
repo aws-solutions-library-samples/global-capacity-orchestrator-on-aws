@@ -106,7 +106,10 @@ class TestStaticPodTokenBoundaries:
         assert pod["serviceAccountName"] == "gco-cost-monitor-sa"
 
         container = pod["containers"][0]
-        environment = {entry["name"]: entry["value"] for entry in container["env"]}
+        assert container["name"] == "cost-monitor"
+        # Downward-API entries (POD_NAME/POD_NAMESPACE for tracing) carry
+        # valueFrom instead of value.
+        environment = {entry["name"]: entry.get("value") for entry in container["env"]}
         role_arn = account["metadata"]["annotations"]["eks.amazonaws.com/role-arn"]
         token_directory = "/var/run/secrets/eks.amazonaws.com/serviceaccount"
         assert environment["AWS_ROLE_ARN"] == role_arn
@@ -127,6 +130,13 @@ class TestStaticPodTokenBoundaries:
             "expirationSeconds": 86400,
             "path": "token",
         }
+        # The TLS sidecar holds no AWS identity: the Pod Identity webhook skips
+        # it and it mounts neither the STS token nor the application's env.
+        sidecar = next(item for item in pod["containers"] if item["name"] == "api-tls-proxy")
+        annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+        assert annotations["eks.amazonaws.com/skip-containers"] == "api-tls-proxy"
+        assert "aws-iam-token" not in {mount["name"] for mount in sidecar["volumeMounts"]}
+        assert "AWS_ROLE_ARN" not in {entry["name"] for entry in sidecar["env"]}
 
 
 # ── render_placeholders ───────────────────────────────────────────────────────

@@ -3777,6 +3777,40 @@ class TestLegacyCustomResourceHandler:
         assert status == helm_handler.SUCCESS
         assert call.args[4] == "helm-charts-existing"
 
+    def test_json_encoded_charts_keep_their_types_and_malformed_ones_fail(self):
+        """The stack sends Charts as one JSON string, since CloudFormation turns
+        every number and boolean in an object property into a string; this path
+        decodes it the same way the orchestrator and teardown provider do."""
+        installs = {}
+
+        def _install(chart_name, config, kubeconfig, value_overrides):
+            installs[chart_name] = value_overrides
+            return True, f"Successfully installed {chart_name}"
+
+        volume = {"name": "gco-tls", "secret": {"optional": True, "defaultMode": 292}}
+        charts = json.dumps({"keda": {"values": {"extraVolumes": [volume]}}})
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc-missing"),
+            patch.object(helm_handler, "uninstall_chart", return_value=(True, "not found")),
+            patch.object(helm_handler, "install_chart", side_effect=_install),
+            patch.object(helm_handler, "_apply_gateway_crds", return_value=[]),
+            patch.object(helm_handler, "send_response") as mock_send,
+        ):
+            for value in (charts, "{not json", '["keda"]'):
+                helm_handler.lambda_handler(self._event("Create", Charts=value), MagicMock())
+
+        assert installs["keda"]["extraVolumes"] == [volume]
+        assert installs["keda"]["extraVolumes"][0]["secret"]["optional"] is True
+        outcomes = [(call.args[2], call.args[5:]) for call in mock_send.call_args_list]
+        assert outcomes[0] == (helm_handler.SUCCESS, ())
+        assert outcomes[1][0] == helm_handler.FAILED
+        assert "Charts is not valid JSON" in outcomes[1][1][0]
+        assert outcomes[2] == (
+            helm_handler.FAILED,
+            ("Charts must be a JSON object of per-chart overrides",),
+        )
+
     def test_webhook_failure_triggers_cleanup_and_succeeds_on_retry(self, caplog):
         attempts = {"keda": 0}
 

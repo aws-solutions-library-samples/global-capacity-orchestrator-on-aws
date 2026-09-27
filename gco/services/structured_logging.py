@@ -10,6 +10,13 @@ Example CloudWatch Insights query:
     | filter level = "ERROR"
     | sort @timestamp desc
 
+While tracing is active (see :mod:`gco.services.tracing`), a line logged
+inside a traced request also carries ``trace_id``, ``span_id`` and
+``trace_sampled`` -- the ids the request's spans carry in ``aws/spans`` --
+so one trace's log lines can be pulled from the service's log group:
+    fields @timestamp, message
+    | filter trace_id = "<32 hex digits>"
+
 Environment Variables:
     LOG_FORMAT: "json" for structured logging, "text" for human-readable (default: json)
     LOG_LEVEL: Logging level (default: INFO)
@@ -22,6 +29,8 @@ import traceback
 from datetime import UTC, datetime
 from typing import Any
 
+from gco.services import tracing
+
 
 class StructuredJsonFormatter(logging.Formatter):
     """
@@ -32,6 +41,8 @@ class StructuredJsonFormatter(logging.Formatter):
     - level
     - logger (logger name)
     - message
+    - The formatter's default fields (e.g., cluster_id, region)
+    - trace_id, span_id and trace_sampled when a traced span is current
     - Any extra fields passed via the ``extra`` dict
 
     Exceptions are serialized into an ``exception`` field with type,
@@ -54,6 +65,9 @@ class StructuredJsonFormatter(logging.Formatter):
 
         # Include default fields (e.g., cluster_id, region)
         log_entry.update(self.default_fields)
+
+        # Correlate with the current span; empty (and cheap) while tracing is off
+        log_entry.update(tracing.current_trace_fields())
 
         # Include any extra fields passed via logger.info("msg", extra={...})
         # Filter out standard LogRecord attributes

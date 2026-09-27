@@ -3,16 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import inspect
+import logging
+import os
+import ssl
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
-import httpx
+import httpx2
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from fastapi import HTTPException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
+from starlette.types import Message
 
+from gco.services import internal_tls, tracing
 from gco.services.api_routes import inference_proxy as proxy
+from gco.services.internal_tls import InternalTLSError
+
+# Captured before any test swaps the constructor for a spy.
+_REAL_ASYNC_TRANSPORT = httpx2.AsyncHTTPTransport
+
+
+@pytest.fixture(autouse=True)
+def _fresh_internal_ca_cache() -> Iterator[None]:
+    """A context one test cached never answers another test's CA lookup."""
+    internal_tls.clear_cache()
+    yield
+    internal_tls.clear_cache()
 
 
 class _FakeStore:
@@ -42,11 +67,13 @@ class _FakeUpstreamResponse:
     ):
         self.chunks = chunks
         self.status_code = status_code
-        self.headers = httpx.Headers(headers or [])
+        self.headers = httpx2.Headers(headers or [])
         self.stream_error = stream_error
+        self.iterated = False
         self.closed = False
 
     async def aiter_raw(self) -> AsyncIterator[bytes]:
+        self.iterated = True
         for chunk in self.chunks:
             yield chunk
         if self.stream_error is not None:
@@ -60,27 +87,36 @@ class _FakeHTTPClient:
     def __init__(
         self,
         response: _FakeUpstreamResponse | None = None,
-        error: httpx.HTTPError | None = None,
+        error: BaseException | None = None,
+        build_error: Exception | None = None,
     ):
         self.response = response
         self.error = error
+        self.build_error = build_error
         self.build_args: tuple[str, str] | None = None
         self.build_kwargs: dict[str, object] | None = None
         self.built_request = object()
         self.sent_request: object | None = None
         self.send_stream: bool | None = None
+        self.send_started = asyncio.Event()
         self.closed = False
 
     def build_request(self, method: str, url: str, **kwargs: object) -> object:
         self.build_args = (method, url)
         self.build_kwargs = kwargs
+        if self.build_error is not None:
+            raise self.build_error
         return self.built_request
 
     async def send(self, request: object, *, stream: bool = False) -> _FakeUpstreamResponse:
         self.sent_request = request
         self.send_stream = stream
+        self.send_started.set()
         if self.error is not None:
             raise self.error
+        if self.response is None:
+            # A model that never answers: the request can only be cancelled.
+            await asyncio.Event().wait()
         assert self.response is not None
         return self.response
 
@@ -141,15 +177,131 @@ def _install_store(monkeypatch: pytest.MonkeyPatch, endpoint: dict[str, object] 
 def _install_http_client(
     monkeypatch: pytest.MonkeyPatch,
     client: _FakeHTTPClient,
-) -> dict[str, object]:
-    constructor_kwargs: dict[str, object] = {}
+) -> Mock:
+    """Hand ``client`` to the next proxied request as its upstream client."""
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(proxy, "_new_upstream_client", factory)
+    return factory
 
-    def factory(**kwargs: object) -> _FakeHTTPClient:
-        constructor_kwargs.update(kwargs)
-        return client
 
-    monkeypatch.setattr(proxy.httpx, "AsyncClient", factory)
-    return constructor_kwargs
+def _streamed(
+    *chunks: bytes,
+    status_code: int = 200,
+    headers: list[tuple[str, str]] | None = None,
+) -> httpx2.Response:
+    """A mock upstream response whose body is still a stream, like the real wire.
+
+    A bytes body would be read eagerly by ``httpx2.Response`` and could then
+    no longer be relayed raw.
+    """
+
+    async def body() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    return httpx2.Response(status_code, headers=headers, content=body())
+
+
+_Handler = Callable[[httpx2.Request], httpx2.Response | Awaitable[httpx2.Response]]
+
+
+class _RecordingTransport(httpx2.AsyncBaseTransport):
+    """Stands in for the traced transport of one request's client.
+
+    Answers from the wire's handler instead of the network and records that
+    the client closed it; closing also closes the real transport it wraps.
+    """
+
+    def __init__(self, wire: _UpstreamWire, inner: httpx2.AsyncBaseTransport) -> None:
+        self._wire = wire
+        self.inner = inner
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self._wire.requests.append(request)
+        answer = self._wire.handler(request)
+        return await answer if inspect.isawaitable(answer) else answer
+
+    async def aclose(self) -> None:
+        self.closed = True
+        await self.inner.aclose()
+
+
+class _UpstreamWire:
+    """Real per-request upstream clients, answering from memory.
+
+    The transport constructor is spied, and the tracing seam every upstream
+    client passes through swaps in a :class:`_RecordingTransport` per client.
+    Unless ``real_ca`` is set, the internal CA lookup returns one stand-in
+    context; with it, the real cached lookup reads ``GCO_INTERNAL_CA_FILE``.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, real_ca: bool = False) -> None:
+        self.context = ssl.create_default_context()
+        self.context_lookups = 0
+        self.transport_kwargs: list[dict[str, Any]] = []
+        self.transports: list[_RecordingTransport] = []
+        self.requests: list[httpx2.Request] = []
+        self.handler: _Handler = lambda _request: _streamed()
+        if not real_ca:
+            monkeypatch.setattr(internal_tls, "internal_ssl_context", self._context)
+        monkeypatch.setattr(httpx2, "AsyncHTTPTransport", self._transport)
+        monkeypatch.setattr(tracing, "wrap_async_transport", self._wrap)
+
+    def _context(self, ca_file: object = None) -> ssl.SSLContext:
+        self.context_lookups += 1
+        return self.context
+
+    def _transport(self, **kwargs: Any) -> httpx2.AsyncHTTPTransport:
+        self.transport_kwargs.append(kwargs)
+        return _REAL_ASYNC_TRANSPORT(**kwargs)
+
+    def _wrap(self, transport: httpx2.AsyncBaseTransport) -> httpx2.AsyncBaseTransport:
+        recording = _RecordingTransport(self, transport)
+        self.transports.append(recording)
+        return recording
+
+
+def _ca_pem(common_name: str) -> bytes:
+    """A throwaway self-signed CA certificate, PEM-encoded."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def _trusted_common_names(context: ssl.SSLContext) -> list[str]:
+    """Common names of the CA certificates ``context`` trusts."""
+    return [
+        value
+        for ca in context.get_ca_certs()
+        for rdn in ca["subject"]
+        for key, value in rdn
+        if key == "commonName"
+    ]
+
+
+def _asgi_scope(spec_version: str) -> dict[str, object]:
+    """A minimal ASGI HTTP scope for driving a response directly."""
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/inference/model/v1/completions",
+        "headers": [],
+    }
 
 
 def _ready_canary_status(**overrides: object) -> dict[str, object]:
@@ -686,18 +838,19 @@ def test_validate_upstream_path_rejects_unlisted_path_method_pairs(
     assert raised.value.detail == "Inference path is not exposed"
 
 
-async def test_stream_response_yields_raw_chunks_and_closes_both_resources() -> None:
+async def test_stream_response_yields_raw_chunks_then_closes_response_and_client() -> None:
     response = _FakeUpstreamResponse(chunks=(b"first", b"second"))
     client = _FakeHTTPClient(response)
 
     chunks = [chunk async for chunk in proxy._stream_response(response, client)]
 
     assert chunks == [b"first", b"second"]
+    # The client belongs to this one request, so it goes with the stream.
     assert response.closed is True
     assert client.closed is True
 
 
-async def test_stream_response_closes_resources_when_upstream_iteration_fails() -> None:
+async def test_stream_response_releases_the_upstream_when_iteration_fails() -> None:
     response = _FakeUpstreamResponse(
         chunks=(b"partial",),
         stream_error=RuntimeError("upstream stream failed"),
@@ -714,7 +867,7 @@ async def test_stream_response_closes_resources_when_upstream_iteration_fails() 
 async def test_stream_response_shields_cleanup_from_consumer_cancellation() -> None:
     response_close_started = asyncio.Event()
     release_response_close = asyncio.Event()
-    client_closed = asyncio.Event()
+    response_closed = asyncio.Event()
 
     class BlockingResponse:
         async def aiter_raw(self) -> AsyncIterator[bytes]:
@@ -723,12 +876,10 @@ async def test_stream_response_shields_cleanup_from_consumer_cancellation() -> N
         async def aclose(self) -> None:
             response_close_started.set()
             await release_response_close.wait()
+            response_closed.set()
 
-    class TrackingClient:
-        async def aclose(self) -> None:
-            client_closed.set()
-
-    stream = proxy._stream_response(BlockingResponse(), TrackingClient())
+    client = _FakeHTTPClient()
+    stream = proxy._stream_response(BlockingResponse(), client)
     assert await anext(stream) == b"chunk"
 
     close_task = asyncio.create_task(stream.aclose())
@@ -737,8 +888,115 @@ async def test_stream_response_shields_cleanup_from_consumer_cancellation() -> N
     with pytest.raises(asyncio.CancelledError):
         await close_task
 
+    # The cancelled consumer left the cleanup running, held until it finishes.
+    [cleanup] = proxy._cleanup_tasks
+    assert client.closed is False
     release_response_close.set()
-    await asyncio.wait_for(client_closed.wait(), timeout=1)
+    await asyncio.wait_for(response_closed.wait(), timeout=1)
+    await asyncio.wait_for(cleanup, timeout=1)
+    assert client.closed is True
+    # Done callbacks run on the loop's next turn; then the task is let go.
+    await asyncio.sleep(0)
+    assert proxy._cleanup_tasks == set()
+
+
+async def test_close_upstream_closes_the_client_even_when_the_response_close_fails() -> None:
+    class BrokenResponse:
+        async def aclose(self) -> None:
+            raise RuntimeError("response close failed")
+
+    client = _FakeHTTPClient()
+
+    with pytest.raises(RuntimeError, match="response close failed"):
+        await proxy._close_upstream(BrokenResponse(), client)
+
+    assert client.closed is True
+
+
+async def test_close_upstream_without_a_response_closes_only_the_client() -> None:
+    client = _FakeHTTPClient()
+
+    await proxy._close_upstream(None, client)
+
+    assert client.closed is True
+
+
+async def test_streaming_response_relays_the_body_and_releases_the_upstream() -> None:
+    response = _FakeUpstreamResponse(
+        chunks=(b"data: one\n\n", b"data: two\n\n"),
+        status_code=201,
+        headers=[("content-type", "text/event-stream"), ("content-length", "22")],
+    )
+    client = _FakeHTTPClient(response)
+    streamed = proxy._UpstreamStreamingResponse(response, client)
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        # The caller stays connected until the stream is done.
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await streamed(_asgi_scope("2.3"), receive, send)
+
+    assert sent[0]["status"] == 201
+    assert (b"content-type", b"text/event-stream") in sent[0]["headers"]
+    assert all(name != b"content-length" for name, _value in sent[0]["headers"])
+    assert [message["body"] for message in sent[1:]] == [
+        b"data: one\n\n",
+        b"data: two\n\n",
+        b"",
+    ]
+    assert response.closed is True
+    assert client.closed is True
+    assert proxy._cleanup_tasks == set()
+
+
+async def test_streaming_response_releases_the_upstream_when_the_caller_left_first() -> None:
+    """The body generator never starts; the response still releases the upstream."""
+    response = _FakeUpstreamResponse(chunks=(b"never relayed",))
+    client = _FakeHTTPClient(response)
+    streamed = proxy._UpstreamStreamingResponse(response, client)
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        # The caller hung up while the model was answering (ASGI 2.4 servers
+        # report that as OSError), so the headers never leave.
+        raise OSError("caller disconnected")
+
+    with pytest.raises(ClientDisconnect):
+        await streamed(_asgi_scope("2.4"), receive, send)
+
+    assert response.iterated is False
+    assert response.closed is True
+    assert client.closed is True
+
+
+async def test_streaming_response_releases_the_upstream_when_cancelled_before_the_body() -> None:
+    """A disconnect seen before the first chunk cancels the relay before it starts."""
+    response = _FakeUpstreamResponse(chunks=(b"never relayed",))
+    client = _FakeHTTPClient(response)
+    streamed = proxy._UpstreamStreamingResponse(response, client)
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+        # A middleware's send yields to the loop, where the disconnect lands.
+        await asyncio.sleep(0)
+
+    await streamed(_asgi_scope("2.3"), receive, send)
+
+    assert [message["type"] for message in sent] == ["http.response.start"]
+    assert response.iterated is False
+    assert response.closed is True
+    assert client.closed is True
 
 
 @pytest.mark.parametrize("path", ["..", ".", "v1/../models", "v1/models/./secret"])
@@ -749,7 +1007,7 @@ async def test_proxy_rejects_traversal_before_endpoint_or_network_access(
     resolve = AsyncMock(side_effect=AssertionError("endpoint resolved"))
     client_factory = Mock(side_effect=AssertionError("client created"))
     monkeypatch.setattr(proxy, "_resolve_upstream", resolve)
-    monkeypatch.setattr(proxy.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(proxy, "_new_upstream_client", client_factory)
 
     with pytest.raises(HTTPException) as raised:
         await proxy._proxy(_request("GET"), "model", path)
@@ -780,7 +1038,7 @@ async def test_proxy_builds_bounded_request_and_streams_filtered_response(
         ],
     )
     client = _FakeHTTPClient(upstream)
-    constructor_kwargs = _install_http_client(monkeypatch, client)
+    factory = _install_http_client(monkeypatch, client)
     request = _request(
         "POST",
         query=b"tenant=alpha&tenant=beta&empty=",
@@ -797,18 +1055,19 @@ async def test_proxy_builds_bounded_request_and_streams_filtered_response(
     streamed = await proxy._proxy(request, "model", "v1/chat/completions")
 
     resolve.assert_awaited_once_with("model")
-    assert constructor_kwargs["follow_redirects"] is False
-    assert constructor_kwargs["trust_env"] is False
-    timeout = constructor_kwargs["timeout"]
-    assert isinstance(timeout, httpx.Timeout)
+    factory.assert_called_once_with()
+    assert isinstance(streamed, proxy._UpstreamStreamingResponse)
+    assert client.build_args == (
+        "POST",
+        "https://model.gco-inference.svc.cluster.local:8443/v1/chat/completions",
+    )
+    assert client.build_kwargs is not None
+    timeout = client.build_kwargs.pop("timeout")
+    assert isinstance(timeout, httpx2.Timeout)
     assert timeout.connect == 1.5
     assert timeout.read == 45.0
     assert timeout.write == 12.0
     assert timeout.pool == 2.5
-    assert client.build_args == (
-        "POST",
-        "http://model.gco-inference.svc.cluster.local/v1/chat/completions",
-    )
     assert client.build_kwargs == {
         "params": [("tenant", "alpha"), ("tenant", "beta"), ("empty", "")],
         "headers": [
@@ -826,7 +1085,10 @@ async def test_proxy_builds_bounded_request_and_streams_filtered_response(
     assert "content-length" not in streamed.headers
     assert "transfer-encoding" not in streamed.headers
 
+    # The request's client stays open while its response streams ...
+    assert client.closed is False
     assert [chunk async for chunk in streamed.body_iterator] == [b'{"token":', b'"ok"}']
+    # ... and goes with the stream.
     assert upstream.closed is True
     assert client.closed is True
 
@@ -857,7 +1119,7 @@ async def test_proxy_constructs_root_and_percent_encoded_urls(
 
     assert client.build_args == (
         "GET",
-        f"http://model.gco-inference.svc.cluster.local{expected_suffix}",
+        f"https://model.gco-inference.svc.cluster.local:8443{expected_suffix}",
     )
     assert [chunk async for chunk in streamed.body_iterator] == []
     assert upstream.closed is True
@@ -865,35 +1127,361 @@ async def test_proxy_constructs_root_and_percent_encoded_urls(
 
 
 @pytest.mark.parametrize(
-    ("exception_type", "expected_status", "expected_detail"),
+    ("exception_type", "expected_status", "expected_detail", "logged"),
     [
-        (httpx.ReadTimeout, 504, "Inference endpoint timed out"),
-        (httpx.ConnectError, 502, "Inference endpoint is unavailable"),
+        (httpx2.ReadTimeout, 504, "Inference endpoint timed out", False),
+        (httpx2.ConnectError, 502, "Inference endpoint is unavailable", True),
     ],
 )
-async def test_proxy_maps_transport_failures_and_closes_client(
+async def test_proxy_maps_transport_failures_and_releases_the_client(
     monkeypatch: pytest.MonkeyPatch,
-    exception_type: type[httpx.HTTPError],
+    caplog: pytest.LogCaptureFixture,
+    exception_type: type[httpx2.HTTPError],
     expected_status: int,
     expected_detail: str,
+    logged: bool,
 ) -> None:
     monkeypatch.setattr(
         proxy,
         "_resolve_upstream",
         AsyncMock(return_value=("model", "gco-inference", "/health")),
     )
-    upstream_request = httpx.Request("POST", "http://upstream.invalid/v1/chat/completions")
+    upstream_request = httpx2.Request("POST", "https://upstream.invalid/v1/chat/completions")
     transport_error = exception_type("transport failed", request=upstream_request)
     client = _FakeHTTPClient(error=transport_error)
     _install_http_client(monkeypatch, client)
 
-    with pytest.raises(HTTPException) as raised:
+    with (
+        caplog.at_level(logging.WARNING, logger=proxy.__name__),
+        pytest.raises(HTTPException) as raised,
+    ):
         await proxy._proxy(_request("POST"), "model", "v1/chat/completions")
 
     assert raised.value.status_code == expected_status
     assert raised.value.detail == expected_detail
     assert raised.value.__cause__ is transport_error
+    # The failed request's own client is released before the error is reported.
     assert client.closed is True
+    assert ("Inference upstream request failed" in caplog.text) is logged
+    if logged:
+        assert "service=model namespace=gco-inference error_type=ConnectError" in caplog.text
+
+
+async def test_proxy_releases_the_client_when_the_request_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    build_error = ValueError("unencodable request")
+    client = _FakeHTTPClient(build_error=build_error)
+    _install_http_client(monkeypatch, client)
+
+    with pytest.raises(ValueError, match="unencodable request") as raised:
+        await proxy._proxy(_request("GET"), "model", "v1/models")
+
+    # Unmapped failures propagate unchanged, and still release the client.
+    assert raised.value is build_error
+    assert client.sent_request is None
+    assert client.closed is True
+
+
+async def test_proxy_releases_the_upstream_when_the_response_cannot_be_relayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    upstream = _FakeUpstreamResponse(chunks=(b"{}",))
+    client = _FakeHTTPClient(upstream)
+    _install_http_client(monkeypatch, client)
+    monkeypatch.setattr(
+        proxy, "_response_headers", Mock(side_effect=RuntimeError("headers unusable"))
+    )
+
+    with pytest.raises(RuntimeError, match="headers unusable"):
+        await proxy._proxy(_request("GET"), "model", "v1/models")
+
+    assert upstream.iterated is False
+    assert upstream.closed is True
+    assert client.closed is True
+
+
+async def test_proxy_releases_the_client_when_the_request_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    client = _FakeHTTPClient()
+    _install_http_client(monkeypatch, client)
+
+    task = asyncio.create_task(proxy._proxy(_request("POST"), "model", "v1/completions"))
+    await asyncio.wait_for(client.send_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.closed is True
+    assert proxy._cleanup_tasks == set()
+
+
+async def test_every_request_gets_its_own_verified_no_keepalive_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = _UpstreamWire(monkeypatch)
+
+    first = proxy._new_upstream_client()
+    second = proxy._new_upstream_client()
+
+    assert first is not second
+    # Trust is looked up for every client, never captured once per process.
+    assert wire.context_lookups == 2
+    assert len(wire.transport_kwargs) == 2
+    for kwargs in wire.transport_kwargs:
+        # TLS trust and pool limits live on the transport: a client given
+        # transport= ignores its own verify/limits.
+        assert kwargs["verify"] is wire.context
+        assert kwargs["limits"] == httpx2.Limits(max_connections=None, max_keepalive_connections=0)
+        assert kwargs["trust_env"] is False
+    # Each client's real transport went through the tracing seam.
+    assert [type(transport.inner) for transport in wire.transports] == [
+        _REAL_ASYNC_TRANSPORT,
+        _REAL_ASYNC_TRANSPORT,
+    ]
+    for client in (first, second):
+        assert client.follow_redirects is False
+        assert client.trust_env is False
+        assert "accept-encoding" not in client.headers
+        await client.aclose()
+    assert all(transport.closed for transport in wire.transports)
+
+
+async def test_proxy_relays_through_per_request_clients_with_only_caller_encodings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end over real clients: per-request timeout, no default encoding."""
+    monkeypatch.setenv("INFERENCE_PROXY_READ_TIMEOUT_SECONDS", "45")
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+    wire.handler = lambda _request: _streamed(
+        b"data: one\n\n",
+        b"data: two\n\n",
+        headers=[("content-type", "text/event-stream"), ("content-encoding", "br")],
+    )
+
+    encoded = await proxy._proxy(
+        _request("POST", headers=[("Accept-Encoding", "br")], body=b"{}"),
+        "model",
+        "v1/chat/completions",
+    )
+    assert [chunk async for chunk in encoded.body_iterator] == [
+        b"data: one\n\n",
+        b"data: two\n\n",
+    ]
+    wire.handler = lambda _request: _streamed(b"{}")
+    plain = await proxy._proxy(_request("GET"), "model", "v1/models")
+    assert [chunk async for chunk in plain.body_iterator] == [b"{}"]
+
+    first, second = wire.requests
+    assert str(first.url) == (
+        "https://model.gco-inference.svc.cluster.local:8443/v1/chat/completions"
+    )
+    assert first.headers["accept-encoding"] == "br"
+    assert encoded.headers["content-encoding"] == "br"
+    # Without a caller encoding the model is asked for identity bytes, which
+    # is what the raw relay hands the caller.
+    assert "accept-encoding" not in second.headers
+    assert first.extensions["timeout"] == {
+        "connect": 5.0,
+        "read": 45.0,
+        "write": 30.0,
+        "pool": 5.0,
+    }
+    # One client per request, each closed with its stream.
+    assert len(wire.transport_kwargs) == 2
+    assert [transport.closed for transport in wire.transports] == [True, True]
+
+
+async def test_a_rotated_internal_ca_is_trusted_from_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The upgrade case: the projected ca.crt changes under a running proxy."""
+    ca_file = tmp_path / "ca.crt"
+    ca_file.write_bytes(_ca_pem("GCO internal CA before rotation"))
+    monkeypatch.setenv(internal_tls.INTERNAL_CA_FILE_ENV, str(ca_file))
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch, real_ca=True)
+
+    async def proxied_trust() -> ssl.SSLContext:
+        """Serve one request; return the context its client's transport verified with."""
+        streamed = await proxy._proxy(_request("GET"), "model", "v1/models")
+        assert [chunk async for chunk in streamed.body_iterator] == []
+        verify = wire.transport_kwargs[-1]["verify"]
+        assert isinstance(verify, ssl.SSLContext)
+        return verify
+
+    before = await proxied_trust()
+    # An unchanged bundle is answered from the cache, not reloaded per request.
+    assert await proxied_trust() is before
+
+    # Kubernetes updates a projected Secret by swapping in a new file.
+    staged = tmp_path / "ca.crt.staged"
+    staged.write_bytes(_ca_pem("GCO internal CA after rotation"))
+    os.replace(staged, ca_file)
+
+    after = await proxied_trust()
+    assert after is not before
+    assert _trusted_common_names(before) == ["GCO internal CA before rotation"]
+    assert _trusted_common_names(after) == ["GCO internal CA after rotation"]
+    assert after.verify_mode is ssl.CERT_REQUIRED
+    assert after.check_hostname is True
+    assert len(wire.requests) == 3
+    assert all(transport.closed for transport in wire.transports)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (httpx2.ReadTimeout("model timed out"), 504),
+        (httpx2.ConnectError("certificate verify failed"), 502),
+    ],
+)
+async def test_real_client_is_closed_when_the_upstream_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    error: httpx2.HTTPError,
+    expected_status: int,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise error
+
+    wire.handler = fail
+
+    with pytest.raises(HTTPException) as raised:
+        await proxy._proxy(_request("POST", body=b"{}"), "model", "v1/completions")
+
+    assert raised.value.status_code == expected_status
+    [transport] = wire.transports
+    assert transport.closed is True
+
+
+async def test_real_client_is_closed_when_the_request_is_cancelled_mid_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+    sent = asyncio.Event()
+
+    async def never_answers(request: httpx2.Request) -> httpx2.Response:
+        sent.set()
+        await asyncio.Event().wait()
+        return _streamed()
+
+    wire.handler = never_answers
+
+    task = asyncio.create_task(proxy._proxy(_request("GET"), "model", "v1/models"))
+    await asyncio.wait_for(sent.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    [transport] = wire.transports
+    assert transport.closed is True
+
+
+async def test_real_client_is_closed_when_the_stream_fails_mid_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+
+    async def truncated() -> AsyncIterator[bytes]:
+        yield b"data: one\n\n"
+        raise httpx2.RemoteProtocolError("peer closed connection mid-stream")
+
+    wire.handler = lambda _request: httpx2.Response(200, content=truncated())
+
+    streamed = await proxy._proxy(_request("POST", body=b"{}"), "model", "v1/completions")
+    relayed: list[object] = []
+
+    async def relay() -> None:
+        async for chunk in streamed.body_iterator:
+            relayed.append(chunk)
+
+    with pytest.raises(httpx2.RemoteProtocolError, match="mid-stream"):
+        await relay()
+
+    assert relayed == [b"data: one\n\n"]
+    [transport] = wire.transports
+    assert transport.closed is True
+
+
+async def test_proxy_fails_closed_without_the_internal_ca_and_retries_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+    missing = InternalTLSError("GCO internal CA bundle is not readable")
+    monkeypatch.setattr(internal_tls, "internal_ssl_context", Mock(side_effect=missing))
+
+    with (
+        caplog.at_level(logging.ERROR, logger=proxy.__name__),
+        pytest.raises(HTTPException) as raised,
+    ):
+        await proxy._proxy(_request("GET"), "model", "v1/models")
+
+    assert raised.value.status_code == 502
+    assert raised.value.detail == "Inference endpoint is unavailable"
+    assert raised.value.__cause__ is missing
+    assert "Inference upstream TLS trust is unavailable" in caplog.text
+    # The CA is read before any transport or client exists: nothing to close.
+    assert wire.transport_kwargs == []
+    assert wire.transports == []
+    assert wire.requests == []
+
+    # Once the bundle is mounted the next request builds its client.
+    monkeypatch.setattr(internal_tls, "internal_ssl_context", wire._context)
+    streamed = await proxy._proxy(_request("GET"), "model", "v1/models")
+    assert streamed.status_code == 200
+    assert [chunk async for chunk in streamed.body_iterator] == []
+    assert len(wire.requests) == 1
+    [transport] = wire.transports
+    assert transport.closed is True
 
 
 async def test_route_wrappers_delegate_root_and_subpaths(

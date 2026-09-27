@@ -30,6 +30,7 @@ EXPECTED_HANDLER_ENTRYPOINTS = {
     "secret-rotation": "lambda_handler",
     "tls-certificate-manager": "lambda_handler",
     "traffic-dial-controller": "lambda_handler",
+    "transaction-search": "lambda_handler",
     "vector-ingest": "lambda_handler",
 }
 

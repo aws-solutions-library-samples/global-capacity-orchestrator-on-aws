@@ -5,14 +5,16 @@ The network posture GCO ships, pinned to the manifests that implement it.
 single source of truth for three namespaces:
 
 - ``gco-system``: default-deny ingress; every platform Deployment is admitted
-  on exactly the port it serves (8443 for the TLS proxy sidecars the ALB
-  targets, 9090 for the inference monitor's metrics endpoint), egress is DNS +
-  HTTPS plus the proxy's path into ``gco-inference``.
+  on exactly the TLS port its sidecar serves (8443 for the TLS proxy sidecars
+  the ALB targets, 9443 for the inference monitor's metrics sidecar) while the
+  plaintext listeners stay on pod loopback; egress is DNS + HTTPS plus the
+  proxy's TLS path into ``gco-inference``.
 - ``gco-jobs``: default-deny ingress from other namespaces, everything allowed
   between job pods, egress DNS + HTTPS anywhere + the in-VPC ranges from
   ``vpc_endpoint_cidrs`` on any port.
-- ``gco-inference``: model pods reachable only from the authenticated proxy and
-  each other; egress DNS + HTTPS.
+- ``gco-inference``: model pods reachable only from each other and from the
+  authenticated proxy, which may use only their TLS sidecar's 8443; egress
+  DNS + HTTPS.
 
 The rules that make it real on EKS Auto Mode live in
 ``06-network-policy-controller.yaml`` (the enforcement ConfigMap, rendered from
@@ -42,7 +44,7 @@ PLATFORM_INGRESS_PORTS = {
     "health-monitor": {8443},
     "manifest-processor": {8443},
     "inference-proxy": {8443},
-    "inference-monitor": {9090},
+    "inference-monitor": {9443},
 }
 
 
@@ -196,17 +198,47 @@ class TestPlatformIngress:
                     assert port in served, f"{policy['metadata']['name']} opens unserved {port}"
 
     def test_inference_monitor_metrics_port_matches_the_scrape_and_probes(self):
-        """The 9090 rule covers the PodMonitor scrape and the manifest's probes."""
+        """The 9443 rule covers the TLS scrape and the sidecar's kubelet probes.
+
+        The plaintext metrics listener binds pod loopback and is probed from
+        inside the container, so no rule needs to (or may) admit 9090.
+        """
         deployment = next(
             doc
             for doc in _stubbed_documents(MANIFESTS_DIR / "32-inference-monitor.yaml")
             if doc["kind"] == "Deployment"
         )
-        (container,) = deployment["spec"]["template"]["spec"]["containers"]
-        ports = {port["name"]: port["containerPort"] for port in container["ports"]}
-        assert ports == {"metrics": 9090}
+        containers = {
+            container["name"]: container
+            for container in deployment["spec"]["template"]["spec"]["containers"]
+        }
+        assert set(containers) == {"inference-monitor", "metrics-tls-proxy"}
+        monitor, sidecar = containers["inference-monitor"], containers["metrics-tls-proxy"]
+
+        monitor_env = {item["name"]: item.get("value") for item in monitor["env"]}
+        assert monitor_env["METRICS_HOST"] == "127.0.0.1"
+        assert monitor_env["METRICS_PORT"] == "9090"
+        assert {port["name"]: port["containerPort"] for port in monitor["ports"]} == {
+            "metrics": 9090
+        }
         for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
-            assert container[probe]["httpGet"]["port"] == "metrics"
+            source = monitor[probe]["exec"]["command"][-1]
+            assert "socket.create_connection(('127.0.0.1',9090),3)" in source
+            assert "GET /metrics " in source
+
+        sidecar_ports = {port["name"]: port["containerPort"] for port in sidecar["ports"]}
+        assert sidecar_ports == {"https-metrics": 9443}
+        sidecar_env = {item["name"]: item.get("value") for item in sidecar["env"]}
+        assert sidecar_env["TLS_PROXY_PORT"] == "9443"
+        assert sidecar_env["TLS_PROXY_UPSTREAM_PORT"] == monitor_env["METRICS_PORT"]
+        for probe in ("startupProbe", "livenessProbe"):
+            assert sidecar[probe]["tcpSocket"] == {"port": "https-metrics"}
+        assert sidecar["readinessProbe"]["httpGet"] == {
+            "path": "/metrics",
+            "port": "https-metrics",
+            "scheme": "HTTPS",
+        }
+
         monitors = [
             doc
             for doc in _stubbed_documents(
@@ -215,10 +247,9 @@ class TestPlatformIngress:
             if doc["kind"] == "PodMonitor"
             and doc["spec"]["selector"]["matchLabels"] == {"app": "inference-monitor"}
         ]
-        assert [monitor["spec"]["podMetricsEndpoints"][0]["port"] for monitor in monitors] == [
-            "metrics"
-        ]
-        assert PLATFORM_INGRESS_PORTS["inference-monitor"] == {ports["metrics"]}
+        endpoints = [monitor["spec"]["podMetricsEndpoints"][0] for monitor in monitors]
+        assert [(e["port"], e["scheme"]) for e in endpoints] == [("https-metrics", "https")]
+        assert PLATFORM_INGRESS_PORTS["inference-monitor"] == {sidecar_ports["https-metrics"]}
 
     def test_scraped_tls_ports_are_the_alb_ports(self):
         """The three HTTPS PodMonitors scrape the same 8443 the ALB rules open."""
@@ -492,8 +523,8 @@ class TestInferenceNamespacePosture:
         policy = _find_netpol(netpol_docs, "allow-inference-proxy-to-inference", "gco-system")
         assert policy is not None
         assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "inference-proxy"}}
-        peers = policy["spec"]["egress"][0]["to"]
-        assert peers == [
+        (rule,) = policy["spec"]["egress"]
+        assert rule["to"] == [
             {
                 "namespaceSelector": {
                     "matchLabels": {"kubernetes.io/metadata.name": "gco-inference"}
@@ -501,18 +532,31 @@ class TestInferenceNamespacePosture:
                 "podSelector": {"matchLabels": {"gco.io/type": "inference"}},
             }
         ]
+        # Only the model pods' TLS sidecar port: the Service port and the
+        # sidecar's container port are both 8443, so the rule holds on either
+        # side of kube-proxy's DNAT.
+        assert rule["ports"] == [{"protocol": "TCP", "port": 8443}]
 
     def test_model_ingress_accepts_only_inference_proxy(self, netpol_docs):
         policy = _find_netpol(netpol_docs, "allow-inference-proxy-ingress", "gco-inference")
         assert policy is not None
         assert policy["spec"]["podSelector"] == {"matchLabels": {"gco.io/type": "inference"}}
-        peers = policy["spec"]["ingress"][0]["from"]
-        assert peers == [
+        (rule,) = policy["spec"]["ingress"]
+        assert rule["from"] == [
             {
                 "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "gco-system"}},
                 "podSelector": {"matchLabels": {"app": "inference-proxy"}},
             }
         ]
+        # The model servers' plaintext ports are never reachable from gco-system.
+        assert rule["ports"] == [{"protocol": "TCP", "port": 8443}]
+
+    def test_no_cross_namespace_rule_reaches_model_pods_on_any_other_port(self, netpol_docs):
+        """Only same-namespace peers (PD proxy, KV transfer) may use other ports."""
+        for policy in _policies_in(netpol_docs, "gco-inference"):
+            for rule in policy["spec"].get("ingress") or []:
+                if any("namespaceSelector" in peer for peer in rule.get("from", [])):
+                    assert _get_port_protocols(rule) == {("TCP", 8443)}, policy["metadata"]
 
     @pytest.mark.parametrize(
         ("policy_name", "namespace"),

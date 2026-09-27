@@ -5,8 +5,15 @@ ConfigMap (the monitor reads this file's own source and mounts it at
 ``/etc/pd-proxy/mooncake_pd_proxy.py``), and the proxy container runs it with
 ``python3 /etc/pd-proxy/mooncake_pd_proxy.py``. It therefore must depend only on
 what the upstream ``vllm/vllm-openai`` image already ships — ``fastapi``,
-``uvicorn`` and ``httpx`` — and must not import anything from the ``gco``
-package.
+``uvicorn`` and ``httpx`` — must run on that image's Python 3.12, and must not
+import anything from the ``gco`` package. It uses ``httpx2`` when the image
+provides it (as GCO's own environment does) and otherwise the image's
+``httpx``; the two share the API used here.
+
+The proxy binds ``PD_PROXY_HOST`` (loopback in the pod, behind the pod's TLS
+sidecar) and reaches prefill and decode over verified HTTPS: with
+``PD_PROXY_CA_FILE`` set it trusts exactly that CA bundle (the GCO internal
+CA), and hostname verification stays on.
 
 Per request on the public ``/v1/*`` serving paths it:
 
@@ -46,17 +53,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-26T23:26:19Z
+# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
 # Flowchart(s) generated from this file:
 #   * ``_dispatch`` -> ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.png``)
@@ -64,14 +71,22 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # <pyflowchart-code-diagram> END
 
 
+try:
+    import httpx2 as httpx  # type: ignore[import-not-found,unused-ignore]
+except ImportError:
+    import httpx  # type: ignore[no-redef,unused-ignore]
+
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s [mooncake-pd-proxy] %(message)s"
 )
 logger = logging.getLogger("mooncake-pd-proxy")
 
+HOST = os.environ.get("PD_PROXY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PD_PROXY_PORT", "8000"))
 PREFILL_URL = os.environ.get("PD_PROXY_PREFILL_URL", "").rstrip("/")
 DECODE_URL = os.environ.get("PD_PROXY_DECODE_URL", "").rstrip("/")
+CA_FILE = os.environ.get("PD_PROXY_CA_FILE", "").strip()
 RESIDENCY_TIMEOUT = float(os.environ.get("PD_PROXY_RESIDENCY_TIMEOUT_SECONDS", "2"))
 NO_DECODE_STATUS = int(os.environ.get("PD_PROXY_NO_DECODE_BACKEND_STATUS", "503"))
 NO_DECODE_MESSAGE = os.environ.get(
@@ -117,8 +132,30 @@ _HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 
+
+def _upstream_verify() -> ssl.SSLContext | bool:
+    """TLS trust for the prefill and decode hops.
+
+    With ``PD_PROXY_CA_FILE`` set, trust exactly that bundle and nothing from
+    the system store; hostname verification stays on, so each role Service
+    must present a certificate for the name the proxy dialled. Unset keeps the
+    library default for plain ``http://`` backends and local runs. A bundle
+    that is configured but unreadable fails the process at start rather than
+    serving over a weaker trust.
+    """
+    if not CA_FILE:
+        return True
+    context = ssl.create_default_context(cafile=CA_FILE)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 app = FastAPI()
-_client = httpx.AsyncClient(timeout=_TIMEOUT)
+_client = httpx.AsyncClient(timeout=_TIMEOUT, verify=_upstream_verify())
+# The proxy relays decode's raw bytes, so the library's default Accept-Encoding
+# must not reach a backend: only an encoding the caller asked for (forwarded by
+# _request_headers) may shape the body the client receives.
+del _client.headers["accept-encoding"]
 
 
 @app.get("/healthz")
@@ -209,9 +246,11 @@ async def _stream_decode(
     upstream_request = _client.build_request(method, url, **request_kwargs)
     try:
         resp = await _client.send(upstream_request, stream=True)
-    except httpx.ConnectError:
-        # No Ready decode endpoint behind the Service: reject with a stable
-        # status instead of emitting any partial output.
+    except httpx.ConnectError as exc:
+        # No Ready decode endpoint behind the Service (or a TLS handshake the
+        # decode sidecar failed): reject with a stable status instead of
+        # emitting any partial output, and log why for the operator.
+        logger.warning("decode backend unreachable: %s", exc)
         return JSONResponse(
             {"error": {"message": NO_DECODE_MESSAGE, "type": "no_decode_backend"}},
             status_code=NO_DECODE_STATUS,
@@ -298,5 +337,7 @@ async def _dispatch(full_path: str, request: Request) -> Any:
 
 
 if __name__ == "__main__":
-    logger.info("starting PD proxy on :%d (prefill=%s decode=%s)", PORT, PREFILL_URL, DECODE_URL)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    logger.info(
+        "starting PD proxy on %s:%d (prefill=%s decode=%s)", HOST, PORT, PREFILL_URL, DECODE_URL
+    )
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")

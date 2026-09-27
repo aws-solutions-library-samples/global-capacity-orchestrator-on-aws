@@ -2,7 +2,7 @@
 
 The request-shaping helpers are pinned elsewhere; these checks drive the parts
 of the proxy that talk to the prefill and decode Services and answer the admin
-and health surfaces. Every test mocks the module-level outbound httpx client and
+and health surfaces. Every test mocks the module-level outbound HTTP client and
 the URL / key globals through monkeypatch so the restore is automatic and no
 state leaks across xdist workers, and no real network is ever touched. The
 suite also pins explicit health handling, GET passthrough, query preservation,
@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -134,23 +134,27 @@ def test_prime_prefill_swallows_errors_and_returns_empty(monkeypatch) -> None:
     assert result == {}
 
 
-def test_stream_decode_rejects_when_no_decode_backend(monkeypatch) -> None:
-    """A connect failure (no Ready decode endpoint) becomes a stable 503."""
+def test_stream_decode_rejects_when_no_decode_backend(monkeypatch, caplog) -> None:
+    """A connect failure (no Ready decode endpoint) becomes a stable, logged 503."""
     client = MagicMock()
     client.build_request = MagicMock(return_value="REQ")
-    client.send = AsyncMock(side_effect=httpx.ConnectError("no route to decode"))
+    # Raised from the HTTP library the program actually loaded (httpx2 here,
+    # the image's httpx in the pod), which is the class it catches.
+    client.send = AsyncMock(side_effect=proxy.httpx.ConnectError("no route to decode"))
     monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
     monkeypatch.setattr(proxy, "NO_DECODE_STATUS", 503)
     monkeypatch.setattr(proxy, "NO_DECODE_MESSAGE", "no available decode backend")
     monkeypatch.setattr(proxy, "_client", client)
 
-    response = asyncio.run(proxy._stream_decode("POST", "/v1/completions", {"stream": True}))
+    with caplog.at_level(logging.WARNING, logger="mooncake-pd-proxy"):
+        response = asyncio.run(proxy._stream_decode("POST", "/v1/completions", {"stream": True}))
 
     assert isinstance(response, proxy.JSONResponse)
     assert response.status_code == 503
     payload = json.loads(response.body)
     assert payload["error"]["type"] == "no_decode_backend"
     assert payload["error"]["message"] == "no available decode backend"
+    assert "decode backend unreachable: no route to decode" in caplog.text
 
 
 def test_stream_decode_streams_decode_response(monkeypatch) -> None:

@@ -7,11 +7,29 @@ The service then forwards to one strictly derived in-cluster Service name. This
 keeps model traffic out of the manifest processor and removes the historical
 direct ALB target groups that allowed callers to bypass API Gateway through
 Global Accelerator.
+
+The upstream hop is verified HTTPS on port 8443: every managed model pod runs
+a TLS sidecar serving the ``gco-inference`` wildcard certificate, and this
+proxy trusts only the GCO internal CA (see :mod:`gco.services.internal_tls`).
+
+Every proxied request builds its own upstream client and closes it once its
+stream ends. A process-wide client would pool nothing: kube-proxy balances
+connections, not requests, so keep-alive stays off to spread requests across
+the Ready model replicas, and each request opens its own connection either
+way. A client per request also takes its TLS context from
+:func:`~gco.services.internal_tls.internal_ssl_context` when the request
+arrives. That cache hands back the same context until the projected
+``ca.crt`` changes and a fresh one afterwards, so a rotated internal CA (for
+example the post-Helm pass re-issuing ``inference-proxy-tls`` during an
+in-place upgrade) is trusted from the next request on, without restarting
+the pod; a long-lived client would keep verifying against the bundle it
+loaded first and answer 502 until a restart.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import secrets
@@ -20,15 +38,17 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
 
-import httpx
+import httpx2
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
+from gco.services import internal_tls, tracing
 from gco.services.inference_store import InferenceEndpointStore, get_inference_endpoint_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T14:22:22Z
-# Generated from Git commit: 90ffb3d23eb7fe5fdd4b00a669ee9184e86a7d7b
+# Generated at (UTC): 2026-09-26T23:26:19Z
+# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
 # Flowchart(s) generated from this file:
 #   * ``_resolve_upstream`` -> ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.png``)
@@ -39,6 +59,7 @@ from gco.services.inference_store import InferenceEndpointStore, get_inference_e
 
 
 router = APIRouter(prefix="/inference", tags=["Inference"])
+logger = logging.getLogger(__name__)
 
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _SUPPORTED_METHODS = ["GET", "HEAD", "POST"]
@@ -94,6 +115,41 @@ def _bounded_timeout(name: str, default: float, minimum: float, maximum: float) 
 def _get_inference_store() -> InferenceEndpointStore:
     """Create one process-local DynamoDB endpoint-store client lazily."""
     return get_inference_endpoint_store()
+
+
+#: Upstream cleanups still running. The event loop holds only weak references
+#: to tasks, and a cleanup outlives its awaiter whenever the request that
+#: started it is cancelled, so each one is held here until it finishes.
+_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def _new_upstream_client() -> httpx2.AsyncClient:
+    """Build the client for one proxied request; the caller releases it.
+
+    The TLS context is looked up now, per request, which is what lets a
+    rotated internal CA take effect without a restart (see the module
+    docstring); a lookup whose CA file is unchanged costs one ``stat``, not a
+    CA load. No keep-alive and no connection cap: the client carries exactly
+    one request, and its connection closes as soon as that response ends.
+    ``verify`` and ``limits`` sit on the transport because a client given
+    ``transport=`` ignores its own. The default ``Accept-Encoding`` is removed
+    because the proxy relays raw upstream bytes: only an encoding the caller
+    asked for may reach the model. Raises
+    :class:`~gco.services.internal_tls.InternalTLSError` while the CA bundle
+    is missing or invalid, before anything exists that would need closing.
+    """
+    transport = httpx2.AsyncHTTPTransport(
+        verify=internal_tls.internal_ssl_context(),
+        limits=httpx2.Limits(max_connections=None, max_keepalive_connections=0),
+        trust_env=False,
+    )
+    client = httpx2.AsyncClient(
+        transport=tracing.wrap_async_transport(transport),
+        follow_redirects=False,
+        trust_env=False,
+    )
+    del client.headers["accept-encoding"]
+    return client
 
 
 def _validate_label(value: object, field: str) -> str:
@@ -193,7 +249,7 @@ def _request_headers(request: Request) -> list[tuple[str, str]]:
     ]
 
 
-def _response_headers(response: httpx.Response) -> dict[str, str]:
+def _response_headers(response: httpx2.Response) -> dict[str, str]:
     """Copy end-to-end response headers while dropping hop-by-hop framing."""
     blocked = _HOP_BY_HOP_HEADERS | {"content-length"}
     return {name: value for name, value in response.headers.items() if name.lower() not in blocked}
@@ -233,21 +289,67 @@ def _validate_upstream_path(
     raise HTTPException(status_code=404, detail="Inference path is not exposed")
 
 
-async def _close_upstream(response: httpx.Response, client: httpx.AsyncClient) -> None:
-    await response.aclose()
-    await client.aclose()
+async def _close_upstream(response: httpx2.Response | None, client: httpx2.AsyncClient) -> None:
+    """Close one request's upstream response, if it got one, then its client.
+
+    Both closes are idempotent, so releasing an upstream twice is harmless.
+    """
+    try:
+        if response is not None:
+            await response.aclose()
+    finally:
+        await client.aclose()
+
+
+async def _release_upstream(response: httpx2.Response | None, client: httpx2.AsyncClient) -> None:
+    """Close one request's upstream in its own task, shielded from cancellation.
+
+    Cancelling the request (the caller went away, or shutdown outlived its
+    grace period) interrupts only this wait, never the close itself, so a
+    cancelled request still releases its model connection.
+    """
+    cleanup = asyncio.create_task(_close_upstream(response, client))
+    _cleanup_tasks.add(cleanup)
+    cleanup.add_done_callback(_cleanup_tasks.discard)
+    await asyncio.shield(cleanup)
 
 
 async def _stream_response(
-    response: httpx.Response, client: httpx.AsyncClient
+    response: httpx2.Response, client: httpx2.AsyncClient
 ) -> AsyncIterator[bytes]:
-    """Yield the upstream response and shield connection cleanup on cancellation."""
+    """Yield the upstream body unchanged, then release the request's upstream."""
     try:
         async for chunk in response.aiter_raw():
             yield chunk
     finally:
-        cleanup = asyncio.create_task(_close_upstream(response, client))
-        await asyncio.shield(cleanup)
+        await _release_upstream(response, client)
+
+
+class _UpstreamStreamingResponse(StreamingResponse):
+    """Relay one upstream response, releasing its client however the relay ends.
+
+    The body generator releases the upstream as soon as the stream finishes,
+    fails, or is cancelled mid-body. Starlette starts that generator only once
+    the headers are on their way, though: when the caller disconnected while
+    the model was still answering, the response is cancelled before its first
+    chunk and the generator never runs, so the response itself releases the
+    upstream again once it is done (a no-op after the generator's release).
+    """
+
+    def __init__(self, response: httpx2.Response, client: httpx2.AsyncClient) -> None:
+        super().__init__(
+            _stream_response(response, client),
+            status_code=response.status_code,
+            headers=_response_headers(response),
+            media_type=None,
+        )
+        self._upstream = (response, client)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _release_upstream(*self._upstream)
 
 
 async def _proxy(
@@ -267,17 +369,26 @@ async def _proxy(
     upstream_url = (  # nosemgrep: python.django.security.injection.tainted-url-host.tainted-url-host
         # Both host labels passed the strict Kubernetes DNS-label allowlist in
         # _resolve_upstream; callers cannot supply a URL, address, or suffix.
-        f"http://{service_name}.{namespace}.svc.cluster.local{upstream_path_value}"
+        # Port 8443 is the model pod's TLS sidecar, the only port its Service
+        # publishes.
+        f"https://{service_name}.{namespace}.svc.cluster.local:8443{upstream_path_value}"
     )
 
     body = await request.body()
-    timeout = httpx.Timeout(
+    timeout = httpx2.Timeout(
         connect=_bounded_timeout("INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS", 5.0, 0.1, 30.0),
         read=_bounded_timeout("INFERENCE_PROXY_READ_TIMEOUT_SECONDS", 300.0, 1.0, 900.0),
         write=_bounded_timeout("INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS", 30.0, 1.0, 300.0),
         pool=_bounded_timeout("INFERENCE_PROXY_POOL_TIMEOUT_SECONDS", 5.0, 0.1, 30.0),
     )
-    client = httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False)
+    try:
+        client = _new_upstream_client()
+    except internal_tls.InternalTLSError as exc:
+        logger.error("Inference upstream TLS trust is unavailable: %s", exc)
+        raise HTTPException(status_code=502, detail="Inference endpoint is unavailable") from exc
+
+    # Until the streaming response owns the upstream, every exit releases it.
+    response: httpx2.Response | None = None
     try:
         upstream_request = client.build_request(
             request.method,
@@ -285,21 +396,27 @@ async def _proxy(
             params=list(request.query_params.multi_items()),
             headers=_request_headers(request),
             content=body,
+            timeout=timeout,
         )
         response = await client.send(upstream_request, stream=True)
-    except httpx.TimeoutException as exc:
-        await client.aclose()
+        return _UpstreamStreamingResponse(response, client)
+    except httpx2.TimeoutException as exc:
+        await _release_upstream(response, client)
         raise HTTPException(status_code=504, detail="Inference endpoint timed out") from exc
-    except httpx.HTTPError as exc:
-        await client.aclose()
+    except httpx2.HTTPError as exc:
+        await _release_upstream(response, client)
+        logger.warning(
+            "Inference upstream request failed: service=%s namespace=%s error_type=%s error=%s",
+            service_name,
+            namespace,
+            type(exc).__name__,
+            exc,
+        )
         raise HTTPException(status_code=502, detail="Inference endpoint is unavailable") from exc
-
-    return StreamingResponse(
-        _stream_response(response, client),
-        status_code=response.status_code,
-        headers=_response_headers(response),
-        media_type=None,
-    )
+    except BaseException:
+        # Anything else, a cancelled request included, releases it too.
+        await _release_upstream(response, client)
+        raise
 
 
 async def proxy_inference_root(request: Request, endpoint_name: str) -> StreamingResponse:

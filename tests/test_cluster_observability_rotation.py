@@ -36,7 +36,11 @@ ROTATION_MANIFEST = (
 
 SECRET_NAME = "kube-prometheus-stack-grafana"
 NAMESPACE = "monitoring"
+# The unit tests drive the rotator over a plain-http override (no CA bundle
+# needed); the shipped CronJob calls the verified-HTTPS grafana-tls Service.
+# tests/test_grafana_rotator_tls.py covers the https trust path.
 SERVICE_URL = "http://kube-prometheus-stack-grafana.monitoring.svc"
+MANIFEST_SERVICE_URL = "https://grafana-tls.monitoring.svc.cluster.local:3443"
 GATE_ANNOTATION = "gco.io/cluster-observability-enabled"
 GATE_PLACEHOLDER = "{{CLUSTER_OBSERVABILITY_ENABLED}}"
 
@@ -197,7 +201,33 @@ def test_cronjob_runs_rotator_via_gco_image(rotation_docs: list[dict]) -> None:
     assert container["command"] == ["python", "-m", "gco.services.grafana_rotator"]
     env = {e["name"]: e["value"] for e in container["env"]}
     assert env["GRAFANA_ADMIN_SECRET"] == SECRET_NAME
-    assert env["GRAFANA_SERVICE_URL"] == SERVICE_URL
+    assert env["GRAFANA_SERVICE_URL"] == MANIFEST_SERVICE_URL
+    assert env["GRAFANA_SERVICE_URL"] == grafana_rotator.DEFAULT_SERVICE_URL
+    assert env["GCO_INTERNAL_CA_FILE"] == "/var/run/gco/ca/ca.crt"
+
+
+def test_cronjob_mounts_only_the_internal_ca_certificate(rotation_docs: list[dict]) -> None:
+    """The rotator verifies Grafana against the GCO internal CA and sees no private key.
+
+    The bundle is the ``ca.crt`` key of the gco-monitoring-trust Secret (a
+    cert-manager leaf in the rotator's own namespace, issued by the internal
+    CA only so that its Secret carries ``ca.crt``); nothing else from that
+    Secret is projected.
+    """
+    cronjob = next(d for d in rotation_docs if d["kind"] == "CronJob")
+    pod = cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    # 0440 + the pod's fsGroup, like every GCO-built pod's Secret volume.
+    assert pod["securityContext"]["fsGroup"] == 10000
+    assert volumes["internal-ca"]["secret"] == {
+        "secretName": "gco-monitoring-trust",
+        "items": [{"key": "ca.crt", "path": "ca.crt"}],
+        "defaultMode": 0o440,
+    }
+    (container,) = pod["containers"]
+    assert container["volumeMounts"] == [
+        {"name": "internal-ca", "mountPath": "/var/run/gco/ca", "readOnly": True}
+    ]
 
 
 def test_cronjob_pod_is_hardened(rotation_docs: list[dict]) -> None:

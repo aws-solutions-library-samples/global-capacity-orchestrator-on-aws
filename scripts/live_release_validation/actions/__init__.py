@@ -35,6 +35,7 @@ from .policy import action_policy
 from .preflight import action_preflight
 from .schedulers import action_schedulers
 from .topology import action_topology
+from .tracing import action_tracing
 
 __all__ = [
     "action_api_lifecycle",
@@ -54,5 +55,6 @@ __all__ = [
     "action_schedulers",
     "action_sqs_lifecycle",
     "action_topology",
+    "action_tracing",
     "destroy_deployment",
 ]

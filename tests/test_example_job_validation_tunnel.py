@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import socket
 import ssl
+import stat
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -698,6 +700,20 @@ class TestSessionKubectl:
         kube.ensure_tunnel(runner)
         assert keeper.ensured == 1
 
+    def test_the_session_environment_carries_its_own_kubeconfig(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("KUBECONFIG", str(tmp_path / "exported"))
+        isolated = tmp_path / "report" / "kubeconfig"
+
+        environment = kube.session_environment(kube.SessionKubectl(isolated))
+        assert environment is not None
+        assert environment["KUBECONFIG"] == str(isolated)
+        assert environment["PATH"] == os.environ["PATH"]
+        # A session on the default kubeconfig, and any other runner, inherit.
+        assert kube.session_environment(kube.SessionKubectl(None)) is None
+        assert kube.session_environment(lambda *a, **k: (0, "", "")) is None
+
 
 # --------------------------------------------------------------------------
 # cluster_session wiring
@@ -830,6 +846,126 @@ class TestClusterSessionKeeper:
         assert lifecycle == []
 
 
+# Stand-ins for the three executables a session starts. Each appends
+# "<process>|<kubeconfig it was pointed at>|<KUBECONFIG it saw>" to
+# $STAND_IN_LOG; the aws one writes the kubeconfig where the AWS CLI would.
+_AWS_STAND_IN = r"""#!/bin/sh
+target=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--kubeconfig" ]; then target="$argument"; fi
+  previous="$argument"
+done
+if [ -z "$target" ]; then
+  if [ -n "${KUBECONFIG:-}" ]; then target="${KUBECONFIG%%:*}"; else target="$HOME/.kube/config"; fi
+fi
+printf 'aws|%s|%s\n' "$target" "${KUBECONFIG:-}" >> "$STAND_IN_LOG"
+mkdir -p "$(dirname "$target")"
+cat > "$target" <<'EOF'
+apiVersion: v1
+kind: Config
+clusters:
+- name: arn:aws:eks:us-east-1:111111111111:cluster/test-cluster
+  cluster:
+    server: https://ABC123.gr7.us-east-1.eks.amazonaws.com
+    certificate-authority-data: Q0E=
+EOF
+"""
+_KUBECTL_STAND_IN = r"""#!/bin/sh
+kubeconfig=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--kubeconfig" ]; then kubeconfig="$argument"; fi
+  previous="$argument"
+done
+printf 'kubectl|%s|%s\n' "$kubeconfig" "${KUBECONFIG:-}" >> "$STAND_IN_LOG"
+echo ok
+"""
+_GCO_STAND_IN = r"""#!/bin/sh
+printf 'gco %s %s||%s\n' "$1" "$2" "${KUBECONFIG:-}" >> "$STAND_IN_LOG"
+echo "job.batch/efs-output-job created"
+"""
+_EXPORTED_KUBECONFIG = "apiVersion: v1\nkind: Config\nclusters: []\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-ins for aws, kubectl and gco")
+class TestIsolatedKubeconfigThroughRealProcesses:
+    """The examples session keeps to its own kubeconfig, across every process it starts.
+
+    Two live examples runs timed out on the private endpoint before their first
+    example: the operator's shell exported KUBECONFIG, so ``aws eks
+    update-kubeconfig`` and kubectl used that file while the tunnel was pinned
+    in ``~/.kube/config``. This runs the real session and submission plumbing
+    with stand-in executables on PATH (only the SSM tunnel itself is faked), a
+    KUBECONFIG exported, and a home directory of its own.
+    """
+
+    def test_access_refresh_readiness_and_submit_direct_use_the_report_dir_kubeconfig(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, script in (
+            ("aws", _AWS_STAND_IN),
+            ("kubectl", _KUBECTL_STAND_IN),
+            ("gco", _GCO_STAND_IN),
+        ):
+            executable = bin_dir / name
+            executable.write_text(script, encoding="utf-8")
+            executable.chmod(0o700)
+        home = tmp_path / "home"
+        home.mkdir()
+        exported = tmp_path / "exported" / "kubeconfig"
+        exported.parent.mkdir()
+        exported.write_text(_EXPORTED_KUBECONFIG, encoding="utf-8")
+        report_dir = tmp_path / "report"
+        report_dir.mkdir(mode=0o700)
+        isolated = report_dir / "kubeconfig"
+        log = tmp_path / "processes.log"
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("KUBECONFIG", str(exported))
+        monkeypatch.setenv("STAND_IN_LOG", str(log))
+
+        @contextlib.contextmanager
+        def fake_tunnel(formatter: Any, **kwargs: Any):
+            yield _tunnel_session(instance_id=None)
+
+        monkeypatch.setattr(cluster_tunnel, "open_api_server_tunnel", fake_tunnel)
+        parsed = static_checks.parse_example(REPO_ROOT, "efs-output-job")
+        assert parsed.spec.submission == SUBMIT_DIRECT
+
+        with kube.cluster_session(
+            REPO_ROOT, "test-cluster", "us-east-1", kubeconfig_path=isolated
+        ) as kubectl:
+            evidence = drivers.submit_example(
+                parsed, parsed.path, repo_root=REPO_ROOT, region="us-east-1", kubectl=kubectl
+            )
+
+        assert evidence["output"].strip() == "job.batch/efs-output-job created"
+        # The tunnel is pinned in the run's own owner-only kubeconfig...
+        (entry,) = yaml.safe_load(isolated.read_text(encoding="utf-8"))["clusters"]
+        assert entry["cluster"]["server"] == "https://127.0.0.1:8443"
+        assert entry["cluster"]["tls-server-name"] == HOST
+        assert stat.S_IMODE(isolated.stat().st_mode) == 0o600
+        # ...the exported kubeconfig and ~/.kube/config are untouched...
+        assert exported.read_text(encoding="utf-8") == _EXPORTED_KUBECONFIG
+        assert not (home / ".kube").exists()
+        # ...and every process the session and the submission started used it.
+        records = [line.split("|") for line in log.read_text(encoding="utf-8").splitlines()]
+        assert [process for process, _pointed, _exported in records] == [
+            "gco stacks access",
+            "aws",
+            "kubectl",
+            "gco jobs submit-direct",
+        ]
+        assert {seen for _process, _pointed, seen in records} == {str(isolated)}
+        assert [pointed for process, pointed, _seen in records if pointed] == [
+            str(isolated),
+            str(isolated),
+        ]
+
+
 class TestTunnelSessionInstanceId:
     @staticmethod
     def _private(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -902,7 +1038,12 @@ def _record_cli(monkeypatch: pytest.MonkeyPatch, *answers: tuple[int, str, str])
     calls: list[list[str]] = []
     queue = list(answers)
 
-    def fake_run_cli(args: list[str], repo_root: Path, timeout: int = 600) -> tuple[int, str, str]:
+    def fake_run_cli(
+        args: list[str],
+        repo_root: Path,
+        timeout: int = 600,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
         calls.append(list(args))
         return queue.pop(0) if len(queue) > 1 else queue[0]
 

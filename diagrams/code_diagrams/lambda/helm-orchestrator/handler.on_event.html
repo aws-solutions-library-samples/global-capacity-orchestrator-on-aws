@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="536ed84f6fb4367e">
+        <meta name="gco-generated-at" content="2026-09-27T04:10:54Z">
+        <meta name="gco-source-commit" content="590c275a9cd8dc0e0ba9f8ea74acefb63754df46">
+        <meta name="gco-flow-digest" content="46e890b18f1a3f25">
         <title>Helm convergence orchestrator (start/adopt, replay identity, rollback fencing)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,101 +208,101 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5306=>operation: 'Start a state-machine execution for Create/Update; no-op for Delete.\n\n    Returns immediately after starting the execution — the custom resource is\n    fire-and-forget, so CloudFormation considers the resource created as soon as\n    the helm-install state machine has been *kicked off*, never waiting for the\n    charts to finish. The started ``ExecutionArn`` is returned in ``Data`` purely\n    as an observability attribute (it does not gate resource completion).\n    '
-op5308=>operation: request_type = event['RequestType']
-sub5310=>subroutine: logger.info('on_event %s: %s', request_type, json.dumps(event.get('ResourceProperties', {})))
-op5312=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-install-charts'
-cond5315=>condition: if request_type == 'Delete'
-io5322=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e5320=>end: end function return
-op5328=>operation: props = event['ResourceProperties']
-op5330=>operation: state_machine_arn = os.environ['STATE_MACHINE_ARN']
-op5332=>operation: deployment_token = props['DeploymentTimestamp']
-op5334=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'RegistryRegion': props['RegistryRegion'], 'ProjectName': props['ProjectName'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'ImageReplacements': props.get('ImageReplacements', {}), 'DeploymentToken': deployment_token}
-op5336=>operation: endpoint_group_arn = props.get('EndpointGroupArn')
-cond5339=>operation: execution_input['EndpointGroupArn'] = endpoint_group_arn if  endpoint_group_arn
-op5349=>operation: execution_input_json = _canonical_json(execution_input)
-op5351=>operation: execution_input_bytes = execution_input_json.encode('utf-8')
-op5353=>operation: project = str(props['ProjectName'])
-op5355=>operation: region = str(props['Region'])
-op5357=>operation: parameter_root = f'/{project}/addons/{region}'
-op5359=>operation: input_sha256 = hashlib.sha256(execution_input_bytes).hexdigest()
-op5361=>operation: ssm = _ssm()
-op5363=>operation: fence_name = f'{parameter_root}/_teardown'
-sub5365=>subroutine: _prepare_teardown_fence(ssm, request_type=request_type, fence_name=fence_name)
-op5367=>operation: encoded_input = _encode_replay_input(execution_input_json)
-cond5370=>operation: raise ValueError(f'Encoded convergence replay input is {len(encoded_input)} bytes; SSM Parameter Store supports at most {_SSM_PARAMETER_MAX_BYTES} bytes') if  len(encoded_input) > _SSM_PARAMETER_MAX_BYTES
-sub5383=>subroutine: ssm.put_parameter(Name=f'{parameter_root}/_input', Value=encoded_input, Type='String', Tier='Intelligent-Tiering', Overwrite=True)
-cond5380=>condition: exception raised?
-cond5385=>condition: except Exception as exc
-sub5389=>subroutine: logger.error('Replay-input persistence failed', exc_info=True)
-sub5391=>subroutine: raise RuntimeError('Could not persist the convergence replay input: ' + _bounded_error_text(exc)) from exc
-op5396=>operation: request_id = event.get('RequestId')
-op5398=>operation: sfn_client = _sfn()
-op5400=>operation: resp = _start_or_adopt_execution(sfn_client, state_machine_arn=state_machine_arn, execution_input_json=execution_input_json, request_id=request_id)
-op5402=>operation: execution_arn = resp['executionArn']
-op5404=>operation: execution_metadata = {'execution_arn': execution_arn, 'state_machine_arn': state_machine_arn, 'deployment_token': deployment_token, 'cluster_name': props['ClusterName'], 'region': region, 'input_sha256': input_sha256, 'started_at': _started_at(resp)}
-sub5409=>subroutine: ssm.put_parameter(Name=f'{parameter_root}/_execution', Value=_canonical_json(execution_metadata), Type='String', Overwrite=True)
-cond5406=>condition: exception raised?
-cond5411=>condition: except Exception as exc
-sub5415=>subroutine: logger.error('Execution-metadata persistence failed', exc_info=True)
-sub5420=>subroutine: _stop_execution_and_wait(sfn_client, execution_arn)
-cond5417=>condition: exception raised?
-cond5422=>condition: except Exception as stop_exc
-sub5426=>subroutine: raise RuntimeError(f'Could not confirm untracked execution {execution_arn} stopped') from stop_exc
-sub5431=>subroutine: raise RuntimeError('Could not persist the convergence execution identity: ' + _bounded_error_text(exc)) from exc
-sub5436=>subroutine: logger.info('Started and recorded execution %s (fire-and-forget)', execution_arn)
-io5441=>inputoutput: output: {'PhysicalResourceId': physical_id, 'ExecutionArn': execution_arn, 'Data': {'ExecutionArn': execution_arn}}
-e5439=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op577=>operation: 'Start a state-machine execution for Create/Update; no-op for Delete.\n\n    Returns immediately after starting the execution — the custom resource is\n    fire-and-forget, so CloudFormation considers the resource created as soon as\n    the helm-install state machine has been *kicked off*, never waiting for the\n    charts to finish. The started ``ExecutionArn`` is returned in ``Data`` purely\n    as an observability attribute (it does not gate resource completion).\n    '
+op579=>operation: request_type = event['RequestType']
+sub581=>subroutine: logger.info('on_event %s: %s', request_type, json.dumps(event.get('ResourceProperties', {})))
+op583=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-install-charts'
+cond586=>condition: if request_type == 'Delete'
+io593=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e591=>end: end function return
+op599=>operation: props = event['ResourceProperties']
+op601=>operation: state_machine_arn = os.environ['STATE_MACHINE_ARN']
+op603=>operation: deployment_token = props['DeploymentTimestamp']
+op605=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'RegistryRegion': props['RegistryRegion'], 'ProjectName': props['ProjectName'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': _chart_overrides(props), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'ImageReplacements': props.get('ImageReplacements', {}), 'DeploymentToken': deployment_token}
+op607=>operation: endpoint_group_arn = props.get('EndpointGroupArn')
+cond610=>operation: execution_input['EndpointGroupArn'] = endpoint_group_arn if  endpoint_group_arn
+op620=>operation: execution_input_json = _canonical_json(execution_input)
+op622=>operation: execution_input_bytes = execution_input_json.encode('utf-8')
+op624=>operation: project = str(props['ProjectName'])
+op626=>operation: region = str(props['Region'])
+op628=>operation: parameter_root = f'/{project}/addons/{region}'
+op630=>operation: input_sha256 = hashlib.sha256(execution_input_bytes).hexdigest()
+op632=>operation: ssm = _ssm()
+op634=>operation: fence_name = f'{parameter_root}/_teardown'
+sub636=>subroutine: _prepare_teardown_fence(ssm, request_type=request_type, fence_name=fence_name)
+op638=>operation: encoded_input = _encode_replay_input(execution_input_json)
+cond641=>operation: raise ValueError(f'Encoded convergence replay input is {len(encoded_input)} bytes; SSM Parameter Store supports at most {_SSM_PARAMETER_MAX_BYTES} bytes') if  len(encoded_input) > _SSM_PARAMETER_MAX_BYTES
+sub654=>subroutine: ssm.put_parameter(Name=f'{parameter_root}/_input', Value=encoded_input, Type='String', Tier='Intelligent-Tiering', Overwrite=True)
+cond651=>condition: exception raised?
+cond656=>condition: except Exception as exc
+sub660=>subroutine: logger.error('Replay-input persistence failed', exc_info=True)
+sub662=>subroutine: raise RuntimeError('Could not persist the convergence replay input: ' + _bounded_error_text(exc)) from exc
+op667=>operation: request_id = event.get('RequestId')
+op669=>operation: sfn_client = _sfn()
+op671=>operation: resp = _start_or_adopt_execution(sfn_client, state_machine_arn=state_machine_arn, execution_input_json=execution_input_json, request_id=request_id)
+op673=>operation: execution_arn = resp['executionArn']
+op675=>operation: execution_metadata = {'execution_arn': execution_arn, 'state_machine_arn': state_machine_arn, 'deployment_token': deployment_token, 'cluster_name': props['ClusterName'], 'region': region, 'input_sha256': input_sha256, 'started_at': _started_at(resp)}
+sub680=>subroutine: ssm.put_parameter(Name=f'{parameter_root}/_execution', Value=_canonical_json(execution_metadata), Type='String', Overwrite=True)
+cond677=>condition: exception raised?
+cond682=>condition: except Exception as exc
+sub686=>subroutine: logger.error('Execution-metadata persistence failed', exc_info=True)
+sub691=>subroutine: _stop_execution_and_wait(sfn_client, execution_arn)
+cond688=>condition: exception raised?
+cond693=>condition: except Exception as stop_exc
+sub697=>subroutine: raise RuntimeError(f'Could not confirm untracked execution {execution_arn} stopped') from stop_exc
+sub702=>subroutine: raise RuntimeError('Could not persist the convergence execution identity: ' + _bounded_error_text(exc)) from exc
+sub707=>subroutine: logger.info('Started and recorded execution %s (fire-and-forget)', execution_arn)
+io712=>inputoutput: output: {'PhysicalResourceId': physical_id, 'ExecutionArn': execution_arn, 'Data': {'ExecutionArn': execution_arn}}
+e710=>end: end function return
 
-op5306->op5308
-op5308->sub5310
-sub5310->op5312
-op5312->cond5315
-cond5315(yes)->io5322
-io5322->e5320
-cond5315(no)->op5328
-op5328->op5330
-op5330->op5332
-op5332->op5334
-op5334->op5336
-op5336->cond5339
-cond5339->op5349
-op5349->op5351
-op5351->op5353
-op5353->op5355
-op5355->op5357
-op5357->op5359
-op5359->op5361
-op5361->op5363
-op5363->sub5365
-sub5365->op5367
-op5367->cond5370
-cond5370->sub5383
-sub5383->cond5380
-cond5380(yes)->cond5385
-cond5385(yes)->sub5389
-sub5389->sub5391
-cond5385(no)->op5396
-op5396->op5398
-op5398->op5400
-op5400->op5402
-op5402->op5404
-op5404->sub5409
-sub5409->cond5406
-cond5406(yes)->cond5411
-cond5411(yes)->sub5415
-sub5415->sub5420
-sub5420->cond5417
-cond5417(yes)->cond5422
-cond5422(yes)->sub5426
-cond5422(no)->sub5431
-cond5417(no)->sub5431
-cond5411(no)->sub5436
-sub5436->io5441
-io5441->e5439
-cond5406(no)->sub5436
-cond5380(no)->op5396
+op577->op579
+op579->sub581
+sub581->op583
+op583->cond586
+cond586(yes)->io593
+io593->e591
+cond586(no)->op599
+op599->op601
+op601->op603
+op603->op605
+op605->op607
+op607->cond610
+cond610->op620
+op620->op622
+op622->op624
+op624->op626
+op626->op628
+op628->op630
+op630->op632
+op632->op634
+op634->sub636
+sub636->op638
+op638->cond641
+cond641->sub654
+sub654->cond651
+cond651(yes)->cond656
+cond656(yes)->sub660
+sub660->sub662
+cond656(no)->op667
+op667->op669
+op669->op671
+op671->op673
+op673->op675
+op675->sub680
+sub680->cond677
+cond677(yes)->cond682
+cond682(yes)->sub686
+sub686->sub691
+sub691->cond688
+cond688(yes)->cond693
+cond693(yes)->sub697
+cond693(no)->sub702
+cond688(no)->sub702
+cond682(no)->sub707
+sub707->io712
+io712->e710
+cond677(no)->sub707
+cond651(no)->op667
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -312,17 +312,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-09-27T04:10:54Z -->
+        <!-- Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-09-27T04:10:54Z">2026-09-27T04:10:54Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>590c275a9cd8dc0e0ba9f8ea74acefb63754df46</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>536ed84f6fb4367e</code>
+            Flow content SHA-256: <code>46e890b18f1a3f25</code>
           </p>
           <div id="canvas"></div>
         </div>

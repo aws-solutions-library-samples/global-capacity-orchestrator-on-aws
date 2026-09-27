@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-25T01:31:13Z">
-        <meta name="gco-source-commit" content="6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7">
-        <meta name="gco-flow-digest" content="64467c6011fa0357">
+        <meta name="gco-generated-at" content="2026-09-27T04:10:54Z">
+        <meta name="gco-source-commit" content="590c275a9cd8dc0e0ba9f8ea74acefb63754df46">
+        <meta name="gco-flow-digest" content="ada06fb2ea7b7aa1">
         <title>Helm Installer Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -221,7 +221,7 @@ cluster_name = props['ClusterName']
 region = props['Region']
 default_config = load_charts_config()
 charts_config = default_config.get('charts', {})
-chart_overrides = props.get('Charts', {})
+chart_overrides = _cfn_chart_overrides(props)
 for chart_name, overrides in chart_overrides.items():
     if chart_name in charts_config:
         charts_config[chart_name] = deep_merge(charts_config[chart_name], overrides)
@@ -332,17 +332,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-25T01:31:13Z -->
-        <!-- Generated from Git commit: 6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7 -->
+        <!-- Generated at (UTC): 2026-09-27T04:10:54Z -->
+        <!-- Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-25T01:31:13Z">2026-09-25T01:31:13Z</time>
+            Generated at (UTC): <time datetime="2026-09-27T04:10:54Z">2026-09-27T04:10:54Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7</code>
+            Source commit: <code>590c275a9cd8dc0e0ba9f8ea74acefb63754df46</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>64467c6011fa0357</code>
+            Flow content SHA-256: <code>ada06fb2ea7b7aa1</code>
           </p>
           <div id="canvas"></div>
         </div>

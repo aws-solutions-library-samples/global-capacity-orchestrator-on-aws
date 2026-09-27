@@ -70,7 +70,7 @@ Passed through verbatim as the state-machine execution input.
 | `ClusterName` | Yes | EKS cluster name |
 | `Region` | Yes | AWS region |
 | `EnabledCharts` | No | List of chart names to install |
-| `Charts` | No | Dict of per-chart config overrides |
+| `Charts` | No | Per-chart config overrides as one JSON string, decoded into the execution input (an object is accepted too). CloudFormation turns every number and boolean in an object property into a string, which chart values rendered with `toYaml` (a Secret volume's `optional` and `defaultMode`, a sidecar's ports and probes) cannot survive |
 | `KedaOperatorRoleArn` | No | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) role ARN for KEDA [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) |
 | `ProjectName` | No | Project prefix used for the SSM replay parameter |
 
