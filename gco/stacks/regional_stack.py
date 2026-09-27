@@ -5151,7 +5151,7 @@ class GCORegionalStack(Stack):
         it, and the Helm orchestrator and teardown provider decode it before
         building their execution input.
         """
-        return self.to_json_string(self._helm_chart_value_overrides())
+        return str(self.to_json_string(self._helm_chart_value_overrides()))
 
     def _helm_chart_value_overrides(self) -> dict[str, Any]:
         """Per-chart helm value overrides injected into the install payload.

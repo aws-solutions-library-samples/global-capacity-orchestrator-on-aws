@@ -152,7 +152,15 @@ class _JsonLines(logging.Handler):
 
 @pytest.fixture(autouse=True)
 def _isolated_tracing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Fresh module and OpenTelemetry globals per test; shuts down whatever a test configured."""
+    """Fresh module and OpenTelemetry globals per test; shuts down whatever a test configured.
+
+    The module logger is pinned to WARNING, so a test sees INFO records only
+    inside its own ``caplog.at_level(logging.INFO, ...)`` block. Without the
+    pin its level follows the root logger, which the Lambda handler modules
+    other tests import in the same worker raise to INFO; the INFO "Tracing
+    enabled" record from configuring tracing before a WARNING-level capture
+    block then leaks into the exact-message assertions.
+    """
     for name in (*_TRACING_ENV, *(name for name in os.environ if name.startswith("OTEL_"))):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(tracing, "_active", None)
@@ -161,8 +169,13 @@ def _isolated_tracing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
     monkeypatch.setattr(trace, "_TRACER_PROVIDER_SET_ONCE", Once())
     monkeypatch.setattr(propagate, "_HTTP_TEXT_FORMAT", propagate.get_global_textmap())
-    yield
-    tracing.shutdown_tracing()
+    previous_level = tracing.logger.level
+    tracing.logger.setLevel(logging.WARNING)
+    try:
+        yield
+        tracing.shutdown_tracing()
+    finally:
+        tracing.logger.setLevel(previous_level)
 
 
 @pytest.fixture(autouse=True)
