@@ -912,7 +912,7 @@ class TestIsolatedKubeconfigThroughRealProcesses:
         ):
             executable = bin_dir / name
             executable.write_text(script, encoding="utf-8")
-            executable.chmod(0o755)
+            executable.chmod(0o700)
         home = tmp_path / "home"
         home.mkdir()
         exported = tmp_path / "exported" / "kubeconfig"
