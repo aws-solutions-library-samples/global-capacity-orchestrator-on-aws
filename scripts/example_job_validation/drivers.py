@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from .kube import KubectlRunner, through_tunnel
+from .kube import KubectlRunner, session_environment, through_tunnel
 from .specs import (
     ACK_RESOURCE_SYNCED,
     ARGOCD_APP_HEALTHY,
@@ -76,9 +76,14 @@ class ExampleRunResult:
         }
 
 
-def _run_cli(args: list[str], repo_root: Path, timeout: int = 600) -> tuple[int, str, str]:
+def _run_cli(
+    args: list[str],
+    repo_root: Path,
+    timeout: int = 600,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
     result = subprocess.run(
-        args, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False
+        args, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False, env=env
     )
     return result.returncode, result.stdout, result.stderr
 
@@ -160,9 +165,12 @@ def submit_example(
         raise ExampleValidationError(f"No live submission for {spec.submission}")
 
     timeout = 1800 if spec.submission == DAG_RUN else 600
+    # The CLI reads the session's kubeconfig, the file the tunnel is pinned in
+    # and kubectl uses; submit-direct shells out to kubectl with it.
+    environment = session_environment(kubectl)
 
     def submit() -> tuple[int, str, str]:
-        return _run_cli(args, repo_root, timeout=timeout)
+        return _run_cli(args, repo_root, timeout=timeout, env=environment)
 
     if spec.submission == SUBMIT_DIRECT:
         # submit-direct is the one submission that shells out to kubectl

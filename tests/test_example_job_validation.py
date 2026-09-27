@@ -10,6 +10,7 @@ registry — without any AWS access.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -584,6 +585,7 @@ class TestParallelExamples:
                 selected_examples=tuple(selected),
                 max_parallel_examples=max_parallel,
                 repo_root=tmp_path,
+                kubeconfig_path=tmp_path / "report" / "kubeconfig",
             ),
             deployment_regions=["us-east-1"],
             config=SimpleNamespace(project_name="gco"),
@@ -633,9 +635,11 @@ class TestParallelExamples:
         assert summary["max_parallel"] == len(names)
         assert [item["name"] for item in summary["results"]] == names
         assert sorted(ctx.checkpoint.state["examples"]) == names
-        # One session, its bastion sized to the pending examples, and the
-        # keeper's reopen log is the very list the summary reports.
+        # One session on the run's own kubeconfig in its report dir, its bastion
+        # sized to the pending examples, and the keeper's reopen log is the very
+        # list the summary reports.
         assert len(sessions) == 1
+        assert sessions[0]["kubeconfig_path"] == ctx.settings.kubeconfig_path
         assert summary["tunnel"] == {
             "bastion_ttl_minutes": actions._bastion_ttl_minutes(names, len(names)),
             "reopens": [],
@@ -1633,7 +1637,22 @@ class TestRunCli:
             "text": True,
             "timeout": 7,
             "check": False,
+            "env": None,
         }
+
+    def test_an_explicit_environment_reaches_the_process(self, monkeypatch, tmp_path):
+        import subprocess
+
+        seen: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(drivers.subprocess, "run", fake_run)
+        drivers._run_cli(["gco", "jobs", "submit-direct"], tmp_path, env={"KUBECONFIG": "/k"})
+        assert seen["env"] == {"KUBECONFIG": "/k"}
+        assert seen["timeout"] == 600
 
 
 class TestMutationChannels:
@@ -1762,10 +1781,11 @@ class TestSubmitExample:
     ) -> None:
         seen: dict[str, object] = {}
 
-        def fake_run_cli(args, repo_root, timeout=600):
+        def fake_run_cli(args, repo_root, timeout=600, env=None):
             seen["args"] = args
             seen["repo_root"] = repo_root
             seen["timeout"] = timeout
+            seen["env"] = env
             return 0, "x" * 2000 + "submitted", ""
 
         monkeypatch.setattr(drivers, "_run_cli", fake_run_cli)
@@ -1780,8 +1800,45 @@ class TestSubmitExample:
         assert seen["args"] == [str(manifest) if item == "MANIFEST" else item for item in argv]
         assert seen["repo_root"] == REPO_ROOT
         assert seen["timeout"] == timeout
+        # A runner that is not a session has no kubeconfig to hand on.
+        assert seen["env"] is None
         assert evidence["command"] == " ".join(argv[:3]) + " examples/simple-job.yaml"
         assert len(evidence["output"]) == 1500 and evidence["output"].endswith("submitted")
+
+    @pytest.mark.parametrize(
+        "submission",
+        [drivers.SUBMIT_DIRECT, drivers.SUBMIT_SQS, drivers.SUBMIT_API, drivers.DAG_RUN],
+    )
+    def test_cli_paths_hand_the_session_kubeconfig_to_gco(
+        self, monkeypatch, tmp_path, submission: str
+    ) -> None:
+        """Every gco submission reads the session's kubeconfig, over an exported one."""
+        from scripts.example_job_validation import kube
+
+        class _NoKubectl(kube.SessionKubectl):
+            def run_once(self, *args, timeout: float = 120, **kwargs):
+                pytest.fail("kubectl must not be used for CLI paths")
+
+        isolated = tmp_path / "report" / "kubeconfig"
+        monkeypatch.setenv("KUBECONFIG", str(tmp_path / "stray-kubeconfig"))
+        seen: dict[str, object] = {}
+
+        def fake_run_cli(args, repo_root, timeout=600, env=None):
+            seen["env"] = env
+            return 0, "submitted", ""
+
+        monkeypatch.setattr(drivers, "_run_cli", fake_run_cli)
+        drivers.submit_example(
+            self._parsed_for(submission),
+            tmp_path / "m.yaml",
+            repo_root=REPO_ROOT,
+            region="us-east-1",
+            kubectl=_NoKubectl(isolated),
+        )
+        env = seen["env"]
+        assert isinstance(env, dict)
+        assert env["KUBECONFIG"] == str(isolated)
+        assert env["PATH"] == os.environ["PATH"]
 
     def test_cli_failure_reports_stdout_when_stderr_is_empty(self, monkeypatch, tmp_path):
         monkeypatch.setattr(drivers, "_run_cli", lambda *_a, **_k: (4, "  queue missing  ", ""))
@@ -2429,7 +2486,7 @@ def _live_ctx(session=None, *, run_id: str = "run-1"):
 def _record_run_cli(monkeypatch, respond) -> list[tuple[list[str], Path, int]]:
     calls: list[tuple[list[str], Path, int]] = []
 
-    def fake_run_cli(args, repo_root, timeout=600):
+    def fake_run_cli(args, repo_root, timeout=600, env=None):
         calls.append((list(args), repo_root, timeout))
         return respond(args)
 

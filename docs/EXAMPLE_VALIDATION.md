@@ -120,10 +120,16 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals): the
-harness provisions the ephemeral bastion, points kubeconfig at the tunnel
-(`tls-server-name` pinned to the real endpoint host), and tears the
-bastion down with the session — so `gco jobs submit-direct`, which shells
-out to kubectl, works unmodified too.
+harness provisions the ephemeral bastion, points the run's own kubeconfig
+at the tunnel (`tls-server-name` pinned to the real endpoint host), and
+tears the bastion down with the session. That kubeconfig lives in the
+run's private report directory; every kubectl call and every `gco`
+command the harness runs is given it (`--kubeconfig`, `KUBECONFIG`), so
+`gco jobs submit-direct`, which shells out to kubectl, works unmodified
+too. `~/.kube/config` is never read or rewritten, and a `KUBECONFIG` your
+shell exports is ignored: two runs that followed one timed out on the
+private endpoint, because `aws eks update-kubeconfig` and kubectl used
+the exported file while the tunnel was pinned in `~/.kube/config`.
 
 The session also keeps that tunnel carrying traffic, because a Session
 Manager port-forward can stall with its local listener still accepting
@@ -205,7 +211,9 @@ zero — a skip is never silent.
 ## Reports
 
 `~/gco-example-job-validation-reports/<run-id>/` receives
-`example-job-validation.{json,md}` plus `checkpoint.json`. The JSON
+`example-job-validation.{json,md}` plus `checkpoint.json`, and the
+mode-`0600` `kubeconfig` the `examples` action reached the cluster with
+(tunnel-pinned, so it stops working when the run ends). The JSON
 carries a per-example row (status, duration, submission command, disclosed
 mutations, criteria evidence, cleanup proof). Reports contain
 account-specific identifiers — share sanitized summaries only, never the
