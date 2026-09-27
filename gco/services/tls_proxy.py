@@ -244,7 +244,6 @@ class TlsProxy:
         deadline = started + budget
         poll = max(self.config.poll_seconds, _MIN_KEYPAIR_WAIT_POLL_SECONDS)
         next_log = started
-        remaining = budget
         waited = False
         while True:
             try:

@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -155,7 +156,7 @@ def _isolated_tracing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (*_TRACING_ENV, *(name for name in os.environ if name.startswith("OTEL_"))):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(tracing, "_active", None)
-    monkeypatch.setattr(tracing, "_configure_attempted", False)
+    monkeypatch.setattr(tracing, "_configure_attempted", threading.Event())
     monkeypatch.setattr(tracing, "_instrumentation_warnings", tracing._Throttle(60.0))
     monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
     monkeypatch.setattr(trace, "_TRACER_PROVIDER_SET_ONCE", Once())

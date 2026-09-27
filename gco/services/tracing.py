@@ -62,7 +62,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         a long-lived exporter keeps signing with current keys.
         """
 
-        def get_frozen_credentials(self) -> object: ...
+        def get_frozen_credentials(self) -> object:
+            """Return the credentials to sign one request with, refreshed first if due."""
 
 else:
     _SpanExporterBase = object
@@ -315,8 +316,9 @@ class _ActiveTracing:
 _lock = threading.Lock()
 _active: _ActiveTracing | None = None
 #: Set by the first enabled configure call whatever its outcome, so a failed
-#: setup warns once per process and a shut-down process stays untraced.
-_configure_attempted = False
+#: setup warns once per process and a shut-down process stays untraced. Only
+#: read and set while holding ``_lock``.
+_configure_attempted = threading.Event()
 _instrumentation_warnings = _Throttle(_WARNING_INTERVAL_SECONDS)
 
 
@@ -479,12 +481,12 @@ def configure_tracing(service_name: str) -> bool:
     twice per process (``python -m`` and Uvicorn's import string), and the
     second call reuses the first call's provider. Never raises.
     """
-    global _active, _configure_attempted
+    global _active
     if not tracing_enabled():
         return False
     with _lock:
-        if not _configure_attempted:
-            _configure_attempted = True
+        if not _configure_attempted.is_set():
+            _configure_attempted.set()
             try:
                 _active = _setup(service_name)
             except Exception:
