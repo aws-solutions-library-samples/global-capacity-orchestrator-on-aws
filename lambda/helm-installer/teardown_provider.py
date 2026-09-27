@@ -24,8 +24,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-27T04:10:54Z
+# Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46
 # Flowchart(s) generated from this file:
 #   * ``on_event`` -> ``diagrams/code_diagrams/lambda/helm-installer/teardown_provider.on_event.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/teardown_provider.on_event.png``)

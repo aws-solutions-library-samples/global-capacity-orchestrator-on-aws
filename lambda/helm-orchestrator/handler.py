@@ -51,8 +51,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-27T04:10:54Z
+# Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46
 # Flowchart(s) generated from this file:
 #   * ``on_event`` -> ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.png``)

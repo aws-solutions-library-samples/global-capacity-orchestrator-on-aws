@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="c49454f6e7e5c320">
+        <meta name="gco-generated-at" content="2026-09-27T04:10:54Z">
+        <meta name="gco-source-commit" content="590c275a9cd8dc0e0ba9f8ea74acefb63754df46">
+        <meta name="gco-flow-digest" content="8a15fb943e811776">
         <title>Helm teardown completion poll (continued fencing + terminal status)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,42 +208,42 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4755=>operation: 'Surface teardown terminal status; the workflow owns the drain loop.'
-cond4758=>condition: if event['RequestType'] != 'Delete'
-io4765=>inputoutput: output: {'IsComplete': True}
-e4763=>end: end function return
-op4771=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
-op4773=>operation: execution_name = _execution_name(event)
-op4775=>operation: execution_arn = _execution_arn(state_machine_arn, execution_name)
-op4777=>operation: sfn_client = _sfn()
-op4779=>operation: response = sfn_client.describe_execution(executionArn=execution_arn)
-op4781=>operation: status = response['status']
-cond4784=>condition: if status == 'RUNNING'
-io4791=>inputoutput: output: {'IsComplete': False}
-e4789=>end: end function return
-cond4798=>condition: if status == 'SUCCEEDED'
-io4805=>inputoutput: output: {'IsComplete': True}
-e4803=>end: end function return
-op4811=>operation: detail = response.get('cause') or response.get('error') or 'no failure detail'
-sub4813=>subroutine: raise RuntimeError(f'Helm teardown execution {status}: {detail}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op215=>operation: 'Surface teardown terminal status; the workflow owns the drain loop.'
+cond218=>condition: if event['RequestType'] != 'Delete'
+io225=>inputoutput: output: {'IsComplete': True}
+e223=>end: end function return
+op231=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
+op233=>operation: execution_name = _execution_name(event)
+op235=>operation: execution_arn = _execution_arn(state_machine_arn, execution_name)
+op237=>operation: sfn_client = _sfn()
+op239=>operation: response = sfn_client.describe_execution(executionArn=execution_arn)
+op241=>operation: status = response['status']
+cond244=>condition: if status == 'RUNNING'
+io251=>inputoutput: output: {'IsComplete': False}
+e249=>end: end function return
+cond258=>condition: if status == 'SUCCEEDED'
+io265=>inputoutput: output: {'IsComplete': True}
+e263=>end: end function return
+op271=>operation: detail = response.get('cause') or response.get('error') or 'no failure detail'
+sub273=>subroutine: raise RuntimeError(f'Helm teardown execution {status}: {detail}')
 
-op4755->cond4758
-cond4758(yes)->io4765
-io4765->e4763
-cond4758(no)->op4771
-op4771->op4773
-op4773->op4775
-op4775->op4777
-op4777->op4779
-op4779->op4781
-op4781->cond4784
-cond4784(yes)->io4791
-io4791->e4789
-cond4784(no)->cond4798
-cond4798(yes)->io4805
-io4805->e4803
-cond4798(no)->op4811
-op4811->sub4813
+op215->cond218
+cond218(yes)->io225
+io225->e223
+cond218(no)->op231
+op231->op233
+op233->op235
+op235->op237
+op237->op239
+op239->op241
+op241->cond244
+cond244(yes)->io251
+io251->e249
+cond244(no)->cond258
+cond258(yes)->io265
+io265->e263
+cond258(no)->op271
+op271->sub273
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,17 +253,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-27T04:10:54Z -->
+        <!-- Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-27T04:10:54Z">2026-09-27T04:10:54Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>590c275a9cd8dc0e0ba9f8ea74acefb63754df46</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>c49454f6e7e5c320</code>
+            Flow content SHA-256: <code>8a15fb943e811776</code>
           </p>
           <div id="canvas"></div>
         </div>

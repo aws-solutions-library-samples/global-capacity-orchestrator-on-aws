@@ -137,9 +137,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "95b6dc2cc433f090ed2ae6b59567fd63b41aaa56e332f03cf4b6535531bfec6b",
-      "generated_at": "2026-09-26T23:26:19Z",
-      "source_commit": "f3be7366f66f942f857b581eaf47f75a14c29d81"
+      "digest": "ddcf4d17b1b9bd0bea918121a4d43c3924ac522c987fc73150eb89ee4ebdda76",
+      "generated_at": "2026-09-27T04:10:54Z",
+      "source_commit": "590c275a9cd8dc0e0ba9f8ea74acefb63754df46"
     },
     "gco_mcp/audit.py": {
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",
@@ -222,19 +222,19 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "lambda/helm-installer/handler.py": {
-      "digest": "f0ff66e35907629c1663a02d2c9fa351f19fcab88a7912b3cce985060e9f0362",
-      "generated_at": "2026-09-25T01:31:13Z",
-      "source_commit": "6d1f7ea26e77091f1f7ccf730fd4ded8ea0fb7a7"
+      "digest": "36047e47f713a38d1fd8732224ee5f4bf39cfe358c3d5b0ed100834f526b0a9c",
+      "generated_at": "2026-09-27T04:10:54Z",
+      "source_commit": "590c275a9cd8dc0e0ba9f8ea74acefb63754df46"
     },
     "lambda/helm-installer/teardown_provider.py": {
-      "digest": "96ca3c2a35518ee498355f88ecdc077618275c5829b937bb4b3b5e8261b3ceec",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "846fa5eb74ffc9ff796a97d04542084e1782a62826ceceb1a7efc9013158fb9c",
+      "generated_at": "2026-09-27T04:10:54Z",
+      "source_commit": "590c275a9cd8dc0e0ba9f8ea74acefb63754df46"
     },
     "lambda/helm-orchestrator/handler.py": {
-      "digest": "bf885f23cee98454c750f3a96e2dd6d08599ba354d125cb408b1ac9f92c039e6",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "cafae33feaaa12b8a960a1e67956b98cc68482c0a70376e76832fda553cb1a29",
+      "generated_at": "2026-09-27T04:10:54Z",
+      "source_commit": "590c275a9cd8dc0e0ba9f8ea74acefb63754df46"
     },
     "lambda/image-lookup/handler.py": {
       "digest": "46c93f35f7ef1dfa8d5ffdd0472b4b8459b48d5713fda0a80931eaf70d28619f",
