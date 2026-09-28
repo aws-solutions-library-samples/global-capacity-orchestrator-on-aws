@@ -9,7 +9,7 @@ labels, the shared Mooncake master, the ConfigMaps its pods mount by name, its
 provenance annotations), the model endpoints' keypair cert-manager's, and the
 CA bundle trust-manager publishes in gco-jobs trust-manager's.
 
-Its CEL runs through ``tests/_cel.py``. The names it keys on are pinned to
+Its CEL compiles and runs in cel-expr-python (``tests/_cel.py``). The names it keys on are pinned to
 their owners here (the monitor's constants and endpoint inventory, the
 monitor's Deployment, the cert-manager and trust-manager releases, the shipped
 Bundle), so renaming one without the other fails. Every object GCO ships, and every example and harness manifest,
@@ -32,14 +32,7 @@ import yaml
 
 from gco.services import inference_monitor
 from gco.services.inference_monitor import InferenceMonitor, ReconcileAuthority
-from tests._cel import (
-    CelError,
-    _cel_bool,
-    _cel_eval,
-    _CelParser,
-    _CelVariables,
-    _variable_references,
-)
+from tests._cel import CelError, Variables, check, evaluate, evaluate_bool
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -157,7 +150,7 @@ def _activation(
             "userInfo": {"username": user, "groups": ["system:authenticated"]},
         },
     }
-    activation["variables"] = _CelVariables(_policy()["spec"]["variables"], activation)
+    activation["variables"] = Variables(_policy()["spec"]["variables"], activation)
     return activation
 
 
@@ -182,9 +175,9 @@ def _review(
     failures = []
     for validation in _policy()["spec"]["validations"]:
         try:
-            if _cel_bool(_cel_eval(_CelParser(validation["expression"]).parse(), activation)):
+            if evaluate_bool(validation["expression"], activation):
                 continue
-            message = _cel_eval(_CelParser(validation["messageExpression"]).parse(), activation)
+            message = evaluate(validation["messageExpression"], activation)
         except CelError as error:
             pytest.fail(f"CEL error in {validation['expression']!r}: {error}")
         assert isinstance(message, str) and message.strip() and "\n" not in message
@@ -439,16 +432,16 @@ class TestFencePolicy:
             assert validation["message"].strip() and "\n" not in validation["message"]
             assert validation["messageExpression"].strip()
 
-    def test_expressions_parse_and_use_only_variables_defined_before_them(self) -> None:
+    def test_expressions_compile_and_use_only_variables_defined_before_them(self) -> None:
         spec = _policy()["spec"]
         defined: list[str] = []
         for variable in spec["variables"]:
-            assert set(_variable_references(variable["expression"])) <= set(defined), variable
+            check(variable["expression"], defined)
             defined.append(variable["name"])
         assert len(defined) == len(set(defined))
         for validation in spec["validations"]:
             for field in ("expression", "messageExpression"):
-                assert set(_variable_references(validation[field])) <= set(defined), validation
+                check(validation[field], defined)
 
 
 # ─── The names it keys on, pinned to their owners ──────────────────

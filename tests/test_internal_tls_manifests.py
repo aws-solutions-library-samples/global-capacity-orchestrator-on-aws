@@ -14,8 +14,8 @@ Every in-cluster hop GCO owns is HTTPS verified against one private CA:
   and the Grafana rotator all name the Service host their peer's leaf carries.
 
 * ``08-internal-ca-issuance.yaml`` fences who may get the CA to sign: its
-  ValidatingAdmissionPolicy's own CEL runs through a small interpreter here, over
-  every shipped Certificate and over the tenant objects it must refuse.
+  ValidatingAdmissionPolicy's own CEL runs here in cel-expr-python, over every
+  shipped Certificate and over the tenant objects it must refuse.
 
 The four traced services also carry the tracing switches, and nothing else
 does. These tests parse the shipped manifests the way the applier would.
@@ -34,14 +34,7 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 
-from tests._cel import (
-    CelError,
-    _cel_bool,
-    _cel_eval,
-    _CelParser,
-    _CelVariables,
-    _variable_references,
-)
+from tests._cel import CelError, Variables, check, evaluate, evaluate_bool
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -779,12 +772,11 @@ class TestTracingEnvironment:
 
 # ─── The issuance fence ────────────────────────────────────────────
 #
-# The policy's own CEL runs through tests/_cel.py, which knows exactly the CEL
-# GCO's admission policies use and fails a test on any error (an error would
-# deny the request under failurePolicy: Fail) or any construct it does not
-# model. integration:kind:examples-smoke runs the same policy in a real API
-# server against the pinned cert-manager (TestIssuanceFenceInKind pins its
-# probes).
+# The policy's own CEL compiles and runs in cel-expr-python through
+# tests/_cel.py, with CEL's standard library only, and fails a test on any
+# error (an error would deny the request under failurePolicy: Fail).
+# integration:kind:examples-smoke runs the same policy in a real API server
+# against the pinned cert-manager (TestIssuanceFenceInKind pins its probes).
 
 POLICY = "gco-internal-ca-issuance"
 CERT_MANAGER_USER = "system:serviceaccount:cert-manager:cert-manager"
@@ -828,7 +820,7 @@ def _activation(
             "userInfo": {"username": user, "groups": ["system:authenticated"]},
         },
     }
-    activation["variables"] = _CelVariables(_fence_policy()["spec"]["variables"], activation)
+    activation["variables"] = Variables(_fence_policy()["spec"]["variables"], activation)
     return activation
 
 
@@ -859,9 +851,9 @@ def _review(obj: dict[str, Any], **request: Any) -> list[str] | None:
     failures = []
     for validation in _fence_policy()["spec"]["validations"]:
         try:
-            if _cel_bool(_cel_eval(_CelParser(validation["expression"]).parse(), activation)):
+            if evaluate_bool(validation["expression"], activation):
                 continue
-            message = _cel_eval(_CelParser(validation["messageExpression"]).parse(), activation)
+            message = evaluate(validation["messageExpression"], activation)
         except CelError as error:
             pytest.fail(f"CEL error in {validation['expression']!r}: {error}")
         assert isinstance(message, str) and message.strip() and "\n" not in message
@@ -927,41 +919,33 @@ def _key(obj: dict[str, Any]) -> str:
     return f"{obj['metadata']['namespace']}/{obj['metadata']['name']}"
 
 
-class TestCelInterpreter:
-    """The interpreter behaves like CEL for every construct the policy relies on."""
+class TestCelEvaluation:
+    """tests/_cel.py runs CEL in cel-expr-python with the semantics the policies rely on."""
 
     @pytest.mark.parametrize(
         ("source", "expected"),
         [
             ("has(o.a)", True),
             ("has(o.missing)", False),
+            # && and || settle over an error on either side.
             ("true || o.missing", True),
             ("o.missing || true", True),
             ("false && o.missing", False),
             ("o.missing && false", False),
             ("o.a == 1 ? 'one' : o.missing", "one"),
-            ("'x' in ['y', 'x']", True),
             ("'b' in {'a': 1, 'b': 2}", True),
             ("o.m['k'] + '/' + o.m['k']", "v/v"),
             ("['a'] + ['b'] == ['a', 'b']", True),
-            ("1 == true", False),
-            ("[].all(n, n == 1)", True),
-            ("['a', 'b'].all(n, n in ['a', 'b', 'c'])", True),
-            ("['a', 'z'].all(n, n in ['a', 'b'])", False),
+            # Values of different types are unequal: in CEL a bool is not an int.
+            ("o.a == true", False),
             # A false element settles all() over another element's error.
             ("[1, 'z'].all(n, n + 'x' == 'ax')", False),
-            ("!(o.a != 1)", True),
-            ("\"double\" == 'double'", True),
-            (r"'it\'s' == " + '"it\'s"', True),
-            ("'ep-tls-proxy'.endsWith('-tls-proxy')", True),
-            ("'tls-proxy-notes'.endsWith('-tls-proxy')", False),
-            ("o.m['k'].startsWith('v') && !o.m['k'].startsWith('w')", True),
             ("o.missing.endsWith('x') || true", True),
+            ("{'k': [o.a, null, o.m]}", {"k": [1, None, {"k": "v"}]}),
         ],
     )
     def test_values(self, source: str, expected: Any) -> None:
-        activation = {"o": {"a": 1, "m": {"k": "v"}}}
-        assert _cel_eval(_CelParser(source).parse(), activation) == expected
+        assert evaluate(source, {"o": {"a": 1, "m": {"k": "v"}}}) == expected
 
     @pytest.mark.parametrize(
         "source",
@@ -973,38 +957,57 @@ class TestCelInterpreter:
             "o.m['absent']",
             "!o.a",
             "o.a ? 1 : 2",
-            "1 + 'a'",
-            "'a' in 'abc'",
-            "[o.missing].all(n, n == 'a')",
             "['a', 1].all(n, n + 'x' == 'ax')",
-            "unknown",
             "o.a.endsWith('1')",
-            "'x'.startsWith(1)",
-            "o.missing.endsWith('x')",
+            # These do not compile: an overload CEL lacks, an unbound root, a
+            # Kubernetes library function, optional syntax, a syntax error.
+            "'a' in 'abc'",
+            "params.x",
+            "'A'.lowerAscii()",
+            "o.?a",
+            "[1, 2",
         ],
     )
     def test_errors(self, source: str) -> None:
         with pytest.raises(CelError):
-            _cel_eval(_CelParser(source).parse(), {"o": {"a": 1, "m": {"k": "v"}}})
+            evaluate(source, {"o": {"a": 1, "m": {"k": "v"}}})
 
-    @pytest.mark.parametrize(
-        "source",
-        [
-            "size(o)",
-            "o.exists(n, n)",
-            "o.contains('x')",
-            "o.endsWith('a', 'b')",
-            "o.?a",
-            "o.a < 2",
-            "has(o)",
-            "[1, 2",
-            "o.a o.b",
-            "'\\n'",
-        ],
-    )
-    def test_constructs_it_does_not_model_are_parse_errors(self, source: str) -> None:
-        with pytest.raises(ValueError, match=r"CEL"):
-            _CelParser(source).parse()
+    def test_a_validation_must_be_a_bool(self) -> None:
+        assert evaluate_bool("o.a == 1", {"o": {"a": 1}}) is True
+        with pytest.raises(CelError, match="expected a bool"):
+            evaluate_bool("o.a", {"o": {"a": 1}})
+
+    def test_variables_compose_in_order_and_keep_their_own_errors(self) -> None:
+        activation: dict[str, Any] = {"o": {"a": 1}}
+        variables = Variables(
+            [
+                {"name": "one", "expression": "o.a"},
+                {"name": "broken", "expression": "o.missing"},
+                {"name": "two", "expression": "variables.one + 1"},
+                {"name": "ahead", "expression": "variables.later"},
+                {"name": "later", "expression": "3"},
+            ],
+            activation,
+        )
+        activation["variables"] = variables
+        assert (variables.get("one"), variables.get("two"), variables.get("later")) == (1, 2, 3)
+        with pytest.raises(CelError, match="missing"):
+            variables.get("broken")
+        with pytest.raises(CelError, match="does not compile"):
+            variables.get("ahead")
+        with pytest.raises(CelError, match="undefined variable"):
+            variables.get("absent")
+        # An erroring variable is an error where it is used, and it is reported as itself.
+        assert evaluate("variables.broken == 1 || variables.two == 2", activation) is True
+        with pytest.raises(CelError, match=r"^variables\.broken: .*missing"):
+            evaluate("variables.broken == 1", activation)
+
+    def test_check_knows_only_the_request_roots_and_the_named_variables(self) -> None:
+        check("request.name == object.metadata.name && oldObject == null")
+        check("variables.one == 1", ["one"])
+        for source in ("variables.one == 1", "params.x", "namespaceObject.metadata", "authorizer"):
+            with pytest.raises(CelError, match="does not compile"):
+                check(source)
 
 
 class TestIssuanceFencePolicy:
@@ -1079,16 +1082,16 @@ class TestIssuanceFencePolicy:
             assert validation["message"].strip() and "\n" not in validation["message"]
             assert validation["messageExpression"].strip()
 
-    def test_expressions_parse_and_use_only_variables_defined_before_them(self) -> None:
+    def test_expressions_compile_and_use_only_variables_defined_before_them(self) -> None:
         spec = _fence_policy()["spec"]
         defined: list[str] = []
         for variable in spec["variables"]:
-            assert set(_variable_references(variable["expression"])) <= set(defined), variable
+            check(variable["expression"], defined)
             defined.append(variable["name"])
         assert len(defined) == len(set(defined))
         for validation in spec["validations"]:
             for field in ("expression", "messageExpression"):
-                assert set(_variable_references(validation[field])) <= set(defined), validation
+                check(validation[field], defined)
 
     def test_the_allowlist_is_exactly_the_shipped_leaves_and_their_names(self) -> None:
         """Every Certificate that names gco-internal-ca, parsed from every manifest."""

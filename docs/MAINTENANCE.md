@@ -616,13 +616,16 @@ resolve, the environment is dirty — fix the environment, don't loosen the pin.
      pip install --quiet "pip==25.0.1" &&
      pip-compile --no-emit-index-url --strip-extras --all-extras \
        -o requirements-lock.txt pyproject.toml &&
-     sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
+     sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt &&
+     chmod 644 requirements-lock.txt
    '
    ```
 
    The `pip==25.0.1` downgrade is required first: `pip-tools==7.6.1` imports
    pip internals that newer pip (as shipped in the current `python:3.14-slim`
-   base) has removed, and it only affects the throwaway container.
+   base) has removed, and it only affects the throwaway container. The final
+   `chmod` undoes `sed -i` leaving the file owner-only on a macOS bind mount,
+   which `gco stacks deploy` would refuse.
 
 4. Run the affected checks, then open a PR. CI rejects stale Python or npm
    lockfiles, unmanaged npm graphs, and inconsistent Node/npm/CDK pins.
