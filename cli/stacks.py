@@ -345,6 +345,9 @@ def _normalize_asset_modes(root: Path) -> None:
     """
     if not _modes_gate_reads():
         return
+    # World-listable on purpose: the Lambda runtime and an image's non-root
+    # user must list and enter every asset directory (_PUBLISHED_DIRECTORY_MODE).
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(root, _PUBLISHED_DIRECTORY_MODE)
     for directory, directories, files in os.walk(root):
         for name in (*directories, *files):

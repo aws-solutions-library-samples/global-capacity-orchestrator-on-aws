@@ -74,9 +74,11 @@ def test_staged_builds_get_git_modes_whatever_the_umask(tmp_path: Path) -> None:
     outside = _write(tmp_path / "outside.txt", mode=0o600)
     link = staging / "pkg" / "link"
     link.symlink_to(outside)
-    os.chmod(staging / "pkg" / "bin", 0o700)
-    os.chmod(staging / "pkg", 0o700)
-    os.chmod(staging, 0o700)
+    # Owner-only directories, as a build under umask 077 leaves them. Semgrep's
+    # permissions audit flags any mode above 0o644, owner-only 0o700 included.
+    for directory in (staging / "pkg" / "bin", staging / "pkg", staging):
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.chmod(directory, 0o700)
 
     stacks._normalize_asset_modes(staging)
 
@@ -166,16 +168,21 @@ def test_hidden_entries_are_files_others_cannot_read_or_directories_they_cannot_
 def test_world_readability_ignores_the_root_and_fails_closed(tmp_path: Path) -> None:
     build = tmp_path / "build"
     handler = _write(build / "pkg" / "handler.py")
-    os.chmod(build, 0o700)  # tempfile.mkdtemp's mode; no asset carries it
+    # tempfile.mkdtemp's owner-only mode; no asset carries it.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(build, 0o700)
     assert stacks._asset_tree_is_world_readable(build) is True
 
     os.chmod(handler, 0o600)
     assert stacks._asset_tree_is_world_readable(build) is False
 
     os.chmod(handler, 0o644)
+    # An owner-only directory hides the readable file inside it.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(build / "pkg", 0o700)
     assert stacks._asset_tree_is_world_readable(build) is False
 
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(build / "pkg", 0o755)
     with patch.object(stacks.Path, "lstat", side_effect=PermissionError("denied")):
         assert stacks._asset_tree_is_world_readable(build) is False
