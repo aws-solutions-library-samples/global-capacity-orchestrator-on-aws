@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-28T07:53:52Z">
-        <meta name="gco-source-commit" content="8f5a89a0a3c71e8e8cb0e4943642bb6cd07802da">
-        <meta name="gco-flow-digest" content="573b3519998c0a64">
+        <meta name="gco-generated-at" content="2026-09-28T16:13:31Z">
+        <meta name="gco-source-commit" content="b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba">
+        <meta name="gco-flow-digest" content="175b42e2f939c757">
         <title>gco stacks deploy-all — orchestrated multi-stack deploy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -209,7 +209,7 @@ function base64ToSvgDocument(base64) {
     </head>
     <body>
         <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then base regional stacks, regional API\n        bridges, and finally monitoring. Parallelism never crosses a dependency\n        level.\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n\n        Raises:\n            AssetPermissionError: before the stack listing synthesizes\n                anything, when a deployable source is owner-only.\n        '
-sub4=>subroutine: self._check_asset_sources_readable()
+sub4=>subroutine: self.ensure_asset_sources_readable()
 op6=>operation: stacks = self.list_stacks()
 op8=>operation: stack_names = set(stacks)
 op10=>operation: project_name = self.config.project_name
@@ -426,17 +426,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-28T07:53:52Z -->
-        <!-- Generated from Git commit: 8f5a89a0a3c71e8e8cb0e4943642bb6cd07802da -->
+        <!-- Generated at (UTC): 2026-09-28T16:13:31Z -->
+        <!-- Generated from Git commit: b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-28T07:53:52Z">2026-09-28T07:53:52Z</time>
+            Generated at (UTC): <time datetime="2026-09-28T16:13:31Z">2026-09-28T16:13:31Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>8f5a89a0a3c71e8e8cb0e4943642bb6cd07802da</code>
+            Source commit: <code>b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>573b3519998c0a64</code>
+            Flow content SHA-256: <code>175b42e2f939c757</code>
           </p>
           <div id="canvas"></div>
         </div>
