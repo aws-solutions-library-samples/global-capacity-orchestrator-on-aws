@@ -46,8 +46,8 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-28T07:34:51Z
+# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
 # Flowchart(s) generated from this file:
 #   * ``AuthenticationMiddleware.dispatch`` -> ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.png``)

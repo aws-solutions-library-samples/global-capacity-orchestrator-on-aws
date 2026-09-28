@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="81c630ead74a658e">
+        <meta name="gco-generated-at" content="2026-09-28T07:34:51Z">
+        <meta name="gco-source-commit" content="95213a3dfe214f41ea8e3977b79711b1be061ac0">
+        <meta name="gco-flow-digest" content="55207add64c51b04">
         <title>gco stacks deploy-all — orchestrated multi-stack deploy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,213 +208,215 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op553=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then base regional stacks, regional API\n        bridges, and finally monitoring. Parallelism never crosses a dependency\n        level.\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
-op555=>operation: stacks = self.list_stacks()
-op557=>operation: stack_names = set(stacks)
-op559=>operation: project_name = self.config.project_name
-op561=>operation: ordered_stacks = get_stack_deployment_order(stacks, project_name=project_name)
-op563=>operation: strict_deployment = strict_deployment_token is not None or on_change_set_prepared is not None
-cond566=>condition: if strict_deployment
-cond571=>operation: raise RuntimeError('Strict deployment requires both a run token and a prepared-change-set callback') if  not strict_deployment_token or on_change_set_prepared is None
-cond582=>operation: raise RuntimeError('Strict orchestrated deployment cannot auto-bootstrap') if  allow_bootstrap
-cond593=>operation: raise RuntimeError('Strict orchestrated deployment requires an exact authorizer') if  authorize_stack is None
-cond604=>operation: raise RuntimeError('Strict orchestrated deployment lacks target identities') if  expected_stack_ids is None
-cond615=>operation: raise RuntimeError('Strict orchestrated deployment lacks change-set history') if  prepared_change_sets is None
-op625=>operation: missing = sorted(set(stacks) - set(expected_stack_ids))
-op627=>operation: unexpected = sorted(set(expected_stack_ids) - set(stacks))
-cond630=>operation: raise RuntimeError(f'Strict deployment target map does not match the CDK graph; missing={missing}, unexpected={unexpected}') if  missing or unexpected
-op640=>operation: missing_history = sorted(set(stacks) - set(prepared_change_sets))
-op642=>operation: unexpected_history = sorted(set(prepared_change_sets) - set(stacks))
-cond645=>operation: raise RuntimeError(f'Strict change-set history does not match the CDK graph; missing={missing_history}, unexpected={unexpected_history}') if  missing_history or unexpected_history
-op655=>operation: validated_regions: set[str] = set()
-cond658=>condition: for target_name in ordered_stacks
-op662=>operation: region = self._get_deploy_region(target_name)
-cond665=>operation: raise RuntimeError(f'Could not resolve deploy Region for {target_name}') if  not region
-cond676=>condition: if region not in validated_regions
-op680=>operation: expected_bootstrap = (bootstrap_stacks or {}).get(region)
-cond683=>operation: raise RuntimeError(f'Strict deployment lacks a checkpointed CDKToolkit identity for {region}') if  expected_bootstrap is None
-sub693=>subroutine: self._validate_bootstrap_stack(region, expected_bootstrap)
-sub695=>subroutine: validated_regions.add(region)
-op700=>operation: expected_id = expected_stack_ids[target_name]
-op702=>operation: target = self._describe_stack_target(target_name, expected_stack_id=expected_id, require_expected_identity=True)
-cond705=>operation: raise RuntimeError(f'Checkpointed stack {expected_id} is absent; refusing recreation') if  expected_id is not None and target is None
-cond716=>operation: authorize_stack(target_name, region, str(target[2]['StackId'])) if  target is not None
-op731=>operation: pre_regional_stacks = [s for s in ordered_stacks if s.endswith(('-global', '-api-gateway'))]
-op733=>operation: regional_api_stacks = [s for s in ordered_stacks if _is_regional_api_bridge_stack(s, project_name=project_name, stack_names=stack_names)]
-op735=>operation: regional_stacks = [s for s in ordered_stacks if not s.endswith(('-global', '-api-gateway', '-monitoring')) and (not _is_regional_api_bridge_stack(s, project_name=project_name, stack_names=stack_names))]
-op737=>operation: post_regional_stacks = [s for s in ordered_stacks if s.endswith('-monitoring')]
-op739=>operation: successful: list[str] = []
-op741=>operation: failed: list[str] = []
-op743=>operation: deployment_safety: _StackOperationSafetyKwargs = {'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
-cond746=>condition: for stack_name in pre_regional_stacks
-cond751=>operation: on_stack_start(stack_name) if  on_stack_start
-op761=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, **deployment_safety)
-cond764=>condition: if success
-sub768=>subroutine: successful.append(stack_name)
-cond776=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond787=>condition: if not success
-io794=>inputoutput: output: (False, successful, failed)
-e792=>end: end function return
-sub772=>subroutine: failed.append(stack_name)
-cond803=>condition: if regional_stacks
-cond808=>condition: if parallel and len(regional_stacks) > 1
-op812=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers, allow_bootstrap=allow_bootstrap, bootstrap_stacks=bootstrap_stacks, expected_stack_ids=expected_stack_ids, prepared_change_sets=prepared_change_sets, authorize_stack=authorize_stack, strict_deployment_token=strict_deployment_token, on_change_set_prepared=on_change_set_prepared, on_ecr_repository_created=on_ecr_repository_created)
-sub814=>subroutine: successful.extend(successful_regional)
-sub816=>subroutine: failed.extend(failed_regional)
-cond819=>condition: if failed_regional
-io826=>inputoutput: output: (False, successful, failed)
-e824=>end: end function return
-cond896=>condition: if regional_api_stacks
-cond901=>condition: if parallel and len(regional_api_stacks) > 1
-op905=>operation: successful_api, failed_api = self._deploy_stacks_parallel(stacks=regional_api_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers, allow_bootstrap=allow_bootstrap, bootstrap_stacks=bootstrap_stacks, expected_stack_ids=expected_stack_ids, prepared_change_sets=prepared_change_sets, authorize_stack=authorize_stack, strict_deployment_token=strict_deployment_token, on_change_set_prepared=on_change_set_prepared, on_ecr_repository_created=on_ecr_repository_created)
-sub907=>subroutine: successful.extend(successful_api)
-sub909=>subroutine: failed.extend(failed_api)
-cond912=>condition: if failed_api
-io919=>inputoutput: output: (False, successful, failed)
-e917=>end: end function return
-cond989=>condition: for stack_name in post_regional_stacks
-cond994=>operation: on_stack_start(stack_name) if  on_stack_start
-op1004=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
-cond1007=>condition: if success
-sub1011=>subroutine: successful.append(stack_name)
-cond1019=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1030=>condition: if not success
-io1037=>inputoutput: output: (False, successful, failed)
-e1035=>end: end function return
-sub1015=>subroutine: failed.append(stack_name)
-io1048=>inputoutput: output: (len(failed) == 0, successful, failed)
-e1046=>end: end function return
-cond928=>condition: for stack_name in regional_api_stacks
-cond933=>operation: on_stack_start(stack_name) if  on_stack_start
-op943=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
-cond946=>condition: if success
-sub950=>subroutine: successful.append(stack_name)
-cond958=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond969=>condition: if not success
-io976=>inputoutput: output: (False, successful, failed)
-e974=>end: end function return
-sub954=>subroutine: failed.append(stack_name)
-cond835=>condition: for stack_name in regional_stacks
-cond840=>operation: on_stack_start(stack_name) if  on_stack_start
-op850=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
-cond853=>condition: if success
-sub857=>subroutine: successful.append(stack_name)
-cond865=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond876=>condition: if not success
-io883=>inputoutput: output: (False, successful, failed)
-e881=>end: end function return
-sub861=>subroutine: failed.append(stack_name)
+        <div><textarea id="code" style="width: 100%;" rows="11">op54=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then base regional stacks, regional API\n        bridges, and finally monitoring. Parallelism never crosses a dependency\n        level.\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n\n        Raises:\n            AssetPermissionError: before the stack listing synthesizes\n                anything, when a deployable source is owner-only.\n        '
+sub56=>subroutine: self._check_asset_sources_readable()
+op58=>operation: stacks = self.list_stacks()
+op60=>operation: stack_names = set(stacks)
+op62=>operation: project_name = self.config.project_name
+op64=>operation: ordered_stacks = get_stack_deployment_order(stacks, project_name=project_name)
+op66=>operation: strict_deployment = strict_deployment_token is not None or on_change_set_prepared is not None
+cond69=>condition: if strict_deployment
+cond74=>operation: raise RuntimeError('Strict deployment requires both a run token and a prepared-change-set callback') if  not strict_deployment_token or on_change_set_prepared is None
+cond85=>operation: raise RuntimeError('Strict orchestrated deployment cannot auto-bootstrap') if  allow_bootstrap
+cond96=>operation: raise RuntimeError('Strict orchestrated deployment requires an exact authorizer') if  authorize_stack is None
+cond107=>operation: raise RuntimeError('Strict orchestrated deployment lacks target identities') if  expected_stack_ids is None
+cond118=>operation: raise RuntimeError('Strict orchestrated deployment lacks change-set history') if  prepared_change_sets is None
+op128=>operation: missing = sorted(set(stacks) - set(expected_stack_ids))
+op130=>operation: unexpected = sorted(set(expected_stack_ids) - set(stacks))
+cond133=>operation: raise RuntimeError(f'Strict deployment target map does not match the CDK graph; missing={missing}, unexpected={unexpected}') if  missing or unexpected
+op143=>operation: missing_history = sorted(set(stacks) - set(prepared_change_sets))
+op145=>operation: unexpected_history = sorted(set(prepared_change_sets) - set(stacks))
+cond148=>operation: raise RuntimeError(f'Strict change-set history does not match the CDK graph; missing={missing_history}, unexpected={unexpected_history}') if  missing_history or unexpected_history
+op158=>operation: validated_regions: set[str] = set()
+cond161=>condition: for target_name in ordered_stacks
+op165=>operation: region = self._get_deploy_region(target_name)
+cond168=>operation: raise RuntimeError(f'Could not resolve deploy Region for {target_name}') if  not region
+cond179=>condition: if region not in validated_regions
+op183=>operation: expected_bootstrap = (bootstrap_stacks or {}).get(region)
+cond186=>operation: raise RuntimeError(f'Strict deployment lacks a checkpointed CDKToolkit identity for {region}') if  expected_bootstrap is None
+sub196=>subroutine: self._validate_bootstrap_stack(region, expected_bootstrap)
+sub198=>subroutine: validated_regions.add(region)
+op203=>operation: expected_id = expected_stack_ids[target_name]
+op205=>operation: target = self._describe_stack_target(target_name, expected_stack_id=expected_id, require_expected_identity=True)
+cond208=>operation: raise RuntimeError(f'Checkpointed stack {expected_id} is absent; refusing recreation') if  expected_id is not None and target is None
+cond219=>operation: authorize_stack(target_name, region, str(target[2]['StackId'])) if  target is not None
+op234=>operation: pre_regional_stacks = [s for s in ordered_stacks if s.endswith(('-global', '-api-gateway'))]
+op236=>operation: regional_api_stacks = [s for s in ordered_stacks if _is_regional_api_bridge_stack(s, project_name=project_name, stack_names=stack_names)]
+op238=>operation: regional_stacks = [s for s in ordered_stacks if not s.endswith(('-global', '-api-gateway', '-monitoring')) and (not _is_regional_api_bridge_stack(s, project_name=project_name, stack_names=stack_names))]
+op240=>operation: post_regional_stacks = [s for s in ordered_stacks if s.endswith('-monitoring')]
+op242=>operation: successful: list[str] = []
+op244=>operation: failed: list[str] = []
+op246=>operation: deployment_safety: _StackOperationSafetyKwargs = {'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
+cond249=>condition: for stack_name in pre_regional_stacks
+cond254=>operation: on_stack_start(stack_name) if  on_stack_start
+op264=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, **deployment_safety)
+cond267=>condition: if success
+sub271=>subroutine: successful.append(stack_name)
+cond279=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond290=>condition: if not success
+io297=>inputoutput: output: (False, successful, failed)
+e295=>end: end function return
+sub275=>subroutine: failed.append(stack_name)
+cond306=>condition: if regional_stacks
+cond311=>condition: if parallel and len(regional_stacks) > 1
+op315=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers, allow_bootstrap=allow_bootstrap, bootstrap_stacks=bootstrap_stacks, expected_stack_ids=expected_stack_ids, prepared_change_sets=prepared_change_sets, authorize_stack=authorize_stack, strict_deployment_token=strict_deployment_token, on_change_set_prepared=on_change_set_prepared, on_ecr_repository_created=on_ecr_repository_created)
+sub317=>subroutine: successful.extend(successful_regional)
+sub319=>subroutine: failed.extend(failed_regional)
+cond322=>condition: if failed_regional
+io329=>inputoutput: output: (False, successful, failed)
+e327=>end: end function return
+cond399=>condition: if regional_api_stacks
+cond404=>condition: if parallel and len(regional_api_stacks) > 1
+op408=>operation: successful_api, failed_api = self._deploy_stacks_parallel(stacks=regional_api_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers, allow_bootstrap=allow_bootstrap, bootstrap_stacks=bootstrap_stacks, expected_stack_ids=expected_stack_ids, prepared_change_sets=prepared_change_sets, authorize_stack=authorize_stack, strict_deployment_token=strict_deployment_token, on_change_set_prepared=on_change_set_prepared, on_ecr_repository_created=on_ecr_repository_created)
+sub410=>subroutine: successful.extend(successful_api)
+sub412=>subroutine: failed.extend(failed_api)
+cond415=>condition: if failed_api
+io422=>inputoutput: output: (False, successful, failed)
+e420=>end: end function return
+cond492=>condition: for stack_name in post_regional_stacks
+cond497=>operation: on_stack_start(stack_name) if  on_stack_start
+op507=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
+cond510=>condition: if success
+sub514=>subroutine: successful.append(stack_name)
+cond522=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond533=>condition: if not success
+io540=>inputoutput: output: (False, successful, failed)
+e538=>end: end function return
+sub518=>subroutine: failed.append(stack_name)
+io551=>inputoutput: output: (len(failed) == 0, successful, failed)
+e549=>end: end function return
+cond431=>condition: for stack_name in regional_api_stacks
+cond436=>operation: on_stack_start(stack_name) if  on_stack_start
+op446=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
+cond449=>condition: if success
+sub453=>subroutine: successful.append(stack_name)
+cond461=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond472=>condition: if not success
+io479=>inputoutput: output: (False, successful, failed)
+e477=>end: end function return
+sub457=>subroutine: failed.append(stack_name)
+cond338=>condition: for stack_name in regional_stacks
+cond343=>operation: on_stack_start(stack_name) if  on_stack_start
+op353=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True, **deployment_safety)
+cond356=>condition: if success
+sub360=>subroutine: successful.append(stack_name)
+cond368=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond379=>condition: if not success
+io386=>inputoutput: output: (False, successful, failed)
+e384=>end: end function return
+sub364=>subroutine: failed.append(stack_name)
 
-op553->op555
-op555->op557
-op557->op559
-op559->op561
-op561->op563
-op563->cond566
-cond566(yes)->cond571
-cond571->cond582
-cond582->cond593
-cond593->cond604
-cond604->cond615
-cond615->op625
-op625->op627
-op627->cond630
-cond630->op640
-op640->op642
-op642->cond645
-cond645->op655
-op655->cond658
-cond658(yes)->op662
-op662->cond665
-cond665->cond676
-cond676(yes)->op680
-op680->cond683
-cond683->sub693
-sub693->sub695
-sub695->op700
-op700->op702
-op702->cond705
-cond705->cond716
-cond716->cond658
-cond676(no)->op700
-cond658(no)->op731
-op731->op733
-op733->op735
-op735->op737
-op737->op739
-op739->op741
-op741->op743
-op743->cond746
-cond746(yes)->cond751
-cond751->op761
-op761->cond764
-cond764(yes)->sub768
-sub768->cond776
-cond776->cond787
-cond787(yes)->io794
-io794->e792
-cond787(no)->cond746
-cond764(no)->sub772
-sub772->cond776
-cond746(no)->cond803
-cond803(yes)->cond808
-cond808(yes)->op812
-op812->sub814
-sub814->sub816
-sub816->cond819
-cond819(yes)->io826
-io826->e824
-cond819(no)->cond896
-cond896(yes)->cond901
-cond901(yes)->op905
-op905->sub907
-sub907->sub909
-sub909->cond912
-cond912(yes)->io919
-io919->e917
-cond912(no)->cond989
-cond989(yes)->cond994
-cond994->op1004
-op1004->cond1007
-cond1007(yes)->sub1011
-sub1011->cond1019
-cond1019->cond1030
-cond1030(yes)->io1037
-io1037->e1035
-cond1030(no)->cond989
-cond1007(no)->sub1015
-sub1015->cond1019
-cond989(no)->io1048
-io1048->e1046
-cond901(no)->cond928
-cond928(yes)->cond933
-cond933->op943
-op943->cond946
-cond946(yes)->sub950
-sub950->cond958
-cond958->cond969
-cond969(yes)->io976
-io976->e974
-cond969(no)->cond928
-cond946(no)->sub954
-sub954->cond958
-cond928(no)->cond989
-cond896(no)->cond989
-cond808(no)->cond835
-cond835(yes)->cond840
-cond840->op850
-op850->cond853
-cond853(yes)->sub857
-sub857->cond865
-cond865->cond876
-cond876(yes)->io883
-io883->e881
-cond876(no)->cond835
-cond853(no)->sub861
-sub861->cond865
-cond835(no)->cond896
-cond803(no)->cond896
-cond566(no)->op731
+op54->sub56
+sub56->op58
+op58->op60
+op60->op62
+op62->op64
+op64->op66
+op66->cond69
+cond69(yes)->cond74
+cond74->cond85
+cond85->cond96
+cond96->cond107
+cond107->cond118
+cond118->op128
+op128->op130
+op130->cond133
+cond133->op143
+op143->op145
+op145->cond148
+cond148->op158
+op158->cond161
+cond161(yes)->op165
+op165->cond168
+cond168->cond179
+cond179(yes)->op183
+op183->cond186
+cond186->sub196
+sub196->sub198
+sub198->op203
+op203->op205
+op205->cond208
+cond208->cond219
+cond219->cond161
+cond179(no)->op203
+cond161(no)->op234
+op234->op236
+op236->op238
+op238->op240
+op240->op242
+op242->op244
+op244->op246
+op246->cond249
+cond249(yes)->cond254
+cond254->op264
+op264->cond267
+cond267(yes)->sub271
+sub271->cond279
+cond279->cond290
+cond290(yes)->io297
+io297->e295
+cond290(no)->cond249
+cond267(no)->sub275
+sub275->cond279
+cond249(no)->cond306
+cond306(yes)->cond311
+cond311(yes)->op315
+op315->sub317
+sub317->sub319
+sub319->cond322
+cond322(yes)->io329
+io329->e327
+cond322(no)->cond399
+cond399(yes)->cond404
+cond404(yes)->op408
+op408->sub410
+sub410->sub412
+sub412->cond415
+cond415(yes)->io422
+io422->e420
+cond415(no)->cond492
+cond492(yes)->cond497
+cond497->op507
+op507->cond510
+cond510(yes)->sub514
+sub514->cond522
+cond522->cond533
+cond533(yes)->io540
+io540->e538
+cond533(no)->cond492
+cond510(no)->sub518
+sub518->cond522
+cond492(no)->io551
+io551->e549
+cond404(no)->cond431
+cond431(yes)->cond436
+cond436->op446
+op446->cond449
+cond449(yes)->sub453
+sub453->cond461
+cond461->cond472
+cond472(yes)->io479
+io479->e477
+cond472(no)->cond431
+cond449(no)->sub457
+sub457->cond461
+cond431(no)->cond492
+cond399(no)->cond492
+cond311(no)->cond338
+cond338(yes)->cond343
+cond343->op353
+op353->cond356
+cond356(yes)->sub360
+sub360->cond368
+cond368->cond379
+cond379(yes)->io386
+io386->e384
+cond379(no)->cond338
+cond356(no)->sub364
+sub364->cond368
+cond338(no)->cond399
+cond306(no)->cond399
+cond69(no)->op234
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -424,17 +426,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-09-28T07:34:51Z -->
+        <!-- Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-09-28T07:34:51Z">2026-09-28T07:34:51Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>95213a3dfe214f41ea8e3977b79711b1be061ac0</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>81c630ead74a658e</code>
+            Flow content SHA-256: <code>55207add64c51b04</code>
           </p>
           <div id="canvas"></div>
         </div>
