@@ -1539,11 +1539,13 @@ class StackManager:
             logger.debug("Failed to diagnose deploy failure for %s: %s", stack_name, e)
             # Best effort — don't fail the deploy further
 
-    def _check_asset_sources_readable(self) -> None:
+    def ensure_asset_sources_readable(self) -> None:
         """Run :func:`check_asset_sources_readable` once per manager.
 
         A multi-stack deploy calls ``deploy`` once per stack; the checkout's
-        modes are only walked on the first call.
+        modes are only walked on the first call. ``gco upgrade`` calls it before
+        its teardown, so a checkout that could not be redeployed stops the
+        upgrade before any stack is touched.
 
         Raises:
             AssetPermissionError: when a deployable source is owner-only.
@@ -2042,9 +2044,11 @@ class StackManager:
             AssetPermissionError: before anything is copied, packaged or
                 uploaded, when a deployable source is owner-only.
         """
-        # Destroy never runs this check: a teardown must not depend on the
-        # checkout's modes.
-        self._check_asset_sources_readable()
+        # A destroy never runs this check itself: a teardown must not depend on
+        # the checkout's modes. The monitoring detach a keep-control-plane
+        # teardown starts with is a deploy, though, and uploads assets, so it
+        # does.
+        self.ensure_asset_sources_readable()
         # Synchronize canonical checked-in copies first, then source-check and
         # atomically publish only stale generated assets. A deploy must never
         # destructively rebuild a fresh tree while another CDK process may be
@@ -4245,7 +4249,7 @@ class StackManager:
             AssetPermissionError: before the stack listing synthesizes
                 anything, when a deployable source is owner-only.
         """
-        self._check_asset_sources_readable()
+        self.ensure_asset_sources_readable()
         stacks = self.list_stacks()
         stack_names = set(stacks)
         project_name = self.config.project_name
@@ -4794,6 +4798,10 @@ class StackManager:
         cost-report data it owns) stays. A monitoring stack that is not
         deployed has nothing to detach and is left alone. ``cdk.json`` is never
         edited; the caller's run-scoped context is restored afterwards.
+
+        Raises:
+            AssetPermissionError: when a deployable source is owner-only; the
+                detach is a deploy, and it runs before any stack is deleted.
         """
         monitoring_stack = f"{self.config.project_name}-monitoring"
         if not self._stack_exists_in_cloudformation(monitoring_stack):

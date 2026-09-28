@@ -622,6 +622,31 @@ def test_run_stack_cycle_happy_path_passes_the_callbacks_through() -> None:
     assert result.to_dict()["ok"] is True
 
 
+def test_run_stack_cycle_checks_the_sources_before_the_teardown() -> None:
+    """The redeploy's readability check runs first, so it cannot strand a teardown."""
+    manager = _manager([(True, ["gco-us-east-1"], [])])
+
+    engine.run_stack_cycle(manager, sleep=lambda _s: None)
+
+    names = [call[0] for call in manager.mock_calls]
+    assert names.index("ensure_asset_sources_readable") < names.index("destroy_orchestrated")
+
+
+def test_an_owner_only_checkout_stops_the_cycle_before_any_stack_is_touched() -> None:
+    from cli.stacks import AssetPermissionError
+
+    manager = _manager([(True, ["gco-us-east-1"], [])])
+    manager.ensure_asset_sources_readable.side_effect = AssetPermissionError("owner-only")
+    log: list[str] = []
+
+    with pytest.raises(AssetPermissionError, match="owner-only"):
+        engine.run_stack_cycle(manager, log=log.append, sleep=lambda _s: None)
+
+    manager.destroy_orchestrated.assert_not_called()
+    manager.deploy_orchestrated.assert_not_called()
+    assert log == []
+
+
 def test_run_stack_cycle_retries_the_teardown_and_merges_destroyed_stacks() -> None:
     manager = _manager(
         [

@@ -459,9 +459,24 @@ def test_deploy_orchestrated_refuses_before_the_stack_listing(tmp_path: Path) ->
 def test_the_checkout_is_walked_once_per_manager(tmp_path: Path) -> None:
     manager = _manager(_checkout(tmp_path))
     with patch.object(stacks, "check_asset_sources_readable") as check:
-        manager._check_asset_sources_readable()
-        manager._check_asset_sources_readable()
+        manager.ensure_asset_sources_readable()
+        manager.ensure_asset_sources_readable()
     check.assert_called_once_with(tmp_path)
+
+
+def test_a_keep_control_plane_teardown_checks_before_deleting_anything(tmp_path: Path) -> None:
+    """Its monitoring detach is a deploy: an owner-only checkout stops it first."""
+    manager = _manager(_owner_only_checkout(tmp_path))
+    with (
+        patch.object(manager, "list_stacks", return_value=["gco-monitoring", "gco-us-east-1"]),
+        patch.object(manager, "_stack_exists_in_cloudformation", return_value=True),
+        patch.object(manager, "_run_cdk") as run_cdk,
+        patch.object(manager, "destroy") as destroy,
+        pytest.raises(stacks.AssetPermissionError),
+    ):
+        manager.destroy_orchestrated(force=True, keep_control_plane=True)
+    run_cdk.assert_not_called()
+    destroy.assert_not_called()
 
 
 def test_destroy_never_checks_the_checkout(tmp_path: Path) -> None:

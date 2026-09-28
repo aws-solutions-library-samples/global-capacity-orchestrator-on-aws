@@ -14,7 +14,9 @@ CloudFormation stacks — to a tagged release in one pass:
    the editable install of this checkout, ``npm ci`` when the checkout carries
    its own CDK toolchain, and a rebuild of the ``gco-dev`` image when a
    container runtime and the image are both present.
-4. **Cycle the stacks.** Scale the workload tier to zero
+4. **Cycle the stacks.** Check that the checkout's deployable sources are
+   readable by every user (the redeploy would refuse them otherwise, after the
+   teardown), then scale the workload tier to zero
    (:meth:`cli.stacks.StackManager.destroy_orchestrated` with
    ``keep_control_plane=True`` — the monitoring stack is first updated in place
    so it stops referencing the regional stacks), then run the ordinary
@@ -547,17 +549,31 @@ def run_stack_cycle(
 ) -> StackCycleResult:
     """Scale the workload tier to zero, then deploy-all from the new release.
 
+    The checkout's deployable sources are checked first
+    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the
+    redeploy refuses owner-only sources, so a checkout it could not deploy —
+    for example one whose files the upgrade's own ``git checkout`` wrote under
+    a restrictive umask — must stop the upgrade before the teardown, not
+    after it. The teardown's monitoring detach would catch it too, but only
+    when the monitoring stack is deployed.
+
     The teardown uses the same retry loop as ``gco stacks destroy-all``: a
     failed attempt clears the orphaned network interfaces that typically block
     VPC deletion, waits, and tries again. The redeploy is a single
     ``deploy_orchestrated`` pass — global and API Gateway stacks update in
     place, regional stacks and their bridges are recreated, monitoring is
     updated back to the full topology.
+
+    Raises:
+        cli.stacks.AssetPermissionError: before any stack is touched, when a
+            deployable source is owner-only.
     """
     import time
 
     wait = sleep or time.sleep
     result = StackCycleResult()
+
+    manager.ensure_asset_sources_readable()
 
     log("Phase 1/2: scaling the workload tier to zero (control plane stays)...")
     ok = False

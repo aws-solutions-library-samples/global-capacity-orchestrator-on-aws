@@ -196,7 +196,7 @@ If you deploy from your host instead, ensure one of `docker buildx`, Finch (`doc
 
 ### Deploy Refuses Owner-Only Sources (Restrictive umask)
 
-**Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...`.
+**Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...`. `gco upgrade` stops with the same message after its checkout and before its teardown, and adds `No stack was changed`.
 
 **Cause**: The checkout, or files added to it, was created under a restrictive umask such as `077`. CDK zips the plain Lambda directories and builds the service images from the checkout exactly as it is on disk. The Lambda runtime reads function code as an unprivileged user, and the service images run as non-root users, so owner-only files deploy cleanly and then fail at run time. CDK's asset hash ignores file modes, so an owner-only zip would also stay in the bootstrap bucket for every later deploy of the same content.
 

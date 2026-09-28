@@ -5812,9 +5812,11 @@ Runs inside a git checkout of the repository and:
    without pip), `npm ci` when the checkout carries its own CDK toolchain
    (`node_modules/.bin/cdk`), and a rebuild of the `gco-dev` image when a
    container runtime and the image are both present;
-3. scales the workload tier to zero: the monitoring stack is updated in place
-   with `--context gco:control-plane-only=true` so it stops referencing the
-   regional stacks, then every regional API bridge and regional stack is
+3. checks that the checkout's deployable sources are readable by every user —
+   the check `gco stacks deploy` makes, run here before anything is torn down —
+   then scales the workload tier to zero: the monitoring stack is updated in
+   place with `--context gco:control-plane-only=true` so it stops referencing
+   the regional stacks, then every regional API bridge and regional stack is
    **destroyed** — the same teardown as
    [`gco stacks destroy-all --keep-control-plane`](#keeping-the-control-plane---keep-control-plane),
    with its retry loop;
@@ -5860,6 +5862,10 @@ gco upgrade [OPTIONS]
 - If the stack cycle fails, the checkout and local install are already on the new
   release. Fix the cause (the failing stack is named) and rerun
   `gco upgrade --skip-checkout` to finish; the teardown half is idempotent.
+- Owner-only deployable sources (a checkout made under `umask 077`) stop the
+  command before the teardown with no stack changed; make them readable
+  ([Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask))
+  and rerun `gco upgrade --skip-checkout`.
 - The running `gco` process keeps executing the previous release's CLI code until
   you open a new shell (the dev-container shell function starts a fresh container
   from the rebuilt image). The deployed stacks are on the new release either way.

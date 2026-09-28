@@ -180,7 +180,9 @@ def upgrade(
       2. refreshes the local install: pip install -e . for an editable CLI,
          npm ci for a checkout-local CDK toolchain, and a rebuild of the
          gco-dev container image when it exists;
-      3. scales the workload tier to zero — the monitoring stack is updated
+      3. checks that the checkout's deployable sources are readable by every
+         user (stopping, with no stack touched, when they are not), then
+         scales the workload tier to zero — the monitoring stack is updated
          in place so it stops referencing the regional stacks, then every
          regional API bridge and regional stack is DESTROYED;
       4. updates the global, API Gateway and monitoring stacks in place and
@@ -207,7 +209,7 @@ def upgrade(
         gco upgrade --ref v8.1.0
         gco upgrade --skip-checkout -y
     """
-    from ..stacks import get_stack_manager
+    from ..stacks import AssetPermissionError, get_stack_manager
 
     formatter = get_output_formatter(config)
     machine = config.output_format != "table"
@@ -289,6 +291,7 @@ def upgrade(
 
     result: dict[str, Any] = {"status": "ok", "plan": plan.to_dict(), "steps": {}}
     steps = result["steps"]
+    cycle_started = False
     try:
         runtime = require_container_runtime()
 
@@ -346,6 +349,7 @@ def upgrade(
             else:
                 formatter.print_error(f"  ✗ {stack_name} failed")
 
+        cycle_started = True
         cycle = run_stack_cycle(
             manager,
             parallel=parallel,
@@ -355,11 +359,29 @@ def upgrade(
             log=formatter.print_info,
         )
         steps["stacks"] = cycle.to_dict()
+    except AssetPermissionError as e:
+        # run_stack_cycle checks this before its teardown, so no stack has been
+        # touched; the checkout and local install have already moved.
+        formatter.print_error(str(e))
+        formatter.print_error(
+            "No stack was changed. Once the modes are fixed, run "
+            "'gco upgrade --skip-checkout' to cycle the stacks on this checkout."
+        )
+        sys.exit(1)
     except UpgradeError as e:
         formatter.print_error(str(e))
         sys.exit(1)
     except Exception as e:
-        formatter.print_error(f"Upgrade failed: {e}")
+        if cycle_started:
+            reason = str(e).rstrip(".")
+            formatter.print_error(
+                f"Upgrade failed during the stack cycle: {reason}. Stacks may be partly "
+                "torn down or recreated; fix the cause and rerun "
+                "'gco upgrade --skip-checkout' to finish the cycle (the teardown half is "
+                "idempotent)."
+            )
+        else:
+            formatter.print_error(f"Upgrade failed: {e}")
         sys.exit(1)
 
     if not cycle.ok:

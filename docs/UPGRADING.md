@@ -52,12 +52,16 @@ release, while the control plane is updated in place and keeps its state:
    the editable install of this checkout, `npm ci` when the checkout has its own
    CDK toolchain, and a rebuild of the `gco-dev` image when a container runtime
    and the image are present.
-4. **Scale the workload tier to zero.** The monitoring stack is updated in place
-   with `--context gco:control-plane-only=true` so it stops referencing the
-   regional stacks, then every regional API bridge and regional stack is
-   destroyed — the same teardown as `gco stacks destroy-all --keep-control-plane`,
-   with its retry loop and its sweeps of orphaned bastions, implicit log groups
-   and dynamically provisioned EBS volumes.
+4. **Scale the workload tier to zero.** First the checkout's deployable sources
+   are checked: the redeploy refuses files other users cannot read, so the
+   command stops here, with no stack touched, rather than after the teardown
+   (see [If it stops halfway](#if-it-stops-halfway)). The monitoring stack is
+   then updated in place with `--context gco:control-plane-only=true` so it
+   stops referencing the regional stacks, and every regional API bridge and
+   regional stack is destroyed — the same teardown as
+   `gco stacks destroy-all --keep-control-plane`, with its retry loop and its
+   sweeps of orphaned bastions, implicit log groups and dynamically provisioned
+   EBS volumes.
 5. **Deploy-all on the new release.** `<project>-global` and
    `<project>-api-gateway` are updated in place, the regional stacks and their
    bridges are recreated from `cdk.json`, and the monitoring stack is updated back
@@ -174,9 +178,18 @@ Every step reports what it did, and the command tells you where it stopped.
 - **After the checkout, during the install refresh**: the checkout is on the new
   release; the message names the `pip`/`uv` command to run by hand, then
   `gco upgrade --skip-checkout` finishes the stack cycle.
+- **At the source check, before the teardown** (`N deployable path(s) in the
+  checkout are not readable by every user`): the checkout and local install are
+  on the new release and no stack has changed. Make the named sources
+  readable — `chmod -R a+rX lambda gco dockerfiles pyproject.toml
+  requirements-lock.txt` from the repository root; see
+  [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask)
+  — then `gco upgrade --skip-checkout`.
 - **During the stack cycle**: the checkout and local install are on the new
   release. The failing stack is named; `gco stacks status <stack> -r <region>`
-  and the CloudFormation console show why. Once fixed, rerun
+  and the CloudFormation console show why. An error that interrupts the cycle
+  itself (credentials that expired, a dropped network) is reported as
+  `Upgrade failed during the stack cycle`. Either way, once fixed, rerun
   `gco upgrade --skip-checkout` — the teardown half is idempotent (already
   deleted stacks are skipped) and the deploy half is the ordinary deploy-all.
 - **Container image rebuild or `npm ci` failures** are warnings, not stops: the
@@ -326,7 +339,11 @@ ways during an in-place redeploy:
   that the packaged Lambdas and service images could not read at runtime. The
   deploy, the orchestrated deploy and the release harness now refuse to start
   and name the files (fix them with `chmod -R a+rX` or re-clone under umask
-  022), and the CLI's own Lambda builds set their file modes explicitly. Code
+  022), and the CLI's own Lambda builds set their file modes explicitly.
+  `gco upgrade` runs the same check after its checkout and before its teardown,
+  so an upgrade the redeploy would refuse stops with every stack intact; this
+  takes effect from the upgrade after this release, because an upgrade runs the
+  CLI it started with. Code
   an older CLI already uploaded owner-only stays in the bootstrap bucket until
   its object is deleted once; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask).

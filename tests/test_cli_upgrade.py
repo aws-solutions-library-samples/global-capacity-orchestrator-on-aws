@@ -470,12 +470,41 @@ def test_engine_error_during_execution_exits_1() -> None:
     engine.patches["run_stack_cycle"].assert_not_called()
 
 
-def test_unexpected_error_during_execution_exits_1() -> None:
+def test_unexpected_error_during_the_stack_cycle_names_the_resume_command() -> None:
     with _Engine(_plan()) as engine:
-        engine.patches["run_stack_cycle"].side_effect = RuntimeError("boom")
+        engine.patches["run_stack_cycle"].side_effect = RuntimeError("connection reset.")
+        result = _invoke(["-y"])
+    assert result.exit_code == 1
+    assert "Upgrade failed during the stack cycle: connection reset. Stacks may be" in (
+        result.output
+    )
+    assert "gco upgrade --skip-checkout" in result.output
+
+
+def test_unexpected_error_before_the_stack_cycle_exits_1() -> None:
+    with _Engine(_plan(node=True)) as engine:
+        engine.patches["refresh_node_toolchain"].side_effect = RuntimeError("boom")
         result = _invoke(["-y"])
     assert result.exit_code == 1
     assert "Upgrade failed: boom" in result.output
+    assert "--skip-checkout" not in result.output
+    engine.patches["run_stack_cycle"].assert_not_called()
+
+
+def test_owner_only_sources_stop_the_upgrade_with_no_stack_changed() -> None:
+    from cli.stacks import AssetPermissionError
+
+    with _Engine(_plan()) as engine:
+        engine.patches["run_stack_cycle"].side_effect = AssetPermissionError(
+            "1 deployable path(s) in the checkout are not readable by every user: "
+            "lambda/fn/handler.py."
+        )
+        result = _invoke(["-y"])
+    assert result.exit_code == 1
+    assert "lambda/fn/handler.py" in result.output
+    assert "No stack was changed" in result.output
+    assert "gco upgrade --skip-checkout" in result.output
+    assert "Upgrade failed" not in result.output
 
 
 def test_missing_container_runtime_stops_before_the_checkout() -> None:
