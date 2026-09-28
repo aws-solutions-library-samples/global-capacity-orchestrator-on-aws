@@ -18,6 +18,7 @@ from cli.stacks import StackManager
 from .actions import action_final_inventory, destroy_deployment
 from .aws_session import ThrottleResilientSession
 from .models import (
+    ActionFailure,
     ActionResult,
     RunCheckpoint,
     RunContext,
@@ -338,6 +339,9 @@ class LiveValidationRunner:
                 started_monotonic=started,
                 ended_monotonic=time.monotonic(),
                 error=exc,
+                # An action that gathered evidence before failing hands it over
+                # on the exception, so the report keeps it.
+                details=exc.details if isinstance(exc, ActionFailure) else None,
             )
             self.checkpoint.action_results[definition.name] = result
             if definition.name in self.checkpoint.completed_actions:

@@ -176,8 +176,10 @@ skip):
   `torch-distributed` runtime before submitting (deploy-time artifacts;
   nothing to revert).
 - **mlflow-tracking-job** — waits for the tracking server Deployment to be
-  Available first, since its backend volume lands one applier pass after
-  the chart on a fresh install (readiness wait; nothing to revert).
+  Available and for the `gco-jobs/gco-internal-ca` ConfigMap to carry a
+  `ca.crt` first: the client verifies the server's HTTPS listener against the
+  CA trust-manager publishes there, and its pod cannot start without the
+  ConfigMap (readiness wait; nothing to revert).
 - **argocd-gitops-job** — waits for the `gco-tenants` project, the
   application controller and the repo server, then pins the Application's
   `targetRevision` to the commit under validation (a disclosed mutation, so
@@ -215,7 +217,9 @@ zero — a skip is never silent.
 mode-`0600` `kubeconfig` the `examples` action reached the cluster with
 (tunnel-pinned, so it stops working when the run ends). The JSON
 carries a per-example row (status, duration, submission command, disclosed
-mutations, criteria evidence, cleanup proof). Reports contain
+mutations, criteria evidence, cleanup proof) under the `examples` action's
+`details`, whether the action passed or failed; a failed `static` action
+keeps its failed checks there the same way. Reports contain
 account-specific identifiers — share sanitized summaries only, never the
 raw files.
 

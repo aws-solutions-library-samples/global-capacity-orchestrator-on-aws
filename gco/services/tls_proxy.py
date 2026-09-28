@@ -3,7 +3,7 @@
 The application container listens on pod-loopback HTTP. A second container
 using this module exposes only HTTPS to the pod network and forwards decrypted
 bytes over loopback. It fronts the ALB-facing API pods, the cost monitor, the
-inference monitor's metrics endpoint, the OpenCost and Grafana chart pods, and
+inference monitor's metrics endpoint, the OpenCost, Grafana and MLflow chart pods, and
 managed model pods. Certificate files are treated as a pluggable projection:
 today cert-manager supplies a Secret volume; a future Kubernetes PodCertificate
 volume can replace it without changing the proxy or Service topology.
@@ -23,7 +23,7 @@ for uvicorn) and on the stdlib selector loop otherwise.
 Startup fails closed by default: a keypair that is missing or invalid when the
 process starts is an error, because a GCO pod mounts its Secret non-optionally
 and the kubelet does not start the container until the Secret exists. Pods GCO
-does not build (the OpenCost and Grafana chart pods) can start before the
+does not build (the OpenCost, Grafana and MLflow chart pods) can start before the
 post-Helm Certificates have produced their Secrets, so those sidecars mount the
 Secret ``optional`` and set ``TLS_PROXY_KEYPAIR_WAIT_SECONDS``: the proxy then
 polls for the keypair for that long before binding, and only raises the load

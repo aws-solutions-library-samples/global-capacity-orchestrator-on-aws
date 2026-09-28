@@ -99,8 +99,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Before the server listens: the startup probe covers this window, the
     # liveness probe does not cover the first scheduled pass.
     preload_report_writer()
-    # Shutdown releases the instance this lifespan built, whatever the module
-    # global holds by then.
+    # The scheduled loop runs on the instance this lifespan built, whatever
+    # the module global holds by then. It holds no upstream connections to
+    # release: every OpenCost call builds and closes its own client.
     monitor = create_cost_monitor_from_env()
     cost_monitor = monitor
     configure_structured_logging(
@@ -122,7 +123,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.wait_for(loop_task, timeout=30)
         except TimeoutError:
             loop_task.cancel()
-        monitor.opencost.close()
         # Last, so spans from the final scheduled pass are exported too.
         tracing.shutdown_tracing()
         logger.info("Shutting down Cost Monitor Service")

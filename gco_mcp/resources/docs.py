@@ -126,7 +126,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
     },
     "mlflow-tracking-job": {
         "category": "Jobs & Training",
-        "summary": "Logs params and a loss curve to the in-cluster MLflow tracking server over service DNS, then reads the run back and asserts every value round-tripped.",
+        "summary": "Logs params and a loss curve to the in-cluster MLflow tracking server over verified HTTPS, then reads the run back and asserts every value round-tripped.",
         "gpu": "no",
         "opt_in": "",
         "submission": "gco jobs submit-direct examples/mlflow-tracking-job.yaml -r us-east-1",

@@ -18,6 +18,7 @@
 #   - Neuron Helm Chart: https://github.com/aws-neuron/neuron-helm-charts/releases
 #   - Slinky Slurm Operator: https://github.com/SlinkyProject/slurm-operator/tags
 #   - cert-manager: https://github.com/cert-manager/cert-manager/releases
+#   - trust-manager: https://github.com/cert-manager/trust-manager/releases
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
 #   - Kubeflow Trainer: https://github.com/kubeflow/trainer/releases
 #   - MLflow: https://mlflow.org/docs/latest/self-hosting/kubernetes-helm/
@@ -338,6 +339,56 @@ charts:
           limits:
             cpu: 200m
             memory: 256Mi
+
+  # trust-manager - CA bundle distribution (a cert-manager project)
+  # Publishes the GCO internal CA's certificate as the ConfigMap
+  # gco-jobs/gco-internal-ca, which MLflow's clients mount to verify the
+  # tracking server's HTTPS listener (mlflow-tls.monitoring:5443). The regional
+  # stack installs it only while MLflow deploys, like opencost and mlflow
+  # below; the Bundle and its source are post-Helm manifests
+  # (post-helm-mlflow-tls.yaml).
+  #
+  # Its own namespace is also its trust namespace, the only one it reads
+  # Secrets from. trust-manager can read every Secret there, so the source is
+  # a leaf that exists only to carry the CA certificate
+  # (trust-manager/gco-internal-ca-source), not the CA Secret in cert-manager,
+  # and trust-manager never gets read access to the CA's private key.
+  # targetNamespaces limits the ConfigMaps it may write to gco-jobs (plus its
+  # own namespace), instead of every namespace in the cluster. The default
+  # public-CA package and Secret targets stay off: the bundle carries the
+  # internal CA and nothing else. Depends on cert-manager (its webhook
+  # certificate is issued by cert-manager), which installs earlier.
+  # https://cert-manager.io/docs/trust/trust-manager/
+  trust-manager:
+    enabled: false
+    repo_name: jetstack
+    repo_url: https://charts.jetstack.io
+    chart: trust-manager
+    version: "v0.25.0"
+    namespace: trust-manager
+    create_namespace: true
+    values:
+      crds:
+        enabled: true
+      defaultPackage:
+        enabled: false
+      secretTargets:
+        enabled: false
+      app:
+        trust:
+          namespace: trust-manager
+        targetNamespaces:
+          - gco-jobs
+        # Prevent Karpenter from evicting trust-manager during node consolidation
+        podAnnotations:
+          karpenter.sh/do-not-disrupt: "true"
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
 
   # Slinky Slurm Operator - Run Slurm on Kubernetes
   # Deploys the Kubernetes operator for managing Slurm cluster lifecycles (creation,
@@ -885,14 +936,21 @@ charts:
       # with the complete list, appending wildcard patterns derived from
       # cdk.json's vpc_endpoint_cidrs (single source of truth — see
       # _mlflow_allowed_hosts in gco/stacks/regional_stack.py) so the
-      # allow-list follows the VPC range with no edit here. Arbitrary DNS
-      # names stay rejected; /health is exempt so probes never depended on
-      # this. Verified against the pinned image.
+      # allow-list follows the VPC range with no edit here. The mlflow-tls
+      # spellings are the HTTPS front door gco-jobs clients dial
+      # (mlflow-tls.monitoring.svc.cluster.local:5443): the TLS sidecar
+      # forwards their Host header unchanged. Arbitrary DNS names stay
+      # rejected; /health is exempt so probes never depended on this.
+      # Verified against the pinned image. The escaped line breaks join the
+      # list without spaces.
       server:
         value_options:
           workers: 1
-          allowed_hosts: >-
-            mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+          allowed_hosts: "mlflow.monitoring,mlflow.monitoring:5000,\
+            mlflow-tls,mlflow-tls:5443,mlflow-tls.monitoring,mlflow-tls.monitoring:5443,\
+            mlflow-tls.monitoring.svc,mlflow-tls.monitoring.svc:5443,\
+            mlflow-tls.monitoring.svc.cluster.local,mlflow-tls.monitoring.svc.cluster.local:5443,\
+            localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
       # Never voluntarily consolidate the singleton tracking server.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"

@@ -252,13 +252,35 @@ def _compute_kubectl_regional_shared_replacements(
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
 
+#: The MLflow server's own port (the chart Service's and the container's), and
+#: its HTTPS front door: the post-Helm Service ``mlflow-tls``
+#: (post-helm-mlflow-tls.yaml) in front of the ``mlflow-tls-proxy`` sidecar,
+#: which terminates TLS with the ``mlflow-tls`` leaf and forwards to the
+#: server on pod loopback.
+_MLFLOW_SERVER_PORT = 5000
+_MLFLOW_TLS_PORT = 5443
+
 #: In-cluster names clients use to reach the MLflow tracking server. MLflow
 #: 3.x's host-validation middleware matches the raw Host header (port
 #: included — that is why both spellings are listed), and setting
 #: ``allowed-hosts`` REPLACES its built-in localhost/private-IP allowance
 #: rather than extending it, so the value override must carry the complete
-#: list (see ``_mlflow_allowed_hosts``).
-_MLFLOW_SERVICE_HOSTS = ("mlflow.monitoring", "mlflow.monitoring:5000")
+#: list (see ``_mlflow_allowed_hosts``). The TLS sidecar forwards the
+#: decrypted bytes unchanged, so an HTTPS client's Host header names the
+#: ``mlflow-tls`` Service in whichever of its four DNS forms it dialled. A
+#: plain literal, so the kind examples job can lift it from this source.
+_MLFLOW_SERVICE_HOSTS = (
+    "mlflow.monitoring",
+    "mlflow.monitoring:5000",
+    "mlflow-tls",
+    "mlflow-tls:5443",
+    "mlflow-tls.monitoring",
+    "mlflow-tls.monitoring:5443",
+    "mlflow-tls.monitoring.svc",
+    "mlflow-tls.monitoring.svc:5443",
+    "mlflow-tls.monitoring.svc.cluster.local",
+    "mlflow-tls.monitoring.svc.cluster.local:5443",
+)
 
 #: Loopback spellings a browser sends through the access tunnel.
 #:
@@ -702,7 +724,7 @@ _APPLICATION_SIGNALS_LANGUAGES = ("java", "python", "dotnet", "nodejs")
 _TLS_PROXY_KEYPAIR_DIR = "/var/run/gco/tls"
 
 #: How long a chart-pod TLS sidecar waits for its leaf Secret. The Helm charts
-#: start OpenCost and Grafana before the post-Helm manifests create their
+#: start OpenCost, Grafana and MLflow before the post-Helm manifests create their
 #: Certificates, so the Secret volume is optional and the sidecar polls for
 #: the keypair instead of failing closed immediately.
 _CHART_TLS_PROXY_KEYPAIR_WAIT_SECONDS = 1800
@@ -723,7 +745,7 @@ def _chart_tls_proxy_sidecar(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return the ``(container, volume)`` of a TLS sidecar for a Helm chart pod.
 
-    OpenCost and Grafana serve plain HTTP on pod loopback; the sidecar runs
+    OpenCost, Grafana and MLflow serve plain HTTP; the sidecar runs
     ``gco.services.tls_proxy`` from a GCO service image, terminates TLS on
     ``port`` (container port ``https``, which the post-Helm ``*-tls``
     Services target) with the cert-manager leaf in ``secret_name``, and
@@ -1466,8 +1488,10 @@ class GCORegionalStack(Stack):
         The build context is the repository root because every service image
         ``COPY``s shared ``gco/`` code, and the exclude list drops the inputs
         that cannot affect this service so an unrelated edit does not churn
-        its asset hash. All images target AMD64 (x86_64) to match EKS Auto
-        Mode's default system nodepool.
+        its asset hash. All images target AMD64 (x86_64) only (an image asset
+        is single-platform), so every pod that runs one pins
+        ``kubernetes.io/arch: amd64``: the ``cpu-general`` NodePool also
+        provisions Graviton nodes.
         """
         dockerfile = service_dockerfile(service)
         return ecr_assets.DockerImageAsset(
@@ -4297,11 +4321,12 @@ class GCORegionalStack(Stack):
                 }
             )
 
-        # MLflow (on by default, requires observability): gate the client
-        # egress NetworkPolicy (post-helm-mlflow-network.yaml) on the toggle
-        # via the same unreplaced-placeholder mechanism; a disabled
-        # deployment leaves the file unapplied and the applier prunes both
-        # the policy and the chart-managed metadata claim helm uninstall
+        # MLflow (on by default, requires observability): gate the server and
+        # client NetworkPolicies (post-helm-mlflow-network.yaml) and the HTTPS
+        # front door with its trust bundle (post-helm-mlflow-tls.yaml) on the
+        # toggle via the same unreplaced-placeholder mechanism; a disabled
+        # deployment leaves the files unapplied and the applier prunes what
+        # they created plus the chart-managed metadata claim helm uninstall
         # leaves behind (metadata is discarded, artifacts stay in S3).
         if self._mlflow_active():
             image_replacements.update({"{{MLFLOW_ENABLED}}": "true"})
@@ -5177,6 +5202,10 @@ class GCORegionalStack(Stack):
           ``charts.yaml`` when ``cluster_observability.enabled`` is true.
         - ``opencost``: the cluster identity and the OpenCost TLS sidecar
           built from the cost-monitor image, while cost monitoring deploys.
+        - ``mlflow``: the artifact destination, IRSA role, claim size, the
+          complete host allow-list and the MLflow TLS sidecar built from the
+          manifest-processor image, while MLflow deploys
+          (``_mlflow_chart_values``).
         - ``argocd``: the repo-server size and optional CPU autoscaler from
           ``helm.argocd.repo_server`` (``gco.argocd_config.argocd_chart_values``)
           whenever the chart installs, by the cdk.json toggle or a run-scoped
@@ -5254,7 +5283,7 @@ class GCORegionalStack(Stack):
     def _mlflow_chart_values(self) -> dict[str, Any]:
         """Build the MLflow value overrides that carry deployment tokens.
 
-        Only four things are dynamic — everything static (image pin, PVC
+        These things are dynamic — everything static (image pin, PVC
         wiring, resources, posture toggles) lives in ``charts.yaml``:
 
         - ``mlflow.artifactsDestination``: run artifacts go to the
@@ -5274,11 +5303,29 @@ class GCORegionalStack(Stack):
           ``_mlflow_allowed_hosts``); the deep merge keeps the static
           ``workers`` value while replacing the charts.yaml DNS-only
           fallback with this full list.
+        - ``extraContainers``/``extraVolumes``: the ``mlflow-tls-proxy``
+          sidecar, from the manifest-processor image like Grafana's. It
+          terminates verified TLS on 5443 (the ``mlflow-tls`` Service that
+          gco-jobs clients call, trusting the ``gco-internal-ca`` bundle
+          trust-manager publishes there) and forwards to the server on
+          loopback 5000, with the ``mlflow-tls`` leaf mounted from an
+          optional Secret volume. The server keeps its plaintext 5000 for
+          the chart's probes, the ServiceMonitor and the tunnel. The chart
+          renders both keys with ``toYaml``, so they are lists.
+        - ``nodeSelector``: the service images are amd64 only, so the pod
+          is pinned to amd64 nodes.
         """
         s3_destination = (
             f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
         )
         vpc_endpoint_cidrs = self.node.try_get_context("vpc_endpoint_cidrs") or ["10.0.0.0/16"]
+        sidecar, tls_volume = _chart_tls_proxy_sidecar(
+            name="mlflow-tls-proxy",
+            image=self.manifest_processor_image.image_uri,
+            port=_MLFLOW_TLS_PORT,
+            upstream_port=_MLFLOW_SERVER_PORT,
+            secret_name="mlflow-tls",  # nosec B106  # Kubernetes Secret name, not a credential
+        )
         return {
             "values": {
                 "mlflow": {
@@ -5299,6 +5346,9 @@ class GCORegionalStack(Stack):
                         "allowed_hosts": _mlflow_allowed_hosts(vpc_endpoint_cidrs),
                     },
                 },
+                "extraContainers": [sidecar],
+                "extraVolumes": [tls_volume],
+                "nodeSelector": {"kubernetes.io/arch": "amd64"},
             }
         }
 
@@ -5491,8 +5541,12 @@ class GCORegionalStack(Stack):
         # MLflow is driven by the on-by-default cluster_observability.mlflow
         # sub-toggle and requires observability itself (monitoring namespace,
         # gp3 StorageClass, ServiceMonitor discovery, tunnel access path).
+        # trust-manager comes with it: it publishes the internal CA bundle
+        # MLflow's gco-jobs clients verify the tracking server's HTTPS
+        # listener against, and nothing else uses it. charts.yaml orders it
+        # right after cert-manager, which issues its webhook certificate.
         if self._mlflow_active():
-            enabled_charts.append("mlflow")
+            enabled_charts.extend(("trust-manager", "mlflow"))
 
         return enabled_charts
 

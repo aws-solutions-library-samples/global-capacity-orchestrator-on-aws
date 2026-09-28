@@ -349,6 +349,13 @@ exclude = [
     "lambda/helm-installer-build",
 ]
 
+# The Mooncake PD proxy runs on the upstream vLLM image's Python 3.12, so it is
+# formatted and linted for that interpreter: py314 formatting would, for one,
+# unparenthesize a multi-exception ``except`` into 3.14-only syntax.
+# tests/test_mooncake_pd_proxy_transport.py parses it with the 3.12 grammar.
+[tool.ruff.per-file-target-version]
+"gco/services/mooncake_pd_proxy.py" = "py312"
+
 [tool.ruff.lint]
 select = [
     "E",        # pycodestyle errors

@@ -593,8 +593,23 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     # fixture's 10.41.0.0/16 + 10.42.0.0/16), proving the VPC range is the
     # single source — no charts.yaml edit involved.
     assert mlflow_values["server"]["value_options"]["allowed_hosts"] == (
-        "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.41.*,10.42.*"
+        "mlflow.monitoring,mlflow.monitoring:5000,"
+        "mlflow-tls,mlflow-tls:5443,mlflow-tls.monitoring,mlflow-tls.monitoring:5443,"
+        "mlflow-tls.monitoring.svc,mlflow-tls.monitoring.svc:5443,"
+        "mlflow-tls.monitoring.svc.cluster.local,mlflow-tls.monitoring.svc.cluster.local:5443,"
+        "localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.41.*,10.42.*"
     )
+    # The HTTPS front door: trust-manager publishes the clients' CA bundle,
+    # and the chart pod gets the TLS sidecar from the manifest-processor
+    # image (the same asset Grafana's sidecar runs), pinned to amd64.
+    assert "trust-manager" in enabled
+    (mlflow_sidecar,) = mlflow_values["extraContainers"]
+    assert mlflow_sidecar["name"] == "mlflow-tls-proxy"
+    assert json.dumps(mlflow_sidecar["image"], sort_keys=True) == json.dumps(
+        properties["ImageReplacements"]["{{MANIFEST_PROCESSOR_IMAGE}}"], sort_keys=True
+    )
+    assert mlflow_values["extraVolumes"][0]["secret"]["secretName"] == "mlflow-tls"
+    assert mlflow_values["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
 
     replacements = properties["ImageReplacements"]
     assert replacements["{{MLFLOW_ENABLED}}"] == "true"

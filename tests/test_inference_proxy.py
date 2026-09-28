@@ -10,7 +10,6 @@ import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -48,21 +47,13 @@ class _FakeStore:
         return self.endpoint
 
 
-class _HeaderItems:
-    def __init__(self, items: list[tuple[str, str]]):
-        self._items = items
-
-    def items(self):
-        return iter(self._items)
-
-
 class _FakeUpstreamResponse:
     def __init__(
         self,
         *,
         chunks: tuple[bytes, ...] = (),
         status_code: int = 200,
-        headers: list[tuple[str, str]] | None = None,
+        headers: list[tuple[str, str]] | list[tuple[bytes, bytes]] | None = None,
         stream_error: Exception | None = None,
     ):
         self.chunks = chunks
@@ -130,8 +121,10 @@ def _request(
     path: str = "/inference/model",
     query: bytes = b"",
     headers: list[tuple[str, str]] | None = None,
+    raw_headers: list[tuple[bytes, bytes]] | None = None,
     body: bytes = b"",
 ) -> Request:
+    """An ASGI request; ``raw_headers`` arrive exactly as a server would pass them."""
     sent = False
 
     async def receive() -> dict[str, object]:
@@ -151,7 +144,8 @@ def _request(
         "raw_path": path.encode(),
         "root_path": "",
         "query_string": query,
-        "headers": [(name.encode(), value.encode()) for name, value in (headers or [])],
+        "headers": [(name.encode(), value.encode()) for name, value in (headers or [])]
+        + list(raw_headers or []),
         "client": ("test-client", 1234),
         "server": ("testserver", 443),
     }
@@ -187,7 +181,7 @@ def _install_http_client(
 def _streamed(
     *chunks: bytes,
     status_code: int = 200,
-    headers: list[tuple[str, str]] | None = None,
+    headers: list[tuple[str, str]] | list[tuple[bytes, bytes]] | None = None,
 ) -> httpx2.Response:
     """A mock upstream response whose body is still a stream, like the real wire.
 
@@ -715,38 +709,81 @@ def test_request_headers_forward_only_explicit_model_headers() -> None:
     )
 
     assert proxy._request_headers(request) == [
-        ("accept", "text/event-stream"),
-        ("content-type", "application/json"),
-        ("x-request-id", "request-123"),
-        ("range", "bytes=0-99"),
+        (b"accept", b"text/event-stream"),
+        (b"content-type", b"application/json"),
+        (b"x-request-id", b"request-123"),
+        (b"range", b"bytes=0-99"),
+    ]
+
+
+#: Header values no str round trip survives: UTF-8 outside latin-1, UTF-8
+#: inside it, and a lone latin-1 byte that is not valid UTF-8.
+_UTF8_BEYOND_LATIN1 = "gpt—日本".encode()
+_UTF8_WITHIN_LATIN1 = "café".encode()
+_LATIN1_BYTE = b"caf\xe9"
+
+
+def test_request_headers_forward_non_ascii_values_byte_for_byte() -> None:
+    """httpx2 encodes str values as ASCII; the raw bytes reach the model as sent."""
+    request = _request(
+        raw_headers=[
+            (b"user-agent", _UTF8_BEYOND_LATIN1),
+            (b"x-request-id", _LATIN1_BYTE),
+            (b"prefer", _UTF8_WITHIN_LATIN1),
+            (b"cookie", _UTF8_BEYOND_LATIN1),
+        ]
+    )
+
+    assert proxy._request_headers(request) == [
+        (b"user-agent", _UTF8_BEYOND_LATIN1),
+        (b"x-request-id", _LATIN1_BYTE),
+        (b"prefer", _UTF8_WITHIN_LATIN1),
     ]
 
 
 def test_response_headers_drop_framing_but_preserve_end_to_end_metadata() -> None:
-    response = SimpleNamespace(
-        headers=_HeaderItems(
-            [
-                ("Content-Type", "application/json"),
-                ("Content-Length", "999"),
-                ("Connection", "close"),
-                ("Keep-Alive", "timeout=5"),
-                ("Proxy-Authenticate", "Basic"),
-                ("Proxy-Authorization", "secret"),
-                ("TE", "trailers"),
-                ("Trailer", "Expires"),
-                ("Transfer-Encoding", "chunked"),
-                ("Upgrade", "websocket"),
-                ("ETag", '"model-v1"'),
-                ("Set-Cookie", "model-cookie=value"),
-            ]
-        )
+    response = _FakeUpstreamResponse(
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", "999"),
+            ("Connection", "close"),
+            ("Keep-Alive", "timeout=5"),
+            ("Proxy-Authenticate", "Basic"),
+            ("Proxy-Authorization", "secret"),
+            ("TE", "trailers"),
+            ("Trailer", "Expires"),
+            ("Transfer-Encoding", "chunked"),
+            ("Upgrade", "websocket"),
+            ("ETag", '"model-v1"'),
+            ("Set-Cookie", "model-cookie=value"),
+            ("Set-Cookie", "other-cookie=value"),
+        ]
     )
 
-    assert proxy._response_headers(response) == {
-        "Content-Type": "application/json",
-        "ETag": '"model-v1"',
-        "Set-Cookie": "model-cookie=value",
-    }
+    # Names lowercased as ASGI requires; a repeated header keeps each line.
+    assert proxy._response_headers(response) == [
+        (b"content-type", b"application/json"),
+        (b"etag", b'"model-v1"'),
+        (b"set-cookie", b"model-cookie=value"),
+        (b"set-cookie", b"other-cookie=value"),
+    ]
+
+
+def test_response_headers_keep_non_latin1_values_byte_for_byte() -> None:
+    """Starlette would re-encode str values as latin-1: a 500 or a transcoded value."""
+    response = _FakeUpstreamResponse(
+        headers=[
+            (b"X-Model-Name", _UTF8_BEYOND_LATIN1),
+            (b"x-served-by", _UTF8_WITHIN_LATIN1),
+            (b"x-legacy", _LATIN1_BYTE),
+        ]
+    )
+
+    assert proxy._response_headers(response) == [
+        (b"x-model-name", _UTF8_BEYOND_LATIN1),
+        (b"x-served-by", _UTF8_WITHIN_LATIN1),
+        (b"x-legacy", _LATIN1_BYTE),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1071,9 +1108,9 @@ async def test_proxy_builds_bounded_request_and_streams_filtered_response(
     assert client.build_kwargs == {
         "params": [("tenant", "alpha"), ("tenant", "beta"), ("empty", "")],
         "headers": [
-            ("content-type", "application/json"),
-            ("accept", "application/json"),
-            ("x-request-id", "request-1"),
+            (b"content-type", b"application/json"),
+            (b"accept", b"application/json"),
+            (b"x-request-id", b"request-1"),
         ],
         "content": b'{"prompt":"hello"}',
     }
@@ -1311,6 +1348,75 @@ async def test_proxy_relays_through_per_request_clients_with_only_caller_encodin
     # One client per request, each closed with its stream.
     assert len(wire.transport_kwargs) == 2
     assert [transport.closed for transport in wire.transports] == [True, True]
+
+
+async def test_non_latin1_headers_cross_the_proxy_in_both_directions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over real clients: both failures were 500s, and a latin-1 value was transcoded.
+
+    A non-ASCII request value failed in httpx2's ASCII header encoding, and a
+    UTF-8 response value outside latin-1 failed in Starlette's latin-1 one.
+    Both directions now carry the exact bytes, repeated headers included.
+    """
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("model", "gco-inference", "/health")),
+    )
+    wire = _UpstreamWire(monkeypatch)
+    wire.handler = lambda _request: _streamed(
+        b"{}",
+        headers=[
+            (b"Content-Type", b"application/json"),
+            (b"X-Model-Name", _UTF8_BEYOND_LATIN1),
+            (b"x-served-by", _UTF8_WITHIN_LATIN1),
+            (b"Link", b"</a>; rel=a"),
+            (b"Link", b"</b>; rel=b"),
+            (b"Transfer-Encoding", b"chunked"),
+        ],
+    )
+
+    streamed = await proxy._proxy(
+        _request(
+            "POST",
+            raw_headers=[
+                (b"user-agent", _UTF8_BEYOND_LATIN1),
+                (b"x-request-id", _LATIN1_BYTE),
+                (b"content-type", b"application/json"),
+            ],
+            body=b"{}",
+        ),
+        "model",
+        "v1/chat/completions",
+    )
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await streamed(_asgi_scope("2.3"), receive, send)
+
+    (upstream_request,) = wire.requests
+    forwarded = [
+        (name.lower(), value)
+        for name, value in upstream_request.headers.raw
+        if name.lower() in {b"user-agent", b"x-request-id"}
+    ]
+    assert forwarded == [(b"user-agent", _UTF8_BEYOND_LATIN1), (b"x-request-id", _LATIN1_BYTE)]
+    assert sent[0]["headers"] == [
+        (b"content-type", b"application/json"),
+        (b"x-model-name", _UTF8_BEYOND_LATIN1),
+        (b"x-served-by", _UTF8_WITHIN_LATIN1),
+        (b"link", b"</a>; rel=a"),
+        (b"link", b"</b>; rel=b"),
+    ]
+    assert [message["body"] for message in sent[1:]] == [b"{}", b""]
+    assert [transport.closed for transport in wire.transports] == [True]
 
 
 async def test_a_rotated_internal_ca_is_trusted_from_the_next_request(

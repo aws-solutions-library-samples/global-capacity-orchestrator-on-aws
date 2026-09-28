@@ -240,19 +240,37 @@ async def _resolve_upstream(endpoint_name: str) -> tuple[str, str, str]:
     return _target_service(endpoint, endpoint_name), namespace, configured_health_path
 
 
-def _request_headers(request: Request) -> list[tuple[str, str]]:
-    """Forward only explicitly supported end-to-end model request headers."""
+def _request_headers(request: Request) -> list[tuple[bytes, bytes]]:
+    """Forward only explicitly supported end-to-end model request headers, as sent.
+
+    The raw ASGI bytes are forwarded rather than Starlette's latin-1 decoded
+    strings: httpx2 encodes a ``str`` header value as ASCII, so one non-ASCII
+    byte (a UTF-8 ``user-agent``, say) would fail the request with a 500
+    instead of reaching the model unchanged.
+    """
     return [
         (name.lower(), value)
-        for name, value in request.headers.items()
-        if name.lower() in _ALLOWED_REQUEST_HEADERS
+        for name, value in request.headers.raw
+        if name.lower().decode("latin-1") in _ALLOWED_REQUEST_HEADERS
     ]
 
 
-def _response_headers(response: httpx2.Response) -> dict[str, str]:
-    """Copy end-to-end response headers while dropping hop-by-hop framing."""
+def _response_headers(response: httpx2.Response) -> list[tuple[bytes, bytes]]:
+    """Copy end-to-end response headers byte for byte, dropping hop-by-hop framing.
+
+    Starlette encodes ``str`` header values as latin-1, so relaying httpx2's
+    decoded values failed any response carrying a UTF-8 value outside latin-1
+    with a 500 and silently transcoded one inside it. The raw bytes keep every
+    value exact and every repeated header on its own line; names are
+    lowercased, as ASGI requires.
+    """
     blocked = _HOP_BY_HOP_HEADERS | {"content-length"}
-    return {name: value for name, value in response.headers.items() if name.lower() not in blocked}
+    relayed: list[tuple[bytes, bytes]] = []
+    for name, value in response.headers.raw:
+        lowered = name.lower()
+        if lowered.decode("latin-1") not in blocked:
+            relayed.append((lowered, value))
+    return relayed
 
 
 def _validate_upstream_path(
@@ -337,12 +355,15 @@ class _UpstreamStreamingResponse(StreamingResponse):
     """
 
     def __init__(self, response: httpx2.Response, client: httpx2.AsyncClient) -> None:
+        relayed_headers = _response_headers(response)
         super().__init__(
             _stream_response(response, client),
             status_code=response.status_code,
-            headers=_response_headers(response),
             media_type=None,
         )
+        # Assigned rather than passed as ``headers=``, which takes ``str``
+        # values and re-encodes them as latin-1 (see _response_headers).
+        self.raw_headers = relayed_headers
         self._upstream = (response, client)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

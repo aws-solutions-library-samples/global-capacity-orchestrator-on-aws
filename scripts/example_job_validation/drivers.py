@@ -1026,12 +1026,41 @@ def wait_trainer_runtime_ready(kubectl: KubectlRunner, *, timeout: int = 300) ->
     )
 
 
+#: The CA bundle trust-manager publishes for MLflow's clients
+#: (post-helm-mlflow-tls.yaml); the example mounts it to verify the server.
+MLFLOW_CA_BUNDLE_NAMESPACE = "gco-jobs"
+MLFLOW_CA_BUNDLE_CONFIGMAP = "gco-internal-ca"
+
+
+def _mlflow_ca_bundle_state(kubectl: KubectlRunner) -> str:
+    """Return why the MLflow clients' CA bundle is not usable yet, or ``""``."""
+    reference = f"{MLFLOW_CA_BUNDLE_NAMESPACE}/{MLFLOW_CA_BUNDLE_CONFIGMAP}"
+    code, out, err = kubectl(
+        "get",
+        "configmap",
+        MLFLOW_CA_BUNDLE_CONFIGMAP,
+        "-n",
+        MLFLOW_CA_BUNDLE_NAMESPACE,
+        "-o",
+        "json",
+    )
+    if code != 0:
+        return f"CA bundle ConfigMap {reference} not found: {err.strip()[:300]}"
+    data = json.loads(out).get("data") or {}
+    if not str(data.get("ca.crt", "")).strip():
+        return f"CA bundle ConfigMap {reference} has no ca.crt yet"
+    return ""
+
+
 def wait_mlflow_ready(kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str, Any]:
-    """Wait until the MLflow tracking server Deployment is Available.
+    """Wait until the MLflow tracking server is Available and its clients' CA is published.
 
     The example's client job fails its read-back (or hangs on connect) if
-    it races the server's first rollout — the backend PVC arrives one
-    applier pass after the chart on a fresh install. Readiness wait only;
+    it races the server's first rollout. It also mounts the
+    ``gco-jobs/gco-internal-ca`` ConfigMap, the CA certificate it verifies
+    the server's HTTPS listener with, which trust-manager writes from the
+    ``gco-internal-ca`` Bundle once the post-Helm pass has created both; a
+    pod created before that waits in ContainerCreating. Readiness wait only;
     nothing to revert.
     """
     deadline = time.monotonic() + timeout
@@ -1047,17 +1076,21 @@ def wait_mlflow_ready(kubectl: KubectlRunner, *, timeout: int = 600) -> dict[str
                 condition.get("type") == "Available" and condition.get("status") == "True"
                 for condition in conditions
             )
-            if available:
-                return {
-                    "deployment": "monitoring/mlflow",
-                    "ready_replicas": payload.get("status", {}).get("readyReplicas", 0),
-                }
-            last_state = f"conditions: {json.dumps(conditions)[:400]}"
+            if not available:
+                last_state = f"conditions: {json.dumps(conditions)[:400]}"
+            else:
+                last_state = _mlflow_ca_bundle_state(kubectl)
+                if not last_state:
+                    return {
+                        "deployment": "monitoring/mlflow",
+                        "ready_replicas": payload.get("status", {}).get("readyReplicas", 0),
+                        "ca_bundle": f"{MLFLOW_CA_BUNDLE_NAMESPACE}/{MLFLOW_CA_BUNDLE_CONFIGMAP}",
+                    }
         if time.monotonic() >= deadline:
             break
         time.sleep(_POLL_SECONDS)
     raise ExampleValidationError(
-        f"MLflow tracking server not Available within {timeout}s — is "
+        f"MLflow tracking server not ready within {timeout}s — is "
         f"cluster_observability.mlflow enabled? Last state: {last_state}"
     )
 

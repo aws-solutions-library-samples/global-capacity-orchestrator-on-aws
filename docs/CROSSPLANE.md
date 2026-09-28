@@ -134,7 +134,12 @@ tenant namespace.
 Objects Crossplane composes do not pass through the GCO manifest API, so its
 [job admission policy](CUSTOMIZATION.md#security-policy-configuration) does
 not apply to them; the namespace `ResourceQuota`/`LimitRange` and the RBAC
-above are the controls on this path.
+above are the controls on this path, with two admission policies on top: a
+composed `Certificate` cannot name GCO's internal CA
+(`gco-internal-ca-issuance`), and a Composition cannot change what GCO keeps in
+the tenant namespaces, such as the inference monitor's objects and the
+`gco-inference-tls` Secret (`gco-tenant-write-fence`, see
+[ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence)).
 
 ## Providers and AWS resources
 

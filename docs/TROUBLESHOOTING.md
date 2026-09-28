@@ -10,6 +10,7 @@ Common issues and their solutions.
 - [Deployment Issues](#deployment-issues)
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
+  - [Deploy Refuses Owner-Only Sources (Restrictive umask)](#deploy-refuses-owner-only-sources-restrictive-umask)
   - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
   - [Lambda or State-Machine Custom Resource Timeout](#lambda-or-state-machine-custom-resource-timeout)
@@ -192,6 +193,22 @@ docker run --rm gco-dev docker buildx version   # confirm Buildx is present
 ```
 
 If you deploy from your host instead, ensure one of `docker buildx`, Finch (`docker pull --all-platforms`), or `skopeo` is on `PATH`.
+
+### Deploy Refuses Owner-Only Sources (Restrictive umask)
+
+**Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...`.
+
+**Cause**: The checkout, or files added to it, was created under a restrictive umask such as `077`. CDK zips the plain Lambda directories and builds the service images from the checkout exactly as it is on disk. The Lambda runtime reads function code as an unprivileged user, and the service images run as non-root users, so owner-only files deploy cleanly and then fail at run time. CDK's asset hash ignores file modes, so an owner-only zip would also stay in the bootstrap bucket for every later deploy of the same content.
+
+**Solution**: From the repository root, make the deployable sources readable and deploy again:
+
+```bash
+chmod -R a+rX lambda gco dockerfiles pyproject.toml requirements-lock.txt
+```
+
+Cloning under `umask 022` avoids it. The builds the CLI makes itself (`lambda/*-build`) get git's modes (`0644`, or `0755` for directories and executables) whatever the umask, and a build an older CLI published owner-only is rebuilt on the next deploy.
+
+A deploy made by an older CLI may already have uploaded owner-only code; its functions fail with `Permission denied` or `Unable to import module`. Because the asset hash ignores modes, the next deploy reuses that object. Find the asset's `objectKey` in `cdk.out/<stack>.assets.json`, delete that object from the Region's `cdk-*-assets-*` bootstrap bucket, and deploy again so CDK uploads a readable copy.
 
 ### Stack Stuck in REVIEW_IN_PROGRESS
 
@@ -652,7 +669,10 @@ A certificate issued by another CA, or one that does not name the Service the
 client dialled, is refused by design. During an in-place upgrade the inference
 proxy answers 502 until the post-Helm pass has re-issued `inference-proxy-tls`
 and the kubelet has refreshed the proxy's mounted `ca.crt`; its next request
-then trusts the new CA, with no restart. See
+then trusts the new CA, with no restart. The cost monitor's OpenCost calls and
+a disaggregated endpoint's PD proxy read their mounted `ca.crt` the same way,
+per call; the PD proxy answers 503 `no_decode_backend` and logs
+`decode backend trust is unavailable` while that bundle is unusable. See
 [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
 
 ### API Gateway Timeout After Deployment

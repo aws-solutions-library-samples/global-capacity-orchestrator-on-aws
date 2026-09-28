@@ -92,13 +92,14 @@ Per regional cluster, when enabled:
   binds its plaintext endpoint to pod loopback (`127.0.0.1:9090`) and serves
   it through a `metrics-tls-proxy` sidecar on 9443 (`https-metrics`). See
   [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
-- TLS sidecars in two chart pods, for GCO's in-cluster clients: Grafana's
+- TLS sidecars in three chart pods, for in-cluster clients: Grafana's
   `grafana-tls-proxy` (3443, the `grafana-tls` Service the credential rotator
-  calls) and OpenCost's `opencost-tls-proxy` (9443, the `opencost-tls` Service
-  the cost monitor calls). Both run from a GCO service image, which is built
-  for amd64 only, so those two pods carry a `kubernetes.io/arch: amd64`
-  node selector. `gco monitoring open` still port-forwards to the charts' own
-  Services. Grafana's Deployment uses the `Recreate` strategy: its single
+  calls), OpenCost's `opencost-tls-proxy` (9443, the `opencost-tls` Service
+  the cost monitor calls) and MLflow's `mlflow-tls-proxy` (5443, the
+  `mlflow-tls` Service job pods log runs to). They run from a GCO service
+  image, which is built for amd64 only, so those pods carry a
+  `kubernetes.io/arch: amd64` node selector. `gco monitoring open` still
+  port-forwards to the charts' own Services. Grafana's Deployment uses the `Recreate` strategy: its single
   replica owns a ReadWriteOnce volume, so a rolling update could never attach
   the volume to a surge pod on another node, and a rollout is a brief restart
   instead.
@@ -255,8 +256,11 @@ artifact traffic, so client pods never need S3 credentials of their own. Run
 MLflow deletes the metadata volume on the next deploy — artifacts in S3
 survive.
 
-**Access.** The service is `ClusterIP` only (in-cluster DNS
-`mlflow.monitoring:5000`) — no Ingress, no public endpoint:
+**Access.** Both Services are `ClusterIP` only — no Ingress, no public
+endpoint. Jobs use the HTTPS front door,
+`https://mlflow-tls.monitoring.svc.cluster.local:5443` (see *Logging from a
+job* below); the chart's own `mlflow.monitoring:5000` serves the probes, the
+Prometheus scrape and the tunnel:
 
 ```bash
 gco monitoring open --service mlflow                  # http://localhost:5000
@@ -274,9 +278,10 @@ logs, captured through the tunnel command above.
 > attack detected"). Setting `--allowed-hosts` REPLACES its built-in
 > localhost/private-IP allowance rather than extending it, so GCO's list
 > carries every spelling that legitimately reaches the server: the in-cluster
-> service DNS (with and without the port), the loopback spellings this tunnel
-> forwards to, and a wildcard per `vpc_endpoint_cidrs` entry so Prometheus can
-> scrape the pod IP. The list is assembled at deploy time from that one
+> service DNS (with and without the port, for both `mlflow` and `mlflow-tls`,
+> whose sidecar relays the client's `Host` header unchanged), the loopback
+> spellings this tunnel forwards to, and a wildcard per `vpc_endpoint_cidrs`
+> entry so Prometheus can scrape the pod IP. The list is assembled at deploy time from that one
 > `cdk.json` key (see `_mlflow_allowed_hosts` in `gco/stacks/regional_stack.py`)
 > — arbitrary DNS names stay rejected, and `/health` is exempt so probes never
 > depend on it.
@@ -284,19 +289,25 @@ logs, captured through the tunnel command above.
 **Auth posture.** The server runs without application-level authentication —
 the same posture as the OpenCost UI: it is reachable only from inside the
 cluster (workloads opt in via a NetworkPolicy label, and a GCO-owned
-NetworkPolicy fences the server pod itself — ingress on the server port from
-in-cluster pods and the VPC CIDRs, egress limited to DNS and 443) and through
-the authenticated
-SSM/port-forward tunnel, which is the security boundary. The chart supports
-MLflow's basic-auth plugin (`server.value_options.app_name` plus a
-Secret-backed CSRF key — see the chart docs) if your deployment needs an
-additional in-cluster boundary.
+NetworkPolicy fences the server pod itself — ingress on the server port and
+the TLS port from in-cluster pods and the VPC CIDRs, egress limited to DNS and
+443) and through the authenticated SSM/port-forward tunnel, which is the
+security boundary. The chart supports MLflow's basic-auth plugin
+(`server.value_options.app_name` plus a Secret-backed CSRF key — see the chart
+docs) if your deployment needs an additional in-cluster boundary.
 
-**Logging from a job.** Point the client at the service DNS and opt into
-egress with the `gco.io/mlflow-client: "true"` pod label —
+**Logging from a job.** Point the client at
+`https://mlflow-tls.monitoring.svc.cluster.local:5443`, trust the GCO internal
+CA, and opt into egress with the `gco.io/mlflow-client: "true"` pod label. The
+CA comes from the ConfigMap `gco-internal-ca` in `gco-jobs`, which
+[trust-manager](https://cert-manager.io/docs/trust/trust-manager/) (installed
+with MLflow) publishes and keeps current: mount it and set
+`MLFLOW_TRACKING_SERVER_CERT_PATH` to its `ca.crt`. The label admits the
+server's HTTPS port (5443) only.
 [`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
 is the complete, validated pattern (it logs a run, reads it back through the
-API, and asserts every value round-tripped).
+API, and asserts every value round-tripped). See
+[In-cluster TLS](ARCHITECTURE.md#in-cluster-tls) for how the bundle is built.
 
 ## Curated dashboards
 

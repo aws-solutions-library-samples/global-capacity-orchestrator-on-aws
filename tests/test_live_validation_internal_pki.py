@@ -172,11 +172,27 @@ class TestExpectedLeaves:
         assert skipped["monitoring/grafana-tls"] == (
             "cluster_observability is disabled in cdk.json"
         )
+        assert skipped["monitoring/mlflow-tls"] == "mlflow is disabled in cdk.json"
         assert set(skipped) == {
             "gco-system/cost-monitor-tls",
             "monitoring/opencost-tls",
             "monitoring/grafana-tls",
             "monitoring/gco-monitoring-trust",
+            "monitoring/mlflow-tls",
+            "trust-manager/gco-internal-ca-source",
+        }
+
+    def test_mlflow_off_drops_the_mlflow_leaf_and_the_bundle_source(self) -> None:
+        leaves, skipped = checks.expected_leaf_certificates(
+            _context(cdk_context={"cluster_observability": {"mlflow": {"enabled": False}}})
+        )
+        assert {f"{leaf.namespace}/{leaf.name}" for leaf in leaves} == ALL_LEAVES - {
+            "monitoring/mlflow-tls",
+            "trust-manager/gco-internal-ca-source",
+        }
+        assert skipped == {
+            "monitoring/mlflow-tls": "mlflow is disabled in cdk.json",
+            "trust-manager/gco-internal-ca-source": "mlflow is disabled in cdk.json",
         }
 
     @pytest.mark.parametrize(
@@ -194,6 +210,23 @@ class TestExpectedLeaves:
         assert checks.cluster_observability_configured(_context(cdk_context=cdk_context)) is (
             expected
         )
+
+    @pytest.mark.parametrize(
+        ("cdk_context", "expected"),
+        [
+            ({}, True),
+            ({"cluster_observability": "not-a-block"}, True),
+            ({"cluster_observability": {"mlflow": "not-a-block"}}, True),
+            ({"cluster_observability": {"mlflow": {"persistence_size": "20Gi"}}}, True),
+            ({"cluster_observability": {"mlflow": {"enabled": False}}}, False),
+            # The conjunction: MLflow needs observability, whatever its own toggle says.
+            ({"cluster_observability": {"enabled": False, "mlflow": {"enabled": True}}}, False),
+        ],
+    )
+    def test_mlflow_follows_its_toggle_and_observability(
+        self, cdk_context: dict[str, Any], expected: bool
+    ) -> None:
+        assert checks.mlflow_configured(_context(cdk_context=cdk_context)) is expected
 
 
 class TestSoundPki:

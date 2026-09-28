@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from scripts.live_release_validation.models import RunContext
+from scripts.live_release_validation.models import ActionFailure, RunContext
 
 from . import drivers, kube
 from .drivers import ExampleRunResult, ExampleValidationError
@@ -31,7 +31,9 @@ def action_static(ctx: RunContext) -> dict[str, Any]:
         ],
     }
     if failed:
-        raise RuntimeError(f"{len(failed)} static example check(s) failed: {details['failed']}")
+        raise ActionFailure(
+            f"{len(failed)} static example check(s) failed: {details['failed']}", details
+        )
     return details
 
 
@@ -176,8 +178,9 @@ def _run_one_example(
             evidence["setup"] = drivers.wait_trainer_runtime_ready(kubectl)
         elif spec.setup_driver == "mlflow-ready":
             # Readiness wait; the tracking server may still be rolling out
-            # right after a fresh install (its PVC lands one applier pass
-            # after the chart). Nothing to revert.
+            # right after a fresh install, and the CA bundle the client
+            # mounts is published by trust-manager after the post-Helm
+            # pass. Nothing to revert.
             evidence["setup"] = drivers.wait_mlflow_ready(kubectl)
         elif spec.setup_driver == "argocd-revision-pin":
             # Readiness wait on deploy-time artifacts, then the disclosed
@@ -367,8 +370,11 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
     ctx.persist()
     if summary["failed"]:
         failed_names = [item.name for item in ordered if item.status == "failed"]
-        raise RuntimeError(
+        # The summary rides on the exception so the failed action's report
+        # row carries every example's result, as a passing run's does.
+        raise ActionFailure(
             f"{summary['failed']} example(s) failed: {', '.join(failed_names)} "
-            "(per-example evidence is in the report details)"
+            "(per-example results are in this action's details in the JSON report)",
+            summary,
         )
     return summary

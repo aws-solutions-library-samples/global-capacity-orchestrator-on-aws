@@ -10,6 +10,7 @@ fallback, and refresh throttling. An autouse fixture resets all module-level
 cache, timing, client, and nonce state between tests.
 """
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -57,6 +58,46 @@ def _signed_headers(
         "x-gco-nonce": request_nonce,
         "x-gco-content-sha256": content_hash,
     }
+
+
+async def _asgi_status(
+    app: FastAPI, method: str, path: str, headers: list[tuple[bytes, bytes]]
+) -> int:
+    """Drive ``app`` with exactly the header bytes a server would pass it.
+
+    TestClient round-trips header values through ``str`` and re-encodes them
+    as UTF-8, so it cannot deliver the byte sequences a real server does. An
+    unhandled error propagates here rather than becoming a 500.
+    """
+    messages: list[dict[str, object]] = []
+    delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("test-client", 1234),
+        "server": ("testserver", 80),
+    }
+    await app(scope, receive, send)
+    return next(int(m["status"]) for m in messages if m["type"] == "http.response.start")
 
 
 @pytest.fixture(autouse=True)
@@ -201,6 +242,43 @@ class TestAuthenticatedPaths:
                 headers={"x-gco-signature-version": "v1", "x-gco-signature": ""},
             )
             assert response.status_code == 403
+
+    @pytest.mark.parametrize(
+        ("header", "value"),
+        [
+            # 64 latin-1 bytes, so 64 characters once Starlette decodes them.
+            ("x-gco-signature", b"\xe9" * 64),
+            ("x-gco-content-sha256", b"\xe9" * 64),
+            # 64 bytes of UTF-8, which Starlette decodes into 64 characters.
+            ("x-gco-signature", "é".encode() * 32),
+            # Right length and alphabet, wrong case: neither signer emits it.
+            ("x-gco-signature", b"A" * 64),
+        ],
+    )
+    def test_a_non_hex_digest_header_is_403_not_500(self, app_with_middleware, header, value):
+        """hmac.compare_digest raises TypeError for non-ASCII str input, which was a 500."""
+        signed = _signed_headers("valid-key", "POST", "/api/v1/manifests")
+        raw = [(name.encode(), text.encode()) for name, text in signed.items() if name != header]
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
+            status = asyncio.run(
+                _asgi_status(
+                    app_with_middleware,
+                    "POST",
+                    "/api/v1/manifests",
+                    [*raw, (header.encode(), value)],
+                )
+            )
+        assert status == 403
+
+    def test_the_raw_asgi_path_accepts_a_valid_envelope(self, app_with_middleware):
+        """Control for the test above: the same raw path lets a signed request through."""
+        signed = _signed_headers("valid-key", "POST", "/api/v1/manifests")
+        raw = [(name.encode(), text.encode()) for name, text in signed.items()]
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
+            status = asyncio.run(
+                _asgi_status(app_with_middleware, "POST", "/api/v1/manifests", raw)
+            )
+        assert status == 200
 
     def test_pending_key_allowed_during_rotation(self, app_with_middleware):
         """AWSCURRENT and AWSPENDING keys can sign distinct requests during rotation."""

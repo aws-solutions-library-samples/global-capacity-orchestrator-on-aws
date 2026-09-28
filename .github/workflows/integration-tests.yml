@@ -32,7 +32,7 @@
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
-#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow charts + real TrainJob e2e + SubjectAccessReview sweep + mlflow probe
+#   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow/trust-manager + TrainJob e2e + SAR sweep + mlflow over HTTPS
 #   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
 #   - integration:lambda:imports                  — import each Lambda handler
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
@@ -4338,6 +4338,11 @@ jobs:
     #      passed green while that bug was live (caught live 2026-08-15
     #      instead, one full deploy cycle later). The rollout gate below is
     #      only meaningful with enforcement on.
+    #   7. MLflow over HTTPS — the pinned trust-manager publishes the internal
+    #      CA to gco-jobs, the chart pod runs the stack's TLS sidecar with a
+    #      cert-manager leaf, and the REAL mlflow example logs and reads back
+    #      a run through https://mlflow-tls.monitoring.svc.cluster.local:5443,
+    #      verifying the server, over the shipped client NetworkPolicy.
     #
     # What stays live-only (the harness in scripts/example_job_validation):
     # IRSA/S3 artifact writes, Bedrock vector search, Karpenter/GPU capacity,
@@ -4478,6 +4483,7 @@ jobs:
 
           pull_chart kube-prometheus-stack KPS_CHART_ARCHIVE
           pull_chart cert-manager CERT_MANAGER_CHART_ARCHIVE
+          pull_chart trust-manager TRUST_MANAGER_CHART_ARCHIVE
           pull_chart kubeflow-trainer TRAINER_CHART_ARCHIVE
           pull_chart mlflow MLFLOW_CHART_ARCHIVE
       - name: Create kind cluster (no default CNI)
@@ -4677,6 +4683,62 @@ jobs:
             --wait --timeout 5m
           kubectl wait --for=condition=Established \
             crd/certificates.cert-manager.io --timeout=60s
+      - name: Install pinned trust-manager with shipped values
+        # trust-manager publishes the internal CA's certificate to MLflow's
+        # clients in gco-jobs (the gco-internal-ca Bundle in
+        # post-helm-mlflow-tls.yaml, applied further down). Production installs
+        # it right after cert-manager, which issues its webhook certificate,
+        # whenever MLflow deploys. Its release namespace is also its trust
+        # namespace, the only one it may read Secrets in: never cert-manager's,
+        # where the CA's private key lives. targetNamespaces limits the
+        # ConfigMaps it may write to gco-jobs (and its own namespace); the
+        # chart creates that Role in gco-jobs, which the RBAC step created.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref trust-manager
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values trust-manager \
+            > "${RUNNER_TEMP}/trust-manager-values.yaml"
+          helm install trust-manager "${TRUST_MANAGER_CHART_ARCHIVE}" \
+            --namespace "${namespace}" --create-namespace \
+            --values "${RUNNER_TEMP}/trust-manager-values.yaml" \
+            --wait --timeout 5m
+          kubectl wait --for=condition=Established \
+            crd/bundles.trust.cert-manager.io --timeout=60s
+          # can-i prints the verdict and exits 1 on "no"; the verdict is what counts.
+          can_i() {
+            kubectl auth can-i "$1" "$2" --namespace "$3" \
+              --as="system:serviceaccount:${namespace}:trust-manager" || true
+          }
+          test "$(can_i get secrets "${namespace}")" = "yes"
+          test "$(can_i get secrets cert-manager)" = "no"
+          test "$(can_i create configmaps gco-jobs)" = "yes"
+          test "$(can_i create configmaps gco-system)" = "no"
+          test "$(can_i create secrets gco-jobs)" = "no"
+          echo "trust-manager reads Secrets only in ${namespace} and writes ConfigMaps only in gco-jobs"
+      - name: Re-run the trust-manager install as an upgrade (idempotency contract)
+        # Every redeploy is a helm upgrade, which Helm 4 applies server-side:
+        # a field the chart renders and a controller then rewrites (here the
+        # webhook's CA bundle, which cert-manager's cainjector fills in) would
+        # fail the second apply as a field-ownership conflict, the class the
+        # trainer upgrade below guards against.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref trust-manager
+          )
+          if ! helm upgrade trust-manager "${TRUST_MANAGER_CHART_ARCHIVE}" \
+              --namespace "${namespace}" \
+              --values "${RUNNER_TEMP}/trust-manager-values.yaml" \
+              --wait --timeout 5m; then
+            echo "::error::helm upgrade of trust-manager failed — the chart is not"
+            echo "::error::idempotent, so a second deploy of an existing cluster breaks."
+            exit 1
+          fi
+          test -n "$(kubectl get validatingwebhookconfiguration trust-manager \
+            -o jsonpath='{.webhooks[0].clientConfig.caBundle}')"
+          echo "trust-manager chart upgrade is idempotent."
       - name: Install pinned kubeflow-trainer chart with shipped values
         # Exactly what the installer Lambda does for this chart: the OCI ref,
         # version, namespace, values, and the blocking wait all come from
@@ -4763,20 +4825,25 @@ jobs:
         # gco-internal-ca is refused, a listed leaf in a tenant namespace
         # cannot be widened, a CertificateRequest from anyone but cert-manager
         # is refused even with RBAC cleared, a tenant's own Issuer still
-        # issues, and cert-manager still re-issues a listed leaf. The
+        # issues, and cert-manager still re-issues a listed leaf. The tenant
+        # write fence (09-tenant-write-fence.yaml, also base pass) goes in with
+        # it, so cert-manager issues gco-inference-tls, the one Secret only it
+        # may write, with that fence in force; the next step probes it. The
         # ValidatingAdmissionPolicy v1 API needs Kubernetes 1.30+; the pinned
         # kind node image is newer.
         run: |
           set -euo pipefail
           fence_manifest=lambda/kubectl-applier-simple/manifests/08-internal-ca-issuance.yaml
+          write_fence_manifest=lambda/kubectl-applier-simple/manifests/09-tenant-write-fence.yaml
           manifest=lambda/kubectl-applier-simple/manifests/post-helm-api-workload-certificates.yaml
-          for file in "${fence_manifest}" "${manifest}"; do
+          for file in "${fence_manifest}" "${write_fence_manifest}" "${manifest}"; do
             if grep -Eq '\{\{[A-Z0-9_]+\}\}' "${file}"; then
               echo "::error::${file} now carries a placeholder; render it the way the applier does"
               exit 1
             fi
           done
           kubectl apply -f "${fence_manifest}"
+          kubectl apply -f "${write_fence_manifest}"
           kubectl apply -f "${manifest}"
           kubectl wait --for=condition=Ready clusterissuer/gco-internal-ca-bootstrap --timeout=2m
           kubectl -n cert-manager wait --for=condition=Ready certificate/gco-internal-ca --timeout=2m
@@ -4947,6 +5014,120 @@ jobs:
             echo "::error::the refused tenant Certificate has a Secret"
             exit 1
           fi
+      - name: Prove the tenant write fence in the real API server
+        # 09-tenant-write-fence.yaml went in with the issuance fence above,
+        # and cert-manager issued gco-inference-tls with it in force. Here an
+        # identity RBAC does not stop (system:masters) but that is not the
+        # inference monitor is refused, with the policy's own messages, what
+        # the kro, Argo CD and Crossplane tenant roles must not do in
+        # gco-inference: write the model endpoints' keypair, create an object
+        # carrying the monitor's label, change what a monitor ConfigMap
+        # carries or unlabel it, recreate a deleted <name>-tls-proxy
+        # ConfigMap without the label, change a monitor Deployment's pod
+        # template, create the shared mooncake-master, or forge the monitor's
+        # provenance. The same identity may still annotate, scale and delete
+        # those objects, and the inference monitor's ServiceAccount may do all
+        # of it (it alone does not write the keypair). The probe Deployment
+        # keeps zero replicas, so no image is pulled.
+        # tests/test_tenant_write_fence.py evaluates the same rules offline.
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/tenant-write-fence"
+          mkdir -p "${work}"
+          tenant=(--as=gco-ci-tenant --as-group=system:masters)
+          monitor=(--as=system:serviceaccount:gco-system:gco-inference-monitor-sa --as-group=system:masters)
+          policy="ValidatingAdmissionPolicy 'gco-tenant-write-fence'"
+          only_monitor="only the inference monitor (system:serviceaccount:gco-system:gco-inference-monitor-sa) may"
+          managed="is managed by the inference monitor: only"
+          # config_map <file> <name> <labels JSON> <data JSON>
+          config_map() {
+            printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"gco-inference","labels":%s},"data":%s}\n' \
+              "$2" "$3" "$4" > "$1"
+          }
+          # refused <what> <message> <command...>: the fence refuses the request.
+          refused() {
+            local what="$1" message="$2"
+            shift 2
+            if "$@" >"${work}/out" 2>"${work}/err"; then
+              echo "::error::the API server admitted ${what}"
+              exit 1
+            fi
+            cat "${work}/err"
+            grep -qF "${policy}" "${work}/err"
+            grep -qF "${message}" "${work}/err"
+          }
+
+          # A new policy takes a moment to be enforced: wait for a refused dry run.
+          config_map "${work}/labelled.json" gco-ci-fence-labelled '{"gco.io/type":"inference"}' '{"k":"v"}'
+          enforced=0
+          for _ in $(seq 1 30); do
+            if ! kubectl "${tenant[@]}" create --dry-run=server -f "${work}/labelled.json" \
+                >/dev/null 2>"${work}/err" && grep -qF "${policy}" "${work}/err"; then
+              enforced=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "${enforced}" -ne 1 ]; then
+            cat "${work}/err"
+            echo "::error::the API server never enforced gco-tenant-write-fence"
+            exit 1
+          fi
+
+          # The model endpoints' keypair is cert-manager's alone.
+          kubectl -n gco-inference get secret gco-inference-tls >/dev/null
+          refused "a tenant replacing the ca.crt of gco-inference-tls" "only the cert-manager controller" \
+            kubectl "${tenant[@]}" -n gco-inference patch secret gco-inference-tls --type=merge \
+              -p '{"data":{"ca.crt":"cGxhbnRlZA=="}}'
+          refused "the inference monitor writing gco-inference-tls" "only the cert-manager controller" \
+            kubectl "${monitor[@]}" -n gco-inference annotate secret gco-inference-tls gco-ci/probe=1
+
+          # Only the monitor creates an object carrying its label.
+          refused "a tenant creating a monitor-labelled ConfigMap" "${only_monitor}" \
+            kubectl "${tenant[@]}" create -f "${work}/labelled.json"
+
+          # A monitor pod program: its data is the monitor's, and once deleted
+          # it cannot come back without the label.
+          config_map "${work}/program.json" gco-ci-fence-tls-proxy \
+            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference"}' '{"tls_proxy.py":"print(1)"}'
+          kubectl "${monitor[@]}" create -f "${work}/program.json"
+          refused "a tenant rewriting a monitor ConfigMap" "${managed}" \
+            kubectl "${tenant[@]}" -n gco-inference patch configmap gco-ci-fence-tls-proxy --type=merge \
+              -p '{"data":{"tls_proxy.py":"print(2)"}}'
+          refused "a tenant unlabelling a monitor ConfigMap" "${only_monitor}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/type-
+          kubectl "${tenant[@]}" -n gco-inference annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
+          kubectl "${tenant[@]}" -n gco-inference delete configmap gco-ci-fence-tls-proxy
+          config_map "${work}/unlabelled.json" gco-ci-fence-tls-proxy '{"app":"gco-ci-fence"}' '{"tls_proxy.py":"print(3)"}'
+          refused "a tenant recreating a deleted pod program unlabelled" "the inference monitor mounts ConfigMaps named" \
+            kubectl "${tenant[@]}" create -f "${work}/unlabelled.json"
+
+          # A monitor Deployment: what it runs is the monitor's, how far it
+          # scales is not.
+          cat > "${work}/deployment.json" <<'EOF'
+          {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"gco-ci-fence","namespace":"gco-inference","labels":{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference"}},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"gco-ci-fence"}},"template":{"metadata":{"labels":{"app":"gco-ci-fence","gco.io/type":"inference"}},"spec":{"containers":[{"name":"model","image":"registry.invalid/gco-ci-fence:never-pulled"}]}}}}
+          EOF
+          kubectl "${monitor[@]}" create -f "${work}/deployment.json"
+          refused "a tenant changing a monitor Deployment's pod template" "${managed}" \
+            kubectl "${tenant[@]}" -n gco-inference set env deployment/gco-ci-fence GCO_CI_FENCE=tenant
+          refused "a tenant restarting a monitor Deployment" "${managed}" \
+            kubectl "${tenant[@]}" -n gco-inference rollout restart deployment/gco-ci-fence
+          kubectl "${tenant[@]}" -n gco-inference scale deployment/gco-ci-fence --replicas=0
+          kubectl "${monitor[@]}" -n gco-inference set env deployment/gco-ci-fence GCO_CI_FENCE=monitor
+
+          # The shared Mooncake master, and the monitor's provenance.
+          cat > "${work}/master.json" <<'EOF'
+          {"apiVersion":"v1","kind":"Service","metadata":{"name":"mooncake-master","namespace":"gco-inference","labels":{"app":"mooncake-master","project":"gco"}},"spec":{"selector":{"app":"mooncake-master"},"ports":[{"name":"rpc","port":50051}]}}
+          EOF
+          refused "a tenant creating mooncake-master" "${only_monitor}" \
+            kubectl "${tenant[@]}" create --dry-run=server -f "${work}/master.json"
+          config_map "${work}/own.json" gco-ci-fence-own '{"app":"gco-ci-fence"}' '{"k":"v"}'
+          kubectl "${tenant[@]}" create -f "${work}/own.json"
+          refused "a tenant forging a lifecycle id" "may set, change or remove the gco.io/lifecycle-id" \
+            kubectl "${tenant[@]}" -n gco-inference annotate configmap gco-ci-fence-own gco.io/lifecycle-id=forged
+
+          kubectl -n gco-inference delete deployment gco-ci-fence
+          kubectl -n gco-inference delete configmap gco-ci-fence-own
       - name: Apply the shipped torch-distributed runtime
         # The platform delivers this runtime through the post-Helm kubectl
         # pass (chart hook Jobs stay disabled — see charts.yaml). Applying it
@@ -4966,6 +5147,21 @@ jobs:
         # returns. Namespace comes from the emit (monitoring); production
         # gets it from kube-prometheus-stack's create_namespace, so create it
         # here.
+        #
+        # The chart pod also gets the HTTPS front door the regional stack
+        # injects: GCORegionalStack._mlflow_chart_values and the
+        # _chart_tls_proxy_sidecar it calls are executed from the stack source
+        # (as the cost-pipeline job does for OpenCost), and their TLS keys are
+        # applied: the mlflow-tls-proxy sidecar (verified TLS on 5443 in front
+        # of the server's 127.0.0.1:5000, the mlflow-tls leaf mounted from an
+        # optional Secret volume that does not exist yet) and the amd64 node
+        # selector. The rest of that output needs AWS (the S3 artifact
+        # destination, the IRSA annotation) or is replaced by kind (the claim
+        # size, the CIDR-derived host globs), so the shipped values keep those.
+        # One CI-only substitution: this job builds no service image, so the
+        # sidecar runs the same stdlib-only gco/services/tls_proxy.py from a
+        # ConfigMap on the pinned Python image, which is how the inference
+        # monitor runs it in every model pod.
         run: |
           set -euo pipefail
           read -r _ref _version namespace _repo_url < <(
@@ -4973,9 +5169,112 @@ jobs:
           )
           python3 .github/scripts/validate_helm_charts.py --emit-values mlflow \
             > "${RUNNER_TEMP}/mlflow-values.yaml"
+          kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n "${namespace}" create configmap gco-ci-mlflow-tls-proxy \
+            --from-file=tls_proxy.py=gco/services/tls_proxy.py
+          python3 - <<'PY' > "${RUNNER_TEMP}/mlflow-ci-overlay.yaml"
+          import ast
+          import ipaddress
+          from pathlib import Path
+          from types import SimpleNamespace
+          from typing import Any
+
+          import yaml
+
+          from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE
+
+
+          def is_literal(node):
+              try:
+                  ast.literal_eval(node)
+              except (ValueError, TypeError, SyntaxError, RecursionError):
+                  return False
+              return True
+
+
+          source = Path("gco/stacks/regional_stack.py")
+          tree = ast.parse(source.read_text(encoding="utf-8"))
+          (stack_class,) = [
+              node for node in tree.body
+              if isinstance(node, ast.ClassDef) and node.name == "GCORegionalStack"
+          ]
+          helpers = {"_chart_tls_proxy_sidecar", "_mlflow_allowed_hosts"}
+          lifted = [
+              # The module's literal constants (the ports, the host spellings,
+              # the sidecar's uid and wait budget among them), then the functions.
+              *(
+                  node for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and all(isinstance(target, ast.Name) for target in node.targets)
+                  and is_literal(node.value)
+              ),
+              *(
+                  node for node in tree.body
+                  if isinstance(node, ast.FunctionDef) and node.name in helpers
+              ),
+              *(
+                  node for node in stack_class.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "_mlflow_chart_values"
+              ),
+          ]
+          found = {node.name for node in lifted if isinstance(node, ast.FunctionDef)}
+          assert found == helpers | {"_mlflow_chart_values"}, (
+              f"{source} no longer defines the MLflow value builders ({sorted(found)}); "
+              "update this step with the stack"
+          )
+          namespace = {"Any": Any, "ipaddress": ipaddress}
+          exec(compile(ast.Module(body=lifted, type_ignores=[]), str(source), "exec"), namespace)
+          stack = SimpleNamespace(
+              cluster_shared_identity=SimpleNamespace(name="gco-ci-cluster-shared"),
+              deployment_region="us-east-1",
+              node=SimpleNamespace(try_get_context=lambda key: None),
+              mlflow_role=SimpleNamespace(role_arn="gco-ci-no-irsa"),
+              config=SimpleNamespace(
+                  get_cluster_observability_config=lambda: {"mlflow": {"persistence_size": "1Gi"}}
+              ),
+              manifest_processor_image=SimpleNamespace(image_uri="manifest-processor:ci"),
+          )
+          values = namespace["_mlflow_chart_values"](stack)["values"]
+          (sidecar,) = values["extraContainers"]
+          assert sidecar["name"] == "mlflow-tls-proxy", sidecar["name"]
+          assert sidecar["image"] == "manifest-processor:ci", sidecar["image"]
+          assert sidecar["command"] == ["python", "-m", "gco.services.tls_proxy"], sidecar["command"]
+          # CI-only (see the step comment): the same program, from a ConfigMap,
+          # on the pinned interpreter image; bytecode stays off the read-only root.
+          sidecar["image"] = ENDPOINT_TLS_PROXY_IMAGE
+          sidecar["command"] = ["python3", "/etc/gco-tls-proxy/tls_proxy.py"]
+          sidecar["env"].append({"name": "PYTHONDONTWRITEBYTECODE", "value": "1"})
+          sidecar["volumeMounts"].append(
+              {"name": "gco-ci-tls-proxy", "mountPath": "/etc/gco-tls-proxy", "readOnly": True}
+          )
+          overlay = {
+              "extraContainers": [sidecar],
+              "extraVolumes": [
+                  *values["extraVolumes"],
+                  {"name": "gco-ci-tls-proxy", "configMap": {"name": "gco-ci-mlflow-tls-proxy"}},
+              ],
+              "nodeSelector": values["nodeSelector"],
+          }
+          print(yaml.safe_dump(overlay, sort_keys=False))
+          PY
+          cat "${RUNNER_TEMP}/mlflow-ci-overlay.yaml"
           helm install mlflow "${MLFLOW_CHART_ARCHIVE}" \
             --namespace "${namespace}" --create-namespace \
-            --values "${RUNNER_TEMP}/mlflow-values.yaml"
+            --values "${RUNNER_TEMP}/mlflow-values.yaml" \
+            --values "${RUNNER_TEMP}/mlflow-ci-overlay.yaml"
+          # The TLS front door rendered into the chart pod, on the named port
+          # the mlflow-tls Service targets, from an optional Secret volume
+          # that does not exist yet, and the pod is pinned to amd64 nodes.
+          test "$(kubectl -n "${namespace}" get deployment mlflow \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="mlflow-tls-proxy")].ports[?(@.name=="https")].containerPort}')" = "5443"
+          test "$(kubectl -n "${namespace}" get deployment mlflow \
+            -o jsonpath='{.spec.template.spec.volumes[?(@.name=="gco-tls")].secret.optional}')" = "true"
+          test "$(kubectl -n "${namespace}" get deployment mlflow \
+            -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/arch}')" = "amd64"
+          if kubectl -n "${namespace}" get secret mlflow-tls >/dev/null 2>&1; then
+            echo "::error::mlflow-tls exists before the post-Helm step; the keypair wait would go untested"
+            exit 1
+          fi
       - name: Apply the post-Helm mlflow network policies
         # GCO owns the server's NetworkPolicy (the chart's is disabled in the
         # shipped values because its ingress admits only POD sources and so
@@ -5078,12 +5377,206 @@ jobs:
             -H "Host: anything.invalid" "http://127.0.0.1:5000/health")
           allowed=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Host: mlflow.monitoring:5000" "http://127.0.0.1:5000/")
+          # What an HTTPS client sends: the TLS sidecar relays its Host header.
+          allowed_tls=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: mlflow-tls.monitoring.svc.cluster.local:5443" "http://127.0.0.1:5000/")
           rejected=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Host: rebind.attacker.example" "http://127.0.0.1:5000/")
-          echo "health(exempt)=$health allowed-host=$allowed arbitrary-host=$rejected"
+          echo "health(exempt)=$health allowed-host=$allowed allowed-tls-host=$allowed_tls arbitrary-host=$rejected"
           test "$health" = "200"
           test "$allowed" = "200"
+          test "$allowed_tls" = "200"
           test "$rejected" = "403"
+      - name: Publish the MLflow CA bundle and serve MLflow over verified HTTPS
+        # post-helm-mlflow-tls.yaml, rendered the way the applier renders it
+        # (MLFLOW_ENABLED on, nothing left unrendered), against the real
+        # cert-manager, trust-manager and chart pod: the gco-internal-ca
+        # ClusterIssuer issued above signs the mlflow-tls leaf and the
+        # gco-internal-ca-source carrier in trust-manager's namespace, and the
+        # gco-internal-ca Bundle turns Synced. Its ConfigMap must exist in
+        # gco-jobs only and hold exactly one certificate, the internal CA's
+        # (the fingerprint of the certificate the PKI step saved). The tenant
+        # write fence keeps it trust-manager's: an identity RBAC does not stop
+        # is refused a rewrite with the policy's message, and trust-manager's
+        # ServiceAccount is admitted. The MLflow pod started without its
+        # Secret, as on a fresh cluster; the step ends once the sidecar's
+        # keypair wait has picked the leaf up, proven with a verified /health
+        # through the sidecar's own listener.
+        run: |
+          set -euo pipefail
+          manifest=lambda/kubectl-applier-simple/manifests/post-helm-mlflow-tls.yaml
+          rendered="${RUNNER_TEMP}/mlflow-tls.yaml"
+          sed 's|{{MLFLOW_ENABLED}}|true|g' "${manifest}" > "${rendered}"
+          if grep -Eq '\{\{[A-Z0-9_]+\}\}' "${rendered}"; then
+            echo "::error::${manifest} now carries another placeholder; render it the way the applier does"
+            exit 1
+          fi
+          read -r _ref _version tm_namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref trust-manager
+          )
+          kubectl apply -f "${rendered}"
+          kubectl -n monitoring wait --for=condition=Ready certificate/mlflow-tls --timeout=2m
+          kubectl -n "${tm_namespace}" wait --for=condition=Ready \
+            certificate/gco-internal-ca-source --timeout=2m
+          kubectl wait --for=condition=Synced bundles.trust.cert-manager.io/gco-internal-ca --timeout=2m
+
+          pki="${RUNNER_TEMP}/internal-pki"
+          ca_fingerprint="$(openssl x509 -in "${pki}/ca.crt" -noout -fingerprint -sha256)"
+          kubectl -n monitoring get secret mlflow-tls -o jsonpath='{.data.tls\.crt}' \
+            | base64 -d > "${pki}/mlflow-tls.crt"
+          openssl verify -x509_strict -purpose sslserver -CAfile "${pki}/ca.crt" \
+            -verify_hostname mlflow-tls.monitoring.svc.cluster.local "${pki}/mlflow-tls.crt"
+          kubectl -n gco-jobs get configmap gco-internal-ca -o json > "${pki}/bundle.json"
+          python3 - "${pki}/bundle.json" "${pki}/bundle.crt" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["data"]
+          assert set(data) == {"ca.crt"}, sorted(data)
+          assert data["ca.crt"].count("-----BEGIN CERTIFICATE-----") == 1, data["ca.crt"]
+          Path(sys.argv[2]).write_text(data["ca.crt"], encoding="utf-8")
+          PY
+          if [ "$(openssl x509 -in "${pki}/bundle.crt" -noout -fingerprint -sha256)" != "${ca_fingerprint}" ]; then
+            echo "::error::gco-jobs/gco-internal-ca is not the gco-internal-ca certificate"
+            exit 1
+          fi
+          test "$(kubectl get configmaps --all-namespaces --field-selector metadata.name=gco-internal-ca \
+            -o jsonpath='{.items[*].metadata.namespace}')" = "gco-jobs"
+
+          # Only trust-manager writes the bundle.
+          policy="ValidatingAdmissionPolicy 'gco-tenant-write-fence'"
+          owned="only trust-manager (system:serviceaccount:${tm_namespace}:trust-manager)"
+          if kubectl --as=gco-ci-tenant --as-group=system:masters -n gco-jobs \
+              patch configmap gco-internal-ca --type=merge -p '{"data":{"ca.crt":"planted"}}' \
+              2>"${pki}/bundle-fence.err"; then
+            echo "::error::the API server let a tenant rewrite gco-jobs/gco-internal-ca"
+            exit 1
+          fi
+          cat "${pki}/bundle-fence.err"
+          grep -qF "${policy}" "${pki}/bundle-fence.err"
+          grep -qF "${owned}" "${pki}/bundle-fence.err"
+          kubectl --as="system:serviceaccount:${tm_namespace}:trust-manager" --as-group=system:masters \
+            -n gco-jobs annotate configmap gco-internal-ca gco-ci/probe=admitted --dry-run=server
+
+          # The Service's selector must find the chart pod, on the sidecar's port.
+          for _ in $(seq 1 30); do
+            ports="$(kubectl -n monitoring get endpointslices \
+              -l kubernetes.io/service-name=mlflow-tls -o jsonpath='{.items[*].ports[*].port}')"
+            [ "${ports}" = "5443" ] && break
+            sleep 2
+          done
+          test "${ports}" = "5443"
+
+          deadline=$((SECONDS + 300))
+          until kubectl -n monitoring exec deploy/mlflow -c mlflow-tls-proxy -- python3 -c '
+          import socket
+          import ssl
+
+          host = "mlflow-tls.monitoring.svc.cluster.local"
+          context = ssl.create_default_context(cafile="/var/run/gco/tls/ca.crt")
+          with socket.create_connection(("127.0.0.1", 5443), timeout=5) as raw:
+              with context.wrap_socket(raw, server_hostname=host) as tls:
+                  tls.sendall(f"GET /health HTTP/1.0\r\nHost: {host}:5443\r\n\r\n".encode())
+                  status = tls.makefile("rb").readline().decode().strip()
+          print(f"MLflow through its TLS front door: {status}")
+          assert status.split(" ")[1:2] == ["200"], status
+          '; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::the mlflow-tls-proxy sidecar never served its leaf within 300s"
+              kubectl -n monitoring describe pods -l app.kubernetes.io/name=mlflow || true
+              kubectl -n monitoring logs deploy/mlflow -c mlflow-tls-proxy --tail=100 || true
+              exit 1
+            fi
+            sleep 10
+          done
+      - name: Resolve the mlflow example's image
+        id: mlflow-example-image
+        run: |
+          set -euo pipefail
+          image=$(python3 -c '
+          import yaml
+          with open("examples/mlflow-tracking-job.yaml", encoding="utf-8") as fh:
+              doc = yaml.safe_load(fh)
+          (container,) = doc["spec"]["template"]["spec"]["containers"]
+          print(container["image"])
+          ')
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: ${{ steps.mlflow-example-image.outputs.image }}
+      - name: Load the mlflow example's image into kind
+        run: |
+          set -euo pipefail
+          kind load docker-image "${{ steps.mlflow-example-image.outputs.image }}" \
+            --name gco-examples-smoke
+          docker image rm "${{ steps.mlflow-example-image.outputs.image }}"
+      - name: Run the REAL mlflow tracking example over verified HTTPS as the processor SA
+        # The exact file users submit, applied with the production identity:
+        # it installs the MLflow client, logs a run to
+        # https://mlflow-tls.monitoring.svc.cluster.local:5443 while verifying
+        # the server against the gco-internal-ca ConfigMap it mounts, reads the
+        # run back and asserts it. The client's path to the server is the
+        # shipped allow-mlflow-clients policy (5443 to the server pods only).
+        # In production every gco-jobs pod also gets DNS and 443 from
+        # 03-network-policies.yaml (allow-dns, allow-https-egress); this job
+        # does not apply that file (its egress rules would isolate the
+        # TrainJob's pods too), so a CI-only policy gives MLflow clients just
+        # those two, for the lookup and the package index.
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<'EOF'
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: gco-ci-mlflow-client-dns-and-https
+            namespace: gco-jobs
+          spec:
+            podSelector:
+              matchLabels:
+                gco.io/mlflow-client: "true"
+            policyTypes:
+              - Egress
+            egress:
+              - ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+                  - protocol: UDP
+                    port: 5353
+                  - protocol: TCP
+                    port: 5353
+              - ports:
+                  - protocol: TCP
+                    port: 443
+          EOF
+          kubectl apply --as="$PROCESSOR_SA" -f examples/mlflow-tracking-job.yaml
+          job=mlflow-tracking-example
+          deadline=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            complete=$(kubectl -n gco-jobs get job "${job}" \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            failed=$(kubectl -n gco-jobs get job "${job}" \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+            if [ "$complete" = "True" ] || [ "$failed" = "True" ]; then
+              break
+            fi
+            sleep 10
+          done
+          kubectl -n gco-jobs logs "job/${job}" --tail=-1 > "${RUNNER_TEMP}/mlflow-example.log" || true
+          cat "${RUNNER_TEMP}/mlflow-example.log"
+          if [ "$complete" != "True" ]; then
+            echo "::error::the mlflow tracking example did not complete (Failed=${failed:-unset})"
+            kubectl -n gco-jobs describe job "${job}" || true
+            kubectl -n gco-jobs describe pods -l "job-name=${job}" || true
+            exit 1
+          fi
+          grep -q "Tracking to https://mlflow-tls.monitoring.svc.cluster.local:5443" \
+            "${RUNNER_TEMP}/mlflow-example.log"
+          grep -q "Read-back verified" "${RUNNER_TEMP}/mlflow-example.log"
+          kubectl -n gco-jobs delete job "${job}" --wait=true
+          kubectl -n gco-jobs delete networkpolicy gco-ci-mlflow-client-dns-and-https
       - name: Pre-pull the example's training image into kind
         # The kubelet would pull this ~3.5GB docker.io image itself, but an
         # explicit pull-with-retry gives Docker Hub blips bounded, attributed
@@ -5161,6 +5654,9 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl -n kubeflow-trainer logs deployment/kubeflow-trainer-controller-manager --tail=200 || true
           kubectl -n monitoring logs deployment/mlflow --tail=200 --all-containers || true
+          kubectl -n trust-manager logs deployment/trust-manager --tail=200 || true
+          kubectl get bundles.trust.cert-manager.io -o yaml || true
+          kubectl -n gco-jobs logs job/mlflow-tracking-example --tail=200 || true
           kubectl -n gco-jobs get trainjob -o yaml || true
           kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
 

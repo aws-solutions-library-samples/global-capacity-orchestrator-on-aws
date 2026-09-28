@@ -61,6 +61,11 @@ spec:
         enableServiceLinks: false
         serviceAccountName: gco-manifest-processor-sa
         priorityClassName: gco-platform-critical
+        # GCO's service images are built for linux/amd64 only, and the
+        # cpu-general pool also runs Graviton (arm64) nodes, where this pod
+        # would fail with an exec format error.
+        nodeSelector:
+          kubernetes.io/arch: amd64
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000

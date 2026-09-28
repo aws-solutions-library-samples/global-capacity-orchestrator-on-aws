@@ -1,0 +1,156 @@
+# MLflow's half of GCO's internal PKI (post-Helm pass): the tracking server's
+# HTTPS front door, and the CA bundle its clients in gco-jobs verify it with.
+#
+#   mlflow-tls              the leaf and the Service in front of the MLflow
+#                           pod's mlflow-tls-proxy sidecar (5443 -> the server
+#                           on 127.0.0.1:5000)
+#   gco-internal-ca-source  the trust-manager namespace's copy of the GCO
+#                           internal CA certificate, the Bundle's only source
+#   gco-internal-ca         the trust-manager Bundle that writes that
+#                           certificate to the ConfigMap gco-jobs/gco-internal-ca
+#                           (key ca.crt), which clients mount
+#
+# Why trust-manager. A leaf in gco-jobs would deliver the CA the way
+# gco-monitoring-trust does in monitoring, but its Secret would put a private
+# key in a namespace every job can read. trust-manager publishes only the
+# certificate, as a ConfigMap. It reads Secrets only in its own namespace (its
+# trust namespace, charts.yaml trust-manager), so its source is a leaf there
+# that exists only to carry the CA certificate as ca.crt, not the CA Secret
+# in cert-manager: trust-manager never gets read access to the CA's key. The
+# tenant write fence (09-tenant-write-fence.yaml) lets only trust-manager
+# write gco-jobs/gco-internal-ca.
+#
+# The server keeps its plaintext port 5000 for the chart's probes, the
+# ServiceMonitor scrape and `gco monitoring open --service mlflow`; clients use
+# https://mlflow-tls.monitoring.svc.cluster.local:5443
+# (examples/mlflow-tracking-job.yaml).
+#
+# Both leaves come from the gco-internal-ca ClusterIssuer
+# (post-helm-api-workload-certificates.yaml), and 08-internal-ca-issuance.yaml
+# lists them with exactly these DNS names. Only applied when the MLflow
+# conjunction holds (cdk.json cluster_observability.enabled AND
+# cluster_observability.mlflow.enabled), like the trust-manager chart itself:
+# otherwise {{MLFLOW_ENABLED}} stays unreplaced, the applier skips this file,
+# and _FEATURE_RESOURCE_INVENTORY prunes what an earlier deploy created
+# (Secrets included: cert-manager leaves them behind).
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mlflow-tls
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-mlflow
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  secretName: mlflow-tls
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - mlflow-tls
+    - mlflow-tls.monitoring
+    - mlflow-tls.monitoring.svc
+    - mlflow-tls.monitoring.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Selects the MLflow chart's pod by its selector labels (release "mlflow") and
+# targets the sidecar's named port. mlflow-server (post-helm-mlflow-network.yaml)
+# admits 5443 next to 5000, and allow-mlflow-clients lets labelled gco-jobs
+# pods reach 5443 only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-tls
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-mlflow
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: mlflow
+    app.kubernetes.io/instance: mlflow
+---
+# The trust-manager namespace's copy of the GCO internal CA. Nothing serves
+# this leaf: cert-manager writes the issuing CA into every leaf Secret as
+# ca.crt, which makes it the way to deliver the CA certificate (and every
+# later renewal of it) into trust-manager's trust namespace. The Bundle reads
+# only ca.crt.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gco-internal-ca-source
+  namespace: trust-manager
+  labels:
+    project: gco
+    app: gco-mlflow
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  secretName: gco-internal-ca-source
+  duration: 2160h
+  renewBefore: 720h
+  revisionHistoryLimit: 1
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - server auth
+  dnsNames:
+    - gco-internal-ca-source
+    - gco-internal-ca-source.trust-manager
+    - gco-internal-ca-source.trust-manager.svc
+    - gco-internal-ca-source.trust-manager.svc.cluster.local
+  issuerRef:
+    name: gco-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# trust-manager writes the ConfigMap gco-internal-ca, key ca.crt, into gco-jobs
+# only: the selector names it, and the chart's targetNamespaces keeps
+# trust-manager's write access to that namespace. The CA is a root, so ca.crt
+# is one certificate and nothing else (no intermediates, no public CAs).
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: gco-internal-ca
+  labels:
+    project: gco
+    app: gco-mlflow
+  annotations:
+    gco.io/mlflow-enabled: "{{MLFLOW_ENABLED}}"
+spec:
+  sources:
+    - secret:
+        name: gco-internal-ca-source
+        key: ca.crt
+  target:
+    configMap:
+      key: ca.crt
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: gco-jobs

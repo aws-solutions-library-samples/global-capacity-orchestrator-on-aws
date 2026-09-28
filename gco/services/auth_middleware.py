@@ -67,6 +67,11 @@ _secrets_client = None
 _nonce_lock = threading.Lock()
 _seen_nonces: dict[str, float] = {}
 _NONCE_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+#: A lowercase SHA-256 hex digest, as both signers emit. Checked before any
+#: ``hmac.compare_digest``, which raises ``TypeError`` for a ``str`` holding a
+#: non-ASCII character (Starlette decodes header bytes as latin-1), so a
+#: malformed header is a 403 rather than a 500.
+_HEX_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _bounded_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -280,8 +285,8 @@ async def _has_valid_signature(request: Request, signing_keys: set[str]) -> bool
     nonce = headers.get("x-gco-nonce", "")
     claimed_content_hash = headers.get("x-gco-content-sha256", "")
     if (
-        len(signature) != 64
-        or len(claimed_content_hash) != 64
+        _HEX_DIGEST_PATTERN.fullmatch(signature) is None
+        or _HEX_DIGEST_PATTERN.fullmatch(claimed_content_hash) is None
         or _NONCE_PATTERN.fullmatch(nonce) is None
     ):
         return False
