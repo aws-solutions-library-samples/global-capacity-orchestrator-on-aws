@@ -42,9 +42,9 @@
       "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
     },
     "cli/stacks.py": {
-      "digest": "2c8228a811a48f39516ae71a905b6a5c3b19a9dd743610face1dbe718bc21d5f",
-      "generated_at": "2026-09-28T07:34:51Z",
-      "source_commit": "95213a3dfe214f41ea8e3977b79711b1be061ac0"
+      "digest": "c6626cb866e9cdb8202d8c9b6fa9978cf20487080fdcd05a89d7c8cff873511f",
+      "generated_at": "2026-09-28T07:53:52Z",
+      "source_commit": "8f5a89a0a3c71e8e8cb0e4943642bb6cd07802da"
     },
     "gco/services/api_routes/inference_proxy.py": {
       "digest": "15a888305d84b0f156bf210ae5fe7c13641783c7d08d6e254dd65e24b7b55213",
