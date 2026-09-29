@@ -314,7 +314,7 @@ numpy==2.4.6
     #   pandas
     #   rank-bm25
     #   tensorboard
-oauthlib==3.3.1
+oauthlib==4.0.0
     # via requests-oauthlib
 openapi-pydantic==0.5.1
     # via fastmcp-slim
@@ -490,7 +490,7 @@ pygments==2.20.0
     #   pytest
     #   rich
     #   zensical
-pyjwt==2.13.0
+pyjwt==2.14.0
     # via mcp
 pymdown-extensions==11.0.1
     # via zensical

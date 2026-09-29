@@ -14,13 +14,7 @@
   "devDependencies": {
     "aws-cdk": "2.1142.0",
     "cdk-dia": "0.12.3",
-    "markdownlint-cli2": "0.23.2",
+    "markdownlint-cli2": "0.23.3",
     "swagger-ui-dist": "5.33.0"
-  },
-  "overrides": {
-    "markdownlint-cli2": {
-      "js-yaml": "5.2.2",
-      "smol-toml": "1.7.2"
-    }
   }
 }
