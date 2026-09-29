@@ -4,6 +4,10 @@
 # maximum availability and cost efficiency — Graviton instances (c7g, m7g, r7g)
 # offer better price/performance for CPU-bound workloads.
 # Spot is preferred; on-demand is the fallback.
+# GCO's own service images are amd64-only, so every pod that runs one pins
+# kubernetes.io/arch: amd64 (see the manifests README's Platform Workload
+# Contract); a user image must be multi-arch, or pinned the same way, to run
+# here safely.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:

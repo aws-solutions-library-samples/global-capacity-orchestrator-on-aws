@@ -175,6 +175,13 @@ the tenant namespace. A tenant `Certificate` must reference an `Issuer` in its
 own namespace: the admission policy `gco-internal-ca-issuance` refuses any
 Certificate that names GCO's internal CA ClusterIssuers
 ([ARCHITECTURE.md → Who can obtain a trusted certificate](ARCHITECTURE.md#in-cluster-tls)).
+Nor may a tenant repository change what GCO keeps in those namespaces: the
+admission policy `gco-tenant-write-fence` refuses writes to the inference
+monitor's objects in `gco-inference` (anything labelled `gco.io/type:
+inference`, the `<name>-tls-proxy`, `<name>-pd-proxy` and `<name>-mooncake`
+ConfigMaps, and the monitor's provenance annotations), to the
+`gco-inference-tls` Secret, and to the `gco-internal-ca` bundle in `gco-jobs`
+([ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence)).
 
 The [job admission policy](CUSTOMIZATION.md#security-policy-configuration)
 enforced by GCO's manifest API does **not** apply to objects Argo CD writes

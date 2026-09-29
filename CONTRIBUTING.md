@@ -164,7 +164,8 @@ docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
   pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
-  sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
+  sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt &&
+  chmod 644 requirements-lock.txt
 '
 ```
 
@@ -180,6 +181,11 @@ The `sed` step removes the `gco-cli @ file:///workspace` self-reference that
 continuation). CI installs the project separately with `pip install --no-deps`,
 and the staleness check strips `^gco-cli @ file` anyway, but we keep it out of
 the committed file for readability.
+
+The `chmod` puts the file's mode back. On a bind mount from a macOS host (seen
+with Podman), `sed -i` leaves its replacement file owner-only (`0600`), and
+`gco stacks deploy` refuses owner-only deployable sources, which include
+`requirements-lock.txt`.
 
 Running on Linux directly (native or WSL) matches the container's environment
 — macOS-only resolutions will produce a different lockfile that CI rejects,
@@ -502,7 +508,8 @@ docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
   pip install --quiet "pip==25.0.1" &&
   pip-compile --no-emit-index-url --strip-extras --all-extras \
     -o requirements-lock.txt pyproject.toml &&
-  sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt
+  sed -i "/^gco-cli @ file:/,+1d" requirements-lock.txt &&
+  chmod 644 requirements-lock.txt
 '
 ```
 

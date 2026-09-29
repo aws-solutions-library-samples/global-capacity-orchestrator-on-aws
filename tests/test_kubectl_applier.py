@@ -2450,7 +2450,7 @@ class TestAuthoritativeManifestPlanner:
         dispatched = set(re.findall(r'(?:el)?if kind == "([A-Za-z0-9]+)"', source))
         for group in re.findall(r"(?:el)?if kind in \(([^)]*)\)", source):
             dispatched.update(re.findall(r'"([A-Za-z0-9]+)"', group))
-        # Table-driven branches use the four custom-object maps. Require each
+        # Table-driven branches use the custom-object maps. Require each
         # map name to appear in the dispatch condition so adding a map cannot
         # leave its kinds admitted by planning but unreachable at apply time.
         for map_name in (
@@ -2459,6 +2459,7 @@ class TestAuthoritativeManifestPlanner:
             "_CERT_MANAGER_CUSTOM_OBJECTS",
             "_ARGOCD_CUSTOM_OBJECTS",
             "_CROSSPLANE_CUSTOM_OBJECTS",
+            "_TRUST_MANAGER_CUSTOM_OBJECTS",
         ):
             assert f"kind in {map_name}" in source, (
                 f"table-driven custom-object dispatch omitted {map_name}; update the apply loop"
@@ -2468,6 +2469,7 @@ class TestAuthoritativeManifestPlanner:
         dispatched.update(handler_module._CERT_MANAGER_CUSTOM_OBJECTS)
         dispatched.update(handler_module._ARGOCD_CUSTOM_OBJECTS)
         dispatched.update(handler_module._CROSSPLANE_CUSTOM_OBJECTS)
+        dispatched.update(handler_module._TRUST_MANAGER_CUSTOM_OBJECTS)
 
         supported = set(handler_module._SUPPORTED_MANIFEST_KINDS)
         assert supported - dispatched == set(), (
@@ -3382,6 +3384,11 @@ class TestPlatformAddOnManifests:
                 {_ARGOCD_ACCESS_MANIFEST, _ARGOCD_GITOPS_MANIFEST},
             ),
             ("_CROSSPLANE_CUSTOM_OBJECTS", "pkg.crossplane.io", {_CROSSPLANE_MANIFEST}),
+            (
+                "_TRUST_MANAGER_CUSTOM_OBJECTS",
+                "trust.cert-manager.io",
+                {"post-helm-mlflow-tls.yaml"},
+            ),
         ],
     )
     def test_manifest_api_versions_match_the_applier_map(
@@ -3411,6 +3418,7 @@ class TestPlatformAddOnManifests:
             handler_module._CERT_MANAGER_CUSTOM_OBJECTS,
             handler_module._ARGOCD_CUSTOM_OBJECTS,
             handler_module._CROSSPLANE_CUSTOM_OBJECTS,
+            handler_module._TRUST_MANAGER_CUSTOM_OBJECTS,
         )
         seen: set[str] = set()
         for mapping in maps:
@@ -4792,6 +4800,7 @@ _APPLY_DISPATCH = [
     _namespaced_custom("AppProject", "argoproj.io/v1alpha1", "appprojects"),
     _namespaced_custom("Application", "argoproj.io/v1alpha1", "applications"),
     _cluster_custom("Function", "pkg.crossplane.io/v1", "functions"),
+    _cluster_custom("Bundle", "trust.cert-manager.io/v1alpha1", "bundles"),
     _cluster_custom("NodePool", "karpenter.sh/v1", "nodepools"),
     _cluster_custom("EC2NodeClass", "karpenter.k8s.aws/v1", "ec2nodeclasses"),
     _typed(
@@ -5823,6 +5832,49 @@ class TestResourceReadinessFailures:
     )
     def test_each_kind_reports_its_unready_reason(self, handler_module, kind, resource, message):
         assert handler_module._resource_readiness_failure(kind, resource) == message
+
+    @pytest.mark.parametrize(
+        ("conditions", "message"),
+        [
+            (
+                [{"type": "Synced", "status": "True", "observedGeneration": 2}],
+                None,
+            ),
+            (
+                [{"type": "Synced", "status": "True", "observedGeneration": 1}],
+                "Bundle condition Synced is stale (generation=2, observedGeneration=1)",
+            ),
+            (
+                [
+                    {
+                        "type": "Synced",
+                        "status": "False",
+                        "reason": "SourceNotFound",
+                        "message": 'Bundle source was not found: secret "gco-internal-ca-source"',
+                        "observedGeneration": 2,
+                    }
+                ],
+                "Bundle condition Synced is not True "
+                '(Bundle source was not found: secret "gco-internal-ca-source")',
+            ),
+            # A Ready condition is not what trust-manager reports.
+            (
+                [{"type": "Ready", "status": "True", "observedGeneration": 2}],
+                "Bundle condition Synced is missing",
+            ),
+        ],
+        ids=["synced", "stale", "source-missing", "no-synced-condition"],
+    )
+    def test_a_bundle_is_ready_once_trust_manager_synced_its_current_spec(
+        self, handler_module, conditions, message
+    ):
+        resource = {"metadata": {"generation": 2}, "status": {"conditions": conditions}}
+        assert handler_module._resource_readiness_failure("Bundle", resource) == message
+
+    def test_a_bundle_needs_a_generation(self, handler_module):
+        assert handler_module._resource_readiness_failure(
+            "Bundle", {"metadata": {"generation": True}, "status": {}}
+        ) == ("invalid metadata.generation (True)")
 
 
 class TestServiceEndpointEvidence:

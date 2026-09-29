@@ -1402,13 +1402,14 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [Kubeflow Trainer](https://github.com/kubeflow/trainer) | Enabled | Trainer v2 controller + JobSet for `TrainJob` distributed training — see the [Distributed Training Guide](DISTRIBUTED_TRAINING.md) |
 | kube-prometheus-stack | Enabled | [Prometheus](https://prometheus.io/docs/introduction/overview/), Alertmanager, and [Grafana](https://grafana.com/docs/grafana/latest/) when `cluster_observability.enabled` is true |
 | [MLflow](https://mlflow.org/) | Enabled | Experiment tracking server when `cluster_observability.enabled` AND `cluster_observability.mlflow.enabled` are true — see [MONITORING.md](MONITORING.md#mlflow-experiment-tracking) |
+| [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) | With MLflow | No toggle of its own: installed whenever MLflow is, in its own `trust-manager` namespace, to publish the internal CA to MLflow's clients in `gco-jobs` — see [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls) |
 | Slurm/Slinky | Disabled | Slurm operator and cluster |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
 | [Argo CD](https://argo-cd.readthedocs.io/en/stable/) | Disabled | Self-managed GitOps controller in namespaced mode, fenced to `gco-jobs` and `gco-inference`, with an optional root Application per cluster and a repo-server autoscaler (`helm.argocd.gitops`, `helm.argocd.repo_server`) — see [GitOps with Argo CD](GITOPS.md) |
 | [Crossplane](https://docs.crossplane.io/) + Crossview | Disabled | Crossplane v2 and its dashboard under one toggle; composite resources compose tenant workloads in the tenant namespaces only — see [Crossplane](CROSSPLANE.md) |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
 
-Disabling `helm.kubeflow_trainer` uninstalls the trainer on the next deploy, prunes the shipped `torch-distributed` runtime, and makes `TrainJob` submissions fail with an actionable enable-the-addon message (the kind stays in the [allowed-kinds policy](#allowed-resource-kinds); the addon gate is what rejects it). Disabling `cluster_observability.mlflow` removes the tracking server and deletes its run-metadata volume; artifacts in S3 survive.
+Disabling `helm.kubeflow_trainer` uninstalls the trainer on the next deploy, prunes the shipped `torch-distributed` runtime, and makes `TrainJob` submissions fail with an actionable enable-the-addon message (the kind stays in the [allowed-kinds policy](#allowed-resource-kinds); the addon gate is what rejects it). Disabling `cluster_observability.mlflow` removes the tracking server and trust-manager, deletes the run-metadata volume, and prunes the HTTPS front door and the `gco-jobs/gco-internal-ca` CA bundle; artifacts in S3 survive.
 
 Disable optional charts you do not use to reduce system-node overhead and deployment time. KEDA cannot be disabled without replacing platform features that depend on it.
 

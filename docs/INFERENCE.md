@@ -154,7 +154,12 @@ internal CA (the chain is described in
   dials `https://<name>-prefill.gco-inference.svc.cluster.local:8443` and
   `https://<name>-decode.gco-inference.svc.cluster.local:8443`, trusting only
   the internal CA (`PD_PROXY_CA_FILE=/var/run/gco/ca/ca.crt`, the `ca.crt` key
-  of `gco-inference-tls` projected on its own). Its probes are exec checks
+  of `gco-inference-tls` projected on its own). Like the inference proxy it
+  opens a new client for every prefill and decode call with keep-alive off,
+  so kube-proxy spreads the calls across the Ready role pods, and it re-reads
+  the CA bundle when the file changes, so a rotated CA takes effect on the
+  next call without restarting the pod. While the bundle is unusable the
+  proxy answers 503 (`no_decode_backend`). Its probes are exec checks
   against its loopback `/healthz`.
 
 **Calling a model from inside the cluster.** Model Services no longer answer
@@ -165,6 +170,18 @@ plain HTTP. A workload of your own that calls one directly must use
 `gco-inference` policies admit only the inference proxy from outside the
 namespace. The authenticated `/inference/<name>/...` path through the API is the
 supported way in.
+
+**The monitor's objects are its own.** In `gco-inference`, the admission policy
+`gco-tenant-write-fence` lets only the inference monitor create an object
+labelled `gco.io/type: inference`, change what one of its objects runs or
+carries, write the `<name>-tls-proxy`, `<name>-pd-proxy` and `<name>-mooncake`
+ConfigMaps its pods mount, or set its provenance annotations; only cert-manager
+writes `gco-inference-tls`. That covers cluster administrators too, so change an
+endpoint through `gco inference` (or the API), not `kubectl edit`. A manifest
+you apply yourself (the `examples/inference-*.yaml` Deployments, say) keeps the
+label on its pod template, which joins the model pods' network rules, and off
+the Deployment and Service themselves. See
+[ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence).
 
 **Upgrading existing endpoints.** On an in-place redeploy, the monitor adds the
 sidecar to each existing endpoint Deployment (a digest annotation,

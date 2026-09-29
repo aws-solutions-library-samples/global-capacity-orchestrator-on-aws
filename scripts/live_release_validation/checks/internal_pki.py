@@ -2,7 +2,8 @@
 
 The in-cluster HTTPS hops (ALB to the API pods, manifest-processor to
 cost-monitor, cost-monitor to OpenCost, Prometheus to the service metrics,
-the Grafana rotator to Grafana, inference-proxy to the model pods) verify
+the Grafana rotator to Grafana, inference-proxy to the model pods, MLflow's
+gco-jobs clients to the tracking server) verify
 their peers against a single cert-manager CA: a self-signed bootstrap
 ``ClusterIssuer`` issues the ``cert-manager/gco-internal-ca`` CA Certificate,
 and the ``gco-internal-ca`` ``ClusterIssuer`` signs every leaf from it. A
@@ -17,7 +18,8 @@ On the live cluster this requires, per Region:
 * every GCO leaf Certificate the configuration deploys ``Ready`` with
   ``spec.issuerRef`` naming the ``gco-internal-ca`` ClusterIssuer (the
   cost-monitor and OpenCost leaves only with cost monitoring, the Grafana
-  leaf and the monitoring trust bundle only with cluster observability); and
+  leaf and the monitoring trust bundle only with cluster observability, the
+  MLflow leaf and the trust-manager bundle source only with MLflow); and
 * the retired per-namespace ``gco-api-selfsigned`` Issuer gone.
 
 A missing object, a wrong issuer, or the retired Issuer fails on the first
@@ -70,6 +72,8 @@ LEAF_CERTIFICATES: tuple[LeafCertificate, ...] = (
     LeafCertificate("monitoring", "opencost-tls", "cost_monitoring"),
     LeafCertificate("monitoring", "grafana-tls", "cluster_observability"),
     LeafCertificate("monitoring", "gco-monitoring-trust", "cluster_observability"),
+    LeafCertificate("monitoring", "mlflow-tls", "mlflow"),
+    LeafCertificate("trust-manager", "gco-internal-ca-source", "mlflow"),
 )
 
 
@@ -85,6 +89,17 @@ def cluster_observability_configured(ctx: RunContext) -> bool:
     return True
 
 
+def mlflow_configured(ctx: RunContext) -> bool:
+    """Return whether cdk.json deploys MLflow: its own toggle (default on) and observability."""
+    if not cluster_observability_configured(ctx):
+        return False
+    block = ctx.cdk_context.get("cluster_observability")
+    mlflow = block.get("mlflow") if isinstance(block, dict) else None
+    if isinstance(mlflow, dict) and "enabled" in mlflow:
+        return bool(mlflow["enabled"])
+    return True
+
+
 def expected_leaf_certificates(
     ctx: RunContext,
 ) -> tuple[list[LeafCertificate], dict[str, str]]:
@@ -92,6 +107,7 @@ def expected_leaf_certificates(
     enabled = {
         "cost_monitoring": _cost_monitoring_configured(ctx),
         "cluster_observability": cluster_observability_configured(ctx),
+        "mlflow": mlflow_configured(ctx),
     }
     expected: list[LeafCertificate] = []
     skipped: dict[str, str] = {}

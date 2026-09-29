@@ -50,6 +50,11 @@ spec:
     spec:
       serviceAccountName: gco-inference-monitor-sa
       priorityClassName: gco-platform-critical
+      # GCO's service images are built for linux/amd64 only, and the
+      # cpu-general pool also runs Graviton (arm64) nodes, where this pod
+      # would fail with an exec format error.
+      nodeSelector:
+        kubernetes.io/arch: amd64
       automountServiceAccountToken: false
       enableServiceLinks: false
       # One reconcile pass may be mid-flight when SIGTERM arrives; the handler

@@ -195,6 +195,11 @@ are the same list Argo CD's and Crossplane's tenant grants use; a unit test
 pins the three to each other. To compose another kind (an ACK resource, for
 instance), bind an extra Role naming it to the same user in the tenant
 namespace. Disabling kro prunes exactly these objects on the next deploy.
+Whatever the RBAC allows, the base-pass admission policy
+`gco-tenant-write-fence` keeps an RGD instance from changing what GCO keeps in
+the tenant namespaces: the inference monitor's objects in `gco-inference`, the
+`gco-inference-tls` Secret, and the `gco-internal-ca` bundle in `gco-jobs`
+([ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence)).
 
 ## Using the capabilities
 

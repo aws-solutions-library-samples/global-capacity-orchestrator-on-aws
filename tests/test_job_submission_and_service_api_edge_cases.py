@@ -2276,9 +2276,7 @@ def test_opencost_client_skips_nonmapping_allocation_sets() -> None:
 
     response = MagicMock(status_code=200)
     response.json.return_value = {"data": ["bad", {"ml": {"cpuCost": 1}, "also-bad": []}]}
-    http = MagicMock()
-    http.get.return_value = response
-    with patch.object(costs.OpenCostClient, "_http", return_value=http):
+    with patch.object(costs.OpenCostClient, "_get", return_value=response):
         allocations = costs.OpenCostClient("http://opencost").get_allocation(
             datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 2, tzinfo=UTC)
         )

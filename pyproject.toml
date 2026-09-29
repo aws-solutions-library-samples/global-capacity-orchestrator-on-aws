@@ -286,6 +286,10 @@ test = [
     # Structural diagram tests verify every committed PNG can be parsed in a
     # targeted ``.[test]`` environment; keep this aligned with ``security``.
     "pillow==12.3.0",
+    # The admission-policy suites compile and run the shipped
+    # ValidatingAdmissionPolicies' CEL (tests/_cel.py) with the CEL project's
+    # Python binding of cel-cpp. It has no Python dependencies of its own.
+    "cel-expr-python==0.1.3",
 ]
 security = [
     "bandit==1.9.4",
@@ -348,6 +352,13 @@ exclude = [
     "lambda/kubectl-applier-simple-build",
     "lambda/helm-installer-build",
 ]
+
+# The Mooncake PD proxy runs on the upstream vLLM image's Python 3.12, so it is
+# formatted and linted for that interpreter: py314 formatting would, for one,
+# unparenthesize a multi-exception ``except`` into 3.14-only syntax.
+# tests/test_mooncake_pd_proxy_transport.py parses it with the 3.12 grammar.
+[tool.ruff.per-file-target-version]
+"gco/services/mooncake_pd_proxy.py" = "py312"
 
 [tool.ruff.lint]
 select = [

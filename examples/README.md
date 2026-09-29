@@ -622,7 +622,7 @@ Switch `aggregation` to `last` to track the current step's loss instead of the b
 
 **File:** `mlflow-tracking-job.yaml`
 
-Logs a tiny training run (params plus a loss curve) to the in-cluster MLflow tracking server over service DNS (`http://mlflow.monitoring:5000`), then reads the run back through the API and asserts every logged value round-tripped — proving the tracking pipeline end to end rather than trusting acknowledged writes. The pod opts into egress to the tracking server with the `gco.io/mlflow-client: "true"` label (the `gco-jobs` namespace is otherwise egress-isolated).
+Logs a tiny training run (params plus a loss curve) to the in-cluster MLflow tracking server over verified HTTPS (`https://mlflow-tls.monitoring.svc.cluster.local:5443`), then reads the run back through the API and asserts every logged value round-tripped — proving the tracking pipeline end to end rather than trusting acknowledged writes. The client verifies the server against the cluster's internal CA, which it mounts from the `gco-internal-ca` ConfigMap that trust-manager publishes in `gco-jobs` (`MLFLOW_TRACKING_SERVER_CERT_PATH`). The pod opts into egress to the tracking server's HTTPS port with the `gco.io/mlflow-client: "true"` label (the `gco-jobs` namespace is otherwise egress-isolated).
 
 The tracking server ships with the observability bundle: run metadata persists on its gp3 volume, and run artifacts land in the cluster-shared S3 bucket under `mlflow-artifacts/<region>/` via the server's own IAM role. This example logs metrics and params only, so the client needs no AWS credentials.
 
@@ -635,7 +635,7 @@ gco jobs submit-direct examples/mlflow-tracking-job.yaml -r us-east-1
 gco monitoring open --service mlflow   # browse the logged run at http://localhost:5000
 ```
 
-**Demonstrates:** MLflow client-to-server tracking over service DNS, params/metrics logging, read-back verification, opt-in NetworkPolicy egress labels.
+**Demonstrates:** MLflow client-to-server tracking over verified in-cluster HTTPS, the published CA bundle, params/metrics logging, read-back verification, opt-in NetworkPolicy egress labels.
 
 **When to use:** Track experiments from any training job on the cluster; verify the tracking stack before wiring real training code to it.
 

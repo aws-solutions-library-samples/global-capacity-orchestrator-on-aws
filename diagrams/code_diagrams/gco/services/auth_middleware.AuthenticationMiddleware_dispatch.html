@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="f7eaed3326ef26a6">
+        <meta name="gco-generated-at" content="2026-09-28T07:34:51Z">
+        <meta name="gco-source-commit" content="95213a3dfe214f41ea8e3977b79711b1be061ac0">
+        <meta name="gco-flow-digest" content="6cf58ef750a270e5">
         <title>Backend authentication gate (health bypass, HMAC validation, fail-closed paths)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,58 +208,58 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3176=>operation: '\n        Process incoming request and validate authentication.\n\n        Args:\n            request: The incoming FastAPI request\n            call_next: The next middleware/handler in the chain\n\n        Returns:\n            Response from the next handler, or a bounded JSON authentication error.\n        '
-cond3179=>condition: if request.url.path in UNAUTHENTICATED_PATHS
-io3186=>inputoutput: output: await call_next(request)
-e3184=>end: end function return
-op3192=>operation: valid_tokens = get_valid_tokens()
-cond3195=>condition: if not valid_tokens
-op3199=>operation: secret_arn = os.environ.get('AUTH_SECRET_ARN')
-cond3202=>condition: if not secret_arn
-op3206=>operation: dev_mode = os.environ.get('GCO_DEV_MODE', '').lower() == 'true'
-cond3209=>condition: if dev_mode
-sub3213=>subroutine: logger.warning('Authentication bypassed - GCO_DEV_MODE=true, no secret configured')
-io3218=>inputoutput: output: await call_next(request)
-e3216=>end: end function return
-sub3224=>subroutine: logger.error('No AUTH_SECRET_ARN configured and GCO_DEV_MODE is not enabled. Set AUTH_SECRET_ARN for production or GCO_DEV_MODE=true for local development.')
-io3229=>inputoutput: output: JSONResponse(status_code=503, content={'detail': 'Service unavailable - authentication not configured'})
-e3227=>end: end function return
-sub3235=>subroutine: logger.error('Failed to load authentication tokens')
-io3240=>inputoutput: output: JSONResponse(status_code=503, content={'detail': 'Service temporarily unavailable - authentication error'})
-e3238=>end: end function return
-cond3247=>condition: if not await _has_valid_signature(request, valid_tokens)
-op3251=>operation: client_ip = request.client.host if request.client else 'unknown'
-sub3253=>subroutine: logger.warning('Invalid backend signature from %s for %s', client_ip, request.url.path)
-io3258=>inputoutput: output: JSONResponse(status_code=403, content={'detail': 'Forbidden - requests must come through authenticated API Gateway'})
-e3256=>end: end function return
-io3267=>inputoutput: output: await call_next(request)
-e3265=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1314=>operation: '\n        Process incoming request and validate authentication.\n\n        Args:\n            request: The incoming FastAPI request\n            call_next: The next middleware/handler in the chain\n\n        Returns:\n            Response from the next handler, or a bounded JSON authentication error.\n        '
+cond1317=>condition: if request.url.path in UNAUTHENTICATED_PATHS
+io1324=>inputoutput: output: await call_next(request)
+e1322=>end: end function return
+op1330=>operation: valid_tokens = get_valid_tokens()
+cond1333=>condition: if not valid_tokens
+op1337=>operation: secret_arn = os.environ.get('AUTH_SECRET_ARN')
+cond1340=>condition: if not secret_arn
+op1344=>operation: dev_mode = os.environ.get('GCO_DEV_MODE', '').lower() == 'true'
+cond1347=>condition: if dev_mode
+sub1351=>subroutine: logger.warning('Authentication bypassed - GCO_DEV_MODE=true, no secret configured')
+io1356=>inputoutput: output: await call_next(request)
+e1354=>end: end function return
+sub1362=>subroutine: logger.error('No AUTH_SECRET_ARN configured and GCO_DEV_MODE is not enabled. Set AUTH_SECRET_ARN for production or GCO_DEV_MODE=true for local development.')
+io1367=>inputoutput: output: JSONResponse(status_code=503, content={'detail': 'Service unavailable - authentication not configured'})
+e1365=>end: end function return
+sub1373=>subroutine: logger.error('Failed to load authentication tokens')
+io1378=>inputoutput: output: JSONResponse(status_code=503, content={'detail': 'Service temporarily unavailable - authentication error'})
+e1376=>end: end function return
+cond1385=>condition: if not await _has_valid_signature(request, valid_tokens)
+op1389=>operation: client_ip = request.client.host if request.client else 'unknown'
+sub1391=>subroutine: logger.warning('Invalid backend signature from %s for %s', client_ip, request.url.path)
+io1396=>inputoutput: output: JSONResponse(status_code=403, content={'detail': 'Forbidden - requests must come through authenticated API Gateway'})
+e1394=>end: end function return
+io1405=>inputoutput: output: await call_next(request)
+e1403=>end: end function return
 
-op3176->cond3179
-cond3179(yes)->io3186
-io3186->e3184
-cond3179(no)->op3192
-op3192->cond3195
-cond3195(yes)->op3199
-op3199->cond3202
-cond3202(yes)->op3206
-op3206->cond3209
-cond3209(yes)->sub3213
-sub3213->io3218
-io3218->e3216
-cond3209(no)->sub3224
-sub3224->io3229
-io3229->e3227
-cond3202(no)->sub3235
-sub3235->io3240
-io3240->e3238
-cond3195(no)->cond3247
-cond3247(yes)->op3251
-op3251->sub3253
-sub3253->io3258
-io3258->e3256
-cond3247(no)->io3267
-io3267->e3265
+op1314->cond1317
+cond1317(yes)->io1324
+io1324->e1322
+cond1317(no)->op1330
+op1330->cond1333
+cond1333(yes)->op1337
+op1337->cond1340
+cond1340(yes)->op1344
+op1344->cond1347
+cond1347(yes)->sub1351
+sub1351->io1356
+io1356->e1354
+cond1347(no)->sub1362
+sub1362->io1367
+io1367->e1365
+cond1340(no)->sub1373
+sub1373->io1378
+io1378->e1376
+cond1333(no)->cond1385
+cond1385(yes)->op1389
+op1389->sub1391
+sub1391->io1396
+io1396->e1394
+cond1385(no)->io1405
+io1405->e1403
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -269,17 +269,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-28T07:34:51Z -->
+        <!-- Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-28T07:34:51Z">2026-09-28T07:34:51Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>95213a3dfe214f41ea8e3977b79711b1be061ac0</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>f7eaed3326ef26a6</code>
+            Flow content SHA-256: <code>6cf58ef750a270e5</code>
           </p>
           <div id="canvas"></div>
         </div>

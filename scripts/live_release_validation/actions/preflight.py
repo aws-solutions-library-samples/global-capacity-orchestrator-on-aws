@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from cli.stacks import check_asset_sources_readable
+
 from ..constants import (
     _CLUSTER_TUNNEL_ACTIONS,
     _HEALTHY_STACK_STATUSES,
@@ -118,6 +120,12 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
     free_disk_gib: dict[str, float] | None = None
     if "deploy" in selected and settings.min_free_disk_gib > 0:
         free_disk_gib = _check_free_disk(settings)
+
+    # A checkout made under a restrictive umask deploys Lambda code that the
+    # Lambda runtime cannot read; refuse it before the stack listing below
+    # synthesizes the app, and long before anything is created.
+    if "deploy" in selected:
+        check_asset_sources_readable(settings.repo_root)
 
     identity = ctx.session.client("sts", region_name=ctx.config.global_region).get_caller_identity()
     account = str(identity.get("Account") or "")
@@ -250,6 +258,7 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         "session_manager_plugin": session_manager_plugin or "not-required",
         "min_free_disk_gib": settings.min_free_disk_gib,
         "free_disk_gib": free_disk_gib if free_disk_gib is not None else "not-required",
+        "asset_sources_readable": True if "deploy" in selected else "not-required",
         "kms_key_deletion_confirmed": settings.confirm_kms_key_deletion,
         "resume": settings.resume,
     }

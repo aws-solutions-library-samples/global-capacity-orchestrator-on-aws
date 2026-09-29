@@ -693,19 +693,37 @@ class TestParallelExamples:
         assert summary["passed"] == 2
         assert [item["name"] for item in summary["results"]] == names
 
-    def test_failed_examples_raise_with_their_names(self, monkeypatch, tmp_path):
+    def test_failed_examples_raise_with_their_names_and_every_result(self, monkeypatch, tmp_path):
+        """The failure carries the whole summary, so the report row keeps it."""
         from scripts.example_job_validation import actions
+        from scripts.live_release_validation.models import ActionFailure
 
         names = sorted(EXAMPLE_SPECS)[:2]
         self._fake_session(monkeypatch)
 
         def fake_run(_ctx, name, _region, _kubectl):
             status = "failed" if name == names[0] else "passed"
-            return drivers.ExampleRunResult(name=name, status=status, submission="s")
+            return drivers.ExampleRunResult(
+                name=name, status=status, submission="s", detail=f"{name} detail"
+            )
 
         monkeypatch.setattr(actions, "_run_one_example", fake_run)
-        with pytest.raises(RuntimeError, match=names[0]):
-            actions.action_examples(self._ctx(tmp_path, names))
+        ctx = self._ctx(tmp_path, names)
+        with pytest.raises(ActionFailure, match=names[0]) as excinfo:
+            actions.action_examples(ctx)
+
+        assert "in this action's details in the JSON report" in str(excinfo.value)
+        summary = ctx.checkpoint.state["examples_summary"]
+        assert excinfo.value.details == summary
+        assert (excinfo.value.details["passed"], excinfo.value.details["failed"]) == (1, 1)
+        assert [(row["name"], row["status"], row["detail"]) for row in summary["results"]] == [
+            (names[0], "failed", f"{names[0]} detail"),
+            (names[1], "passed", f"{names[1]} detail"),
+        ]
+        # A copy: the checkpoint's summary and the tunnel keeper's reopen log
+        # stay live objects the report row does not alias.
+        assert excinfo.value.details["results"] is not summary["results"]
+        assert excinfo.value.details["tunnel"]["reopens"] is not summary["tunnel"]["reopens"]
 
     def test_unexpected_crash_is_attributed_to_its_example(self, monkeypatch, tmp_path):
         from scripts.example_job_validation import actions
@@ -841,14 +859,57 @@ class TestReadinessWaiters:
         with pytest.raises(drivers.ExampleValidationError, match="torch-distributed"):
             drivers.wait_trainer_runtime_ready(kubectl, timeout=0)
 
+    _AVAILABLE_MLFLOW = (
+        '{"status": {"readyReplicas": 1, "conditions": [{"type": "Available", "status": "True"}]}}'
+    )
+
     def test_mlflow_ready_returns_evidence(self) -> None:
-        deployment = (
-            '{"status": {"readyReplicas": 1, '
-            '"conditions": [{"type": "Available", "status": "True"}]}}'
+        kubectl = self._kubectl(
+            {
+                "get deployment mlflow": (0, self._AVAILABLE_MLFLOW, ""),
+                "get configmap gco-internal-ca -n gco-jobs": (
+                    0,
+                    '{"data": {"ca.crt": "-----BEGIN CERTIFICATE-----"}}',
+                    "",
+                ),
+            }
         )
-        kubectl = self._kubectl({"get deployment mlflow": (0, deployment, "")})
         evidence = drivers.wait_mlflow_ready(kubectl, timeout=5)
-        assert evidence == {"deployment": "monitoring/mlflow", "ready_replicas": 1}
+        assert evidence == {
+            "deployment": "monitoring/mlflow",
+            "ready_replicas": 1,
+            "ca_bundle": "gco-jobs/gco-internal-ca",
+        }
+
+    @pytest.mark.parametrize(
+        ("configmap", "state"),
+        [
+            (
+                (1, "", 'configmaps "gco-internal-ca" not found'),
+                'CA bundle ConfigMap gco-jobs/gco-internal-ca not found: configmaps "gco-internal-ca" not found',
+            ),
+            ((0, "{}", ""), "CA bundle ConfigMap gco-jobs/gco-internal-ca has no ca.crt yet"),
+            (
+                (0, '{"data": {"ca.crt": " "}}', ""),
+                "CA bundle ConfigMap gco-jobs/gco-internal-ca has no ca.crt yet",
+            ),
+        ],
+    )
+    def test_mlflow_waits_for_the_clients_ca_bundle(
+        self, monkeypatch, configmap: tuple[int, str, str], state: str
+    ) -> None:
+        """An Available server is not enough: the example's pod mounts the bundle
+        trust-manager publishes, and waits in ContainerCreating without it."""
+        monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
+        kubectl = self._kubectl(
+            {
+                "get deployment mlflow": (0, self._AVAILABLE_MLFLOW, ""),
+                "get configmap gco-internal-ca -n gco-jobs": configmap,
+            }
+        )
+        with pytest.raises(drivers.ExampleValidationError) as excinfo:
+            drivers.wait_mlflow_ready(kubectl, timeout=0)
+        assert str(excinfo.value).endswith(f"Last state: {state}")
 
     def test_mlflow_missing_error_is_actionable(self, monkeypatch) -> None:
         monkeypatch.setattr(drivers, "_POLL_SECONDS", 0)
@@ -2460,7 +2521,7 @@ class TestReadinessWaiterPolling:
             drivers.wait_mlflow_ready(kubectl, timeout=drivers._POLL_SECONDS)
         message = str(excinfo.value)
         assert message.startswith(
-            f"MLflow tracking server not Available within {drivers._POLL_SECONDS}s"
+            f"MLflow tracking server not ready within {drivers._POLL_SECONDS}s"
         )
         assert message.endswith(
             'Last state: conditions: [{"type": "Progressing", "status": "True"}, '
@@ -2542,12 +2603,24 @@ class TestActionStatic:
         monkeypatch.setattr(actions, "run_static_checks", lambda root, names: findings)
         ctx = _live_ctx()
         ctx.settings.selected_examples = ("gpu-job",)
-        with pytest.raises(RuntimeError) as excinfo:
+        from scripts.live_release_validation.models import ActionFailure
+
+        with pytest.raises(ActionFailure) as excinfo:
             actions.action_static(ctx)
         assert str(excinfo.value) == (
             "1 static example check(s) failed: [{'example': 'gpu-job', "
             "'check': 'trusted image sources (Job/x)', 'detail': 'docker.io'}]"
         )
+        assert excinfo.value.details == {
+            "checked": 2,
+            "failed": [
+                {
+                    "example": "gpu-job",
+                    "check": "trusted image sources (Job/x)",
+                    "detail": "docker.io",
+                }
+            ],
+        }
 
 
 class _FakeQuotas:
@@ -2952,6 +3025,11 @@ class TestRunOneExample:
         kubectl = _ScriptedKubectl(
             {
                 ("get", "deployment", "mlflow", "-n", "monitoring"): (0, _MLFLOW_AVAILABLE, ""),
+                ("get", "configmap", "gco-internal-ca", "-n", "gco-jobs"): (
+                    0,
+                    '{"data": {"ca.crt": "-----BEGIN CERTIFICATE-----"}}',
+                    "",
+                ),
                 ("get", "job", "mlflow-tracking-example"): (0, _JOB_COMPLETE, ""),
                 ("get", "events"): (0, "", ""),
                 ("delete",): (0, "job.batch/mlflow-tracking-example deleted", ""),
@@ -2960,12 +3038,17 @@ class TestRunOneExample:
         result = actions._run_one_example(_live_ctx(), "mlflow-tracking-job", "us-east-1", kubectl)
 
         assert result.status == "passed", result.detail
-        assert result.evidence["setup"] == {"deployment": "monitoring/mlflow", "ready_replicas": 1}
+        assert result.evidence["setup"] == {
+            "deployment": "monitoring/mlflow",
+            "ready_replicas": 1,
+            "ca_bundle": "gco-jobs/gco-internal-ca",
+        }
         assert result.evidence["criteria"] == {
             "jobs": {"gco-jobs/mlflow-tracking-example": "complete"}
         }
         assert cli_calls[0][0][:3] == ["gco", "jobs", "submit-direct"]
         assert kubectl.calls[0][0][:3] == ("get", "deployment", "mlflow")
+        assert kubectl.calls[1][0][:3] == ("get", "configmap", "gco-internal-ca")
 
     def test_dag_example_has_no_waiter_and_cleans_up_its_step_manifests(self, monkeypatch):
         from scripts.example_job_validation import actions

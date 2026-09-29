@@ -486,6 +486,7 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
     for chart, env_name in (
         ("kube-prometheus-stack", "KPS_CHART_ARCHIVE"),
         ("cert-manager", "CERT_MANAGER_CHART_ARCHIVE"),
+        ("trust-manager", "TRUST_MANAGER_CHART_ARCHIVE"),
         ("kubeflow-trainer", "TRAINER_CHART_ARCHIVE"),
         ("mlflow", "MLFLOW_CHART_ARCHIVE"),
     ):
@@ -494,6 +495,10 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
     local_archives = {
         "Install ServiceMonitor CRD from the pinned kube-prometheus-stack": "${KPS_CHART_ARCHIVE}",
         "Install pinned cert-manager (the trainer chart's cert dependency)": "${CERT_MANAGER_CHART_ARCHIVE}",
+        "Install pinned trust-manager with shipped values": "${TRUST_MANAGER_CHART_ARCHIVE}",
+        "Re-run the trust-manager install as an upgrade (idempotency contract)": (
+            "${TRUST_MANAGER_CHART_ARCHIVE}"
+        ),
         "Install pinned kubeflow-trainer chart with shipped values": "${TRAINER_CHART_ARCHIVE}",
         "Re-run the trainer install as an upgrade (idempotency contract)": "${TRAINER_CHART_ARCHIVE}",
         "Install pinned mlflow chart with shipped values": "${MLFLOW_CHART_ARCHIVE}",
@@ -975,9 +980,13 @@ def test_kind_examples_smoke_issues_the_shipped_internal_pki() -> None:
     run = next(step["run"] for step in steps if step.get("name") == name)
 
     assert "manifests/08-internal-ca-issuance.yaml" in run
+    assert "manifests/09-tenant-write-fence.yaml" in run
     assert "manifests/post-helm-api-workload-certificates.yaml" in run
+    # Both fences are in before cert-manager issues anything, so it issues
+    # gco-inference-tls, which only it may write, under the write fence.
     assert (
         run.index('kubectl apply -f "${fence_manifest}"')
+        < run.index('kubectl apply -f "${write_fence_manifest}"')
         < run.index('kubectl apply -f "${manifest}"')
         < run.index('done 3< "${pki}/leaves.txt"')
     )
@@ -1018,6 +1027,186 @@ def test_kind_examples_smoke_issues_the_shipped_internal_pki() -> None:
         < order.index("Re-run the trainer install as an upgrade (idempotency contract)")
         < order.index(name)
     )
+
+
+def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
+    """09-tenant-write-fence.yaml, probed in a real API server right after the PKI.
+
+    Once a dry run shows the policy enforced, an identity in system:masters
+    (so RBAC stops nothing) that is not the inference monitor is refused, with
+    the policy's own messages: writing gco-inference-tls (the monitor too is
+    refused that), creating a monitor-labelled ConfigMap, rewriting or
+    unlabelling a monitor ConfigMap, recreating a deleted pod program without
+    the label, changing or restarting a monitor Deployment's pod template,
+    creating the shared mooncake-master, and forging a lifecycle id. In
+    between, the same identity annotates, deletes and scales those objects and
+    the monitor's ServiceAccount writes them, all admitted. The probe
+    Deployment has zero replicas, so the job pulls nothing for it.
+    tests/test_tenant_write_fence.py evaluates the same rules offline.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-examples-smoke"]["steps"]
+    order = [step.get("name") for step in steps]
+    name = "Prove the tenant write fence in the real API server"
+    assert (
+        order.index(name)
+        == order.index("Issue the shipped internal PKI with the pinned cert-manager") + 1
+    )
+    run = next(step["run"] for step in steps if step.get("name") == name)
+
+    assert "policy=\"ValidatingAdmissionPolicy 'gco-tenant-write-fence'\"" in run
+    assert "--as=gco-ci-tenant --as-group=system:masters" in run
+    assert (
+        "--as=system:serviceaccount:gco-system:gco-inference-monitor-sa --as-group=system:masters"
+        in run
+    )
+    probes = [
+        'kubectl "${tenant[@]}" create --dry-run=server -f "${work}/labelled.json"',
+        'echo "::error::the API server never enforced gco-tenant-write-fence"',
+        'refused "a tenant replacing the ca.crt of gco-inference-tls"',
+        'refused "the inference monitor writing gco-inference-tls"',
+        'refused "a tenant creating a monitor-labelled ConfigMap"',
+        'kubectl "${monitor[@]}" create -f "${work}/program.json"',
+        'refused "a tenant rewriting a monitor ConfigMap"',
+        'refused "a tenant unlabelling a monitor ConfigMap"',
+        "annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted",
+        "delete configmap gco-ci-fence-tls-proxy",
+        'refused "a tenant recreating a deleted pod program unlabelled"',
+        'kubectl "${monitor[@]}" create -f "${work}/deployment.json"',
+        'refused "a tenant changing a monitor Deployment\'s pod template"',
+        'refused "a tenant restarting a monitor Deployment"',
+        "scale deployment/gco-ci-fence --replicas=0",
+        "set env deployment/gco-ci-fence GCO_CI_FENCE=monitor",
+        'refused "a tenant creating mooncake-master"',
+        'refused "a tenant forging a lifecycle id"',
+        "kubectl -n gco-inference delete deployment gco-ci-fence",
+    ]
+    positions = [run.index(probe) for probe in probes]
+    assert positions == sorted(positions)
+    # A refusal only counts with the policy's name and its own message.
+    assert 'grep -qF "${policy}" "${work}/err"' in run
+    assert 'grep -qF "${message}" "${work}/err"' in run
+    assert 'echo "::error::the API server admitted ${what}"' in run
+    for message in (
+        "only the cert-manager controller",
+        "the inference monitor mounts ConfigMaps named",
+        "may set, change or remove the gco.io/lifecycle-id",
+    ):
+        assert message in run, message
+    assert '"replicas":0' in run
+
+
+def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
+    """The MLflow HTTPS hop, end to end in examples-smoke.
+
+    trust-manager installs from the shipped values right after cert-manager and
+    may read Secrets only in its own namespace (never cert-manager's, where the
+    CA key lives) and write ConfigMaps only in gco-jobs. The mlflow chart pod
+    gets the TLS sidecar the regional stack builds, executed from the stack
+    source, not restated; the only CI substitution is the image carrying the
+    same tls_proxy.py. post-helm-mlflow-tls.yaml is applied as rendered, both
+    leaves and the Bundle turn Ready/Synced, the gco-jobs bundle is exactly the
+    internal CA certificate, the write fence keeps it trust-manager's, and the
+    sidecar serves verified TLS. Then the REAL example runs as the processor SA
+    over the shipped client policy, with DNS and 443 as the only CI additions.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-examples-smoke"]["steps"]
+    order = [step.get("name") for step in steps]
+    by_name = {step.get("name"): step for step in steps if isinstance(step, dict)}
+
+    install = "Install pinned trust-manager with shipped values"
+    upgrade = "Re-run the trust-manager install as an upgrade (idempotency contract)"
+    mlflow = "Install pinned mlflow chart with shipped values"
+    publish = "Publish the MLflow CA bundle and serve MLflow over verified HTTPS"
+    example = "Run the REAL mlflow tracking example over verified HTTPS as the processor SA"
+    assert (
+        order.index("Install pinned cert-manager (the trainer chart's cert dependency)")
+        < order.index(install)
+        < order.index(upgrade)
+        < order.index("Issue the shipped internal PKI with the pinned cert-manager")
+        < order.index("Prove the tenant write fence in the real API server")
+        < order.index(mlflow)
+        < order.index("Apply the post-Helm mlflow network policies")
+        < order.index("Probe mlflow host validation (allowed 200 / arbitrary 403 / health exempt)")
+        < order.index(publish)
+        < order.index("Load the mlflow example's image into kind")
+        < order.index(example)
+    )
+
+    run = by_name[install]["run"]
+    assert "--emit-ref trust-manager" in run
+    assert "--emit-values trust-manager" in run
+    assert "--wait --timeout 5m" in run
+    assert "crd/bundles.trust.cert-manager.io" in run
+    for verdict in (
+        'test "$(can_i get secrets "${namespace}")" = "yes"',
+        'test "$(can_i get secrets cert-manager)" = "no"',
+        'test "$(can_i create configmaps gco-jobs)" = "yes"',
+        'test "$(can_i create configmaps gco-system)" = "no"',
+        'test "$(can_i create secrets gco-jobs)" = "no"',
+    ):
+        assert verdict in run, verdict
+    run = by_name[upgrade]["run"]
+    assert 'if ! helm upgrade trust-manager "${TRUST_MANAGER_CHART_ARCHIVE}"' in run
+    assert "validatingwebhookconfiguration trust-manager" in run
+
+    run = by_name[mlflow]["run"]
+    assert 'source = Path("gco/stacks/regional_stack.py")' in run
+    assert 'helpers = {"_chart_tls_proxy_sidecar", "_mlflow_allowed_hosts"}' in run
+    assert 'node.name == "_mlflow_chart_values"' in run
+    assert 'manifest_processor_image=SimpleNamespace(image_uri="manifest-processor:ci")' in run
+    assert 'sidecar["name"] == "mlflow-tls-proxy"' in run
+    # The CI substitution is the carrier only: the pinned interpreter image the
+    # inference monitor uses, running the shipped program from a ConfigMap.
+    assert "from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE" in run
+    assert "--from-file=tls_proxy.py=gco/services/tls_proxy.py" in run
+    assert 'sidecar["command"] = ["python3", "/etc/gco-tls-proxy/tls_proxy.py"]' in run
+    assert '"nodeSelector": values["nodeSelector"]' in run
+    assert '--values "${RUNNER_TEMP}/mlflow-ci-overlay.yaml"' in run
+    assert 'containers[?(@.name=="mlflow-tls-proxy")].ports[?(@.name=="https")]' in run
+    assert 'volumes[?(@.name=="gco-tls")].secret.optional}\')" = "true"' in run
+    assert "get secret mlflow-tls" in run
+
+    probe = by_name["Probe mlflow host validation (allowed 200 / arbitrary 403 / health exempt)"]
+    assert '-H "Host: mlflow-tls.monitoring.svc.cluster.local:5443"' in probe["run"]
+    assert 'test "$allowed_tls" = "200"' in probe["run"]
+
+    run = by_name[publish]["run"]
+    fragments = [
+        "sed 's|{{MLFLOW_ENABLED}}|true|g' \"${manifest}\"",
+        'kubectl apply -f "${rendered}"',
+        "wait --for=condition=Ready certificate/mlflow-tls",
+        "certificate/gco-internal-ca-source",
+        "wait --for=condition=Synced bundles.trust.cert-manager.io/gco-internal-ca",
+        "-verify_hostname mlflow-tls.monitoring.svc.cluster.local",
+        'assert set(data) == {"ca.crt"}',
+        '.count("-----BEGIN CERTIFICATE-----") == 1',
+        '-noout -fingerprint -sha256)" != "${ca_fingerprint}"',
+        '-o jsonpath=\'{.items[*].metadata.namespace}\')" = "gco-jobs"',
+        "kubectl --as=gco-ci-tenant --as-group=system:masters -n gco-jobs",
+        'grep -qF "${owned}"',
+        "annotate configmap gco-internal-ca gco-ci/probe=admitted --dry-run=server",
+        "-l kubernetes.io/service-name=mlflow-tls",
+        "exec deploy/mlflow -c mlflow-tls-proxy -- python3 -c",
+    ]
+    positions = [run.index(fragment) for fragment in fragments]
+    assert positions == sorted(positions)
+    assert 'owned="only trust-manager (system:serviceaccount:${tm_namespace}:trust-manager)"' in run
+    assert 'ssl.create_default_context(cafile="/var/run/gco/tls/ca.crt")' in run
+
+    run = by_name[example]["run"]
+    assert 'kubectl apply --as="$PROCESSOR_SA" -f examples/mlflow-tracking-job.yaml' in run
+    assert 'grep -q "Read-back verified"' in run
+    # The CI-only policy selects MLflow clients only and adds DNS and 443,
+    # never the server's ports: those stay the shipped policy's to grant.
+    policy_text = run[run.index("apiVersion: networking.k8s.io/v1") : run.index("EOF\n")]
+    policy = yaml.safe_load(policy_text)
+    assert policy["spec"]["podSelector"] == {"matchLabels": {"gco.io/mlflow-client": "true"}}
+    ports = {entry["port"] for rule in policy["spec"]["egress"] for entry in rule["ports"]}
+    assert ports == {53, 5353, 443}
+    assert all("to" not in rule for rule in policy["spec"]["egress"])
+    assert "kubectl -n gco-jobs delete networkpolicy gco-ci-mlflow-client-dns-and-https" in run
 
 
 def test_kind_manifests_are_authenticated_before_local_apply() -> None:

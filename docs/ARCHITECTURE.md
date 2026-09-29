@@ -16,6 +16,7 @@
 - [Security Architecture](#security-architecture)
   - [Network Security](#network-security)
   - [In-cluster TLS](#in-cluster-tls)
+  - [Tenant write fence](#tenant-write-fence)
   - [IAM Security](#iam-security)
   - [Data Security](#data-security)
 - [Scalability](#scalability)
@@ -81,7 +82,9 @@ Each region contains:
   - `gpu-efa-pool`: EFA-enabled distributed GPU workloads
   - `mooncake-efa-pool`: EFA-enabled disaggregated inference
   - `neuron-pool`: AWS [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) workloads
-  - `cpu-general-pool`: general CPU workloads with project-specific limits
+  - `cpu-general-pool`: general CPU workloads with project-specific limits, on
+    x86_64 and Graviton (arm64) instances; GCO's amd64-only platform pods pin
+    `kubernetes.io/arch: amd64` so they never land on the Graviton nodes
 
 **Application Load Balancer**
 
@@ -241,6 +244,7 @@ rendered as spec sheets and as the interaction diagram in
   - AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) and Neuron device plugins
   - [Volcano](https://volcano.sh/) and KubeRay
   - [cert-manager](https://cert-manager.io/docs/)
+  - [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) when MLflow deploys (it publishes the internal CA to MLflow's clients)
   - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
   - kube-prometheus-stack when cluster observability is enabled
   - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
@@ -360,8 +364,8 @@ Every in-cluster hop GCO owns is HTTPS, and every client of one of those hops
 verifies the server's certificate against one private CA, the GCO internal CA,
 that cert-manager runs inside each regional cluster. The manifests are
 `post-helm-api-workload-certificates.yaml` (the chain and the always-on
-leaves), `post-helm-cost-monitoring-tls.yaml`, and `post-helm-monitoring-tls.yaml`
-(leaves gated like the features they serve).
+leaves), `post-helm-cost-monitoring-tls.yaml`, `post-helm-monitoring-tls.yaml`
+and `post-helm-mlflow-tls.yaml` (leaves gated like the features they serve).
 
 **The CA chain.** A selfSigned ClusterIssuer, `gco-internal-ca-bootstrap`,
 signs exactly one certificate: the `gco-internal-ca` CA (ECDSA P-256, 10 years,
@@ -388,21 +392,30 @@ four DNS forms of its Service (`name`, `name.ns`, `name.ns.svc`,
 | `opencost-tls` (cost monitoring) | `monitoring` | the OpenCost pod's `opencost-tls-proxy` (9443) | — |
 | `grafana-tls` (cluster observability) | `monitoring` | the Grafana pod's `grafana-tls-proxy` (3443) | — |
 | `gco-monitoring-trust` (cluster observability) | `monitoring` | nothing | Prometheus (GCO PodMonitors) and the Grafana credential rotator |
+| `mlflow-tls` (MLflow) | `monitoring` | the MLflow pod's `mlflow-tls-proxy` (5443) | — |
+| `gco-internal-ca-source` (MLflow) | `trust-manager` | nothing | trust-manager (the `gco-internal-ca` Bundle) |
 
 **Clients trust only the internal CA.** cert-manager writes the issuing CA's
 certificate into every leaf Secret as `ca.crt`, so a client projects just that
 key, from a Secret in its own namespace, as a separate read-only volume at
 `/var/run/gco/ca/ca.crt` (`GCO_INTERNAL_CA_FILE`); a client container never
 mounts a private key, and `gco-monitoring-trust` exists only to deliver the CA
-into the `monitoring` namespace. `gco/services/internal_tls.py` builds a context
+into the `monitoring` namespace. MLflow's clients are job pods in `gco-jobs`, a
+namespace every job can read, so they get the CA without a Secret at all:
+trust-manager publishes it there as the ConfigMap `gco-internal-ca` (the CA
+bundle in `gco-jobs`, below). `gco/services/internal_tls.py` builds a context
 that trusts that file and nothing else (no public anchors), requires TLS 1.2 or
 later, and verifies that the certificate names the exact Service host dialled.
 A missing or unusable bundle fails the call closed (503 on the cost routes, 502
 on inference) instead of falling back to another trust store. Contexts are cached
-per file identity, so a rotated `ca.crt` is picked up by the next new context.
-The PD proxy trusts `PD_PROXY_CA_FILE` the same way, the Grafana rotator hands
-the bundle path to `requests`, and Prometheus uses each PodMonitor's
-`tlsConfig.ca` with a `serverName`, because it dials pod IPs.
+per file identity, so a rotated `ca.crt` is picked up by the next new context,
+and the inference proxy and the cost monitor's OpenCost client build a client
+per call, so they trust a rotated CA from the next call without a restart. The
+PD proxy trusts `PD_PROXY_CA_FILE` the same way, with its own per-call clients
+and file-identity cache, the Grafana rotator hands the bundle path to
+`requests`, as MLflow's client does (`MLFLOW_TRACKING_SERVER_CERT_PATH`), and
+Prometheus uses each PodMonitor's `tlsConfig.ca` with a `serverName`, because
+it dials pod IPs.
 
 **Servers terminate TLS in a sidecar.** `gco/services/tls_proxy.py` mounts its
 leaf at `/var/run/gco/tls`, binds its listener once, activates a rotated keypair
@@ -414,11 +427,16 @@ credentials: pods with an AWS identity exclude it from credential injection
 three shapes:
 
 - **`gco-system` pods** run it from their own service image, with the Secret at
-  mode 0440 and the pod's fsGroup.
-- **The OpenCost and Grafana chart pods** get it through Helm values the regional
-  stack builds, running from the cost-monitor and manifest-processor images
-  respectively. Those images are amd64-only, so both pods carry an amd64 node
-  selector. The chart pods start before the post-Helm Certificates exist, so the
+  mode 0440 and the pod's fsGroup. Every GCO service image is built for amd64
+  only, and the untainted `cpu-general` pool also provisions Graviton nodes, so
+  every pod that runs one (the five platform Deployments, the queue-processor
+  ScaledJob, and the Grafana credential rotator) carries a
+  `kubernetes.io/arch: amd64` node selector.
+- **The OpenCost, Grafana and MLflow chart pods** get it through Helm values the
+  regional stack builds, running from the cost-monitor image (OpenCost) and the
+  manifest-processor image (Grafana and MLflow). Those images are amd64-only, so
+  the three pods carry an amd64 node selector. The chart pods start before the
+  post-Helm Certificates exist, so the
   Secret volume is `optional` (mode 0444, because GCO does not own the chart
   pods' users), the sidecar waits up to 30 minutes for the keypair
   (`TLS_PROXY_KEYPAIR_WAIT_SECONDS=1800`), and it has no readiness probe, so the
@@ -441,12 +459,31 @@ hops below verify the server's certificate:
 | Grafana credential rotator → Grafana admin API | `https://grafana-tls.monitoring.svc.cluster.local:3443` | `grafana-tls-proxy`, `grafana-tls` | `gco-monitoring-trust` |
 | inference-proxy → model endpoints (`<endpoint>`, `<endpoint>-canary`, `<endpoint>-proxy`) | `https://<service>.gco-inference.svc.cluster.local:8443/<path>` | `endpoint-tls-proxy`, `gco-inference-tls` | `inference-proxy-tls` |
 | Mooncake PD proxy → prefill and decode | `https://<endpoint>-prefill.gco-inference.svc.cluster.local:8443`, `https://<endpoint>-decode.gco-inference.svc.cluster.local:8443` | `endpoint-tls-proxy`, `gco-inference-tls` | `gco-inference-tls` (`PD_PROXY_CA_FILE`) |
+| MLflow clients (`gco-jobs` pods labelled `gco.io/mlflow-client`) → MLflow tracking server | `https://mlflow-tls.monitoring.svc.cluster.local:5443` | `mlflow-tls-proxy`, `mlflow-tls` | the `gco-internal-ca` ConfigMap trust-manager publishes in `gco-jobs` |
 
 The NetworkPolicies on these paths name only the TLS ports. The plaintext
 ports behind them are either bound to pod loopback (inference-monitor 9090,
 cost-monitor 8080, the PD proxy's 8000) or not admitted from these clients
 (OpenCost's 9003 for the cost monitor, the model servers' own ports for the
-inference proxy).
+inference proxy). MLflow's own port is the exception, listed below.
+
+**The CA bundle in `gco-jobs`.** A leaf in `gco-jobs` would deliver the CA the
+way `gco-monitoring-trust` does in `monitoring`, but its Secret would put a
+private key where every job can read it. So while MLflow deploys, the regional
+stack also installs trust-manager, the cert-manager project's trust bundle
+controller, and `post-helm-mlflow-tls.yaml` gives it one `Bundle`,
+`gco-internal-ca`. trust-manager writes that Bundle's source into the ConfigMap
+`gco-jobs/gco-internal-ca` (key `ca.crt`) and keeps it current as the CA renews;
+clients mount it at `/var/run/gco/ca`.
+
+trust-manager may read every Secret in its trust namespace, so that is a
+namespace of its own, `trust-manager`, where it also runs. The Bundle's only
+source is the `ca.crt` of `gco-internal-ca-source`, a leaf that exists only to
+carry the CA certificate there, not the CA Secret in `cert-manager`: trust-manager
+never has read access to the CA's private key. It may write ConfigMaps only in
+`gco-jobs` and its own namespace (the chart's `targetNamespaces`), its public CA
+package and Secret targets are off, and the tenant write fence lets nobody else
+write `gco-jobs/gco-internal-ca`.
 
 **What stays plaintext, and why:**
 
@@ -464,8 +501,13 @@ inference proxy).
   The forward rides the authenticated TLS connection to the private EKS API
   server, and the node opens the last connection inside the pod, so the
   plaintext never crosses the pod network.
-- **MLflow** (5000), which job pods labelled `gco.io/mlflow-client` reach over
-  plain HTTP, fenced by NetworkPolicy.
+- **MLflow's own port** (5000), where the chart's probes, the ServiceMonitor
+  scrape and `gco monitoring open --service mlflow` reach the server. GCO's
+  clients use the HTTPS front door, and the client NetworkPolicy
+  (`allow-mlflow-clients`) admits only 5443. A pod that dials 5000 directly can
+  still reach it: the kubelet probes the port from the node, and with the VPC
+  CNI pods take their IPs from the same subnets as the nodes, so the server's
+  policy cannot admit the probes and refuse the pods.
 - **Slurm REST** (slurmrestd, 6820) and the **Ray dashboard** (8265), which
   their upstream operators and clients drive over plain HTTP inside
   `gco-jobs`, fenced by NetworkPolicy.
@@ -520,13 +562,64 @@ What the fence does not cover:
 **Lifecycle.** Certificates are post-Helm objects, because cert-manager's CRDs
 come from its chart. On a fresh cluster, `gco-system` pods that mount a leaf wait
 in `ContainerCreating` until cert-manager issues it; model pods wait the same way
-for `gco-inference-tls`. The applier's legacy sweep deletes the
+for `gco-inference-tls`, and an MLflow client pod for the `gco-internal-ca`
+ConfigMap, which trust-manager writes once the Bundle's source is issued. The
+applier treats the Bundle as ready when trust-manager reports it `Synced` for
+its current spec. Disabling MLflow uninstalls trust-manager and prunes the
+Bundle, the ConfigMap and both leaves with their Secrets. The applier's legacy sweep deletes the
 `gco-api-selfsigned` Issuer that used to sign the three API leaves as their own
 roots. [Live release validation](LIVE_RELEASE_VALIDATION.md) requires the
 ClusterIssuer and every leaf the configuration deploys to be `Ready` and issued
 by `gco-internal-ca`, and probes that only the TLS ports answer; the kind CI jobs
 exercise the chain and the verified hops as well
 ([CI.md](../.github/CI.md#in-cluster-tls-in-the-kind-jobs)).
+
+### Tenant write fence
+
+The tenant roles of the optional Argo CD, Crossplane and kro integrations may
+write ConfigMaps, Secrets, Services, Deployments and StatefulSets in `gco-jobs`
+and `gco-inference` ([GITOPS.md](GITOPS.md), [CROSSPLANE.md](CROSSPLANE.md),
+[EKS_CAPABILITIES.md](EKS_CAPABILITIES.md)). RBAC cannot tell a tenant's object
+in those namespaces from one GCO put there, so the ValidatingAdmissionPolicy
+`gco-tenant-write-fence` (`09-tenant-write-fence.yaml`, base pass, fail closed)
+keeps GCO's objects to their owners. It exempts no other requester, the kubectl
+applier and cluster administrators included:
+
+- In `gco-inference`, only the inference monitor
+  (`system:serviceaccount:gco-system:gco-inference-monitor-sa`) may create an
+  object labelled `gco.io/type: inference` or the shared `mooncake-master`
+  StatefulSet or Service, add or remove that label, or change what such an
+  object runs, serves or carries: a ConfigMap's or Secret's data, `binaryData`
+  and `immutable`, and any other kind's `spec`. The ConfigMaps an endpoint's
+  pods mount by name are the monitor's to create even without the label:
+  `<name>-tls-proxy`, the program the model pods' TLS sidecar runs with the
+  wildcard key, `<name>-pd-proxy` and `<name>-mooncake`. Deleting one and
+  recreating it unlabelled therefore cannot change what the pods run. Only the
+  monitor sets, changes or removes its provenance annotations
+  (`gco.io/lifecycle-id`, `gco.io/region-generation`, `gco.io/leader-epoch`), so
+  it cannot be made to adopt an object it never created.
+- Only cert-manager's controller may create or update
+  `gco-inference/gco-inference-tls`. Nobody can plant that Secret, with a
+  `ca.crt` every PD proxy would trust, before cert-manager first issues it.
+- Only trust-manager (`system:serviceaccount:trust-manager:trust-manager`) may
+  create or update `gco-jobs/gco-internal-ca`, the CA bundle MLflow's clients
+  trust.
+
+DELETE and subresources are never matched. Namespace deletion and garbage
+collection work as before, controllers still write status, and a tenant can
+still scale or delete a managed object (the monitor recreates what is deleted).
+Other annotations and labels stay writable.
+
+What the fence does not cover:
+
+- The tenant roles can read every Secret in `gco-inference`, `gco-inference-tls`
+  included, and run pods of their own there. A pod carrying a model Service's
+  selector labels receives a share of that Service's traffic. Grant those roles
+  only to identities you trust with the model endpoints' traffic.
+- HorizontalPodAutoscalers and ScaledObjects (KEDA copies a ScaledObject's
+  labels onto its HPA), and the scale subresource: a tenant can change how far a
+  managed endpoint scales, not what it runs.
+- An object created before the fence existed is checked only when it changes.
 
 ### IAM Security
 
@@ -550,7 +643,7 @@ exercise the chain and the verified hops as well
 - **Client and AWS API Transit**: AWS-managed TLS protects API Gateway and AWS service API connections; aggregator-to-regional-API calls also require SigV4
 - **Private Backend Transit**: In `aws`, global proxy → Global Accelerator → ALB uses deployment-local private-root TLS; in every partition, regional VPC proxy → ALB uses the same trust and explicit `backend.<project>.gco.internal` SNI/hostname verification. Global Accelerator is Layer 4 and does not terminate TLS.
 - **Workload Target Transit**: The ALB terminates its private-root client connection and re-encrypts every target hop to cert-manager-backed HTTPS listeners on health-monitor, manifest-processor, and inference-proxy. ALB target TLS encrypts traffic but does not validate target certificates and is not mTLS.
-- **In-cluster Transit**: Every in-cluster hop GCO owns (to the cost monitor, OpenCost, model endpoints, prefill/decode, Grafana's admin API, and the GCO metrics scrapes) is HTTPS verified against the cluster's internal CA; see [In-cluster TLS](#in-cluster-tls) for the hops and for what stays plaintext.
+- **In-cluster Transit**: Every in-cluster hop GCO owns (to the cost monitor, OpenCost, model endpoints, prefill/decode, Grafana's admin API, the MLflow tracking server, and the GCO metrics scrapes) is HTTPS verified against the cluster's internal CA; see [In-cluster TLS](#in-cluster-tls) for the hops and for what stays plaintext.
 - **Private-Key Boundary**: Only the certificate-manager role can read the customer-managed-KMS-encrypted root secret; backend clients read public SSM trust only
 - **Request Authentication**: HMAC adds integrity, freshness, and replay defense, not encryption
 - **EFS Transit**: TLS-enabled mounts

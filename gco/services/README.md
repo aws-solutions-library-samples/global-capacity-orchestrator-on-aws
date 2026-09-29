@@ -8,11 +8,11 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 |------|-------------|
 | `__init__.py` | Package marker for the service modules; runtime entry points import concrete modules directly. |
 | `api_shared.py` | Shared Pydantic response models, pagination helpers, and API error utilities. |
-| `auth_middleware.py` | Validates short-lived HMAC request envelopes, including timestamp, nonce, method, target, and body digest. |
+| `auth_middleware.py` | Validates short-lived HMAC request envelopes, including timestamp, nonce, method, target, and body digest; a signature or digest header that is not 64 lowercase hex characters is a 403 before any comparison. |
 | `aws_ssm.py` | Shared required/optional read, existence-check, and write helpers for SSM Parameter Store. |
 | `central_queue_worker.py` | Lease-fenced worker that claims global queue records and adopts or creates deterministic Kubernetes Jobs. |
-| `cost_api.py` | Internal FastAPI surface and scheduled reporting loop for the cost-monitor Deployment; traced as `cost-monitor`, and its lifespan closes the OpenCost client and flushes spans at shutdown. |
-| `cost_monitor.py` | Queries OpenCost over verified HTTPS (`opencost-tls` Service, internal CA) through one lazily built `httpx2` client, normalizes report windows, and writes deterministic Parquet reports. |
+| `cost_api.py` | Internal FastAPI surface and scheduled reporting loop for the cost-monitor Deployment; traced as `cost-monitor`, and its lifespan stops the scheduled reporter and flushes spans at shutdown. |
+| `cost_monitor.py` | Queries OpenCost over verified HTTPS (`opencost-tls` Service, internal CA) through a new `httpx2` client per call (internal CA looked up per call, so a rotated CA needs no restart), normalizes report windows, and writes deterministic Parquet reports. |
 | `grafana_rotator.py` | Rotates the in-cluster Grafana administrator credential through the Grafana API over verified HTTPS (`grafana-tls` Service, internal CA; fails closed before reading a credential when the CA is missing) and patches the Kubernetes Secret. |
 | `health_api.py` | Health-monitor FastAPI app exposing `/`, `/healthz`, `/readyz`, `/api/v1/health`, `/api/v1/metrics`, `/api/v1/status`, and Prometheus `/metrics`; traced as `health-monitor`. |
 | `health_monitor.py` | Collects cluster and workload health, resource utilization, and self-healing observations. |
@@ -24,7 +24,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `manifest_api.py` | Authenticated control-plane FastAPI app for manifests, jobs, policy, queues, templates, webhooks, and costs; traced as `manifest-processor`. |
 | `manifest_processor.py` | Validates and applies Kubernetes manifests with namespace, resource, placement, and security policy enforcement. |
 | `metrics_publisher.py` | Publishes GCO health and workload metrics to CloudWatch. |
-| `mooncake_pd_proxy.py` | Standalone Mooncake prefill/decode proxy mounted into disaggregated inference endpoint pods; binds `PD_PROXY_HOST` (loopback behind the pod's TLS sidecar), dials prefill/decode over HTTPS trusting only `PD_PROXY_CA_FILE`, and uses `httpx2` when the vLLM image has it, else the image's `httpx`. |
+| `mooncake_pd_proxy.py` | Standalone Mooncake prefill/decode proxy mounted into disaggregated inference endpoint pods; binds `PD_PROXY_HOST` (loopback behind the pod's TLS sidecar), dials prefill/decode over HTTPS trusting only `PD_PROXY_CA_FILE` through a new client per call (the CA re-read when the file changes, so a rotated CA needs no restart; keep-alive off), relays header values byte for byte, and uses `httpx2` when the vLLM image has it, else the image's `httpx`; it must parse as Python 3.12. |
 | `queue_processor.py` | SQS consumer that validates regional job submissions and applies them through Kubernetes. |
 | `request_context.py` | Binds server-generated request IDs to responses, generic errors, and correlated log records. |
 | `request_size_middleware.py` | Enforces request-body limits before authentication while replaying the exact bytes downstream. |
@@ -44,7 +44,7 @@ The `api_routes/` package splits the manifest and inference applications into fo
 | File | Description |
 |------|-------------|
 | `cost.py` | Authenticated `/api/v1/cost/*` proxy to the internal cost-monitor service at `https://cost-monitor.gco-system.svc.cluster.local:8443`, verified against the internal CA; an unreachable service or a missing CA answers 503. |
-| `inference_proxy.py` | Authenticated, allowlisted streaming reverse proxy for managed inference serving paths, dialling `https://<service>.<namespace>.svc.cluster.local:8443` through a new `httpx2` client per request (internal CA looked up per request, so a rotated CA needs no restart; keep-alive off; only the caller's `Accept-Encoding`), released when its stream ends or fails. |
+| `inference_proxy.py` | Authenticated, allowlisted streaming reverse proxy for managed inference serving paths, dialling `https://<service>.<namespace>.svc.cluster.local:8443` through a new `httpx2` client per request (internal CA looked up per request, so a rotated CA needs no restart; keep-alive off; only the caller's `Accept-Encoding`), released when its stream ends or fails; header values cross it byte for byte. |
 | `jobs.py` | Job listing, status, logs, events, pods, metrics, retry, and deletion. |
 | `manifests.py` | Manifest submission and validation. |
 | `queue.py` | Idempotent global queue submission, listing, cancellation, pagination, and status polling. |

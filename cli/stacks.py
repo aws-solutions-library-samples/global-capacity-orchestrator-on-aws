@@ -74,8 +74,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-09-28T16:13:31Z
+# Generated from Git commit: b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -294,6 +294,91 @@ def _read_build_manifest(build_dir: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+#: The modes every published asset entry carries. Lambda reads a zip entry as
+#: an unprivileged user, and a Dockerfile COPY keeps the build context's modes
+#: in an image whose later steps run as a non-root user, so an entry that only
+#: the deploying user can read deploys cleanly and fails at run time. Git
+#: records exactly these two file modes, so a build made under the default
+#: umask already has them and its digest (which hashes modes) does not change.
+_PUBLISHED_DIRECTORY_MODE = 0o755
+_PUBLISHED_EXECUTABLE_MODE = 0o755
+_PUBLISHED_FILE_MODE = 0o644
+
+
+def _modes_gate_reads() -> bool:
+    """Whether POSIX mode bits decide who may read a file (they do not on Windows)."""
+    return os.name != "nt"
+
+
+def _published_mode(metadata: os.stat_result) -> int | None:
+    """Return the mode a published entry must have, or ``None`` to keep its own.
+
+    Symlinks keep theirs: nothing reads a link's own mode, and ``os.chmod``
+    would follow the link to its target.
+    """
+    if stat.S_ISDIR(metadata.st_mode):
+        return _PUBLISHED_DIRECTORY_MODE
+    if stat.S_ISREG(metadata.st_mode):
+        return _PUBLISHED_EXECUTABLE_MODE if metadata.st_mode & 0o111 else _PUBLISHED_FILE_MODE
+    return None
+
+
+def _hidden_from_other_users(metadata: os.stat_result) -> bool:
+    """A file others cannot read, or a directory others cannot list and enter."""
+    if stat.S_ISDIR(metadata.st_mode):
+        return metadata.st_mode & 0o005 != 0o005
+    if stat.S_ISREG(metadata.st_mode):
+        return not metadata.st_mode & 0o004
+    return False
+
+
+def _normalize_asset_modes(root: Path) -> None:
+    """Give a staged asset tree its publishable modes, whatever the umask was.
+
+    ``pip install -t`` and ``npm ci`` create files under the process umask, and
+    ``shutil.copy2`` / ``copytree`` copy the checkout's own modes, so a build
+    made under ``umask 077`` (or from a checkout made under it) would publish
+    owner-only files. CDK's asset hash ignores modes, so such a zip would also
+    be reused from the bootstrap bucket by later deploys. This runs before the
+    completion manifest is written, so the build digest records the final
+    modes. Windows modes do not gate reads, so it is a no-op there.
+    """
+    if not _modes_gate_reads():
+        return
+    # World-listable on purpose: the Lambda runtime and an image's non-root
+    # user must list and enter every asset directory (_PUBLISHED_DIRECTORY_MODE).
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(root, _PUBLISHED_DIRECTORY_MODE)
+    for directory, directories, files in os.walk(root):
+        for name in (*directories, *files):
+            path = Path(directory, name)
+            metadata = path.lstat()
+            wanted = _published_mode(metadata)
+            if wanted is not None and stat.S_IMODE(metadata.st_mode) != wanted:
+                os.chmod(path, wanted)
+
+
+def _asset_tree_is_world_readable(root: Path) -> bool:
+    """Whether every entry below ``root`` is readable (and searchable) by every user.
+
+    A build published before modes were normalized can hold owner-only
+    entries that its own manifest still matches; failing freshness on it makes
+    the next deploy rebuild (and so re-upload) it. ``root`` itself is not
+    judged: no asset carries its mode, and the staging directory it was
+    renamed from was created owner-only by ``tempfile.mkdtemp``.
+    """
+    if not _modes_gate_reads():
+        return True
+    try:
+        for directory, directories, files in os.walk(root):
+            for name in (*directories, *files):
+                if _hidden_from_other_users(Path(directory, name).lstat()):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
 def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
     """Write the completion marker only after the staged build is complete."""
     build_digest = _asset_tree_digest(build_dir)
@@ -310,6 +395,10 @@ def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+    # The manifest ships inside the asset too and is created under the umask.
+    # It is not part of the build digest, so its mode can be set afterwards.
+    if _modes_gate_reads():
+        os.chmod(manifest_path, _PUBLISHED_FILE_MODE)
 
 
 def _asset_build_is_fresh_unlocked(
@@ -328,6 +417,7 @@ def _asset_build_is_fresh_unlocked(
         and build_digest is not None
         and manifest.get("source_digest") == source_digest
         and manifest.get("build_digest") == build_digest
+        and _asset_tree_is_world_readable(build_dir)
     )
 
 
@@ -664,6 +754,7 @@ def _prepare_lambda_asset(
         )
         try:
             builder(staging_dir)
+            _normalize_asset_modes(staging_dir)
             if _asset_tree_digest(source_dir, source_inputs=source_inputs) != source_digest:
                 raise RuntimeError(f"{display_name} sources changed while packaging")
             _write_build_manifest(staging_dir, source_digest)
@@ -813,6 +904,119 @@ class CdkToolchainError(RuntimeError):
     'aws_cdk'`` that the ``python3 app.py`` synth subprocess would otherwise
     emit from a base (extra-less) install.
     """
+
+
+class AssetPermissionError(RuntimeError):
+    """Deployable sources in the checkout are not readable by every user."""
+
+
+#: The checkout paths CDK packages exactly as they sit on disk, relative to
+#: the project root: every plain Lambda directory under ``lambda/`` (zipped as
+#: is, or a Docker build context) and the service images' build context,
+#: which the root ``.dockerignore`` narrows to ``gco/``, ``cli/``,
+#: ``dockerfiles/``, ``pyproject.toml`` and ``requirements-lock.txt`` and the
+#: image assets narrow further (the regional stack excludes ``cli/**``,
+#: ``gco/stacks/**`` and ``dockerfiles/README.md``).
+_ASSET_SOURCE_ROOTS = ("lambda", "gco", "dockerfiles", "pyproject.toml", "requirements-lock.txt")
+#: Paths below those roots that never reach an asset as they are.
+_ASSET_SOURCE_EXCLUDED = frozenset({"gco/stacks", "dockerfiles/README.md"})
+#: Lambda sources CDK never packages directly: only their generated builds
+#: are assets, and ``_normalize_asset_modes`` gives those their modes.
+_CLI_BUILT_LAMBDA_SOURCES = frozenset({"kubectl-applier-simple", "inference-streaming-proxy"})
+_ASSET_SOURCE_IGNORED_DIRECTORIES = _LAMBDA_SOURCE_IGNORED_DIRECTORIES | {"node_modules"}
+_ASSET_SOURCE_REPORT_LIMIT = 10
+
+
+def _skip_asset_source_directory(parent: str, name: str) -> bool:
+    if name in _ASSET_SOURCE_IGNORED_DIRECTORIES or f"{parent}/{name}" in _ASSET_SOURCE_EXCLUDED:
+        return True
+    # Generated builds with their lock, staging and backup siblings, and the
+    # CLI-built sources: the CLI normalizes what it publishes from them.
+    return parent == "lambda" and (
+        name.startswith(".") or name.endswith("-build") or name in _CLI_BUILT_LAMBDA_SOURCES
+    )
+
+
+def _skip_asset_source_file(parent: str, name: str) -> bool:
+    if name in _LAMBDA_SOURCE_IGNORED_FILES or name.endswith((".pyc", ".pyo")):
+        return True
+    # Files directly under lambda/ (its README and the asset locks) are in no asset.
+    return parent == "lambda" or f"{parent}/{name}" in _ASSET_SOURCE_EXCLUDED
+
+
+def unreadable_asset_sources(project_root: str | Path) -> list[str]:
+    """Return the deployable checkout paths other users cannot read, sorted.
+
+    Covers :data:`_ASSET_SOURCE_ROOTS`: files must be world-readable and
+    directories world-readable and searchable. Symlinks are not judged by
+    their own mode. Paths are relative to ``project_root``, POSIX-style.
+    """
+    root = Path(project_root)
+    offenders: list[str] = []
+
+    def check(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return  # removed while walking (an editor's scratch file): nothing to package
+        except OSError:
+            offenders.append(path.relative_to(root).as_posix())
+            return
+        if _hidden_from_other_users(metadata):
+            offenders.append(path.relative_to(root).as_posix())
+
+    for name in _ASSET_SOURCE_ROOTS:
+        top = root / name
+        if not top.exists():
+            continue
+        check(top)
+        if top.is_symlink() or not top.is_dir():
+            continue
+        for directory, directories, files in os.walk(top):
+            current = Path(directory)
+            parent = current.relative_to(root).as_posix()
+            directories[:] = sorted(
+                entry for entry in directories if not _skip_asset_source_directory(parent, entry)
+            )
+            for entry in directories:
+                check(current / entry)
+            for entry in sorted(files):
+                if not _skip_asset_source_file(parent, entry):
+                    check(current / entry)
+    return sorted(offenders)
+
+
+def check_asset_sources_readable(project_root: str | Path) -> None:
+    """Refuse to deploy from a checkout whose deployable sources are owner-only.
+
+    CDK zips plain Lambda directories and builds the service images from the
+    checkout exactly as it is on disk, and its asset hash ignores file modes.
+    A checkout made under a restrictive umask therefore uploads Lambda code
+    the Lambda runtime cannot read (the function deploys and then fails when
+    invoked), fails the service image builds once they run as their non-root
+    user, and leaves those unreadable zips in the bootstrap bucket for later
+    deploys to reuse. Runs before anything is packaged. Windows modes do not
+    gate reads, so there is nothing to check there.
+
+    Raises:
+        AssetPermissionError: naming the offending paths and the fix.
+    """
+    if not _modes_gate_reads():
+        return
+    offenders = unreadable_asset_sources(project_root)
+    if not offenders:
+        return
+    shown = ", ".join(offenders[:_ASSET_SOURCE_REPORT_LIMIT])
+    if len(offenders) > _ASSET_SOURCE_REPORT_LIMIT:
+        shown += f" (and {len(offenders) - _ASSET_SOURCE_REPORT_LIMIT} more)"
+    raise AssetPermissionError(
+        f"{len(offenders)} deployable path(s) in the checkout are not readable by every "
+        f"user: {shown}. CDK packages them as they are, so Lambda could not read the "
+        "uploaded code and the service image builds would fail; a checkout made under a "
+        "restrictive umask (such as 077) does this. Make files world-readable and "
+        "directories world-searchable from the repository root, then deploy again: "
+        f"chmod -R a+rX {' '.join(_ASSET_SOURCE_ROOTS)}"
+    )
 
 
 @dataclass
@@ -1335,6 +1539,22 @@ class StackManager:
             logger.debug("Failed to diagnose deploy failure for %s: %s", stack_name, e)
             # Best effort — don't fail the deploy further
 
+    def ensure_asset_sources_readable(self) -> None:
+        """Run :func:`check_asset_sources_readable` once per manager.
+
+        A multi-stack deploy calls ``deploy`` once per stack; the checkout's
+        modes are only walked on the first call. ``gco upgrade`` calls it before
+        its teardown, so a checkout that could not be redeployed stops the
+        upgrade before any stack is touched.
+
+        Raises:
+            AssetPermissionError: when a deployable source is owner-only.
+        """
+        if getattr(self, "_asset_sources_checked", False):
+            return
+        check_asset_sources_readable(self.project_root)
+        self._asset_sources_checked = True
+
     def _sync_lambda_sources(self) -> None:
         """Atomically synchronize canonical shared files before asset ensures.
 
@@ -1819,7 +2039,16 @@ class StackManager:
                 forces custom resources (notably KubectlApplyManifests)
                 to re-run each time, adding minutes per phase for no
                 actual change.
+
+        Raises:
+            AssetPermissionError: before anything is copied, packaged or
+                uploaded, when a deployable source is owner-only.
         """
+        # A destroy never runs this check itself: a teardown must not depend on
+        # the checkout's modes. The monitoring detach a keep-control-plane
+        # teardown starts with is a deploy, though, and uploads assets, so it
+        # does.
+        self.ensure_asset_sources_readable()
         # Synchronize canonical checked-in copies first, then source-check and
         # atomically publish only stale generated assets. A deploy must never
         # destructively rebuild a fresh tree while another CDK process may be
@@ -4015,7 +4244,12 @@ class StackManager:
 
         Returns:
             Tuple of (overall_success, successful_stacks, failed_stacks)
+
+        Raises:
+            AssetPermissionError: before the stack listing synthesizes
+                anything, when a deployable source is owner-only.
         """
+        self.ensure_asset_sources_readable()
         stacks = self.list_stacks()
         stack_names = set(stacks)
         project_name = self.config.project_name
@@ -4564,6 +4798,10 @@ class StackManager:
         cost-report data it owns) stays. A monitoring stack that is not
         deployed has nothing to detach and is left alone. ``cdk.json`` is never
         edited; the caller's run-scoped context is restored afterwards.
+
+        Raises:
+            AssetPermissionError: when a deployable source is owner-only; the
+                detach is a deploy, and it runs before any stack is deleted.
         """
         monitoring_stack = f"{self.config.project_name}-monitoring"
         if not self._stack_exists_in_cloudformation(monitoring_stack):

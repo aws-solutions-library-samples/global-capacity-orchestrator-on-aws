@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
 import traceback as traceback_module
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from .json_utils import loads_without_duplicate_keys
 
 __all__ = [
     "INFERENCE_OWNER_LABEL",
+    "ActionFailure",
     "ActionResult",
     "Framework",
     "InferenceRuntimeSpec",
@@ -61,6 +63,20 @@ _LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_
 def utc_now() -> str:
     """Return an RFC 3339-compatible UTC timestamp."""
     return datetime.now(UTC).isoformat()
+
+
+class ActionFailure(RuntimeError):
+    """An action failure that keeps the evidence gathered before it failed.
+
+    The runner records ``details`` on the failed :class:`ActionResult`, so the
+    report carries what a passing run would have returned (for example every
+    example's result) instead of an empty object. The mapping is deep-copied:
+    callers often raise with a structure that also lives in ``checkpoint.state``.
+    """
+
+    def __init__(self, message: str, details: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.details: dict[str, Any] = copy.deepcopy(dict(details))
 
 
 def to_jsonable(value: Any) -> Any:

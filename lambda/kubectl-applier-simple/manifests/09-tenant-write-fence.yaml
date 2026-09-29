@@ -1,0 +1,233 @@
+# The write fence on the GCO objects that live in the tenant namespaces: what
+# an identity allowed to write gco-inference and gco-jobs may not change.
+# Base pass, never gated.
+#
+# Threat. The optional kro, Argo CD and Crossplane tenant roles
+# (07-kro-tenant-access.yaml, post-helm-argocd-access.yaml,
+# post-helm-crossplane.yaml) may write ConfigMaps, Secrets, Services,
+# Deployments and StatefulSets in gco-inference and gco-jobs, and RBAC cannot
+# tell a tenant's object from GCO's in the same namespace. Without this fence
+# such an identity could:
+#   * rewrite, or delete and recreate, the <endpoint>-tls-proxy ConfigMap: the
+#     program every model pod's endpoint-tls-proxy sidecar runs, holding the
+#     gco-inference-tls key and seeing all of the endpoint's traffic, from its
+#     next start. <endpoint>-pd-proxy (the PD proxy's program) and
+#     <endpoint>-mooncake (where the role pods find the Mooncake master) are
+#     mounted the same way;
+#   * change any other object the inference monitor manages: a Deployment's
+#     image, a Service's selector, an endpoint's generated admin key;
+#   * forge the monitor's provenance (the gco.io/type: inference label and the
+#     gco.io/lifecycle-id, gco.io/region-generation and gco.io/leader-epoch
+#     annotations), so the monitor adopts an object it never created;
+#   * create or edit the gco-inference-tls Secret before or after cert-manager
+#     issues it, planting a ca.crt that the PD proxies would then trust;
+#   * edit the gco-internal-ca ConfigMap trust-manager publishes in gco-jobs
+#     (MLflow's trust bundle), so other tenants' clients trust a CA of theirs.
+#
+# Rules, for every requester but the one named (the kubectl applier and
+# cluster administrators included). DELETE and subresources are never matched,
+# so garbage collection, the scale subresource and status writes are untouched,
+# and the monitor recreates what a tenant deletes.
+#   * In gco-inference, only the inference monitor
+#     (system:serviceaccount:gco-system:gco-inference-monitor-sa) may:
+#       - create an object labelled gco.io/type: inference, or the shared
+#         mooncake-master StatefulSet or Service, or add or remove that label;
+#       - create a ConfigMap named <anything>-tls-proxy, <anything>-pd-proxy
+#         or <anything>-mooncake, labelled or not;
+#       - change what any of these objects runs, serves or carries: a
+#         ConfigMap's or Secret's data (a Secret's stringData included),
+#         binaryData and immutable, and any other kind's spec;
+#       - set, change or remove a provenance annotation, on any object.
+#   * Only cert-manager's controller
+#     (system:serviceaccount:cert-manager:cert-manager) may create or update
+#     the Secret gco-inference/gco-inference-tls.
+#   * Only trust-manager (system:serviceaccount:trust-manager:trust-manager,
+#     the chart's default ServiceAccount in its own namespace) may create or
+#     update the ConfigMap gco-jobs/gco-internal-ca.
+#
+# What it does not close. The tenant roles can still read every Secret in
+# gco-inference, the gco-inference-tls wildcard key among them, and run pods of
+# their own there; a pod that carries a model Service's labels receives a share
+# of that Service's traffic. Grant those roles only to identities trusted with
+# the model endpoints' traffic (docs/ARCHITECTURE.md, "Tenant write fence").
+# HorizontalPodAutoscalers and ScaledObjects are not fenced (KEDA copies a
+# ScaledObject's labels onto the HPA it creates), nor is the scale subresource:
+# a tenant can change how far a managed endpoint scales, not what it runs.
+#
+# Why the base pass: like the issuance fence (08-internal-ca-issuance.yaml),
+# the policy is enforced before Helm installs cert-manager, before the
+# post-Helm pass creates gco-inference-tls, and before the inference monitor
+# creates its first object on a new cluster. tests/test_tenant_write_fence.py
+# pins the names above to the monitor's own constants.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gco-tenant-write-fence
+  labels:
+    app: gco
+    project: gco
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["gco-inference", "gco-jobs"]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps", "secrets", "services"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets"]
+  variables:
+    - name: inInference
+      expression: "request.namespace == 'gco-inference'"
+    - name: resource
+      expression: "request.resource.resource"
+    - name: objectName
+      expression: "has(object.metadata.name) ? object.metadata.name : ''"
+    - name: objectRef
+      expression: "request.kind.kind + ' ' + request.namespace + '/' + variables.objectName"
+    - name: isUpdate
+      expression: "request.operation == 'UPDATE'"
+    - name: fromMonitor
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:gco-system:gco-inference-monitor-sa'
+    - name: fromCertManager
+      expression: "request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
+    - name: fromTrustManager
+      expression: "request.userInfo.username == 'system:serviceaccount:trust-manager:trust-manager'"
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: oldLabels
+      expression: >-
+        variables.isUpdate && has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}
+    - name: labelled
+      expression: "'gco.io/type' in variables.labels && variables.labels['gco.io/type'] == 'inference'"
+    - name: wasLabelled
+      expression: >-
+        'gco.io/type' in variables.oldLabels && variables.oldLabels['gco.io/type'] == 'inference'
+    # The one per-region Mooncake master the monitor shares across endpoints.
+    - name: sharedMaster
+      expression: >-
+        variables.resource in ['statefulsets', 'services'] && variables.objectName == 'mooncake-master'
+    # The per-endpoint ConfigMaps the monitor's pods mount by name.
+    - name: podProgram
+      expression: >-
+        variables.resource == 'configmaps' && (variables.objectName.endsWith('-tls-proxy')
+        || variables.objectName.endsWith('-pd-proxy') || variables.objectName.endsWith('-mooncake'))
+    # What the monitor manages. An update that also drops the label is refused
+    # by the label rule, so the old object's label need not count here.
+    - name: managed
+      expression: "variables.labelled || variables.sharedMaster || variables.podProgram"
+    - name: annotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldAnnotations
+      expression: >-
+        variables.isUpdate && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+    - name: provenanceKept
+      expression: >-
+        ['gco.io/lifecycle-id', 'gco.io/region-generation', 'gco.io/leader-epoch'].all(key,
+        (key in variables.annotations) == (key in variables.oldAnnotations)
+        && (!(key in variables.annotations) || variables.annotations[key] == variables.oldAnnotations[key]))
+    # What an update may not change on a managed object: what it runs, serves
+    # or carries. A ConfigMap's or Secret's payload (a Secret's stringData
+    # arrives merged into data, and the API server itself refuses a type
+    # change) or any other kind's spec. immutable counts: a frozen ConfigMap is
+    # one the monitor can no longer repair.
+    - name: contentKept
+      expression: >-
+        variables.resource in ['configmaps', 'secrets']
+        ? (has(object.data) ? object.data : {}) == (has(oldObject.data) ? oldObject.data : {})
+        && (has(object.binaryData) ? object.binaryData : {}) == (has(oldObject.binaryData) ? oldObject.binaryData : {})
+        && (has(object.immutable) && object.immutable) == (has(oldObject.immutable) && oldObject.immutable)
+        : (has(object.spec) ? object.spec : {}) == (has(oldObject.spec) ? oldObject.spec : {})
+    - name: endpointKeypair
+      expression: >-
+        variables.inInference && variables.resource == 'secrets'
+        && variables.objectName == 'gco-inference-tls'
+    - name: trustBundle
+      expression: >-
+        request.namespace == 'gco-jobs' && variables.resource == 'configmaps'
+        && variables.objectName == 'gco-internal-ca'
+  validations:
+    # Only the monitor creates, labels or unlabels its objects.
+    - expression: >-
+        !variables.inInference || variables.fromMonitor
+        || (variables.isUpdate ? variables.labelled == variables.wasLabelled
+        : !(variables.labelled || variables.sharedMaster))
+      message: >-
+        only the inference monitor may create gco-inference objects labelled gco.io/type: inference,
+        or add or remove that label
+      messageExpression: >-
+        variables.objectRef + ': only the inference monitor
+        (system:serviceaccount:gco-system:gco-inference-monitor-sa) may '
+        + (variables.isUpdate ? 'add or remove the label gco.io/type: inference' : 'create it')
+        + ', not ' + request.userInfo.username
+      reason: Forbidden
+    # Nor may anyone else change what one of them runs, serves or carries.
+    - expression: >-
+        !variables.inInference || variables.fromMonitor || !variables.isUpdate
+        || !variables.managed || variables.contentKept
+      message: >-
+        only the inference monitor may change what an object it manages in gco-inference runs,
+        serves or carries
+      messageExpression: >-
+        variables.objectRef + ' is managed by the inference monitor: only
+        system:serviceaccount:gco-system:gco-inference-monitor-sa may change its '
+        + (variables.resource in ['configmaps', 'secrets'] ? 'data' : 'spec')
+        + ', not ' + request.userInfo.username
+      reason: Forbidden
+    # The programs and configuration its pods mount by name are its own, even
+    # when a deleted one is recreated without the label (the rule above keeps
+    # their data).
+    - expression: >-
+        !variables.inInference || variables.fromMonitor || variables.isUpdate || !variables.podProgram
+      message: >-
+        only the inference monitor may create gco-inference ConfigMaps named <name>-tls-proxy,
+        <name>-pd-proxy or <name>-mooncake
+      messageExpression: >-
+        variables.objectRef + ': the inference monitor mounts ConfigMaps named <name>-tls-proxy,
+        <name>-pd-proxy and <name>-mooncake into its pods, so only
+        system:serviceaccount:gco-system:gco-inference-monitor-sa may create one, not '
+        + request.userInfo.username
+      reason: Forbidden
+    # Its provenance annotations are its own on every object.
+    - expression: "!variables.inInference || variables.fromMonitor || variables.provenanceKept"
+      message: >-
+        only the inference monitor may set, change or remove the gco.io/lifecycle-id,
+        gco.io/region-generation and gco.io/leader-epoch annotations in gco-inference
+      messageExpression: >-
+        variables.objectRef + ': only the inference monitor may set, change or remove the
+        gco.io/lifecycle-id, gco.io/region-generation and gco.io/leader-epoch annotations, not '
+        + request.userInfo.username
+      reason: Forbidden
+    - expression: "!variables.endpointKeypair || variables.fromCertManager"
+      message: only cert-manager's controller may write the Secret gco-inference/gco-inference-tls
+      messageExpression: >-
+        variables.objectRef + ': only the cert-manager controller
+        (system:serviceaccount:cert-manager:cert-manager) may write the keypair of the model
+        endpoints, not ' + request.userInfo.username
+      reason: Forbidden
+    - expression: "!variables.trustBundle || variables.fromTrustManager"
+      message: only trust-manager may write the ConfigMap gco-jobs/gco-internal-ca
+      messageExpression: >-
+        variables.objectRef + ': only trust-manager (system:serviceaccount:trust-manager:trust-manager)
+        may write the GCO internal CA bundle, not ' + request.userInfo.username
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gco-tenant-write-fence
+  labels:
+    app: gco
+    project: gco
+spec:
+  policyName: gco-tenant-write-fence
+  validationActions: [Deny]

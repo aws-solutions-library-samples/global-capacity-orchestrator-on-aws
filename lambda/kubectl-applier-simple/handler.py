@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-27T00:57:37Z
-# Generated from Git commit: ddc2bce8e97f32a5019e6446f145741da36a2a04
+# Generated at (UTC): 2026-09-28T07:34:51Z
+# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -151,6 +151,14 @@ _ARGOCD_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
 _CROSSPLANE_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "Function": ("pkg.crossplane.io", "v1", "functions", True),
 }
+# The trust-manager Bundle that publishes the internal CA certificate to
+# MLflow's clients in gco-jobs (post-helm-mlflow-tls.yaml). Cluster-scoped; the
+# trust-manager chart installs its CRD, so it is a POST-HELM kind. Readiness
+# is a Synced condition for the current generation: trust-manager has written
+# the target ConfigMap from the current spec and source.
+_TRUST_MANAGER_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "Bundle": ("trust.cert-manager.io", "v1alpha1", "bundles", True),
+}
 
 # Services annotated with this marker are validated for exact existence only;
 # a ready EndpointSlice endpoint is not required. Reserved for Services whose
@@ -166,6 +174,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "APIService",
         "AppProject",
         "Application",
+        "Bundle",
         "Certificate",
         "ClusterIssuer",
         "ClusterRole",
@@ -219,6 +228,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
 _CLUSTER_SCOPED_KINDS = frozenset(
     {
         "APIService",
+        "Bundle",
         "ClusterIssuer",
         "ClusterQueue",
         "ClusterRole",
@@ -771,6 +781,19 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         # The server's own network posture; GCO owns it because the chart's
         # policy drops kubelet probes (post-helm-mlflow-network.yaml).
         ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "mlflow-server"),
+        # The HTTPS front door and its trust (post-helm-mlflow-tls.yaml). Each
+        # Certificate goes before its Secret, as for the observability leaves.
+        # The Bundle goes before the ConfigMap trust-manager writes from it,
+        # so nothing rewrites the ConfigMap once it is deleted; the Bundle
+        # owns it, but pruning it here does not wait on garbage collection.
+        # helm uninstall keeps the Bundle CRD, so the Bundle delete resolves.
+        ("v1", "Service", "monitoring", "mlflow-tls"),
+        ("cert-manager.io/v1", "Certificate", "monitoring", "mlflow-tls"),
+        ("v1", "Secret", "monitoring", "mlflow-tls"),
+        ("trust.cert-manager.io/v1alpha1", "Bundle", None, "gco-internal-ca"),
+        ("v1", "ConfigMap", "gco-jobs", "gco-internal-ca"),
+        ("cert-manager.io/v1", "Certificate", "trust-manager", "gco-internal-ca-source"),
+        ("v1", "Secret", "trust-manager", "gco-internal-ca-source"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),
@@ -1579,13 +1602,15 @@ def apply_manifests(
                         or kind in _CERT_MANAGER_CUSTOM_OBJECTS
                         or kind in _ARGOCD_CUSTOM_OBJECTS
                         or kind in _CROSSPLANE_CUSTOM_OBJECTS
+                        or kind in _TRUST_MANAGER_CUSTOM_OBJECTS
                     ):
                         group, version, plural, cluster_scoped = (
                             _GATEWAY_CUSTOM_OBJECTS.get(kind)
                             or _QUEUEING_CUSTOM_OBJECTS.get(kind)
                             or _CERT_MANAGER_CUSTOM_OBJECTS.get(kind)
                             or _ARGOCD_CUSTOM_OBJECTS.get(kind)
-                            or _CROSSPLANE_CUSTOM_OBJECTS[kind]
+                            or _CROSSPLANE_CUSTOM_OBJECTS.get(kind)
+                            or _TRUST_MANAGER_CUSTOM_OBJECTS[kind]
                         )
                         try:
                             if cluster_scoped:
@@ -1776,9 +1801,11 @@ def apply_manifests(
                     elif kind == "ValidatingAdmissionPolicy":
                         # Built-in and cluster-scoped: the fence on who may
                         # obtain a certificate from GCO's internal CA
-                        # (08-internal-ca-issuance.yaml). It is a base-pass
-                        # object even though it matches cert-manager types, so
-                        # it is enforced before the post-Helm pass creates the CA.
+                        # (08-internal-ca-issuance.yaml) and the write fence on
+                        # GCO's objects in the tenant namespaces
+                        # (09-tenant-write-fence.yaml). Both are base-pass
+                        # objects, so they are enforced before the post-Helm
+                        # pass creates the CA and its leaves.
                         admission_v1 = client.AdmissionregistrationV1Api()
                         try:
                             admission_v1.create_validating_admission_policy(body=doc)
@@ -2447,16 +2474,17 @@ def _resource_readiness_failure(kind: str, resource: dict[str, Any]) -> str | No
             )
         return None
 
-    if kind in {"Certificate", "ClusterIssuer", "Issuer"}:
-        # cert-manager stamps observedGeneration on these Ready conditions, so
-        # a condition left over from a previous spec (a re-pointed issuerRef,
-        # a new dnsName) is stale rather than ready.
+    if kind in {"Certificate", "ClusterIssuer", "Issuer", "Bundle"}:
+        # cert-manager stamps observedGeneration on these Ready conditions,
+        # and trust-manager on a Bundle's Synced condition, so a condition
+        # left over from a previous spec (a re-pointed issuerRef, a new
+        # dnsName, another bundle source) is stale rather than ready.
         generation = metadata.get("generation")
         if not isinstance(generation, int) or isinstance(generation, bool):
             return f"invalid metadata.generation ({generation})"
         return _current_condition_failure(
             _conditions(status),
-            "Ready",
+            "Synced" if kind == "Bundle" else "Ready",
             generation,
             kind,
         )

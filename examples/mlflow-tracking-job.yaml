@@ -1,17 +1,21 @@
 # MLflow Experiment Tracking Job Example
 #
 # Logs a tiny training run (params + a loss curve) to the in-cluster
-# MLflow tracking server over service DNS, then READS THE RUN BACK and
+# MLflow tracking server over verified HTTPS, then READS THE RUN BACK and
 # asserts every logged value round-tripped — proof the tracking pipeline
 # works end to end, not just that the POSTs returned 200.
 #
-# The tracking server (http://mlflow.monitoring) ships with the
-# observability bundle: run metadata lives on the server's gp3 volume,
-# run artifacts in the cluster-shared S3 bucket under
-# mlflow-artifacts/<region>/ via the server's own IAM role. This job
-# logs metrics and params only, so it needs no AWS credentials — the
-# pod label `gco.io/mlflow-client: "true"` grants it egress to the
-# tracking server through the platform's zero-trust NetworkPolicies.
+# The tracking server ships with the observability bundle: run metadata
+# lives on the server's gp3 volume, run artifacts in the cluster-shared S3
+# bucket under mlflow-artifacts/<region>/ via the server's own IAM role.
+# Clients reach it at https://mlflow-tls.monitoring.svc.cluster.local:5443
+# and verify its certificate against the cluster's internal CA, which
+# trust-manager publishes in gco-jobs as the ConfigMap gco-internal-ca
+# (mounted below; MLFLOW_TRACKING_SERVER_CERT_PATH points the client at
+# it). This job logs metrics and params only, so it needs no AWS
+# credentials — the pod label `gco.io/mlflow-client: "true"` grants it
+# egress to the tracking server's HTTPS port through the platform's
+# zero-trust NetworkPolicies.
 # Browse the result: gco monitoring open --service mlflow
 #
 # Prerequisites:
@@ -97,8 +101,13 @@ spec:
           print("Browse it: gco monitoring open --service mlflow")
         env:
         - name: MLFLOW_TRACKING_URI
-          # Chart release `mlflow` in the monitoring namespace, port 5000.
-          value: "http://mlflow.monitoring:5000"
+          # The mlflow-tls Service in the monitoring namespace: the tracking
+          # server's HTTPS front door.
+          value: "https://mlflow-tls.monitoring.svc.cluster.local:5443"
+        - name: MLFLOW_TRACKING_SERVER_CERT_PATH
+          # The CA bundle the client verifies the server with (and nothing
+          # else: no public CAs).
+          value: "/var/run/gco/ca/ca.crt"
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: false
@@ -112,5 +121,14 @@ spec:
           limits:
             cpu: "1"
             memory: "1Gi"
+        volumeMounts:
+        - name: gco-internal-ca
+          mountPath: /var/run/gco/ca
+          readOnly: true
+      volumes:
+      # Published by trust-manager, which keeps it current as the CA renews.
+      - name: gco-internal-ca
+        configMap:
+          name: gco-internal-ca
       restartPolicy: Never
   backoffLimit: 2

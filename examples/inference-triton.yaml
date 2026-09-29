@@ -28,9 +28,12 @@ metadata:
   name: triton-models
   namespace: gco-inference
   labels:
+    # No gco.io/type: inference here: on an object in gco-inference that label
+    # marks it as the inference monitor's own, and only the monitor may set it
+    # (09-tenant-write-fence.yaml). The pods below keep it, so they get the
+    # model pods' network rules.
     app: triton-models
     project: gco
-    gco.io/type: inference
     framework: triton
 spec:
   replicas: 2

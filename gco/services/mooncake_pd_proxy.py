@@ -50,6 +50,7 @@ working either way.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -60,10 +61,11 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-26T23:26:19Z
-# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
+# Generated at (UTC): 2026-09-28T07:34:51Z
+# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
 # Flowchart(s) generated from this file:
 #   * ``_dispatch`` -> ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/mooncake_pd_proxy._dispatch.png``)
@@ -133,29 +135,95 @@ _HOP_BY_HOP_HEADERS = frozenset(
 )
 
 
+#: The trust context for the CA file as it was last read, keyed on the file's
+#: identity (inode, modification time, size).
+_verify_cache: tuple[tuple[int, int, int], ssl.SSLContext] | None = None
+
+
 def _upstream_verify() -> ssl.SSLContext | bool:
-    """TLS trust for the prefill and decode hops.
+    """TLS trust for the prefill and decode hops, re-read when the CA changes.
 
     With ``PD_PROXY_CA_FILE`` set, trust exactly that bundle and nothing from
     the system store; hostname verification stays on, so each role Service
     must present a certificate for the name the proxy dialled. Unset keeps the
-    library default for plain ``http://`` backends and local runs. A bundle
-    that is configured but unreadable fails the process at start rather than
-    serving over a weaker trust.
+    library default for plain ``http://`` backends and local runs.
+
+    The context is cached on the file's identity. Kubernetes updates a
+    projected Secret by swapping a symlink, which changes the resolved inode
+    and modification time, so a rotated internal CA is trusted from the next
+    request on without restarting the pod, and an unchanged one costs a
+    ``stat``. A bundle that is missing or is not a CA raises ``OSError``
+    (``ssl.SSLError`` is one): at import that stops the program rather than
+    serving over a weaker trust, and per request it answers like an
+    unreachable decode backend.
     """
+    global _verify_cache
     if not CA_FILE:
         return True
+    info = os.stat(CA_FILE)
+    identity = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = _verify_cache
+    if cached is not None and cached[0] == identity:
+        return cached[1]
     context = ssl.create_default_context(cafile=CA_FILE)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    _verify_cache = (identity, context)
     return context
 
 
+def _new_client() -> httpx.AsyncClient:
+    """Build the client for one upstream call; the caller closes it.
+
+    A client per call takes its trust from :func:`_upstream_verify` when the
+    call starts, which is what lets a rotated CA take effect without a
+    restart; a process-wide client would verify against the bundle it loaded
+    first until the pod restarted. Keep-alive stays off: kube-proxy balances
+    connections, not requests, so a pooled connection would pin every request
+    to one prefill or decode pod. The library's default ``Accept-Encoding`` is
+    removed because the proxy relays decode's raw bytes: only an encoding the
+    caller asked for (forwarded by :func:`_request_headers`) may shape the
+    body the client receives.
+    """
+    client = httpx.AsyncClient(
+        timeout=_TIMEOUT,
+        verify=_upstream_verify(),
+        limits=httpx.Limits(max_keepalive_connections=0),
+    )
+    del client.headers["accept-encoding"]
+    return client
+
+
+# Fail at start on a configured bundle that cannot be used.
+_upstream_verify()
+
 app = FastAPI()
-_client = httpx.AsyncClient(timeout=_TIMEOUT, verify=_upstream_verify())
-# The proxy relays decode's raw bytes, so the library's default Accept-Encoding
-# must not reach a backend: only an encoding the caller asked for (forwarded by
-# _request_headers) may shape the body the client receives.
-del _client.headers["accept-encoding"]
+
+#: Upstream closes still running. The event loop holds only weak references
+#: to tasks, and a close outlives its awaiter whenever the request that
+#: started it is cancelled, so each one is held here until it finishes.
+_closing: set[asyncio.Task[None]] = set()
+
+
+async def _close_upstream(response: httpx.Response | None, client: httpx.AsyncClient) -> None:
+    """Close one call's upstream response, if it got one, then its client."""
+    try:
+        if response is not None:
+            await response.aclose()
+    finally:
+        await client.aclose()
+
+
+async def _release_upstream(response: httpx.Response | None, client: httpx.AsyncClient) -> None:
+    """Close one call's upstream in its own task, shielded from cancellation.
+
+    Cancelling the request (the caller went away) interrupts only this wait,
+    never the close itself, so a cancelled request still releases its
+    connection. Both closes are idempotent, so releasing twice is harmless.
+    """
+    closing = asyncio.create_task(_close_upstream(response, client))
+    _closing.add(closing)
+    closing.add_done_callback(_closing.discard)
+    await asyncio.shield(closing)
 
 
 @app.get("/healthz")
@@ -199,7 +267,11 @@ async def _prime_prefill(path: str, body: dict[str, Any]) -> dict[str, Any]:
     if not PREFILL_URL:
         return {}
     try:
-        resp = await _client.post(f"{PREFILL_URL}{path}", json=_prefill_body(body))
+        client = _new_client()
+        try:
+            resp = await client.post(f"{PREFILL_URL}{path}", json=_prefill_body(body))
+        finally:
+            await client.aclose()
         resp.raise_for_status()
         data = resp.json()
         return data.get("kv_transfer_params") or {}
@@ -214,26 +286,96 @@ def _request_target(request: Request) -> str:
     return f"{path}?{request.url.query}" if request.url.query else path
 
 
-def _request_headers(request: Request) -> list[tuple[str, str]]:
-    """Forward only explicitly supported end-to-end model headers."""
+def _request_headers(request: Request) -> list[tuple[bytes, bytes]]:
+    """Forward only explicitly supported end-to-end model headers, as sent.
+
+    Raw ASGI bytes, not Starlette's latin-1 decoded strings: httpx encodes a
+    ``str`` header value as ASCII, so one non-ASCII byte would fail the
+    request instead of reaching decode unchanged.
+    """
     return [
         (name.lower(), value)
-        for name, value in request.headers.items()
-        if name.lower() in _ALLOWED_REQUEST_HEADERS
+        for name, value in request.headers.raw
+        if name.lower().decode("latin-1") in _ALLOWED_REQUEST_HEADERS
     ]
 
 
-def _response_headers(response: httpx.Response) -> dict[str, str]:
-    """Relay end-to-end metadata while dropping hop-by-hop framing."""
+def _response_headers(response: httpx.Response) -> list[tuple[bytes, bytes]]:
+    """Relay end-to-end metadata byte for byte while dropping hop-by-hop framing.
+
+    Starlette would re-encode ``str`` values as latin-1, failing a UTF-8 value
+    outside latin-1 and transcoding one inside it; raw bytes keep each value
+    exact and each repeated header on its own line. Names are lowercased, as
+    ASGI requires.
+    """
     blocked = _HOP_BY_HOP_HEADERS | {"content-length"}
-    return {name: value for name, value in response.headers.items() if name.lower() not in blocked}
+    relayed: list[tuple[bytes, bytes]] = []
+    for name, value in response.headers.raw:
+        lowered = name.lower()
+        if lowered.decode("latin-1") not in blocked:
+            relayed.append((lowered, value))
+    return relayed
+
+
+def _no_decode_backend() -> JSONResponse:
+    """The stable answer for a decode backend the proxy cannot reach."""
+    return JSONResponse(
+        {"error": {"message": NO_DECODE_MESSAGE, "type": "no_decode_backend"}},
+        status_code=NO_DECODE_STATUS,
+    )
+
+
+async def _relay_decode(
+    response: httpx.Response, client: httpx.AsyncClient
+) -> AsyncIterator[bytes]:
+    """Yield decode's body unchanged, then release the call's upstream."""
+    try:
+        async for chunk in response.aiter_raw():
+            yield chunk
+    finally:
+        await _release_upstream(response, client)
+
+
+class _DecodeStreamingResponse(StreamingResponse):
+    """Relay one decode response, releasing its client however the relay ends.
+
+    The body generator releases the upstream when the stream finishes, fails,
+    or is cancelled mid-body. Starlette starts that generator only once the
+    headers are on their way, though: a caller who disconnected while decode
+    was still answering cancels the response before its first chunk, so the
+    response itself releases the upstream again once it is done (a no-op
+    after the generator's release).
+    """
+
+    def __init__(
+        self, response: httpx.Response, client: httpx.AsyncClient, *, want_stream: bool
+    ) -> None:
+        relayed = _response_headers(response)
+        upstream_type = next(
+            (value for name, value in relayed if name == b"content-type"), b"application/json"
+        )
+        headers = [(name, value) for name, value in relayed if name != b"content-type"]
+        headers.append((b"content-type", b"text/event-stream" if want_stream else upstream_type))
+        super().__init__(
+            _relay_decode(response, client), status_code=response.status_code, media_type=None
+        )
+        # Assigned rather than passed as ``headers=``, which re-encodes ``str``
+        # values as latin-1 (see _response_headers).
+        self.raw_headers = headers
+        self._upstream = (response, client)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _release_upstream(*self._upstream)
 
 
 async def _stream_decode(
     method: str,
     target: str,
     body: dict[str, Any] | None = None,
-    headers: list[tuple[str, str]] | None = None,
+    headers: list[tuple[bytes, bytes]] | None = None,
 ) -> Response:
     """Forward one request to decode and stream its response to the client."""
     want_stream = bool(body and body.get("stream"))
@@ -243,38 +385,31 @@ async def _stream_decode(
         request_kwargs["json"] = body
     if headers is not None:
         request_kwargs["headers"] = headers
-    upstream_request = _client.build_request(method, url, **request_kwargs)
     try:
-        resp = await _client.send(upstream_request, stream=True)
+        client = _new_client()
+    except OSError as exc:
+        # The CA bundle is missing or unusable (ssl.SSLError is an OSError):
+        # fail closed, like a decode backend the proxy cannot verify.
+        logger.warning("decode backend trust is unavailable: %s", exc)
+        return _no_decode_backend()
+
+    # Until the streaming response owns the upstream, every exit releases it.
+    resp: httpx.Response | None = None
+    try:
+        upstream_request = client.build_request(method, url, **request_kwargs)
+        resp = await client.send(upstream_request, stream=True)
+        return _DecodeStreamingResponse(resp, client, want_stream=want_stream)
     except httpx.ConnectError as exc:
         # No Ready decode endpoint behind the Service (or a TLS handshake the
         # decode sidecar failed): reject with a stable status instead of
         # emitting any partial output, and log why for the operator.
+        await _release_upstream(resp, client)
         logger.warning("decode backend unreachable: %s", exc)
-        return JSONResponse(
-            {"error": {"message": NO_DECODE_MESSAGE, "type": "no_decode_backend"}},
-            status_code=NO_DECODE_STATUS,
-        )
-
-    async def _body_iter() -> AsyncIterator[bytes]:
-        try:
-            async for chunk in resp.aiter_raw():
-                yield chunk
-        finally:
-            await resp.aclose()
-
-    response_headers = _response_headers(resp)
-    response_headers["content-type"] = (
-        "text/event-stream"
-        if want_stream
-        else response_headers.get("content-type", "application/json")
-    )
-    return StreamingResponse(
-        _body_iter(),
-        status_code=resp.status_code,
-        headers=response_headers,
-        media_type=None,
-    )
+        return _no_decode_backend()
+    except BaseException:
+        # Anything else, a cancelled request included, releases it too.
+        await _release_upstream(resp, client)
+        raise
 
 
 @app.post(ADMIN_PATH)

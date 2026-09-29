@@ -495,6 +495,94 @@ class TestQueueProcessorTemplate:
         assert scaled_job["spec"]["jobTargetRef"]["backoffLimit"] >= 1
 
 
+# ─── Architecture ──────────────────────────────────────────────────
+
+#: Rendered in place of a GCO service image, so a test can find every use.
+_SERVICE_IMAGE_MARKER = "gco-service-image"
+
+
+def _service_image_tokens() -> dict[str, str]:
+    """``{{<SERVICE>_IMAGE}}`` for every ``dockerfiles/Dockerfile.<service>``.
+
+    Derived from the Dockerfiles rather than listed, so a new service is
+    covered the moment it exists. Upstream images the applier also
+    substitutes (``{{MOONCAKE_MASTER_IMAGE}}``) are not GCO builds.
+    """
+    from gco.service_images import discover_service_dockerfiles
+
+    return {
+        "{{" + service.upper().replace("-", "_") + "_IMAGE}}": f"{_SERVICE_IMAGE_MARKER}/{service}"
+        for service in discover_service_dockerfiles()
+    }
+
+
+def _image_marker_paths(node: Any, path: tuple[Any, ...] = ()) -> Any:
+    """Yield the path of every string that names a GCO service image."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _image_marker_paths(value, (*path, key))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _image_marker_paths(value, (*path, index))
+    elif isinstance(node, str) and _SERVICE_IMAGE_MARKER in node:
+        yield path
+
+
+def _at(node: Any, path: tuple[Any, ...]) -> Any:
+    for step in path:
+        node = node[step]
+    return node
+
+
+class TestArchitecture:
+    """The service images are single-platform ``linux/amd64`` CDK assets.
+
+    The ``cpu-general`` NodePool also provisions Graviton (arm64) nodes and
+    carries no taint, so a pod that can land anywhere eventually lands on one
+    and crash-loops with ``exec format error``.
+    """
+
+    def test_every_service_dockerfile_has_an_image_token(self):
+        tokens = _service_image_tokens()
+        assert len(tokens) >= 6
+        assert "{{MANIFEST_PROCESSOR_IMAGE}}" in tokens
+        assert "{{MOONCAKE_MASTER_IMAGE}}" not in tokens
+
+    def test_every_pod_that_runs_a_service_image_is_pinned_to_amd64(self):
+        tokens = _service_image_tokens()
+        pinned: list[str] = []
+        for manifest in sorted(MANIFESTS_DIR.glob("*.yaml")):
+            text = manifest.read_text(encoding="utf-8")
+            for token, marker in tokens.items():
+                text = text.replace(token, marker)
+            for token, value in {**INTEGER_TOKENS, **QUANTITY_TOKENS}.items():
+                text = text.replace(token, value)
+            text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", text)
+            for document in yaml.safe_load_all(text):
+                if not isinstance(document, dict):
+                    continue
+                for path in _image_marker_paths(document):
+                    where = f"{manifest.name}: {document['kind']} {'.'.join(map(str, path))}"
+                    # Only a container may name one; anything else would be a
+                    # use this test cannot see the pod of.
+                    assert path[-1] == "image", where
+                    assert path[-3] in {"containers", "initContainers"}, where
+                    pod_spec = _at(document, path[:-3])
+                    assert pod_spec.get("nodeSelector", {}).get("kubernetes.io/arch") == (
+                        "amd64"
+                    ), where
+                    pinned.append(f"{manifest.name}:{document['kind']}")
+        # The five Deployments (two images each: application and TLS
+        # sidecar), the queue-processor ScaledJob, and the Grafana rotator.
+        assert sorted(set(pinned)) == sorted(
+            {
+                *(f"{name}:Deployment" for name in DEPLOYMENT_FILES),
+                f"{SCALED_JOB_FILE}:ScaledJob",
+                "post-helm-grafana-credential-rotation.yaml:CronJob",
+            }
+        )
+
+
 # ─── Documentation ─────────────────────────────────────────────────
 
 
@@ -515,5 +603,6 @@ def test_readme_contract_table_names_every_property_tested_here():
         "hpa-controls-replicas",
         "sizeLimit",
         "skip-containers",
+        "kubernetes.io/arch: amd64",
     ):
         assert needle in section, needle

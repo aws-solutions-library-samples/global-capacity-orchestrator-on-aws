@@ -59,6 +59,7 @@ from scripts.live_release_validation.checks import central_queue as checks_centr
 from scripts.live_release_validation.checks.inference import ManagedInferenceValidationError
 from scripts.live_release_validation.constants import _RUN_JOB_LABEL
 from scripts.live_release_validation.models import (
+    ActionFailure,
     ActionResult,
     RunCheckpoint,
     RunContext,
@@ -623,11 +624,47 @@ class TestRunnerExecuteAction:
         assert result.status == "failed"
         assert result.error == "RuntimeError: HEAD moved"
         assert "HEAD moved" in (result.traceback or "")
+        # A plain exception carries no evidence.
+        assert result.details == {}
         persisted = _read_json(instance.settings.checkpoint_path)
         assert persisted["action_results"]["preflight"]["error"] == "RuntimeError: HEAD moved"
         report = _read_json(instance.settings.report_dir / "live-release-validation.json")
         assert report["action_results"][0]["status"] == "failed"
         assert "[fail] preflight: RuntimeError: HEAD moved" in capsys.readouterr().out
+
+    def test_failed_action_keeps_the_evidence_its_failure_carries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ActionFailure hands its details to the failed row, report and checkpoint."""
+        evidence = {"results": [{"name": "a", "status": "failed"}], "failed": 1}
+
+        def fail_with_evidence(ctx: RunContext) -> dict[str, Any]:
+            raise ActionFailure("1 check failed: a", evidence)
+
+        instance = _build_runner(
+            tmp_path, monkeypatch, registry=_fake_registry({"topology": fail_with_evidence})
+        )
+
+        with pytest.raises(ActionFailure, match="1 check failed"):
+            instance._execute_action(instance.registry["topology"])
+
+        # Evidence mutated after the raise does not reach the recorded row.
+        evidence["results"].append({"name": "late"})
+        result = instance.checkpoint.action_results["topology"]
+        assert result.status == "failed"
+        assert result.error == "ActionFailure: 1 check failed: a"
+        assert result.details == {"results": [{"name": "a", "status": "failed"}], "failed": 1}
+        persisted = _read_json(instance.settings.checkpoint_path)
+        assert persisted["action_results"]["topology"]["details"] == result.details
+        report = _read_json(instance.settings.report_dir / "live-release-validation.json")
+        (row,) = report["action_results"]
+        assert (row["name"], row["status"], row["details"]) == (
+            "topology",
+            "failed",
+            result.details,
+        )
+        restored = RunCheckpoint.from_path(instance.settings.checkpoint_path)
+        assert restored.action_results["topology"].details == result.details
 
 
 class TestRunnerGuaranteedCleanup:
@@ -3912,6 +3949,7 @@ class TestActionPreflight:
         assert result["expected_ecr_images"] == self._ECR_IMAGES
         assert result["direct_regional_access"] is True
         assert result["session_manager_plugin"] == "not-required"
+        assert result["asset_sources_readable"] is True
         assert result["kms_key_deletion_confirmed"] is True
         assert result["resume"] is False
         state = ctx.checkpoint.state
@@ -4089,6 +4127,33 @@ class TestActionPreflight:
         disk_usage.assert_not_called()
         assert result["free_disk_gib"] == "not-required"
         assert result["min_free_disk_gib"] == 0
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_deploy_refuses_owner_only_asset_sources_before_any_aws_call(
+        self, tmp_path: Path
+    ) -> None:
+        """A checkout made under umask 077 would deploy Lambda code the Lambda
+        runtime cannot read; the preflight names the paths before synthesis."""
+        ctx = self._ctx(tmp_path)
+        handler = tmp_path / "lambda" / "fn" / "handler.py"
+        handler.parent.mkdir(parents=True)
+        handler.write_text("handler = 1\n", encoding="utf-8")
+        handler.chmod(0o600)
+        with (
+            self._boundaries(),
+            # Matched by name: other suites reload cli.stacks, which rebinds the class.
+            pytest.raises(RuntimeError, match=r"lambda/fn/handler\.py.*chmod -R a\+rX") as raised,
+        ):
+            actions_preflight.action_preflight(ctx)
+        assert raised.type.__name__ == "AssetPermissionError"
+        ctx.session.client.assert_not_called()
+        ctx.stack_manager.list_stacks.assert_not_called()
+
+        # Without deploy nothing is packaged, so nothing is checked.
+        ctx = self._ctx(tmp_path, selected=("preflight", "baseline"))
+        with self._boundaries():
+            result = actions_preflight.action_preflight(ctx)
+        assert result["asset_sources_readable"] == "not-required"
 
     @pytest.mark.parametrize(
         ("identity", "match"),

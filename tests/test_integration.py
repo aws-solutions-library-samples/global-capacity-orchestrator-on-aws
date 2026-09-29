@@ -296,6 +296,10 @@ class TestKubernetesManifests:
             # (post-helm-crossplane.yaml); keep in lockstep with
             # _CROSSPLANE_CUSTOM_OBJECTS in the applier.
             "pkg.crossplane.io/v1",
+            # The trust-manager Bundle behind MLflow's CA bundle
+            # (post-helm-mlflow-tls.yaml); keep in lockstep with
+            # _TRUST_MANAGER_CUSTOM_OBJECTS in the applier.
+            "trust.cert-manager.io/v1alpha1",
         }
 
         for filepath in manifest_files:

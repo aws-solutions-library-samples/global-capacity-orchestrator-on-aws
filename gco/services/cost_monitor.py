@@ -39,7 +39,6 @@ import io
 import logging
 import math
 import os
-import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -251,51 +250,53 @@ class ReportResult:
 class OpenCostClient:
     """Minimal HTTP client for the in-cluster OpenCost allocation API.
 
-    Every call goes through one ``httpx2.Client``, built on first use rather
-    than at construction so that building the service never touches the CA
-    bundle: a bundle that is not mounted yet surfaces as "OpenCost unhealthy"
-    (and a failed allocation query) on each call until it appears, instead of
-    a crash at startup. The scheduled reporter and the API handlers call in
-    from worker threads, so first use is serialized by a lock.
+    Every call builds its own ``httpx2.Client`` and closes it before
+    returning. The TLS trust is looked up then, through
+    :func:`~gco.services.internal_tls.verify_for_url`, whose cache hands back
+    the same context until the projected ``ca.crt`` changes and a fresh one
+    afterwards: a rotated internal CA is trusted from the next call without
+    restarting the pod, where a long-lived client would keep verifying
+    against the bundle it loaded first and report OpenCost unavailable until
+    a restart. Nothing is built at construction, so building the service
+    never touches the CA bundle: a bundle that is not mounted yet surfaces as
+    "OpenCost unhealthy" (and a failed allocation query) on each call until
+    it appears, instead of a crash at startup. The calls are a probe per
+    status request and one allocation query per report, so a connection per
+    call costs nothing that matters, and the scheduled reporter and the API
+    handlers can call in from worker threads without sharing any state.
     """
 
     def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
-        self._client: httpx2.Client | None = None
-        self._client_lock = threading.Lock()
 
     def _http(self) -> httpx2.Client:
-        """Return the shared client, building it (and its TLS trust) on first use.
+        """Build the client for one call, with the TLS trust current now.
 
-        Raises :class:`~gco.services.internal_tls.InternalTLSError` while an
-        ``https`` base URL has no usable internal CA bundle. The transport, not
-        the client, carries ``verify`` because a client given ``transport=``
-        ignores its own TLS settings.
+        The caller closes it. Raises
+        :class:`~gco.services.internal_tls.InternalTLSError` while an
+        ``https`` base URL has no usable internal CA bundle. The transport,
+        not the client, carries ``verify`` because a client given
+        ``transport=`` ignores its own TLS settings.
         """
-        with self._client_lock:
-            if self._client is None:
-                transport = httpx2.HTTPTransport(
-                    verify=internal_tls.verify_for_url(self.base_url), trust_env=False
-                )
-                self._client = httpx2.Client(
-                    transport=tracing.wrap_sync_transport(transport),
-                    timeout=self.timeout_seconds,
-                    trust_env=False,
-                )
-            return self._client
+        transport = httpx2.HTTPTransport(
+            verify=internal_tls.verify_for_url(self.base_url), trust_env=False
+        )
+        return httpx2.Client(
+            transport=tracing.wrap_sync_transport(transport),
+            timeout=self.timeout_seconds,
+            trust_env=False,
+        )
 
-    def close(self) -> None:
-        """Release the connection pool (service shutdown); a later call rebuilds it."""
-        with self._client_lock:
-            client, self._client = self._client, None
-        if client is not None:
-            client.close()
+    def _get(self, path: str, **kwargs: Any) -> httpx2.Response:
+        """One GET on its own client; the body is read before the client closes."""
+        with self._http() as client:
+            return client.get(f"{self.base_url}{path}", **kwargs)
 
     def is_healthy(self) -> bool:
         """Return whether OpenCost answers its /healthz probe."""
         try:
-            response = self._http().get(f"{self.base_url}/healthz")
+            response = self._get("/healthz")
         except internal_tls.InternalTLSError as exc:
             logger.warning("OpenCost TLS trust is unavailable: %s", exc)
             return False
@@ -323,8 +324,8 @@ class OpenCostClient:
             f"{window_end.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}"
         )
         try:
-            response = self._http().get(
-                f"{self.base_url}/allocation/compute",
+            response = self._get(
+                "/allocation/compute",
                 params={
                     "window": window,
                     "aggregate": aggregate,

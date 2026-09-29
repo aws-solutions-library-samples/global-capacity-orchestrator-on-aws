@@ -76,15 +76,15 @@ def _recording_shutdown(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> N
     monkeypatch.setattr(tracing, "shutdown_tracing", lambda: events.append("shutdown_tracing"))
 
 
-async def test_cost_monitor_shutdown_closes_opencost_then_flushes_traces(
+async def test_cost_monitor_shutdown_stops_the_reporter_then_flushes_traces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Every OpenCost call closes its own client; shutdown has none to close."""
     import gco.services.cost_api as cost_api
 
     events: list[str] = []
     _recording_shutdown(monkeypatch, events)
     monitor = MagicMock(cluster="gco-us-east-1", region="us-east-1")
-    monitor.opencost.close.side_effect = lambda: events.append("opencost.close")
     monkeypatch.setattr(cost_api, "create_cost_monitor_from_env", lambda: monitor)
     monkeypatch.setattr(cost_api, "preload_report_writer", lambda: True)
     monkeypatch.setattr(cost_api, "configure_structured_logging", MagicMock())
@@ -93,10 +93,14 @@ async def test_cost_monitor_shutdown_closes_opencost_then_flushes_traces(
     async with cost_api.lifespan(cost_api.app):
         assert cost_api.cost_monitor is monitor
         assert events == []
-        # Shutdown releases the instance it built even when the global moved.
+        loop_task = cost_api.app.state.scheduled_report_task
+        # The reporter runs on the instance the lifespan built even when the
+        # global moved.
         cost_api.cost_monitor = None
 
-    assert events == ["opencost.close", "shutdown_tracing"]
+    assert loop_task.done()
+    assert events == ["shutdown_tracing"]
+    assert monitor.opencost.mock_calls == []
 
 
 async def test_inference_proxy_shutdown_only_flushes_traces(

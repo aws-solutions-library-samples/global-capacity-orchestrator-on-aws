@@ -5,13 +5,14 @@ Mirrors tests/test_cost_opencost_charts.py for the experiment-tracking
 pipeline: the static mlflow entry in charts.yaml (the official OCI chart +
 server image pinned, chart-managed SQLite claim on the observability gp3
 class, ClusterIP/no-ingress/no-app-auth posture, telemetry env kill,
-chart-built pod NetworkPolicy), the GCORegionalStack enablement under the
+chart-built pod NetworkPolicy), the trust-manager entry that publishes the
+clients' CA bundle, the GCORegionalStack enablement under the
 cluster_observability.mlflow conjunction in both directions, the value
-overrides that carry the S3 artifact destination, IRSA role annotation and
-claim size, the {{MLFLOW_ENABLED}}-gated client egress NetworkPolicy and
-the prune inventory (which also owns the chart-managed claim helm
-uninstall leaves behind), the tunnel service entry, and helm-installer
-handle_task convergence.
+overrides that carry the S3 artifact destination, IRSA role annotation,
+claim size and the HTTPS sidecar, the {{MLFLOW_ENABLED}}-gated NetworkPolicies
+and the prune inventory (which also owns the chart-managed claim helm
+uninstall leaves behind, the leaves' Secrets and the bundle's ConfigMap), the
+tunnel service entry, and helm-installer handle_task convergence.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ import yaml
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.regional_stack import (
+    _MLFLOW_SERVICE_HOSTS,
+    _MLFLOW_TUNNEL_HOSTS,
     _OBSERVABILITY_STORAGE_CLASS,
     _mlflow_allowed_hosts,
 )
@@ -37,9 +40,14 @@ from tests._lambda_imports import load_lambda_module
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CHARTS_YAML = _REPO_ROOT / "lambda" / "helm-installer" / "charts.yaml"
-_NETWORK_MANIFEST = (
-    _REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests" / "post-helm-mlflow-network.yaml"
-)
+_MANIFESTS = _REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
+_NETWORK_MANIFEST = _MANIFESTS / "post-helm-mlflow-network.yaml"
+_TLS_MANIFEST = _MANIFESTS / "post-helm-mlflow-tls.yaml"
+_EXAMPLE = _REPO_ROOT / "examples" / "mlflow-tracking-job.yaml"
+_EXAMPLE_URI = "https://mlflow-tls.monitoring.svc.cluster.local:5443"
+
+#: Every Host spelling the server accepts without the CIDR-derived globs.
+_STATIC_HOSTS = (*_MLFLOW_SERVICE_HOSTS, *_MLFLOW_TUNNEL_HOSTS)
 
 
 class _MockNode:
@@ -279,14 +287,15 @@ class TestMlflowChartEntry:
         # MLflow 3.x 403s API requests whose Host header it does not
         # recognize (setting allowed_hosts REPLACES the built-in
         # localhost/private-IP allowance). charts.yaml keeps only the
-        # static service-DNS spellings; the regional stack replaces the
-        # value at deploy time with the complete list, appending wildcard
-        # patterns derived from vpc_endpoint_cidrs — a hardcoded IP glob
-        # here would silently drift from the VPC range.
+        # static service-DNS spellings (the mlflow-tls ones included: the
+        # TLS sidecar forwards the client's Host header unchanged); the
+        # regional stack replaces the value at deploy time with the complete
+        # list, appending wildcard patterns derived from vpc_endpoint_cidrs —
+        # a hardcoded IP glob here would silently drift from the VPC range.
         server = charts["mlflow"]["values"]["server"]
-        assert server["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
-        )
+        assert server["value_options"]["allowed_hosts"] == ",".join(_STATIC_HOSTS)
+        assert _STATIC_HOSTS[:2] == ("mlflow.monitoring", "mlflow.monitoring:5000")
+        assert "mlflow-tls.monitoring.svc.cluster.local:5443" in _STATIC_HOSTS
 
     def test_guaranteed_cpu_beats_the_fixed_liveness_window(self, charts):
         # requests == limits for CPU, measured against the pinned image:
@@ -341,15 +350,63 @@ class TestRegionalChartWiring:
     def test_chart_enabled_when_both_toggles_on(self, valid_cdk_context):
         charts = RS._get_enabled_helm_charts(_stub(valid_cdk_context))
         assert "mlflow" in charts
+        # trust-manager publishes the CA bundle MLflow's clients verify with.
+        assert "trust-manager" in charts
 
     def test_chart_absent_when_mlflow_sub_toggle_off(self, valid_cdk_context):
         charts = RS._get_enabled_helm_charts(_stub(valid_cdk_context, mlflow_enabled=False))
         assert "mlflow" not in charts
+        assert "trust-manager" not in charts
 
     def test_chart_absent_when_observability_off(self, valid_cdk_context):
         charts = RS._get_enabled_helm_charts(_stub(valid_cdk_context, observability_enabled=False))
         assert "mlflow" not in charts
+        assert "trust-manager" not in charts
         assert "kube-prometheus-stack" not in charts
+
+    def test_overrides_carry_the_tls_sidecar_and_the_amd64_pin(self, valid_cdk_context):
+        """The sidecar serves the mlflow-tls leaf on the port the mlflow-tls Service
+        targets and forwards to the server's own port on loopback."""
+        values = RS._helm_chart_value_overrides(_stub(valid_cdk_context))["mlflow"]["values"]
+        (sidecar,) = values["extraContainers"]
+        (volume,) = values["extraVolumes"]
+        assert sidecar["name"] == "mlflow-tls-proxy"
+        # Grafana's sidecar image: the manifest processor's.
+        assert sidecar["image"] == (
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:manifest-processor"
+        )
+        assert sidecar["command"] == ["python", "-m", "gco.services.tls_proxy"]
+        env = {item["name"]: item["value"] for item in sidecar["env"]}
+        documents = {
+            (doc["kind"], doc["metadata"]["name"]): doc
+            for doc in yaml.safe_load_all(_TLS_MANIFEST.read_text(encoding="utf-8"))
+            if doc
+        }
+        (service_port,) = documents[("Service", "mlflow-tls")]["spec"]["ports"]
+        assert sidecar["ports"] == [{"name": service_port["targetPort"], "containerPort": 5443}]
+        assert env["TLS_PROXY_PORT"] == str(service_port["port"]) == "5443"
+        assert env["TLS_PROXY_UPSTREAM_HOST"] == "127.0.0.1"
+        assert env["TLS_PROXY_UPSTREAM_PORT"] == "5000"
+        certificate = documents[("Certificate", "mlflow-tls")]
+        assert volume["secret"]["secretName"] == certificate["spec"]["secretName"]
+        assert volume["secret"]["optional"] is True
+        assert sidecar["volumeMounts"][0]["name"] == volume["name"]
+        # Service images are built for amd64 only.
+        assert values["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+
+    def test_the_example_host_header_is_allowed(self, valid_cdk_context):
+        """The sidecar relays the client's Host header unchanged, so the example's
+        tracking URI authority must be on the server's allow-list."""
+        values = RS._helm_chart_value_overrides(_stub(valid_cdk_context))["mlflow"]["values"]
+        hosts = values["server"]["value_options"]["allowed_hosts"].split(",")
+        assert _EXAMPLE_URI.removeprefix("https://") in hosts
+        certificate = next(
+            doc
+            for doc in yaml.safe_load_all(_TLS_MANIFEST.read_text(encoding="utf-8"))
+            if doc and doc["kind"] == "Certificate" and doc["metadata"]["name"] == "mlflow-tls"
+        )
+        for name in certificate["spec"]["dnsNames"]:
+            assert {name, f"{name}:5443"} <= set(hosts), name
 
     def test_overrides_inject_destination_role_and_claim_size(self, valid_cdk_context):
         overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context))
@@ -371,7 +428,7 @@ class TestRegionalChartWiring:
         # scrape (caught live 2026-08-14). Deep merge keeps the static
         # workers value alongside.
         assert values["server"]["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.0.*"
+            ",".join((*_STATIC_HOSTS, "10.0.*"))
         )
 
     def test_overrides_exclude_mlflow_when_disabled(self, valid_cdk_context):
@@ -386,7 +443,7 @@ class TestRegionalChartWiring:
         ctx["vpc_endpoint_cidrs"] = ["10.0.0.0/16", "172.31.0.0/16"]
         overrides = RS._helm_chart_value_overrides(_stub(ctx))
         assert overrides["mlflow"]["values"]["server"]["value_options"]["allowed_hosts"] == (
-            "mlflow.monitoring,mlflow.monitoring:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,10.0.*,172.31.*"
+            ",".join((*_STATIC_HOSTS, "10.0.*", "172.31.*"))
         )
 
 
@@ -521,21 +578,21 @@ class TestMlflowNetworkManifest:
         }
         assert to["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "mlflow"}
         ports = {entry["port"] for entry in egress["ports"]}
-        # 5000 is both the Service port and the container port (the official
-        # chart exposes the server 1:1), covering pre- and post-DNAT CNIs
-        # with one entry.
-        assert ports == {5000}
+        # 5443 is both the mlflow-tls Service port and the TLS sidecar's
+        # container port, covering pre- and post-DNAT CNIs with one entry.
+        # The plaintext 5000 is not the clients' port.
+        assert ports == {5443}
 
     def test_policy_port_matches_the_example_tracking_uri(self, manifest_text):
         """The example's MLFLOW_TRACKING_URI port and the egress allow must
         agree, or the example hangs on connect."""
-        example_text = (_REPO_ROOT / "examples" / "mlflow-tracking-job.yaml").read_text(
-            encoding="utf-8"
-        )
-        assert "http://mlflow.monitoring:5000" in example_text
+        example = yaml.safe_load(_EXAMPLE.read_text(encoding="utf-8"))
+        (container,) = example["spec"]["template"]["spec"]["containers"]
+        env = {entry["name"]: entry["value"] for entry in container["env"]}
+        assert env["MLFLOW_TRACKING_URI"] == _EXAMPLE_URI
         policy = self._rendered_docs(manifest_text)["allow-mlflow-clients"]
         (egress,) = policy["spec"]["egress"]
-        assert {entry["port"] for entry in egress["ports"]} == {5000}
+        assert {entry["port"] for entry in egress["ports"]} == {5443}
 
     def test_server_policy_admits_the_node_network_for_probes(self, manifest_text):
         """Kubelet probes must be able to reach the server. Live incident pin.
@@ -558,8 +615,10 @@ class TestMlflowNetworkManifest:
         # the placeholder expands as the sole entry under `from:`.
         assert pod_rule["from"] == [{"podSelector": {}}, {"namespaceSelector": {}}]
         assert cidr_rule["from"] == [{"ipBlock": {"cidr": "10.0.0.0/16"}}]
+        # 5000 for the chart's probes and the scrape, 5443 for the clients and
+        # the TLS sidecar's liveness probe (also from the node).
         for rule in (pod_rule, cidr_rule):
-            assert [entry["port"] for entry in rule["ports"]] == [5000]
+            assert [entry["port"] for entry in rule["ports"]] == [5000, 5443]
 
     def test_chart_ships_no_competing_policy(self, charts):
         """The chart's policy must stay off, or the startup race returns.
@@ -643,14 +702,26 @@ class TestApplierPruneInventory:
             ("v1", "PersistentVolumeClaim", "monitoring", "mlflow"),
             ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-mlflow-clients"),
             ("networking.k8s.io/v1", "NetworkPolicy", "monitoring", "mlflow-server"),
+            ("v1", "Service", "monitoring", "mlflow-tls"),
+            ("cert-manager.io/v1", "Certificate", "monitoring", "mlflow-tls"),
+            ("v1", "Secret", "monitoring", "mlflow-tls"),
+            ("trust.cert-manager.io/v1alpha1", "Bundle", None, "gco-internal-ca"),
+            ("v1", "ConfigMap", "gco-jobs", "gco-internal-ca"),
+            ("cert-manager.io/v1", "Certificate", "trust-manager", "gco-internal-ca-source"),
+            ("v1", "Secret", "trust-manager", "gco-internal-ca-source"),
         )
 
-    def test_inventory_covers_manifest_resources_plus_the_chart_claim(self, applier):
-        # Everything the gated manifest ships must be pruned, plus exactly
-        # one resource that is deliberately NOT in a manifest: the
+    def test_inventory_covers_manifest_resources_plus_what_they_leave_behind(self, applier):
+        # Everything the gated manifests ship must be pruned, plus the
+        # resources that are deliberately NOT in a manifest: the
         # chart-managed metadata claim (fullnameOverride name), which helm
-        # uninstall never deletes.
+        # uninstall never deletes, each leaf's Secret, which cert-manager
+        # leaves behind, and the ConfigMap trust-manager writes from the
+        # Bundle.
         rendered = TestMlflowNetworkManifest._render(_NETWORK_MANIFEST.read_text(encoding="utf-8"))
+        rendered += "\n---\n" + _TLS_MANIFEST.read_text(encoding="utf-8").replace(
+            "{{MLFLOW_ENABLED}}", "true"
+        )
         manifest_resources = {
             (doc["kind"], doc["metadata"]["name"]) for doc in yaml.safe_load_all(rendered) if doc
         }
@@ -660,7 +731,12 @@ class TestApplierPruneInventory:
                 ("{{MLFLOW_ENABLED}}", True)
             ]
         }
-        assert pruned == manifest_resources | {("PersistentVolumeClaim", "mlflow")}
+        assert pruned == manifest_resources | {
+            ("PersistentVolumeClaim", "mlflow"),
+            ("Secret", "mlflow-tls"),
+            ("Secret", "gco-internal-ca-source"),
+            ("ConfigMap", "gco-internal-ca"),
+        }
 
     def test_chart_claim_prune_name_matches_the_fullname_override(self, applier, charts):
         # The pruned claim name is whatever the chart names its PVC — the
@@ -751,3 +827,57 @@ class TestHelmInstallerConvergence:
         """The tracking server creates no custom resources, so uninstall
         needs no kueue-style pre-purge."""
         assert "mlflow" not in helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS
+
+    def test_trust_manager_is_not_a_finalizer_purge_chart(self, helm_handler):
+        """trust-manager puts no finalizers on Bundles, and the chart keeps the
+        Bundle CRD on uninstall, so the applier's inventory prunes the Bundle
+        after the chart is gone."""
+        assert "trust-manager" not in helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS
+
+
+class TestTrustManagerChartEntry:
+    """The chart that publishes MLflow's CA bundle: pinned, scoped, and nothing more."""
+
+    def test_chart_is_the_pinned_jetstack_chart(self, charts):
+        chart = charts["trust-manager"]
+        assert (
+            chart["repo_url"] == charts["cert-manager"]["repo_url"] == "https://charts.jetstack.io"
+        )
+        assert chart["repo_name"] == charts["cert-manager"]["repo_name"]
+        assert chart["chart"] == "trust-manager"
+        assert re.fullmatch(r"v\d+\.\d+\.\d+", chart["version"])
+        assert "use_oci" not in chart
+
+    def test_chart_defaults_disabled_and_driven_by_the_stack(self, charts):
+        # Like mlflow, inclusion comes from GCORegionalStack.
+        assert charts["trust-manager"]["enabled"] is False
+
+    def test_chart_installs_after_cert_manager_and_before_mlflow(self, charts):
+        """cert-manager issues its webhook certificate; the Bundle is post-Helm."""
+        order = list(charts)
+        assert order.index("cert-manager") < order.index("trust-manager") < order.index("mlflow")
+
+    def test_its_own_namespace_is_its_trust_namespace(self, charts):
+        """trust-manager reads every Secret in its trust namespace, so that is a
+        namespace of its own (holding the CA-carrier leaf), never cert-manager's,
+        where the CA's private key lives."""
+        chart = charts["trust-manager"]
+        values = chart["values"]
+        assert chart["namespace"] == "trust-manager"
+        assert chart["create_namespace"] is True
+        assert values["app"]["trust"]["namespace"] == chart["namespace"]
+        assert chart["namespace"] != charts["cert-manager"]["namespace"]
+
+    def test_it_writes_only_to_gco_jobs_and_only_configmaps(self, charts):
+        values = charts["trust-manager"]["values"]
+        assert values["app"]["targetNamespaces"] == ["gco-jobs"]
+        assert values["secretTargets"] == {"enabled": False}
+        # No public CA package: the bundle is the internal CA and nothing else.
+        assert values["defaultPackage"] == {"enabled": False}
+        assert values["crds"]["enabled"] is True
+
+    def test_pod_is_bounded_and_protected_from_consolidation(self, charts):
+        values = charts["trust-manager"]["values"]
+        assert values["app"]["podAnnotations"]["karpenter.sh/do-not-disrupt"] == "true"
+        assert values["resources"]["requests"]["cpu"]
+        assert values["resources"]["limits"]["memory"]

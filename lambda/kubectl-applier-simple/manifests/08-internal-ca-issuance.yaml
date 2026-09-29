@@ -131,7 +131,14 @@ spec:
             'grafana-tls.monitoring.svc', 'grafana-tls.monitoring.svc.cluster.local'],
           'monitoring/gco-monitoring-trust': [
             'gco-monitoring-trust', 'gco-monitoring-trust.monitoring',
-            'gco-monitoring-trust.monitoring.svc', 'gco-monitoring-trust.monitoring.svc.cluster.local']
+            'gco-monitoring-trust.monitoring.svc', 'gco-monitoring-trust.monitoring.svc.cluster.local'],
+          'monitoring/mlflow-tls': [
+            'mlflow-tls', 'mlflow-tls.monitoring',
+            'mlflow-tls.monitoring.svc', 'mlflow-tls.monitoring.svc.cluster.local'],
+          'trust-manager/gco-internal-ca-source': [
+            'gco-internal-ca-source', 'gco-internal-ca-source.trust-manager',
+            'gco-internal-ca-source.trust-manager.svc',
+            'gco-internal-ca-source.trust-manager.svc.cluster.local']
         }
     # Whether the named GCO ClusterIssuer signs for this Certificate.
     - name: signable

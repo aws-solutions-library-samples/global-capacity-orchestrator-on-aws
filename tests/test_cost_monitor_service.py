@@ -1,7 +1,8 @@
 """
 Tests for gco/services/cost_monitor.py — the cost-monitor service core.
 
-Covers the OpenCost allocation client (one lazily built verifying client,
+Covers the OpenCost allocation client (a verifying client per call that
+trusts a rotated internal CA from the next call,
 fail-closed while the internal CA is missing, transport failures, non-200s,
 malformed bodies), allocation-row normalization, real Parquet
 serialization via pyarrow, deterministic scheduled report keys, aligned
@@ -25,6 +26,10 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 import gco.services.cost_monitor as cost_monitor_module
 from gco.services import internal_tls, tracing
@@ -52,8 +57,49 @@ from gco.services.internal_tls import InternalTLSError
 WINDOW_START = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
 WINDOW_END = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
 
-# Captured before any test swaps the constructor for a spy.
+# Captured before any test swaps them for spies.
 _REAL_SYNC_TRANSPORT = httpx2.HTTPTransport
+_REAL_VERIFY_FOR_URL = internal_tls.verify_for_url
+
+
+def _ca_pem(common_name: str) -> bytes:
+    """A throwaway self-signed CA certificate, PEM-encoded."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def _trusted_common_names(context: ssl.SSLContext) -> list[str]:
+    """Common names of the CA certificates ``context`` trusts."""
+    return [
+        value
+        for ca in context.get_ca_certs()
+        for rdn in ca["subject"]
+        for key, value in rdn
+        if key == "commonName"
+    ]
+
+
+class _RecordingMockTransport(httpx2.MockTransport):
+    """OpenCost answered in memory, recording whether its client closed it."""
+
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
 
 class _OpenCostWire:
@@ -61,7 +107,8 @@ class _OpenCostWire:
 
     The internal-CA lookup returns a stand-in context (recording each URL it
     was asked about), the transport constructor is spied, and the tracing seam
-    the client passes its transport through swaps in an ``httpx2.MockTransport``.
+    the client passes its transport through swaps in an in-memory transport
+    per client.
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,6 +116,7 @@ class _OpenCostWire:
         self.verified_urls: list[str] = []
         self.transport_kwargs: list[dict[str, Any]] = []
         self.wrapped: list[httpx2.BaseTransport] = []
+        self.mock_transports: list[_RecordingMockTransport] = []
         self.requests: list[httpx2.Request] = []
         self.handler: Callable[[httpx2.Request], httpx2.Response] = lambda _request: (
             httpx2.Response(200, json={})
@@ -92,7 +140,9 @@ class _OpenCostWire:
             self.requests.append(request)
             return self.handler(request)
 
-        return httpx2.MockTransport(handle)
+        mock = _RecordingMockTransport(handle)
+        self.mock_transports.append(mock)
+        return mock
 
     def respond(self, status_code: int = 200, **kwargs: Any) -> None:
         self.handler = lambda _request: httpx2.Response(status_code, **kwargs)
@@ -187,22 +237,23 @@ class TestOpenCostClient:
         with pytest.raises(OpenCostUnavailableError, match="TLS trust is unavailable"):
             client.get_allocation(WINDOW_START, WINDOW_END)
 
-    def test_one_verified_client_serves_every_call(self, opencost_wire):
+    def test_every_call_gets_its_own_verified_client(self, opencost_wire):
         client = OpenCostClient("https://opencost-tls.monitoring.svc.cluster.local:9443/", 12.5)
         opencost_wire.respond(200, json={"data": []})
 
         assert client.is_healthy() is True
         assert client.get_allocation(WINDOW_START, WINDOW_END) == {}
 
-        # Built once, with trust on the transport (a client given transport=
-        # ignores its own verify) and no environment influence.
-        assert opencost_wire.verified_urls == [DEFAULT_OPENCOST_BASE_URL]
-        [transport_kwargs] = opencost_wire.transport_kwargs
-        assert transport_kwargs == {"verify": opencost_wire.context, "trust_env": False}
-        [wrapped] = opencost_wire.wrapped
-        assert isinstance(wrapped, _REAL_SYNC_TRANSPORT)
-        assert client._client is not None
-        assert client._client.trust_env is False
+        # Trust is looked up per call, on the transport (a client given
+        # transport= ignores its own verify), with no environment influence,
+        # and each call's client is closed before the call returns.
+        assert opencost_wire.verified_urls == [DEFAULT_OPENCOST_BASE_URL] * 2
+        assert (
+            opencost_wire.transport_kwargs
+            == [{"verify": opencost_wire.context, "trust_env": False}] * 2
+        )
+        assert all(isinstance(wrapped, _REAL_SYNC_TRANSPORT) for wrapped in opencost_wire.wrapped)
+        assert [mock.closed for mock in opencost_wire.mock_transports] == [True, True]
         for request in opencost_wire.requests:
             assert request.extensions["timeout"] == {
                 "connect": 12.5,
@@ -211,7 +262,8 @@ class TestOpenCostClient:
                 "pool": 12.5,
             }
 
-    def test_first_use_from_many_threads_builds_one_client(self, opencost_wire):
+    def test_concurrent_calls_share_nothing(self, opencost_wire):
+        """The reporter and the API handlers call from worker threads at once."""
         client = OpenCostClient("http://opencost:9003")
         opencost_wire.respond(200)
         start = threading.Barrier(8)
@@ -228,24 +280,36 @@ class TestOpenCostClient:
             thread.join(timeout=10)
 
         assert results == [True] * 8
-        assert len(opencost_wire.transport_kwargs) == 1
+        assert len(opencost_wire.transport_kwargs) == 8
+        assert all(mock.closed for mock in opencost_wire.mock_transports)
 
-    def test_close_releases_the_client_and_a_later_call_rebuilds_it(self, opencost_wire):
-        client = OpenCostClient("http://opencost:9003")
-        client.close()  # never used: nothing to release
+    def test_a_rotated_internal_ca_is_trusted_from_the_next_call(
+        self, opencost_wire, monkeypatch, tmp_path
+    ):
+        """The real cached lookup: a swapped bundle reaches the next call, no restart."""
+        internal_tls.clear_cache()
+        monkeypatch.setattr(internal_tls, "verify_for_url", _REAL_VERIFY_FOR_URL)
+        ca_file = tmp_path / "ca.crt"
+        ca_file.write_bytes(_ca_pem("GCO internal CA"))
+        monkeypatch.setenv("GCO_INTERNAL_CA_FILE", str(ca_file))
+        client = OpenCostClient(DEFAULT_OPENCOST_BASE_URL)
         opencost_wire.respond(200)
-        assert client.is_healthy() is True
-        first = client._client
-        assert first is not None
 
-        client.close()
+        try:
+            assert client.is_healthy() is True
+            assert client.is_healthy() is True
+            staged = tmp_path / ".ca.crt.new"
+            staged.write_bytes(_ca_pem("GCO internal CA (rotated)"))
+            staged.replace(ca_file)
+            assert client.is_healthy() is True
+        finally:
+            internal_tls.clear_cache()
 
-        assert first.is_closed is True
-        assert client._client is None
-        assert client.is_healthy() is True
-        assert client._client is not first
-        assert len(opencost_wire.transport_kwargs) == 2
-        client.close()
+        first, unchanged, rotated = (kwargs["verify"] for kwargs in opencost_wire.transport_kwargs)
+        # An unchanged bundle reuses its context; the rotated one is trusted alone.
+        assert unchanged is first
+        assert rotated is not first
+        assert _trusted_common_names(rotated) == ["GCO internal CA (rotated)"]
 
     def test_get_allocation_merges_allocation_sets(self, opencost_wire):
         client = OpenCostClient("http://opencost:9003/")
@@ -812,9 +876,9 @@ class TestCreateFromEnv:
         assert monitor.opencost.base_url == (
             "https://opencost-tls.monitoring.svc.cluster.local:9443"
         )
-        # Construction reads no CA bundle (none exists here): trust is
-        # resolved on the first OpenCost call.
-        assert monitor.opencost._client is None
+        # Construction read no CA bundle (none exists here, and it did not
+        # fail): trust is resolved on each OpenCost call.
+        assert monitor.opencost.is_healthy() is False
 
     def test_discovers_the_bucket_from_the_published_parameter(self, monkeypatch):
         monkeypatch.delenv("COST_REPORT_BUCKET", raising=False)

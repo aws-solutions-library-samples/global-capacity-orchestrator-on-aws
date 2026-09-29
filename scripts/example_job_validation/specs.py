@@ -157,7 +157,8 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             notes=(
                 "tracking server ships with the default-on observability "
                 "bundle (no override key needed); the setup driver waits for "
-                "the mlflow Deployment before the client job submits"
+                "the mlflow Deployment and the gco-jobs CA bundle before the "
+                "client job submits"
             ),
         ),
         ExampleSpec(

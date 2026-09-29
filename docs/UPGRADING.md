@@ -24,6 +24,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [What the command does not do](#what-the-command-does-not-do)
 - [Release notes for running deployments](#release-notes-for-running-deployments)
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
+  - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
 
 ## How an upgrade works
 
@@ -51,12 +52,16 @@ release, while the control plane is updated in place and keeps its state:
    the editable install of this checkout, `npm ci` when the checkout has its own
    CDK toolchain, and a rebuild of the `gco-dev` image when a container runtime
    and the image are present.
-4. **Scale the workload tier to zero.** The monitoring stack is updated in place
-   with `--context gco:control-plane-only=true` so it stops referencing the
-   regional stacks, then every regional API bridge and regional stack is
-   destroyed — the same teardown as `gco stacks destroy-all --keep-control-plane`,
-   with its retry loop and its sweeps of orphaned bastions, implicit log groups
-   and dynamically provisioned EBS volumes.
+4. **Scale the workload tier to zero.** First the checkout's deployable sources
+   are checked: the redeploy refuses files other users cannot read, so the
+   command stops here, with no stack touched, rather than after the teardown
+   (see [If it stops halfway](#if-it-stops-halfway)). The monitoring stack is
+   then updated in place with `--context gco:control-plane-only=true` so it
+   stops referencing the regional stacks, and every regional API bridge and
+   regional stack is destroyed — the same teardown as
+   `gco stacks destroy-all --keep-control-plane`, with its retry loop and its
+   sweeps of orphaned bastions, implicit log groups and dynamically provisioned
+   EBS volumes.
 5. **Deploy-all on the new release.** `<project>-global` and
    `<project>-api-gateway` are updated in place, the regional stacks and their
    bridges are recreated from `cdk.json`, and the monitoring stack is updated back
@@ -173,9 +178,18 @@ Every step reports what it did, and the command tells you where it stopped.
 - **After the checkout, during the install refresh**: the checkout is on the new
   release; the message names the `pip`/`uv` command to run by hand, then
   `gco upgrade --skip-checkout` finishes the stack cycle.
+- **At the source check, before the teardown** (`N deployable path(s) in the
+  checkout are not readable by every user`): the checkout and local install are
+  on the new release and no stack has changed. Make the named sources
+  readable — `chmod -R a+rX lambda gco dockerfiles pyproject.toml
+  requirements-lock.txt` from the repository root; see
+  [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask)
+  — then `gco upgrade --skip-checkout`.
 - **During the stack cycle**: the checkout and local install are on the new
   release. The failing stack is named; `gco stacks status <stack> -r <region>`
-  and the CloudFormation console show why. Once fixed, rerun
+  and the CloudFormation console show why. An error that interrupts the cycle
+  itself (credentials that expired, a dropped network) is reported as
+  `Upgrade failed during the stack cycle`. Either way, once fixed, rerun
   `gco upgrade --skip-checkout` — the teardown half is idempotent (already
   deleted stacks are skipped) and the deploy half is the ordinary deploy-all.
 - **Container image rebuild or `npm ci` failures** are warnings, not stops: the
@@ -270,3 +284,66 @@ changes running clusters in these ways during an in-place redeploy:
   upgrade. Set `tracing.enable_transaction_search` to `false` before deploying
   if your organization manages it, or `tracing.enabled` to `false` for no
   tracing at all.
+
+### Tenant write fence and MLflow over HTTPS
+
+The release that fences the monitor's objects in the tenant namespaces
+([ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence))
+and moves MLflow's clients to verified HTTPS changes running clusters in these
+ways during an in-place redeploy:
+
+- **Only the inference monitor changes what it manages in `gco-inference`.**
+  The new base-pass policy `gco-tenant-write-fence` applies to every other
+  identity, cluster administrators and the kubectl applier included. A
+  `kubectl edit`, `kubectl set image` or `kubectl rollout restart` of a
+  monitor-managed Deployment, or an edit of a ConfigMap or Secret it manages,
+  is refused; change an endpoint through `gco inference` (`update-image`,
+  `scale`, `canary`, `stop`/`start`) instead. Annotations, scaling and deletes
+  stay allowed. Only cert-manager may write
+  `gco-inference/gco-inference-tls`, and only trust-manager
+  `gco-jobs/gco-internal-ca`.
+- **Tenant objects must not carry the monitor's label on their own metadata.**
+  Manifests that Argo CD, Crossplane or kro apply to `gco-inference` may keep
+  `gco.io/type: inference` on pod templates, not on the Deployment, Service or
+  other object itself (the examples no longer do). An object created with it
+  before this release can no longer be changed by its tool, not even to drop
+  the label: delete it, and the tool recreates it without the label.
+- **Platform pods roll once.** The five platform Deployments, new
+  queue-processor Jobs and the Grafana credential rotator gain a
+  `kubernetes.io/arch: amd64` node selector, because the service images are
+  built for amd64 only and the `cpu-general` pool also provisions Graviton
+  nodes.
+- **MLflow restarts once, and its clients move to HTTPS.** The tracking server
+  pod (`Recreate`) gains the `mlflow-tls-proxy` sidecar and the amd64 node
+  selector, and trust-manager is installed with it (namespace
+  `trust-manager`) to publish the internal CA as the ConfigMap
+  `gco-jobs/gco-internal-ca`. The `gco.io/mlflow-client` label now admits the
+  HTTPS port (5443) only. Point jobs at
+  `https://mlflow-tls.monitoring.svc.cluster.local:5443`, mount that ConfigMap
+  and set `MLFLOW_TRACKING_SERVER_CERT_PATH` to its `ca.crt`, as
+  [`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml)
+  does. A job that still dials `http://mlflow.monitoring:5000` reaches the
+  server only through `allow-vpc-egress`, where `vpc_endpoint_cidrs` covers
+  the pod subnets (the default). `gco monitoring open --service mlflow` is
+  unchanged. Disabling MLflow removes trust-manager too; its `Bundle` CRD
+  stays.
+- **CA renewals need no restarts.** The cost monitor's OpenCost client and the
+  Mooncake PD proxy now build their TLS clients per call from the CA bundle on
+  disk, like the inference proxy.
+- **Header bytes outside Latin-1 no longer turn into a 500.** The inference
+  proxy and the PD proxy relay request and response header bytes as they were
+  sent, and an HMAC signature or content hash that is not 64 lowercase hex
+  characters is refused with 403.
+- **`gco stacks deploy` checks that the deployable sources are readable.** A
+  checkout made under a restrictive umask (such as 077) left owner-only files
+  that the packaged Lambdas and service images could not read at runtime. The
+  deploy, the orchestrated deploy and the release harness now refuse to start
+  and name the files (fix them with `chmod -R a+rX` or re-clone under umask
+  022), and the CLI's own Lambda builds set their file modes explicitly.
+  `gco upgrade` runs the same check after its checkout and before its teardown,
+  so an upgrade the redeploy would refuse stops with every stack intact; this
+  takes effect from the upgrade after this release, because an upgrade runs the
+  CLI it started with. Code
+  an older CLI already uploaded owner-only stays in the bootstrap bucket until
+  its object is deleted once; see
+  [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask).

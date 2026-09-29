@@ -1,11 +1,13 @@
 # Egress for MLflow clients in gco-jobs. The namespace's zero-trust posture
-# (03-network-policies.yaml) limits job pods to DNS + 443-to-VPC-endpoints,
-# so tracking calls to the in-cluster server need an explicit allow. Scoped
-# to pods that opt in with the gco.io/mlflow-client label (see
-# examples/mlflow-tracking-job.yaml) and to the tracking server's pods only.
-# Port 5000 is both the mlflow Service port and the container port (the
-# official chart exposes the server 1:1), so one entry covers CNIs that
-# evaluate egress rules before and after the Service DNAT alike.
+# (03-network-policies.yaml) limits job pods to DNS, 443 and the VPC ranges,
+# so tracking calls to the in-cluster server get an explicit allow that does
+# not depend on where pod IPs come from. Scoped to pods that opt in with the
+# gco.io/mlflow-client label (see examples/mlflow-tracking-job.yaml), to the
+# tracking server's pods only, and to its HTTPS front door: port 5443, the
+# mlflow-tls Service port and the mlflow-tls-proxy sidecar's container port
+# (post-helm-mlflow-tls.yaml), so one entry covers CNIs that evaluate egress
+# rules before and after the Service DNAT alike. Clients verify the server
+# against the gco-internal-ca ConfigMap trust-manager publishes in gco-jobs.
 #
 # The tracking server's own metadata claim is chart-managed (storage.enabled
 # in lambda/helm-installer/charts.yaml) — nothing to ship here. helm
@@ -47,14 +49,18 @@
 # allowed and work. The server can never end up unreachable by its own
 # kubelet.
 #
-# INGRESS: the server port only, from in-cluster pods (Prometheus scrapes
-# /metrics, gco-jobs clients log runs) and from the VPC CIDRs, which is what
-# covers the nodes the kubelet probes from. The CIDR list is the same
-# cdk.json vpc_endpoint_cidrs that _mlflow_allowed_hosts derives the
-# server's --allowed-hosts globs from, so one key governs both. GCO's own
-# services keep probes working the same way — the ingress rules in
-# 03-network-policies.yaml omit `from` entirely (allow-alb-to-health-monitor),
-# admitting any source on the port.
+# INGRESS: the server port and the TLS sidecar's port, from in-cluster pods
+# (Prometheus scrapes /metrics on 5000, gco-jobs clients log runs over HTTPS
+# on 5443) and from the VPC CIDRs, which is what covers the nodes the kubelet
+# probes from (the chart's probes on 5000, the sidecar's liveness probe on
+# 5443). The CIDR list is the same cdk.json vpc_endpoint_cidrs that
+# _mlflow_allowed_hosts derives the server's --allowed-hosts globs from, so
+# one key governs both. GCO's own services keep probes working the same way —
+# the ingress rules in 03-network-policies.yaml omit `from` entirely
+# (allow-alb-to-health-monitor), admitting any source on the port. Port 5000
+# stays open to pods as well: the kubelet probes it from the node, and with
+# the VPC CNI pods take their IPs from the same subnets as the nodes, so no
+# rule could admit the probes and not the pods.
 #
 # EGRESS: DNS plus 443. That is everything the server needs: run metadata is
 # SQLite on its own volume (no database ports), and artifact writes reach S3
@@ -84,6 +90,8 @@ spec:
       ports:
         - protocol: TCP
           port: 5000
+        - protocol: TCP
+          port: 5443
     # The VPC CIDRs, which is what covers the nodes the kubelet probes from.
     # Kept as its own rule because the CIDR placeholder is expanded as the
     # sole entry under `from:` (the same shape 03-network-policies.yaml uses);
@@ -93,6 +101,8 @@ spec:
       ports:
         - protocol: TCP
           port: 5000
+        - protocol: TCP
+          port: 5443
   egress:
     - ports:
         - protocol: UDP
@@ -132,4 +142,4 @@ spec:
               app.kubernetes.io/name: mlflow
       ports:
         - protocol: TCP
-          port: 5000
+          port: 5443
