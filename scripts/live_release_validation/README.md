@@ -226,6 +226,18 @@ This is the safety-critical path. The rule the whole harness is built around:
    resource's identity shape, so a pre-existing account resource of the same
    type can never be matched as run-owned.
 
+Stacks have two creation proofs. This harness uses *prepared-change-set*
+authority: it prepared the change set and checkpointed its identity before
+CloudFormation executed it. The [upgrade harness](../upgrade_validation/README.md),
+whose stacks a `gco` subprocess deploys, uses *run-tag adoption*
+(`_adopt_run_tagged_stacks` in `ownership/stacks.py`): the exact run tag plus a
+creation time after the phase began, with each generation an upgrade replaced
+kept in `replaced_generations`. Only settings with the
+`allows_run_tag_adoption` class attribute can record or honor it. A validator
+that ties a retained resource to its stack must accept every ID
+`_owned_stack_ids` returns, not only the current one, as `ownership/kms.py`
+and `ownership/log_groups.py` do.
+
 ## Layering rules
 
 Imports flow one way:

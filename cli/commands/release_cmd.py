@@ -22,6 +22,12 @@ convenience on top of those guarantees rather than replacing them.
 emulator (Floci) for CI rehearsal; the harness proves the endpoint is an
 emulator before touching anything (see
 ``scripts/live_release_validation/emulator.py`` and docs/FLOCI_TESTING.md).
+
+``gco release validate-upgrade`` wraps the upgrade harness
+(``scripts/upgrade_validation``) the same way: it deploys the previous
+release with that release's own ``gco``, upgrades it to this checkout with
+``gco upgrade``, verifies the result, and destroys it (see
+docs/UPGRADE_VALIDATION.md).
 """
 
 from __future__ import annotations
@@ -377,4 +383,161 @@ def release_validate(
     # Stream harness output directly; operators watch progress live and the
     # harness owns its own reporting/cleanup guarantees.
     result = subprocess.run(command, cwd=repo_root, env=env, check=False)
+    sys.exit(result.returncode)
+
+
+@release.command("validate-upgrade")
+@click.option(
+    "--expected-account",
+    required=True,
+    metavar="ACCOUNT_ID",
+    help="Exact 12-digit AWS account id this run may touch.",
+)
+@click.option(
+    CONSENT_FLAG,
+    "authorized",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required consent: deploys the previous release into the expected account, "
+        "upgrades it to this checkout, and destroys it afterwards."
+    ),
+)
+@click.option(
+    "--confirm-kms-key-deletion",
+    is_flag=True,
+    default=False,
+    help=(
+        "Authorize scheduling this run's retained EKS KMS keys (both the base and the "
+        "upgraded generation) for their 7-day deletion window during cleanup."
+    ),
+)
+@click.option(
+    "--base-ref",
+    default=None,
+    metavar="vX.Y.Z",
+    help="Release to deploy first and upgrade from (default: the newest earlier release).",
+)
+@click.option(
+    "--actions",
+    default="all",
+    show_default=True,
+    metavar="NAME[,NAME...]",
+    help="Harness actions to run; dependencies are added automatically.",
+)
+@click.option("--run-id", default=None, help="Stable run id (default: UTC timestamp + SHA).")
+@click.option(
+    "--report-dir",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Report directory (default: ~/gco-upgrade-validation-reports/<run-id>).",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Resume an interrupted run; requires the original --run-id and --report-dir.",
+)
+@click.option(
+    "--protected-stack",
+    multiple=True,
+    metavar="NAME",
+    help="Additional non-project CloudFormation stack to preserve exactly (repeatable).",
+)
+def release_validate_upgrade(
+    expected_account: str,
+    authorized: bool,
+    confirm_kms_key_deletion: bool,
+    base_ref: str | None,
+    actions: str,
+    run_id: str | None,
+    report_dir: Path | None,
+    resume: bool,
+    protected_stack: tuple[str, ...],
+) -> None:
+    """Validate `gco upgrade` from the previous release to this checkout, live.
+
+    Deploys the base release from a private clone with that release's own
+    gco, runs its `gco upgrade` to the checked-out commit, verifies the
+    upgraded deployment and a sentinel it must preserve, then destroys
+    everything and verifies the account is back to its baseline. Executes
+    ``python -m scripts.upgrade_validation`` and exits with its code. See
+    docs/UPGRADE_VALIDATION.md.
+    """
+    if not _ACCOUNT_RE.fullmatch(expected_account):
+        _fail("--expected-account must be an exact 12-digit AWS account id")
+    if not authorized:
+        _fail(
+            "Refusing to run without explicit consent. Add "
+            f"{CONSENT_FLAG} to acknowledge that this deploys and destroys real "
+            "infrastructure in account " + expected_account + "."
+        )
+    selected = {name.strip() for name in actions.split(",") if name.strip()}
+    if not selected:
+        _fail("--actions must name at least one action")
+    # Only preflight, baseline, and prepare stop short of the deploy action.
+    deploy_selected = bool(selected & {"all", "deploy"}) or bool(
+        selected - {"preflight", "baseline", "prepare"}
+    )
+    if deploy_selected and not confirm_kms_key_deletion:
+        _fail(
+            "The selected actions imply the deploy action, which creates retained "
+            "EKS KMS keys; add --confirm-kms-key-deletion to authorize scheduling "
+            "exactly this run's keys for deletion during cleanup."
+        )
+    if resume and (run_id is None or report_dir is None):
+        _fail(
+            "--resume replays an exact checkpoint identity: pass the original "
+            "--run-id and --report-dir from the interrupted run."
+        )
+
+    repo_root = _repo_root()
+    expected_sha = _run_git(repo_root, "rev-parse", "HEAD")
+    expected_branch = _run_git(repo_root, "symbolic-ref", "--short", "HEAD")
+    resolved_run_id = run_id or (
+        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + expected_sha[:12]
+    )
+    resolved_report_dir = report_dir or (
+        Path.home() / "gco-upgrade-validation-reports" / resolved_run_id
+    )
+
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.upgrade_validation",
+        "--repo-root",
+        str(repo_root),
+        "--expected-account",
+        expected_account,
+        "--expected-sha",
+        expected_sha,
+        "--expected-branch",
+        expected_branch,
+        "--actions",
+        ",".join(sorted(selected)),
+        "--run-id",
+        resolved_run_id,
+        "--report-dir",
+        str(resolved_report_dir),
+        "--checkpoint",
+        str(resolved_report_dir / "checkpoint.json"),
+    ]
+    if base_ref:
+        command.extend(["--base-ref", base_ref])
+    if confirm_kms_key_deletion:
+        command.append("--confirm-kms-key-deletion")
+    if resume:
+        command.append("--resume")
+    for name in protected_stack:
+        command.extend(["--protected-stack", name])
+
+    click.echo(f"run-id:     {resolved_run_id}")
+    click.echo(f"sha:        {expected_sha}")
+    click.echo(f"branch:     {expected_branch}")
+    click.echo(f"account:    {expected_account}")
+    click.echo(f"base:       {base_ref or 'the newest earlier release'}")
+    click.echo(f"actions:    {','.join(sorted(selected))}")
+    click.echo(f"report-dir: {resolved_report_dir}")
+
+    result = subprocess.run(command, cwd=repo_root, env=dict(os.environ), check=False)
     sys.exit(result.returncode)

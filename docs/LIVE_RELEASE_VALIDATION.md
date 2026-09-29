@@ -39,6 +39,8 @@ Use live validation when a change can affect deployed infrastructure or cross-se
 
 The exemptions are risk-based, not filename-based. A CLI change that deploys, destroys, or mutates live AWS resources still requires validation. A dependency bump that changes a deployed image, AWS SDK behavior, CDK output, or runtime integration may require it. Document the decision in the pull request using the template. If validation is required, follow this complete runbook locally; ordinary CI must never substitute for or launch it.
 
+A change that can affect upgrading a running deployment from the previous release (stack names or what they retain, how the control plane stores its state, the teardown and deploy orchestration, the upgrade engine) also needs [upgrade validation](UPGRADE_VALIDATION.md), which deploys that release and runs its `gco upgrade` to the change.
+
 ## Safety Model
 
 The harness creates and destroys paid AWS infrastructure. Run it only with explicit authorization for the target account and only in a dedicated, disposable validation account. "Dedicated" describes the account's condition, not its identity: any account you control with no other workloads and no pre-existing project resources qualifies, including a personal development account, and different operators may validate in different accounts.

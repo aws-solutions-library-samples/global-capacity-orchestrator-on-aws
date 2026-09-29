@@ -29,6 +29,7 @@ from ..inventory import (
 )
 from ..models import RunContext, utc_now
 from ..ownership.stacks import (
+    _owned_stack_ids,
     _owned_stack_record,
 )
 
@@ -129,7 +130,9 @@ def _validated_owned_log_group_identity(
         f"stack/{stack_name}/"
     )
     owned_stack_record = _owned_stack_record(ctx, region, stack_name)
-    expected_stack_id = str((owned_stack_record or {}).get("stack_id") or "")
+    # The source stack may be the current generation or, after an adopted
+    # in-place upgrade, one it replaced (its retained log groups outlive it).
+    owned_stack_ids = _owned_stack_ids(ctx, region, stack_name)
     if (
         not name
         or not logical_id
@@ -158,8 +161,8 @@ def _validated_owned_log_group_identity(
     cleanup_token = str(record.get("cleanup_token") or "")
     expected_cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
     if (
-        not expected_stack_id.startswith(expected_stack_prefix)
-        or stack_id != expected_stack_id
+        not stack_id.startswith(expected_stack_prefix)
+        or stack_id not in owned_stack_ids
         or (owned_stack_record or {}).get("run_tag") != ctx.settings.run_id
         or record.get("run_tag") != ctx.settings.run_id
         or record.get("ownership_authority") != "cloudformation-stack-resource-derived"

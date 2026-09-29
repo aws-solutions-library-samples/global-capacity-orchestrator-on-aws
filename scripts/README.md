@@ -37,6 +37,7 @@ Utility scripts for development, testing, and operations.
 | `test_webhook_delivery.py` | Sends sample lifecycle events and verifies webhook delivery, signatures, and retries. |
 | `example_job_validation/` | Static and authorized live validation harness for every shipped example manifest. See its [README](example_job_validation/README.md) for the layout and where a new example belongs. |
 | `live_release_validation/` | Checkpointed, explicitly authorized live deployment/recovery validation and sanitized reporting harness. See its [README](live_release_validation/README.md) for the layout and where a new check belongs. |
+| `upgrade_validation/` | Authorized live validation of `gco upgrade`: deploys the previous release with its own `gco` from a private clone, upgrades it to the checkout, verifies what the upgrade keeps and recreates, and tears it down. See its [README](upgrade_validation/README.md) for the layout and why it owns stacks by run tag. |
 
 > CI-only scripts live under [`.github/scripts/`](../.github/scripts/). In particular, [`.github/scripts/dependency-scan.sh`](../.github/scripts/dependency-scan.sh) powers the monthly `deps-scan` workflow and invokes `accelerator_catalog.py` for the offline and online accelerator maintenance tiers — see [`.github/CI.md`](../.github/CI.md#dependency-scan-script) for its full reference.
 

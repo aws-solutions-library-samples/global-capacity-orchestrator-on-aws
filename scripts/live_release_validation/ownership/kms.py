@@ -21,6 +21,7 @@ from ..ownership.log_groups import (
     _checkpoint_owned_log_groups,
 )
 from ..ownership.stacks import (
+    _owned_stack_ids,
     _owned_stack_record,
     _owned_stacks,
 )
@@ -69,13 +70,15 @@ def _validated_owned_kms_identity(
         f"stack/{stack_name}/"
     )
     owned_stack_record = _owned_stack_record(ctx, region, stack_name)
-    expected_stack_id = str((owned_stack_record or {}).get("stack_id") or "")
+    # The key's stack may be the current generation or, after an adopted
+    # in-place upgrade, one it replaced (the retained EKS key outlives it).
+    owned_stack_ids = _owned_stack_ids(ctx, region, stack_name)
     if not key_id or arn != expected_arn:
         raise RuntimeError(f"KMS checkpoint ARN is invalid for {arn or key_id}")
     if (
         not stack_name
-        or not expected_stack_id.startswith(expected_stack_prefix)
-        or stack_id != expected_stack_id
+        or not stack_id.startswith(expected_stack_prefix)
+        or stack_id not in owned_stack_ids
         or (owned_stack_record or {}).get("run_tag") != ctx.settings.run_id
     ):
         raise RuntimeError(f"KMS checkpoint stack identity is invalid for {arn}")
