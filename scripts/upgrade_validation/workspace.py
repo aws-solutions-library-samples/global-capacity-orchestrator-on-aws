@@ -422,7 +422,7 @@ def run_logged(
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"$ {' '.join(argv)}\n")
         log.flush()
-        # nosemgrep: dangerous-subprocess-use-audit - fixed argv lists, never a shell
+        # nosemgrep: dangerous-subprocess-use-audit, python36-compatibility-Popen1, python36-compatibility-Popen2 - fixed argv lists, never a shell; encoding/errors need Python 3.6 and the project requires 3.14
         process = subprocess.Popen(
             list(argv),
             cwd=cwd,
