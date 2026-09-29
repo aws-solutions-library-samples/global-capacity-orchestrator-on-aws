@@ -454,6 +454,143 @@ def _set_log_group_disposition(
     return disposition
 
 
+#: Checkpoint list of records a recreated stack superseded (see
+#: :func:`_carry_log_group_across_generations`), kept as evidence only.
+_SUPERSEDED_LOG_GROUPS_KEY = "superseded_log_groups"
+
+#: Record fields a same-name log group keeps when its stack is recreated.
+_GENERATION_INVARIANT_FIELDS = (
+    "region",
+    "name",
+    "stack_name",
+    "source_resource_type",
+    "source_physical_id",
+    "ownership_authority",
+    "authority_phase",
+    "run_tag",
+    "cleanup_token",
+)
+
+#: Record fields that bind a log group to one stack generation. The logical ID
+#: is among them because a later release may rename the construct that owns a
+#: fixed physical name.
+_GENERATION_BINDING_FIELDS = ("stack_id", "source_logical_id", "source_service_identity")
+
+
+def _replaced_generation_record(
+    ctx: RunContext,
+    previous: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    """Whether ``previous`` was derived from a stack generation this run replaced.
+
+    Only run-tag adoption (the upgrade harness) records replaced generations.
+    A recreated stack keeps its fixed resource names, so the EKS cluster's and
+    each named Lambda function's log groups are derived again, under the same
+    names, from the generation that replaced it.
+    """
+    previous_stack = str(previous.get("stack_id") or "")
+    owned = _owned_stack_ids(ctx, str(candidate["region"]), str(candidate["stack_name"]))
+    return (
+        previous_stack != candidate["stack_id"]
+        and previous_stack in owned
+        and all(previous.get(field) == candidate[field] for field in _GENERATION_INVARIANT_FIELDS)
+    )
+
+
+def _carry_log_group_across_generations(
+    ctx: RunContext,
+    records: list[Any],
+    previous: dict[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    logs: Any,
+    authority_tags: Mapping[str, str],
+) -> bool:
+    """Hand a replaced generation's same-name record to the stack that replaced it.
+
+    Returns ``True`` when the recorded group generation outlived its stack:
+    the record is rebound to the new stack generation in place, its earlier
+    binding kept under ``stack_generations``. Returns ``False`` when that
+    generation is gone (``gco``'s teardown deletes the implicit groups of the
+    stacks it destroys): the record moves to ``superseded_log_groups`` and the
+    caller checkpoints the name afresh from the new generation. A deleted
+    log-group generation never returns, since its creation time is part of its
+    identity, so a stable different generation or stable absence proves it
+    gone. Anything else fails closed.
+    """
+    region = str(candidate["region"])
+    name = str(candidate["name"])
+    _validated_owned_log_group_identity(ctx, previous)
+    observed = previous.get("observed_identity")
+    if not isinstance(observed, dict):
+        raise RuntimeError(f"Log-group checkpoint identity is malformed for {region}:{name}")
+    phase = "checkpoint-stack-generation"
+    outcome = _observe_log_group_stability(
+        logs,
+        region,
+        name,
+        expected_identity=observed,
+        expected_tags=authority_tags,
+        required_present=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+        required_absent=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+    )
+    _record_log_group_observation(ctx, previous, phase=phase, outcome=outcome)
+    if outcome["status"] == "present":
+        with ctx.state_lock:
+            binding = {
+                field: copy.deepcopy(previous[field])
+                for field in _GENERATION_BINDING_FIELDS
+                if field in previous
+            }
+            generations = previous.setdefault("stack_generations", [])
+            if not isinstance(generations, list):
+                raise RuntimeError("Log-group stack_generations must be a list")
+            generations.append(
+                {**binding, "rebound_to": candidate["stack_id"], "rebound_at": utc_now()}
+            )
+            # The resource type is invariant, so both records carry the same
+            # binding fields (only an EKS cluster's has a service identity).
+            for field in _GENERATION_BINDING_FIELDS:
+                if field in candidate:
+                    previous[field] = copy.deepcopy(candidate[field])
+            ctx.persist_callback(ctx.checkpoint)
+        return True
+    if outcome["status"] not in {"replacement", "absent"}:
+        _set_log_group_disposition(
+            ctx,
+            previous,
+            status="checkpoint-generation-not-stable",
+            phase=phase,
+            outcome=outcome,
+        )
+        raise RuntimeError(
+            f"Log-group checkpoint generation is not stable for {region}:{name}: "
+            f"{outcome['status']}"
+        )
+    _set_log_group_disposition(
+        ctx,
+        previous,
+        status="superseded-by-stack-generation",
+        phase=phase,
+        outcome=outcome,
+    )
+    with ctx.state_lock:
+        superseded = ctx.checkpoint.state.setdefault(_SUPERSEDED_LOG_GROUPS_KEY, [])
+        if not isinstance(superseded, list):
+            raise RuntimeError("Checkpoint superseded_log_groups must be a list")
+        superseded.append(
+            {
+                **copy.deepcopy(previous),
+                "superseded_by_stack_id": candidate["stack_id"],
+                "superseded_at": utc_now(),
+            }
+        )
+        records[:] = [item for item in records if item is not previous]
+        ctx.persist_callback(ctx.checkpoint)
+    return False
+
+
 def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
     """Fence, tag, and checkpoint exact generations while source stacks are live."""
     target_regions = ctx.checkpoint.state.get("target_stack_regions")
@@ -578,9 +715,23 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                     previous = by_identity.get(key)
                     immutable = tuple(candidate)
                     expected_identity: Mapping[str, Any] | None = None
-                    if previous is not None:
-                        if any(previous.get(field) != candidate[field] for field in immutable):
+                    if previous is not None and any(
+                        previous.get(field) != candidate[field] for field in immutable
+                    ):
+                        if not _replaced_generation_record(ctx, previous, candidate):
                             raise RuntimeError(f"Log-group ownership changed for {region}:{name}")
+                        if _carry_log_group_across_generations(
+                            ctx,
+                            records,
+                            previous,
+                            candidate,
+                            logs=logs,
+                            authority_tags=authority_tags,
+                        ):
+                            continue
+                        del by_identity[key]
+                        previous = None
+                    if previous is not None:
                         observed = previous.get("observed_identity")
                         if not isinstance(observed, dict):
                             raise RuntimeError(

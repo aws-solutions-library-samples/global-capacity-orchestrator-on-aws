@@ -33,18 +33,28 @@ from scripts.live_release_validation.ownership import log_groups as ownership_lo
 from scripts.live_release_validation.ownership import stacks as ownership_stacks
 from tests.test_live_validation_ownership import (
     _ACCOUNT,
+    _AUTHORITY_TAGS,
+    _CLUSTER,
+    _FUNCTION,
     _GLOBAL_STACK,
     _GLOBAL_STACK_ID,
     _REGION,
     _RUN_ID,
+    _RUN_STARTED_MS,
     _STACK,
     _STACK_ID,
+    _absent,
+    _CheckpointHarness,
     _client_error,
     _ctx,
+    _eks_identity,
+    _identity,
     _kms_record,
     _live_stack,
     _log_group_record,
     _owned_stack,
+    _present,
+    _resource,
     _stack_state,
 )
 
@@ -514,6 +524,245 @@ class TestHistoryInRetainedResources:
         ctx.settings.allows_run_tag_adoption = False
         with pytest.raises(RuntimeError, match="only the upgrade validation harness"):
             ownership_kms._validated_owned_kms_identity(ctx, _kms_record())
+
+
+# ─── Log groups a recreated stack derives again ─────────────────────
+
+
+def _log_group_arn(name: str) -> str:
+    return f"arn:aws:logs:{_REGION}:{_ACCOUNT}:log-group:{name}"
+
+
+def _generation_harness(
+    resources: list[dict[str, Any]] | None = None,
+    *,
+    owned_log_groups: list[dict[str, Any]] | None = None,
+    **state: Any,
+) -> _CheckpointHarness:
+    """The upgrade's new stack generation, with the replaced one's records on file."""
+    harness = _CheckpointHarness(
+        resources,
+        live_stack=_live_stack(stack_id=_NEW_STACK_ID),
+        state=_stack_state(
+            owned_stacks={
+                _REGION: {
+                    _STACK: _adopted(_NEW_STACK_ID, replaced_generations=[{"stack_id": _STACK_ID}])
+                }
+            },
+            owned_log_groups=(
+                owned_log_groups
+                if owned_log_groups is not None
+                else [_log_group_record(observed_identity=_identity())]
+            ),
+            **state,
+        ),
+    )
+    harness.ctx.settings.allows_run_tag_adoption = True
+    return harness
+
+
+def _eks_records() -> list[dict[str, Any]]:
+    """The base cluster's five log groups, checkpointed under the replaced stack."""
+    return [
+        _log_group_record(
+            name=name,
+            source_resource_type="AWS::EKS::Cluster",
+            source_logical_id="Cluster",
+            source_physical_id=_CLUSTER,
+            source_service_identity=_eks_identity(),
+            observed_identity=_identity(arn=_log_group_arn(name)),
+        )
+        for name in ownership_log_groups._derived_log_group_names("AWS::EKS::Cluster", _CLUSTER)
+    ]
+
+
+class TestLogGroupsAcrossStackGenerations:
+    """A recreated stack derives its fixed-name log groups again.
+
+    The EKS cluster keeps its name across ``gco upgrade``'s stack cycle, and so
+    does every Lambda function with an explicit name. Run
+    pr429-upgrade-513adf93 stopped here: the new generation derived the same
+    names the replaced one had checkpointed, and the checkpoint refused them
+    as an ownership change, which also blocked the guaranteed teardown.
+    """
+
+    @pytest.mark.parametrize("previous_logical_id", ["ProviderLogGroup", "RenamedConstruct"])
+    def test_a_group_that_outlived_its_stack_is_rebound_to_the_new_generation(
+        self, previous_logical_id: str
+    ) -> None:
+        harness = _generation_harness(
+            owned_log_groups=[
+                _log_group_record(
+                    source_logical_id=previous_logical_id, observed_identity=_identity()
+                )
+            ]
+        )
+
+        records = harness.run([_present()])
+
+        assert harness.records == records
+        [record] = records
+        assert record["stack_id"] == _NEW_STACK_ID
+        assert record["source_logical_id"] == "ProviderLogGroup"
+        assert record["observed_identity"] == _identity()
+        [binding] = record["stack_generations"]
+        assert binding["stack_id"] == _STACK_ID
+        assert binding["source_logical_id"] == previous_logical_id
+        assert binding["rebound_to"] == _NEW_STACK_ID and binding["rebound_at"]
+        assert "source_service_identity" not in binding
+        assert [item["phase"] for item in record["identity_observation_history"]] == [
+            "checkpoint-stack-generation"
+        ]
+        assert harness.observe.call_args.kwargs["expected_identity"] == _identity()
+        assert harness.observe.call_args.kwargs["expected_tags"] == _AUTHORITY_TAGS
+        harness.logs.tag_resource.assert_not_called()
+        assert "superseded_log_groups" not in harness.ctx.checkpoint.state
+
+    def test_a_surviving_eks_group_keeps_the_cluster_identity_across_the_rebinding(self) -> None:
+        harness = _generation_harness(
+            [_resource("AWS::EKS::Cluster", "Cluster", _CLUSTER)], owned_log_groups=_eks_records()
+        )
+
+        def observe(client: Any, region: str, name: str, **kwargs: Any) -> dict[str, Any]:
+            return _present(kwargs["expected_identity"])
+
+        records = harness.run(observe)
+
+        assert len(records) == 5
+        for record in records:
+            assert record["stack_id"] == _NEW_STACK_ID
+            assert record["source_service_identity"] == _eks_identity()
+            assert record["stack_generations"][0]["source_service_identity"] == _eks_identity()
+
+    def test_the_upgrades_deleted_eks_groups_are_superseded_and_checkpointed_afresh(self) -> None:
+        """gco's teardown deleted the base cluster's groups; the new cluster made its own."""
+        harness = _generation_harness(
+            [_resource("AWS::EKS::Cluster", "Cluster", _CLUSTER)], owned_log_groups=_eks_records()
+        )
+        recreated_at = _RUN_STARTED_MS + 9_000
+
+        def observe(
+            client: Any,
+            region: str,
+            name: str,
+            *,
+            expected_identity: Any = None,
+            expected_tags: Any = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            fresh = _identity(recreated_at, tags=expected_tags or {}, arn=_log_group_arn(name))
+            if expected_identity is not None and expected_identity["creation_time"] != recreated_at:
+                return {"status": "replacement", "identity": _identity(recreated_at, tags={})}
+            return _present(fresh)
+
+        records = harness.run(observe)
+
+        names = ownership_log_groups._derived_log_group_names("AWS::EKS::Cluster", _CLUSTER)
+        assert [record["name"] for record in records] == list(names)
+        for record in records:
+            assert record["stack_id"] == _NEW_STACK_ID
+            assert record["observed_identity"]["creation_time"] == recreated_at
+            assert record["observed_identity"]["tags"] == _AUTHORITY_TAGS
+            assert "stack_generations" not in record
+        superseded = harness.ctx.checkpoint.state["superseded_log_groups"]
+        assert [item["name"] for item in superseded] == list(names)
+        for item in superseded:
+            assert item["stack_id"] == _STACK_ID
+            assert item["superseded_by_stack_id"] == _NEW_STACK_ID
+            disposition = item["original_generation_disposition"]
+            assert disposition["status"] == "superseded-by-stack-generation"
+            assert disposition["last_observation_status"] == "replacement"
+        assert harness.logs.tag_resource.call_count == 5
+
+    def test_an_absent_lambda_group_is_superseded_and_created_under_run_authority(self) -> None:
+        name = f"/aws/lambda/{_FUNCTION}"
+        harness = _generation_harness(
+            [_resource("AWS::Lambda::Function", "Worker", _FUNCTION)],
+            owned_log_groups=[
+                _log_group_record(
+                    name=name,
+                    source_resource_type="AWS::Lambda::Function",
+                    source_logical_id="Worker",
+                    source_physical_id=_FUNCTION,
+                    observed_identity=_identity(arn=_log_group_arn(name)),
+                )
+            ],
+        )
+        created = _identity(_RUN_STARTED_MS + 9_000, arn=_log_group_arn(name))
+
+        records = harness.run(
+            [_absent(), _absent(), _present(created), _present(created), _present(created)]
+        )
+
+        [record] = records
+        assert record["stack_id"] == _NEW_STACK_ID
+        assert record["observed_identity"] == created
+        harness.logs.create_log_group.assert_called_once_with(
+            logGroupName=name, tags=_AUTHORITY_TAGS
+        )
+        [superseded] = harness.ctx.checkpoint.state["superseded_log_groups"]
+        assert superseded["original_generation_disposition"]["last_observation_status"] == (
+            "absent"
+        )
+
+    @pytest.mark.parametrize("status", ["unsettled", "tag-drift"])
+    def test_a_carried_generation_that_is_not_stable_fails_closed(self, status: str) -> None:
+        harness = _generation_harness()
+        with pytest.raises(
+            RuntimeError, match=f"checkpoint generation is not stable for .*{status}"
+        ):
+            harness.run([{"status": status}])
+        [record] = harness.records
+        assert record["stack_id"] == _STACK_ID
+        disposition = record["original_generation_disposition"]
+        assert disposition["status"] == "checkpoint-generation-not-stable"
+        assert disposition["phase"] == "checkpoint-stack-generation"
+        assert "superseded_log_groups" not in harness.ctx.checkpoint.state
+        harness.logs.tag_resource.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "previous",
+        [
+            _log_group_record(stack_id=f"{_STACK_ID}-other", observed_identity=_identity()),
+            _log_group_record(authority_phase="post-destroy", observed_identity=_identity()),
+        ],
+        ids=["unowned-stack", "changed-authority"],
+    )
+    def test_only_a_replaced_generation_hands_its_groups_over(
+        self, previous: dict[str, Any]
+    ) -> None:
+        harness = _generation_harness(owned_log_groups=[previous])
+        with pytest.raises(RuntimeError, match="Log-group ownership changed"):
+            harness.run([])
+        harness.observe.assert_not_called()
+
+    def test_malformed_generation_evidence_fails_closed(self) -> None:
+        harness = _generation_harness(
+            owned_log_groups=[_log_group_record(observed_identity="not-a-dict")]
+        )
+        with pytest.raises(RuntimeError, match="identity is malformed"):
+            harness.run([])
+        harness.observe.assert_not_called()
+
+        harness = _generation_harness(
+            owned_log_groups=[
+                _log_group_record(observed_identity=_identity(), stack_generations={})
+            ]
+        )
+        with pytest.raises(RuntimeError, match="stack_generations must be a list"):
+            harness.run([_present()])
+
+        harness = _generation_harness(superseded_log_groups={})
+        with pytest.raises(RuntimeError, match="superseded_log_groups must be a list"):
+            harness.run([{"status": "replacement"}])
+        assert len(harness.records) == 1
+
+    def test_the_release_harness_still_refuses_any_change(self) -> None:
+        harness = _generation_harness()
+        harness.ctx.settings.allows_run_tag_adoption = False
+        with pytest.raises(RuntimeError, match="only the upgrade validation harness"):
+            harness.run([])
+        harness.observe.assert_not_called()
 
 
 class TestPriorReleaseImageTargets:

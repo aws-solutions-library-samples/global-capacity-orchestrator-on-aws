@@ -74,6 +74,20 @@ the KMS and log-group validators consult). Every other rule is unchanged:
 destroy re-checks the exact stack ID and tag before each delete, and a stack
 without the tag is never adopted.
 
+A recreated stack keeps its fixed resource names, so the new generation derives
+some log groups under names the replaced one had checkpointed: the EKS
+cluster's control-plane and Container Insights groups, and the default group of
+every Lambda function with an explicit name. `_checkpoint_owned_log_groups`
+hands such a record to the new generation (`_carry_log_group_across_generations`).
+If the recorded group outlived the old stack, the record is rebound in place and
+its earlier binding kept under `stack_generations`. If the group is gone
+(`gco`'s teardown deletes the implicit log groups of the stacks it destroys),
+stable absence or a stable different generation proves it, since a deleted
+generation never returns; the record moves to `superseded_log_groups` and the
+name is checkpointed afresh from the new generation. Only a replaced
+generation's record can be handed over, with every field but the stack binding
+unchanged; anything else is still an ownership change and fails closed.
+
 The relaxation is gated on the settings class (`allows_run_tag_adoption` is a
 class attribute), so the release and example harnesses cannot record or honor
 an adopted stack.
