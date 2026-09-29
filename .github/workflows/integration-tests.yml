@@ -5891,6 +5891,27 @@ jobs:
           (out / "argocd-post-helm.yaml").write_text("\n---\n".join(rendered), encoding="utf-8")
           PY
           cat "${RUNNER_TEMP}/argocd-gco-values.json"
+      - name: Preload the images the argo-cd chart runs into kind (with retry)
+        # The chart runs Redis from ECR Public, which answers anonymous pulls
+        # past one request a second with 429; the kubelet's own backoff lost
+        # that race until the install's wait expired. The chart is rendered
+        # with the install's values and every image it runs is pulled with
+        # retry and loaded into the node, so the install below never pulls
+        # (the chart's pull policy is IfNotPresent). See the script's docstring.
+        run: |
+          set -euo pipefail
+          read -r _ref _version namespace _repo_url < <(
+            python3 .github/scripts/validate_helm_charts.py --emit-ref argocd
+          )
+          python3 .github/scripts/validate_helm_charts.py --emit-values argocd \
+            > "${RUNNER_TEMP}/argocd-values.yaml"
+          helm template argocd "${ARGOCD_CHART_ARCHIVE}" \
+            --namespace "${namespace}" \
+            --values "${RUNNER_TEMP}/argocd-values.yaml" \
+            --values "${RUNNER_TEMP}/argocd-gco-values.json" \
+            > "${RUNNER_TEMP}/argocd-rendered.yaml"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-platform-addons \
+            "${RUNNER_TEMP}/argocd-rendered.yaml"
       - name: Install the pinned argo-cd chart with the shipped values
         # What the installer Lambda does for this entry: release "argocd", the
         # chart's namespace, the charts.yaml values with the stack's override
@@ -6204,6 +6225,29 @@ jobs:
           fi
           # crds.keep: uninstalling never cascades a CRD delete.
           kubectl get crd applications.argoproj.io appprojects.argoproj.io
+      - name: Preload the images the crossplane and crossview charts run into kind (with retry)
+        # As for argo-cd: the installs below find every image on the node.
+        # The composition Function is not in either chart's render: Crossplane's
+        # package manager fetches it and starts its runtime after the install,
+        # so it is not preloaded here.
+        run: |
+          set -euo pipefail
+          rendered=()
+          for chart in crossplane crossview; do
+            read -r _ref _version namespace _repo_url < <(
+              python3 .github/scripts/validate_helm_charts.py --emit-ref "${chart}"
+            )
+            python3 .github/scripts/validate_helm_charts.py --emit-values "${chart}" \
+              > "${RUNNER_TEMP}/${chart}-values.yaml"
+            archive_var="${chart^^}_CHART_ARCHIVE"
+            helm template "${chart}" "${!archive_var}" \
+              --namespace "${namespace}" \
+              --values "${RUNNER_TEMP}/${chart}-values.yaml" \
+              > "${RUNNER_TEMP}/${chart}-rendered.yaml"
+            rendered+=("${RUNNER_TEMP}/${chart}-rendered.yaml")
+          done
+          python3 .github/scripts/preload_kind_images.py --cluster gco-platform-addons \
+            "${rendered[@]}"
       - name: Install the pinned crossplane and crossview charts with the shipped values
         # One cdk.json toggle, two releases, Crossplane first: Crossview goes
         # into the namespace the crossplane release creates.

@@ -533,10 +533,15 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
 def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> None:
     """The platform add-ons job installs the pinned charts from local archives.
 
-    Registry pulls retry; installs and every assertion stay single-shot. The
-    chart values and post-Helm manifests come from the helpers the regional
-    stack calls, Argo CD syncs this commit, and both dashboards are captured
-    by the CLI's own screenshot code and uploaded even when a later step fails.
+    Registry pulls retry; installs and every assertion stay single-shot. Every
+    image a chart runs is preloaded into the node, with retry, before that
+    chart's install: each preload renders the chart with the install's exact
+    values and loads into the job's own cluster, so ``helm install --wait``
+    never waits on a kubelet pull (ECR Public's anonymous throttle kept failing
+    Argo CD's Redis that way). The chart values and post-Helm manifests come
+    from the helpers the regional stack calls, Argo CD syncs this commit, and
+    both dashboards are captured by the CLI's own screenshot code and uploaded
+    even when a later step fails.
     """
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     job = workflow["jobs"]["integration-kind-platform-addons"]
@@ -616,6 +621,50 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
         < order.index("Check and capture the Crossview dashboard with the gco crossplane code")
         < order.index("Tear Crossplane down the way the stack does")
         < order.index("Upload the dashboard captures")
+    )
+
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    cluster = kind_step["with"]["cluster_name"]
+    assert cluster == "gco-platform-addons"
+    render_name = "Render the Argo CD chart values and post-Helm manifests like the stack"
+    argocd_preload = "Preload the images the argo-cd chart runs into kind (with retry)"
+    # The argo-cd preload renders with the stack's override, so it follows that render.
+    assert order.index(render_name) < order.index(argocd_preload)
+    values_flags = re.compile(r'--values "[^"]+"')
+    for preload_name, install_name, template in (
+        (
+            argocd_preload,
+            "Install the pinned argo-cd chart with the shipped values",
+            'helm template argocd "${ARGOCD_CHART_ARCHIVE}"',
+        ),
+        (
+            "Preload the images the crossplane and crossview charts run into kind (with retry)",
+            "Install the pinned crossplane and crossview charts with the shipped values",
+            'helm template "${chart}" "${!archive_var}"',
+        ),
+    ):
+        preload_run = by_name[preload_name]["run"]
+        install_run = by_name[install_name]["run"]
+        assert steps.index(kind_step) < order.index(preload_name) < order.index(install_name)
+        assert template in preload_run, preload_name
+        # The render is the install's: the same values files, in the same order.
+        assert values_flags.findall(preload_run) == values_flags.findall(install_run), preload_name
+        assert values_flags.findall(install_run), install_name
+        assert (
+            f"python3 .github/scripts/preload_kind_images.py --cluster {cluster}" in preload_run
+        ), preload_name
+        assert not re.search(r"\bhelm (?:install|upgrade)\b", preload_run), preload_name
+        # The retry lives in the preload; the install it precedes stays single-shot.
+        assert len(re.findall(r"^\s*helm install\b", install_run, re.MULTILINE)) == 1, install_name
+        assert "retry" not in install_run.lower(), install_name
+        assert "helm upgrade" not in install_run, install_name
+    assert (
+        "for chart in crossplane crossview; do"
+        in by_name[
+            "Preload the images the crossplane and crossview charts run into kind (with retry)"
+        ]["run"]
     )
 
 
