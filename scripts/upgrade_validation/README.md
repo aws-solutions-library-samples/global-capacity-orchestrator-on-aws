@@ -43,7 +43,7 @@ reporting).
 | `preflight` | — | The release preflight, then the base release: its tag still names the pinned commit, the checkout descends from it, and its cdk.json deploys the same project and Regions. |
 | `baseline` | `preflight` | Reused. |
 | `prepare` | `preflight` | Builds the workspace, installs the base `gco`, and synthesizes the base app; its stacks must be this checkout's targets and must all carry the run tag. |
-| `deploy` | `baseline`, `prepare` | The base `gco stacks deploy-all`, then run-tag adoption of what it created. |
+| `deploy` | `baseline`, `prepare` | Requires the image mirror's repositories in the baseline, runs the base `gco stacks deploy-all`, then adopts what it created by run tag. |
 | `sentinels` | `deploy` | Writes the sentinel through the base release's API. |
 | `upgrade` | `sentinels` | Tags the candidate in the mirror, checks the plan with `gco upgrade --check`, then runs the base `gco upgrade` and adopts the recreated stacks. |
 | `topology` | `upgrade` | Reused, against the upgraded deployment. |
@@ -77,6 +77,16 @@ without the tag is never adopted.
 The relaxation is gated on the settings class (`allows_run_tag_adoption` is a
 class attribute), so the release and example harnesses cannot record or honor
 an adopted stack.
+
+ECR has no such second authority. The release harness owns a repository its
+image mirror creates through the `on_ecr_repository_created` callback, which a
+`gco` subprocess cannot call. So `deploy` first requires every repository
+either release's mirror copies into (the `configured-mirror` targets of both
+checkpointed image graphs) to be in the baseline: the mirror can then only add
+tags, which `_checkpoint_new_ecr_images` records as retained deltas exactly as
+it does for a release run. The base graph's mirror targets come from the base
+clone's own `charts.yaml`, because `_expected_ecr_images` reads the chart
+catalogue of the checkout it is given.
 
 The run tag reaches the stacks through the base checkout's cdk.json:
 `context.tags` is applied to every stack by the app, and `gco upgrade`

@@ -34,6 +34,10 @@ from ..protected import (
 #: the validated checkout (the upgrade harness's base release).
 PRIOR_RELEASE_ECR_IMAGES_KEY = "prior_release_ecr_images"
 
+#: The chart catalogue the image mirror derives its images from, relative to
+#: a checkout (``cli/_image_mirror.py`` reads its own checkout's copy).
+_CHARTS_YAML = Path("lambda") / "helm-installer" / "charts.yaml"
+
 
 def _strip_baseline_ecr(
     project_inventory: dict[str, Any], baseline: dict[str, Any]
@@ -417,9 +421,10 @@ def _expected_ecr_images(
 ) -> list[dict[str, Any]]:
     """Derive exact CDK-asset and configured mirror tags without AWS writes.
 
-    ``root`` is the checkout whose ``cdk.out`` and ``cdk.json`` are read; it
-    defaults to the validated checkout. The upgrade harness also passes the
-    private checkout of the release it deploys first.
+    ``root`` is the checkout whose ``cdk.out``, ``cdk.json``, and chart
+    catalogue are read; it defaults to the validated checkout. The upgrade
+    harness also passes the private checkout of the release it deploys first,
+    whose mirror copies the images its own charts name.
     """
     checkout = ctx.settings.repo_root if root is None else root
     targets: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -452,7 +457,9 @@ def _expected_ecr_images(
 
     mirror_config = _image_mirror.read_mirror_config(checkout / "cdk.json")
     if mirror_config["enabled"]:
-        source_refs = _image_mirror.collect_source_refs()
+        source_refs = _image_mirror.collect_source_refs(
+            _image_mirror.load_charts_config(checkout / _CHARTS_YAML)
+        )
         for region in ctx.deployment_regions:
             plan = _image_mirror.plan_from_sources(
                 source_refs,

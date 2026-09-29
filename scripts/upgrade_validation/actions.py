@@ -36,6 +36,7 @@ from scripts.live_release_validation.inventory import describe_stack
 from scripts.live_release_validation.models import ActionFailure, RunContext, utc_now
 from scripts.live_release_validation.ownership.ecr import (
     PRIOR_RELEASE_ECR_IMAGES_KEY,
+    _checkpointed_ecr_image_targets,
     _expected_ecr_images,
 )
 from scripts.live_release_validation.ownership.kms import _checkpoint_retained_kms_keys
@@ -292,6 +293,40 @@ def _require_prepared_workspace(ctx: RunContext) -> dict[str, Any]:
     return prepared
 
 
+def _require_mirror_repositories_in_baseline(
+    ctx: RunContext, baseline: dict[str, Any]
+) -> dict[str, Any]:
+    """Every repository either release's image mirror copies into must predate the run.
+
+    The mirror runs inside the base ``gco`` and, after the upgrade, inside the
+    candidate's, with no creation callback into this harness: a repository it
+    created would have no ownership record, so final-inventory could neither
+    accept nor remove it. Copying into a repository the baseline already holds
+    is covered the way a release run covers it: a tag the baseline lacked is
+    a retained image delta.
+    """
+    present = {
+        (str(region), str(repository.get("name") or ""))
+        for region, repositories in (baseline.get("ecr_repositories") or {}).items()
+        for repository in repositories
+    }
+    wanted = sorted(
+        {
+            (str(item["region"]), str(item["repository"]))
+            for item in _checkpointed_ecr_image_targets(ctx)
+            if any(source.get("kind") == "configured-mirror" for source in item["sources"])
+        }
+    )
+    missing = [f"{region}:{name}" for region, name in wanted if (region, name) not in present]
+    if missing:
+        raise RuntimeError(
+            "The image mirror would create ECR repositories outside this run's ownership "
+            f"records: {', '.join(missing)}. Seed them with 'gco images mirror --region "
+            "<region>' first (a release validation run leaves them in place), then rerun"
+        )
+    return {"repositories": [f"{region}:{name}" for region, name in wanted]}
+
+
 def _stack_generations(ctx: RunContext) -> dict[str, str]:
     """The stack ID this run owns under each target name now."""
     return {
@@ -370,16 +405,13 @@ def _verify_base_release(ctx: RunContext) -> dict[str, Any]:
             f"{settings.base_ref} deploys a different {' and '.join(differing)} than this "
             "checkout; the teardown and inventory would not cover what it deploys"
         )
-    if (base_context.get("volcano_image_mirror") or {}).get("enabled"):
-        raise RuntimeError(
-            f"{settings.base_ref}'s cdk.json enables the image mirror, whose repositories the "
-            "base gco creates outside this harness's ownership records"
-        )
     return {
         "ref": settings.base_ref,
         "commit": commit,
         "project_name": base_context["project_name"],
         "deployment_regions": base_context["deployment_regions"],
+        # Checked against the baseline before the deploy phase begins.
+        "image_mirror": bool((base_context.get("volcano_image_mirror") or {}).get("enabled")),
     }
 
 
@@ -593,7 +625,8 @@ def action_base_deploy(ctx: RunContext) -> dict[str, Any]:
     phase = _phases(ctx).get("deploy")
     if phase is None:
         _require_prepared_workspace(ctx)
-        phase = _begin_phase(ctx, "deploy")
+        mirror = _require_mirror_repositories_in_baseline(ctx, ctx.checkpoint.baseline)
+        phase = _begin_phase(ctx, "deploy", image_mirror=mirror)
         try:
             # No --tag: the run tag comes from cdk.json, exactly as it must for
             # the upgrade's redeploy, so adopting these stacks also proves it.

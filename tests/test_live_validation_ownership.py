@@ -3809,8 +3809,45 @@ class TestExpectedEcrImages:
         }
 
     def _expected(self, ctx: Any, stack_names: list[str], refs: list[str] | None = None) -> Any:
-        with patch("cli._image_mirror.collect_source_refs", return_value=list(refs or [])):
+        with (
+            patch("cli._image_mirror.load_charts_config", return_value={}),
+            patch("cli._image_mirror.collect_source_refs", return_value=list(refs or [])),
+        ):
             return ownership_ecr._expected_ecr_images(ctx, stack_names)
+
+    def test_the_chart_catalogue_path_matches_the_mirrors(self) -> None:
+        from cli import _image_mirror
+
+        mirrors_own = _image_mirror._CHARTS_YAML.relative_to(_image_mirror._REPO_ROOT)
+        assert mirrors_own == ownership_ecr._CHARTS_YAML
+
+    def test_the_mirror_copies_what_the_given_checkouts_charts_name(self, tmp_path: Path) -> None:
+        # The upgrade harness's base release mirrors the Volcano tag its own
+        # charts.yaml pins, not the validated checkout's.
+        candidate = tmp_path / "candidate"
+        candidate.mkdir()
+        ctx = self._ctx(candidate, mirror_enabled=True)
+        base = tmp_path / "base"
+        (base / "cdk.out").mkdir(parents=True)
+        (base / "cdk.json").write_text(
+            (candidate / "cdk.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        self._write_assets(base, _STACK, {"dockerImages": {}})
+        charts = base / ownership_ecr._CHARTS_YAML
+        charts.parent.mkdir(parents=True)
+        charts.write_text(
+            "charts:\n  volcano:\n    values:\n      basic:\n"
+            "        image_tag_version: v0.0.9\n"
+            "        scheduler_image_name: volcanosh/vc-scheduler\n",
+            encoding="utf-8",
+        )
+
+        targets = ownership_ecr._expected_ecr_images(ctx, [_STACK], root=base)
+
+        assert [(item["region"], item["repository"], item["tag"]) for item in targets] == [
+            (region, f"{_PROJECT}/dockerhub/volcanosh/vc-scheduler", "v0.0.9")
+            for region in sorted((_REGION, _OTHER_REGION))
+        ]
 
     def test_targets_are_merged_across_stacks_and_sorted(self, tmp_path: Path) -> None:
         ctx = self._ctx(tmp_path)

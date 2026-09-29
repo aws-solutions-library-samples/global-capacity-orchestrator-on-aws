@@ -1292,7 +1292,23 @@ class TestVerifyBaseRelease:
             "commit": repo.base,
             "project_name": _PROJECT,
             "deployment_regions": _REGIONS,
+            "image_mirror": False,
         }
+
+    def test_a_base_release_with_the_image_mirror_on_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every release ships the mirror on; deploy checks its repositories.
+        settings = _settings(tmp_path)
+        replies = {
+            "rev-parse": settings.base_commit,
+            "merge-base": settings.base_commit,
+            "show": _cdk_json(volcano_image_mirror={"enabled": True}),
+        }
+        monkeypatch.setattr(
+            actions, "_run_git", lambda _root, command, *_args, **_kwargs: replies[command]
+        )
+        assert actions._verify_base_release(_ctx(settings))["image_mirror"] is True
 
     @pytest.mark.parametrize(
         ("answers", "match"),
@@ -1317,10 +1333,6 @@ class TestVerifyBaseRelease:
                     )
                 },
                 "different deployment_regions",
-            ),
-            (
-                {"show": _cdk_json(volcano_image_mirror={"enabled": True})},
-                "enables the image mirror",
             ),
         ],
     )
@@ -1668,6 +1680,70 @@ class TestBaseDeploy:
         assert settled == ["adopt:deploy:", "reconcile", "kms"]
         assert details["stacks"] == {"stacks": "healthy"}
         assert details["phase"]["command"]["exit_code"] == 0 and details["phase"]["finished_at"]
+        assert details["phase"]["image_mirror"] == {"repositories": []}
+
+    @staticmethod
+    def _image_target(repository: str, *, kind: str = "configured-mirror") -> dict[str, Any]:
+        return {
+            "region": _REGION,
+            "repository": repository,
+            "tag": "v1.15.2",
+            "sources": [{"kind": kind, "source_ref": f"docker.io/{repository}:v1.15.2"}],
+        }
+
+    def _mirroring_ctx(self, tmp_path: Path, *baseline_repositories: str) -> Any:
+        ctx = _ctx(
+            _settings(tmp_path),
+            state={
+                "target_stack_regions": dict(_TARGETS),
+                "expected_ecr_images": [
+                    self._image_target("gco/dockerhub/volcanosh/vc-scheduler"),
+                    self._image_target("cdk-assets", kind="cdk-asset"),
+                ],
+                "prior_release_ecr_images": [
+                    self._image_target("gco/dockerhub/volcanosh/vc-controller-manager")
+                ],
+            },
+        )
+        ctx.checkpoint.baseline = {
+            "ecr_repositories": {_REGION: [{"name": name} for name in baseline_repositories]}
+        }
+        return ctx
+
+    def test_the_mirror_may_only_copy_into_repositories_the_baseline_holds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: list[str]
+    ) -> None:
+        # Either release's mirror would create the controller repository from a
+        # gco subprocess, with no ownership record; the asset repository is not
+        # the mirror's and is ignored.
+        ctx = self._mirroring_ctx(tmp_path, "gco/dockerhub/volcanosh/vc-scheduler")
+        monkeypatch.setattr(actions, "_run_step", lambda *_a, **_k: pytest.fail("must not deploy"))
+        with pytest.raises(
+            RuntimeError,
+            match=re.escape(f"records: {_REGION}:gco/dockerhub/volcanosh/vc-controller-manager."),
+        ):
+            actions.action_base_deploy(ctx)
+        assert ctx.checkpoint.deployment_attempted is False
+        assert ctx.checkpoint.state[actions.STATE_KEY]["phases"] == {}
+        assert settled == []
+
+    def test_the_mirror_repositories_are_recorded_on_the_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: list[str]
+    ) -> None:
+        ctx = self._mirroring_ctx(
+            tmp_path,
+            "gco/dockerhub/volcanosh/vc-controller-manager",
+            "gco/dockerhub/volcanosh/vc-scheduler",
+        )
+        monkeypatch.setattr(actions, "_run_step", lambda *_a, **_k: _result())
+        monkeypatch.setattr(actions, "_require_healthy_targets", lambda ctx: {})
+        details = actions.action_base_deploy(ctx)
+        assert details["phase"]["image_mirror"] == {
+            "repositories": [
+                f"{_REGION}:gco/dockerhub/volcanosh/vc-controller-manager",
+                f"{_REGION}:gco/dockerhub/volcanosh/vc-scheduler",
+            ]
+        }
 
     def test_a_failed_deploy_still_adopts_what_it_left(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: list[str]

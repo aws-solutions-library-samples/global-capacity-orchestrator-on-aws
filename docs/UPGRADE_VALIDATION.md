@@ -58,6 +58,15 @@ adoption**:
 - a same-name stack without the tag, created before the phase, or replacing a control-plane stack is refused, and the run fails rather than guess;
 - teardown re-checks the exact stack ID and tag before every delete, as it does for prepared stacks.
 
+The image mirror (`volcano_image_mirror`, on in the shipped cdk.json) creates
+ECR repositories outside CloudFormation. A release run records each repository
+its mirror creates; `gco` running in another process cannot, so before the
+base deploy this harness requires every repository either release's mirror
+copies into to be in the baseline already. A tag the mirror adds to one
+of them is a retained image delta, as in a release run. A release validation
+run leaves those repositories in place; in a fresh account, seed them first
+with `gco images mirror --region <region>`.
+
 The harness never creates a tag in your repository. The candidate commit is
 tagged with a synthetic release name (the base's next patch version) in a
 private mirror inside the run's workspace, and the base clone upgrades from
@@ -69,10 +78,10 @@ Actions run in registry order. Selecting one action includes its dependencies.
 
 | Action | Depends on | Contract |
 |---|---|---|
-| `preflight` | None | The live release preflight, then the base release: its tag still names the pinned commit, the checkout descends from it, its cdk.json deploys the same project and Regions and leaves the image mirror off, and git, node, and npm are on `PATH` with the free-space floor met on the workspace volume. On resume, first adopts what an interrupted phase left |
+| `preflight` | None | The live release preflight, then the base release: its tag still names the pinned commit, the checkout descends from it, its cdk.json deploys the same project and Regions, and git, node, and npm are on `PATH` with the free-space floor met on the workspace volume. On resume, first adopts what an interrupted phase left |
 | `baseline` | `preflight` | Capture protected CloudFormation and ECR state and every regional Region's Transaction Search state, as the release harness does |
 | `prepare` | `preflight` | Build the private workspace (a mirror sharing objects with your repository, a clone at the base tag, a venv with the base `gco` installed editable with the `cdk` extra pinned by that release's lock file, and its `npm ci`), write the run tag and the run-scoped context into the clone's cdk.json, and synthesize the base app: its stacks must be exactly this checkout's targets, all carrying the run tag, and nothing but cdk.json may change in the clone |
-| `deploy` | `baseline`, `prepare` | Run the base release's `gco stacks deploy-all`, adopt every stack it created by run tag, checkpoint the retained EKS keys and log groups, and require every target stack deployed and owned |
+| `deploy` | `baseline`, `prepare` | Require every ECR repository either release's image mirror copies into to be in the baseline, run the base release's `gco stacks deploy-all`, adopt every stack it created by run tag, checkpoint the retained EKS keys and log groups, and require every target stack deployed and owned |
 | `sentinels` | `deploy` | Create a job template through the base release's API, waiting for the API to answer |
 | `upgrade` | `sentinels` | Tag the candidate in the private mirror, require `gco upgrade --check` to plan exactly this upgrade (the target, an editable install, a control-plane and workload split covering the targets), checkpoint the base generation's retained resources, run the base release's `gco upgrade --yes --skip-container`, and adopt the stacks it recreated |
 | `topology` | `upgrade` | The release harness's topology check against the upgraded deployment: stacks, EKS, HTTPS ALB targets, APIs, queues, and DynamoDB |
