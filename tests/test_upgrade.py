@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -378,35 +379,102 @@ def test_cli_source_root_is_the_package_parent() -> None:
 
 
 def test_refresh_python_install_uses_pip_first(tmp_path: Path) -> None:
-    with patch.object(engine, "_run", return_value=_completed(0)) as run:
+    with (
+        patch.object(engine, "installed_extras", return_value=["cdk", "mcp"]),
+        patch.object(engine, "_run", return_value=_completed(0)) as run,
+    ):
         report = engine.refresh_python_install(tmp_path)
     assert report["tool"] == "pip" and report["status"] == "ok"
+    assert report["extras"] == ["cdk", "mcp"]
     argv = run.call_args.args[0]
     assert argv[:4] == [engine.sys.executable, "-m", "pip", "install"]
-    assert argv[-2:] == ["-e", str(tmp_path)]
+    assert argv[-2:] == ["-e", f"{tmp_path}[cdk,mcp]"]
 
 
 def test_refresh_python_install_falls_back_to_uv(tmp_path: Path) -> None:
     results = iter([_completed(1, stderr="No module named pip"), _completed(0)])
     log: list[str] = []
     with (
+        patch.object(engine, "installed_extras", return_value=["cdk"]),
         patch.object(engine, "_run", side_effect=lambda *a, **k: next(results)) as run,
         patch.object(engine.shutil, "which", return_value="/usr/local/bin/uv"),
     ):
         report = engine.refresh_python_install(tmp_path, log=log.append)
     assert report["tool"] == "uv" and report["status"] == "ok"
+    assert report["extras"] == ["cdk"]
     assert run.call_args.args[0][:3] == ["/usr/local/bin/uv", "pip", "install"]
+    assert run.call_args.args[0][-2:] == ["-e", f"{tmp_path}[cdk]"]
     assert any("retrying with uv" in line for line in log)
 
 
 def test_refresh_python_install_reports_both_failures(tmp_path: Path) -> None:
     results = iter([_completed(1, stderr="pip broke"), _completed(1, stderr="uv broke")])
     with (
+        patch.object(engine, "installed_extras", return_value=["cdk"]),
         patch.object(engine, "_run", side_effect=lambda *a, **k: next(results)),
         patch.object(engine.shutil, "which", return_value="/usr/local/bin/uv"),
-        pytest.raises(UpgradeError, match="uv broke"),
+        pytest.raises(UpgradeError, match=r"(?s)install -e '.*\[cdk\]'.*uv broke"),
     ):
         engine.refresh_python_install(tmp_path)
+
+
+class _FakeDistribution:
+    def __init__(self, requires: list[str] | None) -> None:
+        self.requires = requires
+
+
+def _fake_metadata(installed: set[str], requires: list[str] | None) -> Any:
+    """A stand-in for importlib.metadata: gco-cli plus the names in ``installed``."""
+
+    def distribution(name: str) -> _FakeDistribution:
+        if name == engine.DISTRIBUTION:
+            return _FakeDistribution(requires)
+        if name in installed:
+            return _FakeDistribution([])
+        raise engine.metadata.PackageNotFoundError(name)
+
+    return SimpleNamespace(
+        distribution=distribution, PackageNotFoundError=engine.metadata.PackageNotFoundError
+    )
+
+
+def test_installed_extras_asks_again_for_every_fully_installed_group() -> None:
+    requires = [
+        "boto3==1.43.93",
+        'aws-cdk-lib==2.269.0; extra == "cdk"',
+        'cdk-nag==3.0.2; extra == "cdk"',
+        'fastmcp==3.2.0; extra == "mcp"',
+        "pytest==9.1.1 ; extra == 'test'",
+        'moto==5.2.3; extra == "test"',
+        'gco-cli[test]; extra == "dev"',
+        'pre-commit==4.3.0; extra == "dev"',
+        'uvloop==0.22.1; sys_platform != "win32" and extra == "image-health-monitor"',
+        '; extra == "malformed"',
+    ]
+    installed = {"boto3", "fastmcp", "pytest", "pre-commit"}
+    with patch.object(engine, "metadata", _fake_metadata(installed, requires)):
+        # cdk is always asked for; mcp is fully installed; test lacks moto;
+        # dev's only foreign requirement is installed (its self-reference is
+        # not a separate package); uvloop is missing; a line without a
+        # package name names no group.
+        assert engine.installed_extras() == ["cdk", "dev", "mcp"]
+
+
+def test_installed_extras_without_metadata_still_asks_for_cdk() -> None:
+    with patch.object(engine, "metadata", _fake_metadata(set(), None)):
+        assert engine.installed_extras() == ["cdk"]
+    with patch.object(engine, "metadata", _fake_metadata(set(), [])):
+        assert engine.installed_extras() == ["cdk"]
+
+
+def test_installed_extras_when_the_distribution_is_not_installed() -> None:
+    with patch.object(engine, "metadata", _fake_metadata(set(), None)):
+        assert engine.installed_extras("not-installed") == ["cdk"]
+
+
+def test_installed_extras_reads_the_real_metadata() -> None:
+    """The running interpreter's own install: cdk is always there."""
+    assert "cdk" in engine.installed_extras()
 
 
 def test_refresh_python_install_without_uv_reports_pip_failure(tmp_path: Path) -> None:

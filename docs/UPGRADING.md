@@ -48,8 +48,10 @@ release, while the control plane is updated in place and keeps its state:
    deployment's configuration, not the release's, so its exact bytes are
    snapshotted first and written back afterwards — your project name, Regions and
    feature toggles are what deploys, not the release's defaults.
-3. **Refresh the local install.** `pip install -e .` when the running `gco` is
-   the editable install of this checkout, `npm ci` when the checkout has its own
+3. **Refresh the local install.** `pip install -e '.[cdk,...]'` when the running
+   `gco` is the editable install of this checkout: the `cdk` extra plus every
+   extra that was already installed, so the CDK library the redeploy synthesizes
+   with follows the release's pins. Then `npm ci` when the checkout has its own
    CDK toolchain, and a rebuild of the `gco-dev` image when a container runtime
    and the image are present.
 4. **Scale the workload tier to zero.** First the checkout's deployable sources

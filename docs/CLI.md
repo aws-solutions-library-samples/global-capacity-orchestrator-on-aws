@@ -5807,9 +5807,11 @@ Runs inside a git checkout of the repository and:
    `cdk.json` — the deployment's own configuration — is snapshotted before the
    checkout and written back byte-for-byte afterwards, whether it was modified
    locally or committed on a fork branch;
-2. refreshes the local install: `pip install -e .` when the running `gco` is the
-   editable install of this checkout (falling back to `uv pip` for interpreters
-   without pip), `npm ci` when the checkout carries its own CDK toolchain
+2. refreshes the local install: `pip install -e '.[cdk,...]'` when the running
+   `gco` is the editable install of this checkout, with the `cdk` extra and
+   every extra already installed so their pins follow the release (falling back
+   to `uv pip` for interpreters without pip), `npm ci` when the checkout carries
+   its own CDK toolchain
    (`node_modules/.bin/cdk`), and a rebuild of the `gco-dev` image when a
    container runtime and the image are both present;
 3. checks that the checkout's deployable sources are readable by every user —

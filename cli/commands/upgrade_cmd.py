@@ -65,7 +65,10 @@ def _describe_install_steps(
             f"(currently {plan.checkout.ref} at {plan.checkout.head}); cdk.json is preserved byte-for-byte"
         )
         if plan.install.cli_editable_from_checkout:
-            lines.append("Refresh the editable CLI install (pip install -e .)")
+            lines.append(
+                "Refresh the editable CLI install with the cdk extra and every extra already "
+                "installed (pip install -e '.[cdk,...]')"
+            )
         else:
             lines.append(
                 f"The running gco ({plan.current_version} from {plan.install.cli_path}) is not the "
@@ -177,7 +180,8 @@ def upgrade(
     \b
       1. fetches the release tags and checks out the latest vMAJOR.MINOR.PATCH
          (cdk.json — your deployment's configuration — is preserved as-is);
-      2. refreshes the local install: pip install -e . for an editable CLI,
+      2. refreshes the local install: pip install -e '.[cdk,...]' (the cdk
+         extra plus every extra already installed) for an editable CLI,
          npm ci for a checkout-local CDK toolchain, and a rebuild of the
          gco-dev container image when it exists;
       3. checks that the checkout's deployable sources are readable by every

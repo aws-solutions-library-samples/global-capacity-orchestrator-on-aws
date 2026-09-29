@@ -10,7 +10,8 @@ CloudFormation stacks — to a tagged release in one pass:
    preserved byte-for-byte: the deployment's configuration is the operator's,
    not the release's, so it is snapshotted before the checkout and written back
    afterwards.
-3. **Refresh the local install.** ``pip install -e .`` when the running CLI is
+3. **Refresh the local install.** ``pip install -e '.[cdk,...]'`` (``cdk`` plus
+   every extra already installed) when the running CLI is
    the editable install of this checkout, ``npm ci`` when the checkout carries
    its own CDK toolchain, and a rebuild of the ``gco-dev`` image when a
    container runtime and the image are both present.
@@ -43,6 +44,7 @@ import subprocess  # fixed argv only, never a shell string
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,15 @@ DEFAULT_DEV_IMAGE = "gco-dev"
 
 #: Files that belong to the deployment rather than the release and survive the checkout.
 PRESERVED_FILES: tuple[str, ...] = ("cdk.json",)
+
+#: The distribution the editable install registers (``[project] name``).
+DISTRIBUTION = "gco-cli"
+
+#: Extras the stack cycle needs whatever else is installed: the deploy synthesizes the CDK app.
+REQUIRED_EXTRAS: tuple[str, ...] = ("cdk",)
+
+_EXTRA_MARKER_RE = re.compile(r"""extra\s*==\s*["']([^"']+)["']""")
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 #: Wall-clock cap for one git/pip/npm/image-build subprocess.
 _TOOL_TIMEOUT_SECONDS = 1800.0
@@ -346,31 +357,80 @@ def probe_install(root: Path, *, image: str = DEFAULT_DEV_IMAGE) -> InstallProbe
     )
 
 
+def _installed(name: str) -> bool:
+    try:
+        metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def installed_extras(distribution: str = DISTRIBUTION) -> list[str]:
+    """The optional-dependency groups to reinstall: the ones already installed, plus ``cdk``.
+
+    ``pip install -e .`` alone never touches an extra, so a release that moves
+    the ``cdk`` pins (aws-cdk-lib, cdk-nag, constructs) would otherwise be
+    deployed with the previous release's CDK library. An editable install
+    keeps the metadata it was installed with, so this reads the groups the
+    operator had before the checkout moved: every extra whose requirements are
+    all installed is asked for again, which only re-pins packages already
+    present. ``cdk`` is always included because the stack cycle synthesizes
+    the CDK app.
+    """
+    extras = set(REQUIRED_EXTRAS)
+    try:
+        requirements = metadata.distribution(distribution).requires or []
+    except metadata.PackageNotFoundError:
+        return sorted(extras)
+    self_name = _canonical_name(distribution)
+    by_extra: dict[str, list[str]] = {}
+    for requirement in requirements:
+        extra = _EXTRA_MARKER_RE.search(requirement)
+        name = _REQUIREMENT_NAME_RE.match(requirement)
+        if extra is None or name is None:
+            continue
+        names = by_extra.setdefault(extra.group(1), [])
+        if _canonical_name(name.group(1)) != self_name:
+            names.append(name.group(1))
+    for extra_name, names in by_extra.items():
+        if all(_installed(name) for name in names):
+            extras.add(extra_name)
+    return sorted(extras)
+
+
+def _canonical_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def refresh_python_install(root: Path, *, log: Logger = _quiet) -> dict[str, Any]:
     """Reinstall the checkout into the running interpreter so new pins take effect.
 
+    The reinstall asks for the extras :func:`installed_extras` returns, so the
+    CDK toolchain and any other installed group follow the release's pins.
     ``python -m pip`` is tried first; interpreters created by ``uv`` ship
     without pip, so ``uv pip`` is the fallback when ``uv`` is on PATH.
     """
-    pip_argv = [sys.executable, "-m", "pip", "install", "--quiet", "--no-input", "-e", str(root)]
-    log("Refreshing the editable CLI install (pip install -e .)...")
+    extras = installed_extras()
+    target = f"{root}[{','.join(extras)}]"
+    pip_argv = [sys.executable, "-m", "pip", "install", "--quiet", "--no-input", "-e", target]
+    log(f"Refreshing the editable CLI install with its extras ({', '.join(extras)})...")
     result = _run(pip_argv, cwd=root)
     if result.returncode == 0:
-        return {"tool": "pip", "argv": pip_argv, "status": "ok"}
+        return {"tool": "pip", "argv": pip_argv, "extras": extras, "status": "ok"}
 
     uv = shutil.which("uv")
     if uv is not None:
-        uv_argv = [uv, "pip", "install", "--quiet", "--python", sys.executable, "-e", str(root)]
+        uv_argv = [uv, "pip", "install", "--quiet", "--python", sys.executable, "-e", target]
         log("pip is unavailable in this interpreter; retrying with uv pip...")
         uv_result = _run(uv_argv, cwd=root)
         if uv_result.returncode == 0:
-            return {"tool": "uv", "argv": uv_argv, "status": "ok"}
+            return {"tool": "uv", "argv": uv_argv, "extras": extras, "status": "ok"}
         result = uv_result
     detail = (result.stderr or result.stdout).strip()[-800:]
     raise UpgradeError(
         "Could not refresh the editable CLI install after checking out the release; the "
         "deploy would run the new app against old dependencies. Run "
-        f"'{sys.executable} -m pip install -e {root}' (or 'uv pip install -e .') yourself, "
+        f"\"{sys.executable} -m pip install -e '{target}'\" (or uv pip install) yourself, "
         f"then rerun 'gco upgrade --skip-checkout'. Installer output:\n{detail}"
     )
 
