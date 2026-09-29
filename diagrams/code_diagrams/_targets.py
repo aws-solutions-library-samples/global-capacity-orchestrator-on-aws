@@ -469,4 +469,46 @@ TARGETS: list[Target] = [
         function="HealthMonitor.get_health_status",
         title="Health status policy (thresholds, violations, collection failure)",
     ),
+    # --- Upgrade path, strict deploy fencing, and release validation -----
+    # ``gco upgrade`` destroys and recreates the regional tier; the strict
+    # change-set path is the identity fence every exact-owned deploy and
+    # teardown passes through; the live release and upgrade harnesses decide
+    # which stacks a run may adopt, replace, and delete. The proxy forwarder
+    # and the MCP local-data resolver are trust boundaries with real
+    # branching that had no chart yet.
+    Target(
+        source="cli/upgrade.py",
+        function="run_stack_cycle",
+        title="gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate)",
+    ),
+    Target(
+        source="cli/stacks.py",
+        function="StackManager._execute_prepared_change_set",
+        title="Strict change-set execution (identity, type, and tag fencing; no-op and resume authority)",
+    ),
+    Target(
+        source="lambda/proxy-shared/proxy_utils.py",
+        function="forward_request",
+        title="Proxy upstream forwarding (HTTPS-only target, one deadline, safe-method retries, TLS fail-closed)",
+    ),
+    Target(
+        source="gco_mcp/local_data.py",
+        function="resolve_local_path",
+        title="MCP local-data path boundary (pinned root, traversal and symlink-escape rejection)",
+    ),
+    Target(
+        source="scripts/live_release_validation/ownership/stacks.py",
+        function="_adopt_run_tagged_stacks",
+        title="Run-tag stack adoption (exact tag, creation window, replaceable workload generations)",
+    ),
+    Target(
+        source="scripts/live_release_validation/actions/destroy.py",
+        function="destroy_deployment",
+        title="Live-validation teardown (resume reconciliation, retried exact-owned destroy, absence proofs)",
+    ),
+    Target(
+        source="scripts/upgrade_validation/actions.py",
+        function="action_upgrade",
+        title="Upgrade-validation upgrade phase (plan check, adoption window, settle, resume)",
+    ),
 ]

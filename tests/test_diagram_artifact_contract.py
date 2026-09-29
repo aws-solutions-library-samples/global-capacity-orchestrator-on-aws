@@ -42,6 +42,16 @@ _REQUIRED_HIGH_VALUE_TARGETS = {
         "gco/services/inference_monitor.py",
         "InferenceMonitor._reconcile_endpoint_authorized",
     ),
+    ("cli/upgrade.py", "run_stack_cycle"),
+    ("cli/stacks.py", "StackManager._execute_prepared_change_set"),
+    ("lambda/proxy-shared/proxy_utils.py", "forward_request"),
+    ("gco_mcp/local_data.py", "resolve_local_path"),
+    (
+        "scripts/live_release_validation/ownership/stacks.py",
+        "_adopt_run_tagged_stacks",
+    ),
+    ("scripts/live_release_validation/actions/destroy.py", "destroy_deployment"),
+    ("scripts/upgrade_validation/actions.py", "action_upgrade"),
 }
 
 
@@ -657,9 +667,14 @@ class TestCodeCatalogueViolations:
         (root / "gco" / "odd.py").mkdir(parents=True)
         (root / "lambda" / "x-build").mkdir(parents=True)
         (root / "lambda" / "x-build" / "handler.py").write_text(marker, encoding="utf-8")
+        (root / "scripts" / "harness").mkdir(parents=True)
+        (root / "scripts" / "harness" / "retired.py").write_text(marker, encoding="utf-8")
+        (root / "tests").mkdir()
+        (root / "tests" / "helper.py").write_text(marker, encoding="utf-8")
         assert self._issues(root) == [
             "retired source marker: app.py",
             "retired source marker: cli/retired.py",
+            "retired source marker: scripts/harness/retired.py",
         ]
 
     def test_shared_source_copies_carry_the_canonical_marker(

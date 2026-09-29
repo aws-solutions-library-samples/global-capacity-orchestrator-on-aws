@@ -173,6 +173,41 @@ class TestTargetsCatalogue:
                 nodes = match.body if isinstance(match, ast.ClassDef) else []
         assert not missing, f"diagram selectors do not resolve: {missing}"
 
+    def test_every_charted_source_lies_under_a_marker_root(self) -> None:
+        """Pruning and the contract only walk the marker roots.
+
+        A source charted anywhere else would keep a stale marker forever once
+        it was retired, and the contract would never notice.
+        """
+        outside = [
+            target.source
+            for target in TARGETS
+            if not source_marker_mod.is_marker_source(target.source)
+        ]
+        assert not outside, (
+            f"charted sources outside MARKER_SOURCE_ROOTS: {outside}. Add their "
+            "root to diagrams/code_diagrams/_source_marker.py::MARKER_SOURCE_ROOTS."
+        )
+
+    @pytest.mark.parametrize(
+        ("relative", "expected"),
+        [
+            ("app.py", True),
+            ("cli/jobs.py", True),
+            ("gco/stacks/global_stack.py", True),
+            ("gco_mcp/mission/engine.py", True),
+            ("lambda/helm-installer/handler.py", True),
+            ("scripts/upgrade_validation/actions.py", True),
+            ("app.py.orig", False),
+            ("gcox/module.py", False),
+            ("scriptsx/module.py", False),
+            ("tests/test_example.py", False),
+            ("diagrams/code_diagrams/generate.py", False),
+        ],
+    )
+    def test_marker_roots_match_whole_path_segments(self, relative: str, expected: bool) -> None:
+        assert source_marker_mod.is_marker_source(relative) is expected
+
     def test_targets_and_output_stems_are_unique(self) -> None:
         identities = [(target.source, target.function) for target in TARGETS]
         stems = [
@@ -563,8 +598,8 @@ class TestStripMarkers:
 
     def test_strip_all_markers_walks_standard_roots(self, tmp_path: Path) -> None:
         """``strip_all_markers`` covers ``app.py`` + ``cli/`` + ``gco/``
-        + ``lambda/``, skips the packaged bundle dirs, and returns
-        the number of modified files."""
+        + ``lambda/`` + ``scripts/``, skips the packaged bundle dirs and
+        paths outside every root, and returns the number of modified files."""
         # Set up a miniature project tree.
         self._write_source(
             tmp_path / "app.py",
@@ -582,6 +617,10 @@ class TestStripMarkers:
             tmp_path / "lambda" / "helm-installer" / "handler.py",
             f'"""doc."""\n# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n\ndef f():\n    pass\n',
         )
+        self._write_source(
+            tmp_path / "scripts" / "upgrade_validation" / "actions.py",
+            f'"""doc."""\n# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n\ndef f():\n    pass\n',
+        )
         # Bundle dirs must be skipped — the marker here is NOT ours and
         # must not be touched (in the real tree these hold vendored
         # dependency copies).
@@ -589,20 +628,27 @@ class TestStripMarkers:
             tmp_path / "lambda" / "helm-installer-build" / "handler.py",
             f'"""doc."""\n# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n\ndef f():\n    pass\n',
         )
+        # Outside every marker root, so never walked.
+        self._write_source(
+            tmp_path / "tests" / "helper.py",
+            f'"""doc."""\n# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n\ndef f():\n    pass\n',
+        )
 
         modified = strip_all_markers(tmp_path)
 
-        assert modified == 4
+        assert modified == 5
         # Walked files have no marker.
         for rel in (
             "app.py",
             "cli/jobs.py",
             "gco/stacks/global_stack.py",
             "lambda/helm-installer/handler.py",
+            "scripts/upgrade_validation/actions.py",
         ):
             assert SENTINEL not in (tmp_path / rel).read_text()
-        # Bundle dir untouched.
+        # Bundle dir and out-of-root file untouched.
         assert SENTINEL in (tmp_path / "lambda" / "helm-installer-build" / "handler.py").read_text()
+        assert SENTINEL in (tmp_path / "tests" / "helper.py").read_text()
 
     def test_upsert_strip_then_insert_repositions_stale_block(self, tmp_path: Path) -> None:
         """If a marker exists in a stale location (e.g. above the
@@ -1038,6 +1084,19 @@ class TestIncrementalTargetSelection:
             project_root=tmp_path, targets=[first, second], output_dir=output_dir
         ) == [first]
 
+    def test_a_stale_target_selects_every_target_of_its_source(self, tmp_path: Path) -> None:
+        """Selection is per source, because markers, provenance, and stamps are.
+
+        A function newly charted from an already-charted source has no
+        artifacts yet. Selecting it alone rewrote the source's marker without
+        its sibling and restamped the source past the sibling's artifacts.
+        """
+        first, second, output_dir = self._seed(tmp_path)
+        sibling = Target(source=first.source, function="k")
+        assert generate_mod.select_stale_targets(
+            project_root=tmp_path, targets=[first, sibling, second], output_dir=output_dir
+        ) == [first, sibling]
+
     def test_newly_charted_source_is_selected(self, tmp_path: Path) -> None:
         first, second, output_dir = self._seed(tmp_path)
         fresh = Target(source="fresh.py", function="h")
@@ -1181,8 +1240,14 @@ class TestPruneRetiredMarkers:
         assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
         assert vendored.read_bytes() == before
 
+    def test_retired_script_source_is_stripped(self, tmp_path: Path) -> None:
+        """``scripts/`` is a marker root, so a retired harness chart is pruned too."""
+        retired = self._write(tmp_path, "scripts/live_release_validation/retired.py", self._MARKED)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
+
     def test_files_outside_the_source_roots_are_ignored(self, tmp_path: Path) -> None:
-        outside = self._write(tmp_path, "scripts/helper.py", self._MARKED)
+        outside = self._write(tmp_path, "tests/helper.py", self._MARKED)
         before = outside.read_bytes()
         assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
         assert outside.read_bytes() == before
@@ -2574,6 +2639,55 @@ class TestMainCli:
         readme = repo.readme()
         assert "*Generated at (UTC): `2026-08-31T12:00:00Z`.*" in readme
         assert "[HTML](./cli/alpha.f.html) · [PNG](./cli/alpha.f.png)" in readme
+
+    def test_charting_another_function_of_a_charted_source_rerenders_that_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A new target in an already-charted source re-renders the whole source.
+
+        Markers, provenance entries, and artifact stamps are all per source.
+        Rendering only the new function rewrote the source's marker without
+        its sibling and restamped the manifest entry past the sibling's
+        artifacts, so the canonical incremental run failed the repository
+        contract on its own output.
+        """
+        contract = importlib.import_module("diagrams.generate")
+        repo = _FakeRepo(tmp_path, monkeypatch)
+        repo.commit(
+            "cli/alpha.py",
+            repo.SOURCES["cli/alpha.py"] + "\n\ndef g(flag):\n    return not flag\n",
+        )
+        repo.png_renderer = _FakePngRenderer()
+        repo.main()
+        capsys.readouterr()
+        beta_artifacts = {
+            suffix: repo.artifact(repo.BETA, suffix).read_bytes() for suffix in ("html", "png")
+        }
+        sibling = Target(source="cli/alpha.py", function="g")
+        catalogue = [repo.ALPHA, sibling, repo.BETA]
+        monkeypatch.setattr(generate_mod, "TARGETS", catalogue)
+        monkeypatch.setattr(contract, "TARGETS", catalogue)
+        monkeypatch.setenv("GCO_DIAGRAM_SOURCE_COMMIT", "d" * 40)
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "1788177600")  # 2026-08-31T12:00:00Z
+        repo.png_renderer = _FakePngRenderer()
+
+        repo.main()
+
+        assert "Targets      : 2 of 3 selected" in capsys.readouterr().out
+        assert repo.png_renderer.rendered == [
+            (repo.artifact(target, "html"), repo.artifact(target, "png"))
+            for target in (repo.ALPHA, sibling)
+        ]
+        alpha = (repo.root / "cli" / "alpha.py").read_text(encoding="utf-8")
+        assert f"# Generated from Git commit: {'d' * 40}" in alpha
+        for target in (repo.ALPHA, sibling):
+            html = repo.artifact(target, "html").relative_to(repo.root)
+            assert f"``{target.function}`` -> ``{html}``" in alpha
+        assert repo.manifest()["cli/alpha.py"]["source_commit"] == "d" * 40
+        assert {
+            suffix: repo.artifact(repo.BETA, suffix).read_bytes() for suffix in ("html", "png")
+        } == beta_artifacts
+        assert contract.check_diagram_contract(repo.root, infra=False, api=False) == []
 
     def test_skip_png_writes_html_only_and_removes_stale_pngs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
