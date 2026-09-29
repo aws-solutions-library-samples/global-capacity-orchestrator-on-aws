@@ -1167,6 +1167,7 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
     install = "Install pinned trust-manager with shipped values"
     upgrade = "Re-run the trust-manager install as an upgrade (idempotency contract)"
     mlflow = "Install pinned mlflow chart with shipped values"
+    stage = "Stage the TLS sidecar's pinned interpreter under a local tag (with retry)"
     publish = "Publish the MLflow CA bundle and serve MLflow over verified HTTPS"
     example = "Run the REAL mlflow tracking example over verified HTTPS as the processor SA"
     assert (
@@ -1175,6 +1176,7 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
         < order.index(upgrade)
         < order.index("Issue the shipped internal PKI with the pinned cert-manager")
         < order.index("Prove the tenant write fence in the real API server")
+        < order.index(stage)
         < order.index(mlflow)
         < order.index("Apply the post-Helm mlflow network policies")
         < order.index("Probe mlflow host validation (allowed 200 / arbitrary 403 / health exempt)")
@@ -1207,8 +1209,25 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
     assert 'manifest_processor_image=SimpleNamespace(image_uri="manifest-processor:ci")' in run
     assert 'sidecar["name"] == "mlflow-tls-proxy"' in run
     # The CI substitution is the carrier only: the pinned interpreter image the
-    # inference monitor uses, running the shipped program from a ConfigMap.
-    assert "from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE" in run
+    # inference monitor uses, running the shipped program from a ConfigMap. It
+    # is staged on the node by digest under a local tag and never pulled, so an
+    # ECR Public limit cannot fail the rollout.
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    cluster = kind_step["with"]["cluster_name"]
+    assert steps.index(kind_step) < order.index(stage)
+    local_image = workflow["jobs"]["integration-kind-examples-smoke"]["env"][
+        "CI_TLS_PROXY_LOCAL_IMAGE"
+    ]
+    assert re.fullmatch(r"[a-z0-9-]+:[a-z0-9.-]+", local_image), local_image
+    staged = by_name[stage]["run"]
+    assert "from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE" in staged
+    assert f"python3 .github/scripts/preload_kind_images.py --cluster {cluster}" in staged
+    assert '--pinned "${image}=${CI_TLS_PROXY_LOCAL_IMAGE}"' in staged
+    assert 'sidecar["image"] = os.environ["CI_TLS_PROXY_LOCAL_IMAGE"]' in run
+    assert 'sidecar["imagePullPolicy"] = "Never"' in run
+    assert "ENDPOINT_TLS_PROXY_IMAGE" not in run
     assert "--from-file=tls_proxy.py=gco/services/tls_proxy.py" in run
     assert 'sidecar["command"] = ["python3", "/etc/gco-tls-proxy/tls_proxy.py"]' in run
     assert '"nodeSelector": values["nodeSelector"]' in run

@@ -30,9 +30,19 @@ have, still fails the step. Any other image is pulled as written. An image pinne
 by digest cannot be addressed by ``kind load``, so it is left to the kubelet,
 with a warning.
 
+``--pinned IMAGE=LOCAL`` covers a pod the job writes itself that must run
+digest-pinned bytes. Anonymous ECR Public pulls also run into its data limit
+(429 "Data limit exceeded") from shared runner addresses, which kept failing
+``integration:kind:examples-smoke`` on the MLflow TLS sidecar's pinned Python
+image. The image is pulled by its digest (Docker Hub's copy first for a Docker
+Official Image on ECR Public, then ECR Public), tagged ``LOCAL`` and loaded. The
+pod names ``LOCAL`` with ``imagePullPolicy: Never``, so it never reaches a
+registry.
+
 Usage::
 
     python3 .github/scripts/preload_kind_images.py --cluster NAME RENDERED.yaml [...]
+    python3 .github/scripts/preload_kind_images.py --cluster NAME --pinned IMAGE@DIGEST=LOCAL:TAG
 """
 
 from __future__ import annotations
@@ -341,6 +351,57 @@ def stage_image(
     return True
 
 
+def stage_pinned_image(
+    image: str,
+    local: str,
+    *,
+    run: Runner = _run,
+    sleep: Sleeper = time.sleep,
+) -> None:
+    """Put the digest-pinned ``image`` in the runner's Docker under the local tag ``local``.
+
+    ``kind load`` cannot address a digest reference, so a pod that must run
+    pinned bytes without a registry names a local tag and pulls ``Never``.
+    Docker checks a pull by digest against that digest, so the bytes are the
+    pinned ones whichever registry serves them. A Docker Official Image on ECR
+    Public comes from Docker Hub first, which publishes the same index, then
+    from ECR Public with more attempts. Any other image is pulled by digest
+    from its own registry.
+    """
+    reference = ImageReference.parse(image)
+    if reference.digest is None:
+        raise PreloadError(f"{image} is not pinned by digest")
+    if ImageReference.parse(local).digest is not None:
+        raise PreloadError(f"the local name {local} must be a tag, not a digest")
+    own = f"{reference.registry}/{reference.repository}@{reference.digest}"
+    twin = reference.docker_hub_twin()
+    sources = (
+        [
+            (f"{twin}@{reference.digest}", PULL_ATTEMPTS, PULL_DELAY_SECONDS),
+            (own, ECR_PUBLIC_PULL_ATTEMPTS, ECR_PUBLIC_PULL_DELAY_SECONDS),
+        ]
+        if twin is not None
+        else [(own, PULL_ATTEMPTS, PULL_DELAY_SECONDS)]
+    )
+    for source, attempts, delay in sources:
+        if pull_with_retry(source, run=run, sleep=sleep, attempts=attempts, delay=delay):
+            _tag(source, local, run)
+            print(f"{image}: pulled {source} and tagged it {local}", flush=True)
+            return
+        print(f"::warning::could not pull {source}", flush=True)
+    raise PreloadError(
+        f"could not pull {image} from " + " or ".join(source for source, _, _ in sources)
+    )
+
+
+def _pinned_argument(value: str) -> tuple[str, str]:
+    """Parse ``--pinned IMAGE=LOCAL``."""
+    image, separator, local = value.partition("=")
+    if not separator or not image.strip() or not local.strip():
+        raise argparse.ArgumentTypeError(f"expected IMAGE=LOCAL, got {value!r}")
+    return image.strip(), local.strip()
+
+
 def load_into_kind(images: Sequence[str], cluster: str, *, run: Runner = _run) -> None:
     """``kind load docker-image`` every staged image in one call."""
     if images and run(["kind", "load", "docker-image", "--name", cluster, *images]) != 0:
@@ -358,22 +419,43 @@ def main(
         description="Pull the images rendered Helm manifests run and load them into kind."
     )
     parser.add_argument("--cluster", required=True, help="kind cluster name")
-    parser.add_argument("manifests", nargs="+", type=Path, help="rendered manifest files")
+    parser.add_argument(
+        "--pinned",
+        action="append",
+        default=[],
+        type=_pinned_argument,
+        metavar="IMAGE=LOCAL",
+        help=(
+            "also stage the digest-pinned IMAGE under the local tag LOCAL, for a pod "
+            "that runs it with imagePullPolicy: Never (repeatable)"
+        ),
+    )
+    parser.add_argument("manifests", nargs="*", type=Path, help="rendered manifest files")
     args = parser.parse_args(argv)
+    if not args.manifests and not args.pinned:
+        parser.error("give rendered manifests, --pinned IMAGE=LOCAL, or both")
 
     images = collect_images(path.read_text(encoding="utf-8") for path in args.manifests)
-    if not images:
+    if args.manifests and not images:
         print("::error::the rendered manifests run no container images", flush=True)
         return 1
     try:
         staged = [
             image for image in images if stage_image(image, run=run, sleep=sleep, resolve=resolve)
         ]
-        load_into_kind(staged, args.cluster, run=run)
+        for image, local in args.pinned:
+            stage_pinned_image(image, local, run=run, sleep=sleep)
+        load_into_kind([*staged, *(local for _, local in args.pinned)], args.cluster, run=run)
     except PreloadError as exc:
         print(f"::error::{exc}", flush=True)
         return 1
-    print(f"preloaded {len(staged)} of {len(images)} image(s) into kind cluster {args.cluster}")
+    if args.manifests:
+        print(f"preloaded {len(staged)} of {len(images)} image(s) into kind cluster {args.cluster}")
+    if args.pinned:
+        print(
+            f"loaded {len(args.pinned)} pinned image(s) under local tags into kind cluster "
+            f"{args.cluster}"
+        )
     return 0
 
 

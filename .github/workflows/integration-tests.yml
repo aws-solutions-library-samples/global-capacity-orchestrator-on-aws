@@ -4372,6 +4372,12 @@ jobs:
       # The ServiceAccount the queue/manifest processors run as in
       # production, and the identity that applies the example here.
       PROCESSOR_SA: "system:serviceaccount:gco-system:gco-manifest-processor-sa"
+      # Local tag the MLflow TLS sidecar's pinned interpreter
+      # (ENDPOINT_TLS_PROXY_IMAGE) is loaded into the kind node under. Digest
+      # references cannot be addressed by `kind load`, and the sidecar must
+      # never reach ECR Public, so the overlay runs this tag with
+      # imagePullPolicy: Never.
+      CI_TLS_PROXY_LOCAL_IMAGE: "gco-ci-tls-proxy:local"
       # The kind and Calico pins shared with cluster-e2e live in the
       # workflow-level env block at the top of this file — one declaration.
     steps:
@@ -5140,6 +5146,18 @@ jobs:
             lambda/kubectl-applier-simple/manifests/post-helm-kubeflow-trainer-runtimes.yaml \
             | kubectl apply -f -
           kubectl get clustertrainingruntime torch-distributed
+      - name: Stage the TLS sidecar's pinned interpreter under a local tag (with retry)
+        # The MLflow sidecar below runs on ENDPOINT_TLS_PROXY_IMAGE, the pinned
+        # Python image on ECR Public. Anonymous kubelet pulls of it failed this
+        # job with 429 "Data limit exceeded" (ECR Public's anonymous limits,
+        # counted against shared runner addresses). The same digest is pulled
+        # on the runner instead (Docker Hub's copy of the Docker Official Image
+        # first, then ECR Public), tagged locally and loaded into the node.
+        run: |
+          set -euo pipefail
+          image="$(python3 -c 'from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE; print(ENDPOINT_TLS_PROXY_IMAGE)')"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-examples-smoke \
+            --pinned "${image}=${CI_TLS_PROXY_LOCAL_IMAGE}"
       - name: Install pinned mlflow chart with shipped values
         # charts.yaml sets wait: false for mlflow (installer-side cold-pull
         # rationale), so the readiness gate is the next step's rollout wait —
@@ -5161,7 +5179,9 @@ jobs:
         # One CI-only substitution: this job builds no service image, so the
         # sidecar runs the same stdlib-only gco/services/tls_proxy.py from a
         # ConfigMap on the pinned Python image, which is how the inference
-        # monitor runs it in every model pod.
+        # monitor runs it in every model pod. The previous step loaded that
+        # image's digest under CI_TLS_PROXY_LOCAL_IMAGE, so the sidecar pulls
+        # Never.
         run: |
           set -euo pipefail
           read -r _ref _version namespace _repo_url < <(
@@ -5175,13 +5195,12 @@ jobs:
           python3 - <<'PY' > "${RUNNER_TEMP}/mlflow-ci-overlay.yaml"
           import ast
           import ipaddress
+          import os
           from pathlib import Path
           from types import SimpleNamespace
           from typing import Any
 
           import yaml
-
-          from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE
 
 
           def is_literal(node):
@@ -5240,8 +5259,10 @@ jobs:
           assert sidecar["image"] == "manifest-processor:ci", sidecar["image"]
           assert sidecar["command"] == ["python", "-m", "gco.services.tls_proxy"], sidecar["command"]
           # CI-only (see the step comment): the same program, from a ConfigMap,
-          # on the pinned interpreter image; bytecode stays off the read-only root.
-          sidecar["image"] = ENDPOINT_TLS_PROXY_IMAGE
+          # on the pinned interpreter image, already on the node under its
+          # local tag; bytecode stays off the read-only root.
+          sidecar["image"] = os.environ["CI_TLS_PROXY_LOCAL_IMAGE"]
+          sidecar["imagePullPolicy"] = "Never"
           sidecar["command"] = ["python3", "/etc/gco-tls-proxy/tls_proxy.py"]
           sidecar["env"].append({"name": "PYTHONDONTWRITEBYTECODE", "value": "1"})
           sidecar["volumeMounts"].append(

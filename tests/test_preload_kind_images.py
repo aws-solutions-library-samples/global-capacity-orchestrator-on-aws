@@ -41,6 +41,8 @@ REDIS = "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
 ARGOCD = "quay.io/argoproj/argocd:v3.5.3"
 DIGEST = "sha256:" + "2c" * 32
 OTHER_DIGEST = "sha256:" + "ab" * 32
+PYTHON_PINNED = f"public.ecr.aws/docker/library/python:3.14.7-slim@{DIGEST}"
+LOCAL = "gco-ci-tls-proxy:local"
 
 ARGOCD_RENDER = """\
 ---
@@ -489,6 +491,73 @@ def test_a_failed_tag_fails_the_preload() -> None:
         preload.stage_image(REDIS, run=run, sleep=pytest.fail, resolve=lambda _r: OTHER_DIGEST)
 
 
+def test_a_pinned_docker_official_image_comes_from_docker_hub_by_its_digest() -> None:
+    run = _Recorder()
+    preload.stage_pinned_image(PYTHON_PINNED, LOCAL, run=run, sleep=pytest.fail)
+    source = f"docker.io/library/python@{DIGEST}"
+    assert run.calls == [["docker", "pull", source], ["docker", "tag", source, LOCAL]]
+
+
+def test_a_pinned_digest_docker_hub_lacks_comes_from_ecr_public(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = f"docker.io/library/python@{DIGEST}"
+    fallback = f"public.ecr.aws/docker/library/python@{DIGEST}"
+    run = _Recorder(
+        {f"docker pull {source}": [1] * preload.PULL_ATTEMPTS, f"docker pull {fallback}": [1, 0]}
+    )
+    waits, sleep = _sleeps()
+    preload.stage_pinned_image(PYTHON_PINNED, LOCAL, run=run, sleep=sleep)
+    assert run.calls[-3:] == [
+        ["docker", "pull", fallback],
+        ["docker", "pull", fallback],
+        ["docker", "tag", fallback, LOCAL],
+    ]
+    assert waits == [preload.PULL_DELAY_SECONDS] * (preload.PULL_ATTEMPTS - 1) + [
+        preload.ECR_PUBLIC_PULL_DELAY_SECONDS
+    ]
+    assert f"::warning::could not pull {source}" in capsys.readouterr().out
+
+
+def test_a_pinned_digest_neither_registry_serves_fails_the_preload() -> None:
+    run = _Recorder(
+        {"docker pull": [1] * (preload.PULL_ATTEMPTS + preload.ECR_PUBLIC_PULL_ATTEMPTS)}
+    )
+    sources = f"docker.io/library/python@{DIGEST} or public.ecr.aws/docker/library/python@{DIGEST}"
+    with pytest.raises(
+        preload.PreloadError, match=re.escape(f"could not pull {PYTHON_PINNED} from {sources}")
+    ):
+        preload.stage_pinned_image(PYTHON_PINNED, LOCAL, run=run, sleep=lambda _s: None)
+    assert not [call for call in run.calls if call[:2] == ["docker", "tag"]]
+
+
+def test_a_pinned_image_from_any_other_registry_is_pulled_by_its_own_digest() -> None:
+    run = _Recorder()
+    preload.stage_pinned_image(f"{ARGOCD}@{DIGEST}", LOCAL, run=run, sleep=pytest.fail)
+    source = f"quay.io/argoproj/argocd@{DIGEST}"
+    assert run.calls == [["docker", "pull", source], ["docker", "tag", source, LOCAL]]
+
+
+@pytest.mark.parametrize(
+    ("image", "local", "message"),
+    [
+        (REDIS, LOCAL, "is not pinned by digest"),
+        (PYTHON_PINNED, f"gco-ci-tls-proxy@{DIGEST}", "must be a tag, not a digest"),
+    ],
+)
+def test_pinning_needs_a_digest_and_a_local_tag(image: str, local: str, message: str) -> None:
+    run = _Recorder()
+    with pytest.raises(preload.PreloadError, match=message):
+        preload.stage_pinned_image(image, local, run=run, sleep=pytest.fail)
+    assert run.calls == []
+
+
+def test_a_failed_local_tag_fails_the_pinned_stage() -> None:
+    run = _Recorder({"docker tag": [1]})
+    with pytest.raises(preload.PreloadError, match="docker tag"):
+        preload.stage_pinned_image(PYTHON_PINNED, LOCAL, run=run, sleep=pytest.fail)
+
+
 def test_kind_loads_every_staged_image_in_one_call() -> None:
     run = _Recorder()
     preload.load_into_kind([], "gco", run=run)
@@ -553,3 +622,72 @@ def test_main_reports_a_preload_failure_as_an_annotation(
     )
     assert code == 1
     assert "::error::kind load docker-image into c failed" in capsys.readouterr().out
+
+
+def test_main_stages_a_pinned_image_under_its_local_tag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run = _Recorder()
+    code = preload.main(
+        ["--cluster", "gco-examples-smoke", "--pinned", f"{PYTHON_PINNED}={LOCAL}"],
+        run=run,
+        sleep=pytest.fail,
+        resolve=pytest.fail,
+    )
+    assert code == 0
+    assert run.calls[-1] == ["kind", "load", "docker-image", "--name", "gco-examples-smoke", LOCAL]
+    out = capsys.readouterr().out
+    assert "loaded 1 pinned image(s) under local tags into kind cluster gco-examples-smoke" in out
+    assert "preloaded" not in out
+
+
+def test_main_loads_rendered_and_pinned_images_in_one_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    render = _manifest(tmp_path, "a.yaml", ARGOCD_RENDER)
+    run = _Recorder()
+    code = preload.main(
+        ["--cluster", "c", "--pinned", f" {PYTHON_PINNED} = {LOCAL} ", render],
+        run=run,
+        sleep=pytest.fail,
+        resolve=lambda _r: DIGEST,
+    )
+    assert code == 0
+    assert run.calls[-1] == ["kind", "load", "docker-image", "--name", "c", ARGOCD, REDIS, LOCAL]
+    out = capsys.readouterr().out
+    assert "preloaded 2 of 2 image(s) into kind cluster c" in out
+    assert "loaded 1 pinned image(s) under local tags into kind cluster c" in out
+
+
+def test_main_reports_a_pinned_failure_as_an_annotation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run = _Recorder()
+    code = preload.main(
+        ["--cluster", "c", "--pinned", f"{REDIS}={LOCAL}"],
+        run=run,
+        sleep=pytest.fail,
+        resolve=pytest.fail,
+    )
+    assert code == 1
+    assert f"::error::{REDIS} is not pinned by digest" in capsys.readouterr().out
+    assert run.calls == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--pinned", "no-separator"],
+        ["--pinned", f"={LOCAL}"],
+        ["--pinned", f"{PYTHON_PINNED}= "],
+    ],
+    ids=["nothing to stage", "no separator", "no image", "no local tag"],
+)
+def test_main_refuses_nothing_to_stage_or_a_malformed_pin(
+    extra: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        preload.main(["--cluster", "c", *extra], run=_Recorder(), resolve=pytest.fail)
+    assert excinfo.value.code == 2
+    assert "IMAGE=LOCAL" in capsys.readouterr().err
